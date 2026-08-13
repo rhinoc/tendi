@@ -1,0 +1,52 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  build-test:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: apps/desktop/package-lock.json
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install frontend dependencies
+        run: npm ci --prefix apps/desktop
+
+      - name: Rust tests
+        run: cargo test --workspace
+
+      - name: Rust check
+        run: cargo check --workspace
+
+      - name: Frontend typecheck
+        run: npm run typecheck --prefix apps/desktop
+
+      - name: Frontend alignment e2e
+        run: npm run e2e:align --prefix apps/desktop
+
+      - name: Frontend build
+        run: npm run build --prefix apps/desktop
+
+      - name: Tauri app and DMG build
+        run: npm run build:dmg --prefix apps/desktop
+
+      - name: Upload DMG artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: tendi-dmg
+          path: dist/*.dmg
+          if-no-files-found: error

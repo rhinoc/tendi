@@ -1,0 +1,381 @@
+@font-face {
+  font-family: "Geist";
+  src: url("../node_modules/geist/dist/fonts/geist-sans/Geist-Variable.woff2") format("woff2");
+  font-weight: 100 900;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Geist Mono";
+  src: url("../node_modules/geist/dist/fonts/geist-mono/GeistMono-Variable.woff2") format("woff2");
+  font-weight: 100 900;
+  font-style: normal;
+  font-display: swap;
+}
+
+:root {
+  /* Stacking */
+  --z-base: 0;
+  --z-content: 1;
+  --z-raised: 2;
+  --z-sticky: 3;
+  --z-header: 4;
+  --z-selection-bar: 8;
+  --z-frozen-header: 9;
+  --z-header-rule: 10;
+  --z-legacy-divider: 20;
+  --z-resize-handle: 25;
+  --z-marquee: 30;
+  --z-menu: 40;
+  --z-dialog-backdrop: 50;
+  --z-dialog: 51;
+  --z-popover: 70;
+  --z-drawer: 80;
+
+  color-scheme: light dark;
+
+  /*
+   * Gruvbox light — warm parchment surfaces, muted chroma accents.
+   * Hex sources: bg0_h #f9f5d7 … fg0 #282828, orange #af3a03, yellow #b57614, aqua #427b58, etc.
+   */
+  --bg: oklch(0.965 0.039 100.862);
+  --window: oklch(0.956 0.055 96.155);
+  --sidebar: oklch(0.922 0.055 92.526);
+  --sidebar-2: oklch(0.894 0.057 89.24);
+  --surface: oklch(0.956 0.055 96.155);
+  --surface-2: oklch(0.922 0.055 92.526);
+  --surface-3: oklch(0.894 0.057 89.24);
+  --content-bg: oklch(0.965 0.039 100.862);
+  --panel-bg: oklch(0.956 0.055 96.155);
+  --editor-bg: oklch(0.965 0.039 100.862);
+  --file-tree-bg: oklch(0.922 0.055 92.526);
+
+  --line: oklch(0.411 0.012 51.866 / 0.18);
+  --line-strong: oklch(0.411 0.012 51.866 / 0.28);
+
+  --text: oklch(0.277 0 0);
+  --muted: oklch(0.482 0.018 61.042);
+  --faint: oklch(0.55 0.023 62.567);
+  --disabled: oklch(0.411 0.012 51.866 / 0.42);
+  --link: oklch(0.471 0.082 215.806);
+
+  /* Yellow chips; primary actions use Gruvbox orange */
+  --amber: oklch(0.618 0.128 70.674);
+  --amber-soft: oklch(0.725 0.143 77.708 / 0.16);
+  --amber-soft-strong: oklch(0.725 0.143 77.708 / 0.28);
+  --amber-ink: oklch(0.513 0.12 65);
+  --amber-bright: oklch(0.725 0.143 77.708);
+
+  --accent: oklch(0.513 0.162 39.297);
+  --accent-hover: oklch(0.58 0.165 42);
+  --accent-active: oklch(0.46 0.155 37);
+  --accent-contrast: oklch(0.965 0.039 100.862);
+  --accent-soft: oklch(0.622 0.171 45.812 / 0.12);
+  --accent-soft-strong: oklch(0.622 0.171 45.812 / 0.22);
+  --selection-fill: oklch(0.725 0.143 77.708 / 0.22);
+  --selection-fill-strong: oklch(0.725 0.143 77.708 / 0.36);
+  --focus-ring: oklch(0.513 0.162 39.297 / 0.5);
+  --focus-ring-soft: oklch(0.513 0.162 39.297 / 0.14);
+
+  --green: oklch(0.546 0.112 106.464);
+  --green-soft: oklch(0.656 0.135 109.119 / 0.16);
+  --green-soft-strong: oklch(0.656 0.135 109.119 / 0.3);
+  --orange: oklch(0.513 0.162 39.297);
+  --orange-soft: oklch(0.622 0.171 45.812 / 0.14);
+  --orange-soft-strong: oklch(0.622 0.171 45.812 / 0.28);
+  --danger: oklch(0.437 0.179 28.26);
+  --danger-soft: oklch(0.546 0.203 28.662 / 0.14);
+  --danger-soft-strong: oklch(0.546 0.203 28.662 / 0.24);
+  --danger-text: oklch(0.437 0.179 28.26);
+
+  --tone-info: oklch(0.471 0.082 215.806);
+  --tone-info-soft: oklch(0.576 0.066 199.487 / 0.16);
+  --tone-ok: oklch(0.534 0.082 155.401);
+  --tone-ok-soft: oklch(0.645 0.094 145.266 / 0.16);
+  --tone-warn: oklch(0.618 0.128 70.674);
+  --tone-warn-soft: oklch(0.725 0.143 77.708 / 0.18);
+  --tone-alert: oklch(0.513 0.162 39.297);
+  --tone-danger: oklch(0.437 0.179 28.26);
+  /* wrapper / category — aqua, distinct from yellow update */
+  --tone-meta: oklch(0.534 0.082 155.401);
+  --tone-meta-soft: oklch(0.645 0.094 145.266 / 0.16);
+  --tone-meta-ink: oklch(0.48 0.08 150);
+
+  --agent-codex: oklch(0.534 0.082 155.401);
+  --agent-cursor: oklch(0.489 0.124 344.276);
+  --agent-claude: oklch(0.513 0.162 39.297);
+
+  --chat-user-bg: oklch(0.576 0.066 199.487);
+  --chat-user-fg: oklch(0.965 0.039 100.862);
+  --chat-user-muted: oklch(0.965 0.039 100.862 / 0.76);
+  --chat-user-ring: oklch(0.471 0.082 215.806 / 0.35);
+  --chat-assistant-bg: var(--panel-bg);
+  --chat-tool-bg: oklch(0.922 0.055 92.526);
+
+  /* Syntax — Gruvbox light */
+  --syntax-text: #3c3836;
+  --syntax-muted: #928374;
+  --syntax-comment: #928374;
+  --syntax-keyword: #9d0006;
+  --syntax-string: #79740e;
+  --syntax-number: #8f3f71;
+  --syntax-atom: #8f3f71;
+  --syntax-property: #076678;
+  --syntax-tag: #427b58;
+  --syntax-bracket: #7c6f64;
+  --syntax-link: #076678;
+  --syntax-mono: #af3a03;
+  --syntax-variable: #af3a03;
+  --syntax-xml-0: #427b58;
+  --syntax-xml-0-soft: oklch(0.645 0.094 145.266 / 0.18);
+  --syntax-xml-1: #9d0006;
+  --syntax-xml-1-soft: oklch(0.546 0.203 28.662 / 0.16);
+  --syntax-xml-2: #8f3f71;
+  --syntax-xml-2-soft: oklch(0.597 0.111 352.218 / 0.16);
+  --syntax-xml-3: #076678;
+  --syntax-xml-3-soft: oklch(0.576 0.066 199.487 / 0.16);
+  --syntax-xml-4: #af3a03;
+  --syntax-xml-4-soft: oklch(0.622 0.171 45.812 / 0.16);
+  --syntax-xml-5: #458588;
+  --syntax-xml-5-soft: oklch(0.576 0.066 199.487 / 0.16);
+
+  --overlay-scrim: oklch(0.277 0 0 / 0.32);
+  --hover-fill: oklch(0.411 0.012 51.866 / 0.06);
+  --hover-fill-strong: oklch(0.411 0.012 51.866 / 0.1);
+  --active-fill: oklch(0.411 0.012 51.866 / 0.14);
+  --inset-fill: oklch(0.411 0.012 51.866 / 0.05);
+  --control-fill: oklch(0.411 0.012 51.866 / 0.07);
+  --control-border: oklch(0.411 0.012 51.866 / 0.18);
+
+  --shadow-border:
+    0px 0px 0px 1px oklch(0.277 0 0 / 0.08),
+    0px 1px 2px -1px oklch(0.277 0 0 / 0.08),
+    0px 2px 4px 0px oklch(0.277 0 0 / 0.05);
+  --shadow-border-hover:
+    0px 0px 0px 1px oklch(0.277 0 0 / 0.12),
+    0px 1px 2px -1px oklch(0.277 0 0 / 0.1),
+    0px 2px 4px 0px oklch(0.277 0 0 / 0.07);
+  --shadow-elevated:
+    0 0 0 1px oklch(0.277 0 0 / 0.08),
+    0 18px 48px oklch(0.277 0 0 / 0.16);
+  --shadow-menu:
+    0 0 0 1px oklch(0.277 0 0 / 0.08),
+    0 12px 36px oklch(0.277 0 0 / 0.14);
+
+  --radius-sm: 6px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+  --radius: var(--radius-md);
+  /* Concentric: outer = inner + pad (e.g. dialog 12 + pad 8 → control 8) */
+
+  --font-sans: "Geist", ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
+  --font-mono: "Geist Mono", ui-monospace, Menlo, monospace;
+
+  /* Semantic type scale (caption → display) */
+  --text-caption: 11px;
+  --text-ui: 13px;
+  --text-body: 15px;
+  --text-title: 18px;
+  --text-display: 25px;
+
+  --page-left-inset: 32px;
+  --page-right-inset: 12px;
+  --page-top-inset: 38px;
+  --page-bottom-inset: 12px;
+  --page-compact-bottom-inset: 12px;
+  --page-header-gap: 24px;
+  --page-row-bleed-inset: 24px;
+  --page-row-checkbox-offset: 4px;
+
+  --row-frame-radius: 7px;
+  --row-frame-line: oklch(0.411 0.012 51.866 / 0.14);
+  --row-frame-bg: oklch(0.411 0.012 51.866 / 0.06);
+
+  --data-table-selection-col: 16px;
+  --data-table-first-col-min: 250px;
+  --data-table-row-track-gap: 4px;
+  --data-table-cell-gap: 8px;
+  --data-table-grid-row-min: 58px;
+  --data-table-table-row-height: 58px;
+  --data-table-row-font-size: 13px;
+  --data-table-header-height: 34px;
+  --data-table-group-gap: 18px;
+  --data-table-frozen-cell-bg: var(--content-bg);
+  --data-table-frozen-cell-hover-bg: oklch(0.922 0.055 92.526);
+  --data-table-header-bg: var(--content-bg);
+  --data-table-header-color: var(--muted);
+  --data-table-header-font-size: var(--text-caption);
+  --data-table-header-font-weight: 650;
+  --data-table-header-letter-spacing: 0.06em;
+  --data-table-row-color: var(--muted);
+  --data-table-row-line: var(--row-frame-line);
+  --data-table-row-hover-bg: var(--row-frame-bg);
+  --data-table-row-radius: var(--row-frame-radius);
+  --data-table-frozen-divider-color: oklch(0.411 0.012 51.866 / 0.2);
+
+  --data-table-bottom-bar-padding: 4px;
+  --data-table-bottom-bar-outer-inset-left: calc(var(--page-left-inset) - var(--data-table-text-rail-indent));
+  --data-table-bottom-bar-outer-inset-right: var(--page-right-inset);
+  --data-table-bottom-bar-outer-inset-bottom: var(--page-bottom-inset);
+  --data-table-text-rail-indent: calc(
+    var(--page-row-checkbox-offset) + var(--data-table-selection-col) + var(--data-table-row-track-gap)
+  );
+
+  --ease-out-soft: cubic-bezier(0.2, 0, 0, 1);
+  --press-scale: 0.96;
+  --image-outline: oklch(0.277 0 0 / 0.12);
+  --monochrome-icon-filter: none;
+
+  font-family: var(--font-sans);
+  font-size: var(--text-body);
+}
+
+:root[data-theme="dark"] {
+  /*
+   * Gruvbox dark — warm charcoal surfaces, bright accents.
+   * Hex sources: bg0_h #1d2021 … fg1 #ebdbb2, orange #fe8019, yellow #fabd2f, aqua #8ec07c, etc.
+   */
+  --bg: oklch(0.241 0.005 219.672);
+  --window: oklch(0.277 0 0);
+  --sidebar: oklch(0.311 0.003 48.619);
+  --sidebar-2: oklch(0.344 0.007 48.523);
+  --surface: oklch(0.344 0.007 48.523);
+  --surface-2: oklch(0.311 0.003 48.619);
+  --surface-3: oklch(0.411 0.012 51.866);
+  --content-bg: oklch(0.277 0 0);
+  --panel-bg: oklch(0.344 0.007 48.523);
+  --editor-bg: oklch(0.277 0 0);
+  --file-tree-bg: oklch(0.311 0.003 48.619);
+
+  --line: oklch(0.894 0.057 89.24 / 0.12);
+  --line-strong: oklch(0.894 0.057 89.24 / 0.2);
+
+  --text: oklch(0.894 0.057 89.24);
+  --muted: oklch(0.756 0.041 82.284);
+  --faint: oklch(0.69 0.035 76.307);
+  --disabled: oklch(0.894 0.057 89.24 / 0.36);
+  --link: oklch(0.693 0.042 169.768);
+
+  --amber: oklch(0.832 0.159 82.987);
+  --amber-soft: oklch(0.725 0.143 77.708 / 0.2);
+  --amber-soft-strong: oklch(0.725 0.143 77.708 / 0.34);
+  --amber-ink: oklch(0.894 0.057 89.24);
+  --amber-bright: oklch(0.832 0.159 82.987);
+
+  --accent: oklch(0.731 0.182 51.693);
+  --accent-hover: oklch(0.78 0.175 55);
+  --accent-active: oklch(0.68 0.18 48);
+  --accent-contrast: oklch(0.241 0.005 219.672);
+  --accent-soft: oklch(0.731 0.182 51.693 / 0.16);
+  --accent-soft-strong: oklch(0.731 0.182 51.693 / 0.28);
+  --selection-fill: oklch(0.725 0.143 77.708 / 0.22);
+  --selection-fill-strong: oklch(0.725 0.143 77.708 / 0.36);
+  --focus-ring: oklch(0.731 0.182 51.693 / 0.55);
+  --focus-ring-soft: oklch(0.731 0.182 51.693 / 0.16);
+
+  --green: oklch(0.765 0.158 110.835);
+  --green-soft: oklch(0.656 0.135 109.119 / 0.2);
+  --green-soft-strong: oklch(0.656 0.135 109.119 / 0.36);
+  --orange: oklch(0.731 0.182 51.693);
+  --orange-soft: oklch(0.622 0.171 45.812 / 0.2);
+  --orange-soft-strong: oklch(0.622 0.171 45.812 / 0.36);
+  --danger: oklch(0.66 0.218 30.392);
+  --danger-soft: oklch(0.546 0.203 28.662 / 0.22);
+  --danger-soft-strong: oklch(0.546 0.203 28.662 / 0.36);
+  --danger-text: oklch(0.66 0.218 30.392);
+
+  --tone-info: oklch(0.693 0.042 169.768);
+  --tone-info-soft: oklch(0.576 0.066 199.487 / 0.22);
+  --tone-ok: oklch(0.756 0.108 137.676);
+  --tone-ok-soft: oklch(0.645 0.094 145.266 / 0.22);
+  --tone-warn: oklch(0.832 0.159 82.987);
+  --tone-warn-soft: oklch(0.725 0.143 77.708 / 0.24);
+  --tone-alert: oklch(0.731 0.182 51.693);
+  --tone-danger: oklch(0.66 0.218 30.392);
+  --tone-meta: oklch(0.756 0.108 137.676);
+  --tone-meta-soft: oklch(0.645 0.094 145.266 / 0.24);
+  --tone-meta-ink: oklch(0.82 0.1 140);
+
+  --agent-codex: oklch(0.756 0.108 137.676);
+  --agent-cursor: oklch(0.705 0.098 2.189);
+  --agent-claude: oklch(0.731 0.182 51.693);
+
+  --chat-user-bg: oklch(0.576 0.066 199.487);
+  --chat-user-fg: oklch(0.956 0.055 96.155);
+  --chat-user-muted: oklch(0.956 0.055 96.155 / 0.76);
+  --chat-user-ring: oklch(0.693 0.042 169.768 / 0.4);
+  --chat-tool-bg: oklch(0.344 0.007 48.523);
+
+  /* Syntax — Gruvbox dark */
+  --syntax-text: #ebdbb2;
+  --syntax-muted: #928374;
+  --syntax-comment: #928374;
+  --syntax-keyword: #fb4934;
+  --syntax-string: #b8bb26;
+  --syntax-number: #d3869b;
+  --syntax-atom: #d3869b;
+  --syntax-property: #83a598;
+  --syntax-tag: #8ec07c;
+  --syntax-bracket: #a89984;
+  --syntax-link: #83a598;
+  --syntax-mono: #fe8019;
+  --syntax-variable: #fe8019;
+  --syntax-xml-0: #8ec07c;
+  --syntax-xml-0-soft: oklch(0.645 0.094 145.266 / 0.22);
+  --syntax-xml-1: #fb4934;
+  --syntax-xml-1-soft: oklch(0.546 0.203 28.662 / 0.22);
+  --syntax-xml-2: #d3869b;
+  --syntax-xml-2-soft: oklch(0.597 0.111 352.218 / 0.22);
+  --syntax-xml-3: #83a598;
+  --syntax-xml-3-soft: oklch(0.576 0.066 199.487 / 0.2);
+  --syntax-xml-4: #fe8019;
+  --syntax-xml-4-soft: oklch(0.622 0.171 45.812 / 0.22);
+  --syntax-xml-5: #458588;
+  --syntax-xml-5-soft: oklch(0.576 0.066 199.487 / 0.2);
+
+  --overlay-scrim: oklch(0.2 0.005 50 / 0.66);
+  --hover-fill: oklch(0.894 0.057 89.24 / 0.06);
+  --hover-fill-strong: oklch(0.894 0.057 89.24 / 0.1);
+  --active-fill: oklch(0.894 0.057 89.24 / 0.14);
+  --inset-fill: oklch(0.894 0.057 89.24 / 0.04);
+  --control-fill: oklch(0.894 0.057 89.24 / 0.07);
+  --control-border: oklch(0.894 0.057 89.24 / 0.14);
+
+  --shadow-border:
+    0 0 0 1px oklch(0.894 0.057 89.24 / 0.08),
+    0 1px 2px -1px oklch(0 0 0 / 0.4),
+    0 2px 5px oklch(0 0 0 / 0.28);
+  --shadow-border-hover:
+    0 0 0 1px oklch(0.894 0.057 89.24 / 0.14),
+    0 1px 2px -1px oklch(0 0 0 / 0.46),
+    0 3px 7px oklch(0 0 0 / 0.32);
+  --shadow-elevated:
+    0 0 0 1px oklch(0.894 0.057 89.24 / 0.1),
+    0 20px 52px oklch(0 0 0 / 0.52);
+  --shadow-menu:
+    0 0 0 1px oklch(0.894 0.057 89.24 / 0.1),
+    0 14px 38px oklch(0 0 0 / 0.48);
+
+  --row-frame-line: oklch(0.894 0.057 89.24 / 0.1);
+  --row-frame-bg: oklch(0.894 0.057 89.24 / 0.05);
+  --data-table-frozen-cell-hover-bg: oklch(0.344 0.007 48.523);
+  --data-table-frozen-divider-color: oklch(0.894 0.057 89.24 / 0.16);
+  --image-outline: oklch(0.894 0.057 89.24 / 0.16);
+  --monochrome-icon-filter: invert(1) sepia(0.15) brightness(0.92);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --press-scale: 1;
+  }
+
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}

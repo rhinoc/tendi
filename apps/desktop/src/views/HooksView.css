@@ -1,0 +1,264 @@
+/* Hooks tab — third-column detail body */
+
+.hookDetailPanel {
+  background: var(--editor-bg);
+}
+
+.hookSourceMeta {
+  gap: 0;
+}
+
+.hookSourceMeta span {
+  min-width: 0;
+  width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+
+.hookActions {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.hookDetailBody {
+  min-height: 0;
+  flex: 1;
+  overflow: auto;
+  padding: 16px;
+}
+
+.hookDeleteError {
+  margin: 0 0 12px;
+  padding: 9px 10px;
+  border-radius: 7px;
+  color: var(--danger-text);
+  background: var(--danger-soft);
+  box-shadow: 0 0 0 1px var(--danger-soft-strong);
+  border: 0;
+  font-size: 13px;
+}
+
+.hookDetailSection {
+  padding: 10px 0 18px;
+}
+
+.hookDetailSection:first-child {
+  padding-top: 0;
+}
+
+.hookDetailSection h3 {
+  margin: 0 0 12px;
+  color: var(--faint);
+  font-size: 11px;
+  font-weight: 760;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.hookSectionHeaderRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+
+.hookSectionHeaderRow h3 {
+  margin: 0;
+}
+
+.hookParametersSection {
+  padding-top: 0;
+}
+
+.hookParameterTable {
+  display: grid;
+  gap: 0;
+}
+
+.hookDetailRow {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: 96px minmax(0, 1fr);
+  gap: 14px;
+  align-items: start;
+  padding: 7px 0;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.hookDetailLabel {
+  color: var(--faint);
+  font-weight: 650;
+}
+
+.hookDetailValue {
+  min-width: 0;
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.hookDetailValue span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  line-height: 1.45;
+}
+
+.hookDetailValue.mono span {
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+
+.hookCopyButton {
+  width: 24px;
+  height: 24px;
+  flex: 0 0 24px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  color: var(--faint);
+  background: transparent;
+  cursor: pointer;
+}
+
+.hookCopyButton:hover {
+  color: var(--text);
+  background: var(--hover-fill-strong);
+}
+
+.hookCopyButton.isCopied,
+.hookCopyButton.isCopied:hover {
+  color: var(--green);
+  background: var(--green-soft);
+}
+
+.hookEnabledSwitch {
+  width: 36px;
+  height: 20px;
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: 999px;
+  background: var(--danger-soft);
+  box-shadow: inset 0 0 0 1px var(--danger-soft-strong);
+  cursor: pointer;
+  transition-property: background-color, box-shadow;
+  transition-duration: 120ms;
+  transition-timing-function: ease-out;
+}
+
+.hookEnabledSwitch:not(:disabled):not([aria-disabled="true"]):hover {
+  box-shadow: inset 0 0 0 1px var(--danger);
+}
+
+.hookEnabledSwitch:disabled,
+.hookEnabledSwitch[aria-disabled="true"] {
+  cursor: default;
+  opacity: 0.52;
+}
+
+.hookEnabledSwitchThumb {
+  width: 16px;
+  height: 16px;
+  position: absolute;
+  left: 2px;
+  border-radius: 50%;
+  background: var(--text);
+  box-shadow: 0 1px 3px oklch(0 0 0 / 0.18);
+  transition: transform 120ms ease, background-color 120ms ease;
+}
+
+.hookEnabledSwitch.on {
+  background: var(--green);
+  box-shadow: inset 0 0 0 1px var(--green);
+}
+
+.hookEnabledSwitch.on:not(:disabled):not([aria-disabled="true"]):hover {
+  background: color-mix(in oklch, var(--green) 88%, white);
+  box-shadow: inset 0 0 0 1px color-mix(in oklch, var(--green) 88%, white);
+}
+
+.hookEnabledSwitch.on .hookEnabledSwitchThumb {
+  transform: translateX(16px);
+  /* Filled-control contrast ink — readable on solid green in light and dark */
+  background: var(--accent-contrast);
+}
+
+.hookEnabledSwitch.updating .hookEnabledSwitchThumb {
+  opacity: 0.72;
+}
+
+.hookSectionHeaderActions {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.hookSourceActionButton {
+  flex: 0 0 24px;
+}
+
+.hookSourceCopyButton {
+  flex: 0 0 24px;
+}
+
+.hookSourcePlaceholder,
+.hookSourcePreviewError {
+  display: flex;
+  align-items: center;
+  min-height: 42px;
+  padding: 10px;
+  border: 1px solid var(--hover-fill-strong);
+  border-radius: 7px;
+  color: var(--faint);
+  background: var(--inset-fill);
+  font-size: 13px;
+}
+
+.hookSourcePreviewError {
+  color: var(--danger-text);
+  background: var(--danger-soft);
+  border-color: transparent;
+  box-shadow: 0 0 0 1px var(--danger-soft-strong);
+}
+
+.hookSourcePreview {
+  min-width: 0;
+  border: 1px solid var(--hover-fill-strong);
+  border-radius: 7px;
+  overflow: hidden;
+  background: var(--inset-fill);
+}
+
+.hookConfigCodeMirror {
+  min-height: 140px;
+  max-height: 420px;
+}
+
+.hookConfigCodeMirror .cm-editor {
+  min-height: 140px;
+  max-height: 420px;
+}
+
+.hookConfigCodeMirror .cm-scroller {
+  max-height: 420px;
+  overflow: auto;
+}
+
+.hookConfigCodeMirror .cm-content {
+  padding: 12px 14px 14px;
+}
+
+.hookConfigCodeMirror .cm-line {
+  padding: 0;
+}

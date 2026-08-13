@@ -1,0 +1,211 @@
+.settingsShell {
+  width: 100%;
+  display: grid;
+  gap: 8px;
+}
+
+.settingsGroup {
+  border-top: 1px solid var(--line);
+}
+
+.settingsError {
+  color: var(--danger);
+  font-size: 11px;
+  line-height: 16px;
+}
+
+.settingsAppearanceControl {
+  width: min(100%, 360px);
+  max-width: 100%;
+  display: inline-flex;
+  gap: 2px;
+  padding: 3px;
+  border: 1px solid var(--control-border);
+  border-radius: var(--radius-lg);
+  background: var(--control-fill);
+}
+
+.settingsAppearanceItem {
+  min-width: 0;
+  flex: 1 1 0;
+  height: 32px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: var(--radius-md);
+  color: var(--muted);
+  background: transparent;
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.settingsAppearanceItem svg {
+  flex: 0 0 14px;
+  width: 14px;
+  height: 14px;
+}
+
+.settingsAppearanceItem span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.settingsAppearanceItem:hover {
+  color: var(--text);
+  background: var(--hover-fill-strong);
+}
+
+.settingsAppearanceItem[data-state="on"] {
+  color: var(--text);
+  background: var(--panel-bg);
+  box-shadow: var(--shadow-border);
+}
+
+.settingsAppearanceItem:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 1px;
+}
+
+.settingsTerminalRow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.settingsTerminalInput {
+  position: relative;
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.settingsSelect {
+  height: 38px;
+  width: 100%;
+  padding: 0 38px 0 10px;
+  border: 0;
+  border-radius: var(--radius-md);
+  background: var(--panel-bg);
+  box-shadow: var(--shadow-border);
+  color: var(--text);
+  font-size: 13px;
+}
+
+.settingsTextarea {
+  box-sizing: border-box;
+  width: 100%;
+  min-height: 106px;
+  resize: vertical;
+  padding: 10px;
+  border: 0;
+  border-radius: var(--radius-md);
+  background: var(--panel-bg);
+  box-shadow: var(--shadow-border);
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.settingsSelect::placeholder,
+.settingsTextarea::placeholder {
+  color: var(--faint);
+}
+
+.settingsSelect:focus,
+.settingsTextarea:focus {
+  box-shadow: var(--shadow-border-hover), 0 0 0 3px var(--focus-ring-soft);
+  outline: none;
+}
+
+.settingsSelectContent {
+  width: min(280px, calc(100vw - 32px));
+  box-sizing: border-box;
+}
+
+.settingsTerminalMenuButton {
+  position: absolute;
+  top: 5px;
+  right: 5px;
+}
+
+.settingsTerminalTestButton {
+  flex: 0 0 38px;
+  width: 38px;
+  height: 38px;
+  border: 1px solid var(--control-border);
+  border-radius: var(--radius-md);
+  background: var(--control-fill);
+}
+
+.settingsTerminalTestButton.isSuccess,
+.settingsTerminalTestButton.isSuccess:hover {
+  border-color: var(--green-soft-strong);
+  color: var(--green);
+  background: var(--green-soft);
+}
+
+.settingsTerminalTestButton.isError,
+.settingsTerminalTestButton.isError:hover {
+  border-color: var(--danger-soft-strong);
+  color: var(--danger);
+  background: var(--danger-soft);
+}
+
+.settingsUpdateButton {
+  justify-self: start;
+  min-height: 38px;
+  padding: 0 12px;
+  border: 1px solid var(--control-border);
+  border-radius: var(--radius-md);
+  background: var(--control-fill);
+  color: var(--text);
+  font-size: 13px;
+}
+
+.settingsUpdateButton:hover:not(:disabled) {
+  background: var(--control-fill-hover);
+}
+
+.settingsUpdateButton.isSuccess {
+  color: var(--green);
+  border-color: var(--green-soft-strong);
+  background: var(--green-soft);
+}
+
+.settingsUpdateButton.isError {
+  color: var(--danger);
+  border-color: var(--danger-soft-strong);
+  background: var(--danger-soft);
+}
+
+.settingsSection {
+  display: grid;
+  grid-template-columns: minmax(180px, 220px) minmax(0, 1fr);
+  align-items: start;
+  gap: 24px;
+  padding: 16px 0;
+}
+
+.settingsSection + .settingsSection {
+  border-top: 1px solid var(--line);
+}
+
+.settingsSectionText h2 {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 650;
+  line-height: 1.25;
+}
+
+.settingsControlGroup {
+  min-width: 0;
+  display: grid;
+  gap: 7px;
+}

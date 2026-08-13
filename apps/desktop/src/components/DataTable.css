@@ -1,0 +1,870 @@
+/* DataTable component styles. Shared app tokens remain in ../styles.css. */
+
+.skillsPage > .dataTableFrame,
+.dataPage > .dataTableFrame {
+  min-height: 0;
+  flex: 1;
+}
+
+.tableScroll {
+  position: relative;
+  min-height: 0;
+  flex: 1;
+  overflow: auto;
+}
+
+.dataTableFrame {
+  min-height: 0;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+}
+
+.dataTableShell {
+  --data-table-header-bg: var(--content-bg);
+  --data-table-header-color: var(--muted);
+  --data-table-header-font-size: var(--text-caption);
+  --data-table-header-font-weight: 650;
+  --data-table-header-letter-spacing: 0.06em;
+  --data-table-row-color: var(--muted);
+  --data-table-row-line: var(--row-frame-line);
+  --data-table-row-hover-bg: var(--row-frame-bg);
+  --data-table-row-radius: var(--row-frame-radius);
+  position: relative;
+  min-height: 0;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  margin-left: calc(-1 * var(--data-table-text-rail-indent));
+}
+
+.dataTableShell--frozen {
+  --data-table-frozen-cell-bg: var(--content-bg);
+  --data-table-freeze-pane-width: calc(
+    var(--data-table-text-rail-indent) + var(--data-freeze-column-width)
+  );
+  --data-table-split-scroll-leading-gap: calc(
+    var(--data-table-cell-gap) + var(--data-table-row-track-gap)
+  );
+  --data-table-frozen-divider-left: calc(
+    var(--data-table-text-rail-indent) + var(--data-freeze-column-width)
+  );
+}
+
+.dataTableShell--frozen:has(.sessionFreezeResizeHandle:hover),
+.dataTableShell--frozen:has(.sessionFreezeResizeHandle[data-resize-handle-active]) {
+  --data-table-frozen-divider-color: var(--focus-ring);
+}
+
+.dataTableShell--frozen .sessionFreezeResizeHandle {
+  left: var(--data-table-frozen-divider-left);
+}
+
+.dataTableSplitScroll {
+  overflow: auto;
+}
+
+.dataTableSplitHeader {
+  position: relative;
+  display: flex;
+  flex: 0 0 var(--data-table-header-height, 34px);
+  min-height: var(--data-table-header-height, 34px);
+  overflow: hidden;
+  background: var(--data-table-header-bg, var(--content-bg));
+}
+
+.dataTableFrozenHeaderPane {
+  position: relative;
+  z-index: var(--z-frozen-header);
+  flex: 0 0 var(--data-table-freeze-pane-width);
+  width: var(--data-table-freeze-pane-width);
+  min-width: var(--data-table-freeze-pane-width);
+  background: var(--data-table-header-bg, var(--content-bg));
+}
+
+.dataTableScrollHeaderPane {
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+}
+
+.dataTableScrollHeaderTrack {
+  width: max-content;
+  min-width: 100%;
+  will-change: transform;
+}
+
+.dataTableSplitSurface {
+  position: relative;
+  isolation: isolate;
+  width: max-content;
+  min-width: 100%;
+}
+
+.dataTableFrozenPane {
+  position: sticky;
+  left: 0;
+  z-index: var(--z-frozen-header);
+  float: left;
+  width: var(--data-table-freeze-pane-width);
+  min-width: var(--data-table-freeze-pane-width);
+  background: var(--data-table-frozen-cell-bg);
+  overflow: visible;
+  clip-path: inset(0);
+}
+
+.dataTableFrozenSurface {
+  width: var(--data-table-freeze-pane-width);
+  min-width: var(--data-table-freeze-pane-width);
+}
+
+.dataTableScrollPane {
+  margin-left: var(--data-table-freeze-pane-width);
+  width: max-content;
+  min-width: calc(100% - var(--data-table-freeze-pane-width));
+}
+
+.dataTableShell--frozen .dataTableHeader--frozen,
+.dataTableShell--frozen .dataRow--frozenPane {
+  grid-template-columns: var(--data-table-selection-col) var(--data-freeze-column-width);
+  width: var(--data-table-freeze-pane-width);
+  min-width: var(--data-table-freeze-pane-width);
+}
+
+.dataTableShell--frozen .dataTableHeader--scroll,
+.dataTableShell--frozen .dataRow--scrollPane {
+  grid-template-columns: var(--data-scroll-grid-columns);
+  width: max-content;
+  min-width: 100%;
+  padding-left: var(--data-table-split-scroll-leading-gap);
+}
+
+.dataTableShell--frozen .dataRow > .rowSelection,
+.dataTableShell--frozen .dataRow > .rowSelectionPlaceholder {
+  position: relative;
+  left: auto;
+  z-index: var(--z-content);
+  background: transparent;
+}
+
+.dataTableShell--frozen .dataHeaderSelection {
+  position: relative;
+  left: auto;
+  z-index: var(--z-header-rule);
+  background: var(--data-table-header-bg, var(--content-bg));
+}
+
+.dataTableShell--frozen .dataHeaderCell[data-frozen],
+.dataTableShell--frozen .dataCell[data-frozen] {
+  position: relative;
+  left: auto;
+  z-index: var(--z-raised);
+  background: transparent;
+  box-shadow: none;
+}
+
+.dataTableShell--frozen .dataHeaderCell[data-frozen] {
+  z-index: var(--z-frozen-header);
+  background: var(--data-table-header-bg, var(--content-bg));
+  box-shadow: none;
+}
+
+.dataTableShell--frozen .dataHeaderCell[data-frozen],
+.dataTableShell--frozen .dataCell[data-frozen] {
+  grid-column: 2;
+}
+
+.dataTableBodyScroll {
+  overscroll-behavior-x: none;
+  overscroll-behavior-y: auto;
+}
+
+.pageScrollArea {
+  scrollbar-gutter: stable;
+}
+
+.pageScrollInsetRight {
+  padding-right: var(--page-right-inset);
+}
+
+.dataTableScrollSurface {
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
+}
+
+.dataTableShell:not(.dataTableShell--frozen) .dataTableBodyScroll {
+  overflow-x: hidden;
+}
+
+.sectionHeading {
+  margin: 0;
+}
+
+.dataSplitGroupSpacer {
+  height: 34px;
+}
+
+.sectionHeader {
+  width: 100%;
+  height: 34px;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  border: 0;
+  padding: 0;
+  background: transparent;
+  cursor: pointer;
+  font-family: inherit;
+  text-align: left;
+}
+
+.sectionHeader:hover {
+  color: var(--muted);
+}
+
+.accordionChevron {
+  transition: transform 140ms ease;
+}
+
+.sectionHeader[data-state="closed"] .accordionChevron {
+  transform: rotate(-90deg);
+}
+
+/* ===========================================================================
+   Unified DataTable vocabulary (apps/desktop/src/components/DataTable.tsx).
+   Column sizing is data-driven via `--data-grid-columns`; every ColumnDef must
+   set `width` (see DataTable.types.ts).
+   Plain text cells use `.dataCellText` / `.dataCellTitle` / `.dataCellNumber`.
+   =========================================================================== */
+.dataTableBody {
+  position: relative;
+}
+
+.dataGroup + .dataGroup {
+  margin-top: var(--data-table-group-gap);
+}
+
+/* Unified table row model. The selection checkbox is the first in-flow grid
+   track at `--page-row-checkbox-offset` from the row's left edge; content
+   columns follow it. Headers indent to the same text column (see below). */
+.dataRow {
+  position: relative;
+  padding-left: var(--page-row-checkbox-offset);
+  display: grid;
+  grid-template-columns: var(--data-grid-columns, minmax(var(--data-table-first-col-min), 1fr));
+  align-items: stretch;
+  column-gap: var(--data-table-row-track-gap);
+  min-height: var(--data-table-table-row-height);
+  color: var(--text);
+  font-size: var(--data-table-row-font-size);
+}
+
+.dataRow .dataCell {
+  display: flex;
+  align-items: center;
+  min-height: var(--data-table-table-row-height);
+  padding-block: 8px;
+  position: relative;
+}
+
+.dataRow .dataCell:has(.dataCellSub) {
+  flex-direction: column;
+  align-items: stretch;
+  justify-content: center;
+  overflow: hidden;
+}
+
+.dataRow .dataCell:has(.dataCellSub) .dataCellTitle,
+.dataRow .dataCell:has(.dataCellSub) .dataCellSubLine,
+.dataRow .dataCell:has(.dataCellSub) > .dataCellSub {
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+}
+
+/* The selection control / placeholder always occupies the first grid track so
+   that the row checkbox shares a vertical line with the bottom action bar
+   checkbox (both are `.selectionCheckbox`, both 16px wide). */
+.dataRow > .rowSelection,
+.dataRow > .rowSelectionPlaceholder {
+  grid-column: 1;
+  justify-self: start;
+  /* Table rows use `align-items: stretch` so each cell can manage its own
+     vertical layout; without this the fixed 16px checkbox would pin to the top
+     of the track. Centering keeps it on the row's vertical midline, matching
+     the grid layout and the bottom action bar checkbox. */
+  align-self: center;
+}
+
+.dataCell {
+  min-width: 0;
+}
+
+/* The first *content* cell hugs the selection track; every subsequent cell is
+   separated by the semantic cell gap. (The first content cell is preceded by
+   the checkbox/placeholder, never by another `.dataCell`.) */
+.dataCell + .dataCell {
+  margin-left: var(--data-table-cell-gap);
+}
+
+/* Group (section) headers indent to the row text column so the header label and
+   the item text share a vertical line (the checkbox sits to their left). The
+   indent equals row offset + selection column + track gap. */
+.dataGroup .sectionHeader {
+  padding-left: var(--data-table-text-rail-indent);
+  padding-right: var(--page-right-inset);
+  color: var(--data-table-header-color, var(--muted));
+  font-size: var(--data-table-header-font-size, var(--text-caption));
+  font-weight: var(--data-table-header-font-weight, 750);
+  letter-spacing: var(--data-table-header-letter-spacing, 0.08em);
+  text-transform: uppercase;
+}
+
+/* Non-frozen tables: the group heading spans the full row width, so it can pin
+   to the top (just below the sticky column header) while its rows scroll. */
+.dataTableShell:not(.dataTableShell--frozen) .dataGroup .sectionHeading {
+  position: sticky;
+  top: var(--data-table-sticky-header-offset, 0px);
+  z-index: var(--z-sticky);
+  background: var(--data-table-header-bg, var(--content-bg));
+}
+
+/* Frozen tables: group headers share the first-column rail and must not scroll
+   horizontally with the rest of the grid (same stick zone as the divider). They
+   stay below the sticky column header via the shared group z-layer. */
+.dataTableShell--frozen .dataGroup .sectionHeading {
+  position: sticky;
+  top: var(--data-table-sticky-header-offset, 0px);
+  left: 0;
+  z-index: var(--z-sticky);
+  box-sizing: border-box;
+  width: calc(var(--data-table-text-rail-indent) + var(--data-freeze-column-width));
+  background-color: var(--data-table-header-bg, var(--content-bg));
+}
+
+.dataTableShell--frozen .dataGroup .sectionHeader {
+  width: 100%;
+  padding-right: 12px;
+  box-sizing: border-box;
+}
+
+.dataTableShell--frozen .dataGroup .sectionHeaderLabel {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sectionHeaderLabel {
+  min-width: 0;
+}
+
+.sectionHeaderCount {
+  margin-left: auto;
+  padding-left: 12px;
+  color: var(--data-table-header-color, var(--muted));
+  font-size: var(--data-table-header-font-size, var(--text-caption));
+  font-weight: var(--data-table-header-font-weight, 750);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: normal;
+  text-transform: none;
+}
+
+/* req3: the tab's page title shares the row text rail. The list block is pulled
+   left by `--data-table-text-rail-indent` (see `.dataTableShell`) so its text
+   column lands exactly on the page's left inset — the same origin as the page
+   title. The title therefore needs NO extra indent; the selection checkbox sits
+   in the gutter to the left of both. */
+
+/* Requirement: row checkbox hidden by default, revealed on row hover / focus /
+   selection / while a row menu is open. `.rowSelection { opacity: 0 }` (shared)
+   provides the hidden state. `[data-state="open"]` is set by Radix on the
+   context-menu trigger (the row); `:has([data-state="open"])` catches an open
+   in-cell dropdown (e.g. the row actions menu). */
+.dataRow[data-row-selectable="true"]:hover .rowSelection,
+.dataRow[data-row-selectable="true"].rowSelected .rowSelection,
+.dataRow[data-row-selectable="true"].selectionActive .rowSelection,
+.dataRow[data-row-selectable="true"]:focus-within .rowSelection,
+.dataRow[data-row-selectable="true"][data-state="open"] .rowSelection,
+.dataRow[data-row-selectable="true"]:has([data-state="open"]) .rowSelection,
+.dataRow .rowSelection:not(:disabled):focus-visible {
+  opacity: 1;
+}
+
+.dataTableMarquee {
+  position: fixed;
+  z-index: var(--z-marquee);
+  border: 1px solid var(--focus-ring);
+  border-radius: 4px;
+  background: var(--selection-fill);
+  box-shadow: inset 0 0 0 1px var(--accent-soft-strong);
+  pointer-events: none;
+}
+
+.dataTableEmpty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  padding: 48px 0;
+  color: var(--faint);
+}
+
+/* Table layout (frozen first column) reuses the existing selectable-table
+   header chrome; widths flow from `--data-grid-columns` / freeze width. The
+   header shares the body scroller so flexible tracks use the same available
+   width as rows. `isolation` confines per-cell z-index above body rows. */
+.dataTableHeader {
+  position: relative;
+  flex: 0 0 var(--data-table-header-height, 34px);
+  z-index: var(--z-header);
+  isolation: isolate;
+  display: grid;
+  grid-template-columns: var(--data-grid-columns);
+  align-items: center;
+  column-gap: var(--data-table-row-track-gap);
+  padding-left: var(--page-row-checkbox-offset);
+  height: var(--data-table-header-height, 34px);
+  background: var(--data-table-header-bg, var(--content-bg));
+  color: var(--data-table-header-color, var(--muted));
+  font-size: var(--data-table-header-font-size, var(--text-caption));
+  font-weight: var(--data-table-header-font-weight, 750);
+  letter-spacing: var(--data-table-header-letter-spacing, 0.08em);
+  text-transform: uppercase;
+}
+
+.dataTableShell:not(.dataTableShell--frozen) .dataTableHeader {
+  position: sticky;
+  top: var(--data-table-sticky-header-offset, 0px);
+}
+
+.dataTableShell--frozen .dataTableHeader--frozen {
+  z-index: var(--z-frozen-header);
+  background: var(--data-table-header-bg, var(--content-bg));
+}
+
+.dataTableShell--frozen .dataTableHeader--scroll {
+  z-index: var(--z-header);
+}
+
+/* Single header underline, aligned to the row text rail like `rowFrame::before`. */
+.dataTableHeader::after {
+  content: "";
+  position: absolute;
+  left: var(--data-table-text-rail-indent);
+  right: 0;
+  bottom: 0;
+  height: 1px;
+  z-index: var(--z-header-rule);
+  background: var(--data-table-row-line, var(--row-frame-line));
+  pointer-events: none;
+}
+
+.dataTableShell--frozen .dataTableHeader--scroll::after {
+  left: 0;
+}
+
+.dataHeaderSelection {
+  grid-column: 1;
+  width: var(--data-table-selection-col);
+}
+
+/* Header cells share the body's per-cell gap so header labels line up with the
+   cell content in every column (first content cell hugs the selection track,
+   the rest are separated by `--data-table-cell-gap`). */
+.dataHeaderCell {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  position: relative;
+}
+
+.dataHeaderCell + .dataHeaderCell {
+  margin-left: var(--data-table-cell-gap);
+}
+
+.dataHeaderCellInner {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.dataHeaderLabel {
+  display: inline-flex;
+  align-items: center;
+  flex: 0 1 auto;
+  max-width: 100%;
+  min-width: 0;
+  height: var(--data-table-header-height);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dataHeaderLabelButton {
+  display: inline-flex;
+  align-items: center;
+  flex: 0 1 auto;
+  max-width: 100%;
+  height: var(--data-table-header-height);
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  letter-spacing: inherit;
+  text-transform: inherit;
+  text-align: left;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.dataHeaderGroupButton {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 16px;
+  width: 16px;
+  min-width: 16px;
+  height: var(--data-table-header-height);
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  opacity: 0;
+}
+
+.dataHeaderSortIcon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 13px;
+  width: 13px;
+  height: 13px;
+}
+
+.dataHeaderLabelButton span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dataHeaderLabelButton:hover,
+.dataHeaderSortLabelButton.activeSort {
+  color: var(--text);
+}
+
+.dataHeaderSortLabelButton {
+  gap: 2px;
+}
+
+/* Chevron always occupies a fixed 13px slot. Hide it with transparent stroke
+   (not opacity) so hover reveal never animates or shifts layout. */
+.dataTableHeader .dataHeaderSortIcon svg {
+  position: static;
+  top: auto;
+  right: auto;
+  display: block;
+  width: 13px;
+  height: 13px;
+  opacity: 1;
+  color: transparent;
+  transform: none;
+  transition: none;
+}
+
+.dataTableHeader .dataHeaderSortLabelButton:hover .dataHeaderSortIcon svg,
+.dataTableHeader .dataHeaderSortLabelButton.activeSort .dataHeaderSortIcon svg {
+  color: currentColor;
+}
+
+.dataTableHeader .dataHeaderSortLabelButton.ascending .dataHeaderSortIcon svg {
+  transform: rotate(180deg);
+}
+
+.dataHeaderCell:hover .dataHeaderGroupButton,
+.dataHeaderGroupButton:focus-visible,
+.dataHeaderGroupButton.activeGroup {
+  opacity: 1;
+}
+
+.dataHeaderGroupButton:hover,
+.dataHeaderGroupButton.activeGroup {
+  color: var(--text);
+}
+
+.rowFrame {
+  position: relative;
+  border-radius: var(--data-table-row-radius, var(--row-frame-radius));
+  isolation: isolate;
+}
+
+.rowFrame::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  right: 0;
+  left: var(--data-table-text-rail-indent);
+  height: 1px;
+  background: var(--data-table-row-line, var(--row-frame-line));
+  z-index: var(--z-content);
+  pointer-events: none;
+}
+
+.rowFrame::after {
+  content: "";
+  position: absolute;
+  top: 1px;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  border-radius: var(--data-table-row-radius, var(--row-frame-radius));
+  background: transparent;
+  z-index: var(--z-base);
+  pointer-events: none;
+  transition-property: background-color;
+  transition-duration: 120ms;
+  transition-timing-function: ease-out;
+}
+
+.rowFrame:is(
+  :hover,
+  .rowHover,
+  .rowSelected,
+  .menuActive,
+  [data-state="open"],
+  :has([data-state="open"])
+)::after {
+  background: var(--data-table-row-hover-bg, var(--row-frame-bg));
+}
+
+/* Hide the 1px separator above an active row and on the row directly below it. */
+.rowFrame:is(
+  :hover,
+  .rowHover,
+  .rowSelected,
+  .menuActive,
+  [data-state="open"],
+  :has([data-state="open"])
+)::before,
+.dataTableRowSlot:has(.rowFrame:is(
+  :hover,
+  .rowHover,
+  .rowSelected,
+  .menuActive,
+  [data-state="open"],
+  :has([data-state="open"])
+)) + .dataTableRowSlot .rowFrame::before,
+.dataTableHeader + .dataTableBody > .dataTableRowSlot:first-child .rowFrame::before,
+.dataTableBody > .dataTableRowSlot:first-child .rowFrame::before,
+.dataTableGroups > .dataGroup:first-child .dataTableRowSlot:first-child .rowFrame::before {
+  background: transparent;
+}
+
+.dataTableShell--frozen .dataRow:is(
+  :hover,
+  .rowHover,
+  .rowSelected,
+  .menuActive,
+  [data-state="open"],
+  :has([data-state="open"])
+) .dataCell[data-frozen] {
+  --data-table-frozen-cell-line: transparent;
+  box-shadow: none;
+}
+
+.dataTableShell--frozen .dataTableRowSlot:has(.rowFrame:is(
+  :hover,
+  .rowHover,
+  .rowSelected,
+  .menuActive,
+  [data-state="open"],
+  :has([data-state="open"])
+)) + .dataTableRowSlot .dataCell[data-frozen] {
+  --data-table-frozen-cell-line: transparent;
+  box-shadow: none;
+}
+
+.dataTableShell--frozen .dataTableHeader + .dataTableBody > .dataTableRowSlot:first-child .dataCell[data-frozen],
+.dataTableShell--frozen .dataTableBody > .dataTableRowSlot:first-child .dataCell[data-frozen],
+.dataTableShell--frozen .dataTableGroups > .dataGroup:first-child .dataTableRowSlot:first-child .dataCell[data-frozen] {
+  --data-table-frozen-cell-line: transparent;
+  box-shadow: none;
+}
+
+.dataTableShell--frozen .dataRow > .dataCell:not([data-frozen]) {
+  z-index: var(--z-content);
+}
+
+.dataTableShell--frozen .rowFrame > .dataCell:not([data-frozen]) {
+  z-index: var(--z-content);
+}
+
+.rowFrame > *:not([data-frozen]):not(.rowSelection):not(.rowSelectionPlaceholder) {
+  position: relative;
+  z-index: var(--z-content);
+}
+
+.rowSelection {
+  grid-column: 2;
+  justify-self: start;
+  opacity: 0;
+  transition: opacity 120ms ease;
+}
+
+.rowSelectionPlaceholder {
+  grid-column: 2;
+}
+
+.dataTableShell--frozen .dataRow--frozenPane > .rowSelection,
+.dataTableShell--frozen .dataRow--frozenPane > .rowSelectionPlaceholder,
+.dataTableShell--frozen .dataTableHeader--frozen > .dataHeaderSelection {
+  grid-column: 1;
+}
+
+.dataTableShell--frozen .dataRow--scrollPane::before {
+  left: 0;
+}
+
+.dataTableShell--frozen .dataRow--frozenPane::before {
+  z-index: var(--z-sticky);
+}
+
+.dataTableShell--frozen .dataRow--frozenPane,
+.dataTableShell--frozen .dataRow--frozenPane::after {
+  border-top-right-radius: 0;
+  border-bottom-right-radius: 0;
+}
+
+.dataTableShell--frozen .dataRow--scrollPane,
+.dataTableShell--frozen .dataRow--scrollPane::after {
+  border-top-left-radius: 0;
+  border-bottom-left-radius: 0;
+}
+
+.dataTableShell--frozen .dataRow--scrollPane::after {
+  left: calc(-1 * var(--data-table-split-scroll-leading-gap));
+}
+
+.sessionFreezeResizeHandle {
+  --resize-handle-hit-area: 7px;
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: calc(var(--frozen-leading-offset) + var(--session-freeze-column-width));
+  z-index: var(--z-resize-handle);
+  width: var(--resize-handle-hit-area);
+  padding: 0;
+  margin-left: calc(var(--resize-handle-hit-area) * -0.5);
+  border: 0;
+  background: transparent;
+  cursor: col-resize;
+  outline: none;
+}
+
+.sessionFreezeResizeHandle::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 50%;
+  width: 1px;
+  transform: translateX(-50%);
+  background: transparent;
+}
+
+.dataCellText {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  display: block;
+}
+
+.dataCellTitle {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 14px;
+  line-height: 1.18;
+  font-weight: 720;
+}
+
+.sessionTitleWithKind {
+  width: 100%;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.sessionTitleText {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 14px;
+  font-weight: 720;
+  line-height: 1.18;
+}
+
+.sessionChildBadge {
+  flex: 0 0 auto;
+  min-width: 0;
+  padding: 3px 6px;
+  border-radius: 5px;
+  background: var(--amber-soft);
+  color: var(--amber);
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1;
+  text-transform: uppercase;
+}
+
+.dataCellNumber {
+  display: block;
+  min-width: 0;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+.dataCellSubLine {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  margin-top: 5px;
+}
+
+.dataCellSub {
+  display: block;
+  width: 100%;
+  min-width: 0;
+  margin-top: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--faint);
+  font-size: 12px;
+  line-height: 16px;
+}
+
+.sessionSearchSnippet mark {
+  border-radius: 2px;
+  background: color-mix(in srgb, var(--accent) 24%, transparent);
+  color: inherit;
+}
+
+.dataCell[data-column="source"] .dataCellSub {
+  margin-top: 7px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+}

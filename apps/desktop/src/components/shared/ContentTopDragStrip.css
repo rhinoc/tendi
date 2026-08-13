@@ -1,0 +1,8 @@
+.contentTopDragStrip {
+  position: absolute;
+  z-index: var(--z-content);
+  top: 0;
+  right: 0;
+  left: 0;
+  height: 34px;
+}

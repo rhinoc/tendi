@@ -1,0 +1,19 @@
+[package]
+name = "tendi-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+chrono.workspace = true
+dirs.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml.workspace = true
+sha2.workspace = true
+toml.workspace = true
+toml_edit.workspace = true
+rusqlite.workspace = true
+ureq.workspace = true
+walkdir.workspace = true

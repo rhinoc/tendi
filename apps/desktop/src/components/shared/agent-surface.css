@@ -1,0 +1,74 @@
+.chips {
+  display: flex;
+  gap: 5px;
+}
+
+.agentIconSurface {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  font-weight: 700;
+  line-height: 1;
+  overflow: hidden;
+  background: var(--panel-bg);
+  outline: 1px solid var(--image-outline);
+  outline-offset: -1px;
+}
+
+.chip,
+.agentPill {
+  width: 18px;
+  height: 18px;
+  flex: 0 0 18px;
+  aspect-ratio: 1 / 1;
+  border-radius: 5px;
+  font-size: 11px;
+}
+
+.agentIconImage {
+  width: 100%;
+  height: 100%;
+  flex: 0 0 auto;
+  display: block;
+  object-fit: contain;
+  pointer-events: none;
+  transform: scale(0.82);
+}
+
+.agentIconSurface:is(.cline, .copilot, .cursor, .hermes, .hermesagent, .opencode) .agentIconImage {
+  filter: var(--monochrome-icon-filter);
+}
+
+.agentIconSvg {
+  width: 70%;
+  height: 70%;
+  color: var(--faint);
+  stroke-width: 2.4;
+}
+
+.agentIconFallback {
+  color: var(--faint);
+  font-size: inherit;
+  line-height: inherit;
+}
+
+.agentIconSurface.claude .agentIconImage,
+.agentIconSurface.cursor .agentIconImage {
+  transform: scale(0.72);
+}
+
+.chip.codex,
+.agentPill.codex {
+  color: var(--agent-codex);
+}
+
+.chip.cursor,
+.agentPill.cursor {
+  color: var(--agent-cursor);
+}
+
+.chip.claude,
+.agentPill.claude {
+  color: var(--agent-claude);
+}

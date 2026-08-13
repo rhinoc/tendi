@@ -1,0 +1,200 @@
+/* Shared third-column chrome: DetailPanelHost, DetailPanel, DetailCollapsedRail */
+
+.transcriptPanelHost,
+.ruleEditorPanelHost,
+.hookDetailPanelHost {
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.transcriptPanelHost.collapsed {
+  flex: 0 0 48px;
+}
+
+.emptyTranscript {
+  display: grid;
+  place-items: center;
+}
+
+.ruleEditorPanel {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--editor-bg);
+}
+
+.ruleEditorPanel .threadHeader {
+  flex: 0 0 auto;
+  background: var(--content-bg);
+}
+
+.ruleEditorPanel .threadHeader:not(:has(.threadMeta)) .threadTitleLine {
+  border-bottom: 0;
+}
+
+.ruleEditorPanel .threadTitleLine {
+  padding-right: 12px;
+}
+
+.ruleEditorPanel .editorActions {
+  margin-left: auto;
+  gap: 4px;
+}
+
+.ruleEditorPanel .codePane {
+  flex: 1;
+}
+
+.ruleEditorLoading {
+  flex: 1;
+  display: grid;
+  place-items: center;
+}
+
+.threadHeader {
+  padding: 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.threadHeader:has(.threadMeta) {
+  border-bottom: 0;
+}
+
+.threadTitleLine {
+  min-height: 56px;
+  padding: 0 16px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  border-bottom: 1px solid var(--hover-fill-strong);
+}
+
+.threadTitleLine h2 {
+  min-width: 0;
+  flex: 1 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  margin: 0;
+  font-size: 18px;
+  line-height: 1.15;
+  letter-spacing: 0;
+}
+
+.threadHeaderActions {
+  flex: 0 0 auto;
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.threadPanelToggle {
+  margin-left: auto;
+  width: 30px;
+  height: 30px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--faint);
+  cursor: pointer;
+}
+
+.threadHeaderActions .threadPanelToggle {
+  margin-left: 0;
+}
+
+.threadPanelToggle:hover {
+  background: var(--hover-fill);
+  color: var(--text);
+}
+
+.threadPanelToggle:disabled,
+.threadPanelToggle:disabled:hover {
+  color: var(--disabled);
+  background: transparent;
+  cursor: default;
+}
+
+.threadPanelToggle.sessionResumeButton.isSuccess,
+.threadPanelToggle.sessionResumeButton.isSuccess:hover {
+  color: var(--green);
+  background: var(--green-soft);
+}
+
+.threadPanelToggle.sessionResumeButton.isError,
+.threadPanelToggle.sessionResumeButton.isError:hover {
+  color: var(--danger);
+  background: var(--danger-soft);
+}
+
+.transcriptRail {
+  width: 48px;
+  min-width: 48px;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  padding: 14px 8px;
+  border-left: 1px solid var(--line);
+  background: var(--content-bg);
+}
+
+.railToggle {
+  margin-left: 0;
+  flex: 0 0 30px;
+}
+
+.railLabel {
+  min-height: 0;
+  flex: 1;
+  color: var(--faint);
+  font-size: 12px;
+  font-weight: 650;
+  line-height: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  writing-mode: vertical-rl;
+  white-space: nowrap;
+}
+
+.threadMeta {
+  min-height: 36px;
+  padding: 0 16px;
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  color: var(--faint);
+  font-size: 13px;
+  font-weight: 500;
+  border-bottom: 1px solid var(--hover-fill-strong);
+}
+
+.threadMeta span {
+  white-space: nowrap;
+}
+
+.threadMeta span:last-child {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono);
+  font-weight: 500;
+  opacity: 0.54;
+}
+
+@media (max-width: 980px) {
+  .sessionsLayout .panelResizeHandle,
+  .transcriptPanelHost {
+    display: none;
+  }
+}

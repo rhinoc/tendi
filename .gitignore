@@ -1,0 +1,12 @@
+/target
+
+node_modules
+dist
+.vite
+
+.DS_Store
+*.log
+
+apps/desktop/src-tauri/gen
+apps/desktop/test-results/
+.codex-screenshots/

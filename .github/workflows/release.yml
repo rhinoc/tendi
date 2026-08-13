@@ -1,0 +1,135 @@
+name: Release
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Read and validate version
+        id: version
+        env:
+          RELEASE_TAG: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
+        run: |
+          VERSION="$(node -e 'const fs=require("fs"); console.log(JSON.parse(fs.readFileSync("apps/desktop/src-tauri/tauri.conf.json", "utf8")).version)')"
+          if [ -n "$RELEASE_TAG" ] && [ "$RELEASE_TAG" != "v${VERSION}" ]; then
+            echo "tag $RELEASE_TAG does not match configured version v${VERSION}" >&2
+            exit 1
+          fi
+          echo "version=$VERSION" >>"$GITHUB_OUTPUT"
+
+  build:
+    needs: version
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: aarch64
+            target: aarch64-apple-darwin
+            runner: macos-14
+          - arch: x64
+            target: x86_64-apple-darwin
+            runner: macos-13
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: apps/desktop/package-lock.json
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install dependencies
+        run: npm ci --prefix apps/desktop
+
+      - name: Build signed updater artifacts and DMG
+        env:
+          TENDI_RELEASE_ARCHS: ${{ matrix.arch }}
+          TENDI_INCLUDE_UPDATER_ARTIFACTS: "1"
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: scripts/build-release.sh
+
+      - name: Upload release artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ matrix.arch }}
+          path: |
+            dist/tendi-${{ needs.version.outputs.version }}-${{ matrix.arch }}.dmg
+            dist/tendi-${{ needs.version.outputs.version }}-${{ matrix.arch }}.app.tar.gz
+            dist/tendi-${{ needs.version.outputs.version }}-${{ matrix.arch }}.app.tar.gz.sig
+
+  publish:
+    needs: [version, build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Download release artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: dist-*
+          path: dist
+          merge-multiple: true
+
+      - name: Write updater manifest
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+          TENDI_RELEASE_TAG: v${{ needs.version.outputs.version }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_SERVER_URL: ${{ github.server_url }}
+        run: scripts/write-latest-json.sh
+
+      - name: Publish GitHub Release
+        uses: svenstaro/upload-release-action@v2
+        with:
+          repo_token: ${{ secrets.GITHUB_TOKEN }}
+          file: dist/tendi-${{ needs.version.outputs.version }}-*.dmg
+          file_glob: true
+          tag: v${{ needs.version.outputs.version }}
+          release_name: Tendi v${{ needs.version.outputs.version }}
+          overwrite: true
+          body: |
+            Open the DMG and drag `tendi.app` to Applications.
+
+            If macOS blocks first launch, verify the source and remove quarantine from the installed app:
+
+            ```bash
+            xattr -dr com.apple.quarantine /Applications/tendi.app
+            ```
+
+      - name: Upload updater manifest and packages
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION="${{ needs.version.outputs.version }}"
+          gh release upload "v${VERSION}" \
+            dist/latest.json \
+            "dist/tendi-${VERSION}-aarch64.app.tar.gz" \
+            "dist/tendi-${VERSION}-aarch64.app.tar.gz.sig" \
+            "dist/tendi-${VERSION}-x64.app.tar.gz" \
+            "dist/tendi-${VERSION}-x64.app.tar.gz.sig" \
+            --clobber

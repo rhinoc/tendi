@@ -1,0 +1,47 @@
+{
+  "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
+  "productName": "tendi",
+  "version": "0.1.0",
+  "identifier": "dev.tendi.desktop",
+  "build": {
+    "beforeDevCommand": "npm run dev -- --port 5187 --strictPort",
+    "devUrl": "http://127.0.0.1:5187",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [],
+    "macOSPrivateApi": true,
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["app"],
+    "icon": ["icons/icon.png"],
+    "macOS": {
+      "dmg": {
+        "background": "res/dmg-background.png",
+        "windowSize": {
+          "width": 661,
+          "height": 401
+        },
+        "appPosition": {
+          "x": 180,
+          "y": 197
+        },
+        "applicationFolderPosition": {
+          "x": 480,
+          "y": 197
+        }
+      }
+    }
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEVERUVGODBDMEVGQ0Y2NUYKUldSZjl2d09EUGp1N2V1blJsdzFnRjBFdFBNM0dmby9aQ1ZnTmI5ZURJQm5CLzNNclZDRXZyZisK",
+      "endpoints": ["https://github.com/rhinoc/tendi/releases/latest/download/latest.json"]
+    }
+  }
+}

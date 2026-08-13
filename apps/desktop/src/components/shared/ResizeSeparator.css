@@ -1,0 +1,26 @@
+.panelResizeHandle {
+  --resize-handle-hit-area: 7px;
+  position: relative;
+  z-index: var(--z-raised);
+  flex: 0 0 var(--resize-handle-hit-area);
+  inline-size: var(--resize-handle-hit-area);
+  margin-inline: calc(var(--resize-handle-hit-area) * -0.5);
+  background: transparent;
+  outline: none;
+}
+
+.panelResizeHandle::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 50%;
+  width: 1px;
+  transform: translateX(-50%);
+  background: transparent;
+}
+
+.panelResizeHandle:hover::after,
+.panelResizeHandle[data-resize-handle-active]::after {
+  background: var(--focus-ring);
+}

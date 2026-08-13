@@ -1,0 +1,31 @@
+.pageHeader.compact {
+  padding: var(--page-top-inset) var(--page-right-inset) var(--page-compact-bottom-inset) var(--page-left-inset);
+  margin: 0;
+}
+
+.pageHeader {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--page-header-gap);
+  margin-bottom: 20px;
+}
+
+.headerTools {
+  display: flex;
+  align-items: center;
+  position: relative;
+  gap: 8px;
+}
+
+.skillsPage .pageHeader,
+.dataPage .pageHeader {
+  flex: 0 0 auto;
+}
+
+.sessionListPane .pageHeader,
+.ruleListPane .pageHeader {
+  flex: 0 0 auto;
+  padding-left: var(--page-left-inset);
+  padding-right: var(--page-right-inset);
+}

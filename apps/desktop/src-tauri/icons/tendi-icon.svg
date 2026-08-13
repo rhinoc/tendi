@@ -1,0 +1,101 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" role="img" aria-label="Tendi app icon">
+  <defs>
+    <linearGradient id="bg-gradient" x1="184" y1="106" x2="832" y2="918" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#fbfbf4"/>
+      <stop offset="0.54" stop-color="#eef7ec"/>
+      <stop offset="1" stop-color="#dceee6"/>
+    </linearGradient>
+
+    <linearGradient id="bg-rim" x1="178" y1="92" x2="846" y2="900" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0.9"/>
+      <stop offset="1" stop-color="#b7d8c7" stop-opacity="0.65"/>
+    </linearGradient>
+
+    <linearGradient id="base-gradient" x1="342" y1="616" x2="680" y2="812" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#3c4641"/>
+      <stop offset="0.58" stop-color="#1f2825"/>
+      <stop offset="1" stop-color="#111816"/>
+    </linearGradient>
+
+    <linearGradient id="base-lip-gradient" x1="334" y1="590" x2="684" y2="670" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#59655e"/>
+      <stop offset="1" stop-color="#28332e"/>
+    </linearGradient>
+
+    <linearGradient id="sprout-gradient" x1="390" y1="292" x2="652" y2="626" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#d7ffe8"/>
+      <stop offset="0.42" stop-color="#7ee0a2"/>
+      <stop offset="1" stop-color="#26915a"/>
+    </linearGradient>
+
+    <linearGradient id="sprout-dark" x1="354" y1="302" x2="624" y2="655" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#77c792"/>
+      <stop offset="1" stop-color="#176a45"/>
+    </linearGradient>
+
+    <filter id="ambient-shadow" x="-25%" y="-25%" width="150%" height="150%">
+      <feDropShadow dx="0" dy="30" stdDeviation="32" flood-color="#3f584b" flood-opacity="0.24"/>
+    </filter>
+
+    <filter id="soft-glow" x="-40%" y="-40%" width="180%" height="180%">
+      <feGaussianBlur stdDeviation="11" result="blur"/>
+      <feColorMatrix in="blur" type="matrix" values="0 0 0 0 0.22 0 0 0 0 0.76 0 0 0 0 0.44 0 0 0 0.48 0" result="glow"/>
+      <feMerge>
+        <feMergeNode in="glow"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+  </defs>
+
+  <g id="background">
+    <rect x="72" y="72" width="880" height="880" rx="205" fill="url(#bg-gradient)"/>
+    <rect x="83" y="83" width="858" height="858" rx="194" fill="none" stroke="url(#bg-rim)" stroke-width="22"/>
+    <ellipse cx="512" cy="764" rx="260" ry="58" fill="#91b79f" opacity="0.18"/>
+  </g>
+
+  <g id="icon-object" filter="url(#ambient-shadow)">
+    <g id="sprout" filter="url(#soft-glow)">
+      <path
+        d="M514 637 C512 560 509 503 506 433 C504 382 512 334 530 288"
+        fill="none"
+        stroke="url(#sprout-gradient)"
+        stroke-width="38"
+        stroke-linecap="round"
+      />
+
+      <path
+        d="M499 397 C422 290 318 274 267 316 C299 408 388 459 488 430 C506 425 511 414 499 397Z"
+        fill="url(#sprout-gradient)"
+        stroke="url(#sprout-dark)"
+        stroke-width="12"
+        stroke-linejoin="round"
+      />
+      <path
+        d="M535 383 C604 274 711 245 766 285 C747 383 666 451 559 426 C540 421 527 402 535 383Z"
+        fill="url(#sprout-gradient)"
+        stroke="url(#sprout-dark)"
+        stroke-width="12"
+        stroke-linejoin="round"
+      />
+
+      <path d="M354 350 C402 374 444 397 488 430" fill="none" stroke="#eafff1" stroke-width="13" stroke-linecap="round" opacity="0.64"/>
+      <path d="M684 322 C638 360 598 393 559 426" fill="none" stroke="#eafff1" stroke-width="13" stroke-linecap="round" opacity="0.64"/>
+
+      <circle cx="403" cy="382" r="22" fill="#f5fff8" opacity="0.94"/>
+      <circle cx="635" cy="368" r="22" fill="#f5fff8" opacity="0.94"/>
+      <circle cx="403" cy="382" r="9" fill="#43ad70"/>
+      <circle cx="635" cy="368" r="9" fill="#43ad70"/>
+    </g>
+
+    <g id="planter">
+      <path
+        d="M330 628 C336 605 355 590 379 590 H645 C669 590 688 605 694 628 L657 785 C652 808 632 824 609 824 H415 C392 824 372 808 367 785Z"
+        fill="url(#base-gradient)"
+      />
+      <rect x="312" y="568" width="400" height="104" rx="48" fill="url(#base-lip-gradient)"/>
+      <rect x="350" y="594" width="324" height="36" rx="18" fill="#151e1b" opacity="0.28"/>
+      <path d="M414 724 H560 C592 724 592 700 622 700" fill="none" stroke="#c78045" stroke-width="15" stroke-linecap="round"/>
+      <path d="M386 604 H638" fill="none" stroke="#ffffff" stroke-width="12" stroke-linecap="round" opacity="0.12"/>
+    </g>
+  </g>
+</svg>

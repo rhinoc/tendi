@@ -1,0 +1,280 @@
+.dialogOverlay {
+  position: fixed;
+  inset: 0;
+  z-index: var(--z-dialog-backdrop);
+  background: var(--overlay-scrim);
+}
+
+.confirmDialogTitle {
+  margin: 0;
+  padding: 20px 22px 0;
+  color: var(--text);
+  font-size: 16px;
+  line-height: 1.3;
+  font-weight: 650;
+  letter-spacing: -0.015em;
+  text-wrap: balance;
+}
+
+.confirmDialogPanel {
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  z-index: var(--z-dialog);
+  width: min(380px, calc(100vw - 48px));
+  transform: translate(-50%, -50%);
+  border: 0;
+  border-radius: var(--radius-lg);
+  padding: 0;
+  background: var(--panel-bg);
+  box-shadow: var(--shadow-elevated);
+  overflow: hidden;
+}
+
+.confirmDialogPanel[data-update-preview="true"] {
+  width: min(1180px, calc(100vw - 48px));
+}
+
+.skillUpdateDiffFrame {
+  height: min(62vh, 640px);
+  margin: -4px 22px 20px;
+  overflow: hidden;
+  border: 0;
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-border);
+}
+
+.skillUpdateDiff {
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+}
+
+.skillUpdateDiffFilesPanel,
+.skillUpdateDiffEditor {
+  min-width: 0;
+  min-height: 0;
+}
+
+.skillUpdateDiffFilesPanel {
+  border-right: 1px solid var(--line);
+  background: var(--surface-2);
+}
+
+.skillUpdateDiffFiles {
+  width: 100%;
+  min-height: 100%;
+  padding: 6px 0;
+}
+
+.skillUpdateTreeRow {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  height: 28px;
+  padding: 0 8px;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 28px;
+  text-align: left;
+}
+
+.skillUpdateTreeRow > svg,
+.skillUpdateTreeChevron {
+  flex: 0 0 auto;
+}
+
+.skillUpdateTreeRow > svg {
+  color: var(--faint);
+}
+
+.skillUpdateTreeChevron {
+  width: 12px;
+  height: 14px;
+  display: inline-grid;
+  place-items: center;
+  color: var(--faint);
+}
+
+.skillUpdateTreeName {
+  min-width: 0;
+  flex: 1 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.skillUpdateTreeRow:hover {
+  background: var(--hover-fill);
+  color: var(--text);
+}
+
+.skillUpdateTreeRow.active {
+  background: var(--active-fill);
+  color: var(--text);
+}
+
+.skillUpdateTreeRow.folder {
+  color: var(--faint);
+}
+
+.skillUpdateDiffResizeHandle {
+  margin-inline: -3px;
+}
+
+.skillUpdateDiffEditor {
+  overflow: hidden;
+}
+
+.skillUpdateDiffEditor .codeMirrorEditor,
+.skillUpdateDiffEditor .codeMirrorEditor > div {
+  height: 100%;
+}
+
+.skillUpdatePreviewLoading,
+.skillUpdatePreviewError {
+  margin: 4px 22px 20px;
+}
+
+.skillUpdatePreviewLoading {
+  height: min(62vh, 640px);
+  margin: -4px 22px 20px;
+  display: grid;
+  place-items: center;
+  border: 0;
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-border);
+}
+
+.skillUpdatePreviewError {
+  color: var(--danger-text);
+  white-space: pre-wrap;
+}
+
+.confirmDialogActions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 12px;
+  padding: 14px 24px;
+  border-top: 1px solid var(--line);
+  background: var(--surface-2);
+}
+
+.confirmDialogActions button {
+  height: 38px;
+  min-width: 104px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 14px;
+  border: 0;
+  border-radius: var(--radius-md);
+  color: var(--text);
+  background: var(--panel-bg);
+  box-shadow: var(--shadow-border);
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 600;
+  transition-property: box-shadow, background-color, color, transform;
+  transition-duration: 140ms;
+  transition-timing-function: ease-out;
+}
+
+.confirmDialogActions button:hover {
+  box-shadow: var(--shadow-border-hover);
+}
+
+.confirmDialogActions button:active:not(:disabled) {
+  transform: scale(var(--press-scale));
+}
+
+.confirmDialogActions button:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+
+.confirmDialogActions button.primary {
+  color: var(--accent-contrast);
+  background: var(--accent);
+  box-shadow: none;
+}
+
+.confirmDialogActions button.primary:hover {
+  background: var(--accent-hover);
+}
+
+.confirmDialogActions button.danger {
+  color: var(--panel-bg);
+  background: var(--orange);
+  box-shadow: none;
+}
+
+.confirmDialogActions button.danger:hover {
+  background: var(--danger);
+}
+
+.confirmDialogActions button.danger.subtle {
+  color: var(--danger-text);
+  background: var(--danger-soft);
+  box-shadow: 0 0 0 1px var(--danger-soft-strong);
+}
+
+.confirmDialogActions button.danger.subtle:hover {
+  color: var(--panel-bg);
+  background: var(--orange);
+  box-shadow: none;
+}
+
+.confirmDialogActions button.secondary {
+  min-width: 0;
+  padding: 0 4px;
+  color: var(--muted);
+  background: transparent;
+  box-shadow: none;
+}
+
+.confirmDialogActions button.secondary:hover {
+  color: var(--text);
+  background: transparent;
+}
+
+.confirmDialogDescription {
+  margin: 8px 22px 20px;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.45;
+  text-wrap: pretty;
+}
+
+.confirmDialogImpact {
+  display: grid;
+  gap: 10px;
+  margin: -8px 22px 18px;
+  padding: 10px;
+  border: 0;
+  border-radius: var(--radius-md);
+  background: var(--danger-soft);
+  box-shadow: 0 0 0 1px var(--danger-soft-strong);
+}
+
+.confirmDialogImpact section {
+  display: grid;
+  gap: 4px;
+}
+
+.confirmDialogImpact strong {
+  color: var(--danger-text);
+  font-size: 12px;
+}
+
+.confirmDialogImpact span {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.4;
+}

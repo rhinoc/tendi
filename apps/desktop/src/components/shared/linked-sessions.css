@@ -1,0 +1,23 @@
+.linkedSessionsDrawer .dataTableShell {
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.linkedSessionsDrawer .dataTableBodyScroll {
+  padding-right: 0;
+}
+
+.linkedSessionsDrawer .listSurface {
+  min-width: 0;
+}
+
+.linkedSessionsDrawer .dataTableHeader,
+.linkedSessionsDrawer .dataRow {
+  width: 100%;
+  min-width: 0;
+}
+
+.linkedSessionsDrawer .dataTableScroll {
+  overflow-x: hidden;
+}

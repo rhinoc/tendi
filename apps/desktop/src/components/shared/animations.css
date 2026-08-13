@@ -1,0 +1,84 @@
+@keyframes loadingSpin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes uiEnter {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+.copyIconSwap {
+  position: relative;
+  display: inline-grid;
+  place-items: center;
+  width: 1em;
+  height: 1em;
+  line-height: 0;
+}
+
+.copyIconSwapLayer {
+  grid-area: 1 / 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition-property: opacity, filter, transform;
+  transition-duration: 300ms;
+  transition-timing-function: var(--ease-out-soft);
+}
+
+.copyIconSwapIdle {
+  opacity: 1;
+  filter: blur(0);
+  transform: scale(1);
+}
+
+.copyIconSwapActive {
+  position: absolute;
+  inset: 0;
+  align-items: center;
+  justify-content: center;
+  opacity: 0;
+  filter: blur(4px);
+  transform: scale(0.25);
+}
+
+.copyIconSwap.isCopied .copyIconSwapIdle {
+  opacity: 0;
+  filter: blur(4px);
+  transform: scale(0.25);
+}
+
+.copyIconSwap.isCopied .copyIconSwapActive {
+  opacity: 1;
+  filter: blur(0);
+  transform: scale(1);
+}
+
+.skillsEmpty,
+.dataTableEmpty {
+  animation: none;
+}
+
+.skillsEmpty > *,
+.dataTableEmpty > * {
+  opacity: 0;
+  animation: uiEnter 180ms ease-out both;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .copyIconSwapLayer {
+    transition: none;
+  }
+
+  .skillsEmpty > *,
+  .dataTableEmpty > * {
+    opacity: 1;
+    animation: none;
+  }
+}

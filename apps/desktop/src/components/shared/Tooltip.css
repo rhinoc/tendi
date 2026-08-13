@@ -1,0 +1,51 @@
+.appTooltip {
+  z-index: 1200;
+  max-width: min(320px, calc(100vw - 16px));
+  padding: 5px 8px;
+  overflow-wrap: anywhere;
+  color: var(--text);
+  font-size: var(--text-caption);
+  font-weight: 500;
+  line-height: 1.4;
+  white-space: pre-wrap;
+  background: var(--surface-3);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-sm);
+  box-shadow: var(--shadow-menu);
+  pointer-events: none;
+  user-select: text;
+  animation: appTooltipIn 100ms var(--ease-out-soft);
+}
+
+.appTooltipArrow {
+  overflow: visible;
+}
+
+.appTooltipArrow polygon {
+  fill: var(--surface-3);
+}
+
+.appTooltipArrow polyline {
+  fill: none;
+  stroke: var(--line-strong);
+  stroke-width: 1px;
+  vector-effect: non-scaling-stroke;
+}
+
+@keyframes appTooltipIn {
+  from {
+    opacity: 0;
+    transform: translateY(2px) scale(0.98);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .appTooltip {
+    animation: none;
+  }
+}

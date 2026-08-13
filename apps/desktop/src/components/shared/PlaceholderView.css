@@ -1,0 +1,11 @@
+.placeholder svg {
+  justify-self: center;
+  color: var(--amber);
+}
+
+.placeholder {
+  display: grid;
+  place-content: center;
+  text-align: center;
+  gap: 8px;
+}

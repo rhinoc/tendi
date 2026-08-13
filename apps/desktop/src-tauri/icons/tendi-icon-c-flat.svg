@@ -1,0 +1,190 @@
+<svg
+  xmlns="http://www.w3.org/2000/svg"
+  viewBox="0 0 1024 1024"
+  role="img"
+  aria-labelledby="title description"
+>
+  <title id="title">Tendi portal icon, flat variant C</title>
+  <desc id="description">
+    A warm-black portal with an amber doorway and layered steps.
+  </desc>
+
+  <!-- Palette
+    warm black: #11100D
+    charcoal:   #1C1D19
+    surface:    #20211D
+    warm gray:  #9B988E
+    amber:      #C46F2C
+    terracotta: #D58B52
+    light amber:#E09A63
+  -->
+
+  <g id="app-tile">
+    <rect
+      id="tile-background"
+      x="64"
+      y="64"
+      width="896"
+      height="896"
+      rx="216"
+      fill="#11100D"
+    />
+    <path
+      id="tile-highlight"
+      d="M280 82H744C856 82 942 168 942 280"
+      fill="none"
+      stroke="#20211D"
+      stroke-width="12"
+      stroke-linecap="round"
+    />
+  </g>
+
+  <g id="outer-portal">
+    <path
+      id="portal-shell"
+      d="M512 166
+         C528 166 544 171 558 180
+         L790 335
+         C824 358 844 396 844 437
+         V696
+         C844 728 827 757 800 774
+         L557 923
+         C529 940 495 940 467 923
+         L224 774
+         C197 757 180 728 180 696
+         V437
+         C180 396 200 358 234 335
+         L466 180
+         C480 171 496 166 512 166Z"
+      fill="#080906"
+      stroke="#2A2B26"
+      stroke-width="10"
+      stroke-linejoin="round"
+    />
+    <path
+      id="portal-floor"
+      d="M214 715H810L557 884
+         C529 903 495 903 467 884Z"
+      fill="#0D0E0B"
+    />
+    <path
+      id="floor-edge"
+      d="M214 715H810"
+      fill="none"
+      stroke="#34352F"
+      stroke-width="8"
+      stroke-linecap="round"
+    />
+  </g>
+
+  <g id="inner-portal">
+    <path
+      id="amber-rim"
+      d="M512 354
+         C523 354 534 358 543 364
+         L655 441
+         C681 459 696 488 696 519
+         V706
+         H328
+         V519
+         C328 488 343 459 369 441
+         L481 364
+         C490 358 501 354 512 354Z"
+      fill="#C46F2C"
+    />
+    <path
+      id="inner-chamber"
+      d="M512 371
+         C520 371 527 374 534 378
+         L645 455
+         C666 469 678 493 678 519
+         V688
+         H346
+         V519
+         C346 493 358 469 379 455
+         L490 378
+         C497 374 504 371 512 371Z"
+      fill="#11100D"
+    />
+  </g>
+
+  <g id="doorway">
+    <path
+      id="doorway-halo"
+      d="M512 494L594 550V704H430V550Z"
+      fill="#3A2416"
+    />
+    <path
+      id="doorway-light"
+      d="M512 516L574 559V704H450V559Z"
+      fill="#D58B52"
+      stroke="#E09A63"
+      stroke-width="10"
+      stroke-linejoin="round"
+    />
+  </g>
+
+  <g id="steps">
+    <path
+      id="step-1"
+      d="M438 684H586L620 716H404Z"
+      fill="#2A2B26"
+    />
+    <path
+      id="step-1-front"
+      d="M404 716H620V738H392L404 716Z"
+      fill="#161713"
+    />
+
+    <path
+      id="step-2"
+      d="M392 738H632L676 773H348Z"
+      fill="#242520"
+    />
+    <path
+      id="step-2-front"
+      d="M348 773H676V797H330L348 773Z"
+      fill="#12130F"
+    />
+
+    <path
+      id="step-3"
+      d="M330 797H694L748 839H276Z"
+      fill="#20211D"
+    />
+    <path
+      id="step-3-front"
+      d="M276 839H748V865H254L276 839Z"
+      fill="#0B0C09"
+    />
+
+    <path
+      id="step-4"
+      d="M254 865H770L802 890H222Z"
+      fill="#1C1D19"
+    />
+  </g>
+
+  <g id="accent-lines">
+    <path
+      id="door-threshold"
+      d="M450 704H574"
+      fill="none"
+      stroke="#E09A63"
+      stroke-width="8"
+      stroke-linecap="round"
+    />
+    <path
+      id="portal-rim-accent"
+      d="M369 441L481 364
+         C490 358 501 354 512 354
+         C523 354 534 358 543 364
+         L655 441"
+      fill="none"
+      stroke="#E09A63"
+      stroke-width="6"
+      stroke-linecap="round"
+      stroke-linejoin="round"
+    />
+  </g>
+</svg>

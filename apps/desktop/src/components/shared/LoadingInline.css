@@ -1,0 +1,14 @@
+.loadingInline {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-width: 0;
+  color: inherit;
+  line-height: 1;
+}
+
+.loadingSpinner {
+  flex: 0 0 auto;
+  animation: loadingSpin 0.9s linear infinite;
+}

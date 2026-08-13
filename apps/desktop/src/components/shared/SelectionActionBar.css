@@ -1,0 +1,165 @@
+.actionBar {
+  height: 38px;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 0 10px 0 13px;
+  position: relative;
+  border-radius: var(--radius-lg);
+  background: var(--panel-bg);
+  border: 0;
+  box-shadow: var(--shadow-border);
+  color: var(--text);
+}
+
+.actionBar.bottomBar {
+  position: relative;
+  flex: 0 0 auto;
+  align-self: stretch;
+  box-sizing: border-box;
+  justify-content: space-between;
+  margin-top: 14px;
+  margin-left: calc(-1 * var(--data-table-text-rail-indent));
+  margin-right: 0;
+  margin-bottom: 0;
+  height: calc(
+    var(--data-table-bottom-bar-padding) * 2 + var(--data-table-selection-col)
+  );
+  padding: var(--data-table-bottom-bar-padding);
+  gap: 12px;
+  z-index: var(--z-selection-bar);
+  /* outer 12, pad 4 → inner control radius 8 */
+  border-radius: var(--radius-lg);
+}
+
+.actionBar.bottomBar button:not(.selectionCheckbox, .actionBarClearButton) {
+  height: var(--data-table-selection-col);
+  padding: 0 8px;
+  font-size: 12px;
+  border-radius: var(--radius-md);
+}
+
+.actionBarSelectionSummary {
+  display: flex;
+  align-items: center;
+  gap: var(--data-table-bottom-bar-padding);
+  min-width: 0;
+}
+
+.actionBarSelectionSummary > span {
+  white-space: nowrap;
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
+}
+
+.actionBarActions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 4px;
+  flex: 0 0 auto;
+  margin-left: auto;
+}
+
+.actionBar button {
+  height: 27px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 9px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition-property: background-color, color, transform;
+  transition-duration: 140ms;
+  transition-timing-function: ease-out;
+}
+
+.actionBar button:hover,
+.actionBar button.activeAction {
+  background: var(--hover-fill-strong);
+  color: var(--text);
+}
+
+.actionBar button:active:not(:disabled) {
+  transform: scale(var(--press-scale));
+}
+
+.actionBar button.isCopied,
+.actionBar button.isCopied:hover {
+  color: var(--green);
+  background: var(--green-soft);
+}
+
+.actionBar button.danger {
+  color: var(--danger-text);
+}
+
+.actionBar button.danger:hover {
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+
+.actionBar button:disabled,
+.actionBar button:disabled:hover {
+  cursor: default;
+  opacity: 0.45;
+  color: var(--muted);
+  background: transparent;
+  transform: none;
+}
+
+.actionBar.bottomBar button.actionBarClearButton {
+  width: var(--data-table-selection-col);
+  height: var(--data-table-selection-col);
+  justify-content: center;
+  padding: 0;
+  flex: 0 0 var(--data-table-selection-col);
+  color: var(--muted);
+}
+
+.actionBar.bottomBar button.actionBarClearButton:hover,
+.actionBar.bottomBar button.actionBarClearButton:focus-visible {
+  background: var(--hover-fill-strong);
+  color: var(--text);
+}
+
+.actionBar .selectionCheckbox {
+  width: 16px;
+  height: 16px;
+  display: grid;
+  place-items: center;
+  flex: 0 0 16px;
+  margin: 0;
+  padding: 0;
+  border-radius: 4px;
+}
+
+.actionBar.bottomBar .selectionCheckbox {
+  padding: 0;
+}
+
+.actionBar .selectionCheckbox:hover,
+.actionBar .selectionCheckbox:focus-visible {
+  background: var(--hover-fill);
+}
+
+.actionBar .selectionCheckbox.isChecked,
+.actionBar .selectionCheckbox.isMixed,
+.actionBar .selectionCheckbox.isChecked:hover,
+.actionBar .selectionCheckbox.isMixed:hover {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-contrast);
+}
+
+.sessionSelectionBar.actionBar.bottomBar {
+  flex: 0 0 auto;
+  margin: 0 var(--page-right-inset) 16px calc(var(--page-left-inset) - var(--page-row-bleed-inset));
+}
