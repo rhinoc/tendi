@@ -15,7 +15,7 @@ export type AnalyticsCapabilities = {
 };
 
 export type AnalyticsRefreshProgress = {
-  phase: "overview" | "backfill" | "watch" | "session";
+  phase: "overview" | "recent" | "backfill" | "watch" | "session";
   total: number;
   completed: number;
   parsed: number;
@@ -39,6 +39,12 @@ export type AnalyticsRunSummary = {
   maxMs: number;
 };
 
+export type AnalyticsCallUsage = {
+  name: string;
+  server: string;
+  calls: number;
+};
+
 export type AnalyticsDay = {
   date: string;
   usage: AnalyticsTokenUsage;
@@ -48,6 +54,8 @@ export type AnalyticsDay = {
   aborted: number;
   compacted: number;
   models: Array<{ model: string; totalTokens: number }>;
+  tools: AnalyticsCallUsage[];
+  skills: AnalyticsCallUsage[];
   rateLimits: Record<string, number>;
 };
 
@@ -60,6 +68,7 @@ export type AnalyticsRankItem = {
 };
 
 export type OverviewAnalytics = {
+  revision: number;
   generatedAt: string;
   daysRequested: number;
   rankDays: number;
@@ -68,6 +77,7 @@ export type OverviewAnalytics = {
     last?: string;
     totalSessions: number;
     analyzedSessions: number;
+    indexingSessions: number;
   };
   capabilities: Array<{ agent: string } & AnalyticsCapabilities>;
   summary: {
@@ -113,14 +123,48 @@ export type AnalyticsGranularity = "day" | "week" | "month";
 export type AnalyticsPeriod = {
   key: string;
   label: string;
+  inputTokens: number;
+  cachedInputTokens: number;
   totalTokens: number;
   responses: number;
   sessions: number;
   runs: number;
+  completedRuns: number;
+  unclosedRuns: number;
+  maxRunMs: number;
   aborted: number;
   compacted: number;
   models: Array<{ model: string; totalTokens: number }>;
+  tools: AnalyticsCallUsage[];
+  skills: AnalyticsCallUsage[];
 };
+
+type AnalyticsPeriodAccumulator = AnalyticsPeriod & {
+  modelMap: Map<string, number>;
+  toolMap: Map<string, AnalyticsCallUsage>;
+  skillMap: Map<string, AnalyticsCallUsage>;
+};
+
+function callUsageKey(call: Pick<AnalyticsCallUsage, "name" | "server">): string {
+  return `${call.server}\0${call.name}`;
+}
+
+function addCallUsage(target: Map<string, AnalyticsCallUsage>, calls: AnalyticsCallUsage[]) {
+  for (const call of calls) {
+    const key = callUsageKey(call);
+    const current = target.get(key);
+    if (current) current.calls += call.calls;
+    else target.set(key, { ...call });
+  }
+}
+
+function sortedCallUsage(calls: Iterable<AnalyticsCallUsage>): AnalyticsCallUsage[] {
+  return [...calls].sort((left, right) => (
+    right.calls - left.calls
+    || left.name.localeCompare(right.name)
+    || left.server.localeCompare(right.server)
+  ));
+}
 
 function periodKey(date: string, granularity: AnalyticsGranularity): string {
   if (granularity === "day") return date;
@@ -147,50 +191,56 @@ export function groupAnalyticsDays(
   days: AnalyticsDay[],
   granularity: AnalyticsGranularity,
 ): AnalyticsPeriod[] {
-  const grouped = new Map<string, AnalyticsPeriod & { modelMap: Map<string, number> }>();
+  const grouped = new Map<string, AnalyticsPeriodAccumulator>();
   for (const day of days) {
     const key = periodKey(day.date, granularity);
     const period = grouped.get(key) ?? {
       key,
       label: periodLabel(key, granularity),
+      inputTokens: 0,
+      cachedInputTokens: 0,
       totalTokens: 0,
       responses: 0,
       sessions: 0,
       runs: 0,
+      completedRuns: 0,
+      unclosedRuns: 0,
+      maxRunMs: 0,
       aborted: 0,
       compacted: 0,
       models: [],
+      tools: [],
+      skills: [],
       modelMap: new Map<string, number>(),
+      toolMap: new Map<string, AnalyticsCallUsage>(),
+      skillMap: new Map<string, AnalyticsCallUsage>(),
     };
+    period.inputTokens += day.usage.inputTokens;
+    period.cachedInputTokens += day.usage.cachedInputTokens;
     period.totalTokens += day.usage.totalTokens;
     period.responses += day.responses;
+    // Daily buckets contain distinct sessions. For wider buckets, keep the
+    // peak daily count instead of double-counting sessions active on many days.
     period.sessions = Math.max(period.sessions, day.sessions);
     period.runs += day.runs.started;
+    period.completedRuns += day.runs.completed;
+    period.unclosedRuns += day.runs.unclosed;
+    period.maxRunMs = Math.max(period.maxRunMs, day.runs.maxMs);
     period.aborted += day.aborted;
     period.compacted += day.compacted;
     for (const model of day.models) {
       period.modelMap.set(model.model, (period.modelMap.get(model.model) ?? 0) + model.totalTokens);
     }
+    addCallUsage(period.toolMap, day.tools);
+    addCallUsage(period.skillMap, day.skills);
     grouped.set(key, period);
   }
-  return [...grouped.values()].map(({ modelMap, ...period }) => ({
+  return [...grouped.values()].map(({ modelMap, toolMap, skillMap, ...period }) => ({
     ...period,
     models: [...modelMap]
       .map(([model, totalTokens]) => ({ model, totalTokens }))
       .sort((left, right) => right.totalTokens - left.totalTokens),
-  }));
-}
-
-export function analyticsHeatLevels(days: AnalyticsDay[]): Map<string, number> {
-  const positive = days
-    .map((day) => day.usage.totalTokens)
-    .filter((value) => value > 0)
-    .sort((left, right) => left - right);
-  const threshold = (fraction: number) => positive[Math.min(positive.length - 1, Math.floor(positive.length * fraction))] ?? 0;
-  const thresholds = [threshold(0.25), threshold(0.5), threshold(0.75)];
-  return new Map(days.map((day) => {
-    const value = day.usage.totalTokens;
-    if (value <= 0) return [day.date, 0];
-    return [day.date, 1 + thresholds.filter((entry) => value > entry).length];
+    tools: sortedCallUsage(toolMap.values()),
+    skills: sortedCallUsage(skillMap.values()),
   }));
 }

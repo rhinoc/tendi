@@ -3,7 +3,7 @@ use std::{
     path::{Component, Path, PathBuf},
 };
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use serde::Serialize;
 use walkdir::WalkDir;
 
@@ -125,6 +125,7 @@ pub fn create_skill_file(
     relative_path: &str,
     cached_skill_dir: Option<&Path>,
 ) -> Result<SkillFileContent> {
+    ensure_not_root_skill_manifest(relative_path)?;
     let skill_dir = resolve_skill_dir(cwd, skill_name, cached_skill_dir)?;
     let path = safe_child_path(&skill_dir, relative_path)?;
     if path.exists() {
@@ -167,6 +168,9 @@ pub fn rename_skill_path(
 ) -> Result<()> {
     let skill_dir = resolve_skill_dir(cwd, skill_name, cached_skill_dir)?;
     let from = safe_join(&skill_dir, from_relative_path)?;
+    ensure_strict_skill_child(&skill_dir, &from)?;
+    ensure_not_root_skill_manifest(from_relative_path)?;
+    ensure_not_root_skill_manifest(to_relative_path)?;
     let to = safe_child_path(&skill_dir, to_relative_path)?;
     if to.exists() {
         bail!("path already exists: {}", to.display());
@@ -188,6 +192,8 @@ pub fn delete_skill_path(
 ) -> Result<()> {
     let skill_dir = resolve_skill_dir(cwd, skill_name, cached_skill_dir)?;
     let path = safe_join(&skill_dir, relative_path)?;
+    ensure_strict_skill_child(&skill_dir, &path)?;
+    ensure_not_root_skill_manifest(relative_path)?;
     if path.is_dir() {
         fs::remove_dir_all(&path)
             .with_context(|| format!("failed to delete {}", path.display()))?;
@@ -232,6 +238,36 @@ fn safe_join(root: &Path, relative_path: &str) -> Result<PathBuf> {
         bail!("path escapes skill directory");
     }
     Ok(canonical)
+}
+
+fn ensure_strict_skill_child(root: &Path, path: &Path) -> Result<()> {
+    let root = root
+        .canonicalize()
+        .with_context(|| format!("failed to canonicalize {}", root.display()))?;
+    if path == root {
+        bail!("the skill root cannot be mutated through the file tree");
+    }
+    Ok(())
+}
+
+fn ensure_not_root_skill_manifest(relative_path: &str) -> Result<()> {
+    let mut clean = PathBuf::new();
+    for component in Path::new(relative_path).components() {
+        match component {
+            Component::Normal(value) => clean.push(value),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if !clean.pop() {
+                    bail!("path escapes skill directory");
+                }
+            }
+            Component::RootDir | Component::Prefix(_) => bail!("path escapes skill directory"),
+        }
+    }
+    if clean == Path::new("SKILL.md") {
+        bail!("the root SKILL.md must be edited in place");
+    }
+    Ok(())
 }
 
 fn safe_child_path(root: &Path, relative_path: &str) -> Result<PathBuf> {
@@ -361,6 +397,21 @@ mod tests {
 
         assert!(create_skill_file(&root, "demo", "../escape.md", Some(cached_skill_dir)).is_err());
         assert!(create_skill_folder(&root, "demo", "/tmp/escape", Some(cached_skill_dir)).is_err());
+        assert!(create_skill_file(&root, "demo", "./SKILL.md", Some(cached_skill_dir)).is_err());
+        assert!(
+            rename_skill_path(
+                &root,
+                "demo",
+                "SKILL.md",
+                "renamed.md",
+                Some(cached_skill_dir),
+            )
+            .is_err()
+        );
+        assert!(delete_skill_path(&root, "demo", "./SKILL.md", Some(cached_skill_dir)).is_err());
+        assert!(delete_skill_path(&root, "demo", ".", Some(cached_skill_dir)).is_err());
+        assert!(delete_skill_path(&root, "demo", "", Some(cached_skill_dir)).is_err());
+        assert!(skill_dir.join("SKILL.md").is_file());
 
         let _ = fs::remove_dir_all(root);
     }

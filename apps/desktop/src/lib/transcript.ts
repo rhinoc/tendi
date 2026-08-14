@@ -15,6 +15,16 @@ export type TranscriptItem = {
 
 export type TranscriptGroup = TranscriptItem | { type: "toolGroup"; tools: TranscriptItem[] };
 
+export type TranscriptPage = {
+  items: TranscriptItem[];
+  warnings: string[];
+  nextCursor?: string;
+  done: boolean;
+  sourceVersion: string;
+  restartRequired: boolean;
+  unchanged: boolean;
+};
+
 export type JsonlTranscriptParseResult = {
   items: TranscriptItem[];
   warnings: string[];
@@ -36,6 +46,22 @@ export type JsonlTranscriptParseResult = {
 type JsonObject = Record<string, unknown>;
 type ParsedTokenUsage = NonNullable<JsonlTranscriptParseResult["tokenUsage"]>;
 
+export function createLatestRequestAuthority() {
+  let revision = 0;
+  return {
+    begin(): number {
+      revision += 1;
+      return revision;
+    },
+    isCurrent(requestRevision: number): boolean {
+      return requestRevision === revision;
+    },
+    invalidate(requestRevision: number): void {
+      if (requestRevision === revision) revision += 1;
+    },
+  };
+}
+
 export function normalizeTranscript(items: Array<Record<string, unknown>>): TranscriptItem[] {
   return items.map((item) => ({
     type: `${item.type ?? item.kind ?? ""}`,
@@ -48,7 +74,73 @@ export function normalizeTranscript(items: Array<Record<string, unknown>>): Tran
     linkedSessionId: stringValue(item.linked_session_id ?? item.linkedSessionId) || undefined,
     model: stringValue(item.model) || undefined,
     effort: stringValue(item.effort) || undefined,
+    callId: stringValue(item.call_id ?? item.callId) || undefined,
   }));
+}
+
+export function mergeTranscriptItems(
+  currentItems: TranscriptItem[],
+  incomingItems: TranscriptItem[],
+): TranscriptItem[] {
+  const merged = [...currentItems];
+  for (const item of incomingItems) {
+    const type = transcriptItemType(item);
+    if (type === "tool_result" && item.callId) {
+      let targetIndex = -1;
+      for (let index = merged.length - 1; index >= 0; index -= 1) {
+        const candidate = merged[index];
+        if (transcriptItemType(candidate) === "tool" && candidate.callId === item.callId) {
+          targetIndex = index;
+          break;
+        }
+      }
+      if (targetIndex >= 0) {
+        merged[targetIndex] = {
+          ...merged[targetIndex],
+          result: item.result || item.body,
+          ...(item.durationMs !== undefined ? { durationMs: item.durationMs } : {}),
+        };
+        continue;
+      }
+    }
+    merged.push(item);
+  }
+  return merged;
+}
+
+export function transcriptItemsSize(items: TranscriptItem[]): number {
+  return items.reduce((total, item) => total + ([
+    item.body,
+    item.tag,
+    item.time,
+    item.command,
+    item.result,
+    item.linkedSessionId,
+    item.model,
+    item.effort,
+    item.callId,
+  ] as unknown[]).reduce<number>((itemTotal, value) => itemTotal + `${value ?? ""}`.length, 0), 0);
+}
+
+export function normalizeTranscriptPage(value: unknown): TranscriptPage {
+  const page = value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : {};
+  return {
+    items: Array.isArray(page.items)
+      ? normalizeTranscript(page.items as Array<Record<string, unknown>>)
+      : [],
+    warnings: Array.isArray(page.warnings)
+      ? page.warnings.map((warning) => `${warning}`)
+      : [],
+    nextCursor: typeof page.nextCursor === "string" && page.nextCursor
+      ? page.nextCursor
+      : undefined,
+    done: page.done === true,
+    sourceVersion: `${page.sourceVersion ?? ""}`,
+    restartRequired: page.restartRequired === true,
+    unchanged: page.unchanged === true,
+  };
 }
 
 export function transcriptItemType(item: TranscriptItem): string | undefined {

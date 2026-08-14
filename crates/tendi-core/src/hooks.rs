@@ -1,16 +1,29 @@
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     env, fs,
     path::{Path, PathBuf},
+    sync::{LazyLock, Mutex, MutexGuard},
 };
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use sha2::Digest;
 use toml::Value as TomlValue;
 use walkdir::WalkDir;
 
-use crate::{fsutil::sha256_file, skills::AgentKind};
+use crate::{
+    fsutil::{atomic_write, sha256_file, sha256_text},
+    skills::AgentKind,
+};
+
+static HOOK_MUTATION_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+
+fn lock_hook_mutation() -> Result<MutexGuard<'static, ()>> {
+    HOOK_MUTATION_LOCK
+        .lock()
+        .map_err(|_| anyhow::anyhow!("hook mutation authority is unavailable"))
+}
 
 #[derive(Debug, Clone, Serialize)]
 pub struct HookRecord {
@@ -26,6 +39,11 @@ pub struct HookRecord {
     pub enabled: bool,
     pub path: PathBuf,
     pub trust_hash: String,
+    pub needs_review: bool,
+    #[serde(skip)]
+    codex_hook_key: Option<String>,
+    #[serde(skip)]
+    codex_current_hash: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -90,22 +108,278 @@ pub struct HookSetEnabledRequest {
     pub enabled: bool,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+pub struct HookReviewRequest {
+    pub path: PathBuf,
+    pub expected_trust_hash: String,
+    pub event: String,
+    pub matcher: Option<String>,
+    pub hook_type: Option<String>,
+    pub command: Option<String>,
+    pub url: Option<String>,
+    pub prompt: Option<String>,
+    pub filter: Option<String>,
+    pub status_message: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct NormalizedHookIdentity {
+    event_name: String,
+    #[serde(flatten)]
+    group: NormalizedMatcherGroup,
+}
+
+#[derive(Debug, Serialize)]
+struct NormalizedMatcherGroup {
+    #[serde(default)]
+    matcher: Option<String>,
+    #[serde(default)]
+    hooks: Vec<NormalizedHookHandler>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(tag = "type")]
+enum NormalizedHookHandler {
+    #[serde(rename = "command")]
+    Command {
+        command: String,
+        #[serde(default, rename = "commandWindows")]
+        command_windows: Option<String>,
+        #[serde(default, rename = "timeout")]
+        timeout_sec: Option<u64>,
+        #[serde(default)]
+        r#async: bool,
+        #[serde(default, rename = "statusMessage")]
+        status_message: Option<String>,
+        #[serde(
+            default,
+            rename = "additionalContextLimit",
+            skip_serializing_if = "Option::is_none"
+        )]
+        additional_context_limit: Option<usize>,
+    },
+}
+
+fn load_codex_hook_states(path: &Path) -> HashMap<String, String> {
+    let Ok(text) = fs::read_to_string(path) else {
+        return HashMap::new();
+    };
+    let mut states = HashMap::new();
+    let mut current_key: Option<String> = None;
+    for line in text.lines() {
+        let line = line.trim();
+        if line.starts_with('[') && line.ends_with(']') {
+            current_key = line
+                .strip_prefix("[hooks.state.\"")
+                .and_then(|key| key.strip_suffix("\"]"))
+                .map(|key| key.replace("\\\"", "\"").replace("\\\\", "\\"));
+            continue;
+        }
+        let Some(key) = current_key.as_ref() else {
+            continue;
+        };
+        let Some(value) = line
+            .strip_prefix("trusted_hash = ")
+            .or_else(|| line.strip_prefix("trustedHash = "))
+        else {
+            continue;
+        };
+        if let Ok(trusted_hash) = serde_json::from_str::<String>(value) {
+            states.insert(key.clone(), trusted_hash);
+        }
+    }
+    states
+}
+
+fn codex_event_key_label(event: &str) -> String {
+    let mut label = String::with_capacity(event.len() + 4);
+    for (index, character) in event.chars().enumerate() {
+        if character.is_uppercase() && index > 0 {
+            label.push('_');
+        }
+        label.extend(character.to_lowercase());
+    }
+    label
+}
+
+fn codex_hook_key(path: &Path, event: &str, group_index: usize, handler_index: usize) -> String {
+    format!(
+        "{}:{}:{group_index}:{handler_index}",
+        path.display(),
+        codex_event_key_label(event),
+    )
+}
+
+fn codex_hook_timeout(event: &str, configured: Option<u64>) -> u64 {
+    if event == "SessionEnd" {
+        configured.unwrap_or(1).clamp(1, 3)
+    } else {
+        configured.unwrap_or(600).max(1)
+    }
+}
+
+fn codex_hook_matcher(event: &str, matcher: Option<&str>) -> Option<String> {
+    match event {
+        "UserPromptSubmit" | "Stop" => None,
+        _ => matcher.map(str::to_string),
+    }
+}
+
+fn codex_hook_additional_context_limit(event: &str, value: Option<usize>) -> Option<usize> {
+    let supported = matches!(
+        event,
+        "PreToolUse" | "PostToolUse" | "SessionStart" | "UserPromptSubmit" | "SubagentStart"
+    );
+    supported
+        .then_some(value)
+        .flatten()
+        .filter(|limit| *limit != 2_500)
+}
+
+fn canonical_json(value: &Value) -> Value {
+    match value {
+        Value::Object(map) => {
+            let mut sorted = serde_json::Map::new();
+            let mut keys = map.keys().cloned().collect::<Vec<_>>();
+            keys.sort();
+            for key in keys {
+                if let Some(value) = map.get(&key) {
+                    sorted.insert(key, canonical_json(value));
+                }
+            }
+            Value::Object(sorted)
+        }
+        Value::Array(items) => Value::Array(items.iter().map(canonical_json).collect()),
+        other => other.clone(),
+    }
+}
+
+fn codex_hook_hash(
+    event: &str,
+    matcher: Option<&str>,
+    command: &str,
+    timeout: u64,
+    is_async: bool,
+    status_message: Option<&str>,
+    additional_context_limit: Option<usize>,
+) -> Option<String> {
+    let identity = NormalizedHookIdentity {
+        event_name: codex_event_key_label(event),
+        group: NormalizedMatcherGroup {
+            matcher: codex_hook_matcher(event, matcher),
+            hooks: vec![NormalizedHookHandler::Command {
+                command: command.to_string(),
+                command_windows: None,
+                timeout_sec: Some(timeout),
+                r#async: is_async,
+                status_message: status_message.map(str::to_string),
+                additional_context_limit: codex_hook_additional_context_limit(
+                    event,
+                    additional_context_limit,
+                ),
+            }],
+        },
+    };
+    let value = toml::Value::try_from(identity).ok()?;
+    let canonical = canonical_json(&serde_json::to_value(value).ok()?);
+    let serialized = serde_json::to_vec(&canonical).ok()?;
+    let mut hasher = sha2::Sha256::new();
+    sha2::Digest::update(&mut hasher, serialized);
+    Some(format!("sha256:{:x}", sha2::Digest::finalize(hasher)))
+}
+
+fn apply_codex_hook_review_states(hooks: &mut [HookRecord], states: &HashMap<String, String>) {
+    for hook in hooks {
+        let (Some(key), Some(current_hash)) = (&hook.codex_hook_key, &hook.codex_current_hash)
+        else {
+            continue;
+        };
+        hook.needs_review = states
+            .get(key)
+            .is_none_or(|trusted_hash| trusted_hash != current_hash);
+    }
+}
+
+fn tendi_hook_review_state_path() -> Option<PathBuf> {
+    dirs::data_dir()
+        .or_else(|| dirs::home_dir().map(|home| home.join("Library/Application Support")))
+        .map(|base| base.join("tendi/hook-reviews.json"))
+}
+
+fn load_tendi_hook_review_states() -> HashMap<String, String> {
+    let Some(path) = tendi_hook_review_state_path() else {
+        return HashMap::new();
+    };
+    fs::read_to_string(path)
+        .ok()
+        .and_then(|text| serde_json::from_str(&text).ok())
+        .unwrap_or_default()
+}
+
+fn hook_review_identity(hook: &HookRecord) -> String {
+    serde_json::to_string(&(
+        hook.agent,
+        hook.path.to_string_lossy(),
+        &hook.event,
+        &hook.matcher,
+        &hook.hook_type,
+        &hook.command,
+        &hook.url,
+        &hook.prompt,
+        &hook.filter,
+        &hook.status_message,
+    ))
+    .unwrap_or_default()
+}
+
+fn hook_source_is_managed(hook: &HookRecord) -> bool {
+    let path = hook.path.to_string_lossy();
+    match hook.agent {
+        AgentKind::Cursor => {
+            path.starts_with("/etc/cursor/")
+                || path.starts_with("/Library/Application Support/Cursor/")
+        }
+        AgentKind::Claude => {
+            path.starts_with("/etc/claude-code/")
+                || path.starts_with("/Library/Application Support/ClaudeCode/")
+                || path.contains("/.claude/plugins/")
+        }
+        _ => false,
+    }
+}
+
+fn apply_tendi_hook_review_states(hooks: &mut [HookRecord], states: &HashMap<String, String>) {
+    for hook in hooks {
+        if hook.agent == AgentKind::Codex || hook_source_is_managed(hook) {
+            continue;
+        }
+        hook.needs_review = states
+            .get(&hook_review_identity(hook))
+            .is_none_or(|trusted_hash| trusted_hash != &hook.trust_hash);
+    }
+}
+
 pub fn scan_hooks(cwd: &Path) -> Result<HookScan> {
     let mut hooks = Vec::new();
     let mut warnings = Vec::new();
     let mut scanned_files = HashSet::new();
+    let codex_root = dirs::home_dir().map(|home| codex_home(&home));
+    let codex_hook_states = codex_root
+        .as_ref()
+        .map(|home| load_codex_hook_states(&home.join("config.toml")))
+        .unwrap_or_default();
+    let tendi_hook_review_states = load_tendi_hook_review_states();
 
     if let Some(home) = dirs::home_dir() {
-        let codex_home = codex_home(&home);
         scan_hook_file_once(
-            &codex_home.join("hooks.json"),
+            &codex_home(&home).join("hooks.json"),
             AgentKind::Codex,
             &mut scanned_files,
             &mut hooks,
             &mut warnings,
         );
         scan_codex_config_hooks_once(
-            &codex_home.join("config.toml"),
+            &codex_home(&home).join("config.toml"),
             &mut scanned_files,
             &mut hooks,
             &mut warnings,
@@ -131,6 +405,13 @@ pub fn scan_hooks(cwd: &Path) -> Result<HookScan> {
 
     scan_hook_file_once(
         &PathBuf::from("/etc/cursor/hooks.json"),
+        AgentKind::Cursor,
+        &mut scanned_files,
+        &mut hooks,
+        &mut warnings,
+    );
+    scan_hook_file_once(
+        &PathBuf::from("/Library/Application Support/Cursor/hooks.json"),
         AgentKind::Cursor,
         &mut scanned_files,
         &mut hooks,
@@ -200,35 +481,212 @@ pub fn scan_hooks(cwd: &Path) -> Result<HookScan> {
         scan_claude_component_hooks(&ancestor.join(".claude/agents"), &mut hooks, &mut warnings);
     }
 
+    apply_codex_hook_review_states(&mut hooks, &codex_hook_states);
+    apply_tendi_hook_review_states(&mut hooks, &tendi_hook_review_states);
+
     Ok(HookScan { hooks, warnings })
 }
 
 pub fn delete_hook(request: HookDeleteRequest) -> Result<()> {
-    ensure_deletable_hook_path(&request.path)?;
-    let current_hash = sha256_file(&request.path)?;
-    if current_hash != request.expected_trust_hash {
-        bail!("hook source changed; refresh hooks before deleting");
+    delete_hooks(vec![request])
+}
+
+pub fn delete_hooks(requests: Vec<HookDeleteRequest>) -> Result<()> {
+    let _mutation = lock_hook_mutation()?;
+    let mut requests_by_path = HashMap::<PathBuf, Vec<HookDeleteRequest>>::new();
+    for request in requests {
+        requests_by_path
+            .entry(request.path.clone())
+            .or_default()
+            .push(request);
     }
 
-    match request.path.extension().and_then(|value| value.to_str()) {
-        Some("json") => delete_json_hook(&request),
-        Some("toml") => delete_toml_hook(&request),
-        _ => bail!("deleting hooks from this source type is not supported"),
+    let mut writes = Vec::new();
+    for (path, requests) in requests_by_path {
+        ensure_deletable_hook_path(&path)?;
+        let expected_hash = &requests[0].expected_trust_hash;
+        if requests
+            .iter()
+            .any(|request| request.expected_trust_hash != *expected_hash)
+        {
+            bail!("hook delete requests disagree about the source hash");
+        }
+        let text = fs::read_to_string(&path)?;
+        if sha256_text(&text) != *expected_hash {
+            bail!("hook source changed");
+        }
+
+        let after = match path.extension().and_then(|value| value.to_str()) {
+            Some("json") => {
+                let mut value = serde_json::from_str::<Value>(&text)?;
+                for request in &requests {
+                    if !remove_json_hook_from_value(&mut value, request) {
+                        bail!("matching hook was not found");
+                    }
+                }
+                format!("{}\n", serde_json::to_string_pretty(&value)?)
+            }
+            Some("toml") => {
+                let mut value = toml::from_str::<TomlValue>(&text)?;
+                for request in &requests {
+                    if !remove_toml_hook_from_value(&mut value, request) {
+                        bail!("matching hook was not found");
+                    }
+                }
+                toml::to_string_pretty(&value)?
+            }
+            _ => bail!("deleting hooks from this source type is not supported"),
+        };
+        writes.push((path, text, after));
     }
+
+    let mut committed = Vec::new();
+    for (path, before, after) in &writes {
+        let current = fs::read_to_string(path)?;
+        if current != *before {
+            rollback_hook_writes(&committed)?;
+            bail!("hook source changed");
+        }
+        if let Err(error) = atomic_write(path, after) {
+            rollback_hook_writes(&committed)?;
+            return Err(error);
+        }
+        committed.push((path.clone(), before.clone()));
+    }
+    Ok(())
+}
+
+fn rollback_hook_writes(committed: &[(PathBuf, String)]) -> Result<()> {
+    for (path, before) in committed.iter().rev() {
+        atomic_write(path, before)
+            .with_context(|| format!("failed to roll back hook source {}", path.display()))?;
+    }
+    Ok(())
 }
 
 pub fn set_hook_enabled(request: HookSetEnabledRequest) -> Result<()> {
+    let _mutation = lock_hook_mutation()?;
     ensure_deletable_hook_path(&request.path)?;
-    let current_hash = sha256_file(&request.path)?;
-    if current_hash != request.expected_trust_hash {
-        bail!("hook source changed; refresh hooks before updating");
+    let text = fs::read_to_string(&request.path)?;
+    if sha256_text(&text) != request.expected_trust_hash {
+        bail!("hook source changed");
     }
 
-    match request.path.extension().and_then(|value| value.to_str()) {
-        Some("json") => set_json_hook_enabled(&request),
-        Some("toml") => set_toml_hook_enabled(&request),
+    let after = match request.path.extension().and_then(|value| value.to_str()) {
+        Some("json") => {
+            let mut value = serde_json::from_str::<Value>(&text)?;
+            if !set_json_hook_enabled_in_value(&mut value, &request) {
+                bail!("matching hook was not found");
+            }
+            format!("{}\n", serde_json::to_string_pretty(&value)?)
+        }
+        Some("toml") => {
+            let mut value = toml::from_str::<TomlValue>(&text)?;
+            if !set_toml_hook_enabled_in_value(&mut value, &request) {
+                bail!("matching hook was not found");
+            }
+            toml::to_string_pretty(&value)?
+        }
         _ => bail!("updating hooks from this source type is not supported"),
+    };
+    atomic_write(&request.path, &after)
+}
+
+pub fn review_hook_and_scan(cwd: &Path, request: HookReviewRequest) -> Result<HookScan> {
+    let _mutation = lock_hook_mutation()?;
+    let mut scan = scan_hooks(cwd)?;
+    let hook_index = scan
+        .hooks
+        .iter()
+        .position(|hook| {
+            matches!(
+                hook.agent,
+                AgentKind::Codex | AgentKind::Cursor | AgentKind::Claude
+            ) && hook.path == request.path
+                && hook.trust_hash == request.expected_trust_hash
+                && hook.event == request.event
+                && hook.matcher == request.matcher
+                && hook.hook_type == request.hook_type
+                && hook.command == request.command
+                && hook.url == request.url
+                && hook.prompt == request.prompt
+                && hook.filter == request.filter
+                && hook.status_message == request.status_message
+        })
+        .context("matching hook was not found")?;
+    let hook = &scan.hooks[hook_index];
+    if hook_source_is_managed(hook) {
+        bail!("managed hook sources cannot be reviewed here");
     }
+    if hook.agent == AgentKind::Codex {
+        let key = hook
+            .codex_hook_key
+            .as_deref()
+            .context("this hook does not support review")?;
+        let current_hash = hook
+            .codex_current_hash
+            .as_deref()
+            .filter(|hash| *hash != "unsupported")
+            .context("this hook type does not support review")?;
+        let home = dirs::home_dir().context("home directory is unavailable")?;
+        write_codex_trusted_hash(&codex_home(&home).join("config.toml"), key, current_hash)?;
+    } else {
+        let path = tendi_hook_review_state_path().context("Tendi data directory is unavailable")?;
+        let mut states = load_tendi_hook_review_states();
+        states.insert(hook_review_identity(hook), hook.trust_hash.clone());
+        atomic_write(
+            &path,
+            &format!("{}\n", serde_json::to_string_pretty(&states)?),
+        )?;
+    }
+    scan.hooks[hook_index].needs_review = false;
+    Ok(scan)
+}
+
+fn write_codex_trusted_hash(path: &Path, key: &str, trusted_hash: &str) -> Result<()> {
+    let original = fs::read_to_string(path)
+        .with_context(|| format!("failed to read Codex config {}", path.display()))?;
+    let escaped_key = key.replace('\\', "\\\\").replace('"', "\\\"");
+    let header = format!(r#"[hooks.state."{escaped_key}"]"#);
+    let mut lines = Vec::new();
+    let mut in_target = false;
+    let mut found_target = false;
+    let mut wrote_hash = false;
+    for line in original.lines() {
+        if line.trim_start().starts_with('[') && line.trim_end().ends_with(']') {
+            if in_target && !wrote_hash {
+                lines.push(format!("trusted_hash = {trusted_hash:?}"));
+                wrote_hash = true;
+            }
+            in_target = line.trim() == header;
+            found_target |= in_target;
+        }
+        if in_target && line.trim_start().starts_with("trusted_hash =") {
+            lines.push(format!("trusted_hash = {trusted_hash:?}"));
+            wrote_hash = true;
+        } else if in_target && line.trim_start().starts_with("trustedHash =") {
+            lines.push(format!("trusted_hash = {trusted_hash:?}"));
+            wrote_hash = true;
+        } else {
+            lines.push(line.to_string());
+        }
+    }
+    if in_target && !wrote_hash {
+        lines.push(format!("trusted_hash = {trusted_hash:?}"));
+    }
+    if !found_target {
+        if !lines.is_empty() {
+            lines.push(String::new());
+        }
+        lines.push(header);
+        lines.push(format!("trusted_hash = {trusted_hash:?}"));
+    }
+    let mut updated = lines.join("\n");
+    if original.ends_with('\n') {
+        updated.push('\n');
+    }
+    atomic_write(path, &updated)
+        .with_context(|| format!("failed to write Codex config {}", path.display()))
 }
 
 pub fn read_hook_source(
@@ -242,11 +700,19 @@ pub fn read_hook_source(
         bail!("refusing to read unknown hook source {}", path.display());
     }
 
+    read_hook_source_at_path(path, expected_trust_hash, hook_match)
+}
+
+pub fn read_hook_source_at_path(
+    path: &Path,
+    expected_trust_hash: Option<&str>,
+    hook_match: Option<&HookSourceMatch>,
+) -> Result<HookSourceContent> {
     let content =
         fs::read_to_string(path).with_context(|| format!("failed to read {}", path.display()))?;
     let sha256 = sha256_file(path)?;
     if expected_trust_hash.is_some_and(|expected| !expected.is_empty() && expected != sha256) {
-        bail!("hook source changed; refresh hooks before viewing source");
+        bail!("hook source changed");
     }
 
     let size_bytes = fs::metadata(path)
@@ -522,6 +988,7 @@ fn ensure_deletable_hook_path(path: &Path) -> Result<()> {
 fn hook_management_disabled_reason(path: &Path) -> Option<&'static str> {
     let text = path.to_string_lossy();
     if text.starts_with("/etc/cursor/")
+        || text.starts_with("/Library/Application Support/Cursor/")
         || text.starts_with("/etc/claude-code/")
         || text.starts_with("/Library/Application Support/ClaudeCode/")
         || text.contains("/.claude/plugins/")
@@ -535,52 +1002,6 @@ fn hook_management_disabled_reason(path: &Path) -> Option<&'static str> {
         return Some("managing hooks from this source type is not supported");
     }
     None
-}
-
-fn delete_json_hook(request: &HookDeleteRequest) -> Result<()> {
-    let text = fs::read_to_string(&request.path)?;
-    let mut value = serde_json::from_str::<Value>(&text)?;
-    if !remove_json_hook_from_value(&mut value, request) {
-        bail!("matching hook was not found");
-    }
-    fs::write(
-        &request.path,
-        format!("{}\n", serde_json::to_string_pretty(&value)?),
-    )?;
-    Ok(())
-}
-
-fn delete_toml_hook(request: &HookDeleteRequest) -> Result<()> {
-    let text = fs::read_to_string(&request.path)?;
-    let mut value = toml::from_str::<TomlValue>(&text)?;
-    if !remove_toml_hook_from_value(&mut value, request) {
-        bail!("matching hook was not found");
-    }
-    fs::write(&request.path, toml::to_string_pretty(&value)?)?;
-    Ok(())
-}
-
-fn set_json_hook_enabled(request: &HookSetEnabledRequest) -> Result<()> {
-    let text = fs::read_to_string(&request.path)?;
-    let mut value = serde_json::from_str::<Value>(&text)?;
-    if !set_json_hook_enabled_in_value(&mut value, request) {
-        bail!("matching hook was not found");
-    }
-    fs::write(
-        &request.path,
-        format!("{}\n", serde_json::to_string_pretty(&value)?),
-    )?;
-    Ok(())
-}
-
-fn set_toml_hook_enabled(request: &HookSetEnabledRequest) -> Result<()> {
-    let text = fs::read_to_string(&request.path)?;
-    let mut value = toml::from_str::<TomlValue>(&text)?;
-    if !set_toml_hook_enabled_in_value(&mut value, request) {
-        bail!("matching hook was not found");
-    }
-    fs::write(&request.path, toml::to_string_pretty(&value)?)?;
-    Ok(())
 }
 
 fn codex_home(home: &Path) -> PathBuf {
@@ -688,8 +1109,16 @@ fn collect_codex_hook_events(
         if groups.is_empty() {
             continue;
         }
-        for group in groups {
-            collect_event_hooks(AgentKind::Codex, path, trust_hash, event, group, hooks);
+        for (group_index, group) in groups.iter().enumerate() {
+            collect_event_hooks(
+                AgentKind::Codex,
+                path,
+                trust_hash,
+                event,
+                group_index,
+                group,
+                hooks,
+            );
         }
     }
 }
@@ -1312,8 +1741,19 @@ fn collect_hooks_from_value(
         return;
     };
 
+    let start = hooks.len();
     for (event, specs) in hook_map {
-        collect_event_hooks(agent, path, trust_hash, event, specs, hooks);
+        collect_event_hooks(agent, path, trust_hash, event, 0, specs, hooks);
+    }
+    if agent == AgentKind::Claude
+        && value
+            .get("disableAllHooks")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+    {
+        for hook in &mut hooks[start..] {
+            hook.enabled = false;
+        }
     }
 }
 
@@ -1322,12 +1762,13 @@ fn collect_event_hooks(
     path: &Path,
     trust_hash: &str,
     event: &str,
+    group_index: usize,
     specs: &Value,
     hooks: &mut Vec<HookRecord>,
 ) {
     if let Some(array) = specs.as_array() {
-        for item in array {
-            collect_event_hooks(agent, path, trust_hash, event, item, hooks);
+        for (group_index, item) in array.iter().enumerate() {
+            collect_event_hooks(agent, path, trust_hash, event, group_index, item, hooks);
         }
         return;
     }
@@ -1351,6 +1792,8 @@ fn collect_event_hooks(
             path,
             trust_hash,
             event,
+            group_index,
+            0,
             matcher.as_deref(),
             group_enabled,
             nested,
@@ -1364,6 +1807,8 @@ fn collect_event_hooks(
         path,
         trust_hash,
         event,
+        group_index,
+        0,
         matcher.as_deref(),
         group_enabled,
         object,
@@ -1376,18 +1821,22 @@ fn collect_group_hooks(
     path: &Path,
     trust_hash: &str,
     event: &str,
+    group_index: usize,
+    handler_index: usize,
     matcher: Option<&str>,
     group_enabled: bool,
     specs: &Value,
     hooks: &mut Vec<HookRecord>,
 ) {
     if let Some(array) = specs.as_array() {
-        for item in array {
+        for (handler_index, item) in array.iter().enumerate() {
             collect_group_hooks(
                 agent,
                 path,
                 trust_hash,
                 event,
+                group_index,
+                handler_index,
                 matcher,
                 group_enabled,
                 item,
@@ -1413,6 +1862,8 @@ fn collect_group_hooks(
             path,
             trust_hash,
             event,
+            group_index,
+            handler_index,
             next_matcher,
             next_enabled,
             nested,
@@ -1426,6 +1877,8 @@ fn collect_group_hooks(
         path,
         trust_hash,
         event,
+        group_index,
+        handler_index,
         matcher,
         group_enabled,
         object,
@@ -1438,6 +1891,8 @@ fn push_hook_record(
     path: &Path,
     trust_hash: &str,
     event: &str,
+    group_index: usize,
+    handler_index: usize,
     matcher: Option<&str>,
     group_enabled: bool,
     object: &serde_json::Map<String, Value>,
@@ -1481,6 +1936,41 @@ fn push_hook_record(
         return;
     }
 
+    let status_message = object
+        .get("statusMessage")
+        .or_else(|| object.get("status_message"))
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let codex_hook_key = (agent == AgentKind::Codex)
+        .then(|| codex_hook_key(path, event, group_index, handler_index));
+    let codex_current_hash = if agent == AgentKind::Codex {
+        if let Some(command) = command.as_deref() {
+            let configured_timeout = object.get("timeout").and_then(Value::as_u64);
+            let is_async = object
+                .get("async")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            let additional_context_limit = object
+                .get("additionalContextLimit")
+                .or_else(|| object.get("additional_context_limit"))
+                .and_then(Value::as_u64)
+                .and_then(|value| usize::try_from(value).ok());
+            codex_hook_hash(
+                event,
+                matcher,
+                command,
+                codex_hook_timeout(event, configured_timeout),
+                is_async,
+                status_message.as_deref(),
+                additional_context_limit,
+            )
+        } else {
+            Some("unsupported".to_string())
+        }
+    } else {
+        None
+    };
+
     hooks.push(HookRecord {
         agent,
         event: event.to_string(),
@@ -1490,26 +1980,94 @@ fn push_hook_record(
         url,
         prompt,
         filter: object.get("if").and_then(Value::as_str).map(str::to_string),
-        status_message: object
-            .get("statusMessage")
-            .or_else(|| object.get("status_message"))
-            .and_then(Value::as_str)
-            .map(str::to_string),
+        status_message,
         enabled,
         path: path.to_path_buf(),
         trust_hash: trust_hash.to_string(),
+        needs_review: false,
+        codex_hook_key,
+        codex_current_hash,
     });
 }
 
 #[cfg(test)]
 mod tests {
     use std::{
+        collections::HashMap,
         fs,
+        path::{Path, PathBuf},
         time::{SystemTime, UNIX_EPOCH},
     };
 
-    use super::scan_hook_file;
+    use super::{
+        apply_tendi_hook_review_states, hook_management_disabled_reason, hook_review_identity,
+        scan_hook_file,
+    };
     use crate::skills::AgentKind;
+
+    #[test]
+    fn matches_codex_current_hash_for_command_hook() {
+        assert_eq!(
+            super::codex_hook_hash(
+                "PreToolUse",
+                None,
+                "/Users/ryan/.codex/hooks/block-hook-bypass.py",
+                2,
+                false,
+                Some("Checking for git hook bypass flags"),
+                None,
+            ),
+            Some(
+                "sha256:1f8126ee873513665736cb61c26a9f33332a081eec75930d3fb928b862053520"
+                    .to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn marks_codex_untrusted_and_modified_hooks_for_review() {
+        let root = std::env::temp_dir().join(format!(
+            "tendi-hooks-review-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("system time before epoch")
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).expect("create temp root");
+        let path = root.join("hooks.json");
+        fs::write(
+            &path,
+            r#"{
+  "hooks": {
+    "PreToolUse": [
+      { "hooks": [{ "type": "command", "command": "/bin/echo trusted" }] },
+      { "hooks": [{ "type": "command", "command": "/bin/echo modified" }] }
+    ]
+  }
+}"#,
+        )
+        .expect("write hooks");
+
+        let mut hooks = Vec::new();
+        let mut warnings = Vec::new();
+        super::scan_hook_file(&path, AgentKind::Codex, &mut hooks, &mut warnings);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        let trusted_key = hooks[0].codex_hook_key.clone().expect("trusted key");
+        let trusted_hash = hooks[0].codex_current_hash.clone().expect("trusted hash");
+        let modified_key = hooks[1].codex_hook_key.clone().expect("modified key");
+        super::apply_codex_hook_review_states(
+            &mut hooks,
+            &std::collections::HashMap::from([
+                (trusted_key, trusted_hash),
+                (modified_key, "sha256:old".to_string()),
+            ]),
+        );
+
+        assert!(!hooks[0].needs_review);
+        assert!(hooks[1].needs_review);
+        let _ = fs::remove_dir_all(root);
+    }
 
     #[test]
     fn scans_codex_nested_command_hooks_without_running_them() {
@@ -1555,6 +2113,109 @@ mod tests {
         assert_eq!(hooks[0].command.as_deref(), Some("/bin/echo checked"));
         assert!(!hooks[0].enabled);
         assert!(!hooks[0].trust_hash.is_empty());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn marks_claude_hooks_disabled_when_disable_all_hooks_is_set() {
+        let root = std::env::temp_dir().join(format!(
+            "tendi-claude-disabled-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("system time before epoch")
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).expect("create temp root");
+        let path = root.join("settings.json");
+        fs::write(
+            &path,
+            r#"{
+  "disableAllHooks": true,
+  "hooks": {
+    "PreToolUse": [{ "hooks": [{ "type": "command", "command": "/bin/echo checked" }] }]
+  }
+}"#,
+        )
+        .expect("write settings");
+
+        let mut hooks = Vec::new();
+        let mut warnings = Vec::new();
+        scan_hook_file(&path, AgentKind::Claude, &mut hooks, &mut warnings);
+
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(hooks.len(), 1);
+        assert!(!hooks[0].enabled);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn treats_cursor_macos_managed_hooks_as_read_only() {
+        assert_eq!(
+            hook_management_disabled_reason(Path::new(
+                "/Library/Application Support/Cursor/hooks.json"
+            )),
+            Some("this hook source is read-only")
+        );
+    }
+
+    #[test]
+    fn writes_codex_trusted_hash_without_touching_other_states() {
+        let root = std::env::temp_dir().join(format!(
+            "tendi-codex-state-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("system time before epoch")
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).expect("create temp root");
+        let path = root.join("config.toml");
+        fs::write(
+            &path,
+            "[hooks.state.\"/tmp/hooks.json:pre_tool_use:0:0\"]\ntrusted_hash = \"sha256:old\"\n\n[notice]\nhide = true\n",
+        )
+        .expect("write config");
+
+        super::write_codex_trusted_hash(&path, "/tmp/hooks.json:pre_tool_use:0:0", "sha256:new")
+            .expect("write trusted hash");
+        let text = fs::read_to_string(&path).expect("read config");
+        assert!(text.contains("trusted_hash = \"sha256:new\""));
+        assert!(text.contains("[notice]\nhide = true"));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn marks_unreviewed_cursor_hooks_and_accepts_matching_tendi_state() {
+        let root = std::env::temp_dir().join(format!(
+            "tendi-cursor-review-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("system time before epoch")
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).expect("create temp root");
+        let path = root.join("hooks.json");
+        fs::write(
+            &path,
+            r#"{
+  "hooks": {
+    "beforeSubmitPrompt": [{ "command": "/bin/echo review" }],
+    "stop": [{ "command": "/bin/echo trusted" }]
+  }
+}"#,
+        )
+        .expect("write hooks");
+        let mut hooks = Vec::new();
+        let mut warnings = Vec::new();
+        scan_hook_file(&path, AgentKind::Cursor, &mut hooks, &mut warnings);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        let trusted_identity = hook_review_identity(&hooks[1]);
+        let states = HashMap::from([(trusted_identity, hooks[1].trust_hash.clone())]);
+        apply_tendi_hook_review_states(&mut hooks, &states);
+        assert!(hooks[0].needs_review);
+        assert!(!hooks[1].needs_review);
         let _ = fs::remove_dir_all(root);
     }
 
@@ -1725,6 +2386,158 @@ command = "/bin/echo stop"
         assert!(warnings.is_empty(), "{warnings:?}");
         assert!(hooks.is_empty(), "{hooks:?}");
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn deletes_multiple_hooks_from_one_json_source() {
+        let root = std::env::temp_dir().join(format!(
+            "tendi-hooks-delete-many-json-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("system time before epoch")
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).expect("create temp root");
+        let path = root.join("hooks.json");
+        fs::write(
+            &path,
+            r#"{
+  "hooks": {
+    "PreToolUse": [
+      { "matcher": "Bash", "hooks": [{ "type": "command", "command": "one" }] },
+      { "matcher": "Read", "hooks": [{ "type": "command", "command": "two" }] }
+    ]
+  }
+}"#,
+        )
+        .expect("write hooks");
+        let trust_hash = super::sha256_file(&path).expect("hash");
+        let request = |matcher: &str, command: &str| super::HookDeleteRequest {
+            path: path.clone(),
+            expected_trust_hash: trust_hash.clone(),
+            event: "PreToolUse".to_string(),
+            matcher: Some(matcher.to_string()),
+            hook_type: Some("command".to_string()),
+            command: Some(command.to_string()),
+            url: None,
+            prompt: None,
+            filter: None,
+            status_message: None,
+        };
+
+        super::delete_hooks(vec![request("Bash", "one"), request("Read", "two")])
+            .expect("delete hooks");
+
+        let mut hooks = Vec::new();
+        let mut warnings = Vec::new();
+        scan_hook_file(&path, AgentKind::Codex, &mut hooks, &mut warnings);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert!(hooks.is_empty(), "{hooks:?}");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn concurrent_hook_mutations_accept_only_one_stale_hash() {
+        let root = std::env::temp_dir().join(format!(
+            "tendi-hooks-concurrent-mutation-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("system time before epoch")
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("hooks.json");
+        fs::write(
+            &path,
+            r#"{"hooks":{"Stop":[{"type":"command","command":"one"},{"type":"command","command":"two"}]}}"#,
+        )
+        .unwrap();
+        let trust_hash = super::sha256_file(&path).unwrap();
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let handles = ["one", "two"].map(|command| {
+            let path = path.clone();
+            let trust_hash = trust_hash.clone();
+            let barrier = std::sync::Arc::clone(&barrier);
+            std::thread::spawn(move || {
+                barrier.wait();
+                super::delete_hook(super::HookDeleteRequest {
+                    path,
+                    expected_trust_hash: trust_hash,
+                    event: "Stop".to_string(),
+                    matcher: None,
+                    hook_type: Some("command".to_string()),
+                    command: Some(command.to_string()),
+                    url: None,
+                    prompt: None,
+                    filter: None,
+                    status_message: None,
+                })
+            })
+        });
+        let results = handles.map(|handle| handle.join().unwrap());
+
+        assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+        assert_eq!(results.iter().filter(|result| result.is_err()).count(), 1);
+        let text = fs::read_to_string(&path).unwrap();
+        assert_ne!(text.contains("one"), text.contains("two"));
+        assert!(fs::read_dir(&root).unwrap().all(|entry| {
+            !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .contains("tendi-tmp")
+        }));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn batch_delete_validates_every_source_before_writing() {
+        let root = std::env::temp_dir().join(format!(
+            "tendi-hooks-delete-validate-all-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("system time before epoch")
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let first_path = root.join("first.json");
+        let second_path = root.join("second.json");
+        let hook = |command: &str| {
+            format!(r#"{{"hooks":{{"Stop":[{{"type":"command","command":"{command}"}}]}}}}"#)
+        };
+        let first_before = hook("first");
+        let second_before = hook("second");
+        fs::write(&first_path, &first_before).unwrap();
+        fs::write(&second_path, &second_before).unwrap();
+        let request =
+            |path: PathBuf, expected_trust_hash: String, command: &str| super::HookDeleteRequest {
+                path,
+                expected_trust_hash,
+                event: "Stop".to_string(),
+                matcher: None,
+                hook_type: Some("command".to_string()),
+                command: Some(command.to_string()),
+                url: None,
+                prompt: None,
+                filter: None,
+                status_message: None,
+            };
+
+        let result = super::delete_hooks(vec![
+            request(
+                first_path.clone(),
+                super::sha256_file(&first_path).unwrap(),
+                "first",
+            ),
+            request(second_path, "stale-hash".to_string(), "second"),
+        ]);
+
+        assert!(result.is_err());
+        assert_eq!(fs::read_to_string(first_path).unwrap(), first_before);
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

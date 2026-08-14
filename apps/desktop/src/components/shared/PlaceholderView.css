@@ -9,3 +9,7 @@
   text-align: center;
   gap: 8px;
 }
+
+.placeholder h1 {
+  font-family: var(--font-brand);
+}

@@ -79,9 +79,9 @@ import traeIcon from "@lobehub/icons-static-svg/icons/trae-color.svg";
 
 import type { ComponentProps } from "react";
 import type { RuntimeData } from "./lib/data.ts";
-import { applyAppearance, listenForSystemAppearanceChange, normalizeAppearance, readCachedAppearance, type Appearance } from "./lib/appearance.ts";
-import { COLLAPSED_SIDEBAR_SIZE, SIDEBAR_SIZE, SkillChangeCommand, SkillVisibility, TauriCommand, applySessionDelta, applySkillUpdateReports, applyVisibilityState, clearSkillUpdateAvailability, fallbackAgents, fallbackTranscript, hookSourcePath, hookTrustHash, initialData, mergeSessionRows, mergeSkillListPreservingUpdates, navItems, normalizeReport, normalizeSession, normalizeTranscript, safeInvoke, sameAgent, sessionIdentity, sessionLaunchPayload, sessionLogicalIdentity } from "./lib/index.ts";
-import type { SessionAnalyticsDetail, SessionIdentityRecord } from "./lib/index.ts";
+import { applyAppearance, listenForSystemAppearanceChange, normalizeAppearance, normalizeThemePreferences, readCachedAppearance, readCachedThemePreferences, type Appearance, type ColorTheme, type ThemePreferences } from "./lib/appearance.ts";
+import { COLLAPSED_SIDEBAR_SIZE, SIDEBAR_SIZE, SkillChangeCommand, SkillVisibility, TauriCommand, applySessionDelta, applySessionProjectDelta, applySkillUpdateReports, applyVisibilityState, clearSkillUpdateAvailability, fallbackAgents, hookSourcePath, hookTrustHash, initialData, mergeSessionRows, mergeSkillListPreservingUpdates, navItems, normalizeDomainRows, normalizeReport, normalizeSession, normalizeTranscriptPage, safeInvoke, sameAgent, sessionIdentity, sessionLaunchPayload, sessionLogicalIdentity } from "./lib/index.ts";
+import type { BundledSkillStatus, CliInstallStatus, SessionAnalyticsDetail, SessionIdentityRecord, SessionProjectDelta, TranscriptPage } from "./lib/index.ts";
 import { mcpColumns } from "./lib/tableColumns.tsx";
 import { PlaceholderView } from "./components/shared/PlaceholderView.tsx";
 import { Sidebar } from "./components/shared/Sidebar.tsx";
@@ -104,6 +104,7 @@ type ViewId =
   | "ruleDetail";
 
 const loadConfirmSkillChangesDialog = () => import("./components/shared/ConfirmSkillChangesDialog.tsx");
+const loadBundledSkillInstallDialog = () => import("./components/shared/BundledSkillInstallDialog.tsx");
 const loadRuleEditorView = () => import("./components/shared/RuleEditorView.tsx");
 const loadSettingsView = () => import("./components/shared/SettingsView.tsx");
 const loadDataListView = () => import("./views/McpView.tsx");
@@ -116,6 +117,7 @@ const loadSkillsView = () => import("./views/SkillsView.tsx");
 const loadOverviewView = () => import("./views/OverviewView.tsx");
 
 const ConfirmSkillChangesDialog = lazy(() => loadConfirmSkillChangesDialog().then(({ ConfirmSkillChangesDialog: component }) => ({ default: component })));
+const BundledSkillInstallDialog = lazy(() => loadBundledSkillInstallDialog().then(({ BundledSkillInstallDialog: component }) => ({ default: component })));
 const RuleEditorView = lazy(() => loadRuleEditorView().then(({ RuleEditorView: component }) => ({ default: component })));
 const SettingsView = lazy(() => loadSettingsView().then(({ SettingsView: component }) => ({ default: component })));
 const DataListView = lazy(() => loadDataListView().then(({ DataListView: component }) => ({ default: component })));
@@ -147,8 +149,17 @@ type SkillPreview = {
   summary?: string;
   plan?: Record<string, unknown>;
   previewId?: string;
+  refreshRequired?: boolean;
+  skills?: SkillRecord[];
 };
 type SkillUpdateReport = { name: string; status: string };
+type SkillRefreshResult = { skills: SkillRecord[]; updateCheck?: string };
+type SkillUpdateCheckEvent = {
+  status: "completed" | "failed";
+  skills?: SkillRecord[];
+  updates?: SkillUpdateReport[];
+  error?: string | null;
+};
 
 type SkillIndexStatus = {
   indexed?: number;
@@ -179,6 +190,21 @@ type DomainRow = Record<string, unknown>;
 
 type DomainKey = "skills" | "prompts" | "sessions" | "rules" | "hooks" | "mcp";
 
+function hookDeleteArgs(hook: DomainRow) {
+  return {
+    path: hookSourcePath(hook),
+    expectedTrustHash: hookTrustHash(hook),
+    event: hook.event ?? "",
+    matcher: hook.matcher ?? null,
+    hookType: hook.hook_type ?? hook.hookType ?? null,
+    command: hook.command ?? hook.script ?? null,
+    url: hook.url ?? null,
+    prompt: hook.prompt ?? null,
+    filter: hook.filter ?? null,
+    statusMessage: hook.status_message ?? hook.statusMessage ?? null,
+  };
+}
+
 const domainListCommands: Record<DomainKey, TauriCommand> = {
   skills: TauriCommand.SkillsList,
   prompts: TauriCommand.PromptsList,
@@ -205,7 +231,7 @@ function deletePreviewRelatedNames(preview: SkillPreview | null | undefined) {
 }
 
 export function App() {
-  const [view, setView] = useState<ViewId>("skills");
+  const [view, setView] = useState<ViewId>("overview");
   const [activeSkill, setActiveSkill] = useState<SkillRecord | null>(null);
   const [activeRule, setActiveRule] = useState<DomainRow | null>(null);
   const [activeSessionKey, setActiveSessionKey] = useState("");
@@ -214,14 +240,22 @@ export function App() {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [agentFilter, setAgentFilter] = useState("All");
   const [pendingSkillChange, setPendingSkillChange] = useState<PendingSkillChange | null>(null);
+  const [bundledSkillPrompt, setBundledSkillPrompt] = useState<BundledSkillStatus | null>(null);
+  const [bundledSkillBusy, setBundledSkillBusy] = useState(false);
+  const [bundledSkillError, setBundledSkillError] = useState("");
   const [applyingSkillChange, setApplyingSkillChange] = useState(false);
   const [applyingSkillUpdates, setApplyingSkillUpdates] = useState(false);
   const [skillUpdateError, setSkillUpdateError] = useState("");
   const [checkingSkillUpdates, setCheckingSkillUpdates] = useState(false);
+  const [analyticsRevision, setAnalyticsRevision] = useState(0);
+  const [analyticsRevisionReady, setAnalyticsRevisionReady] = useState(false);
   const [loadingDomains, setLoadingDomains] = useState(() => new Set<string>(["skills"]));
   const [appearance, setAppearance] = useState<Appearance>(() => readCachedAppearance());
+  const [themePreferences, setThemePreferences] = useState<ThemePreferences>(() => readCachedThemePreferences());
   const appearanceChangeRevision = useRef(0);
   const loadedDomains = useRef(new Set<string>());
+  const domainLoadInFlight = useRef(new Map<DomainKey, Promise<void>>());
+  const promptsRefreshInFlight = useRef<Promise<unknown[] | null> | null>(null);
   const sessionsRefreshInFlight = useRef<Promise<unknown> | null>(null);
   const sessionEventReady = useRef<Promise<void>>(Promise.resolve());
   const sessionEventUnlisten = useRef<UnlistenFn | null>(null);
@@ -255,10 +289,10 @@ export function App() {
   }, [agentFilter, data]);
 
   useEffect(() => {
-    applyAppearance(appearance);
+    applyAppearance(appearance, themePreferences);
     if (appearance !== "system") return;
-    return listenForSystemAppearanceChange(() => applyAppearance("system"));
-  }, [appearance]);
+    return listenForSystemAppearanceChange(() => applyAppearance("system", themePreferences));
+  }, [appearance, themePreferences]);
 
   const changeAppearance = useCallback((nextAppearance: Appearance) => {
     appearanceChangeRevision.current += 1;
@@ -268,9 +302,10 @@ export function App() {
   useEffect(() => {
     let cancelled = false;
     const revision = appearanceChangeRevision.current;
-    safeInvoke<{ appearance?: unknown }>(TauriCommand.SettingsGet).then((settings) => {
+    safeInvoke<{ appearance?: unknown; lightTheme?: unknown; darkTheme?: unknown }>(TauriCommand.SettingsGet).then((settings) => {
       if (!cancelled && settings && revision === appearanceChangeRevision.current) {
         setAppearance(normalizeAppearance(settings.appearance));
+        setThemePreferences(normalizeThemePreferences({ light: settings.lightTheme as ColorTheme, dark: settings.darkTheme as ColorTheme }));
       }
     });
     return () => { cancelled = true; };
@@ -293,102 +328,105 @@ export function App() {
     return skills;
   };
 
-  const applyInstalledSkills = (result: SkillInstallResult) => {
-    const plan = result.report?.plan;
-    const installed = plan?.selected ?? [];
-    const materialized = result.report?.results ?? [];
-    if (installed.length > 0) {
-      const optimisticSkills = installed.map((skill, index) => ({
-        name: skill.name,
-        description: skill.description,
-        dependencies: skill.dependencies ?? [],
-        agents: plan?.target ? [plan.target] : [],
-        paths: [{
-          path: materialized[index]?.target,
-          agent: plan?.target,
-          scope: "global",
-          source: plan?.source,
-          source_kind: plan?.source_kind,
-        }],
-        source_summary: plan?.source ?? "local",
-      }));
-      setData((current) => {
-        const remaining = new Map(optimisticSkills.map((skill) => [skill.name, skill]));
-        const merged = current.skills.map((skill) => {
-          const installedSkill = remaining.get(skill.name);
-          if (!installedSkill) return skill;
-          remaining.delete(skill.name);
-          const installedPath = installedSkill.paths[0];
-          return {
-            ...skill,
-            ...installedSkill,
-            agents: [...new Set([...skill.agents, ...(installedSkill.agents ?? [])])],
-            paths: [
-              ...skill.paths.filter((path) => !installedPath.path || path.path !== installedPath.path),
-              installedPath,
-            ],
-          };
-        });
-        return normalizeReport({
-          ...current,
-          skills: [...merged, ...remaining.values()],
-        }, { fallback: false });
-      });
+  const refreshSkillListAndUpdates = async () => {
+    const revision = ++skillListRevision.current;
+    setCheckingSkillUpdates(true);
+    const result = await safeInvoke<SkillRefreshResult>(TauriCommand.SkillsRefresh);
+    if (revision !== skillListRevision.current || !result) {
+      if (revision === skillListRevision.current) setCheckingSkillUpdates(false);
+      return null;
     }
-    void refreshSkillList();
+    setData((current) => normalizeReport({ ...current, skills: result.skills }, { fallback: false }));
+    loadedDomains.current.add("skills");
+    if (result.updateCheck !== "started" && result.updateCheck !== "already-running") {
+      setCheckingSkillUpdates(false);
+    }
+    return result;
+  };
+
+  const applyInstalledSkills = (result: SkillInstallResult) => {
+    if (!result.skills) return;
+    setData((current) => normalizeReport({ ...current, skills: result.skills }, { fallback: false }));
   };
 
   const refreshSkillUpdates = async () => {
     const revision = ++skillUpdateCheckRevision.current;
     setCheckingSkillUpdates(true);
-    try {
-      const updates = await safeInvoke(TauriCommand.SkillsUpdates, { check: true }) as SkillUpdateReport[] | null;
-      if (revision !== skillUpdateCheckRevision.current || !updates) return;
-      setData((current) => applySkillUpdateReports(current, updates));
-    } finally {
+    const result = await safeInvoke<{ updateCheck?: string }>(TauriCommand.SkillsUpdates, { check: true });
+    if (revision !== skillUpdateCheckRevision.current || !result) {
       if (revision === skillUpdateCheckRevision.current) setCheckingSkillUpdates(false);
+      return;
+    }
+    if (result.updateCheck !== "started" && result.updateCheck !== "already-running") {
+      setCheckingSkillUpdates(false);
     }
   };
 
   const refreshSkills = async () => {
     setDomainLoading("skills", true);
     try {
-      const skills = await refreshSkillList();
-      if (skills) void refreshSkillUpdates();
+      await refreshSkillListAndUpdates();
     } finally {
       setDomainLoading("skills", false);
     }
   };
 
   const setDomainRows = (domain: DomainKey, rows: unknown[]) => {
-    setData((current) => normalizeReport({ ...current, [domain]: rows }, { fallback: false }));
+    setData((current) => normalizeDomainRows(current, domain, rows));
     loadedDomains.current.add(domain);
   };
 
   const refreshPrompts = useCallback(async () => {
-    const rows = await safeInvoke(TauriCommand.PromptsList) as unknown[] | null;
-    if (rows) setDomainRows("prompts", rows);
-    return rows;
+    if (!promptsRefreshInFlight.current) {
+      promptsRefreshInFlight.current = (async () => {
+        const rows = await safeInvoke(TauriCommand.PromptsList) as unknown[] | null;
+        if (rows) setDomainRows("prompts", rows);
+        return rows;
+      })().finally(() => {
+        promptsRefreshInFlight.current = null;
+      });
+    }
+    return promptsRefreshInFlight.current;
+  }, []);
+
+  const applyPromptSaved = useCallback((prompt: unknown) => {
+    if (!prompt || typeof prompt !== "object") return;
+    const id = `${(prompt as Record<string, unknown>).id ?? ""}`;
+    setData((current) => normalizeReport({
+      ...current,
+      prompts: [prompt, ...current.prompts.filter((item) => item.id !== id)],
+    }, { fallback: false }));
+    loadedDomains.current.add("prompts");
+  }, []);
+
+  const removePrompts = useCallback((ids: string[]) => {
+    const deleted = new Set(ids);
+    setData((current) => ({
+      ...current,
+      prompts: current.prompts.filter((prompt) => !deleted.has(prompt.id)),
+    }));
   }, []);
 
   const deleteHook = useCallback(async (hook: DomainRow) => {
     try {
-      const rows = await invoke(TauriCommand.HookDelete, {
-        path: hookSourcePath(hook),
-        expectedTrustHash: hookTrustHash(hook),
-        event: hook.event ?? "",
-        matcher: hook.matcher ?? null,
-        hookType: hook.hook_type ?? hook.hookType ?? null,
-        command: hook.command ?? hook.script ?? null,
-        url: hook.url ?? null,
-        prompt: hook.prompt ?? null,
-        filter: hook.filter ?? null,
-        statusMessage: hook.status_message ?? hook.statusMessage ?? null,
-      });
+      const rows = await invoke(TauriCommand.HookDelete, hookDeleteArgs(hook));
       if (Array.isArray(rows)) setDomainRows("hooks", rows);
       return rows;
     } catch (error) {
       console.warn(`tendi command failed: ${TauriCommand.HookDelete}`, error);
+      return { error: `${error}` };
+    }
+  }, []);
+
+  const deleteHooks = useCallback(async (hooks: DomainRow[]) => {
+    try {
+      const rows = await invoke(TauriCommand.HookDeleteMany, {
+        requests: hooks.map(hookDeleteArgs),
+      });
+      if (Array.isArray(rows)) setDomainRows("hooks", rows);
+      return rows;
+    } catch (error) {
+      console.warn(`tendi command failed: ${TauriCommand.HookDeleteMany}`, error);
       return { error: `${error}` };
     }
   }, []);
@@ -416,13 +454,42 @@ export function App() {
     }
   }, []);
 
-  const setSessionRows = useCallback((rows: unknown[]) => {
+  const reviewHook = useCallback(async (hook: DomainRow) => {
+    try {
+      const rows = await invoke(TauriCommand.HookReview, {
+        path: hookSourcePath(hook),
+        expectedTrustHash: hookTrustHash(hook),
+        event: hook.event ?? "",
+        matcher: hook.matcher ?? null,
+        hookType: hook.hook_type ?? hook.hookType ?? null,
+        command: hook.command ?? hook.script ?? null,
+        url: hook.url ?? null,
+        prompt: hook.prompt ?? null,
+        filter: hook.filter ?? null,
+        statusMessage: hook.status_message ?? hook.statusMessage ?? null,
+      });
+      if (Array.isArray(rows)) setDomainRows("hooks", rows);
+      return rows;
+    } catch (error) {
+      console.warn(`tendi command failed: ${TauriCommand.HookReview}`, error);
+      return { error: `${error}` };
+    }
+  }, []);
+
+  const setSessionRows = useCallback((rows: unknown[], { markLoaded = true } = {}) => {
     setData((current) => {
       const nextSessions = mergeSessionRows(current.sessions, rows as Array<Record<string, unknown>>);
       if (nextSessions === current.sessions) return current;
       return { ...current, sessions: nextSessions };
     });
-    loadedDomains.current.add("sessions");
+    if (markLoaded) loadedDomains.current.add("sessions");
+  }, []);
+
+  const applySessionProjectsChanged = useCallback((delta: SessionProjectDelta) => {
+    setData((current) => {
+      const sessions = applySessionProjectDelta(current.sessions, delta);
+      return sessions === current.sessions ? current : { ...current, sessions };
+    });
   }, []);
 
   const flushSessionEventBuffer = useCallback(() => {
@@ -433,9 +500,6 @@ export function App() {
     pendingWatchSessions.current.clear();
     pendingDeletedSessions.current.clear();
     sessionEventFlushTimer.current = undefined;
-    if (currentView.current !== "sessions") {
-      return;
-    }
     if (recent.length > 0 || watch.length > 0 || deleted.length > 0) {
       const upserts = new Map<string, SessionRecord>();
       for (const session of recent) upserts.set(sessionLogicalIdentity(session), session);
@@ -520,6 +584,31 @@ export function App() {
 
   useEffect(() => {
     let disposed = false;
+    let unlisten: UnlistenFn | null = null;
+    const applyRevision = (revision: number) => {
+      if (!disposed) setAnalyticsRevision((current) => Math.max(current, revision));
+    };
+    const ready = listen<{ revision: number }>("analytics://revision", ({ payload }) => {
+      applyRevision(payload.revision);
+    }).then(async (cleanup) => {
+      if (disposed) {
+        cleanup();
+        return;
+      }
+      unlisten = cleanup;
+      const revision = await safeInvoke<number>(TauriCommand.AnalyticsRevision);
+      if (revision !== null) applyRevision(revision);
+      if (!disposed) setAnalyticsRevisionReady(true);
+    });
+    return () => {
+      disposed = true;
+      unlisten?.();
+      void ready;
+    };
+  }, []);
+
+  useEffect(() => {
+    let disposed = false;
     const ready = listen<SessionScanEvent>("sessions://scan", ({ payload }) => {
       if (!disposed) handleSessionScanEvent(payload);
     }).then((unlisten) => {
@@ -537,6 +626,31 @@ export function App() {
       }
     };
   }, [handleSessionScanEvent]);
+
+  useEffect(() => {
+    let disposed = false;
+    let unlisten: UnlistenFn | null = null;
+    const ready = listen<SkillUpdateCheckEvent>("skills://updates", ({ payload }) => {
+      if (disposed) return;
+      if (payload.status === "completed") {
+        setData((current) => {
+          return applySkillUpdateReports(current, payload.updates ?? []);
+        });
+        setSkillUpdateError("");
+      } else {
+        setSkillUpdateError(payload.error || "Update check failed");
+      }
+      setCheckingSkillUpdates(false);
+    }).then((cleanup) => {
+      if (disposed) cleanup();
+      else unlisten = cleanup;
+    });
+    return () => {
+      disposed = true;
+      unlisten?.();
+      void ready;
+    };
+  }, []);
 
   const refreshSessionsFromScan = useCallback(() => {
     if (!sessionsRefreshInFlight.current) {
@@ -591,43 +705,102 @@ export function App() {
   }, []);
 
   useEffect(() => {
-    const loadOneDomain = async (domain: DomainKey, cancelled: () => boolean) => {
+    let cancelled = false;
+    safeInvoke<BundledSkillStatus>(TauriCommand.BundledSkillStatus).then((status) => {
+      if (!cancelled && status?.shouldPrompt) setBundledSkillPrompt(status);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const dismissBundledSkillPrompt = async () => {
+    if (bundledSkillBusy) return;
+    setBundledSkillBusy(true);
+    setBundledSkillError("");
+    try {
+      await invoke(TauriCommand.BundledSkillPromptDismiss);
+      setBundledSkillPrompt(null);
+    } catch (error) {
+      setBundledSkillError(`${error}`);
+    } finally {
+      setBundledSkillBusy(false);
+    }
+  };
+
+  const installBundledSkill = async () => {
+    if (bundledSkillBusy) return;
+    setBundledSkillBusy(true);
+    setBundledSkillError("");
+    try {
+      const cliStatus = await invoke<CliInstallStatus>(TauriCommand.CliInstall);
+      if (cliStatus.state !== "installed" || !cliStatus.pathConfigured) {
+        throw new Error(cliStatus.detail || "The Tendi CLI is not available on PATH.");
+      }
+      await invoke(TauriCommand.BundledSkillInstall);
+      setBundledSkillPrompt(null);
+      void refreshSkillList({ preserveUpdates: false });
+    } catch (error) {
+      setBundledSkillError(`${error}`);
+    } finally {
+      setBundledSkillBusy(false);
+    }
+  };
+
+  useEffect(() => {
+    const loadOneDomain = async (domain: DomainKey) => {
       if (loadedDomains.current.has(domain)) return;
-      setDomainLoading(domain, true);
+      const existing = domainLoadInFlight.current.get(domain);
+      if (existing) {
+        await existing;
+        return;
+      }
+      const request = (async () => {
+        setDomainLoading(domain, true);
+        try {
+          if (domain === "skills") {
+            await refreshSkillListAndUpdates();
+            return;
+          }
+          if (domain === "sessions") {
+            const cachedRows = await safeInvoke(TauriCommand.SessionsList) as unknown[] | null;
+            if (cachedRows) {
+              setSessionRows(cachedRows, { markLoaded: view !== "overview" });
+            }
+            if (view === "overview") return;
+            await refreshSessionsFromScan();
+            return;
+          }
+          if (domain === "prompts") {
+            await refreshPrompts();
+            return;
+          }
+          const rows = await safeInvoke(domainListCommands[domain]) as unknown[] | null;
+          if (rows) setDomainRows(domain, rows);
+        } finally {
+          setDomainLoading(domain, false);
+        }
+      })();
+      domainLoadInFlight.current.set(domain, request);
       try {
-        if (domain === "skills") {
-          await refreshSkillList();
-          return;
-        }
-        if (domain === "sessions") {
-          const cachedRows = await safeInvoke(TauriCommand.SessionsList) as unknown[] | null;
-          if (!cancelled() && cachedRows) setSessionRows(cachedRows);
-          await refreshSessionsFromScan();
-          return;
-        }
-        if (domain === "prompts") {
-          await refreshPrompts();
-          return;
-        }
-        const rows = await safeInvoke(domainListCommands[domain]) as unknown[] | null;
-        if (!cancelled() && rows) setDomainRows(domain, rows);
+        await request;
       } finally {
-        if (!cancelled()) setDomainLoading(domain, false);
+        if (domainLoadInFlight.current.get(domain) === request) {
+          domainLoadInFlight.current.delete(domain);
+        }
       }
     };
 
     if (view === "overview") {
-      let cancelled = false;
       const domains: DomainKey[] = ["skills", "sessions", "prompts", "rules", "hooks", "mcp"];
       let timer = 0;
       let frame = 0;
       frame = window.requestAnimationFrame(() => {
         timer = window.setTimeout(() => {
-          void Promise.all(domains.map((domain) => loadOneDomain(domain, () => cancelled)));
+          void Promise.all(domains.map((domain) => loadOneDomain(domain)));
         }, 0);
       });
       return () => {
-        cancelled = true;
         window.cancelAnimationFrame(frame);
         window.clearTimeout(timer);
         for (const domain of domains) setDomainLoading(domain, false);
@@ -636,16 +809,14 @@ export function App() {
 
     const domain = view === "skillDetail" ? "skills" : view === "ruleDetail" ? "rules" : view;
     if (!isDomainKey(domain)) return;
-    let cancelled = false;
     let timer = 0;
     let frame = 0;
     frame = window.requestAnimationFrame(() => {
       timer = window.setTimeout(() => {
-        void loadOneDomain(domain, () => cancelled);
+        void loadOneDomain(domain);
       }, 0);
     });
     return () => {
-      cancelled = true;
       window.cancelAnimationFrame(frame);
       window.clearTimeout(timer);
       setDomainLoading(domain, false);
@@ -701,10 +872,18 @@ export function App() {
     prefetchTimers.current.clear();
   }, []);
 
-  const loadTranscript = useCallback(async (session: SessionRecord) => {
-    if (!session?.path) return fallbackTranscript;
-    const items = await safeInvoke(TauriCommand.SessionTranscript, { path: session.path, agent: session.agent });
-    return Array.isArray(items) ? normalizeTranscript(items) : fallbackTranscript;
+  const loadTranscript = useCallback(async (session: SessionRecord, cursor?: string, knownSourceVersion?: string): Promise<TranscriptPage> => {
+    if (!session?.path) return { items: [], warnings: [], done: true, sourceVersion: "", restartRequired: false, unchanged: false };
+    const page = await safeInvoke(TauriCommand.SessionTranscript, {
+      path: session.path,
+      agent: session.agent,
+      cursor,
+      limit: 160,
+      knownSourceVersion,
+    });
+    return page
+      ? normalizeTranscriptPage(page)
+      : { items: [], warnings: [], done: true, sourceVersion: "", restartRequired: false, unchanged: false };
   }, []);
 
   const loadSessionAnalytics = useCallback(async (session: SessionRecord) => {
@@ -752,18 +931,25 @@ export function App() {
     { onApplied }: { onApplied?: () => void } = {},
   ) => {
     const isUpdate = command === SkillChangeCommand.UpdateMany;
-    if (isUpdate) {
-      setApplyingSkillUpdates(true);
-      setSkillUpdateError("");
-      setPendingSkillChange({ command, args, preview: null, onApplied });
+    const isDelete = command === SkillChangeCommand.DeleteMany;
+    if (isUpdate || isDelete) {
+      if (isDelete) {
+        setPendingSkillChange({ command, args, preview: null, onApplied });
+      } else {
+        setApplyingSkillUpdates(true);
+        setSkillUpdateError("");
+        setPendingSkillChange({ command, args, preview: null, onApplied });
+      }
     }
     try {
-      const preview = isUpdate
+      const preview = isUpdate || isDelete
         ? await invoke<SkillPreview>(command, { ...args, dryRun: true })
         : await safeInvoke(command, { ...args, dryRun: true }) as SkillPreview | null;
       if (!preview) return;
       if (isUpdate) {
         setPendingSkillChange((current) => current?.command === command ? { ...current, preview } : current);
+      } else if (isDelete) {
+        setPendingSkillChange((current) => current?.command === command && current.args === args ? { ...current, preview } : current);
       } else {
         setPendingSkillChange({ command, args, preview, onApplied });
       }
@@ -771,14 +957,17 @@ export function App() {
       const message = `${error}`;
       setSkillUpdateError(message);
       if (isUpdate) setPendingSkillChange((current) => current?.command === command ? { ...current, previewError: message } : current);
+      if (isDelete) setPendingSkillChange((current) => current?.command === command && current.args === args ? { ...current, previewError: message } : current);
     } finally {
       if (isUpdate) setApplyingSkillUpdates(false);
     }
   };
 
   const applySkillChange = async (command: SkillChangeCommand, args: Record<string, unknown>) => {
-    const result = await invoke(command, { ...args, dryRun: false });
-    await refreshSkillList();
+    const result = await invoke<SkillPreview>(command, { ...args, dryRun: false });
+    if (result.skills) {
+      setData((current) => normalizeReport({ ...current, skills: result.skills }, { fallback: false }));
+    }
     return result;
   };
 
@@ -794,10 +983,14 @@ export function App() {
     if (command === SkillChangeCommand.UpdateMany) setSkillUpdateError("");
     const previewId = command === SkillChangeCommand.DeleteMany
       ? pendingSkillChange.preview?.previewId
-      : undefined;
+      : command === SkillChangeCommand.UpdateMany
+        ? pendingSkillChange.preview?.previewId
+        : undefined;
     try {
-      await invoke(command, { ...args, previewId, dryRun: false });
-      if (command === SkillChangeCommand.DeleteMany) {
+      const result = await invoke<SkillPreview>(command, { ...args, previewId, dryRun: false });
+      if (result.skills) {
+        setData((current) => normalizeReport({ ...current, skills: result.skills }, { fallback: false }));
+      } else if (command === SkillChangeCommand.DeleteMany) {
         const names = new Set((args.names as unknown[] | undefined)?.map((name) => `${name}`) ?? []);
         setData((current) => normalizeReport({
           ...current,
@@ -809,7 +1002,9 @@ export function App() {
       }
       setPendingSkillChange(null);
       onApplied?.();
-      void refreshSkillList({ preserveUpdates: false });
+      if (!result.skills && (command !== SkillChangeCommand.DeleteMany || result?.refreshRequired)) {
+        void refreshSkillList({ preserveUpdates: false });
+      }
     } catch (error) {
       const message = `${error}`;
       setPendingSkillChange((current) => current?.command === command ? { ...current, applyError: message } : current);
@@ -829,15 +1024,19 @@ export function App() {
     setPendingSkillChange((current) => current ? { ...current, args: { ...current.args, names }, applyError: undefined } : current);
     setApplyingSkillChange(true);
     try {
-      await invoke(pendingSkillChange.command, { ...pendingSkillChange.args, names, dryRun: false });
-      const deletedNames = new Set(names);
-      setData((current) => normalizeReport({
-        ...current,
-        skills: current.skills.filter((skill) => !deletedNames.has(skill.name)),
-      }, { fallback: false }));
+      const result = await invoke<SkillPreview>(pendingSkillChange.command, { ...pendingSkillChange.args, names, dryRun: false });
+      if (result.skills) {
+        setData((current) => normalizeReport({ ...current, skills: result.skills }, { fallback: false }));
+      } else {
+        const deletedNames = new Set(names);
+        setData((current) => normalizeReport({
+          ...current,
+          skills: current.skills.filter((skill) => !deletedNames.has(skill.name)),
+        }, { fallback: false }));
+      }
       setPendingSkillChange(null);
       pendingSkillChange.onApplied?.();
-      void refreshSkillList();
+      if (result?.refreshRequired) void refreshSkillList();
     } catch (error) {
       const message = `${error}`;
       setPendingSkillChange((current) => current ? { ...current, applyError: message } : current);
@@ -848,7 +1047,10 @@ export function App() {
 
   const applyVisibility = async (names: string[], visibility: SkillVisibility) => {
     setData((current) => applyVisibilityState(current, names, visibility));
-    const result = await safeInvoke(SkillChangeCommand.Set, { names, visibility, dryRun: false });
+    const result = await safeInvoke<SkillPreview>(SkillChangeCommand.Set, { names, visibility, dryRun: false });
+    if (result?.skills) {
+      setData((current) => normalizeReport({ ...current, skills: result.skills }, { fallback: false }));
+    }
     if (!result) await refreshSkillList();
   };
 
@@ -859,6 +1061,18 @@ export function App() {
 
   return (
     <main className="appShell">
+      {bundledSkillPrompt ? (
+        <Suspense fallback={null}>
+          <BundledSkillInstallDialog
+            open
+            target={bundledSkillPrompt.target}
+            busy={bundledSkillBusy}
+            error={bundledSkillError}
+            onInstall={() => { void installBundledSkill(); }}
+            onDismiss={() => { void dismissBundledSkillPrompt(); }}
+          />
+        </Suspense>
+      ) : null}
       {pendingSkillChange ? (
         <Suspense fallback={null}>
           <ConfirmSkillChangesDialog
@@ -912,7 +1126,11 @@ export function App() {
               skillIndexStatus={skillIndexStatus}
               onOpenSession={openSessionFromLink}
               onOpenSkill={openSkillByName}
-              onSaved={() => { void refreshSkillList(); }}
+              onSaved={(skills) => {
+                if (skills) {
+                  setData((current) => normalizeReport({ ...current, skills }, { fallback: false }));
+                }
+              }}
             />
           ) : view === "ruleDetail" ? (
             <RuleEditorView rule={activeRule} back={() => navigate("rules")} />
@@ -947,24 +1165,33 @@ export function App() {
               onOpenSkill={openSkillByName}
               activeSessionKey={activeSessionKey}
               skillIndexStatus={skillIndexStatus}
-              onSessionProjectsChanged={setSessionRows}
+              onSessionProjectsChanged={applySessionProjectsChanged}
             />
           ) : view === "prompts" ? (
             <PromptsView
               prompts={filteredData.prompts as ComponentProps<typeof PromptsView>["prompts"]}
               loadingPrompts={loadingDomains.has("prompts")}
               onRefreshPrompts={async () => { await refreshPrompts(); }}
+              onPromptSaved={applyPromptSaved}
+              onPromptsDeleted={removePrompts}
             />
             ) : view === "rules" ? (
               <RulesView rows={filteredData.rules} skills={data.skills} loadingRows={loadingDomains.has("rules")} onOpenSkill={openSkillByName} />
             ) : view === "hooks" ? (
-              <HooksView rows={filteredData.hooks} loadingRows={loadingDomains.has("hooks")} onDeleteHook={deleteHook} onSetHookEnabled={setHookEnabled} />
+              <HooksView rows={filteredData.hooks} loadingRows={loadingDomains.has("hooks")} onDeleteHook={deleteHook} onDeleteHooks={deleteHooks} onSetHookEnabled={setHookEnabled} onReviewHook={reviewHook} />
           ) : view === "mcp" ? (
             <DataListView title="MCP" rows={filteredData.mcp} columns={mcpColumns} loading={loadingDomains.has("mcp")} />
           ) : view === "config" ? (
             <ConfigView />
           ) : view === "settings" ? (
-            <SettingsView appearance={appearance} onAppearanceChange={changeAppearance} />
+            <SettingsView
+              appearance={appearance}
+              themePreferences={themePreferences}
+              onAppearanceChange={changeAppearance}
+              onThemeChange={(mode, theme) => {
+                setThemePreferences((current) => ({ ...current, [mode]: theme }));
+              }}
+            />
           ) : view === "overview" ? (
             <OverviewView
               counts={{
@@ -975,24 +1202,17 @@ export function App() {
                 hooks: filteredData.hooks.length,
                 mcp: filteredData.mcp.length,
               }}
+              hookReviewCount={filteredData.hooks.filter((hook) => hook.needs_review === true).length}
               skills={filteredData.skills as SkillRecord[]}
               sessions={filteredData.sessions as SessionRecord[]}
-              sessionsLoading={loadingDomains.has("sessions") || !loadedDomains.current.has("sessions")}
+              analyticsRevision={analyticsRevision}
+              analyticsRevisionReady={analyticsRevisionReady}
               agentFilter={agentFilter}
-              checkingUpdates={checkingSkillUpdates}
-              applyingUpdates={applyingSkillUpdates}
-              updateError={skillUpdateError}
               onNavigate={(id: OverviewNavId) => navigate(id)}
-              onOpenSkill={(skill) => {
-                setActiveSkill(skill);
-                setView("skillDetail");
-              }}
               onOpenSession={(session) => {
                 setActiveSessionKey(`${session.agent ?? ""}:${session.id ?? ""}`);
                 setView("sessions");
               }}
-              onCheckUpdates={refreshSkillUpdates}
-              onApplyUpdates={(names) => previewAndApply(SkillChangeCommand.UpdateMany, { names })}
             />
           ) : (
             <PlaceholderView title={activeNav?.label ?? "Overview"} />

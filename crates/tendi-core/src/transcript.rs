@@ -1,12 +1,12 @@
 use std::{
     fs,
-    io::{BufRead, BufReader},
+    io::{BufRead, BufReader, Read, Seek, SeekFrom},
     path::{Path, PathBuf},
 };
 
 use anyhow::{Context, Result};
 use rusqlite::{Connection, OpenFlags};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::{sessions::extract_cursor_blob_model, skills::AgentKind};
@@ -29,7 +29,7 @@ pub struct TranscriptItem {
     pub model: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub effort: Option<String>,
-    #[serde(skip)]
+    #[serde(rename = "callId", skip_serializing_if = "Option::is_none")]
     pub call_id: Option<String>,
     #[serde(skip)]
     pub started_at_ms: Option<i64>,
@@ -39,6 +39,376 @@ pub struct TranscriptItem {
 pub struct TranscriptScan {
     pub items: Vec<TranscriptItem>,
     pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TranscriptPage {
+    pub items: Vec<TranscriptItem>,
+    pub warnings: Vec<String>,
+    pub next_cursor: Option<String>,
+    pub done: bool,
+    pub source_version: String,
+    pub restart_required: bool,
+    pub unchanged: bool,
+}
+
+const TRANSCRIPT_PAGE_DEFAULT_LIMIT: usize = 160;
+const TRANSCRIPT_PAGE_MAX_LIMIT: usize = 400;
+const TRANSCRIPT_PAGE_MAX_SOURCE_BYTES: u64 = 8 * 1024 * 1024;
+const TRANSCRIPT_PAGE_MAX_SOURCE_LINES: usize = 2_000;
+const TRANSCRIPT_PAGE_MAX_LINE_BYTES: usize = 2 * 1024 * 1024;
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+struct TranscriptCursor {
+    offset: u64,
+    line: usize,
+    source: TranscriptSourceIdentity,
+    boundary_hash: u64,
+    source_size: u64,
+    source_modified_ns: u128,
+}
+
+impl TranscriptCursor {
+    fn parse(value: &str) -> Result<Self> {
+        let encoded = value
+            .strip_prefix("v1-")
+            .with_context(|| "unsupported transcript cursor")?;
+        if encoded.len() > 2_048 {
+            anyhow::bail!("transcript cursor is too large");
+        }
+        let bytes = decode_hex(encoded).with_context(|| "invalid transcript cursor")?;
+        let cursor: Self =
+            serde_json::from_slice(&bytes).with_context(|| "invalid transcript cursor")?;
+        if cursor.source.prefix_len > 4 * 1024 || cursor.line > 1_000_000_000 {
+            anyhow::bail!("transcript cursor fields exceed their bounds");
+        }
+        Ok(cursor)
+    }
+
+    fn encode(&self) -> Result<String> {
+        Ok(format!("v1-{}", encode_hex(&serde_json::to_vec(self)?)))
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+struct TranscriptSourceIdentity {
+    device: u64,
+    inode: u64,
+    prefix_len: usize,
+    prefix_hash: u64,
+}
+
+struct TranscriptSourceSnapshot {
+    identity: TranscriptSourceIdentity,
+    size: u64,
+    modified_ns: u128,
+}
+
+impl TranscriptSourceSnapshot {
+    fn version(&self) -> String {
+        format!(
+            "v1-{}-{}-{:016x}-{}-{}",
+            self.identity.device,
+            self.identity.inode,
+            self.identity.prefix_hash,
+            self.size,
+            self.modified_ns,
+        )
+    }
+}
+
+fn encode_hex(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut encoded = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        encoded.push(HEX[(byte >> 4) as usize] as char);
+        encoded.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    encoded
+}
+
+fn decode_hex(value: &str) -> Result<Vec<u8>> {
+    if !value.len().is_multiple_of(2) {
+        anyhow::bail!("odd cursor encoding length");
+    }
+    value
+        .as_bytes()
+        .chunks_exact(2)
+        .map(|pair| {
+            let high = (pair[0] as char)
+                .to_digit(16)
+                .with_context(|| "invalid cursor encoding")?;
+            let low = (pair[1] as char)
+                .to_digit(16)
+                .with_context(|| "invalid cursor encoding")?;
+            Ok(((high << 4) | low) as u8)
+        })
+        .collect()
+}
+
+fn transcript_source_snapshot(
+    file: &mut fs::File,
+    prefix_len: Option<usize>,
+) -> Result<TranscriptSourceSnapshot> {
+    let metadata = file.metadata()?;
+    let size = metadata.len();
+    let modified_ns = metadata
+        .modified()
+        .ok()
+        .and_then(|modified| modified.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default();
+    let (device, inode) = transcript_file_identity(&metadata);
+    file.seek(SeekFrom::Start(0))?;
+    let prefix_len = prefix_len
+        .unwrap_or_else(|| usize::try_from(size.min(4 * 1024)).unwrap_or_default())
+        .min(usize::try_from(size).unwrap_or(usize::MAX));
+    let mut prefix = vec![0u8; prefix_len];
+    file.read_exact(&mut prefix)?;
+    file.seek(SeekFrom::Start(0))?;
+    let prefix_hash = prefix.iter().fold(0xcbf29ce484222325u64, |hash, byte| {
+        (hash ^ u64::from(*byte)).wrapping_mul(0x100000001b3)
+    });
+    Ok(TranscriptSourceSnapshot {
+        identity: TranscriptSourceIdentity {
+            device,
+            inode,
+            prefix_len,
+            prefix_hash,
+        },
+        size,
+        modified_ns,
+    })
+}
+
+fn transcript_boundary_hash(path: &Path, offset: u64) -> Result<u64> {
+    let mut file = fs::File::open(path)?;
+    let start = offset.saturating_sub(4 * 1024);
+    file.seek(SeekFrom::Start(start))?;
+    let mut bytes = vec![0u8; usize::try_from(offset - start).unwrap_or_default()];
+    file.read_exact(&mut bytes)?;
+    Ok(bytes.iter().fold(0xcbf29ce484222325u64, |hash, byte| {
+        (hash ^ u64::from(*byte)).wrapping_mul(0x100000001b3)
+    }))
+}
+
+#[cfg(unix)]
+fn transcript_file_identity(metadata: &fs::Metadata) -> (u64, u64) {
+    use std::os::unix::fs::MetadataExt;
+    (metadata.dev(), metadata.ino())
+}
+
+#[cfg(not(unix))]
+fn transcript_file_identity(_metadata: &fs::Metadata) -> (u64, u64) {
+    (0, 0)
+}
+
+pub fn parse_transcript_page(
+    path: &Path,
+    agent: AgentKind,
+    cursor: Option<&str>,
+    limit: Option<usize>,
+) -> Result<TranscriptPage> {
+    parse_transcript_page_with_cursor_store(path, agent, cursor, limit, None)
+}
+
+pub fn transcript_source_version(path: &Path) -> Result<String> {
+    let mut file =
+        fs::File::open(path).with_context(|| format!("failed to read {}", path.display()))?;
+    Ok(transcript_source_snapshot(&mut file, None)?.version())
+}
+
+fn parse_transcript_page_with_cursor_store(
+    path: &Path,
+    agent: AgentKind,
+    cursor: Option<&str>,
+    limit: Option<usize>,
+    cursor_store: Option<&Path>,
+) -> Result<TranscriptPage> {
+    let cursor = cursor.map(TranscriptCursor::parse).transpose()?;
+    let mut file =
+        fs::File::open(path).with_context(|| format!("failed to read {}", path.display()))?;
+    let source = transcript_source_snapshot(
+        &mut file,
+        cursor.as_ref().map(|cursor| cursor.source.prefix_len),
+    )
+    .with_context(|| format!("failed to inspect {}", path.display()))?;
+    let source_version = source.version();
+    let cursor_stale = if let Some(cursor) = cursor.as_ref() {
+        cursor.source != source.identity
+            || cursor.offset > source.size
+            || cursor.source_size != source.size
+            || cursor.source_modified_ns != source.modified_ns
+            || transcript_boundary_hash(path, cursor.offset)? != cursor.boundary_hash
+    } else {
+        false
+    };
+    if cursor_stale {
+        return Ok(TranscriptPage {
+            items: Vec::new(),
+            warnings: vec!["transcript source changed; restart from the first page".to_string()],
+            next_cursor: None,
+            done: false,
+            source_version,
+            restart_required: true,
+            unchanged: false,
+        });
+    }
+    let cursor = match cursor {
+        Some(cursor) => cursor,
+        None => TranscriptCursor {
+            offset: 0,
+            line: 0,
+            source: source.identity.clone(),
+            boundary_hash: transcript_boundary_hash(path, 0)?,
+            source_size: source.size,
+            source_modified_ns: source.modified_ns,
+        },
+    };
+
+    let limit = limit
+        .unwrap_or(TRANSCRIPT_PAGE_DEFAULT_LIMIT)
+        .clamp(1, TRANSCRIPT_PAGE_MAX_LIMIT);
+    let mut reader = BufReader::new(file);
+    reader
+        .seek(SeekFrom::Start(cursor.offset))
+        .with_context(|| format!("failed to seek {}", path.display()))?;
+    let mut items = Vec::new();
+    let mut warnings = Vec::new();
+    let mut line_number = cursor.line;
+    let mut source_bytes = 0u64;
+
+    while items.len() < limit
+        && line_number.saturating_sub(cursor.line) < TRANSCRIPT_PAGE_MAX_SOURCE_LINES
+        && source_bytes < TRANSCRIPT_PAGE_MAX_SOURCE_BYTES
+    {
+        let Some(line) = read_bounded_jsonl_line(&mut reader, TRANSCRIPT_PAGE_MAX_LINE_BYTES)?
+        else {
+            break;
+        };
+        line_number += 1;
+        source_bytes = source_bytes.saturating_add(line.consumed);
+        if line.truncated {
+            warnings.push(format!(
+                "{}:{} exceeds {} bytes and was skipped",
+                path.display(),
+                line_number,
+                TRANSCRIPT_PAGE_MAX_LINE_BYTES,
+            ));
+            continue;
+        }
+        let line = match String::from_utf8(line.bytes) {
+            Ok(line) => line,
+            Err(err) => {
+                warnings.push(format!("{}:{}: {err}", path.display(), line_number));
+                continue;
+            }
+        };
+        if line.trim().is_empty() {
+            continue;
+        }
+        let value = match serde_json::from_str::<Value>(&line) {
+            Ok(value) => value,
+            Err(err) => {
+                warnings.push(format!("{}:{}: {err}", path.display(), line_number));
+                continue;
+            }
+        };
+        collect_transcript_value(&value, agent, &mut items);
+    }
+
+    let offset = reader.stream_position()?;
+    let done = reader.fill_buf()?.is_empty();
+    if done && agent == AgentKind::Cursor {
+        if let Some(store_path) = cursor_store
+            .map(Path::to_path_buf)
+            .or_else(|| find_cursor_store_db(path))
+        {
+            append_cursor_model_configs_from_store(&store_path, &mut items);
+        }
+    }
+    let next_cursor = if done {
+        None
+    } else {
+        Some(
+            TranscriptCursor {
+                offset,
+                line: line_number,
+                source: source.identity,
+                boundary_hash: transcript_boundary_hash(path, offset)?,
+                source_size: source.size,
+                source_modified_ns: source.modified_ns,
+            }
+            .encode()?,
+        )
+    };
+    Ok(TranscriptPage {
+        items,
+        warnings,
+        next_cursor,
+        done,
+        source_version,
+        restart_required: false,
+        unchanged: false,
+    })
+}
+
+struct BoundedJsonlLine {
+    bytes: Vec<u8>,
+    consumed: u64,
+    truncated: bool,
+}
+
+fn read_bounded_jsonl_line<R: BufRead>(
+    reader: &mut R,
+    max_bytes: usize,
+) -> std::io::Result<Option<BoundedJsonlLine>> {
+    let mut bytes = Vec::with_capacity(max_bytes.min(16 * 1024));
+    let mut consumed = 0u64;
+    let mut truncated = false;
+    let mut saw_data = false;
+    loop {
+        let available = reader.fill_buf()?;
+        if available.is_empty() {
+            return Ok(saw_data.then_some(BoundedJsonlLine {
+                bytes,
+                consumed,
+                truncated,
+            }));
+        }
+        saw_data = true;
+        let chunk_len = available
+            .iter()
+            .position(|byte| *byte == b'\n')
+            .map_or(available.len(), |index| index + 1);
+        let line_complete = available.get(chunk_len.saturating_sub(1)) == Some(&b'\n');
+        let remaining = max_bytes.saturating_sub(bytes.len());
+        let copy_len = remaining.min(chunk_len);
+        bytes.extend_from_slice(&available[..copy_len]);
+        if copy_len < chunk_len {
+            truncated = true;
+        }
+        reader.consume(chunk_len);
+        consumed = consumed.saturating_add(chunk_len as u64);
+        if line_complete {
+            return Ok(Some(BoundedJsonlLine {
+                bytes,
+                consumed,
+                truncated,
+            }));
+        }
+    }
+}
+
+fn collect_transcript_value(value: &Value, agent: AgentKind, items: &mut Vec<TranscriptItem>) {
+    match agent {
+        AgentKind::Codex => collect_codex_item(value, items),
+        AgentKind::Claude => collect_claude_item(value, items),
+        AgentKind::Cursor | AgentKind::Shared | AgentKind::Unknown => {
+            collect_generic_item(value, items)
+        }
+    }
 }
 
 pub fn parse_transcript(path: &Path, agent: AgentKind) -> Result<TranscriptScan> {
@@ -66,13 +436,7 @@ pub fn parse_transcript(path: &Path, agent: AgentKind) -> Result<TranscriptScan>
             }
         };
 
-        match agent {
-            AgentKind::Codex => collect_codex_item(&value, &mut items),
-            AgentKind::Claude => collect_claude_item(&value, &mut items),
-            AgentKind::Cursor | AgentKind::Shared | AgentKind::Unknown => {
-                collect_generic_item(&value, &mut items)
-            }
-        }
+        collect_transcript_value(&value, agent, &mut items);
     }
 
     if agent == AgentKind::Cursor {
@@ -107,13 +471,7 @@ pub(crate) fn parse_search_transcript(path: &Path, agent: AgentKind) -> Result<T
             }
         };
 
-        match agent {
-            AgentKind::Codex => collect_codex_item(&value, &mut items),
-            AgentKind::Claude => collect_claude_item(&value, &mut items),
-            AgentKind::Cursor | AgentKind::Shared | AgentKind::Unknown => {
-                collect_generic_item(&value, &mut items)
-            }
-        }
+        collect_transcript_value(&value, agent, &mut items);
     }
     items.retain(|item| matches!(item.kind.as_str(), "user" | "assistant"));
     Ok(TranscriptScan { items, warnings })
@@ -272,13 +630,27 @@ fn collect_codex_item(value: &Value, items: &mut Vec<TranscriptItem>) {
         }
         Some("function_call_output") | Some("custom_tool_call_output") => {
             let result = extract_tool_result(payload);
-            attach_tool_result(
+            let call_id = extract_call_id(payload);
+            if !attach_tool_result(
                 items,
-                extract_call_id(payload).as_deref(),
+                call_id.as_deref(),
                 result.clone(),
                 extract_duration_ms(payload, result.as_deref()),
                 timestamp_ms,
-            );
+            ) {
+                push_tool_item(
+                    items,
+                    "tool_result",
+                    "Tool result".to_string(),
+                    Some("tool_result".to_string()),
+                    time,
+                    None,
+                    result,
+                    extract_duration_ms(payload, None),
+                    call_id,
+                    timestamp_ms,
+                );
+            }
         }
         Some("web_search_call") | Some("image_generation_call") => {
             let kind = payload
@@ -591,7 +963,18 @@ fn collect_claude_item(value: &Value, items: &mut Vec<TranscriptItem>) {
             extract_duration_ms(value, None),
             timestamp_ms,
         ) {
-            push_item(items, "tool", body, Some("tool_result".to_string()), time);
+            push_tool_item(
+                items,
+                "tool_result",
+                "Tool result".to_string(),
+                Some("tool_result".to_string()),
+                time,
+                None,
+                Some(body),
+                extract_duration_ms(value, None),
+                call_id.map(str::to_string),
+                timestamp_ms,
+            );
         }
     }
 }
@@ -631,12 +1014,17 @@ fn attach_claude_tool_results(
             extract_duration_ms(value, Some(&body)),
             timestamp_ms,
         ) {
-            push_item(
+            push_tool_item(
                 items,
-                "tool",
-                body,
+                "tool_result",
+                "Tool result".to_string(),
                 Some("tool_result".to_string()),
                 time.clone(),
+                None,
+                Some(body.clone()),
+                extract_duration_ms(value, Some(&body)),
+                call_id.map(str::to_string),
+                timestamp_ms,
             );
         }
     }
@@ -1146,7 +1534,8 @@ mod tests {
 
     use super::{
         append_cursor_model_configs_from_store, collect_claude_item, collect_codex_item,
-        collect_generic_item, parse_search_transcript, summarize_tool_call,
+        collect_generic_item, parse_search_transcript, parse_transcript_page,
+        parse_transcript_page_with_cursor_store, summarize_tool_call,
     };
 
     fn temp_path(prefix: &str) -> PathBuf {
@@ -1168,6 +1557,391 @@ mod tests {
         })
         .to_string()
         .into_bytes()
+    }
+
+    fn codex_message(role: &str, body: &str) -> String {
+        json!({
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": role,
+                "content": [{ "type": "input_text", "text": body }]
+            }
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn transcript_pages_use_backend_byte_cursors_without_duplicates() {
+        let path = temp_path("tendi-transcript-page-test.jsonl");
+        fs::write(
+            &path,
+            [
+                codex_message("user", "one"),
+                codex_message("assistant", "two"),
+                codex_message("user", "three"),
+                codex_message("assistant", "four"),
+                codex_message("user", "five"),
+            ]
+            .join("\n"),
+        )
+        .unwrap();
+
+        let first =
+            parse_transcript_page(&path, crate::skills::AgentKind::Codex, None, Some(2)).unwrap();
+        assert_eq!(first.items.len(), 2);
+        assert!(!first.done);
+        let second = parse_transcript_page(
+            &path,
+            crate::skills::AgentKind::Codex,
+            first.next_cursor.as_deref(),
+            Some(2),
+        )
+        .unwrap();
+        assert_eq!(second.items.len(), 2);
+        assert!(!second.done);
+        let third = parse_transcript_page(
+            &path,
+            crate::skills::AgentKind::Codex,
+            second.next_cursor.as_deref(),
+            Some(2),
+        )
+        .unwrap();
+        assert_eq!(third.items.len(), 1);
+        assert!(third.done);
+        assert_eq!(
+            first
+                .items
+                .iter()
+                .chain(&second.items)
+                .chain(&third.items)
+                .map(|item| item.body.as_str())
+                .collect::<Vec<_>>(),
+            ["one", "two", "three", "four", "five"],
+        );
+
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn transcript_cursor_requests_restart_when_the_file_appends() {
+        let path = temp_path("tendi-transcript-page-append-test.jsonl");
+        fs::write(
+            &path,
+            [
+                codex_message("user", "one"),
+                codex_message("assistant", "two"),
+            ]
+            .join("\n"),
+        )
+        .unwrap();
+        let first =
+            parse_transcript_page(&path, crate::skills::AgentKind::Codex, None, Some(1)).unwrap();
+        assert!(!first.done);
+        use std::io::Write;
+        writeln!(
+            fs::OpenOptions::new().append(true).open(&path).unwrap(),
+            "\n{}",
+            codex_message("user", "three"),
+        )
+        .unwrap();
+
+        let stale = parse_transcript_page(
+            &path,
+            crate::skills::AgentKind::Codex,
+            first.next_cursor.as_deref(),
+            Some(10),
+        )
+        .unwrap();
+
+        assert!(stale.restart_required);
+        assert!(stale.items.is_empty());
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn transcript_cursor_rejects_unbounded_source_prefix() {
+        let path = temp_path("tendi-transcript-page-cursor-bounds-test.jsonl");
+        fs::write(&path, codex_message("user", "one")).unwrap();
+        let cursor = super::TranscriptCursor {
+            offset: 0,
+            line: 0,
+            source: super::TranscriptSourceIdentity {
+                device: 0,
+                inode: 0,
+                prefix_len: 10 * 1024 * 1024,
+                prefix_hash: 0,
+            },
+            boundary_hash: 0,
+            source_size: 0,
+            source_modified_ns: 0,
+        }
+        .encode()
+        .unwrap();
+
+        let error = parse_transcript_page(
+            &path,
+            crate::skills::AgentKind::Codex,
+            Some(&cursor),
+            Some(1),
+        )
+        .unwrap_err();
+
+        assert!(format!("{error:#}").contains("fields exceed their bounds"));
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn transcript_cursor_requests_restart_after_rewrite() {
+        let path = temp_path("tendi-transcript-page-rewrite-test.jsonl");
+        fs::write(
+            &path,
+            [
+                codex_message("user", "original-one"),
+                codex_message("assistant", "original-two"),
+            ]
+            .join("\n"),
+        )
+        .unwrap();
+        let first =
+            parse_transcript_page(&path, crate::skills::AgentKind::Codex, None, Some(1)).unwrap();
+        fs::write(
+            &path,
+            [
+                codex_message("user", "rewritten-one"),
+                codex_message("assistant", "rewritten-two"),
+            ]
+            .join("\n"),
+        )
+        .unwrap();
+
+        let stale = parse_transcript_page(
+            &path,
+            crate::skills::AgentKind::Codex,
+            first.next_cursor.as_deref(),
+            Some(10),
+        )
+        .unwrap();
+
+        assert!(stale.restart_required);
+        assert!(!stale.done);
+        assert!(stale.items.is_empty());
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn transcript_page_preserves_cross_boundary_tool_result_identity() {
+        let path = temp_path("tendi-transcript-page-cross-tool-test.jsonl");
+        let call = json!({
+            "type": "response_item",
+            "payload": {
+                "type": "function_call",
+                "call_id": "call_cross_page",
+                "name": "exec_command",
+                "arguments": "{\"cmd\":\"cargo test\"}"
+            }
+        });
+        let output = json!({
+            "type": "response_item",
+            "payload": {
+                "type": "function_call_output",
+                "call_id": "call_cross_page",
+                "output": "cross-page-result"
+            }
+        });
+        let mut lines = vec![call.to_string()];
+        lines.extend(
+            (0..super::TRANSCRIPT_PAGE_MAX_SOURCE_LINES)
+                .map(|index| json!({ "type": "metadata", "index": index }).to_string()),
+        );
+        lines.push(output.to_string());
+        fs::write(&path, lines.join("\n")).unwrap();
+
+        let first =
+            parse_transcript_page(&path, crate::skills::AgentKind::Codex, None, Some(1)).unwrap();
+        assert_eq!(first.items[0].call_id.as_deref(), Some("call_cross_page"));
+        assert!(first.items[0].result.is_none());
+        assert!(!first.done);
+        let mut cursor = first.next_cursor;
+        let result_page = loop {
+            let page = parse_transcript_page(
+                &path,
+                crate::skills::AgentKind::Codex,
+                cursor.as_deref(),
+                Some(1),
+            )
+            .unwrap();
+            if !page.items.is_empty() {
+                break page;
+            }
+            assert!(!page.done);
+            cursor = page.next_cursor;
+        };
+        assert_eq!(result_page.items[0].kind, "tool_result");
+        assert_eq!(
+            result_page.items[0].call_id.as_deref(),
+            Some("call_cross_page")
+        );
+        assert_eq!(
+            result_page.items[0].result.as_deref(),
+            Some("cross-page-result")
+        );
+
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn transcript_page_skips_an_oversized_line_with_a_warning() {
+        let path = temp_path("tendi-transcript-page-large-line-test.jsonl");
+        fs::write(
+            &path,
+            format!(
+                "{}\n{}",
+                "x".repeat(super::TRANSCRIPT_PAGE_MAX_LINE_BYTES + 1),
+                codex_message("user", "after-large-line"),
+            ),
+        )
+        .unwrap();
+
+        let page =
+            parse_transcript_page(&path, crate::skills::AgentKind::Codex, None, Some(10)).unwrap();
+
+        assert!(page.done);
+        assert_eq!(page.items[0].body, "after-large-line");
+        assert_eq!(page.warnings.len(), 1);
+        assert!(page.warnings[0].contains("exceeds"));
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn transcript_page_reports_bad_lines_and_reaches_eof() {
+        let path = temp_path("tendi-transcript-page-warning-test.jsonl");
+        fs::write(
+            &path,
+            format!("not-json\n{}", codex_message("user", "valid")),
+        )
+        .unwrap();
+
+        let page =
+            parse_transcript_page(&path, crate::skills::AgentKind::Codex, None, Some(2)).unwrap();
+
+        assert!(page.done);
+        assert!(page.next_cursor.is_none());
+        assert_eq!(page.items.len(), 1);
+        assert_eq!(page.warnings.len(), 1);
+        assert!(page.warnings[0].contains(":1:"));
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn empty_transcript_page_is_done() {
+        let path = temp_path("tendi-empty-transcript-page-test.jsonl");
+        fs::write(&path, "").unwrap();
+
+        let page =
+            parse_transcript_page(&path, crate::skills::AgentKind::Codex, None, Some(2)).unwrap();
+
+        assert!(page.done);
+        assert!(page.items.is_empty());
+        assert!(page.next_cursor.is_none());
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn transcript_page_keeps_strict_item_limit_for_pending_tool() {
+        let path = temp_path("tendi-transcript-page-tool-test.jsonl");
+        let call = json!({
+            "type": "response_item",
+            "payload": {
+                "type": "function_call",
+                "call_id": "call_1",
+                "name": "exec_command",
+                "arguments": "{\"cmd\":\"cargo test\"}"
+            }
+        });
+        let output = json!({
+            "type": "response_item",
+            "payload": {
+                "type": "function_call_output",
+                "call_id": "call_1",
+                "output": "passed"
+            }
+        });
+        fs::write(
+            &path,
+            format!("{call}\n{output}\n{}", codex_message("user", "next")),
+        )
+        .unwrap();
+
+        let first =
+            parse_transcript_page(&path, crate::skills::AgentKind::Codex, None, Some(1)).unwrap();
+        assert_eq!(first.items.len(), 1);
+        assert!(first.items[0].result.is_none());
+        assert!(!first.done);
+        let second = parse_transcript_page(
+            &path,
+            crate::skills::AgentKind::Codex,
+            first.next_cursor.as_deref(),
+            Some(1),
+        )
+        .unwrap();
+        assert_eq!(second.items.len(), 1);
+        assert_eq!(second.items[0].kind, "tool_result");
+        assert_eq!(second.items[0].result.as_deref(), Some("passed"));
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn final_cursor_page_includes_cursor_model_config() {
+        let root = temp_path("tendi-transcript-page-cursor-test");
+        fs::create_dir_all(&root).unwrap();
+        let transcript_path = root.join("session.jsonl");
+        fs::write(
+            &transcript_path,
+            [
+                json!({ "role": "user", "content": "first" }).to_string(),
+                json!({ "role": "assistant", "content": "second" }).to_string(),
+            ]
+            .join("\n"),
+        )
+        .unwrap();
+        let store_path = root.join("store.db");
+        let connection = Connection::open(&store_path).unwrap();
+        connection
+            .execute("CREATE TABLE blobs (id TEXT PRIMARY KEY, data BLOB)", [])
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO blobs (id, data) VALUES (?1, ?2)",
+                rusqlite::params!["1", cursor_model_blob("cursor-fast")],
+            )
+            .unwrap();
+        drop(connection);
+
+        let first = parse_transcript_page_with_cursor_store(
+            &transcript_path,
+            crate::skills::AgentKind::Cursor,
+            None,
+            Some(1),
+            Some(&store_path),
+        )
+        .unwrap();
+        assert!(!first.done);
+        assert!(first.items.iter().all(|item| item.kind != "model_config"));
+        let final_page = parse_transcript_page_with_cursor_store(
+            &transcript_path,
+            crate::skills::AgentKind::Cursor,
+            first.next_cursor.as_deref(),
+            Some(1),
+            Some(&store_path),
+        )
+        .unwrap();
+        assert!(final_page.done);
+        assert!(final_page.items.iter().any(|item| {
+            item.kind == "model_config" && item.model.as_deref() == Some("cursor-fast")
+        }));
+
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

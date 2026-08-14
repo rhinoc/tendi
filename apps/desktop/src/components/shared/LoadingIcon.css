@@ -1,0 +1,6 @@
+.loadingIcon {
+  display: block;
+  flex: 0 0 auto;
+  transform-origin: center;
+  animation: loadingSpin 0.9s linear infinite;
+}

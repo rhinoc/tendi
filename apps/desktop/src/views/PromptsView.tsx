@@ -6,7 +6,6 @@ import {
   Plus,
   RefreshCw,
   Save,
-  Search,
   Trash2,
   X,
 } from "lucide-react";
@@ -15,9 +14,12 @@ import { ContentTopDragStrip } from "../components/shared/ContentTopDragStrip.ts
 import { CopyButton } from "../components/shared/CopyButton.tsx";
 import { CopyTextMenuItem, DeleteMenuItem } from "../components/shared/DataTableMenus.tsx";
 import { DialogActionBar } from "../components/shared/DialogActionBar.tsx";
+import { DialogActionButton } from "../components/shared/DialogActionButton.tsx";
 import { DialogTextField } from "../components/shared/DialogTextField.tsx";
+import { LoadingIcon } from "../components/shared/LoadingIcon.tsx";
 import { LoadingInline } from "../components/shared/LoadingInline.tsx";
 import { PageHeader } from "../components/shared/PageHeader.tsx";
+import { SearchField } from "../components/shared/SearchField.tsx";
 import { DataTable } from "../components/DataTable.tsx";
 import type { ColumnDef } from "../components/DataTable.types";
 import { TauriCommand, compactDateTime, normalizePromptTags, promptPreview, promptTagsLabel, safeInvoke } from "../lib/index.ts";
@@ -151,14 +153,15 @@ export function PromptDialog({ open, prompt, busy, error, onOpenChange, onSave }
             {error ? <div className="addSkillError promptDialogError">{error}</div> : null}
           </div>
           <DialogActionBar cancelDisabled={busy} onCancel={() => onOpenChange(false)}>
-            <button
-              className="primary dialogAdvanceButton"
+            <DialogActionButton
+              variant="primary"
+              className="dialogAdvanceButton"
               disabled={!canSave || busy}
               onClick={() => onSave({ id: prompt?.id, title, tags, body })}
             >
               <span>{busy ? "Saving" : "Save"}</span>
-              {busy ? <RefreshCw className="dialogLoadingIcon" size={16} /> : <Save size={16} />}
-            </button>
+              {busy ? <LoadingIcon size={16} /> : <Save size={16} />}
+            </DialogActionButton>
           </DialogActionBar>
         </Dialog.Content>
       </Dialog.Portal>
@@ -187,9 +190,11 @@ type PromptsViewProps = {
   prompts: PromptRecord[];
   loadingPrompts?: boolean;
   onRefreshPrompts: () => void | Promise<void>;
+  onPromptSaved?: (prompt: unknown) => void;
+  onPromptsDeleted?: (ids: string[]) => void;
 };
 
-export function PromptsView({ prompts, loadingPrompts = false, onRefreshPrompts }: PromptsViewProps) {
+export function PromptsView({ prompts, loadingPrompts = false, onRefreshPrompts, onPromptSaved, onPromptsDeleted }: PromptsViewProps) {
   const [selected, setSelected] = useState<string[]>([]);
   const [query, setQuery] = useState("");
   const [editingPrompt, setEditingPrompt] = useState<PromptRecord | null>(null);
@@ -233,15 +238,15 @@ export function PromptsView({ prompts, loadingPrompts = false, onRefreshPrompts 
       return;
     }
     setDialogOpen(false);
-    await onRefreshPrompts();
+    onPromptSaved?.(result);
   };
-  const copyPrompts = async (items: PromptRecord[]) => {
+  const copyPrompts = useCallback(async (items: PromptRecord[]) => {
     const text = items.map((prompt) => prompt.body).filter(Boolean).join("\n\n");
     if (!text) return false;
     await copyTextToClipboard(text);
     return true;
-  };
-  const deleteSelected = async (ids: string[]) => {
+  }, []);
+  const deleteSelected = useCallback(async (ids: string[]) => {
     if (ids.length === 0) return;
     const pendingIds = ids.filter((id) => !deletingPromptIds.includes(id));
     if (pendingIds.length === 0) return;
@@ -250,11 +255,11 @@ export function PromptsView({ prompts, loadingPrompts = false, onRefreshPrompts 
       const result = await safeInvoke(TauriCommand.PromptsDeleteMany, { ids: pendingIds });
       if (!result) return;
       setSelected((current) => current.filter((id) => !pendingIds.includes(id)));
-      await onRefreshPrompts();
+      onPromptsDeleted?.(pendingIds);
     } finally {
       setDeletingPromptIds((current) => current.filter((id) => !pendingIds.includes(id)));
     }
-  };
+  }, [deletingPromptIds, onPromptsDeleted]);
   const columns = useMemo((): ColumnDef<PromptRecord>[] => [
     {
       key: "title",
@@ -305,7 +310,6 @@ export function PromptsView({ prompts, loadingPrompts = false, onRefreshPrompts 
             className="iconButton"
             copyLabel={`Copy ${prompt.title}`}
             copiedLabel="Prompt copied"
-            title="Copy prompt"
             iconSize={15}
             stopPropagation
             onCopy={() => copyPrompts([prompt])}
@@ -333,7 +337,7 @@ export function PromptsView({ prompts, loadingPrompts = false, onRefreshPrompts 
             }}
           >
             {deletingPromptIds.includes(prompt.id)
-              ? <RefreshCw className="loadingSpinner" size={15} />
+              ? <LoadingIcon size={15} />
               : <Trash2 size={15} />}
           </button>
         </div>
@@ -359,7 +363,7 @@ export function PromptsView({ prompts, loadingPrompts = false, onRefreshPrompts 
         onClick={() => deleteSelected(selectedRows.map((prompt) => prompt.id))}
       >
         {selectedRows.some((prompt) => deletingPromptIds.includes(prompt.id))
-          ? <RefreshCw className="loadingSpinner" size={15} />
+          ? <LoadingIcon size={15} />
           : <Trash2 size={15} />}
         {selectedRows.some((prompt) => deletingPromptIds.includes(prompt.id)) ? "Deleting" : "Delete"}
       </button>
@@ -401,10 +405,7 @@ export function PromptsView({ prompts, loadingPrompts = false, onRefreshPrompts 
     <section className="content dataPage promptsPage">
       <ContentTopDragStrip />
       <PageHeader title="Prompts">
-        <div className="searchBox">
-          <Search size={15} />
-          <input placeholder="Search prompts" value={query} onChange={(event) => setQuery(event.target.value)} />
-        </div>
+        <SearchField placeholder="Search prompts" value={query} onChange={(event) => setQuery(event.target.value)} />
         <button className="iconButton" aria-label="Refresh prompts" onClick={onRefreshPrompts}><RefreshCw size={16} /></button>
         <button className="iconButton filled" aria-label="Add prompt" onClick={openNewPrompt}><Plus size={16} /></button>
       </PageHeader>

@@ -1,12 +1,14 @@
 import { Tooltip } from "./Tooltip.tsx";
 import { lazy, Suspense, useCallback, useEffect, useRef, useState, type MouseEvent, type ReactNode } from "react";
-import { Check, ChevronDown, ChevronUp, Code2, Copy, Eye, RefreshCw, Save, Search, X } from "lucide-react";
+import { Check, ChevronDown, ChevronUp, Code2, Eye, Save, Search, X } from "lucide-react";
 
 import { copyText, isMarkdownPath, isYamlPath } from "../../lib/index.ts";
 import { loadCodeMirrorFileEditor } from "./code-mirror-loader.ts";
 import type { CodeMirrorLanguage } from "./CodeMirrorFileEditor.tsx";
+import { LoadingIcon } from "./LoadingIcon.tsx";
 import { LoadingInline } from "./LoadingInline.tsx";
 import { PlainTextFileEditor } from "./PlainTextFileEditor.tsx";
+import { CopyFeedbackIcon, useCopyFeedback } from "./useCopyFeedback.tsx";
 
 const CodeMirrorFileEditor = lazy(() => loadCodeMirrorFileEditor().then(({ CodeMirrorFileEditor: component }) => ({ default: component })));
 const TokenStatusBar = lazy(() => import("../TokenStatusBar.tsx").then(({ TokenStatusBar: component }) => ({ default: component })));
@@ -89,7 +91,7 @@ export function MarkdownFilePane({
   const [showPreview, setShowPreview] = useState(false);
   const [showDiff, setShowDiff] = useState(false);
   const [selectionText, setSelectionText] = useState("");
-  const [copiedPath, setCopiedPath] = useState(false);
+  const { copied: copiedPath, markCopied: markPathCopied } = useCopyFeedback();
   const showEditorDiff = !readOnly && !showPreview && showDiff;
   const hasDiff = diffStats.added > 0 || diffStats.removed > 0;
   const activeSearchIndex = searchCount > 0 ? Math.min(searchIndex, searchCount - 1) : 0;
@@ -125,7 +127,7 @@ export function MarkdownFilePane({
     event.preventDefault();
     event.stopPropagation();
     await copyText(activePath);
-    setCopiedPath(true);
+    markPathCopied();
   };
 
   useEffect(() => {
@@ -145,12 +147,6 @@ export function MarkdownFilePane({
   useEffect(() => {
     setSelectionText("");
   }, [activePath, showPreview]);
-
-  useEffect(() => {
-    if (!copiedPath) return undefined;
-    const timer = window.setTimeout(() => setCopiedPath(false), 1400);
-    return () => window.clearTimeout(timer);
-  }, [copiedPath]);
 
   useEffect(() => {
     if (searchCount > 0 && searchIndex >= searchCount) setSearchIndex(searchCount - 1);
@@ -191,7 +187,7 @@ export function MarkdownFilePane({
               aria-label={copiedPath ? "Path copied" : "Copy path"}
               onClick={copyActivePath}
             >
-              {copiedPath ? <Check size={13} strokeWidth={2.6} /> : <Copy size={13} />}
+              <CopyFeedbackIcon copied={copiedPath} swap={false} />
             </button>
           ) : null}
           {!readOnly && showDirtyIndicator && dirty && <span className="dirty">modified</span>}
@@ -227,7 +223,7 @@ export function MarkdownFilePane({
                 disabled={!dirty || saveState === "saving"}
               >
                 {saveState === "saving"
-                  ? <RefreshCw className="editorSaveSpinner" size={13} />
+                  ? <LoadingIcon size={13} />
                   : saveState === "saved"
                     ? <Check size={13} strokeWidth={2.6} />
                     : <Save size={13} />}

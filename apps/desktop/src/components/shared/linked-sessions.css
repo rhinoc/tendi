@@ -1,3 +1,8 @@
+.linkedSessionsDrawerChart {
+  flex: 0 0 auto;
+  padding: 0 16px 12px;
+}
+
 .linkedSessionsDrawer .dataTableShell {
   flex: 1;
   min-height: 0;

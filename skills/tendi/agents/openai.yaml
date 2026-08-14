@@ -1,0 +1,4 @@
+interface:
+  display_name: "Tendi"
+  short_description: "Query and manage local agent sessions and skills"
+  default_prompt: "Use $tendi to inspect my local agent sessions and skills."

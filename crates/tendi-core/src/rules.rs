@@ -50,6 +50,10 @@ pub fn scan_rules(cwd: &Path) -> Result<RuleScan> {
 
 pub fn read_rule_file(cwd: &Path, path: &Path) -> Result<RuleFileContent> {
     ensure_known_rule(cwd, path)?;
+    read_rule_file_at_path(path)
+}
+
+pub fn read_rule_file_at_path(path: &Path) -> Result<RuleFileContent> {
     let content =
         fs::read_to_string(path).with_context(|| format!("failed to read {}", path.display()))?;
     Ok(RuleFileContent {
@@ -66,6 +70,14 @@ pub fn save_rule_file(
     content: &str,
 ) -> Result<RuleFileContent> {
     ensure_known_rule(cwd, path)?;
+    save_rule_file_at_path(path, expected_sha256, content)
+}
+
+pub fn save_rule_file_at_path(
+    path: &Path,
+    expected_sha256: &str,
+    content: &str,
+) -> Result<RuleFileContent> {
     let before =
         fs::read_to_string(path).with_context(|| format!("failed to read {}", path.display()))?;
     let current_sha = sha256_text(&before);

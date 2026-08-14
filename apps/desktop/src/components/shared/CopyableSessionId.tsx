@@ -1,6 +1,5 @@
 import { Tooltip } from "./Tooltip.tsx";
-import { useEffect, useState } from "react";
-import { Check, Copy } from "lucide-react";
+import { CopyFeedbackIcon, useCopyFeedback } from "./useCopyFeedback.tsx";
 
 import { copyText } from "../../lib/index.ts";
 
@@ -10,12 +9,7 @@ export type CopyableSessionIdProps = {
 };
 
 export function CopyableSessionId({ sessionId, className = "" }: CopyableSessionIdProps) {
-  const [copied, setCopied] = useState(false);
-  useEffect(() => {
-    if (!copied) return undefined;
-    const timer = window.setTimeout(() => setCopied(false), 1400);
-    return () => window.clearTimeout(timer);
-  }, [copied]);
+  const { copied, markCopied } = useCopyFeedback();
 
   if (!sessionId) return <code>-</code>;
 
@@ -23,7 +17,7 @@ export function CopyableSessionId({ sessionId, className = "" }: CopyableSession
     event.preventDefault();
     event.stopPropagation();
     await copyText(sessionId);
-    setCopied(true);
+    markCopied();
   };
 
   return (
@@ -35,14 +29,7 @@ export function CopyableSessionId({ sessionId, className = "" }: CopyableSession
         className="copyableSessionIdButton"
         onClick={copySessionId}
       >
-        <span className={`copyIconSwap${copied ? " isCopied" : ""}`} aria-hidden="true">
-          <span className="copyIconSwapLayer copyIconSwapActive">
-            <Check size={13} strokeWidth={2.6} />
-          </span>
-          <span className="copyIconSwapLayer copyIconSwapIdle">
-            <Copy size={13} strokeWidth={2} />
-          </span>
-        </span>
+        <CopyFeedbackIcon copied={copied} />
       </button>
     </span>
   );

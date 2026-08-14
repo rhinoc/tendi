@@ -1,5 +1,6 @@
 import type { ReactNode } from "react";
 
+import { DialogActionButton } from "./DialogActionButton.tsx";
 import "./dialog-action-bar.css";
 
 export type DialogActionBarProps = {
@@ -11,7 +12,7 @@ export type DialogActionBarProps = {
 export function DialogActionBar({ onCancel, cancelDisabled = false, children }: DialogActionBarProps) {
   return (
     <div className="dialogActions">
-      <button className="secondary" disabled={cancelDisabled} onClick={onCancel}>Cancel</button>
+      <DialogActionButton variant="secondary" disabled={cancelDisabled} onClick={onCancel}>Cancel</DialogActionButton>
       {children}
     </div>
   );

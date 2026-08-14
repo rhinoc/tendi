@@ -1,11 +1,13 @@
 import { Tooltip } from "./Tooltip.tsx";
-import { AlertCircle, Check, RefreshCw } from "lucide-react";
+import { AlertCircle, ArrowLeft, ArrowRight, Check } from "lucide-react";
 
 import type { ColumnDef } from "../DataTable.types";
-import { friendlyAgent, sessionCacheRate, sessionKind, sessionProject, sessionProjectGroupKey, sessionProjectGroupLabel, sortValue, type SessionRecord } from "../../lib/index.ts";
+import { friendlyAgent, sessionCacheRate, sessionKind, sessionProject, sessionProjectGroupKey, sessionProjectGroupLabel, sortValue, summarizeSessionPreviewRecord, type SessionRecord } from "../../lib/index.ts";
 import { cacheRateTone } from "../../lib/token-style.ts";
 import { AgentBadge } from "./AgentBadge.tsx";
 import { CopyableSessionId } from "./CopyableSessionId.tsx";
+import { LoadingIcon } from "./LoadingIcon.tsx";
+import { TranscriptLinkText } from "./TranscriptLinkText.tsx";
 
 export type SessionTableRow = {
   id?: string;
@@ -22,6 +24,8 @@ export type SessionTableRow = {
   startedAt?: string;
   updatedLabel?: string;
   updatedAt?: string;
+  time?: string;
+  path?: string;
   messages?: number;
   turnCount?: number;
   parentSessionId?: string;
@@ -37,14 +41,6 @@ export type CreateSessionTableColumnsOptions<T extends SessionTableRow = Session
   keys?: string[];
   widths?: Partial<Record<string, string>>;
 };
-
-function renderSearchSnippet(value: string) {
-  return value.split(/[⟦⟧]/).map((part, index) => (
-    index % 2 === 1
-      ? <mark key={`${index}:${part}`}>{part}</mark>
-      : part
-  ));
-}
 
 export function createSessionTableColumns<T extends SessionTableRow = SessionTableRow>({
   normalizedQuery = "",
@@ -63,23 +59,42 @@ export function createSessionTableColumns<T extends SessionTableRow = SessionTab
       sortable: true,
       sortValue: (session) => sortValue(session as SessionRecord, "title"),
       width: widths.title ?? "var(--data-freeze-column-width, 360px)",
-      render: (session) => (
-        <>
-          <span className="sessionTitleWithKind">
-            <span className="sessionTitleText">{session.title}</span>
-            {sessionKind(session as SessionRecord) === "child" ? <span className="sessionChildBadge">Child</span> : null}
-          </span>
-          <span className="dataCellSubLine">
-            {normalizedQuery && session.searchSnippet
-              ? (
+      render: (session) => {
+        const preview = summarizeSessionPreviewRecord(session as SessionRecord);
+        const displayTitle = preview?.title || `${session.title ?? ""}`;
+        return (
+          <>
+            <span className="sessionTitleWithKind">
+              <Tooltip content={displayTitle} onlyWhenTruncated>
+                <span className="sessionTitleText"><TranscriptLinkText interactive={false} value={displayTitle} /></span>
+              </Tooltip>
+              {sessionKind(session as SessionRecord) === "child" ? <span className="sessionChildBadge">Child</span> : null}
+            </span>
+            {normalizedQuery && session.searchSnippet ? (
+              <span className="dataCellSubLine">
                 <Tooltip content={session.searchSnippet.replace(/[⟦⟧]/g, "")} onlyWhenTruncated><span className="dataCellSub sessionSearchSnippet">
-                  {renderSearchSnippet(session.searchSnippet)}
+                  <TranscriptLinkText interactive={false} query={normalizedQuery} value={session.searchSnippet.replace(/[⟦⟧]/g, "")} />
                 </span></Tooltip>
-              )
-              : <CopyableSessionId sessionId={`${session.id ?? ""}`} className="dataCellSub inSessionTable" />}
-          </span>
-        </>
-      ),
+              </span>
+            ) : preview ? (
+              <span className="dataCellSubLine sessionPreviewSubLine">
+                <span className="sessionPreviewMessage">
+                  <ArrowRight size={13} aria-hidden="true" />
+                  <span className="dataCellSub sessionPreviewText"><TranscriptLinkText interactive={false} value={preview.userLast} /></span>
+                </span>
+                <span className="sessionPreviewMessage">
+                  <ArrowLeft size={13} aria-hidden="true" />
+                  <span className="dataCellSub sessionPreviewText"><TranscriptLinkText interactive={false} value={preview.assistantLast} /></span>
+                </span>
+              </span>
+            ) : (
+              <span className="dataCellSubLine">
+                <CopyableSessionId sessionId={`${session.id ?? ""}`} className="dataCellSub inSessionTable" />
+              </span>
+            )}
+          </>
+        );
+      },
     },
     {
       key: "agent",
@@ -122,7 +137,7 @@ export function createSessionTableColumns<T extends SessionTableRow = SessionTab
             onKeyDown={(event) => event.stopPropagation()}
           >
             {state === "loading"
-              ? <RefreshCw className="loadingSpinner" size={14} />
+              ? <LoadingIcon size={14} />
               : state === "success"
                 ? <Check size={14} />
                 : state === "error"
@@ -141,7 +156,6 @@ export function createSessionTableColumns<T extends SessionTableRow = SessionTab
       sortValue: (session) => sortValue(session as SessionRecord, "project"),
       width: widths.project ?? "202px",
       value: (session) => sessionProject(session as SessionRecord),
-      title: (session) => session.repositoryUrl || sessionProject(session as SessionRecord),
       groupLabel: sessionProjectGroupLabel,
       empty: "Unknown",
     },

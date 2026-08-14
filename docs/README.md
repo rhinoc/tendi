@@ -14,6 +14,8 @@ Project documentation is split between user-facing setup and focused implementat
 
 - [AI context reference model](ai-context-reference-model.md): proposed reference-only model
   for carrying sessions, skills, and other local entities across an AI conversation.
+- [`skills` CLI compatibility audit](skills-cli-compat-audit.md): database-authoritative lock
+  migration, source/update compatibility, and remaining feature gaps.
 - [MCP and Hooks tab audit](mcp-hooks-tab-audit.md): current data sources, UI capabilities,
   limitations, and follow-up design options.
 - [Performance gates](performance-gates.md): local performance thresholds, baselines, and the

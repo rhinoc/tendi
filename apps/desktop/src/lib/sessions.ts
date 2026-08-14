@@ -20,6 +20,9 @@ export type SessionRecord = {
   updatedLabel?: string;
   updatedDetailLabel?: string;
   messages?: number;
+  firstUserMessage?: string;
+  lastUserMessage?: string;
+  lastAssistantMessage?: string;
   turnCount?: number;
   model?: string;
   mode?: string;
@@ -95,6 +98,9 @@ export function normalizeSession(session: Record<string, unknown>, index: number
     updatedLabel: compactDateTime(updatedAt),
     updatedDetailLabel: compactDateTime(updatedAt, { year: true }),
     messages: Number(session.message_count ?? session.messages ?? 0),
+    firstUserMessage: textValue(session.first_user_message ?? session.firstUserMessage) || undefined,
+    lastUserMessage: textValue(session.last_user_message ?? session.lastUserMessage) || undefined,
+    lastAssistantMessage: textValue(session.last_assistant_message ?? session.lastAssistantMessage) || undefined,
     turnCount: optionalCount(session.turn_count ?? session.turnCount),
     model: `${session.model ?? ""}`,
     mode: textValue(session.mode) || undefined,
@@ -148,11 +154,17 @@ export function sessionWorkspace(session: Pick<SessionRecord, "project" | "proje
   return sessionWorkspacePath(session) || textValue(session.projectPath) || textValue(session.project) || "Unknown";
 }
 
+function isCodexChat(session: Pick<SessionRecord, "project" | "projectPath">): boolean {
+  return sessionWorkspace(session) === "/Users/ryan/Documents/Codex";
+}
+
 export function sessionProject(session: Pick<SessionRecord, "project" | "projectPath" | "repository" | "repositoryPath" | "logicalProjectName">): string {
+  if (isCodexChat(session)) return "Chat";
   return textValue(session.logicalProjectName) || basename(sessionRepositoryPath(session) || sessionWorkspace(session));
 }
 
 export function sessionProjectGroupKey(session: Pick<SessionRecord, "project" | "projectPath" | "repository" | "repositoryPath" | "logicalProjectId" | "logicalProjectName">): string {
+  if (isCodexChat(session)) return "codex-chat";
   const projectId = textValue(session.logicalProjectId);
   return projectId
     ? JSON.stringify(["logical-project", projectId, sessionProject(session)])

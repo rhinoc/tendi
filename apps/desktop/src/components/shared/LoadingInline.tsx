@@ -1,6 +1,6 @@
-import { RefreshCw } from "lucide-react";
-
 import "./LoadingInline.css";
+
+import { LoadingIcon } from "./LoadingIcon.tsx";
 
 export type LoadingInlineProps = {
   label: string;
@@ -9,7 +9,7 @@ export type LoadingInlineProps = {
 export function LoadingInline({ label }: LoadingInlineProps) {
   return (
     <span className="loadingInline">
-      <RefreshCw className="loadingSpinner" size={15} aria-hidden="true" />
+      <LoadingIcon size={15} />
       <span>{label}</span>
     </span>
   );

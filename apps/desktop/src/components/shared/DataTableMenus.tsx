@@ -17,9 +17,11 @@ export type DataTableMenuComponents = {
 export function RevealInFinderMenuItem({
   Menu,
   path,
+  label = "Reveal in Finder",
 }: {
   Menu: DataTableMenuComponents;
   path?: string | null;
+  label?: string;
 }) {
   const resolved = `${path ?? ""}`.trim();
   return (
@@ -28,7 +30,7 @@ export function RevealInFinderMenuItem({
       disabled={!resolved}
       onSelect={() => resolved && safeInvoke(TauriCommand.RevealInFinder, { path: resolved })}
     >
-      Reveal in Finder
+      {label}
     </Menu.Item>
   );
 }

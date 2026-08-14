@@ -1,7 +1,7 @@
 import { Tooltip } from "../components/shared/Tooltip.tsx";
 import { lazy, Suspense, useCallback, useDeferredValue, useEffect, useMemo, useState, type ComponentType, type ReactNode } from "react";
 import { ContextMenu, DropdownMenu } from "radix-ui";
-import { FolderOpen, Info, MoreHorizontal, Search } from "lucide-react";
+import { FolderOpen, Info } from "lucide-react";
 import { Group as PanelGroup, Panel } from "react-resizable-panels";
 
 import { DataTable } from "../components/DataTable.tsx";
@@ -13,7 +13,10 @@ import { DetailPanel } from "../components/shared/DetailPanel.tsx";
 import { DetailPanelHost } from "../components/shared/DetailPanelHost.tsx";
 import { DiscardChangesDialog } from "../components/shared/DiscardChangesDialog.tsx";
 import { LoadingInline } from "../components/shared/LoadingInline.tsx";
+import { InfoSection } from "../components/shared/InfoSection.tsx";
+import { MoreActionsButton } from "../components/shared/MoreActionsButton.tsx";
 import { PageHeader } from "../components/shared/PageHeader.tsx";
+import { SearchField } from "../components/shared/SearchField.tsx";
 import type { SkillDependencyRecord } from "../components/shared/SkillDependencyGraph.tsx";
 import { ruleColumns as sharedRuleColumns } from "../lib/tableColumns.tsx";
 import { RULE_FREEZE_COLUMN, TauriCommand, diffPreview, friendlyAgent, ruleKey, ruleSearchText, ruleSortValue, ruleTitle, safeInvoke, suppressNextClick } from "../lib/index.ts";
@@ -62,9 +65,7 @@ function RuleActionsCell({ rule }: { rule: RuleRecord }) {
   return (
     <DropdownMenu.Root onOpenChange={(open) => { if (!open) suppressNextClick(); }}>
       <DropdownMenu.Trigger asChild>
-        <button className="iconButton" aria-label={`Rule actions for ${ruleTitle(rule)}`}>
-          <MoreHorizontal size={16} />
-        </button>
+        <MoreActionsButton aria-label={`Rule actions for ${ruleTitle(rule)}`} />
       </DropdownMenu.Trigger>
       <DropdownMenu.Portal>
         <DropdownMenu.Content className="skillMenuContent" align="end" sideOffset={6}>
@@ -119,35 +120,21 @@ function RuleInfoMenu({
             <strong>{title}</strong>
           </div>
           <div className="skillInfoSections">
-            <section className="skillInfoSection">
-              <span>Agent</span>
-              <div className="skillInfoValueLine">
+            <InfoSection label="Agent">
                 <AgentBadge agent={agent} small />
                 <span className="ruleInfoValue">{agent}</span>
-              </div>
-            </section>
+            </InfoSection>
             {rule.scope && (
-              <section className="skillInfoSection">
-                <span>Scope</span>
-                <div className="skillInfoValueLine"><span className="ruleInfoValue">{rule.scope}</span></div>
-              </section>
+              <InfoSection label="Scope"><span className="ruleInfoValue">{rule.scope}</span></InfoSection>
             )}
             {kind && (
-              <section className="skillInfoSection">
-                <span>Kind</span>
-                <div className="skillInfoValueLine"><span className="ruleInfoValue">{kind}</span></div>
-              </section>
+              <InfoSection label="Kind"><span className="ruleInfoValue">{kind}</span></InfoSection>
             )}
             {order && (
-              <section className="skillInfoSection">
-                <span>Order</span>
-                <div className="skillInfoValueLine"><span className="ruleInfoValue">{order}</span></div>
-              </section>
+              <InfoSection label="Order"><span className="ruleInfoValue">{order}</span></InfoSection>
             )}
             {path && (
-              <section className="skillInfoSection">
-                <span>Path</span>
-                <div className="skillInfoValueLine">
+              <InfoSection label="Path">
                   <Tooltip content={path} onlyWhenTruncated><code>{path}</code></Tooltip>
                   <button
                     aria-label="Reveal rule in Finder"
@@ -156,13 +143,11 @@ function RuleInfoMenu({
                   >
                     <FolderOpen size={13} />
                   </button>
-                  <CopyButton className="skillInfoIconButton" value={path} copyLabel="Copy rule path" copiedLabel="Rule path copied" title="Copy path" />
-                </div>
-              </section>
+                  <CopyButton className="skillInfoIconButton" value={path} copyLabel="Copy rule path" copiedLabel="Rule path copied" />
+              </InfoSection>
             )}
             {referencedSkillNames.length > 0 && (
-              <section className="skillInfoSection">
-                <span>Referenced skills</span>
+              <InfoSection label="Referenced skills" valueLine={false}>
                 <div className="ruleInfoSkillRefs">
                   {referencedSkillNames.map((name) => {
                     const skill = skillsByName.get(name);
@@ -177,7 +162,7 @@ function RuleInfoMenu({
                     );
                   })}
                 </div>
-              </section>
+              </InfoSection>
             )}
           </div>
         </DropdownMenu.Content>
@@ -403,7 +388,7 @@ export function RulesView({
       <Panel className="sessionListPanel ruleListPanel" defaultSize="54%" minSize="360px">
         <div className="sessionListPane ruleListPane">
           <PageHeader title="Rules" compact>
-            <div className="searchBox"><Search size={15} /><input placeholder="Search rules" value={query} onChange={(event) => setQuery(event.target.value)} /></div>
+            <SearchField placeholder="Search rules" value={query} onChange={(event) => setQuery(event.target.value)} />
           </PageHeader>
           <div className="sessionListBody">
             <DataTable

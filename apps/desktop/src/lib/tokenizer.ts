@@ -1,6 +1,10 @@
 import { countTokens as countO200kTokens } from "gpt-tokenizer/encoding/o200k_base";
 import { parse as parseYaml } from "yaml";
 
+import { formatTokenCount } from "./token-format.ts";
+
+export { formatTokenCount } from "./token-format.ts";
+
 export const TOKENIZER_LABEL = "OpenAI o200k_base";
 export const TOKENIZER_PACKAGE = "gpt-tokenizer";
 export const TOKENIZER_URL = "https://github.com/niieani/gpt-tokenizer";
@@ -58,15 +62,6 @@ export function countTextTokens(value: unknown): number {
   const text = `${value ?? ""}`;
   if (!text) return 0;
   return countO200kTokens(text);
-}
-
-export function formatTokenCount(value: number): string {
-  if (!Number.isFinite(value)) return "0";
-  if (value < 1000) return `${value}`;
-  if (value < 10000) return `${(value / 1000).toFixed(1).replace(/\.0$/, "")}k`;
-  if (value < 1000000) return `${Math.round(value / 1000)}k`;
-  if (value < 10000000) return `${(value / 1000000).toFixed(1).replace(/\.0$/, "")}M`;
-  return `${Math.round(value / 1000000)}M`;
 }
 
 export function tokenEstimateTitle(): string {

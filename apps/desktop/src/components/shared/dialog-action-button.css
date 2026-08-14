@@ -1,0 +1,87 @@
+.dialogActionButton {
+  height: 38px;
+  min-width: 104px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 14px;
+  border: 0;
+  border-radius: var(--radius-md);
+  color: var(--text);
+  background: var(--panel-bg);
+  box-shadow: var(--shadow-border);
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 600;
+  transition-property: box-shadow, background-color, color, transform;
+  transition-duration: 140ms;
+  transition-timing-function: ease-out;
+}
+
+.dialogActionButton:hover { box-shadow: var(--shadow-border-hover); }
+.dialogActionButton:active:not(:disabled) { transform: scale(var(--press-scale)); }
+.dialogActionButton:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: -2px;
+}
+
+.dialogActionButton.primary {
+  color: var(--accent-contrast);
+  background: var(--accent);
+  box-shadow: none;
+}
+.dialogActionButton.primary:hover { background: var(--accent-hover); }
+.dialogActionButton.primary:active { background: var(--accent-active); }
+
+.dialogActionButton.danger {
+  color: var(--panel-bg);
+  background: var(--orange);
+  box-shadow: none;
+}
+.dialogActionButton.danger:hover { background: var(--danger); }
+.dialogActionButton.danger.subtle {
+  color: var(--danger-text);
+  background: var(--danger-soft);
+  box-shadow: 0 0 0 1px var(--danger-soft-strong);
+}
+.dialogActionButton.danger.subtle:hover {
+  color: var(--panel-bg);
+  background: var(--orange);
+  box-shadow: none;
+}
+
+.dialogActionButton.secondary {
+  min-width: 0;
+  padding: 0 4px;
+  color: var(--muted);
+  background: transparent;
+  box-shadow: none;
+}
+.dialogActionButton.secondary:hover {
+  color: var(--text);
+  background: transparent;
+}
+
+.dialogActionButton.dialogAdvanceButton {
+  min-width: 84px;
+  gap: 6px;
+  padding: 0 12px;
+}
+
+.dialogActionButton:disabled,
+.dialogActionButton:disabled:hover {
+  color: var(--faint);
+  background: var(--control-fill);
+  box-shadow: none;
+  cursor: default;
+  opacity: 1;
+  transform: none;
+}
+.dialogActionButton.primary.isBusy,
+.dialogActionButton.primary.isBusy:disabled,
+.dialogActionButton.primary.isBusy:disabled:hover {
+  color: var(--accent-contrast);
+  background: var(--accent);
+  box-shadow: none;
+  cursor: wait;
+}

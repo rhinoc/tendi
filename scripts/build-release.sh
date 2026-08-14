@@ -32,14 +32,30 @@ rm -f "$ROOT"/dist/tendi-${VERSION}-*.dmg \
 build_arch() {
   local target="$1"
   local arch="$2"
-  local build_args=(--bundles app --ci)
+  local target_triple="$target"
+  local host_triple
+  host_triple="$(rustc -vV | awk '/^host:/ { print $2 }')"
+  local build_args=(--bundles app --ci --config src-tauri/tauri.release.conf.json)
   local target_args=()
+  local cargo_target_args=()
+  local cli_output_dir="$ROOT/target/$target/release"
   if [[ "$target" != "host" ]]; then
     target_args=(--target "$target")
+    cargo_target_args=(--target "$target")
+  else
+    target_triple="$host_triple"
+    cli_output_dir="$ROOT/target/release"
   fi
   if [[ "$UPDATER_ENABLED" == "1" ]]; then
     build_args+=(--config '{"bundle":{"createUpdaterArtifacts":true}}')
   fi
+
+  cargo build --release -p tendi-cli "${cargo_target_args[@]}"
+  local sidecar_dir="$ROOT/apps/desktop/src-tauri/binaries"
+  local sidecar="$sidecar_dir/tendi-$target_triple"
+  mkdir -p "$sidecar_dir"
+  cp "$cli_output_dir/tendi" "$sidecar"
+  chmod 755 "$sidecar"
 
   npm --prefix "$ROOT/apps/desktop" run build:tauri -- "${target_args[@]}" "${build_args[@]}"
 
@@ -51,8 +67,27 @@ build_arch() {
   local updater_src="$bundle_root/macos/tendi.app.tar.gz"
   local updater_sig_src="$updater_src.sig"
   local dmg="$ROOT/dist/tendi-${VERSION}-${arch}.dmg"
+  local bundled_cli="$app/Contents/MacOS/tendi"
 
   [[ -d "$app" ]] || { echo "error: missing app bundle at $app" >&2; exit 1; }
+  [[ -x "$bundled_cli" ]] || { echo "error: missing bundled CLI at $bundled_cli" >&2; exit 1; }
+  if [[ "$target_triple" == "$host_triple" ]]; then
+    "$bundled_cli" --version | grep -q "^tendi $VERSION$" || {
+      echo "error: bundled CLI version does not match app version $VERSION" >&2
+      exit 1
+    }
+  else
+    local expected_arch
+    case "$target_triple" in
+      aarch64-apple-darwin) expected_arch="arm64" ;;
+      x86_64-apple-darwin) expected_arch="x86_64" ;;
+      *) echo "error: unsupported target triple: $target_triple" >&2; exit 1 ;;
+    esac
+    file "$bundled_cli" | grep -q "Mach-O 64-bit executable $expected_arch" || {
+      echo "error: bundled CLI does not match target architecture $expected_arch" >&2
+      exit 1
+    }
+  fi
   "$ROOT/scripts/build-dmg.sh" "$app" "$dmg" tendi
 
   if [[ "$UPDATER_ENABLED" == "1" ]]; then

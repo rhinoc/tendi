@@ -1,4 +1,7 @@
-use std::{env, io::Write};
+use std::{
+    env,
+    io::{IsTerminal, Write},
+};
 
 use anyhow::Result;
 use clap::{ArgAction, Parser, Subcommand, ValueEnum};
@@ -24,6 +27,10 @@ enum Command {
         #[command(subcommand)]
         command: SkillCommand,
     },
+    Setup {
+        #[command(subcommand)]
+        command: SetupCommand,
+    },
     Sessions {
         #[command(subcommand)]
         command: SessionCommand,
@@ -44,14 +51,24 @@ enum Command {
 
 #[derive(Debug, Subcommand)]
 enum SkillCommand {
+    Guide {
+        #[arg(long)]
+        json: bool,
+    },
     List {
+        #[arg(long)]
+        json: bool,
+    },
+    Targets {
         #[arg(long)]
         json: bool,
     },
     Add {
         source: String,
         #[arg(long = "to", default_value = "shared")]
-        to: AgentArg,
+        to: tendi_core::SkillTarget,
+        #[arg(long, default_value = "global")]
+        scope: tendi_core::SkillInstallScope,
         #[arg(long = "skill")]
         skills: Vec<String>,
         #[arg(long)]
@@ -60,6 +77,14 @@ enum SkillCommand {
         copy: bool,
         #[arg(long)]
         overwrite: bool,
+        #[arg(long, value_enum, default_value = "auto")]
+        visibility: VisibilityArg,
+        #[arg(long)]
+        dry_run: bool,
+        #[arg(long)]
+        yes: bool,
+    },
+    Restore {
         #[arg(long)]
         dry_run: bool,
         #[arg(long)]
@@ -103,13 +128,31 @@ enum SkillCommand {
     Link {
         source: String,
         #[arg(long)]
-        to: AgentArg,
+        to: tendi_core::SkillTarget,
+        #[arg(long, default_value = "global")]
+        scope: tendi_core::SkillInstallScope,
         #[arg(long)]
         name: Option<String>,
         #[arg(long)]
         dry_run: bool,
         #[arg(long)]
         yes: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum SetupCommand {
+    Skills {
+        #[arg(long = "to", default_value = "shared")]
+        to: AgentArg,
+        #[arg(long)]
+        overwrite: bool,
+        #[arg(long)]
+        dry_run: bool,
+        #[arg(long)]
+        yes: bool,
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -180,6 +223,7 @@ impl From<VisibilityArg> for tendi_core::SkillVisibility {
 fn main() -> Result<()> {
     let cli = Cli::parse();
     let cwd = env::current_dir()?;
+    maybe_offer_bundled_skill(&cli.command)?;
 
     match cli.command {
         Command::Scan { json } => {
@@ -201,6 +245,21 @@ fn main() -> Result<()> {
             }
         },
         Command::Skills { command } => match command {
+            SkillCommand::Guide { json } => {
+                let markdown = tendi_core::bundled_skill::guide_markdown();
+                if json {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&serde_json::json!({
+                            "name": "tendi",
+                            "version": env!("CARGO_PKG_VERSION"),
+                            "markdown": markdown,
+                        }))?
+                    );
+                } else {
+                    print!("{markdown}");
+                }
+            }
             SkillCommand::List { json } => {
                 let report = tendi_core::skills::scan_skills_synced(&cwd)?;
                 if json {
@@ -209,13 +268,35 @@ fn main() -> Result<()> {
                     println!("{}", tendi_core::skills::format_skill_table(&report.skills));
                 }
             }
+            SkillCommand::Targets { json } => {
+                let targets = tendi_core::skill_targets::target_catalog();
+                if json {
+                    println!("{}", serde_json::to_string_pretty(targets)?);
+                } else {
+                    for target in targets {
+                        println!(
+                            "{:<20} {:<24} project={} global={}",
+                            target.id,
+                            target.display_name,
+                            target.project_skills_dir,
+                            if target.supports_global() {
+                                "yes"
+                            } else {
+                                "no"
+                            },
+                        );
+                    }
+                }
+            }
             SkillCommand::Add {
                 source,
                 to,
+                scope,
                 skills,
                 list,
                 copy,
                 overwrite,
+                visibility,
                 dry_run,
                 yes,
             } => {
@@ -227,10 +308,12 @@ fn main() -> Result<()> {
 
                 let options = tendi_core::skills::SkillAddOptions {
                     source,
-                    target: to.into(),
+                    target: to,
+                    scope,
                     skills,
                     copy,
                     overwrite,
+                    visibility: visibility.into(),
                 };
                 let plan = tendi_core::skills::plan_skill_add(&cwd, &options)?;
                 print_skill_add_plan(&plan)?;
@@ -242,7 +325,32 @@ fn main() -> Result<()> {
                     return Ok(());
                 }
                 let report = tendi_core::skills::apply_skill_add(&cwd, &options)?;
+                let source_records = tendi_core::skills::skill_source_records_for_add(&report);
+                tendi_core::storage::Store::open_default()?
+                    .upsert_skill_source_records(&source_records)?;
                 print_skill_add_results(&report.results)?;
+            }
+            SkillCommand::Restore { dry_run, yes } => {
+                let store = tendi_core::storage::Store::open_default()?;
+                let plan = tendi_core::skill_restore::plan_project_skill_restore(&cwd, &store)?;
+                print_skill_restore_operations(
+                    &plan.lock_path,
+                    &plan.target_root,
+                    &plan.operations,
+                )?;
+                if dry_run || !plan.operations.iter().any(|item| item.status == "planned") {
+                    return Ok(());
+                }
+                if !yes && !confirm("Restore these project skills? [y/N] ")? {
+                    println!("aborted");
+                    return Ok(());
+                }
+                let report = tendi_core::skill_restore::apply_project_skill_restore(&plan, &store)?;
+                print_skill_restore_operations(
+                    &report.lock_path,
+                    &report.target_root,
+                    &report.operations,
+                )?;
             }
             SkillCommand::Set {
                 pattern,
@@ -307,15 +415,20 @@ fn main() -> Result<()> {
             SkillCommand::Link {
                 source,
                 to,
+                scope,
                 name,
                 dry_run,
                 yes,
             } => {
                 let source = std::path::PathBuf::from(source);
-                let preview = tendi_core::skills::materialize_skill_dir(
+                let preview = tendi_core::skills::materialize_skill_dir_for_target(
                     &source,
-                    to.into(),
+                    &to,
+                    scope,
+                    &cwd,
                     name.as_deref(),
+                    false,
+                    false,
                     true,
                 )?;
                 println!(
@@ -331,13 +444,74 @@ fn main() -> Result<()> {
                     println!("aborted");
                     return Ok(());
                 }
-                let result = tendi_core::skills::materialize_skill_dir(
+                let result = tendi_core::skills::materialize_skill_dir_for_target(
                     &source,
-                    to.into(),
+                    &to,
+                    scope,
+                    &cwd,
                     name.as_deref(),
+                    false,
+                    false,
                     false,
                 )?;
                 println!("{}: {}", result.mode, result.health);
+            }
+        },
+        Command::Setup { command } => match command {
+            SetupCommand::Skills {
+                to,
+                overwrite,
+                dry_run,
+                yes,
+                json,
+            } => {
+                let agent = to.into();
+                let plan = tendi_core::bundled_skill::plan_install(agent)?;
+                if dry_run {
+                    if json {
+                        println!("{}", serde_json::to_string_pretty(&plan)?);
+                    } else {
+                        print_bundled_skill_install_plan(&plan)?;
+                    }
+                    return Ok(());
+                }
+                if json && !yes {
+                    anyhow::bail!("--json requires --yes for a real installation");
+                }
+                if plan.requires_overwrite && !overwrite {
+                    if !json {
+                        print_bundled_skill_install_plan(&plan)?;
+                    }
+                    anyhow::bail!(
+                        "the target contains different content; inspect it and rerun with --overwrite"
+                    );
+                }
+                if !yes && !plan.changes.changes.is_empty() {
+                    print_bundled_skill_install_plan(&plan)?;
+                    let question = if plan.requires_overwrite {
+                        "Replace the existing bundled skill files? [y/N] "
+                    } else {
+                        "Install the Tendi skill? [Y/n] "
+                    };
+                    let confirmed = if plan.requires_overwrite {
+                        confirm(question)?
+                    } else {
+                        confirm_default_yes(question)?
+                    };
+                    if !confirmed {
+                        tendi_core::bundled_skill::dismiss_prompt()?;
+                        println!("aborted");
+                        return Ok(());
+                    }
+                }
+                let report = tendi_core::bundled_skill::install(agent, overwrite, false)?;
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&report)?);
+                } else if report.applied {
+                    println!("installed: {}", report.status.target.display());
+                } else {
+                    println!("up to date: {}", report.status.target.display());
+                }
             }
         },
         Command::Sessions { command } => match command {
@@ -350,7 +524,10 @@ fn main() -> Result<()> {
                     &cache,
                 )?;
                 if json {
-                    println!("{}", serde_json::to_string_pretty(&report.sessions)?);
+                    let stdout = std::io::stdout();
+                    let mut output = stdout.lock();
+                    serde_json::to_writer_pretty(&mut output, &report.sessions)?;
+                    writeln!(output)?;
                 } else {
                     print_sessions(&report.sessions)?;
                 }
@@ -494,6 +671,31 @@ fn print_skill_add_plan(plan: &tendi_core::skills::SkillAddPlan) -> Result<()> {
             operation.source.display(),
             operation.target.display(),
             operation.mode
+        )?;
+    }
+    Ok(())
+}
+
+fn print_skill_restore_operations(
+    lock_path: &std::path::Path,
+    target_root: &std::path::Path,
+    operations: &[tendi_core::skill_restore::SkillRestoreOperation],
+) -> Result<()> {
+    let mut stdout = std::io::stdout().lock();
+    writeln!(stdout, "lock: {}", lock_path.display())?;
+    writeln!(stdout, "target: {}", target_root.display())?;
+    for operation in operations {
+        writeln!(
+            stdout,
+            "{} {} -> {}{}",
+            operation.status,
+            operation.name,
+            operation.target.display(),
+            operation
+                .message
+                .as_deref()
+                .map(|message| format!(" ({message})"))
+                .unwrap_or_default()
         )?;
     }
     Ok(())
@@ -755,6 +957,52 @@ fn run_changeset(changeset: tendi_core::skills::ChangeSet, dry_run: bool, yes: b
     Ok(())
 }
 
+fn maybe_offer_bundled_skill(command: &Command) -> Result<()> {
+    if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
+        return Ok(());
+    }
+    if matches!(
+        command,
+        Command::Skills {
+            command: SkillCommand::Guide { .. }
+        } | Command::Setup {
+            command: SetupCommand::Skills { .. }
+        }
+    ) {
+        return Ok(());
+    }
+    let status = tendi_core::bundled_skill::status(tendi_core::AgentKind::Shared)?;
+    if !status.should_prompt {
+        return Ok(());
+    }
+
+    println!("Tendi can install a small agent skill for searching sessions and managing skills.");
+    if confirm_default_yes("Install it for your coding agents? [Y/n] ")? {
+        let report =
+            tendi_core::bundled_skill::install(tendi_core::AgentKind::Shared, false, false)?;
+        println!("installed: {}", report.status.target.display());
+    } else {
+        tendi_core::bundled_skill::dismiss_prompt()?;
+    }
+    Ok(())
+}
+
+fn print_bundled_skill_install_plan(
+    plan: &tendi_core::bundled_skill::BundledSkillInstallPlan,
+) -> Result<()> {
+    let mut stdout = std::io::stdout().lock();
+    writeln!(stdout, "action: {}", plan.action)?;
+    writeln!(stdout, "target: {}", plan.target.display())?;
+    for change in &plan.changes.changes {
+        let operation = if change.before.is_some() { "M" } else { "A" };
+        writeln!(stdout, "{operation} {}", change.path.display())?;
+    }
+    if plan.requires_overwrite {
+        writeln!(stdout, "requires: --overwrite")?;
+    }
+    Ok(())
+}
+
 fn confirm(prompt: &str) -> Result<bool> {
     let mut stdout = std::io::stdout().lock();
     write!(stdout, "{prompt}")?;
@@ -763,4 +1011,63 @@ fn confirm(prompt: &str) -> Result<bool> {
     let mut input = String::new();
     std::io::stdin().read_line(&mut input)?;
     Ok(matches!(input.trim(), "y" | "Y" | "yes" | "YES"))
+}
+
+fn confirm_default_yes(prompt: &str) -> Result<bool> {
+    let mut stdout = std::io::stdout().lock();
+    write!(stdout, "{prompt}")?;
+    stdout.flush()?;
+
+    let mut input = String::new();
+    std::io::stdin().read_line(&mut input)?;
+    Ok(input.trim().is_empty() || matches!(input.trim(), "y" | "Y" | "yes" | "YES"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn skill_add_accepts_extended_target_and_project_scope() {
+        let cli = Cli::try_parse_from([
+            "tendi", "skills", "add", "./repo", "--to", "opencode", "--scope", "project",
+        ])
+        .unwrap();
+        let Command::Skills {
+            command: SkillCommand::Add { to, scope, .. },
+        } = cli.command
+        else {
+            panic!("unexpected command");
+        };
+        assert_eq!(to.id(), "opencode");
+        assert_eq!(scope, tendi_core::SkillInstallScope::Project);
+    }
+
+    #[test]
+    fn skill_link_keeps_legacy_shared_target() {
+        let cli =
+            Cli::try_parse_from(["tendi", "skills", "link", "./skill", "--to", "shared"]).unwrap();
+        let Command::Skills {
+            command: SkillCommand::Link { to, scope, .. },
+        } = cli.command
+        else {
+            panic!("unexpected command");
+        };
+        assert_eq!(to.id(), "shared");
+        assert_eq!(scope, tendi_core::SkillInstallScope::Global);
+    }
+
+    #[test]
+    fn skill_restore_accepts_dry_run_and_yes() {
+        let cli =
+            Cli::try_parse_from(["tendi", "skills", "restore", "--dry-run", "--yes"]).unwrap();
+        let Command::Skills {
+            command: SkillCommand::Restore { dry_run, yes },
+        } = cli.command
+        else {
+            panic!("unexpected command");
+        };
+        assert!(dry_run);
+        assert!(yes);
+    }
 }

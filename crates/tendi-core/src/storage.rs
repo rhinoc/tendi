@@ -2,7 +2,7 @@ use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     fs,
     path::{Path, PathBuf},
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::{Context, Result};
@@ -12,15 +12,17 @@ use serde::{Deserialize, Serialize};
 use crate::{
     ScanReport,
     analytics::{
-        self, AnalyticsRefreshProgress, AnalyticsRefreshReport, OverviewAnalytics,
+        self, AnalyticsCapabilities, AnalyticsCoverage, AnalyticsProviderCapability,
+        AnalyticsRefreshProgress, AnalyticsRefreshReport, OverviewAnalytics,
         SessionAnalyticsDetail, SessionAnalyticsRecord,
     },
     fsutil::sha256_text,
     session_skills::{SessionFileState, SessionSkillIndexStatus, SessionSkillLink},
     sessions::{
-        SessionIdentity, SessionRecord, SessionScan, SessionScanCache, SessionScanCacheEntry,
+        SESSION_PREVIEW_MAX_CHARS, SessionIdentity, SessionRecord, SessionScan, SessionScanCache,
+        SessionScanCacheEntry, bound_session_preview, normalize_session_projects,
     },
-    skills::{AgentKind, SkillScan},
+    skills::{AgentKind, SkillRecord, SkillScan, SkillSourceRecord},
     transcript,
 };
 
@@ -53,12 +55,26 @@ pub struct Store {
     path: PathBuf,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct AnalyticsOverviewBackfillReport {
+    pub processed: usize,
+    pub failed: usize,
+    pub remaining: usize,
+    pub revision: u64,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AppSettings {
     #[serde(default = "default_appearance")]
     pub appearance: String,
+    #[serde(default = "default_color_theme")]
+    pub light_theme: String,
+    #[serde(default = "default_color_theme")]
+    pub dark_theme: String,
     pub terminal: String,
+    #[serde(default = "default_editor")]
+    pub editor: String,
     #[serde(default)]
     pub additional_session_roots: Vec<String>,
     #[serde(default)]
@@ -69,12 +85,32 @@ fn default_appearance() -> String {
     "system".to_string()
 }
 
+fn default_color_theme() -> String {
+    "gruvbox".to_string()
+}
+
+fn default_editor() -> String {
+    "vscode".to_string()
+}
+
 fn normalize_appearance(value: &str) -> Result<String> {
     let appearance = value.trim().to_ascii_lowercase();
     if matches!(appearance.as_str(), "system" | "light" | "dark") {
         Ok(appearance)
     } else {
         anyhow::bail!("invalid appearance setting: {value}")
+    }
+}
+
+fn normalize_color_theme(value: &str) -> Result<String> {
+    let theme = value.trim().to_ascii_lowercase();
+    if matches!(
+        theme.as_str(),
+        "gruvbox" | "dracula" | "nord" | "catppuccin" | "tokyo-night"
+    ) {
+        Ok(theme)
+    } else {
+        anyhow::bail!("invalid color theme setting: {value}")
     }
 }
 
@@ -126,8 +162,29 @@ impl Store {
         }
         let conn = Connection::open(&path)
             .with_context(|| format!("failed to open sqlite database {}", path.display()))?;
+        conn.busy_timeout(Duration::from_secs(5))?;
         let store = Self { conn, path };
-        store.init()?;
+        for attempt in 0..5 {
+            match store.init() {
+                Ok(()) => break,
+                Err(error)
+                    if attempt < 4
+                        && error
+                            .downcast_ref::<rusqlite::Error>()
+                            .is_some_and(|error| {
+                                matches!(
+                                    error,
+                                    rusqlite::Error::SqliteFailure(code, _)
+                                        if code.code == rusqlite::ErrorCode::DatabaseBusy
+                                            || code.code == rusqlite::ErrorCode::DatabaseLocked
+                                )
+                            }) =>
+                {
+                    std::thread::yield_now();
+                }
+                Err(error) => return Err(error),
+            }
+        }
         Ok(store)
     }
 
@@ -146,6 +203,26 @@ impl Store {
             .optional()?
             .unwrap_or_else(default_appearance);
         let appearance = normalize_appearance(&appearance)?;
+        let light_theme = self
+            .conn
+            .query_row(
+                "SELECT value FROM app_settings WHERE key = 'light_theme'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+            .unwrap_or_else(default_color_theme);
+        let light_theme = normalize_color_theme(&light_theme)?;
+        let dark_theme = self
+            .conn
+            .query_row(
+                "SELECT value FROM app_settings WHERE key = 'dark_theme'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+            .unwrap_or_else(default_color_theme);
+        let dark_theme = normalize_color_theme(&dark_theme)?;
         let terminal = self
             .conn
             .query_row(
@@ -155,6 +232,15 @@ impl Store {
             )
             .optional()?
             .unwrap_or_else(|| "auto".to_string());
+        let editor = self
+            .conn
+            .query_row(
+                "SELECT value FROM app_settings WHERE key = 'editor'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+            .unwrap_or_else(default_editor);
         let additional_session_roots = self
             .conn
             .query_row(
@@ -194,7 +280,10 @@ impl Store {
         }
         Ok(AppSettings {
             appearance,
+            light_theme,
+            dark_theme,
             terminal,
+            editor,
             additional_session_roots,
             config_profiles,
         })
@@ -202,7 +291,10 @@ impl Store {
 
     pub fn save_app_settings(&self, settings: AppSettings) -> Result<AppSettings> {
         let appearance = normalize_appearance(&settings.appearance)?;
+        let light_theme = normalize_color_theme(&settings.light_theme)?;
+        let dark_theme = normalize_color_theme(&settings.dark_theme)?;
         let terminal = normalize_setting_value(&settings.terminal, "auto");
+        let editor = normalize_setting_value(&settings.editor, "vscode");
         let additional_session_roots =
             normalize_additional_session_roots(settings.additional_session_roots)?;
         let config_profiles = settings
@@ -221,9 +313,24 @@ impl Store {
             params![appearance],
         )?;
         self.conn.execute(
+            "INSERT INTO app_settings (key, value) VALUES ('light_theme', ?1)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![light_theme],
+        )?;
+        self.conn.execute(
+            "INSERT INTO app_settings (key, value) VALUES ('dark_theme', ?1)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![dark_theme],
+        )?;
+        self.conn.execute(
             "INSERT INTO app_settings (key, value) VALUES ('terminal', ?1)
              ON CONFLICT(key) DO UPDATE SET value = excluded.value",
             params![terminal],
+        )?;
+        self.conn.execute(
+            "INSERT INTO app_settings (key, value) VALUES ('editor', ?1)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![editor],
         )?;
         self.conn.execute(
             "INSERT INTO app_settings (key, value) VALUES ('additional_session_roots', ?1)
@@ -237,7 +344,10 @@ impl Store {
         )?;
         Ok(AppSettings {
             appearance,
+            light_theme,
+            dark_theme,
             terminal,
+            editor,
             additional_session_roots,
             config_profiles,
         })
@@ -310,6 +420,10 @@ impl Store {
         }
 
         for session in &report.sessions.sessions {
+            let first_user_message = bound_session_preview(session.first_user_message.clone());
+            let last_user_message = bound_session_preview(session.last_user_message.clone());
+            let last_assistant_message =
+                bound_session_preview(session.last_assistant_message.clone());
             tx.execute(
                 "INSERT INTO current_sessions (id, agent, path)
                  VALUES (?1, ?2, ?3)",
@@ -320,16 +434,22 @@ impl Store {
                 ],
             )?;
             tx.execute(
-                "INSERT INTO sessions (id, agent, title, project, path, started_at, updated_at, message_count, data_json)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+                "INSERT INTO sessions (id, agent, title, project, path, started_at, updated_at, message_count, first_user_message, last_user_message, last_assistant_message, data_json)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
                  ON CONFLICT(id, agent, path) DO UPDATE SET
                     title = excluded.title,
                     project = excluded.project,
                     started_at = excluded.started_at,
                     updated_at = excluded.updated_at,
                     message_count = excluded.message_count,
+                    first_user_message = excluded.first_user_message,
+                    last_user_message = excluded.last_user_message,
+                    last_assistant_message = excluded.last_assistant_message,
                     data_json = excluded.data_json
-                 WHERE sessions.data_json IS NOT excluded.data_json",
+                 WHERE sessions.data_json IS NOT excluded.data_json
+                    OR sessions.first_user_message IS NOT excluded.first_user_message
+                    OR sessions.last_user_message IS NOT excluded.last_user_message
+                    OR sessions.last_assistant_message IS NOT excluded.last_assistant_message",
                 params![
                     session.id,
                     agent_label(session.agent),
@@ -339,7 +459,10 @@ impl Store {
                     session.started_at,
                     session.updated_at,
                     session.message_count.map(|value| value as i64),
-                    serde_json::to_string(session)?,
+                    first_user_message,
+                    last_user_message,
+                    last_assistant_message,
+                    Self::session_metadata_json(session)?,
                 ],
             )?;
             index_session_search_document_best_effort(&tx, session);
@@ -421,17 +544,33 @@ impl Store {
 
     pub fn list_sessions(&self) -> Result<SessionScan> {
         let mut stmt = self.conn.prepare(
-            "SELECT data_json FROM sessions
+            "SELECT data_json, first_user_message, last_user_message, last_assistant_message
+             FROM sessions
              ORDER BY updated_at DESC, id ASC",
         )?;
-        let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, Option<String>>(1)?,
+                row.get::<_, Option<String>>(2)?,
+                row.get::<_, Option<String>>(3)?,
+            ))
+        })?;
         let mut sessions = Vec::new();
         let mut warnings = Vec::new();
 
         for row in rows {
-            let data_json = row?;
+            let (data_json, first_user_message, last_user_message, last_assistant_message) = row?;
             match serde_json::from_str::<SessionRecord>(&data_json) {
-                Ok(session) => sessions.push(session),
+                Ok(mut session) => {
+                    Self::apply_session_preview_columns(
+                        &mut session,
+                        first_user_message,
+                        last_user_message,
+                        last_assistant_message,
+                    );
+                    sessions.push(session);
+                }
                 Err(err) => warnings.push(format!("invalid cached session row: {err}")),
             }
         }
@@ -439,7 +578,34 @@ impl Store {
         Ok(SessionScan { sessions, warnings })
     }
 
+    fn apply_session_preview_columns(
+        session: &mut SessionRecord,
+        first_user_message: Option<String>,
+        last_user_message: Option<String>,
+        last_assistant_message: Option<String>,
+    ) {
+        session.first_user_message =
+            bound_session_preview(session.first_user_message.take().or(first_user_message));
+        session.last_user_message =
+            bound_session_preview(session.last_user_message.take().or(last_user_message));
+        session.last_assistant_message = bound_session_preview(
+            session
+                .last_assistant_message
+                .take()
+                .or(last_assistant_message),
+        );
+    }
+
+    fn session_metadata_json(session: &SessionRecord) -> Result<String> {
+        let mut metadata = session.clone();
+        metadata.first_user_message = None;
+        metadata.last_user_message = None;
+        metadata.last_assistant_message = None;
+        Ok(serde_json::to_string(&metadata)?)
+    }
+
     pub fn resolve_session_projects(&self, sessions: &mut [SessionRecord]) -> Result<()> {
+        normalize_session_projects(sessions);
         let tx = self.conn.unchecked_transaction()?;
         let mut projects = load_session_projects(&tx)?;
         let mut aliases = load_session_project_aliases(&tx)?;
@@ -552,23 +718,22 @@ impl Store {
         &self,
         target_project_id: &str,
         source_project_ids: &[String],
-    ) -> Result<()> {
+    ) -> Result<String> {
         let tx = self.conn.unchecked_transaction()?;
-        let target_exists = tx.query_row(
-            "SELECT EXISTS(SELECT 1 FROM session_projects WHERE id = ?1)",
-            [target_project_id],
-            |row| row.get::<_, bool>(0),
-        )?;
-        if !target_exists {
-            anyhow::bail!("target session project not found: {target_project_id}");
-        }
+        let target_name = tx
+            .query_row(
+                "SELECT name FROM session_projects WHERE id = ?1",
+                [target_project_id],
+                |row| row.get::<_, String>(0),
+            )
+            .with_context(|| format!("target session project not found: {target_project_id}"))?;
         for source in source_project_ids {
             if source != target_project_id {
                 merge_session_project_rows(&tx, target_project_id, source)?;
             }
         }
         tx.commit()?;
-        Ok(())
+        Ok(target_name)
     }
 
     pub fn split_sessions_into_project(
@@ -653,6 +818,11 @@ impl Store {
         for (batch_index, batch) in sessions.chunks(SESSION_ANALYTICS_BATCH_SIZE).enumerate() {
             let mut updates = Vec::new();
             {
+                let mut state_stmt = self.conn.prepare(
+                    "SELECT file_mtime, file_size
+                     FROM session_analytics
+                     WHERE session_id = ?1 AND agent = ?2 AND session_path = ?3",
+                )?;
                 let mut cache_stmt = self.conn.prepare(
                     "SELECT file_mtime, file_size, analytics_json, parser_state_json
                      FROM session_analytics
@@ -660,6 +830,35 @@ impl Store {
                 )?;
 
                 for session in batch {
+                    let cached_state = state_stmt
+                        .query_row(
+                            params![
+                                session.id,
+                                agent_label(session.agent),
+                                session.path.display().to_string(),
+                            ],
+                            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+                        )
+                        .optional()?;
+                    let file_state = match crate::session_skills::session_file_state(&session.path)
+                    {
+                        Ok(state) => state,
+                        Err(err) => {
+                            report.failed += 1;
+                            warnings.push(format!(
+                                "analytics skipped {} {}: {err}",
+                                agent_label(session.agent),
+                                session.path.display()
+                            ));
+                            continue;
+                        }
+                    };
+                    if cached_state.is_some_and(|(file_mtime, file_size)| {
+                        file_mtime == file_state.file_mtime && file_size == file_state.file_size
+                    }) {
+                        report.skipped += 1;
+                        continue;
+                    }
                     let cached_row = cache_stmt
                         .query_row(
                             params![
@@ -697,26 +896,6 @@ impl Store {
                             }
                         },
                     );
-                    let file_state = match crate::session_skills::session_file_state(&session.path)
-                    {
-                        Ok(state) => state,
-                        Err(err) => {
-                            report.failed += 1;
-                            warnings.push(format!(
-                                "analytics skipped {} {}: {err}",
-                                agent_label(session.agent),
-                                session.path.display()
-                            ));
-                            continue;
-                        }
-                    };
-                    if cached.as_ref().is_some_and(|record| {
-                        record.file_mtime == file_state.file_mtime
-                            && record.file_size == file_state.file_size
-                    }) {
-                        report.skipped += 1;
-                        continue;
-                    }
                     let was_append = cached.as_ref().is_some_and(|record| {
                         record.file_size >= 0 && record.file_size < file_state.file_size
                     });
@@ -756,17 +935,31 @@ impl Store {
         }
         let tx = self.conn.unchecked_transaction()?;
         for record in records {
+            let overview = record.analytics.overview_index(&record.state);
             tx.execute(
                 "INSERT INTO session_analytics (
                     session_id, agent, session_path, file_mtime, file_size,
-                    indexed_at, analytics_json, parser_state_json
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                    indexed_at, analytics_json, parser_state_json,
+                    event_min_date, event_max_date, has_activity,
+                    capability_token_usage, capability_reasoning_tokens,
+                    capability_explicit_runs, capability_rate_limit_history,
+                    overview_indexed, overview_index_error
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, 1, NULL)
                  ON CONFLICT(session_id, agent, session_path) DO UPDATE SET
                     file_mtime = excluded.file_mtime,
                     file_size = excluded.file_size,
                     indexed_at = excluded.indexed_at,
                     analytics_json = excluded.analytics_json,
-                    parser_state_json = excluded.parser_state_json",
+                    parser_state_json = excluded.parser_state_json,
+                    event_min_date = excluded.event_min_date,
+                    event_max_date = excluded.event_max_date,
+                    has_activity = excluded.has_activity,
+                    capability_token_usage = excluded.capability_token_usage,
+                    capability_reasoning_tokens = excluded.capability_reasoning_tokens,
+                    capability_explicit_runs = excluded.capability_explicit_runs,
+                    capability_rate_limit_history = excluded.capability_rate_limit_history,
+                    overview_indexed = 1,
+                    overview_index_error = NULL",
                 params![
                     record.analytics.session_id,
                     agent_label(record.analytics.agent),
@@ -776,9 +969,17 @@ impl Store {
                     unix_now().to_string(),
                     serde_json::to_string(&record.analytics)?,
                     serde_json::to_string(&record.state)?,
+                    overview.first,
+                    overview.last,
+                    overview.has_activity,
+                    overview.capabilities.token_usage,
+                    overview.capabilities.reasoning_tokens,
+                    overview.capabilities.explicit_runs,
+                    overview.capabilities.rate_limit_history,
                 ],
             )?;
         }
+        bump_analytics_revision(&tx)?;
         tx.commit()?;
         Ok(())
     }
@@ -789,10 +990,22 @@ impl Store {
         days: u32,
         rank_days: u32,
     ) -> Result<OverviewAnalytics> {
-        let (records, warnings) = self.load_session_analytics_records(agent)?;
-        Ok(analytics::aggregate_overview(
-            &records, days, rank_days, warnings,
-        ))
+        let today = chrono::Local::now().date_naive();
+        let days = days.clamp(1, 365);
+        let rank_days = rank_days.clamp(1, 730);
+        let since = today - chrono::Duration::days(i64::from(days.saturating_sub(1)));
+        let rank_since = today - chrono::Duration::days(i64::from(rank_days.saturating_sub(1)));
+        let cutoff = since.min(rank_since).to_string();
+        let (records, warnings) = self.load_session_analytics_records(agent, Some(&cutoff))?;
+        let mut overview = analytics::aggregate_overview(&records, days, rank_days, warnings);
+        let (coverage, capabilities) = self.analytics_overview_metadata(agent)?;
+        overview.revision = self.analytics_revision()?;
+        overview.coverage = coverage;
+        overview.capabilities = capabilities;
+        overview
+            .warnings
+            .extend(self.analytics_overview_index_warnings(agent)?);
+        Ok(overview)
     }
 
     pub fn session_analytics_detail(
@@ -842,19 +1055,26 @@ impl Store {
     fn load_session_analytics_records(
         &self,
         agent: Option<AgentKind>,
+        event_cutoff: Option<&str>,
     ) -> Result<(Vec<SessionAnalyticsRecord>, Vec<String>)> {
         let mut records = Vec::new();
         let mut warnings = Vec::new();
         let sql = if agent.is_some() {
             "SELECT file_mtime, file_size, analytics_json, parser_state_json
-             FROM session_analytics WHERE agent = ?1"
+             FROM session_analytics
+             WHERE agent = ?1
+               AND overview_indexed = 1
+               AND (?2 IS NULL OR event_max_date >= ?2)"
         } else {
             "SELECT file_mtime, file_size, analytics_json, parser_state_json
-             FROM session_analytics WHERE ?1 IS NULL"
+             FROM session_analytics
+             WHERE ?1 IS NULL
+               AND overview_indexed = 1
+               AND (?2 IS NULL OR event_max_date >= ?2)"
         };
         let agent_value = agent.map(agent_label);
         let mut stmt = self.conn.prepare(sql)?;
-        let rows = stmt.query_map([agent_value], |row| {
+        let rows = stmt.query_map(params![agent_value, event_cutoff], |row| {
             Ok((
                 row.get::<_, i64>(0)?,
                 row.get::<_, i64>(1)?,
@@ -864,8 +1084,10 @@ impl Store {
         })?;
         for row in rows {
             let (file_mtime, file_size, analytics_json, parser_state_json) = row?;
-            let analytics = serde_json::from_str(&analytics_json);
-            let state = serde_json::from_str(&parser_state_json);
+            let analytics =
+                serde_json::from_str::<crate::analytics::SessionAnalytics>(&analytics_json);
+            let state =
+                serde_json::from_str::<crate::analytics::AnalyticsParserState>(&parser_state_json);
             match (analytics, state) {
                 (Ok(analytics), Ok(state)) => records.push(SessionAnalyticsRecord {
                     analytics,
@@ -881,9 +1103,215 @@ impl Store {
         Ok((records, warnings))
     }
 
+    fn analytics_overview_metadata(
+        &self,
+        agent: Option<AgentKind>,
+    ) -> Result<(AnalyticsCoverage, Vec<AnalyticsProviderCapability>)> {
+        let agent_value = agent.map(agent_label);
+        let mut coverage = self.conn.query_row(
+            "SELECT MIN(event_min_date), MAX(event_max_date), COUNT(*),
+                    COALESCE(SUM(has_activity), 0)
+             FROM session_analytics
+             WHERE (?1 IS NULL OR agent = ?1) AND overview_indexed = 1",
+            [agent_value],
+            |row| {
+                Ok(AnalyticsCoverage {
+                    first: row.get(0)?,
+                    last: row.get(1)?,
+                    total_sessions: row.get::<_, i64>(2)? as usize,
+                    analyzed_sessions: row.get::<_, i64>(3)? as usize,
+                    indexing_sessions: 0,
+                })
+            },
+        )?;
+        coverage.total_sessions = self.conn.query_row(
+            "SELECT COUNT(*) FROM session_analytics WHERE ?1 IS NULL OR agent = ?1",
+            [agent_value],
+            |row| row.get::<_, i64>(0),
+        )? as usize;
+        coverage.indexing_sessions = self.conn.query_row(
+            "SELECT COUNT(*) FROM session_analytics
+             WHERE overview_indexed = 0 AND (?1 IS NULL OR agent = ?1)",
+            [agent_value],
+            |row| row.get::<_, i64>(0),
+        )? as usize;
+        let mut stmt = self.conn.prepare(
+            "SELECT agent,
+                    MAX(capability_token_usage),
+                    MAX(capability_reasoning_tokens),
+                    MAX(capability_explicit_runs),
+                    MAX(capability_rate_limit_history)
+             FROM session_analytics
+             WHERE (?1 IS NULL OR agent = ?1) AND overview_indexed = 1
+             GROUP BY agent",
+        )?;
+        let capabilities = stmt
+            .query_map([agent_value], |row| {
+                Ok(AnalyticsProviderCapability {
+                    agent: parse_agent_label(&row.get::<_, String>(0)?),
+                    capabilities: AnalyticsCapabilities {
+                        token_usage: row.get(1)?,
+                        reasoning_tokens: row.get(2)?,
+                        explicit_runs: row.get(3)?,
+                        rate_limit_history: row.get(4)?,
+                    },
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok((coverage, capabilities))
+    }
+
+    pub fn analytics_revision(&self) -> Result<u64> {
+        self.conn
+            .query_row(
+                "SELECT value FROM meta WHERE key = 'analytics_revision'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+            .map(|value| value.parse::<u64>().context("invalid analytics revision"))
+            .transpose()
+            .map(|value| value.unwrap_or(0))
+    }
+
+    pub fn session_overview_metadata(
+        &self,
+        agent: Option<AgentKind>,
+    ) -> Result<(usize, Vec<AgentKind>)> {
+        let agent_value = agent.map(agent_label);
+        let total = self.conn.query_row(
+            "SELECT COUNT(*) FROM sessions WHERE ?1 IS NULL OR agent = ?1",
+            [agent_value],
+            |row| row.get::<_, i64>(0),
+        )? as usize;
+        let mut stmt = self.conn.prepare(
+            "SELECT DISTINCT agent FROM sessions
+             WHERE ?1 IS NULL OR agent = ?1
+             ORDER BY agent",
+        )?;
+        let agents = stmt
+            .query_map([agent_value], |row| {
+                Ok(parse_agent_label(&row.get::<_, String>(0)?))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok((total, agents))
+    }
+
+    fn analytics_overview_index_warnings(&self, agent: Option<AgentKind>) -> Result<Vec<String>> {
+        let agent_value = agent.map(agent_label);
+        let mut stmt = self.conn.prepare(
+            "SELECT session_path, overview_index_error
+             FROM session_analytics
+             WHERE overview_index_error IS NOT NULL
+               AND (?1 IS NULL OR agent = ?1)",
+        )?;
+        stmt.query_map([agent_value], |row| {
+            Ok(format!(
+                "analytics index unavailable for {}: {}",
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+            ))
+        })?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(Into::into)
+    }
+
+    pub fn backfill_session_analytics_overview_index_batch(
+        &self,
+        limit: usize,
+    ) -> Result<AnalyticsOverviewBackfillReport> {
+        let limit = limit.max(1).min(256) as i64;
+        let mut stmt = self.conn.prepare(
+            "SELECT session_id, agent, session_path, analytics_json, parser_state_json
+             FROM session_analytics
+             WHERE overview_indexed = 0
+             ORDER BY session_id, agent, session_path
+             LIMIT ?1",
+        )?;
+        let rows = stmt
+            .query_map([limit], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        drop(stmt);
+
+        let tx = self.conn.unchecked_transaction()?;
+        let mut processed = 0;
+        let mut failed = 0;
+        for (session_id, agent, session_path, analytics_json, parser_state_json) in rows {
+            let indexed = serde_json::from_str(&analytics_json).and_then(
+                |analytics: crate::analytics::SessionAnalytics| {
+                    serde_json::from_str(&parser_state_json)
+                        .map(|state| analytics.overview_index(&state))
+                },
+            );
+            let changed = match indexed {
+                Ok(index) => tx.execute(
+                    "UPDATE session_analytics
+                     SET event_min_date = ?1, event_max_date = ?2, has_activity = ?3,
+                         capability_token_usage = ?4, capability_reasoning_tokens = ?5,
+                         capability_explicit_runs = ?6,
+                         capability_rate_limit_history = ?7,
+                         overview_indexed = 1, overview_index_error = NULL
+                     WHERE session_id = ?8 AND agent = ?9 AND session_path = ?10
+                       AND overview_indexed = 0",
+                    params![
+                        index.first,
+                        index.last,
+                        index.has_activity,
+                        index.capabilities.token_usage,
+                        index.capabilities.reasoning_tokens,
+                        index.capabilities.explicit_runs,
+                        index.capabilities.rate_limit_history,
+                        session_id,
+                        agent,
+                        session_path,
+                    ],
+                )?,
+                Err(error) => {
+                    failed += 1;
+                    tx.execute(
+                        "UPDATE session_analytics
+                         SET overview_indexed = 1, overview_index_error = ?1
+                         WHERE session_id = ?2 AND agent = ?3 AND session_path = ?4
+                           AND overview_indexed = 0",
+                        params![error.to_string(), session_id, agent, session_path],
+                    )?
+                }
+            };
+            processed += changed;
+        }
+        if processed > 0 {
+            bump_analytics_revision(&tx)?;
+        }
+        tx.commit()?;
+        let remaining = self.conn.query_row(
+            "SELECT COUNT(*) FROM session_analytics WHERE overview_indexed = 0",
+            [],
+            |row| row.get::<_, i64>(0),
+        )? as usize;
+        Ok(AnalyticsOverviewBackfillReport {
+            processed,
+            failed,
+            remaining,
+            revision: self.analytics_revision()?,
+        })
+    }
+
     pub fn session_scan_cache(&self) -> Result<SessionScanCache> {
         let mut stmt = self.conn.prepare(
-            "SELECT sessions.data_json, search.file_mtime, search.file_size
+            "SELECT sessions.data_json,
+                    sessions.first_user_message,
+                    sessions.last_user_message,
+                    sessions.last_assistant_message,
+                    search.file_mtime,
+                    search.file_size
              FROM sessions
              JOIN session_search_index AS search
                ON search.session_id = sessions.id
@@ -893,21 +1321,39 @@ impl Store {
         let rows = stmt.query_map([], |row| {
             Ok((
                 row.get::<_, String>(0)?,
-                row.get::<_, i64>(1)?,
-                row.get::<_, i64>(2)?,
+                row.get::<_, Option<String>>(1)?,
+                row.get::<_, Option<String>>(2)?,
+                row.get::<_, Option<String>>(3)?,
+                row.get::<_, i64>(4)?,
+                row.get::<_, i64>(5)?,
             ))
         })?;
-        let entries =
-            rows.filter_map(Result::ok)
-                .filter_map(|(data_json, file_mtime, file_size)| {
-                    serde_json::from_str::<SessionRecord>(&data_json)
-                        .ok()
-                        .map(|session| SessionScanCacheEntry {
+        let entries = rows.filter_map(Result::ok).filter_map(
+            |(
+                data_json,
+                first_user_message,
+                last_user_message,
+                last_assistant_message,
+                file_mtime,
+                file_size,
+            )| {
+                serde_json::from_str::<SessionRecord>(&data_json)
+                    .ok()
+                    .map(|mut session| {
+                        Self::apply_session_preview_columns(
+                            &mut session,
+                            first_user_message,
+                            last_user_message,
+                            last_assistant_message,
+                        );
+                        SessionScanCacheEntry {
                             session,
                             file_mtime,
                             file_size,
-                        })
-                });
+                        }
+                    })
+            },
+        );
         Ok(SessionScanCache::from_entries(entries))
     }
 
@@ -958,15 +1404,34 @@ impl Store {
                 }
             }
             let path = canonical.path.display().to_string();
-            let data_json = serde_json::to_string(&canonical)?;
+            let data_json = Self::session_metadata_json(&canonical)?;
+            let first_user_message = bound_session_preview(canonical.first_user_message.clone());
+            let last_user_message = bound_session_preview(canonical.last_user_message.clone());
+            let last_assistant_message =
+                bound_session_preview(canonical.last_assistant_message.clone());
             let current = tx
                 .query_row(
-                    "SELECT data_json FROM sessions WHERE id = ?1 AND agent = ?2 AND path = ?3",
+                    "SELECT data_json, first_user_message, last_user_message, last_assistant_message
+                     FROM sessions WHERE id = ?1 AND agent = ?2 AND path = ?3",
                     params![canonical.id, agent, path],
-                    |row| row.get::<_, String>(0),
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, Option<String>>(1)?,
+                            row.get::<_, Option<String>>(2)?,
+                            row.get::<_, Option<String>>(3)?,
+                        ))
+                    },
                 )
                 .optional()?;
-            if current.as_deref() == Some(data_json.as_str()) {
+            if current.as_ref().is_some_and(
+                |(current_json, current_first, current_last, current_assistant)| {
+                    current_json == &data_json
+                        && current_first == &first_user_message
+                        && current_last == &last_user_message
+                        && current_assistant == &last_assistant_message
+                },
+            ) {
                 continue;
             }
             tx.execute(
@@ -974,14 +1439,17 @@ impl Store {
                 params![canonical.id, agent, path],
             )?;
             tx.execute(
-                "INSERT INTO sessions (id, agent, title, project, path, started_at, updated_at, message_count, data_json)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+                "INSERT INTO sessions (id, agent, title, project, path, started_at, updated_at, message_count, first_user_message, last_user_message, last_assistant_message, data_json)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
                  ON CONFLICT(id, agent, path) DO UPDATE SET
                     title = excluded.title,
                     project = excluded.project,
                     started_at = excluded.started_at,
                     updated_at = excluded.updated_at,
                     message_count = excluded.message_count,
+                    first_user_message = excluded.first_user_message,
+                    last_user_message = excluded.last_user_message,
+                    last_assistant_message = excluded.last_assistant_message,
                     data_json = excluded.data_json",
                 params![
                     canonical.id,
@@ -995,6 +1463,9 @@ impl Store {
                     canonical.started_at,
                     canonical.updated_at,
                     canonical.message_count.map(|value| value as i64),
+                    first_user_message,
+                    last_user_message,
+                    last_assistant_message,
                     data_json,
                 ],
             )?;
@@ -1069,6 +1540,9 @@ impl Store {
         let mut stmt = self.conn.prepare(
             "SELECT
                 sessions.data_json,
+                sessions.first_user_message,
+                sessions.last_user_message,
+                sessions.last_assistant_message,
                 bm25(
                     session_search_fts,
                     0.5, 10.0, 5.0, 6.0, 3.0
@@ -1097,16 +1571,32 @@ impl Store {
         let rows = stmt.query_map([query], |row| {
             Ok((
                 row.get::<_, String>(0)?,
-                row.get::<_, f64>(1)?,
-                row.get::<_, String>(2)?,
+                row.get::<_, Option<String>>(1)?,
+                row.get::<_, Option<String>>(2)?,
+                row.get::<_, Option<String>>(3)?,
+                row.get::<_, f64>(4)?,
+                row.get::<_, String>(5)?,
             ))
         })?;
         let mut hits = Vec::new();
         let mut seen = HashSet::new();
         for row in rows {
-            let (data_json, raw_score, snippet) = row?;
-            let session = serde_json::from_str::<SessionRecord>(&data_json)
+            let (
+                data_json,
+                first_user_message,
+                last_user_message,
+                last_assistant_message,
+                raw_score,
+                snippet,
+            ) = row?;
+            let mut session = serde_json::from_str::<SessionRecord>(&data_json)
                 .context("invalid cached session search row")?;
+            Self::apply_session_preview_columns(
+                &mut session,
+                first_user_message,
+                last_user_message,
+                last_assistant_message,
+            );
             let key = (
                 session.id.clone(),
                 agent_label(session.agent),
@@ -1141,6 +1631,9 @@ impl Store {
         let sql = format!(
             "SELECT
                 sessions.data_json,
+                sessions.first_user_message,
+                sessions.last_user_message,
+                sessions.last_assistant_message,
                 search.metadata_text,
                 search.title,
                 search.project,
@@ -1161,21 +1654,36 @@ impl Store {
         let rows = stmt.query_map(params_from_iter(patterns.iter()), |row| {
             Ok((
                 row.get::<_, String>(0)?,
+                row.get::<_, Option<String>>(1)?,
+                row.get::<_, Option<String>>(2)?,
+                row.get::<_, Option<String>>(3)?,
                 SessionSearchDocument {
-                    metadata_text: row.get(1)?,
-                    title: row.get(2)?,
-                    project: row.get(3)?,
-                    user_text: row.get(4)?,
-                    assistant_text: row.get(5)?,
+                    metadata_text: row.get(4)?,
+                    title: row.get(5)?,
+                    project: row.get(6)?,
+                    user_text: row.get(7)?,
+                    assistant_text: row.get(8)?,
                 },
             ))
         })?;
         let mut hits: Vec<SessionSearchHit> = Vec::new();
         let mut hit_indexes: HashMap<(String, &'static str, PathBuf), usize> = HashMap::new();
         for row in rows {
-            let (data_json, document) = row?;
-            let session = serde_json::from_str::<SessionRecord>(&data_json)
+            let (
+                data_json,
+                first_user_message,
+                last_user_message,
+                last_assistant_message,
+                document,
+            ) = row?;
+            let mut session = serde_json::from_str::<SessionRecord>(&data_json)
                 .context("invalid cached session search row")?;
+            Self::apply_session_preview_columns(
+                &mut session,
+                first_user_message,
+                last_user_message,
+                last_assistant_message,
+            );
             let key = (
                 session.id.clone(),
                 agent_label(session.agent),
@@ -1231,23 +1739,29 @@ impl Store {
         for session in &sessions.sessions {
             let agent = agent_label(session.agent);
             let path = session.path.display().to_string();
-            let data_json = serde_json::to_string(session)?;
+            let data_json = Self::session_metadata_json(session)?;
             tx.execute(
                 "INSERT INTO current_sessions (id, agent, path)
                  VALUES (?1, ?2, ?3)",
                 params![session.id, agent, path],
             )?;
             tx.execute(
-                "INSERT INTO sessions (id, agent, title, project, path, started_at, updated_at, message_count, data_json)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+                "INSERT INTO sessions (id, agent, title, project, path, started_at, updated_at, message_count, first_user_message, last_user_message, last_assistant_message, data_json)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
                  ON CONFLICT(id, agent, path) DO UPDATE SET
                     title = excluded.title,
                     project = excluded.project,
                     started_at = excluded.started_at,
                     updated_at = excluded.updated_at,
                     message_count = excluded.message_count,
+                    first_user_message = excluded.first_user_message,
+                    last_user_message = excluded.last_user_message,
+                    last_assistant_message = excluded.last_assistant_message,
                     data_json = excluded.data_json
-                 WHERE sessions.data_json IS NOT excluded.data_json",
+                 WHERE sessions.data_json IS NOT excluded.data_json
+                    OR sessions.first_user_message IS NOT excluded.first_user_message
+                    OR sessions.last_user_message IS NOT excluded.last_user_message
+                    OR sessions.last_assistant_message IS NOT excluded.last_assistant_message",
                 params![
                     session.id,
                     agent,
@@ -1257,6 +1771,9 @@ impl Store {
                     session.started_at,
                     session.updated_at,
                     session.message_count.map(|value| value as i64),
+                    bound_session_preview(session.first_user_message.clone()),
+                    bound_session_preview(session.last_user_message.clone()),
+                    bound_session_preview(session.last_assistant_message.clone()),
                     data_json,
                 ],
             )?;
@@ -1533,6 +2050,144 @@ impl Store {
             .map_err(Into::into)
     }
 
+    pub fn skill_source_records(&self) -> Result<Vec<SkillSourceRecord>> {
+        let mut statement = self
+            .conn
+            .prepare("SELECT data_json FROM skill_sources ORDER BY skill_name, skill_path")?;
+        let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
+        rows.map(|row| {
+            let data_json = row?;
+            serde_json::from_str::<SkillSourceRecord>(&data_json).map_err(|error| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    0,
+                    rusqlite::types::Type::Text,
+                    Box::new(error),
+                )
+            })
+        })
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(Into::into)
+    }
+
+    pub fn skill_source_record(&self, skill_path: &Path) -> Result<Option<SkillSourceRecord>> {
+        let data_json = self
+            .conn
+            .query_row(
+                "SELECT data_json FROM skill_sources WHERE skill_path = ?1",
+                params![skill_path.display().to_string()],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        data_json
+            .map(|data_json| serde_json::from_str(&data_json).map_err(Into::into))
+            .transpose()
+    }
+
+    pub fn insert_skill_source_records_if_missing(
+        &self,
+        records: &[SkillSourceRecord],
+    ) -> Result<usize> {
+        if records.is_empty() {
+            return Ok(0);
+        }
+        let tx = self.conn.unchecked_transaction()?;
+        let mut inserted = 0;
+        for record in records {
+            inserted += tx.execute(
+                "INSERT OR IGNORE INTO skill_sources (
+                    skill_path, skill_name, source_kind, source, source_ref, source_version,
+                    source_relative_path, update_status, origin, data_json
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                params![
+                    record.skill_path.display().to_string(),
+                    record.skill_name,
+                    record.source_kind,
+                    record.source,
+                    record.source_ref,
+                    record.source_version,
+                    record.source_relative_path,
+                    record.update_status,
+                    record.origin,
+                    serde_json::to_string(record)?,
+                ],
+            )?;
+        }
+        tx.commit()?;
+        Ok(inserted)
+    }
+
+    pub fn upsert_skill_source_records(&self, records: &[SkillSourceRecord]) -> Result<usize> {
+        if records.is_empty() {
+            return Ok(0);
+        }
+        let tx = self.conn.unchecked_transaction()?;
+        let mut changed = 0;
+        for record in records {
+            changed += tx.execute(
+                "INSERT INTO skill_sources (
+                    skill_path, skill_name, source_kind, source, source_ref, source_version,
+                    source_relative_path, update_status, origin, data_json
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+                 ON CONFLICT(skill_path) DO UPDATE SET
+                    skill_name = excluded.skill_name,
+                    source_kind = excluded.source_kind,
+                    source = excluded.source,
+                    source_ref = excluded.source_ref,
+                    source_version = excluded.source_version,
+                    source_relative_path = excluded.source_relative_path,
+                    update_status = excluded.update_status,
+                    origin = excluded.origin,
+                    data_json = excluded.data_json",
+                params![
+                    record.skill_path.display().to_string(),
+                    record.skill_name,
+                    record.source_kind,
+                    record.source,
+                    record.source_ref,
+                    record.source_version,
+                    record.source_relative_path,
+                    record.update_status,
+                    record.origin,
+                    serde_json::to_string(record)?,
+                ],
+            )?;
+        }
+        tx.commit()?;
+        Ok(changed)
+    }
+
+    pub fn delete_skill_source_records(&self, skill_paths: &[PathBuf]) -> Result<usize> {
+        if skill_paths.is_empty() {
+            return Ok(0);
+        }
+        let tx = self.conn.unchecked_transaction()?;
+        let mut deleted = 0;
+        for skill_path in skill_paths {
+            deleted += tx.execute(
+                "DELETE FROM skill_sources WHERE skill_path = ?1",
+                params![skill_path.display().to_string()],
+            )?;
+        }
+        tx.commit()?;
+        Ok(deleted)
+    }
+
+    pub fn delete_skill_source_records_for_names(&self, names: &[String]) -> Result<usize> {
+        if names.is_empty() {
+            return Ok(0);
+        }
+        let tx = self.conn.unchecked_transaction()?;
+        let mut deleted = 0;
+        for name in names {
+            deleted += tx.execute(
+                "DELETE FROM skill_sources WHERE skill_name = ?1",
+                params![name],
+            )?;
+        }
+        tx.commit()?;
+        Ok(deleted)
+    }
+
     pub fn save_skills(&self, skills: &SkillScan) -> Result<()> {
         if !skills.warnings.is_empty() {
             return Ok(());
@@ -1576,6 +2231,91 @@ impl Store {
             }
         }
 
+        tx.execute(
+            "INSERT INTO meta (key, value) VALUES ('skills_last_scan_at', ?1)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![unix_now().to_string()],
+        )?;
+        cleanup_stale_skill_link_rows(&tx)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn remove_skills(&self, names: &[String]) -> Result<()> {
+        if names.is_empty() {
+            return Ok(());
+        }
+
+        let tx = self.conn.unchecked_transaction()?;
+        for name in names {
+            tx.execute("DELETE FROM skills WHERE name = ?1", params![name])?;
+            tx.execute(
+                "DELETE FROM skill_paths WHERE skill_name = ?1",
+                params![name],
+            )?;
+        }
+        tx.execute(
+            "INSERT INTO meta (key, value) VALUES ('skills_last_scan_at', ?1)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![unix_now().to_string()],
+        )?;
+        cleanup_stale_skill_link_rows(&tx)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn save_skill_delta(&self, upserts: &[SkillRecord], removed: &[String]) -> Result<()> {
+        if upserts.is_empty() && removed.is_empty() {
+            return Ok(());
+        }
+
+        let tx = self.conn.unchecked_transaction()?;
+        for name in removed {
+            tx.execute("DELETE FROM skills WHERE name = ?1", params![name])?;
+            tx.execute(
+                "DELETE FROM skill_paths WHERE skill_name = ?1",
+                params![name],
+            )?;
+        }
+        for skill in upserts {
+            tx.execute(
+                "INSERT INTO skills (name, visibility, agents_json, description, is_system, data_json)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                 ON CONFLICT(name) DO UPDATE SET
+                   visibility = excluded.visibility,
+                   agents_json = excluded.agents_json,
+                   description = excluded.description,
+                   is_system = excluded.is_system,
+                   data_json = excluded.data_json",
+                params![
+                    skill.name,
+                    format!("{:?}", skill.visibility).to_lowercase(),
+                    serde_json::to_string(&skill.agents)?,
+                    skill.description,
+                    skill.is_system,
+                    serde_json::to_string(skill)?,
+                ],
+            )?;
+            tx.execute(
+                "DELETE FROM skill_paths WHERE skill_name = ?1",
+                params![skill.name],
+            )?;
+            for path in &skill.paths {
+                tx.execute(
+                    "INSERT INTO skill_paths (skill_name, path, root, scope, agent, sha256, data_json)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                    params![
+                        skill.name,
+                        path.path.display().to_string(),
+                        path.root.display().to_string(),
+                        path.scope,
+                        agent_label(path.agent),
+                        path.sha256,
+                        serde_json::to_string(path)?,
+                    ],
+                )?;
+            }
+        }
         tx.execute(
             "INSERT INTO meta (key, value) VALUES ('skills_last_scan_at', ?1)
              ON CONFLICT(key) DO UPDATE SET value = excluded.value",
@@ -1694,6 +2434,20 @@ impl Store {
                 sha256 TEXT NOT NULL,
                 data_json TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS skill_sources (
+                skill_path TEXT PRIMARY KEY,
+                skill_name TEXT NOT NULL,
+                source_kind TEXT NOT NULL,
+                source TEXT,
+                source_ref TEXT,
+                source_version TEXT,
+                source_relative_path TEXT,
+                update_status TEXT NOT NULL,
+                origin TEXT NOT NULL,
+                data_json TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_skill_sources_name
+                ON skill_sources(skill_name);
             CREATE TABLE IF NOT EXISTS sessions (
                 id TEXT NOT NULL,
                 agent TEXT NOT NULL,
@@ -1703,6 +2457,9 @@ impl Store {
                 started_at TEXT,
                 updated_at TEXT,
                 message_count INTEGER,
+                first_user_message TEXT,
+                last_user_message TEXT,
+                last_assistant_message TEXT,
                 data_json TEXT NOT NULL,
                 PRIMARY KEY (id, agent, path)
             );
@@ -1773,6 +2530,15 @@ impl Store {
                 indexed_at TEXT NOT NULL,
                 analytics_json TEXT NOT NULL,
                 parser_state_json TEXT NOT NULL,
+                event_min_date TEXT,
+                event_max_date TEXT,
+                has_activity INTEGER NOT NULL DEFAULT 0,
+                capability_token_usage INTEGER NOT NULL DEFAULT 0,
+                capability_reasoning_tokens INTEGER NOT NULL DEFAULT 0,
+                capability_explicit_runs INTEGER NOT NULL DEFAULT 0,
+                capability_rate_limit_history INTEGER NOT NULL DEFAULT 0,
+                overview_indexed INTEGER NOT NULL DEFAULT 1,
+                overview_index_error TEXT,
                 PRIMARY KEY (session_id, agent, session_path)
             );
             CREATE TABLE IF NOT EXISTS session_search_records (
@@ -1796,8 +2562,6 @@ impl Store {
                 ON session_skill_links(skill_path);
             CREATE INDEX IF NOT EXISTS idx_session_search_index_session
                 ON session_search_index(session_id, agent);
-            CREATE INDEX IF NOT EXISTS idx_session_analytics_agent
-                ON session_analytics(agent);
             CREATE INDEX IF NOT EXISTS idx_session_search_records_session
                 ON session_search_records(session_id, agent, session_path);
             CREATE TABLE IF NOT EXISTS rules (
@@ -1845,7 +2609,135 @@ impl Store {
             ",
         )?;
         self.ensure_prompt_tags_column()?;
+        self.ensure_skill_source_ref_column()?;
+        self.ensure_session_preview_columns()?;
+        self.ensure_session_analytics_overview_columns()?;
         self.ensure_session_search_fts()?;
+        Ok(())
+    }
+
+    fn ensure_skill_source_ref_column(&self) -> Result<()> {
+        let mut statement = self.conn.prepare("PRAGMA table_info(skill_sources)")?;
+        let columns = statement
+            .query_map([], |row| row.get::<_, String>(1))?
+            .collect::<Result<Vec<_>, _>>()?;
+        drop(statement);
+        if !columns.iter().any(|column| column == "source_ref") {
+            self.conn
+                .execute("ALTER TABLE skill_sources ADD COLUMN source_ref TEXT", [])?;
+        }
+        Ok(())
+    }
+
+    fn ensure_session_analytics_overview_columns(&self) -> Result<()> {
+        let tx = self.conn.unchecked_transaction()?;
+        let mut stmt = tx.prepare("PRAGMA table_info(session_analytics)")?;
+        let columns = stmt
+            .query_map([], |row| row.get::<_, String>(1))?
+            .collect::<Result<HashSet<_>, _>>()?;
+        drop(stmt);
+        for (name, definition) in [
+            ("event_min_date", "TEXT"),
+            ("event_max_date", "TEXT"),
+            ("has_activity", "INTEGER NOT NULL DEFAULT 0"),
+            ("capability_token_usage", "INTEGER NOT NULL DEFAULT 0"),
+            ("capability_reasoning_tokens", "INTEGER NOT NULL DEFAULT 0"),
+            ("capability_explicit_runs", "INTEGER NOT NULL DEFAULT 0"),
+            (
+                "capability_rate_limit_history",
+                "INTEGER NOT NULL DEFAULT 0",
+            ),
+            ("overview_indexed", "INTEGER NOT NULL DEFAULT 0"),
+            ("overview_index_error", "TEXT"),
+        ] {
+            if !columns.contains(name) {
+                tx.execute(
+                    &format!("ALTER TABLE session_analytics ADD COLUMN {name} {definition}"),
+                    [],
+                )?;
+            }
+        }
+        tx.execute_batch(
+            "CREATE INDEX IF NOT EXISTS idx_session_analytics_agent_max_date
+             ON session_analytics(agent, event_max_date);",
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    fn ensure_session_preview_columns(&self) -> Result<()> {
+        let tx = self.conn.unchecked_transaction()?;
+        let mut stmt = tx.prepare("PRAGMA table_info(sessions)")?;
+        let columns = stmt
+            .query_map([], |row| row.get::<_, String>(1))?
+            .collect::<Result<Vec<_>, _>>()?;
+        drop(stmt);
+        for (name, definition) in [
+            ("first_user_message", "TEXT"),
+            ("last_user_message", "TEXT"),
+            ("last_assistant_message", "TEXT"),
+        ] {
+            if !columns.iter().any(|column| column == name) {
+                tx.execute(
+                    &format!("ALTER TABLE sessions ADD COLUMN {name} {definition}"),
+                    [],
+                )?;
+            }
+        }
+
+        let already_backfilled = tx
+            .query_row(
+                "SELECT 1 FROM meta WHERE key = 'session_previews_backfilled' LIMIT 1",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()?
+            .is_some();
+        if !already_backfilled {
+            tx.execute_batch(&format!(
+                "UPDATE sessions AS target
+                 SET first_user_message = COALESCE(
+                         NULLIF(target.first_user_message, ''),
+                         (SELECT substr(records.user_text, 1, {SESSION_PREVIEW_MAX_CHARS})
+                          FROM session_search_records AS records
+                          WHERE records.session_id = target.id
+                            AND records.agent = target.agent
+                            AND records.session_path = target.path
+                            AND records.user_text <> ''
+                          ORDER BY records.record_order ASC
+                          LIMIT 1)
+                     ),
+                     last_user_message = COALESCE(
+                         NULLIF(target.last_user_message, ''),
+                         (SELECT substr(records.user_text, 1, {SESSION_PREVIEW_MAX_CHARS})
+                          FROM session_search_records AS records
+                          WHERE records.session_id = target.id
+                            AND records.agent = target.agent
+                            AND records.session_path = target.path
+                            AND records.user_text <> ''
+                          ORDER BY records.record_order DESC
+                          LIMIT 1)
+                     ),
+                     last_assistant_message = COALESCE(
+                         NULLIF(target.last_assistant_message, ''),
+                         (SELECT substr(records.assistant_text, 1, {SESSION_PREVIEW_MAX_CHARS})
+                          FROM session_search_records AS records
+                          WHERE records.session_id = target.id
+                            AND records.agent = target.agent
+                            AND records.session_path = target.path
+                            AND records.assistant_text <> ''
+                          ORDER BY records.record_order DESC
+                          LIMIT 1)
+                     )
+                 WHERE target.first_user_message IS NULL
+                    OR target.last_user_message IS NULL
+                    OR target.last_assistant_message IS NULL;
+                 INSERT INTO meta (key, value)
+                 VALUES ('session_previews_backfilled', '1')
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value;"
+            ))?;
+        }
+        tx.commit()?;
         Ok(())
     }
 
@@ -2207,7 +3099,7 @@ fn cleanup_stale_session_search_rows(conn: &rusqlite::Transaction<'_>) -> Result
 }
 
 fn cleanup_stale_session_analytics_rows(conn: &rusqlite::Transaction<'_>) -> Result<()> {
-    conn.execute(
+    let deleted = conn.execute(
         "DELETE FROM session_analytics
          WHERE NOT EXISTS (
             SELECT 1 FROM sessions
@@ -2215,6 +3107,19 @@ fn cleanup_stale_session_analytics_rows(conn: &rusqlite::Transaction<'_>) -> Res
               AND sessions.agent = session_analytics.agent
               AND sessions.path = session_analytics.session_path
          )",
+        [],
+    )?;
+    if deleted > 0 {
+        bump_analytics_revision(conn)?;
+    }
+    Ok(())
+}
+
+fn bump_analytics_revision(conn: &rusqlite::Transaction<'_>) -> Result<()> {
+    conn.execute(
+        "INSERT INTO meta (key, value) VALUES ('analytics_revision', '1')
+         ON CONFLICT(key) DO UPDATE
+         SET value = CAST(CAST(meta.value AS INTEGER) + 1 AS TEXT)",
         [],
     )?;
     Ok(())
@@ -2591,17 +3496,23 @@ mod tests {
         collections::BTreeMap,
         fmt::Write as _,
         fs,
-        path::PathBuf,
+        path::{Path, PathBuf},
         time::{SystemTime, UNIX_EPOCH},
     };
 
     use crate::{
         AgentScan, HookScan, McpScan, RuleScan, ScanReport, SessionRecord, SessionScan,
         SkillRecord, SkillScan, SkillVisibility,
+        analytics::{
+            AnalyticsParserState, AnalyticsResponseUsage, AnalyticsTokenUsage, SessionAnalytics,
+            SessionAnalyticsRecord,
+        },
         session_skills::{SessionFileState, SessionSkillLink},
-        sessions::SessionIdentity,
-        skills::{AgentKind, SkillPath, SkillRoot},
+        sessions::{SESSION_PREVIEW_MAX_CHARS, SessionIdentity},
+        skills::{AgentKind, SkillPath, SkillRoot, SkillSourceRecord},
     };
+    use chrono::{Local, TimeZone};
+    use rusqlite::params;
 
     use super::{
         AppSettings, PromptWrite, SESSION_SEARCH_RECORD_TEXT_LIMIT, Store,
@@ -2667,6 +3578,30 @@ mod tests {
     }
 
     #[test]
+    fn resolving_projects_normalizes_legacy_codex_chat_workspaces() {
+        let temp = temp_dir("tendi-storage-codex-chat-project");
+        fs::create_dir_all(&temp).unwrap();
+        let store = Store::open(temp.join("tendi.sqlite3")).unwrap();
+        let mut chat = session("chat", "Chat");
+        chat.project = Some(PathBuf::from(
+            "/Users/test/Documents/tutti/session-c98d1ced-5371-43cc-8173-9416c349a776",
+        ));
+
+        store
+            .resolve_session_projects(std::slice::from_mut(&mut chat))
+            .unwrap();
+
+        assert_eq!(
+            chat.project.as_deref(),
+            Some(Path::new("/Users/test/Documents/tutti"))
+        );
+        assert_eq!(chat.logical_project_name.as_deref(), Some("tutti"));
+
+        drop(store);
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
     fn manual_session_project_split_overrides_automatic_aliases() {
         let temp = temp_dir("tendi-storage-session-project-split");
         fs::create_dir_all(&temp).unwrap();
@@ -2698,11 +3633,16 @@ mod tests {
 
         let target = sessions[0].logical_project_id.clone().unwrap();
         let source = sessions[1].logical_project_id.clone().unwrap();
-        store
-            .merge_session_projects(&target, &[source])
-            .unwrap();
+        let target_name = store.merge_session_projects(&target, &[source]).unwrap();
+        assert_eq!(
+            target_name,
+            sessions[0].logical_project_name.clone().unwrap()
+        );
         store.resolve_session_projects(&mut sessions).unwrap();
-        assert_eq!(sessions[0].logical_project_id, sessions[1].logical_project_id);
+        assert_eq!(
+            sessions[0].logical_project_id,
+            sessions[1].logical_project_id
+        );
 
         drop(store);
         fs::remove_dir_all(temp).unwrap();
@@ -2715,11 +3655,17 @@ mod tests {
         let db = temp.join("tendi.sqlite3");
         let store = Store::open(&db).unwrap();
         assert_eq!(store.app_settings().unwrap().appearance, "system");
+        assert_eq!(store.app_settings().unwrap().light_theme, "gruvbox");
+        assert_eq!(store.app_settings().unwrap().dark_theme, "gruvbox");
+        assert_eq!(store.app_settings().unwrap().editor, "vscode");
 
         let saved = store
             .save_app_settings(AppSettings {
                 appearance: "dark".to_string(),
+                light_theme: "nord".to_string(),
+                dark_theme: "tokyo-night".to_string(),
                 terminal: "Warp".to_string(),
+                editor: "zed".to_string(),
                 additional_session_roots: vec![
                     "/tmp/tendi-additional-sessions".to_string(),
                     "\n/tmp/tendi-additional-sessions\n".to_string(),
@@ -2733,7 +3679,10 @@ mod tests {
             .unwrap();
 
         assert_eq!(saved.appearance, "dark");
+        assert_eq!(saved.light_theme, "nord");
+        assert_eq!(saved.dark_theme, "tokyo-night");
         assert_eq!(saved.terminal, "Warp");
+        assert_eq!(saved.editor, "zed");
         assert_eq!(saved.config_profiles["codex"], "deep-review");
         assert_eq!(saved.config_profiles["claude"], "safe-mode");
         assert_eq!(saved.config_profiles["cursor"], "safe-mode");
@@ -2781,6 +3730,200 @@ mod tests {
         fs::remove_dir_all(temp).unwrap();
     }
 
+    #[test]
+    fn remove_skills_cleans_skill_rows() {
+        let temp = temp_dir("tendi-storage-remove-skills");
+        fs::create_dir_all(&temp).unwrap();
+        let db = temp.join("tendi.sqlite3");
+        let store = Store::open(&db).unwrap();
+
+        store
+            .save_scan(&report_with_skill("remove-me", SkillVisibility::Auto))
+            .unwrap();
+        store.remove_skills(&["remove-me".to_string()]).unwrap();
+
+        assert_eq!(count(&store, "skills"), 0);
+        assert_eq!(count(&store, "skill_paths"), 0);
+
+        drop(store);
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn skill_source_lifecycle_upserts_looks_up_and_deletes_by_path() {
+        let temp = temp_dir("tendi-storage-skill-source-lifecycle");
+        fs::create_dir_all(&temp).unwrap();
+        let store = Store::open(temp.join("tendi.sqlite3")).unwrap();
+        let skill_path = temp.join("skills/demo");
+        let migrated = SkillSourceRecord {
+            skill_name: "demo".to_string(),
+            skill_path: skill_path.clone(),
+            source_kind: "github".to_string(),
+            source: Some("https://github.com/old/demo.git".to_string()),
+            source_ref: Some("main".to_string()),
+            source_version: Some("old".to_string()),
+            source_relative_path: Some("skills/demo".to_string()),
+            update_status: "tracked".to_string(),
+            origin: "skills-cli-lock".to_string(),
+        };
+        assert_eq!(
+            store
+                .insert_skill_source_records_if_missing(std::slice::from_ref(&migrated))
+                .unwrap(),
+            1
+        );
+
+        let installed = SkillSourceRecord {
+            source: Some("https://github.com/new/demo.git".to_string()),
+            source_ref: Some("release".to_string()),
+            source_version: Some("new".to_string()),
+            origin: "tendi-install".to_string(),
+            ..migrated
+        };
+        assert_eq!(
+            store
+                .upsert_skill_source_records(std::slice::from_ref(&installed))
+                .unwrap(),
+            1
+        );
+        let stored = store.skill_source_record(&skill_path).unwrap().unwrap();
+        assert_eq!(stored.source, installed.source);
+        assert_eq!(stored.source_ref, installed.source_ref);
+        assert_eq!(stored.source_version, installed.source_version);
+        assert_eq!(stored.origin, "tendi-install");
+
+        assert_eq!(
+            store
+                .delete_skill_source_records(std::slice::from_ref(&skill_path))
+                .unwrap(),
+            1
+        );
+        assert!(store.skill_source_record(&skill_path).unwrap().is_none());
+
+        drop(store);
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn opening_existing_database_adds_skill_source_ref_column() {
+        let temp = temp_dir("tendi-storage-skill-source-ref-migration");
+        fs::create_dir_all(&temp).unwrap();
+        let db = temp.join("tendi.sqlite3");
+        let connection = rusqlite::Connection::open(&db).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE skill_sources (
+                    skill_path TEXT PRIMARY KEY,
+                    skill_name TEXT NOT NULL,
+                    source_kind TEXT NOT NULL,
+                    source TEXT,
+                    source_version TEXT,
+                    source_relative_path TEXT,
+                    update_status TEXT NOT NULL,
+                    origin TEXT NOT NULL,
+                    data_json TEXT NOT NULL
+                );",
+            )
+            .unwrap();
+        drop(connection);
+
+        let store = Store::open(&db).unwrap();
+        let columns = store
+            .conn
+            .prepare("PRAGMA table_info(skill_sources)")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(1))
+            .unwrap()
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .unwrap();
+        assert!(columns.iter().any(|column| column == "source_ref"));
+
+        drop(store);
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn skill_delta_retains_source_records_as_database_authority() {
+        let temp = temp_dir("tendi-storage-skill-source-delta");
+        fs::create_dir_all(&temp).unwrap();
+        let store = Store::open(temp.join("tendi.sqlite3")).unwrap();
+        let mut report = report_with_skill("demo", SkillVisibility::Auto).skills;
+        let retained_path = report.skills[0].paths[0].path.clone();
+        let stale_path = retained_path.with_file_name("demo-old");
+        let other_path = retained_path.with_file_name("other");
+        let records = [
+            test_skill_source("demo", &retained_path),
+            test_skill_source("demo", &stale_path),
+            test_skill_source("other", &other_path),
+        ];
+        store.upsert_skill_source_records(&records).unwrap();
+
+        store.save_skill_delta(&report.skills, &[]).unwrap();
+
+        assert!(store.skill_source_record(&retained_path).unwrap().is_some());
+        assert!(store.skill_source_record(&stale_path).unwrap().is_some());
+        assert!(store.skill_source_record(&other_path).unwrap().is_some());
+
+        report.skills.clear();
+        store.save_skill_delta(&[], &["demo".to_string()]).unwrap();
+        assert!(store.skill_source_record(&retained_path).unwrap().is_some());
+        assert!(store.skill_source_record(&stale_path).unwrap().is_some());
+        assert!(store.skill_source_record(&other_path).unwrap().is_some());
+
+        drop(store);
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    fn test_skill_source(name: &str, path: &Path) -> SkillSourceRecord {
+        SkillSourceRecord {
+            skill_name: name.to_string(),
+            skill_path: path.to_path_buf(),
+            source_kind: "github".to_string(),
+            source: Some(format!("https://github.com/example/{name}.git")),
+            source_ref: Some("main".to_string()),
+            source_version: Some("abc123".to_string()),
+            source_relative_path: Some(format!("skills/{name}")),
+            update_status: "tracked".to_string(),
+            origin: "tendi-install".to_string(),
+        }
+    }
+
+    #[test]
+    fn skill_delta_does_not_overwrite_unrelated_rows() {
+        let temp = temp_dir("tendi-storage-skill-delta");
+        fs::create_dir_all(&temp).unwrap();
+        let store = Store::open(temp.join("tendi.sqlite3")).unwrap();
+        let mut alpha = report_with_skill("alpha", SkillVisibility::Auto).skills;
+        let beta = report_with_skill("beta", SkillVisibility::Auto)
+            .skills
+            .skills
+            .remove(0);
+        alpha.skills.push(beta.clone());
+        store.save_skills(&alpha).unwrap();
+
+        let mut externally_updated_beta = beta;
+        externally_updated_beta.description = Some("external beta".to_string());
+        store
+            .save_skill_delta(&[externally_updated_beta], &[])
+            .unwrap();
+        alpha.skills[0].description = Some("changed alpha".to_string());
+        store.save_skill_delta(&alpha.skills[..1], &[]).unwrap();
+
+        let beta_json = store
+            .conn
+            .query_row(
+                "SELECT data_json FROM skills WHERE name = 'beta'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap();
+        let beta_json = serde_json::from_str::<serde_json::Value>(&beta_json).unwrap();
+        assert_eq!(beta_json["description"], "external beta");
+
+        drop(store);
+        fs::remove_dir_all(temp).unwrap();
+    }
+
     fn report_with_skill(name: &str, visibility: SkillVisibility) -> ScanReport {
         let root = PathBuf::from("/tmp/tendi-test/.agents/skills");
         let path = root.join(name);
@@ -2813,6 +3956,7 @@ mod tests {
                         install_target: "shared:/tmp/tendi-test/.agents/skills".to_string(),
                         source_kind: "local".to_string(),
                         source: Some("local:/tmp/tendi-test/.agents/skills".to_string()),
+                        source_ref: None,
                         source_version: None,
                         source_relative_path: None,
                         symlink_status: "local".to_string(),
@@ -2885,6 +4029,101 @@ mod tests {
     }
 
     #[test]
+    fn session_preview_columns_round_trip_with_cached_sessions() {
+        let temp = temp_dir("tendi-storage-session-previews");
+        fs::create_dir_all(&temp).unwrap();
+        let db = temp.join("tendi.sqlite3");
+        let store = Store::open(&db).unwrap();
+        let mut record = session("preview", "Cached title");
+        record.first_user_message = Some("First question".to_string());
+        record.last_user_message = Some("Last question".to_string());
+        record.last_assistant_message = Some("Last answer".to_string());
+
+        store
+            .save_sessions(&SessionScan {
+                sessions: vec![record],
+                warnings: Vec::new(),
+            })
+            .unwrap();
+
+        let cached = store.list_sessions().unwrap();
+        assert_eq!(
+            cached.sessions[0].first_user_message.as_deref(),
+            Some("First question")
+        );
+        assert_eq!(
+            cached.sessions[0].last_user_message.as_deref(),
+            Some("Last question")
+        );
+        assert_eq!(
+            cached.sessions[0].last_assistant_message.as_deref(),
+            Some("Last answer")
+        );
+        let data_json = store
+            .conn
+            .query_row(
+                "SELECT data_json FROM sessions WHERE id = 'preview'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap();
+        let data_json = serde_json::from_str::<serde_json::Value>(&data_json).unwrap();
+        assert!(data_json.get("first_user_message").is_none());
+        assert!(data_json.get("last_user_message").is_none());
+        assert!(data_json.get("last_assistant_message").is_none());
+
+        let mut preview_update = cached.sessions[0].clone();
+        preview_update.last_user_message = Some("Updated by full save".to_string());
+        store
+            .save_sessions(&SessionScan {
+                sessions: vec![preview_update.clone()],
+                warnings: Vec::new(),
+            })
+            .unwrap();
+        assert_eq!(
+            store.list_sessions().unwrap().sessions[0]
+                .last_user_message
+                .as_deref(),
+            Some("Updated by full save")
+        );
+
+        preview_update.last_user_message = Some("Updated by delta".to_string());
+        assert_eq!(
+            store.apply_session_delta(&[preview_update]).unwrap().len(),
+            1
+        );
+        assert_eq!(
+            store.list_sessions().unwrap().sessions[0]
+                .last_user_message
+                .as_deref(),
+            Some("Updated by delta")
+        );
+
+        let oversized = "界".repeat(SESSION_PREVIEW_MAX_CHARS + 1);
+        let mut oversized_record = session("oversized-preview", "Cached title");
+        oversized_record.last_user_message = Some(oversized);
+        store
+            .save_sessions(&SessionScan {
+                sessions: vec![oversized_record],
+                warnings: Vec::new(),
+            })
+            .unwrap();
+        let bounded = store.list_sessions().unwrap();
+        assert_eq!(
+            bounded.sessions[0]
+                .last_user_message
+                .as_deref()
+                .unwrap()
+                .chars()
+                .count(),
+            SESSION_PREVIEW_MAX_CHARS + 1
+        );
+
+        drop(store);
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
     fn session_analytics_cache_skips_unchanged_appends_and_cleans_stale_rows() {
         use std::{fs::OpenOptions, io::Write};
 
@@ -2909,15 +4148,19 @@ mod tests {
                 warnings: Vec::new(),
             })
             .unwrap();
+        let initial_revision = store.analytics_revision().unwrap();
 
         let first = store
             .refresh_session_analytics(std::slice::from_ref(&record))
             .unwrap();
         assert_eq!((first.parsed, first.skipped, first.failed), (1, 0, 0));
+        let first_revision = store.analytics_revision().unwrap();
+        assert!(first_revision > initial_revision);
         let unchanged = store
             .refresh_session_analytics(std::slice::from_ref(&record))
             .unwrap();
         assert_eq!((unchanged.parsed, unchanged.skipped), (0, 1));
+        assert_eq!(store.analytics_revision().unwrap(), first_revision);
 
         let mut file = OpenOptions::new().append(true).open(&path).unwrap();
         writeln!(
@@ -2929,6 +4172,7 @@ mod tests {
             .refresh_session_analytics(std::slice::from_ref(&record))
             .unwrap();
         assert_eq!((appended.parsed, appended.appended), (1, 1));
+        assert!(store.analytics_revision().unwrap() > first_revision);
         let detail = store.session_analytics_detail(&record).unwrap();
         assert_eq!(detail.responses.len(), 2);
         assert_eq!(detail.responses[1].usage.total_tokens, 15);
@@ -2943,6 +4187,262 @@ mod tests {
             .unwrap();
         assert_eq!(count(&store, "session_analytics"), 0);
 
+        drop(store);
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn unchanged_analytics_skips_before_parsing_corrupt_cached_json() {
+        let temp = temp_dir("tendi-storage-analytics-skip-corrupt");
+        fs::create_dir_all(&temp).unwrap();
+        let path = temp.join("rollout.jsonl");
+        let timestamp = Local::now().to_rfc3339();
+        fs::write(
+            &path,
+            format!(
+                "{{\"timestamp\":\"{timestamp}\",\"type\":\"event_msg\",\"payload\":{{\"type\":\"token_count\",\"info\":{{\"total_token_usage\":{{\"input_tokens\":10,\"total_tokens\":10}}}}}}}}\n"
+            ),
+        )
+        .unwrap();
+        let store = Store::open(temp.join("tendi.sqlite3")).unwrap();
+        let mut record = session("skip-corrupt", "Skip corrupt");
+        record.path = path;
+        store
+            .save_sessions(&SessionScan {
+                sessions: vec![record.clone()],
+                warnings: Vec::new(),
+            })
+            .unwrap();
+        store
+            .refresh_session_analytics(std::slice::from_ref(&record))
+            .unwrap();
+        store
+            .conn
+            .execute(
+                "UPDATE session_analytics SET analytics_json = 'not-json'",
+                [],
+            )
+            .unwrap();
+
+        let refresh = store
+            .refresh_session_analytics(std::slice::from_ref(&record))
+            .unwrap();
+
+        assert_eq!((refresh.parsed, refresh.skipped, refresh.failed), (0, 1, 0));
+        assert!(refresh.warnings.is_empty());
+        drop(store);
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn overview_filters_json_by_local_day_without_shrinking_full_history_metadata() {
+        let temp = temp_dir("tendi-storage-overview-window");
+        fs::create_dir_all(&temp).unwrap();
+        let store = Store::open(temp.join("tendi.sqlite3")).unwrap();
+        let today = Local::now().date_naive();
+        let yesterday = today.pred_opt().unwrap();
+        let today_timestamp = Local
+            .from_local_datetime(&today.and_hms_opt(12, 0, 0).unwrap())
+            .single()
+            .unwrap()
+            .to_rfc3339();
+        let yesterday_timestamp = Local
+            .from_local_datetime(&yesterday.and_hms_opt(23, 59, 0).unwrap())
+            .single()
+            .unwrap()
+            .to_rfc3339();
+        store
+            .save_session_analytics_records(&[
+                analytics_record("old", AgentKind::Claude, &yesterday_timestamp, 10),
+                analytics_record("current", AgentKind::Codex, &today_timestamp, 25),
+            ])
+            .unwrap();
+        store
+            .conn
+            .execute(
+                "UPDATE session_analytics SET analytics_json = 'not-json' WHERE session_id = 'old'",
+                [],
+            )
+            .unwrap();
+
+        let overview = store.overview_analytics(None, 1, 1).unwrap();
+
+        assert_eq!(overview.summary.usage.total_tokens, 25);
+        assert_eq!(overview.days.len(), 1);
+        assert_eq!(overview.days[0].date, today.to_string());
+        let today = today.to_string();
+        let yesterday = yesterday.to_string();
+        assert_eq!(overview.coverage.first.as_deref(), Some(yesterday.as_str()));
+        assert_eq!(overview.coverage.last.as_deref(), Some(today.as_str()));
+        assert_eq!(overview.coverage.total_sessions, 2);
+        assert_eq!(overview.coverage.analyzed_sessions, 2);
+        assert!(
+            overview
+                .capabilities
+                .iter()
+                .any(|entry| entry.agent == AgentKind::Claude)
+        );
+        assert!(
+            overview
+                .capabilities
+                .iter()
+                .any(|entry| entry.agent == AgentKind::Codex)
+        );
+
+        drop(store);
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn analytics_overview_index_migrates_old_schema_in_resumable_batches() {
+        let temp = temp_dir("tendi-storage-overview-migration");
+        fs::create_dir_all(&temp).unwrap();
+        let db = temp.join("tendi.sqlite3");
+        let timestamp = Local::now().to_rfc3339();
+        let records = (0..3)
+            .map(|index| {
+                analytics_record(
+                    &format!("legacy-{index}"),
+                    AgentKind::Codex,
+                    &timestamp,
+                    10 + index,
+                )
+            })
+            .collect::<Vec<_>>();
+        let connection = rusqlite::Connection::open(&db).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE session_analytics (
+                    session_id TEXT NOT NULL,
+                    agent TEXT NOT NULL,
+                    session_path TEXT NOT NULL,
+                    file_mtime INTEGER NOT NULL,
+                    file_size INTEGER NOT NULL,
+                    indexed_at TEXT NOT NULL,
+                    analytics_json TEXT NOT NULL,
+                    parser_state_json TEXT NOT NULL,
+                    PRIMARY KEY (session_id, agent, session_path)
+                );",
+            )
+            .unwrap();
+        for record in &records {
+            connection
+                .execute(
+                "INSERT INTO session_analytics
+                 (session_id, agent, session_path, file_mtime, file_size, indexed_at, analytics_json, parser_state_json)
+                 VALUES (?1, 'codex', ?2, 0, 0, '0', ?3, ?4)",
+                params![
+                    record.analytics.session_id,
+                    record.analytics.session_path.display().to_string(),
+                    serde_json::to_string(&record.analytics).unwrap(),
+                    serde_json::to_string(&record.state).unwrap(),
+                ],
+                )
+                .unwrap();
+        }
+        drop(connection);
+
+        let store = Store::open(&db).unwrap();
+        assert_eq!(
+            store
+                .conn
+                .query_row(
+                    "SELECT SUM(overview_indexed) FROM session_analytics",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            0,
+        );
+        let first = store
+            .backfill_session_analytics_overview_index_batch(1)
+            .unwrap();
+        assert_eq!((first.processed, first.remaining), (1, 2));
+        let indexed_date = store
+            .conn
+            .query_row(
+                "SELECT event_max_date FROM session_analytics WHERE overview_indexed = 1 LIMIT 1",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap();
+        assert_eq!(indexed_date, Local::now().date_naive().to_string());
+        store
+            .conn
+            .execute(
+                "UPDATE session_analytics SET analytics_json = 'not-json' WHERE overview_indexed = 1",
+                [],
+            )
+            .unwrap();
+        drop(store);
+
+        let reopened = Store::open(&db).unwrap();
+        let second = reopened
+            .backfill_session_analytics_overview_index_batch(1)
+            .unwrap();
+        assert_eq!((second.processed, second.remaining), (1, 1));
+        let third = reopened
+            .backfill_session_analytics_overview_index_batch(1)
+            .unwrap();
+        assert_eq!((third.processed, third.remaining), (1, 0));
+        drop(reopened);
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn overview_hot_path_does_not_parse_unindexed_legacy_json() {
+        let temp = temp_dir("tendi-storage-overview-unindexed");
+        fs::create_dir_all(&temp).unwrap();
+        let store = Store::open(temp.join("tendi.sqlite3")).unwrap();
+        store
+            .conn
+            .execute(
+                "INSERT INTO session_analytics (
+                    session_id, agent, session_path, file_mtime, file_size,
+                    indexed_at, analytics_json, parser_state_json, overview_indexed
+                 ) VALUES ('legacy', 'codex', '/tmp/legacy.jsonl', 0, 0, '0', 'not-json', '{}', 0)",
+                [],
+            )
+            .unwrap();
+
+        let overview = store.overview_analytics(None, 30, 30).unwrap();
+
+        assert_eq!(overview.coverage.indexing_sessions, 1);
+        assert!(overview.warnings.is_empty());
+        drop(store);
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn concurrent_store_open_serializes_schema_migrations() {
+        let temp = temp_dir("tendi-storage-concurrent-open");
+        fs::create_dir_all(&temp).unwrap();
+        let db = temp.join("tendi.sqlite3");
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let handles = (0..2)
+            .map(|_| {
+                let db = db.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    Store::open(db).map(|store| drop(store))
+                })
+            })
+            .collect::<Vec<_>>();
+
+        for handle in handles {
+            handle.join().unwrap().unwrap();
+        }
+        let store = Store::open(&db).unwrap();
+        let columns = store
+            .conn
+            .prepare("PRAGMA table_info(session_analytics)")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(1))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert!(columns.iter().any(|column| column == "overview_indexed"));
         drop(store);
         fs::remove_dir_all(temp).unwrap();
     }
@@ -3392,6 +4892,9 @@ mod tests {
             started_at: Some("2026-06-23T10:00:00Z".to_string()),
             updated_at: Some(format!("2026-06-23T10:0{}:00Z", id.len())),
             message_count: Some(id.len()),
+            first_user_message: None,
+            last_user_message: None,
+            last_assistant_message: None,
             turn_count: Some(id.len()),
             model: None,
             mode: None,
@@ -3399,6 +4902,37 @@ mod tests {
             is_run_everything: None,
             parent_session_id: None,
             token_usage: None,
+        }
+    }
+
+    fn analytics_record(
+        id: &str,
+        agent: AgentKind,
+        timestamp: &str,
+        total_tokens: u64,
+    ) -> SessionAnalyticsRecord {
+        let usage = AnalyticsTokenUsage {
+            input_tokens: total_tokens,
+            total_tokens,
+            ..AnalyticsTokenUsage::default()
+        };
+        SessionAnalyticsRecord {
+            analytics: SessionAnalytics {
+                session_id: id.to_string(),
+                agent,
+                session_path: PathBuf::from(format!("/tmp/{id}.jsonl")),
+                responses: vec![AnalyticsResponseUsage {
+                    index: 1,
+                    timestamp: timestamp.to_string(),
+                    model: "test-model".to_string(),
+                    usage,
+                    cumulative: usage,
+                }],
+                ..SessionAnalytics::default()
+            },
+            state: AnalyticsParserState::default(),
+            file_mtime: 0,
+            file_size: 0,
         }
     }
 

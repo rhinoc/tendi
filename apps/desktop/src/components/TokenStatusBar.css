@@ -19,7 +19,7 @@
   border-radius: 8px;
   color: var(--muted);
   background: var(--panel-bg);
-  box-shadow: var(--shadow-menu);
+  box-shadow: var(--shadow-border);
   font-family: var(--font-mono);
   font-size: 11px;
   line-height: 1.2;
@@ -51,7 +51,7 @@
   background:
     linear-gradient(var(--accent-soft), var(--accent-soft)),
     var(--panel-bg);
-  box-shadow: 0 0 0 1px var(--focus-ring-soft), var(--shadow-menu);
+  box-shadow: inset 0 0 0 1px var(--focus-ring-soft), var(--shadow-border);
 }
 
 .tokenStatusCluster:has(.tokenEstimateInfo:hover),

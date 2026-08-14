@@ -1,8 +1,8 @@
 import { Tooltip as AppTooltip } from "../components/shared/Tooltip.tsx";
 import { lazy, memo, Suspense, useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent, type ReactNode } from "react";
-import { AlertCircle, ArrowUpRight, BarChart3, Check, ChevronDown, ChevronLeft, ChevronRight, ChevronRight as ChevronRightIcon, FolderOpen, GitFork, GitMerge, Info, MessageSquareText, PanelRightClose, RefreshCw, Search, TerminalSquare, Upload, Wrench, X } from "lucide-react";
+import { AlertCircle, ArrowUpRight, BarChart3, Check, ChevronDown, ChevronLeft, ChevronRight, ChevronRight as ChevronRightIcon, Filter, FolderOpen, GitFork, GitMerge, Info, MessageSquareText, PanelRightClose, RefreshCw, Search, Sparkles, TerminalSquare, Upload, X } from "lucide-react";
 import { Group as PanelGroup, Panel } from "react-resizable-panels";
-import { Dialog, DropdownMenu, Popover, Tooltip } from "radix-ui";
+import { ContextMenu, Dialog, DropdownMenu, Popover, Tooltip } from "radix-ui";
 
 import { DataTable } from "../components/DataTable.tsx";
 import type { ColumnDef, SortState } from "../components/DataTable.types";
@@ -10,13 +10,20 @@ import type { TokenMetricProps } from "../components/TokenStatusBar.tsx";
 import { AgentBadge } from "../components/shared/AgentBadge.tsx";
 import { CopyButton } from "../components/shared/CopyButton.tsx";
 import { CopyableSessionId } from "../components/shared/CopyableSessionId.tsx";
+import { CopyPathMenuItem, CopyTextMenuItem, RevealInFinderMenuItem } from "../components/shared/DataTableMenus.tsx";
 import { DetailPanelHost } from "../components/shared/DetailPanelHost.tsx";
 import { DialogActionBar } from "../components/shared/DialogActionBar.tsx";
+import { DialogActionButton } from "../components/shared/DialogActionButton.tsx";
 import { DialogTextField } from "../components/shared/DialogTextField.tsx";
+import { InfoSection } from "../components/shared/InfoSection.tsx";
+import { LoadingIcon } from "../components/shared/LoadingIcon.tsx";
 import { LoadingInline } from "../components/shared/LoadingInline.tsx";
 import { PageHeader } from "../components/shared/PageHeader.tsx";
+import { RadialConvergenceChart } from "../components/shared/RadialConvergenceChart.tsx";
+import { SearchField } from "../components/shared/SearchField.tsx";
 import { SelectControl } from "../components/shared/SelectControl.tsx";
 import { createSessionTableColumns } from "../components/shared/createSessionTableColumns.tsx";
+import { TranscriptLinkText } from "../components/shared/TranscriptLinkText.tsx";
 import "./SessionsView.css";
 import { cacheRateTone } from "../lib/token-style.ts";
 import { supportsResponseTokenUsage, type SessionAnalyticsDetail } from "../lib/analytics.ts";
@@ -25,11 +32,14 @@ import {
   TauriCommand,
   compactDateTime,
   compareSessions,
+  createLatestRequestAuthority,
   dayGroupKey,
   formatDuration,
   friendlyAgent,
   groupTranscriptItems,
-  parseJsonlTranscript,
+  isWebSource,
+  mergeTranscriptItems,
+  resolveInitialSession,
   safeInvoke,
   sessionCacheRate,
   sessionKind,
@@ -38,7 +48,9 @@ import {
   sessionWorkspace,
   sessionWorkspacePath,
   transcriptItemType,
+  transcriptItemsSize,
 } from "../lib/index.ts";
+import type { JsonlTranscriptParseResult, SessionProjectDelta, TranscriptPage } from "../lib/index.ts";
 
 const SessionTokenStatusBar = lazy(() => import("../components/SessionTokenStatusBar.tsx").then(({ SessionTokenStatusBar: component }) => ({ default: component })));
 
@@ -61,6 +73,9 @@ export type SessionRecord = {
   updatedLabel?: string;
   updatedDetailLabel?: string;
   messages?: number;
+  firstUserMessage?: string;
+  lastUserMessage?: string;
+  lastAssistantMessage?: string;
   turnCount?: number;
   model?: string;
   mode?: string;
@@ -116,9 +131,85 @@ type SkillIndexStatus = {
 const SESSION_SEARCH_DEBOUNCE_MS = 300;
 const SESSION_LOCATOR_MIN_ITEMS = 4;
 const IMPORTED_SESSION_AGENT = "Imported";
+const TRANSCRIPT_CACHE_ITEM_LIMIT = 1_200;
+const TRANSCRIPT_CACHE_CHARACTER_LIMIT = 8 * 1024 * 1024;
 type SessionResumeState = "idle" | "loading" | "success" | "error";
 type ImportFeedbackState = "idle" | "loading" | "success" | "warning" | "error";
 type ResumeFeedbackState = Exclude<SessionResumeState, "idle">;
+
+type TranscriptImportWorkerResponse =
+  | { ok: true; result: JsonlTranscriptParseResult }
+  | { ok: false; error: string };
+
+function parseImportedTranscript(
+  file: File,
+  workerRef: { current: { worker: Worker; cancel: () => void } | null },
+): Promise<JsonlTranscriptParseResult> {
+  const worker = new Worker(
+    new URL("../workers/transcript-import.worker.ts", import.meta.url),
+    { type: "module" },
+  );
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const cleanup = () => {
+      if (workerRef.current?.worker === worker) workerRef.current = null;
+      worker.terminate();
+    };
+    const cancel = () => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(new Error("Transcript import cancelled"));
+    };
+    worker.onmessage = (event: MessageEvent<TranscriptImportWorkerResponse>) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      if (event.data.ok) resolve(event.data.result);
+      else reject(new Error(event.data.error));
+    };
+    worker.onerror = (event) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(new Error(event.message || "Transcript import worker failed"));
+    };
+    workerRef.current = { worker, cancel };
+    try {
+      worker.postMessage(file);
+    } catch (error) {
+      settled = true;
+      cleanup();
+      reject(error);
+    }
+  });
+}
+
+function trimTranscriptCache(cache: Map<string, TranscriptPage>) {
+  let itemCount = 0;
+  let characterCount = 0;
+  for (const page of cache.values()) {
+    itemCount += page.items.length;
+    characterCount += transcriptItemsSize(page.items);
+  }
+  while (
+    cache.size > 1
+    && (itemCount > TRANSCRIPT_CACHE_ITEM_LIMIT || characterCount > TRANSCRIPT_CACHE_CHARACTER_LIMIT)
+  ) {
+    const oldestKey = cache.keys().next().value;
+    if (oldestKey === undefined) break;
+    const oldest = cache.get(oldestKey);
+    cache.delete(oldestKey);
+    if (oldest) {
+      itemCount -= oldest.items.length;
+      characterCount -= transcriptItemsSize(oldest.items);
+    }
+  }
+  if (cache.size === 1 && (itemCount > TRANSCRIPT_CACHE_ITEM_LIMIT || characterCount > TRANSCRIPT_CACHE_CHARACTER_LIMIT)) {
+    const key = cache.keys().next().value;
+    if (key !== undefined) cache.delete(key);
+  }
+}
 
 type TranscriptSearchScope = "user" | "assistant" | "system" | "tool";
 
@@ -221,6 +312,7 @@ type SkillEvidenceTarget = {
 };
 
 type TranscriptSearchTarget = SkillEvidenceTarget;
+type AnalyticsResponse = SessionAnalyticsDetail["responses"][number];
 
 type SessionLocatorItem = {
   key: string;
@@ -288,6 +380,73 @@ function findSkillEvidenceTarget(transcriptItems: TranscriptItemRecord[], link: 
     }
   }
   return null;
+}
+
+function responseClock(value: unknown) {
+  const text = `${value ?? ""}`.trim();
+  const isoClock = text.match(/T(\d{2}:\d{2})/);
+  if (isoClock) return isoClock[1];
+  const clock = text.match(/\b(\d{1,2}):(\d{2})\b/);
+  return clock ? `${clock[1].padStart(2, "0")}:${clock[2]}` : "";
+}
+
+function clockMinutes(value: string) {
+  const match = value.match(/^(\d{2}):(\d{2})$/);
+  if (!match) return null;
+  return Number(match[1]) * 60 + Number(match[2]);
+}
+
+function findResponseTarget(
+  transcriptItems: TranscriptItemRecord[],
+  response: AnalyticsResponse,
+  allowApproximate = false,
+): SkillEvidenceTarget | null {
+  const candidates = transcriptItems.flatMap((item, index) => (
+    transcriptItemType(item) === "assistant"
+      ? [{ item, index }]
+      : []
+  ));
+  if (candidates.length === 0) return null;
+
+  const responseTime = responseClock(response.timestamp);
+  if (responseTime) {
+    const indexedCandidate = candidates[response.index - 1];
+    if (indexedCandidate && responseClock(indexedCandidate.item.time) === responseTime) {
+      return { key: transcriptItemKey("assistant", indexedCandidate.index) };
+    }
+    const exactCandidates = candidates.filter(({ item }) => responseClock(item.time) === responseTime);
+    const exact = exactCandidates.length === 0 ? undefined : indexedCandidate
+      ? exactCandidates.reduce((closest, candidate) => (
+        Math.abs(candidate.index - indexedCandidate.index) < Math.abs(closest.index - indexedCandidate.index)
+          ? candidate
+          : closest
+      ), exactCandidates[0])
+      : exactCandidates[0];
+    if (exact) return { key: transcriptItemKey("assistant", exact.index) };
+  }
+
+  if (!allowApproximate) return null;
+
+  const responseMinutes = clockMinutes(responseTime);
+  if (responseMinutes !== null) {
+    let closest = candidates[0];
+    let closestDistance = Number.POSITIVE_INFINITY;
+    for (const candidate of candidates) {
+      const itemMinutes = clockMinutes(responseClock(candidate.item.time));
+      if (itemMinutes === null) continue;
+      const distance = Math.abs(itemMinutes - responseMinutes);
+      if (distance < closestDistance) {
+        closest = candidate;
+        closestDistance = distance;
+      }
+    }
+    if (closestDistance < Number.POSITIVE_INFINITY) {
+      return { key: transcriptItemKey("assistant", closest.index) };
+    }
+  }
+
+  const fallback = candidates[Math.min(Math.max(response.index - 1, 0), candidates.length - 1)];
+  return { key: transcriptItemKey("assistant", fallback.index) };
 }
 
 function findTranscriptSearchTargets(
@@ -370,7 +529,6 @@ function highlightTranscriptText(value: string | undefined, query: string): Reac
   return parts;
 }
 
-
 function cssEscape(value: string) {
   return window.CSS?.escape ? window.CSS.escape(value) : `${value}`.replace(/["\\]/g, "\\$&");
 }
@@ -381,6 +539,8 @@ export function TranscriptPanel({
   childSessions,
   items,
   loading,
+  hasMore,
+  loadingMore,
   skillLinks,
   loadingSkillLinks,
   skillLinksLoaded,
@@ -390,6 +550,7 @@ export function TranscriptPanel({
   onOpenSession,
   onOpenSkill,
   onLoadSkills,
+  onLoadMore,
   loadAnalytics,
 }: {
   session: SessionRecord;
@@ -397,6 +558,8 @@ export function TranscriptPanel({
   childSessions: SessionRecord[];
   items: TranscriptItemRecord[];
   loading: boolean;
+  hasMore: boolean;
+  loadingMore: boolean;
   skillLinks: SkillLinkRecord[];
   loadingSkillLinks: boolean;
   skillLinksLoaded: boolean;
@@ -406,6 +569,7 @@ export function TranscriptPanel({
   onOpenSession: (session: SessionRecord) => void;
   onOpenSkill?: (skillName: string) => void;
   onLoadSkills?: () => void;
+  onLoadMore: () => Promise<TranscriptItemRecord[] | null>;
   loadAnalytics?: (session: SessionRecord) => Promise<SessionAnalyticsDetail | null>;
 }) {
   const transcriptItems = useMemo(() => {
@@ -429,6 +593,13 @@ export function TranscriptPanel({
   const hasReportedUsage = Boolean(session.tokenUsage);
   const cacheMetrics = useMemo(() => sessionCacheMetrics(session), [session]);
   const transcriptRef = useRef<HTMLDivElement | null>(null);
+  const loadMoreRef = useRef<HTMLDivElement | null>(null);
+  const transcriptItemsRef = useRef(items);
+  const hasMoreRef = useRef(hasMore);
+  const loadingMoreRef = useRef(loadingMore);
+  transcriptItemsRef.current = transcriptItems;
+  hasMoreRef.current = hasMore;
+  loadingMoreRef.current = loadingMore;
   const searchInputRef = useRef<HTMLInputElement | null>(null);
   const [highlightedKey, setHighlightedKey] = useState("");
   const [searchQuery, setSearchQuery] = useState("");
@@ -501,6 +672,17 @@ export function TranscriptPanel({
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, []);
+  useEffect(() => {
+    if (!hasMore || loadingMore) return;
+    const root = transcriptRef.current;
+    const sentinel = loadMoreRef.current;
+    if (!root || !sentinel) return;
+    const observer = new IntersectionObserver((entries) => {
+      if (entries.some((entry) => entry.isIntersecting)) void onLoadMore();
+    }, { root, rootMargin: "0px 0px 320px 0px" });
+    observer.observe(sentinel);
+    return () => observer.disconnect();
+  }, [hasMore, loadingMore, onLoadMore]);
   const focusTranscriptTarget = useCallback((target: TranscriptSearchTarget, preferSearchMatch = false, behavior: ScrollBehavior = "smooth") => {
     window.clearTimeout(highlightTimerRef.current);
     setHighlightedKey(target.key);
@@ -536,6 +718,26 @@ export function TranscriptPanel({
     const target = findSkillEvidenceTarget(transcriptItems, link);
     if (target) focusTranscriptTarget(target);
   }, [focusTranscriptTarget, transcriptItems]);
+  const jumpToResponse = useCallback((response: AnalyticsResponse) => {
+    const findTarget = (itemsToSearch: TranscriptItemRecord[], allowApproximate = false) => (
+      findResponseTarget(itemsToSearch, response, allowApproximate)
+    );
+    const findLoadedTarget = async () => {
+      let itemsToSearch = transcriptItemsRef.current;
+      let target = findTarget(itemsToSearch);
+      while (!target && hasMoreRef.current && !loadingMoreRef.current) {
+        const loadedItems = await onLoadMore();
+        if (!loadedItems) break;
+        itemsToSearch = groupTranscriptItems(loadedItems) as TranscriptItemRecord[];
+        target = findTarget(itemsToSearch);
+      }
+      return target ?? findTarget(itemsToSearch, true);
+    };
+    void findLoadedTarget().then((target) => {
+      if (target) focusTranscriptTarget(target);
+    });
+    return true;
+  }, [focusTranscriptTarget, onLoadMore]);
   const selectLocatorItem = useCallback((key: string, behavior?: ScrollBehavior) => {
     focusTranscriptTarget({ key }, false, behavior);
   }, [focusTranscriptTarget]);
@@ -580,7 +782,7 @@ export function TranscriptPanel({
               onClick={() => onResume(session)}
             >
               {resumeState === "loading"
-                ? <RefreshCw className="loadingSpinner" size={15} />
+                ? <LoadingIcon size={15} />
                 : resumeState === "success"
                   ? <Check size={15} />
                   : resumeState === "error"
@@ -606,6 +808,7 @@ export function TranscriptPanel({
               loading={analyticsLoading}
               available={responseUsageAvailable}
               onLoad={loadSessionAnalytics}
+              onJumpToResponse={jumpToResponse}
             />
             <SessionInfoMenu session={session} />
             <button className="threadPanelToggle" aria-label="Collapse session detail" onClick={onCollapse}><PanelRightClose size={16} /></button>
@@ -664,8 +867,8 @@ export function TranscriptPanel({
             <Search size={14} aria-hidden="true" />
             <input
               ref={searchInputRef}
-              aria-label="Search messages in this session"
-              placeholder="Search messages"
+              aria-label={hasMore ? "Search loaded messages" : "Search messages in this session"}
+              placeholder={hasMore ? "Search loaded messages" : "Search messages"}
               value={searchQuery}
               onChange={(event) => setSearchQuery(event.target.value)}
               onKeyDown={(event) => {
@@ -694,20 +897,30 @@ export function TranscriptPanel({
         ) : null}
       </header>
       <div className={`transcript ${locatorItems.length >= SESSION_LOCATOR_MIN_ITEMS ? "withSessionLocator" : ""}`} ref={transcriptRef}>
-        {loading ? <div className="emptyState"><LoadingInline label="Loading transcript" /></div> : transcriptItems.length > 0 ? transcriptItems.map((item, index) => {
-          const itemKey = transcriptItemKey(transcriptItemType(item) === "toolGroup" ? "tool-group" : transcriptItemType(item) || "item", index);
-          return (
-            <div className="transcriptItemShell" key={`${transcriptItemType(item)}-${index}`}>
-              <TranscriptItem
-                item={item}
-                itemKey={itemKey}
-                highlightedKey={highlightedKey}
-                searchQuery={transcriptItemSearchQuery(item, normalizedSearchQuery, searchScopes)}
-                onOpenLinkedSession={openLinkedSession}
-              />
-            </div>
-          );
-        }) : <div className="emptyState">No transcript items</div>}
+        {loading ? <div className="emptyState"><LoadingInline label="Loading transcript" /></div> : transcriptItems.length > 0 ? (
+          <>
+            {transcriptItems.map((item, index) => {
+              const itemKey = transcriptItemKey(transcriptItemType(item) === "toolGroup" ? "tool-group" : transcriptItemType(item) || "item", index);
+              return (
+                <div className="transcriptItemShell" key={`${transcriptItemType(item)}-${index}`}>
+                  <TranscriptItem
+                    item={item}
+                    itemKey={itemKey}
+                    highlightedKey={highlightedKey}
+                    searchQuery={transcriptItemSearchQuery(item, normalizedSearchQuery, searchScopes)}
+                    onOpenLinkedSession={openLinkedSession}
+                  />
+                </div>
+              );
+            })}
+            {hasMore ? (
+              <>
+                {loadingMore ? <div className="sessionTranscriptLoadMore" aria-live="polite"><LoadingInline label="Loading more messages" /></div> : null}
+                <div ref={loadMoreRef} className="sessionTranscriptLoadMoreSentinel" aria-hidden="true" />
+              </>
+            ) : null}
+          </>
+        ) : <div className="emptyState">No transcript items</div>}
       </div>
       <SessionLocator
         items={locatorItems}
@@ -715,13 +928,15 @@ export function TranscriptPanel({
         onSelect={selectLocatorItem}
       />
       <Suspense fallback={null}>
-        <SessionTokenStatusBar
-          items={items}
-          skillLinks={skillLinks}
-          reportedSegments={reportedSegments}
-          metrics={cacheMetrics}
-          usageSource={hasReportedUsage ? "reported" : "estimated"}
-        />
+        {hasReportedUsage || !hasMore ? (
+          <SessionTokenStatusBar
+            items={items}
+            skillLinks={skillLinks}
+            reportedSegments={reportedSegments}
+            metrics={cacheMetrics}
+            usageSource={hasReportedUsage ? "reported" : "estimated"}
+          />
+        ) : null}
       </Suspense>
     </aside>
   );
@@ -866,12 +1081,15 @@ export function SessionUsagePopover({
   loading,
   available,
   onLoad,
+  onJumpToResponse,
 }: {
   analytics: SessionAnalyticsDetail | null;
   loading: boolean;
   available: boolean;
   onLoad: () => void;
+  onJumpToResponse?: (response: AnalyticsResponse) => boolean;
 }) {
+  const [open, setOpen] = useState(false);
   if (!available) {
     return (
       <AppTooltip content="Response token usage unavailable for this provider"><button
@@ -885,8 +1103,12 @@ export function SessionUsagePopover({
   }
   const responses = analytics?.responses.slice(-100).reverse() ?? [];
   const reasoningTokens = Boolean(analytics?.capabilities.reasoningTokens);
+  const jumpToResponse = (response: AnalyticsResponse) => {
+    if (!onJumpToResponse?.(response)) return;
+    setOpen(false);
+  };
   return (
-    <Popover.Root onOpenChange={(open) => { if (open) onLoad(); }}>
+    <Popover.Root open={open} onOpenChange={(nextOpen) => { setOpen(nextOpen); if (nextOpen) onLoad(); }}>
       <AppTooltip content="Response token usage">
         <Popover.Trigger asChild>
           <button
@@ -926,7 +1148,19 @@ export function SessionUsagePopover({
                 </thead>
                 <tbody>
                   {responses.map((response) => (
-                    <tr key={`${response.index}:${response.timestamp}`}>
+                    <tr
+                      key={`${response.index}:${response.timestamp}`}
+                      className={onJumpToResponse ? "sessionUsageRowClickable" : undefined}
+                      role={onJumpToResponse ? "button" : undefined}
+                      tabIndex={onJumpToResponse ? 0 : undefined}
+                      aria-label={onJumpToResponse ? `Jump to response ${response.index}` : undefined}
+                      onClick={onJumpToResponse ? () => jumpToResponse(response) : undefined}
+                      onKeyDown={onJumpToResponse ? (event) => {
+                        if (event.key !== "Enter" && event.key !== " ") return;
+                        event.preventDefault();
+                        jumpToResponse(response);
+                      } : undefined}
+                    >
                       <td>{response.index}</td>
                       <td>{compactDateTime(response.timestamp)}</td>
                       <AppTooltip content={response.model} onlyWhenTruncated><td>{response.model || "—"}</td></AppTooltip>
@@ -995,13 +1229,14 @@ export function SessionRelationsPopover({
       </AppTooltip>
       <Popover.Portal>
         <Popover.Content
-          className="sessionRelationsPopover"
+          className="sessionRelationsPopover hasChart"
           align="end"
           sideOffset={8}
           data-no-drag
           onMouseDown={(event) => event.stopPropagation()}
         >
           <div className="sessionRelationsHeader">Related sessions</div>
+          <SessionRelationsConvergence parentSession={parentSession} childSessions={childSessions} />
           <div className="sessionRelationsList">
             {parentSession ? relationButton(parentSession, "Parent") : null}
             {childSessions.map((session) => relationButton(session, "Child"))}
@@ -1043,7 +1278,7 @@ export function SessionSkillsPopover({
     return (
       <AppTooltip content={disabledReason}><span className="sessionSkillsTriggerWrap">
         <button className="threadPanelToggle" aria-label={disabledReason} disabled>
-          <Wrench size={15} />
+          <Sparkles size={15} />
         </button>
       </span></AppTooltip>
     );
@@ -1054,13 +1289,13 @@ export function SessionSkillsPopover({
       <AppTooltip content="Skills used">
         <Popover.Trigger asChild>
           <button className="threadPanelToggle" aria-label="Show skills used">
-            <Wrench size={15} />
+            <Sparkles size={15} />
           </button>
         </Popover.Trigger>
       </AppTooltip>
       <Popover.Portal>
         <Popover.Content
-          className="sessionSkillsPopover"
+          className={`sessionSkillsPopover${links.length > 0 ? " hasChart" : ""}`}
           align="end"
           sideOffset={8}
           data-no-drag
@@ -1075,6 +1310,51 @@ export function SessionSkillsPopover({
         </Popover.Content>
       </Popover.Portal>
     </Popover.Root>
+  );
+}
+
+
+function SessionSkillsConvergence({ links }: { links: SkillLinkRecord[] }) {
+  const nodes = links.map((link, index) => {
+    const name = linkSkillName(link) || "Unnamed skill";
+    return {
+      key: `${link.skill_path ?? link.skillPath ?? name}-${index}`,
+      label: name,
+    };
+  });
+  return (
+    <RadialConvergenceChart
+      nodes={nodes}
+      centerLabel="SKILLS"
+      ariaLabel={`${links.length} skills used in this session`}
+    />
+  );
+}
+
+
+function SessionRelationsConvergence({
+  parentSession,
+  childSessions,
+}: {
+  parentSession?: SessionRecord;
+  childSessions: SessionRecord[];
+}) {
+  const nodes = [
+    ...(parentSession ? [{
+      key: `parent-${sessionKey(parentSession)}`,
+      label: `Parent · ${parentSession.title || parentSession.id || "Untitled session"}`,
+    }] : []),
+    ...childSessions.map((session) => ({
+      key: `child-${sessionKey(session)}`,
+      label: `Child · ${session.title || session.id || "Untitled session"}`,
+    })),
+  ];
+  return (
+    <RadialConvergenceChart
+      nodes={nodes}
+      centerLabel="LINKED"
+      ariaLabel={`${nodes.length} related sessions linked to this session`}
+    />
   );
 }
 
@@ -1098,32 +1378,35 @@ export function SessionSkillsUsed({
       {loading ? (
         <div className="sessionSkillsEmpty"><LoadingInline label="Loading skills" /></div>
       ) : links.length > 0 ? (
-        <div className="sessionSkillChips">
-          {links.map((link) => (
-            <div
-              className="sessionSkillChip"
-              key={`${link.skill_path ?? link.skillPath ?? linkSkillName(link)}`}
-            >
-              <AppTooltip content={linkEvidenceText(link)} onlyWhenTruncated><span>{linkSkillName(link)}</span></AppTooltip>
-              <div className="sessionSkillChipActions">
-                <AppTooltip content="Open skill"><button
-                  type="button"
-                  aria-label={`Open ${linkSkillName(link)} skill`}
-                  onClick={() => onOpenSkill?.(linkSkillName(link))}
-                >
-                  <Wrench size={12} />
-                </button></AppTooltip>
-                <AppTooltip content="Go to session message"><button
-                  type="button"
-                  aria-label={`Go to ${linkSkillName(link)} usage in transcript`}
-                  onClick={() => onJumpToEvidence?.(link)}
-                >
-                  <MessageSquareText size={12} />
-                </button></AppTooltip>
+        <>
+          <SessionSkillsConvergence links={links} />
+          <div className="sessionSkillChips">
+            {links.map((link) => (
+              <div
+                className="sessionSkillChip"
+                key={`${link.skill_path ?? link.skillPath ?? linkSkillName(link)}`}
+              >
+                <AppTooltip content={linkEvidenceText(link)} onlyWhenTruncated><span>{linkSkillName(link)}</span></AppTooltip>
+                <div className="sessionSkillChipActions">
+                  <AppTooltip content="Open skill"><button
+                    type="button"
+                    aria-label={`Open ${linkSkillName(link)} skill`}
+                    onClick={() => onOpenSkill?.(linkSkillName(link))}
+                  >
+                    <Sparkles size={12} />
+                  </button></AppTooltip>
+                  <AppTooltip content="Go to session message"><button
+                    type="button"
+                    aria-label={`Go to ${linkSkillName(link)} usage in transcript`}
+                    onClick={() => onJumpToEvidence?.(link)}
+                  >
+                    <MessageSquareText size={12} />
+                  </button></AppTooltip>
+                </div>
               </div>
-            </div>
-          ))}
-        </div>
+            ))}
+          </div>
+        </>
       ) : (
         <div className="sessionSkillsEmpty">No observed skill reads</div>
       )}
@@ -1152,22 +1435,14 @@ export function SessionInfoMenu({ session }: { session: SessionRecord }) {
             <strong>{session.title}</strong>
           </div>
           <div className="skillInfoSections">
-            <section className="skillInfoSection">
-              <span>Session ID</span>
-              <div className="skillInfoValueLine">
+            <InfoSection label="Session ID">
                 <CopyableSessionId sessionId={sessionId} className="inInfoMenu" />
-              </div>
-            </section>
-            <section className="skillInfoSection">
-              <span>Agent</span>
-              <div className="skillInfoValueLine">
+            </InfoSection>
+            <InfoSection label="Agent">
                 <AgentBadge agent={friendlyAgent(session.agent)} small />
                 <strong>{friendlyAgent(session.agent)}</strong>
-              </div>
-            </section>
-            <section className="skillInfoSection">
-              <span>Workspace</span>
-              <div className="skillInfoValueLine">
+            </InfoSection>
+            <InfoSection label="Workspace">
                 <AppTooltip content={workspace} onlyWhenTruncated><code>{workspace}</code></AppTooltip>
                 {hasWorkspacePath && (
                   <button
@@ -1179,10 +1454,8 @@ export function SessionInfoMenu({ session }: { session: SessionRecord }) {
                   </button>
                 )}
                 <CopyButton className="skillInfoIconButton" value={workspace} copyLabel="Copy workspace" copiedLabel="Workspace copied" />
-              </div>
-            </section>
-            <section className="skillInfoSection">
-              <span>Timeline</span>
+            </InfoSection>
+            <InfoSection label="Timeline" valueLine={false}>
               <div className="sessionTimeline">
                 <div className="sessionTimelineItem">
                   <span className="sessionTimelineDot" aria-hidden="true" />
@@ -1199,19 +1472,14 @@ export function SessionInfoMenu({ session }: { session: SessionRecord }) {
                   </div>
                 </div>
               </div>
-            </section>
+            </InfoSection>
             {session.model && (
-              <section className="skillInfoSection">
-                <span>Model</span>
-                <div className="skillInfoValueLine">
+              <InfoSection label="Model">
                   <AppTooltip content={session.model} onlyWhenTruncated><code>{session.model}</code></AppTooltip>
-                </div>
-              </section>
+              </InfoSection>
             )}
             {transcriptPath && (
-              <section className="skillInfoSection">
-                <span>Transcript</span>
-                <div className="skillInfoValueLine">
+              <InfoSection label="Transcript">
                   <AppTooltip content={transcriptPath} onlyWhenTruncated><code>{transcriptPath}</code></AppTooltip>
                   <button
                     aria-label="Reveal transcript in Finder"
@@ -1220,9 +1488,8 @@ export function SessionInfoMenu({ session }: { session: SessionRecord }) {
                   >
                     <FolderOpen size={13} />
                   </button>
-                  <CopyButton className="skillInfoIconButton" value={transcriptPath} copyLabel="Copy transcript path" copiedLabel="Transcript path copied" title="Copy path" />
-                </div>
-              </section>
+                  <CopyButton className="skillInfoIconButton" value={transcriptPath} copyLabel="Copy transcript path" copiedLabel="Transcript path copied" />
+              </InfoSection>
             )}
           </div>
         </DropdownMenu.Content>
@@ -1279,7 +1546,7 @@ export const TranscriptItem = memo(function TranscriptItem({
   return (
     <div className={`chatLine ${isUser ? "fromUser" : "fromAgent"} ${highlighted ? "transcriptTarget" : ""}`} data-transcript-key={itemKey}>
       <div className="bubble">
-        <p>{highlightTranscriptText(body, searchQuery)}</p>
+        <p><TranscriptLinkText query={searchQuery} value={body} /></p>
         <div className="bubbleFooter">
           {item.time?.trim() ? <time>{item.time}</time> : <span />}
           {copyable ? (
@@ -1288,7 +1555,6 @@ export const TranscriptItem = memo(function TranscriptItem({
               value={body}
               copyLabel={isUser ? "Copy user message" : "Copy model message"}
               copiedLabel="Message copied"
-              title="Copy message"
             />
           ) : null}
         </div>
@@ -1367,10 +1633,11 @@ export function ContextBlock({
   const [open, setOpen] = useState(false);
   const body = `${item.body ?? ""}`;
   const label = `${item.tag || "Context"}`;
+  const contextKind = label === "Developer" || label === "System" ? label.toLowerCase() : "generic";
   const preview = body.split(/\r?\n/).find((line) => line.trim())?.trim() || label;
   return (
     <details
-      className={`thinkingBlock contextBlock ${highlighted ? "transcriptTarget" : ""}`}
+      className={`thinkingBlock contextBlock ${contextKind} ${highlighted ? "transcriptTarget" : ""}`}
       data-transcript-key={itemKey}
       onToggle={(event) => setOpen(event.currentTarget.open)}
     >
@@ -1551,6 +1818,62 @@ type GroupedSessionPage = {
   groupCount: number;
 };
 
+type SessionProjectOption = {
+  key: string;
+  label: string;
+  title: string;
+  count: number;
+};
+
+type ProjectSearchRank = {
+  distance: number;
+  start: number;
+  length: number;
+};
+
+function projectSearchRank(label: string, query: string): ProjectSearchRank | null {
+  const value = [...label.toLowerCase()];
+  const needle = [...query.toLowerCase()];
+  if (needle.length === 0) return null;
+
+  const required = new Map<string, number>();
+  for (const character of needle) required.set(character, (required.get(character) ?? 0) + 1);
+
+  const found = new Map<string, number>();
+  let complete = 0;
+  let left = 0;
+  let best: ProjectSearchRank | null = null;
+  for (let right = 0; right < value.length; right += 1) {
+    const character = value[right];
+    const requiredCount = required.get(character) ?? 0;
+    if (requiredCount === 0) continue;
+    const nextCount = (found.get(character) ?? 0) + 1;
+    found.set(character, nextCount);
+    if (nextCount <= requiredCount) complete += 1;
+
+    while (complete === needle.length && left <= right) {
+      const candidate = {
+        distance: right - left + 1,
+        start: left,
+        length: value.length,
+      } satisfies ProjectSearchRank;
+      if (!best || candidate.distance < best.distance || (candidate.distance === best.distance && candidate.start < best.start)) {
+        best = candidate;
+      }
+
+      const leftCharacter = value[left];
+      const leftRequiredCount = required.get(leftCharacter) ?? 0;
+      if (leftRequiredCount > 0) {
+        const leftCount = (found.get(leftCharacter) ?? 0) - 1;
+        found.set(leftCharacter, leftCount);
+        if (leftCount < leftRequiredCount) complete -= 1;
+      }
+      left += 1;
+    }
+  }
+  return best;
+}
+
 function sessionGroupKeyForPaging(session: SessionRecord, groupBy: string) {
   if (groupBy === "agent") return friendlyAgent(session.agent);
   if (groupBy === "project") return sessionProjectGroupKey(session);
@@ -1629,7 +1952,7 @@ export function SessionsView({
   onSessionProjectsChanged,
 }: {
   sessions: SessionRecord[];
-  loadTranscript: (session: SessionRecord) => Promise<TranscriptItemRecord[]>;
+  loadTranscript: (session: SessionRecord, cursor?: string, knownSourceVersion?: string) => Promise<TranscriptPage>;
   loadSessionAnalytics?: (session: SessionRecord) => Promise<SessionAnalyticsDetail | null>;
   searchSessions?: (query: string) => Promise<SessionRecord[]>;
   loadSessionSkillLinks?: (session: SessionRecord) => Promise<SkillLinkRecord[]>;
@@ -1639,9 +1962,12 @@ export function SessionsView({
   onOpenSkill?: (skillName: string) => void;
   activeSessionKey?: string;
   skillIndexStatus?: SkillIndexStatus | null;
-  onSessionProjectsChanged?: (sessions: unknown[]) => void;
+  onSessionProjectsChanged?: (delta: SessionProjectDelta) => void;
 }) {
-  const [activeId, setActiveId] = useState(sessionItems[0]?.id ?? "");
+  const [activeRowId, setActiveRowId] = useState(() => {
+    const initialSession = resolveInitialSession(sessionItems, activeSessionKey);
+    return initialSession ? sessionTableRowId(initialSession) : "";
+  });
   const [importedSessions, setImportedSessions] = useState<SessionRecord[]>([]);
   const [importedTranscripts, setImportedTranscripts] = useState<Record<string, TranscriptItemRecord[]>>({});
   const [importFeedback, setImportFeedback] = useState<ImportFeedbackState>("idle");
@@ -1654,6 +1980,8 @@ export function SessionsView({
   const [groupBy, setGroupBy] = useState<string | null>(null);
   const [showChildSessions, setShowChildSessions] = useState(false);
   const [items, setItems] = useState<TranscriptItemRecord[]>([]);
+  const [nextTranscriptCursor, setNextTranscriptCursor] = useState<string | undefined>();
+  const [loadingMoreTranscript, setLoadingMoreTranscript] = useState(false);
   const [skillLinks, setSkillLinks] = useState<SkillLinkRecord[]>([]);
   const [skillLinksKey, setSkillLinksKey] = useState("");
   const [loadingSkillLinks, setLoadingSkillLinks] = useState(false);
@@ -1669,11 +1997,24 @@ export function SessionsView({
   const [splitProjectName, setSplitProjectName] = useState("");
   const [projectActionBusy, setProjectActionBusy] = useState(false);
   const [projectActionError, setProjectActionError] = useState("");
+  const [selectedProjectKeys, setSelectedProjectKeys] = useState<string[]>([]);
+  const [projectFilterQuery, setProjectFilterQuery] = useState("");
+  const [projectFilterOpen, setProjectFilterOpen] = useState(false);
   const [debouncedQuery, setDebouncedQuery] = useState("");
+  const transcriptItemsRef = useRef(items);
+  const nextTranscriptCursorRef = useRef(nextTranscriptCursor);
+  const loadingMoreTranscriptRef = useRef(loadingMoreTranscript);
+  transcriptItemsRef.current = items;
+  nextTranscriptCursorRef.current = nextTranscriptCursor;
+  loadingMoreTranscriptRef.current = loadingMoreTranscript;
   const importInputRef = useRef<HTMLInputElement | null>(null);
+  const importWorkerRef = useRef<{ worker: Worker; cancel: () => void } | null>(null);
+  const projectFilterInputRef = useRef<HTMLInputElement | null>(null);
   const importFeedbackTimerRef = useRef<number | undefined>(undefined);
   const resumeFeedbackTimerRef = useRef<Record<string, number>>({});
   const skillLinksRequestKeyRef = useRef("");
+  const transcriptRequestAuthorityRef = useRef(createLatestRequestAuthority());
+  const transcriptCacheRef = useRef(new Map<string, TranscriptPage>());
   const normalizedInputQuery = query.trim().toLowerCase();
   const normalizedQuery = debouncedQuery;
   const remoteSearchActive = Boolean(normalizedQuery && searchSessions);
@@ -1710,9 +2051,72 @@ export function SessionsView({
   }, []);
   useEffect(() => () => {
     clearImportFeedbackTimer();
+    importWorkerRef.current?.cancel();
+    importWorkerRef.current = null;
     Object.values(resumeFeedbackTimerRef.current).forEach((timer) => window.clearTimeout(timer));
   }, [clearImportFeedbackTimer]);
   const listSessionItems = useMemo(() => [...importedSessions, ...sessionItems], [importedSessions, sessionItems]);
+  const projectSourceSessionItems = useMemo(
+    () => showChildSessions ? listSessionItems : listSessionItems.filter((session) => sessionKind(session) === "main"),
+    [listSessionItems, showChildSessions],
+  );
+  const projectOptions = useMemo<SessionProjectOption[]>(() => {
+    const options = new Map<string, SessionProjectOption>();
+    for (const session of projectSourceSessionItems) {
+      const key = sessionProjectGroupKey(session);
+      const option = options.get(key);
+      if (option) {
+        option.count += 1;
+      } else {
+        options.set(key, {
+          key,
+          label: sessionProject(session),
+          title: session.repositoryUrl || sessionWorkspace(session),
+          count: 1,
+        });
+      }
+    }
+    return [...options.values()].sort((left, right) => left.label.localeCompare(right.label) || left.title.localeCompare(right.title));
+  }, [projectSourceSessionItems]);
+  const selectedProjectKeySet = useMemo(() => new Set(selectedProjectKeys), [selectedProjectKeys]);
+  const visibleProjectOptions = useMemo(() => {
+    const normalizedProjectFilterQuery = projectFilterQuery.trim().toLowerCase();
+    const filtered = projectOptions.filter((option) => (
+      selectedProjectKeySet.has(option.key)
+      || !normalizedProjectFilterQuery
+      || projectSearchRank(option.label, normalizedProjectFilterQuery) !== null
+    ));
+    return [...filtered].sort((left, right) => {
+      const leftSelected = selectedProjectKeySet.has(left.key);
+      const rightSelected = selectedProjectKeySet.has(right.key);
+      if (leftSelected !== rightSelected) return leftSelected ? -1 : 1;
+
+      if (normalizedProjectFilterQuery) {
+        const leftRank = projectSearchRank(left.label, normalizedProjectFilterQuery);
+        const rightRank = projectSearchRank(right.label, normalizedProjectFilterQuery);
+        if (leftRank && rightRank) {
+          return leftRank.distance - rightRank.distance
+            || leftRank.start - rightRank.start
+            || leftRank.length - rightRank.length;
+        }
+      } else {
+        const lengthOrder = left.label.length - right.label.length;
+        if (lengthOrder !== 0) return lengthOrder;
+      }
+      return left.label.localeCompare(right.label) || left.title.localeCompare(right.title);
+    });
+  }, [projectFilterQuery, projectOptions, selectedProjectKeySet]);
+  useEffect(() => {
+    const availableKeys = new Set(projectOptions.map((option) => option.key));
+    setSelectedProjectKeys((current) => {
+      const next = current.filter((key) => availableKeys.has(key));
+      return next.length === current.length ? current : next;
+    });
+  }, [projectOptions]);
+  useEffect(() => {
+    if (!projectFilterOpen) return;
+    window.requestAnimationFrame(() => projectFilterInputRef.current?.focus());
+  }, [projectFilterOpen]);
   const selectedSessionRows = useMemo(() => {
     const selected = new Set(selectedSessionIds);
     return listSessionItems.filter((session) => selected.has(sessionTableRowId(session)));
@@ -1768,11 +2172,16 @@ export function SessionsView({
         }
       }
       for (const session of remoteRows) matches.set(sessionTableRowId(session), session);
-      return [...matches.values()];
+      return [...matches.values()].filter((session) => selectedProjectKeySet.size === 0 || selectedProjectKeySet.has(sessionProjectGroupKey(session)));
     }
-    if (!normalizedQuery) return listSessionItems;
-    return listSessionItems.filter((session) => sessionMatchesQuery(session, normalizedQuery));
-  }, [listSessionItems, normalizedQuery, searchRows, searchRowsKey, searchSessions, sessionMatchesQuery]);
+    if (!normalizedQuery) return selectedProjectKeySet.size === 0
+      ? listSessionItems
+      : listSessionItems.filter((session) => selectedProjectKeySet.has(sessionProjectGroupKey(session)));
+    return listSessionItems.filter((session) => (
+      sessionMatchesQuery(session, normalizedQuery)
+      && (selectedProjectKeySet.size === 0 || selectedProjectKeySet.has(sessionProjectGroupKey(session)))
+    ));
+  }, [listSessionItems, normalizedQuery, searchRows, searchRowsKey, searchSessions, selectedProjectKeySet, sessionMatchesQuery]);
   const childSessionCount = useMemo(
     () => matchedSessions.filter((session) => sessionKind(session) === "child").length,
     [matchedSessions],
@@ -1833,19 +2242,19 @@ export function SessionsView({
     if (currentPage >= pageCount) setCurrentPage(pageCount - 1);
   }, [currentPage, pageCount]);
   useEffect(() => {
-    if (activeId && !sortedSessions.some((session) => session.id === activeId)) setActiveId("");
-  }, [activeId, sortedSessions]);
+    if (activeRowId && !sortedSessions.some((session) => sessionTableRowId(session) === activeRowId)) setActiveRowId("");
+  }, [activeRowId, sortedSessions]);
   useEffect(() => {
     if (!activeSessionKey) return;
     const next = allSessionItems.find((session) => sessionKey(session) === `${activeSessionKey}`.toLowerCase());
     if (next) {
       if (sessionKind(next) === "child") setShowChildSessions(true);
-      setActiveId(next.id);
+      setActiveRowId(sessionTableRowId(next));
       setDetailCollapsed(false);
     }
   }, [activeSessionKey, allSessionItems]);
   const openSession = useCallback((session: SessionRecord) => {
-    setActiveId(session.id);
+    setActiveRowId(sessionTableRowId(session));
     setDetailCollapsed(false);
   }, []);
   const refreshSessions = useCallback(async () => {
@@ -1867,15 +2276,15 @@ export function SessionsView({
     setProjectActionBusy(true);
     setProjectActionError("");
     try {
-      const rows = await safeInvoke<unknown[]>(TauriCommand.SessionsProjectMerge, {
+      const delta = await safeInvoke<SessionProjectDelta>(TauriCommand.SessionsProjectMerge, {
         targetProjectId: projectIds[0],
         sourceProjectIds: projectIds.slice(1),
       });
-      if (!rows) {
+      if (!delta) {
         setProjectActionError("Could not merge projects");
         return;
       }
-      onSessionProjectsChanged?.(rows);
+      onSessionProjectsChanged?.(delta);
       setSelectedSessionIds([]);
     } finally {
       setProjectActionBusy(false);
@@ -1894,7 +2303,7 @@ export function SessionsView({
     setProjectActionBusy(true);
     setProjectActionError("");
     try {
-      const rows = await safeInvoke<unknown[]>(TauriCommand.SessionsProjectSplit, {
+      const delta = await safeInvoke<SessionProjectDelta>(TauriCommand.SessionsProjectSplit, {
         name,
         sessions: pendingSplitSessions.map((session) => ({
           id: session.id,
@@ -1902,11 +2311,11 @@ export function SessionsView({
           path: session.path,
         })),
       });
-      if (!rows) {
+      if (!delta) {
         setProjectActionError("Could not split sessions into a project");
         return;
       }
-      onSessionProjectsChanged?.(rows);
+      onSessionProjectsChanged?.(delta);
       setPendingSplitSessions([]);
       setSelectedSessionIds([]);
     } finally {
@@ -1918,8 +2327,7 @@ export function SessionsView({
     setImportFeedback("loading");
     setImportError("");
     try {
-      const text = await file.text();
-      const parsed = parseJsonlTranscript(text);
+      const parsed = await parseImportedTranscript(file, importWorkerRef);
       if (parsed.parsedCount === 0) {
         setImportError("No valid JSONL rows");
         finishImportFeedback("error");
@@ -1933,6 +2341,14 @@ export function SessionsView({
       const id = `import:${file.name}:${file.lastModified}:${Date.now()}`;
       const startedAt = parsed.startedAt ?? new Date(file.lastModified || Date.now()).toISOString();
       const updatedAt = parsed.updatedAt ?? startedAt;
+      const userMessages = parsed.items
+        .filter((item) => transcriptItemType(item) === "user")
+        .map((item) => `${item.body ?? ""}`.trim())
+        .filter(Boolean);
+      const assistantMessages = parsed.items
+        .filter((item) => transcriptItemType(item) === "assistant")
+        .map((item) => `${item.body ?? ""}`.trim())
+        .filter(Boolean);
       const session: SessionRecord = {
         id,
         title: parsed.title || file.name,
@@ -1946,11 +2362,14 @@ export function SessionsView({
         updatedLabel: compactDateTime(updatedAt),
         updatedDetailLabel: compactDateTime(updatedAt, { year: true }),
         messages: parsed.items.length,
+        firstUserMessage: userMessages[0],
+        lastUserMessage: userMessages.at(-1),
+        lastAssistantMessage: assistantMessages.at(-1),
         tokenUsage: parsed.tokenUsage,
       };
       setImportedTranscripts((current) => ({ ...current, [id]: parsed.items as TranscriptItemRecord[] }));
       setImportedSessions((current) => [session, ...current]);
-      setActiveId(id);
+      setActiveRowId(sessionTableRowId(session));
       setDetailCollapsed(false);
       setImportError(parsed.warnings.length ? `${parsed.warnings.length} invalid lines skipped` : "");
       finishImportFeedback(parsed.warnings.length ? "warning" : "success");
@@ -1982,7 +2401,10 @@ export function SessionsView({
   const getResumeState = useCallback((session: SessionRecord): SessionResumeState => (
     resumeFeedback[session.id] ?? "idle"
   ), [resumeFeedback]);
-  const activeSession = useMemo(() => allSessionItems.find((session) => session.id === activeId), [activeId, allSessionItems]);
+  const activeSession = useMemo(
+    () => allSessionItems.find((session) => sessionTableRowId(session) === activeRowId),
+    [activeRowId, allSessionItems],
+  );
   const activeSessionForTranscriptRef = useRef(activeSession);
   activeSessionForTranscriptRef.current = activeSession;
   const activeParentSession = useMemo(() => {
@@ -2006,13 +2428,15 @@ export function SessionsView({
     setSearchRows(null);
     setSearchRowsKey("");
     setCurrentPage(0);
-    setActiveId(session.id);
+    setActiveRowId(sessionTableRowId(session));
     setDetailCollapsed(false);
   }, []);
   const activeImportedTranscript = activeSession ? importedTranscripts[activeSession.id] : undefined;
   const activeSessionTranscriptKey = useMemo(() => (
-    activeSession ? `${activeSession.agent ?? ""}:${activeSession.path ?? ""}:${activeSession.id ?? ""}` : ""
-  ), [activeSession?.agent, activeSession?.id, activeSession?.path]);
+    activeSession
+      ? `${activeSession.agent ?? ""}:${activeSession.path ?? ""}:${activeSession.id ?? ""}:${activeSession.updatedAt ?? ""}:${activeSession.messages ?? ""}`
+      : ""
+  ), [activeSession?.agent, activeSession?.id, activeSession?.messages, activeSession?.path, activeSession?.updatedAt]);
   const activeSessionLinkKey = useMemo(() => (
     activeSession ? sessionKey(activeSession) : ""
   ), [activeSession?.agent, activeSession?.id]);
@@ -2032,25 +2456,123 @@ export function SessionsView({
     } as { normalizedQuery: string; resumeSession: typeof resumeSession; resumeState: typeof getResumeState }) as ColumnDef<SessionRecord>[],
     [getResumeState, normalizedQuery, resumeSession],
   );
+  const rowContextMenu = useCallback((session: SessionRecord) => {
+    const transcriptPath = `${session.path ?? ""}`.trim();
+    const workspacePath = sessionWorkspacePath(session);
+    const canResume = session.agent !== IMPORTED_SESSION_AGENT
+      && Boolean(session.id && session.agent && transcriptPath);
+    return (
+      <>
+        <ContextMenu.Item
+          className="skillMenuItem"
+          disabled={!canResume}
+          onSelect={() => { void resumeSession(session); }}
+        >
+          <TerminalSquare size={14} />
+          Resume in terminal
+        </ContextMenu.Item>
+        <ContextMenu.Separator className="skillMenuSeparator" />
+        <CopyTextMenuItem Menu={ContextMenu} text={session.id} label="Copy session ID" />
+        <ContextMenu.Separator className="skillMenuSeparator" />
+        <CopyPathMenuItem Menu={ContextMenu} path={transcriptPath} label="Copy transcript path" />
+        <RevealInFinderMenuItem Menu={ContextMenu} path={transcriptPath} label="Reveal transcript in Finder" />
+        <ContextMenu.Separator className="skillMenuSeparator" />
+        <CopyPathMenuItem Menu={ContextMenu} path={workspacePath} label="Copy workspace path" />
+        <RevealInFinderMenuItem Menu={ContextMenu} path={workspacePath} label="Reveal workspace in Finder" />
+      </>
+    );
+  }, [resumeSession]);
   useEffect(() => {
     const transcriptSession = activeSessionForTranscriptRef.current;
-    let cancelled = false;
+    const requestRevision = transcriptRequestAuthorityRef.current.begin();
+    transcriptItemsRef.current = [];
+    nextTranscriptCursorRef.current = undefined;
     setItems([]);
+    setNextTranscriptCursor(undefined);
+    setLoadingMoreTranscript(false);
     setLoading(Boolean(transcriptSession));
     if (!transcriptSession) return;
     if (activeImportedTranscript) {
+      transcriptItemsRef.current = activeImportedTranscript;
       setItems(activeImportedTranscript);
       setLoading(false);
       return;
     }
-    loadTranscript(transcriptSession).then((nextItems) => {
-      if (!cancelled) {
-        setItems(nextItems);
+    const cached = transcriptCacheRef.current.get(activeSessionTranscriptKey);
+    if (cached) {
+      transcriptItemsRef.current = cached.items;
+      nextTranscriptCursorRef.current = cached.nextCursor;
+      transcriptCacheRef.current.delete(activeSessionTranscriptKey);
+      transcriptCacheRef.current.set(activeSessionTranscriptKey, cached);
+      setItems(cached.items);
+      setNextTranscriptCursor(cached.nextCursor);
+      setLoading(false);
+    }
+    loadTranscript(transcriptSession, undefined, cached?.sourceVersion).then((page) => {
+      if (!transcriptRequestAuthorityRef.current.isCurrent(requestRevision)) return;
+      if (cached && page.unchanged) return;
+      transcriptCacheRef.current.set(activeSessionTranscriptKey, page);
+      trimTranscriptCache(transcriptCacheRef.current);
+      transcriptItemsRef.current = page.items;
+      nextTranscriptCursorRef.current = page.nextCursor;
+      setItems(page.items);
+      setNextTranscriptCursor(page.nextCursor);
+    }).finally(() => {
+      if (transcriptRequestAuthorityRef.current.isCurrent(requestRevision)) {
         setLoading(false);
       }
     });
-    return () => { cancelled = true; };
+    return () => {
+      transcriptRequestAuthorityRef.current.invalidate(requestRevision);
+    };
   }, [activeImportedTranscript, activeSessionTranscriptKey, loadTranscript]);
+  const loadMoreTranscript = useCallback(async (): Promise<TranscriptItemRecord[] | null> => {
+    const cursor = nextTranscriptCursorRef.current;
+    if (!activeSession || !cursor || loadingMoreTranscriptRef.current) return null;
+    const requestRevision = transcriptRequestAuthorityRef.current.begin();
+    const requestKey = activeSessionTranscriptKey;
+    const currentItems = transcriptItemsRef.current;
+    loadingMoreTranscriptRef.current = true;
+    setLoadingMoreTranscript(true);
+    try {
+      const page = await loadTranscript(activeSession, cursor);
+      if (!transcriptRequestAuthorityRef.current.isCurrent(requestRevision)) return null;
+      if (page.restartRequired) {
+        const restarted = await loadTranscript(activeSession);
+        if (!transcriptRequestAuthorityRef.current.isCurrent(requestRevision)) return null;
+        transcriptCacheRef.current.set(requestKey, restarted);
+        trimTranscriptCache(transcriptCacheRef.current);
+        transcriptItemsRef.current = restarted.items;
+        nextTranscriptCursorRef.current = restarted.nextCursor;
+        setItems(restarted.items);
+        setNextTranscriptCursor(restarted.nextCursor);
+        return restarted.items;
+      }
+      const cached = transcriptCacheRef.current.get(requestKey);
+      const merged: TranscriptPage = {
+        items: mergeTranscriptItems(cached?.items ?? currentItems, page.items),
+        warnings: [...(cached?.warnings ?? []), ...page.warnings],
+        nextCursor: page.nextCursor,
+        done: page.done,
+        sourceVersion: page.sourceVersion,
+        restartRequired: false,
+        unchanged: false,
+      };
+      transcriptCacheRef.current.delete(requestKey);
+      transcriptCacheRef.current.set(requestKey, merged);
+      trimTranscriptCache(transcriptCacheRef.current);
+      transcriptItemsRef.current = merged.items;
+      nextTranscriptCursorRef.current = merged.nextCursor;
+      setItems(merged.items);
+      setNextTranscriptCursor(merged.nextCursor);
+      return merged.items;
+    } finally {
+      loadingMoreTranscriptRef.current = false;
+      if (transcriptRequestAuthorityRef.current.isCurrent(requestRevision)) {
+        setLoadingMoreTranscript(false);
+      }
+    }
+  }, [activeSession, activeSessionTranscriptKey, loadTranscript]);
   useEffect(() => {
     setSkillLinks([]);
     setSkillLinksKey("");
@@ -2113,7 +2635,7 @@ export function SessionsView({
               onClick={() => importInputRef.current?.click()}
             >
               {importFeedback === "loading"
-                ? <RefreshCw className="loadingSpinner" size={16} />
+                ? <LoadingIcon size={16} />
                 : importFeedback === "success"
                   ? <Check size={16} />
                   : importFeedback === "warning" || importFeedback === "error"
@@ -2133,7 +2655,7 @@ export function SessionsView({
               onClick={refreshSessions}
               disabled={refreshing}
             >
-              <RefreshCw className={refreshing ? "loadingSpinner" : ""} size={16} />
+              {refreshing ? <LoadingIcon size={16} /> : <RefreshCw size={16} />}
             </button>
             <AppTooltip content={showChildSessions ? "Hide child sessions" : `Show ${childSessionCount} child sessions`}><button
               className={`iconButton ${showChildSessions ? "filled" : ""}`}
@@ -2143,7 +2665,79 @@ export function SessionsView({
             >
               <GitFork size={16} />
             </button></AppTooltip>
-            <div className="searchBox"><Search size={15} /><input placeholder="Search sessions" value={query} onChange={(event) => setQuery(event.target.value)} /></div>
+            <div className="sessionSearchControls">
+              <SearchField placeholder="Search sessions" value={query} onChange={(event) => setQuery(event.target.value)} />
+              <DropdownMenu.Root
+                open={projectFilterOpen}
+                onOpenChange={(open) => {
+                  setProjectFilterOpen(open);
+                  if (!open) setProjectFilterQuery("");
+                }}
+              >
+                <DropdownMenu.Trigger asChild>
+                  <button
+                    type="button"
+                    className="sessionProjectFilter"
+                    aria-label="Filter projects"
+                  >
+                    <Filter size={14} aria-hidden="true" />
+                    <span>Filter</span>
+                    {selectedProjectKeys.length > 0 ? <span className="sessionProjectFilterCount">{selectedProjectKeys.length}</span> : null}
+                  </button>
+                </DropdownMenu.Trigger>
+                <DropdownMenu.Portal>
+                  <DropdownMenu.Content
+                    className="skillMenuContent sessionProjectFilterMenu"
+                    align="end"
+                    sideOffset={6}
+                    data-no-drag
+                  >
+                    <div className="sessionProjectFilterSearch" onClick={(event) => event.stopPropagation()}>
+                      <Search size={13} aria-hidden="true" />
+                      <input
+                        ref={projectFilterInputRef}
+                        aria-label="Filter projects"
+                        placeholder="Filter projects"
+                        value={projectFilterQuery}
+                        onChange={(event) => setProjectFilterQuery(event.target.value)}
+                        onKeyDown={(event) => {
+                          if (event.key !== "Escape") event.stopPropagation();
+                        }}
+                      />
+                    </div>
+                    <div className="sessionProjectFilterOptions">
+                      {visibleProjectOptions.map((option) => {
+                        const active = selectedProjectKeySet.has(option.key);
+                        return (
+                          <DropdownMenu.CheckboxItem
+                            key={option.key}
+                            className="skillMenuItem sessionProjectFilterItem"
+                            checked={active}
+                            onCheckedChange={(checked) => {
+                              setSelectedProjectKeys((current) => checked
+                                ? current.includes(option.key) ? current : [...current, option.key]
+                                : current.filter((key) => key !== option.key));
+                            }}
+                            onSelect={(event) => event.preventDefault()}
+                          >
+                            <span className={`selectionCheckbox ${active ? "isChecked" : ""}`} aria-hidden="true">
+                              <DropdownMenu.ItemIndicator className="selectionCheckboxIndicator">
+                                <Check size={12} strokeWidth={2.7} />
+                              </DropdownMenu.ItemIndicator>
+                            </span>
+                            {isWebSource(option.title.trim())
+                              ? <span className="sessionProjectFilterItemLabel">{option.label}</span>
+                              : <AppTooltip content={option.title}><span className="sessionProjectFilterItemLabel">{option.label}</span></AppTooltip>}
+                            <span className="sessionProjectFilterItemCount">{option.count}</span>
+                          </DropdownMenu.CheckboxItem>
+                        );
+                      })}
+                      {visibleProjectOptions.length === 0 ? <span className="sessionProjectFilterEmpty">No matching projects</span> : null}
+                    </div>
+                  </DropdownMenu.Content>
+                </DropdownMenu.Portal>
+              </DropdownMenu.Root>
+            </div>
           </PageHeader>
           <div className="sessionListBody">
             <DataTable
@@ -2160,10 +2754,12 @@ export function SessionsView({
               sort={activeSort}
               onSortChange={handleSortChange}
               manualSorting
+              rowHeight={72}
               groupBy={groupBy}
               onGroupByChange={setGroupBy}
               onRowClick={openSession}
-              rowProps={(session) => (activeId === session.id ? { className: "rowSelected" } : {})}
+              rowContextMenu={rowContextMenu}
+              rowProps={(session) => (activeRowId === sessionTableRowId(session) ? { className: "rowSelected" } : {})}
               loading={(loadingSessions || searchingSessions) && sortedSessions.length === 0}
               loadingLabel={<LoadingInline label="Loading sessions" />}
               emptyState="No matching sessions. Clear filters or adjust your search."
@@ -2249,6 +2845,8 @@ export function SessionsView({
             childSessions={activeChildSessions}
             items={items}
             loading={loading}
+            hasMore={Boolean(nextTranscriptCursor)}
+            loadingMore={loadingMoreTranscript}
             skillLinks={skillLinks}
             loadingSkillLinks={loadingSkillLinks}
             skillLinksLoaded={skillLinksKey === activeSessionSkillLinksKey}
@@ -2258,6 +2856,7 @@ export function SessionsView({
             onOpenSession={openRelatedSession}
             onOpenSkill={onOpenSkill}
             onLoadSkills={loadActiveSessionSkillLinks}
+            onLoadMore={loadMoreTranscript}
             loadAnalytics={loadSessionAnalytics}
           />
         </DetailPanelHost>
@@ -2279,10 +2878,10 @@ export function SessionsView({
           <DialogTextField label="Project name" value={splitProjectName} onChange={setSplitProjectName} placeholder="Project name" />
           {projectActionError ? <div className="addSkillError">{projectActionError}</div> : null}
           <DialogActionBar cancelDisabled={projectActionBusy} onCancel={() => setPendingSplitSessions([])}>
-            <button className="primary" disabled={!splitProjectName.trim() || projectActionBusy} onClick={splitSelectedSessions}>
-              {projectActionBusy ? <RefreshCw className="loadingSpinner" size={14} /> : <GitFork size={14} />}
+            <DialogActionButton variant="primary" disabled={!splitProjectName.trim() || projectActionBusy} onClick={splitSelectedSessions}>
+              {projectActionBusy ? <LoadingIcon size={14} /> : <GitFork size={14} />}
               {projectActionBusy ? "Splitting" : "Create project"}
-            </button>
+            </DialogActionButton>
           </DialogActionBar>
         </Dialog.Content>
       </Dialog.Portal>

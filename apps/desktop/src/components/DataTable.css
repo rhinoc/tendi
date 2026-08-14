@@ -139,6 +139,13 @@
   padding-left: var(--data-table-split-scroll-leading-gap);
 }
 
+/* Frozen and scrolling panes render separate DOM rows. Keep their row tracks
+   fixed so one pane cannot push its following rows below the other pane. */
+.dataTableShell--frozen .dataRow--frozenPane,
+.dataTableShell--frozen .dataRow--scrollPane {
+  height: var(--data-table-table-row-height);
+}
+
 .dataTableShell--frozen .dataRow > .rowSelection,
 .dataTableShell--frozen .dataRow > .rowSelectionPlaceholder {
   position: relative;
@@ -842,6 +849,28 @@
   display: flex;
   align-items: center;
   margin-top: 5px;
+}
+
+.sessionPreviewSubLine {
+  display: grid;
+  align-items: stretch;
+  gap: 2px;
+}
+
+.sessionPreviewMessage {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+}
+
+.sessionPreviewMessage > svg {
+  flex: 0 0 13px;
+  color: var(--faint);
+}
+
+.sessionPreviewText {
+  margin-top: 0;
 }
 
 .dataCellSub {

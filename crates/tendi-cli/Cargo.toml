@@ -7,9 +7,19 @@ license.workspace = true
 [dependencies]
 tendi-core = { path = "../tendi-core" }
 anyhow.workspace = true
+chrono = { workspace = true, optional = true }
 clap.workspace = true
+serde = { workspace = true, optional = true }
 serde_json.workspace = true
+
+[features]
+perf-runner = ["dep:chrono", "dep:serde"]
 
 [[bin]]
 name = "tendi"
 path = "src/main.rs"
+
+[[bin]]
+name = "tendi-perf"
+path = "src/bin/tendi-perf.rs"
+required-features = ["perf-runner"]

@@ -16,11 +16,16 @@ const linkSourceDir = join(temp, "local-skills/link-demo");
 const linkTargetDir = join(home, ".codex/skills/link-demo");
 const addSourceDir = join(temp, "add-source/skills/add-demo");
 const addTargetDir = join(home, ".agents/skills/add-demo");
+const bundledSkillDir = join(home, ".agents/skills/tendi");
 
 function runTendi(args, options = {}) {
+  const command = process.env.TENDI_TEST_BIN || "cargo";
+  const commandArgs = process.env.TENDI_TEST_BIN
+    ? args
+    : ["run", "--quiet", "--manifest-path", join(root, "Cargo.toml"), "-p", "tendi-cli", "--", ...args];
   const result = spawnSync(
-    "cargo",
-    ["run", "--quiet", "--manifest-path", join(root, "Cargo.toml"), "-p", "tendi-cli", "--", ...args],
+    command,
+    commandArgs,
     {
       cwd: project,
       encoding: "utf8",
@@ -36,7 +41,28 @@ function runTendi(args, options = {}) {
   return output;
 }
 
+function parseJsonOutput(output) {
+  const start = output.indexOf("{");
+  assert.notEqual(start, -1, `missing JSON output:\n${output}`);
+  return JSON.parse(output.slice(start));
+}
+
 try {
+  mkdirSync(project, { recursive: true });
+  const guide = runTendi(["skills", "guide"]);
+  assert.match(guide, /# Tendi CLI/);
+  assert.match(guide, /Recall a session/);
+
+  const bundledDryRun = parseJsonOutput(runTendi(["setup", "skills", "--dry-run", "--json"]));
+  assert.equal(bundledDryRun.name, "tendi");
+  assert.equal(bundledDryRun.action, "install");
+  assert.equal(existsSync(bundledSkillDir), false, "bundled skill dry-run created target");
+
+  const bundledInstall = parseJsonOutput(runTendi(["setup", "skills", "--yes", "--json"]));
+  assert.equal(bundledInstall.status.current, true);
+  assert.equal(bundledInstall.applied, true);
+  assert.match(readFileSync(join(bundledSkillDir, "SKILL.md"), "utf8"), /TENDI skills guide/);
+
   mkdirSync(join(skillDir, "agents"), { recursive: true });
   writeFileSync(
     skillFile,

@@ -5,6 +5,7 @@ export type HookRecord = {
   event?: string | null;
   matcher?: string | null;
   enabled?: boolean | null;
+  needs_review?: boolean | null;
   filter?: string | null;
   hook_type?: string | null;
   hookType?: string | null;
@@ -92,7 +93,7 @@ export function hookSourcePath(hook: HookRecord | null | undefined): string {
 export function hookDeleteDisabledReason(hook: HookRecord | null | undefined): string {
   const path = hookSourcePath(hook);
   if (!path) return "Missing hook source path";
-  if (path.startsWith("/etc/cursor/") || path.startsWith("/etc/claude-code/") || path.startsWith("/Library/Application Support/ClaudeCode/")) {
+  if (path.startsWith("/etc/cursor/") || path.startsWith("/Library/Application Support/Cursor/") || path.startsWith("/etc/claude-code/") || path.startsWith("/Library/Application Support/ClaudeCode/")) {
     return "Managed or system hooks are read only";
   }
   if (path.includes("/.claude/plugins/")) {

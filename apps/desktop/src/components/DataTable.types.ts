@@ -61,9 +61,10 @@ export type DataTableProps<TRow> = {
   sort?: SortState | null;
   onSortChange?: (sort: SortState) => void;
   manualSorting?: boolean;
+  rowHeight?: number;
   freezeColumn?: FreezeColumnConfig;
   onRowClick?: (row: TRow) => void;
-  rowProps?: (row: TRow) => Record<string, unknown> & { className?: string };
+  rowProps?: (row: TRow) => { className?: string };
   rowContextMenu?: (row: TRow, ctx: RowContextMenuContext<TRow>) => ReactNode | null;
   bottomBar?: (selectedRows: TRow[], ctx: { clear: () => void }) => ReactNode;
   bottomBarCheckboxLabel?: string;

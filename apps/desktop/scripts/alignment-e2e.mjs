@@ -1018,18 +1018,23 @@ try {
           return 1;
         }
         if (command === "session_transcript") {
-          return Array.from({ length: 5 }, (_, index) => ([
-            {
-              type: "user",
-              body: `Locator prompt ${index + 1}`,
-              time: `10:0${index}`,
-            },
-            {
-              type: "assistant",
-              body: `Locator response ${index + 1}`,
-              time: `10:0${index}`,
-            },
-          ])).flat();
+          return {
+            items: Array.from({ length: 5 }, (_, index) => ([
+              {
+                type: "user",
+                body: `Locator prompt ${index + 1}`,
+                time: `10:0${index}`,
+              },
+              {
+                type: "assistant",
+                body: `Locator response ${index + 1}`,
+                time: `10:0${index}`,
+              },
+            ])).flat(),
+            warnings: [],
+            nextCursor: null,
+            done: true,
+          };
         }
         if (command === "sessions_search") {
           return report.sessions.sessions.map((session, index) => ({

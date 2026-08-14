@@ -16,23 +16,78 @@ import { performance } from "node:perf_hooks";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const binary = join(root, "target/debug/tendi");
+const perfBinary = join(root, "target/debug/tendi-perf");
 const outputDir = join(root, "target/perf");
 const defaultBaselinePath = join(outputDir, "baseline.json");
 const latestPath = join(outputDir, "latest.json");
 const mib = 1024 * 1024;
+const capturedOutputBufferBytes = 64 * mib;
 
 const options = parseArgs(process.argv.slice(2));
 const thresholds = {
-  skillsMs: envNumber("TENDI_PERF_SKILLS_MS", 1_500),
-  hooksMs: envNumber("TENDI_PERF_HOOKS_MS", 500),
-  sessionsMs: envNumber("TENDI_PERF_SESSIONS_MS", 12_000),
-  sessionsRssBytes: envNumber("TENDI_PERF_SESSIONS_RSS_MIB", 192) * mib,
-  syntheticMs: envNumber("TENDI_PERF_SYNTHETIC_MS", 5_000),
-  syntheticRssBytes: envNumber("TENDI_PERF_SYNTHETIC_RSS_MIB", 96) * mib,
-  transcriptRssRatio: envNumber("TENDI_PERF_TRANSCRIPT_RSS_RATIO", 0.65),
-  transcriptRssFloorBytes: envNumber("TENDI_PERF_TRANSCRIPT_RSS_FLOOR_MIB", 128) * mib,
-  idleCpuAverage: envNumber("TENDI_PERF_IDLE_CPU_AVG", 5),
-  idleCpuMax: envNumber("TENDI_PERF_IDLE_CPU_MAX", 25),
+  skillsMs: envNumber("TENDI_PERF_SKILLS_MS", 300),
+  hooksMs: envNumber("TENDI_PERF_HOOKS_MS", 40),
+  rulesMs: envNumber("TENDI_PERF_RULES_MS", 40),
+  mcpMs: envNumber("TENDI_PERF_MCP_MS", 40),
+  sessionsMs: envNumber("TENDI_PERF_SESSIONS_MS", 3_000),
+  sessionsMaxMs: envNumber("TENDI_PERF_SESSIONS_MAX_MS", 8_000),
+  sessionsRssBytes: envNumber("TENDI_PERF_SESSIONS_RSS_MIB", 56) * mib,
+  sessionsOutputBytes: envNumber("TENDI_PERF_SESSIONS_OUTPUT_MIB", 8) * mib,
+  syntheticMs: envNumber("TENDI_PERF_SYNTHETIC_MS", 600),
+  syntheticRssBytes: envNumber("TENDI_PERF_SYNTHETIC_RSS_MIB", 16) * mib,
+  transcriptMs: envNumber("TENDI_PERF_TRANSCRIPT_MS", 4_500),
+  transcriptRssRatio: envNumber("TENDI_PERF_TRANSCRIPT_RSS_RATIO", 0.3),
+  transcriptRssFloorBytes: envNumber("TENDI_PERF_TRANSCRIPT_RSS_FLOOR_MIB", 80) * mib,
+  idleCpuAverage: envNumber("TENDI_PERF_IDLE_CPU_AVG", 1),
+  idleCpuMax: envNumber("TENDI_PERF_IDLE_CPU_MAX", 5),
+  primaryOverviewMs: envNumber("TENDI_PERF_PRIMARY_OVERVIEW_MS", 25),
+  primaryOverviewRssBytes: envNumber("TENDI_PERF_PRIMARY_OVERVIEW_RSS_MIB", 24) * mib,
+  primaryOverviewPayloadBytes: envNumber("TENDI_PERF_PRIMARY_OVERVIEW_PAYLOAD_MIB", 0.25) * mib,
+  primaryPromptsMs: envNumber("TENDI_PERF_PRIMARY_PROMPTS_MS", 50),
+  primaryPromptsRssBytes: envNumber("TENDI_PERF_PRIMARY_PROMPTS_RSS_MIB", 24) * mib,
+  primaryPromptsPayloadBytes: envNumber("TENDI_PERF_PRIMARY_PROMPTS_PAYLOAD_MIB", 1.5) * mib,
+  primaryConfigMs: envNumber("TENDI_PERF_PRIMARY_CONFIG_MS", 12),
+  primaryConfigRssBytes: envNumber("TENDI_PERF_PRIMARY_CONFIG_RSS_MIB", 16) * mib,
+  primaryConfigPayloadBytes: envNumber("TENDI_PERF_PRIMARY_CONFIG_PAYLOAD_MIB", 0.0625) * mib,
+  primarySettingsMs: envNumber("TENDI_PERF_PRIMARY_SETTINGS_MS", 2),
+  primarySettingsRssBytes: envNumber("TENDI_PERF_PRIMARY_SETTINGS_RSS_MIB", 16) * mib,
+  primarySettingsPayloadBytes: envNumber("TENDI_PERF_PRIMARY_SETTINGS_PAYLOAD_MIB", 0.015625) * mib,
+  secondarySessionPageMs: envNumber("TENDI_PERF_SECONDARY_SESSION_PAGE_MS", 35),
+  secondarySessionPageRssBytes: envNumber("TENDI_PERF_SECONDARY_SESSION_PAGE_RSS_MIB", 24) * mib,
+  secondarySessionPagePayloadBytes: envNumber("TENDI_PERF_SECONDARY_SESSION_PAGE_PAYLOAD_MIB", 1) * mib,
+  secondaryLinkedSessionsMs: envNumber("TENDI_PERF_SECONDARY_LINKED_SESSIONS_MS", 25),
+  secondaryLinkedSessionsRssBytes: envNumber("TENDI_PERF_SECONDARY_LINKED_SESSIONS_RSS_MIB", 24) * mib,
+  secondaryLinkedSessionsPayloadBytes: envNumber("TENDI_PERF_SECONDARY_LINKED_SESSIONS_PAYLOAD_MIB", 0.75) * mib,
+  secondarySkillFilesMs: envNumber("TENDI_PERF_SECONDARY_SKILL_FILES_MS", 10),
+  secondarySkillFilesRssBytes: envNumber("TENDI_PERF_SECONDARY_SKILL_FILES_RSS_MIB", 16) * mib,
+  secondarySkillFilesPayloadBytes: envNumber("TENDI_PERF_SECONDARY_SKILL_FILES_PAYLOAD_MIB", 0.125) * mib,
+  secondaryRuleDetailMs: envNumber("TENDI_PERF_SECONDARY_RULE_DETAIL_MS", 15),
+  secondaryRuleDetailRssBytes: envNumber("TENDI_PERF_SECONDARY_RULE_DETAIL_RSS_MIB", 16) * mib,
+  secondaryRuleDetailPayloadBytes: envNumber("TENDI_PERF_SECONDARY_RULE_DETAIL_PAYLOAD_MIB", 0.25) * mib,
+  secondaryHookDetailMs: envNumber("TENDI_PERF_SECONDARY_HOOK_DETAIL_MS", 20),
+  secondaryHookDetailRssBytes: envNumber("TENDI_PERF_SECONDARY_HOOK_DETAIL_RSS_MIB", 16) * mib,
+  secondaryHookDetailPayloadBytes: envNumber("TENDI_PERF_SECONDARY_HOOK_DETAIL_PAYLOAD_MIB", 0.25) * mib,
+  secondaryConfigReadMs: envNumber("TENDI_PERF_SECONDARY_CONFIG_READ_MS", 10),
+  secondaryConfigReadRssBytes: envNumber("TENDI_PERF_SECONDARY_CONFIG_READ_RSS_MIB", 16) * mib,
+  secondaryConfigReadPayloadBytes: envNumber("TENDI_PERF_SECONDARY_CONFIG_READ_PAYLOAD_MIB", 0.25) * mib,
+  tertiarySkillSaveMs: envNumber("TENDI_PERF_TERTIARY_SKILL_SAVE_MS", 45),
+  tertiarySkillSaveRssBytes: envNumber("TENDI_PERF_TERTIARY_SKILL_SAVE_RSS_MIB", 24) * mib,
+  tertiarySkillSavePayloadBytes: envNumber("TENDI_PERF_TERTIARY_SKILL_SAVE_PAYLOAD_MIB", 0.0625) * mib,
+  tertiaryHookDeleteMs: envNumber("TENDI_PERF_TERTIARY_HOOK_DELETE_MS", 55),
+  tertiaryHookDeleteRssBytes: envNumber("TENDI_PERF_TERTIARY_HOOK_DELETE_RSS_MIB", 24) * mib,
+  tertiaryHookDeletePayloadBytes: envNumber("TENDI_PERF_TERTIARY_HOOK_DELETE_PAYLOAD_MIB", 0.25) * mib,
+  tertiaryPromptCrudMs: envNumber("TENDI_PERF_TERTIARY_PROMPT_CRUD_MS", 40),
+  tertiaryPromptCrudRssBytes: envNumber("TENDI_PERF_TERTIARY_PROMPT_CRUD_RSS_MIB", 24) * mib,
+  tertiaryPromptCrudPayloadBytes: envNumber("TENDI_PERF_TERTIARY_PROMPT_CRUD_PAYLOAD_MIB", 1) * mib,
+  tertiarySessionProjectsMs: envNumber("TENDI_PERF_TERTIARY_SESSION_PROJECTS_MS", 10),
+  tertiarySessionProjectsRssBytes: envNumber("TENDI_PERF_TERTIARY_SESSION_PROJECTS_RSS_MIB", 24) * mib,
+  tertiarySessionProjectsPayloadBytes: envNumber("TENDI_PERF_TERTIARY_SESSION_PROJECTS_PAYLOAD_MIB", 0.0625) * mib,
+  tertiaryRuleSaveMs: envNumber("TENDI_PERF_TERTIARY_RULE_SAVE_MS", 40),
+  tertiaryRuleSaveRssBytes: envNumber("TENDI_PERF_TERTIARY_RULE_SAVE_RSS_MIB", 16) * mib,
+  tertiaryRuleSavePayloadBytes: envNumber("TENDI_PERF_TERTIARY_RULE_SAVE_PAYLOAD_MIB", 0.25) * mib,
+  tertiarySettingsSaveMs: envNumber("TENDI_PERF_TERTIARY_SETTINGS_SAVE_MS", 3),
+  tertiarySettingsSaveRssBytes: envNumber("TENDI_PERF_TERTIARY_SETTINGS_SAVE_RSS_MIB", 16) * mib,
+  tertiarySettingsSavePayloadBytes: envNumber("TENDI_PERF_TERTIARY_SETTINGS_SAVE_PAYLOAD_MIB", 0.015625) * mib,
 };
 
 const results = [];
@@ -46,21 +101,118 @@ console.log(`Tendi performance check (${options.profile})`);
 console.log(`root: ${root}`);
 
 if (!options.noBuild) {
-  runRequired("build tendi-cli", "cargo", ["build", "--quiet", "-p", "tendi-cli"]);
+  runRequired("build tendi-cli", "cargo", [
+    "build",
+    "--quiet",
+    "-p",
+    "tendi-cli",
+    "--features",
+    "perf-runner",
+  ]);
 }
 if (!existsSync(binary)) failNow(`missing binary: ${binary}`);
+if (!existsSync(perfBinary)) failNow(`missing binary: ${perfBinary}`);
 
 benchmarkRepeated("skills-list", ["skills", "list", "--json"], thresholds.skillsMs);
 benchmarkRepeated("hooks-list", ["hooks", "list", "--json"], thresholds.hooksMs);
+benchmarkRepeated("rules-list", ["rules", "list", "--json"], thresholds.rulesMs);
+benchmarkRepeated("mcp-list", ["mcp", "list", "--json"], thresholds.mcpMs);
+benchmarkCoreScenario("primary-overview", {
+  maxOperationMs: thresholds.primaryOverviewMs,
+  maxRssBytes: thresholds.primaryOverviewRssBytes,
+  maxPayloadBytes: thresholds.primaryOverviewPayloadBytes,
+});
+benchmarkCoreScenario("primary-prompts", {
+  maxOperationMs: thresholds.primaryPromptsMs,
+  maxRssBytes: thresholds.primaryPromptsRssBytes,
+  maxPayloadBytes: thresholds.primaryPromptsPayloadBytes,
+});
+benchmarkCoreScenario("primary-config", {
+  maxOperationMs: thresholds.primaryConfigMs,
+  maxRssBytes: thresholds.primaryConfigRssBytes,
+  maxPayloadBytes: thresholds.primaryConfigPayloadBytes,
+});
+benchmarkCoreScenario("primary-settings", {
+  maxOperationMs: thresholds.primarySettingsMs,
+  maxRssBytes: thresholds.primarySettingsRssBytes,
+  maxPayloadBytes: thresholds.primarySettingsPayloadBytes,
+});
+benchmarkCoreScenario("secondary-session-page", {
+  maxOperationMs: thresholds.secondarySessionPageMs,
+  maxRssBytes: thresholds.secondarySessionPageRssBytes,
+  maxPayloadBytes: thresholds.secondarySessionPagePayloadBytes,
+});
+benchmarkCoreScenario("secondary-linked-sessions", {
+  maxOperationMs: thresholds.secondaryLinkedSessionsMs,
+  maxRssBytes: thresholds.secondaryLinkedSessionsRssBytes,
+  maxPayloadBytes: thresholds.secondaryLinkedSessionsPayloadBytes,
+});
+benchmarkCoreScenario("secondary-skill-files", {
+  maxOperationMs: thresholds.secondarySkillFilesMs,
+  maxRssBytes: thresholds.secondarySkillFilesRssBytes,
+  maxPayloadBytes: thresholds.secondarySkillFilesPayloadBytes,
+});
+benchmarkCoreScenario("secondary-rule-detail", {
+  maxOperationMs: thresholds.secondaryRuleDetailMs,
+  maxRssBytes: thresholds.secondaryRuleDetailRssBytes,
+  maxPayloadBytes: thresholds.secondaryRuleDetailPayloadBytes,
+});
+benchmarkCoreScenario("secondary-hook-detail", {
+  maxOperationMs: thresholds.secondaryHookDetailMs,
+  maxRssBytes: thresholds.secondaryHookDetailRssBytes,
+  maxPayloadBytes: thresholds.secondaryHookDetailPayloadBytes,
+});
+benchmarkCoreScenario("secondary-config-read", {
+  maxOperationMs: thresholds.secondaryConfigReadMs,
+  maxRssBytes: thresholds.secondaryConfigReadRssBytes,
+  maxPayloadBytes: thresholds.secondaryConfigReadPayloadBytes,
+});
+benchmarkCoreScenario("tertiary-skill-save", {
+  maxOperationMs: thresholds.tertiarySkillSaveMs,
+  maxRssBytes: thresholds.tertiarySkillSaveRssBytes,
+  maxPayloadBytes: thresholds.tertiarySkillSavePayloadBytes,
+});
+benchmarkCoreScenario("tertiary-hook-delete", {
+  maxOperationMs: thresholds.tertiaryHookDeleteMs,
+  maxRssBytes: thresholds.tertiaryHookDeleteRssBytes,
+  maxPayloadBytes: thresholds.tertiaryHookDeletePayloadBytes,
+});
+benchmarkCoreScenario("tertiary-prompt-crud", {
+  maxOperationMs: thresholds.tertiaryPromptCrudMs,
+  maxRssBytes: thresholds.tertiaryPromptCrudRssBytes,
+  maxPayloadBytes: thresholds.tertiaryPromptCrudPayloadBytes,
+});
+benchmarkCoreScenario("tertiary-session-projects", {
+  maxOperationMs: thresholds.tertiarySessionProjectsMs,
+  maxRssBytes: thresholds.tertiarySessionProjectsRssBytes,
+  maxPayloadBytes: thresholds.tertiarySessionProjectsPayloadBytes,
+});
+benchmarkCoreScenario("tertiary-rule-save", {
+  maxOperationMs: thresholds.tertiaryRuleSaveMs,
+  maxRssBytes: thresholds.tertiaryRuleSaveRssBytes,
+  maxPayloadBytes: thresholds.tertiaryRuleSavePayloadBytes,
+});
+benchmarkCoreScenario("tertiary-settings-save", {
+  maxOperationMs: thresholds.tertiarySettingsSaveMs,
+  maxRssBytes: thresholds.tertiarySettingsSaveRssBytes,
+  maxPayloadBytes: thresholds.tertiarySettingsSavePayloadBytes,
+});
 
 if (options.profile === "full") {
-  const sessions = measureProcess("sessions-list", ["sessions", "list", "--json"]);
+  const sessions = measureProcessRepeated(
+    "sessions-list",
+    ["sessions", "list", "--json"],
+    3,
+    true,
+  );
   gate(
     "sessions-list",
-    sessions.elapsedMs <= thresholds.sessionsMs
-      && sessions.peakRssBytes <= thresholds.sessionsRssBytes,
+    sessions.medianMs <= thresholds.sessionsMs
+      && sessions.maxElapsedMs <= thresholds.sessionsMaxMs
+      && sessions.peakRssBytes <= thresholds.sessionsRssBytes
+      && sessions.outputBytes <= thresholds.sessionsOutputBytes,
     sessions,
-    `<= ${formatMs(thresholds.sessionsMs)}, RSS <= ${formatBytes(thresholds.sessionsRssBytes)}`,
+    `median <= ${formatMs(thresholds.sessionsMs)}, max <= ${formatMs(thresholds.sessionsMaxMs)}, RSS <= ${formatBytes(thresholds.sessionsRssBytes)}, output <= ${formatBytes(thresholds.sessionsOutputBytes)}`,
   );
 
   const fixture = ensureSyntheticTranscript();
@@ -86,7 +238,7 @@ if (options.profile === "full") {
 }
 
 const report = {
-  schemaVersion: 1,
+  schemaVersion: 2,
   createdAt: new Date().toISOString(),
   profile: options.profile,
   platform: `${process.platform}-${process.arch}`,
@@ -126,7 +278,7 @@ function parseArgs(args) {
 
   --fast                    Run the pre-push checks
   --full                    Run local-data and memory checks (default)
-  --no-build                Reuse target/debug/tendi
+  --no-build                Reuse target/debug/tendi and tendi-perf
   --app-pid <pid>           Include a 10-second idle CPU gate
   --save-baseline           Save target/perf/baseline.json
   --baseline <path>         Compare with a saved result
@@ -183,27 +335,105 @@ function benchmarkRepeated(name, args, maxMedianMs) {
   gate(name, medianMs <= maxMedianMs, { medianMs, samplesMs }, `median <= ${formatMs(maxMedianMs)}`);
 }
 
-function measureProcess(name, args) {
+function benchmarkCoreScenario(name, limits) {
+  const measured = measureExecutable(name, perfBinary, [name], true);
+  let scenario;
+  try {
+    scenario = JSON.parse(measured.stdout.trim());
+  } catch (error) {
+    failNow(`${name}: invalid tendi-perf output: ${error.message}`);
+  }
+  for (const key of ["operationMs", "payloadBytes", "count"]) {
+    if (!Number.isFinite(scenario[key]) || scenario[key] < 0) {
+      failNow(`${name}: invalid ${key}: ${scenario[key]}`);
+    }
+  }
+  const metrics = {
+    operationMs: scenario.operationMs,
+    processElapsedMs: measured.elapsedMs,
+    peakRssBytes: measured.peakRssBytes,
+    payloadBytes: scenario.payloadBytes,
+    count: scenario.count,
+  };
+  gate(
+    name,
+    metrics.operationMs <= limits.maxOperationMs
+      && metrics.peakRssBytes <= limits.maxRssBytes
+      && metrics.payloadBytes <= limits.maxPayloadBytes,
+    metrics,
+    `operation <= ${formatMs(limits.maxOperationMs)}, RSS <= ${formatBytes(limits.maxRssBytes)}, payload <= ${formatBytes(limits.maxPayloadBytes)}`,
+  );
+}
+
+function measureProcess(name, args, captureOutput = false) {
+  const measured = measureExecutable(name, binary, args, captureOutput);
+  if (captureOutput) delete measured.stdout;
+  return measured;
+}
+
+function measureExecutable(name, executable, args, captureOutput = false) {
   const time = process.platform === "darwin" ? "/usr/bin/time" : "/usr/bin/time";
   if (!existsSync(time)) {
-    const plain = runBinary(args);
-    return { elapsedMs: plain.elapsedMs, peakRssBytes: 0, rssUnavailable: true };
+    const started = performance.now();
+    const plain = spawnSync(executable, args, {
+      cwd: root,
+      encoding: "utf8",
+      maxBuffer: capturedOutputBufferBytes,
+      stdio: ["ignore", captureOutput ? "pipe" : "ignore", "pipe"],
+    });
+    if (plain.error) failNow(`${name}: ${plain.error.message}`);
+    if (plain.status !== 0) failNow(`${name}: exit ${plain.status}\n${plain.stderr ?? ""}`);
+    return {
+      elapsedMs: performance.now() - started,
+      peakRssBytes: 0,
+      rssUnavailable: true,
+      ...(captureOutput
+        ? { outputBytes: Buffer.byteLength(plain.stdout ?? ""), stdout: plain.stdout ?? "" }
+        : {}),
+    };
   }
   const timeArgs = process.platform === "darwin"
-    ? ["-l", binary, ...args]
-    : ["-v", binary, ...args];
+    ? ["-l", executable, ...args]
+    : ["-v", executable, ...args];
   const started = performance.now();
   const result = spawnSync(time, timeArgs, {
     cwd: root,
     encoding: "utf8",
-    stdio: ["ignore", "ignore", "pipe"],
+    maxBuffer: capturedOutputBufferBytes,
+    stdio: ["ignore", captureOutput ? "pipe" : "ignore", "pipe"],
   });
   const elapsedMs = performance.now() - started;
   if (result.error) failNow(`${name}: ${result.error.message}`);
   if (result.status !== 0) failNow(`${name}: exit ${result.status}\n${result.stderr ?? ""}`);
   const peakRssBytes = parsePeakRss(result.stderr ?? "");
   if (!peakRssBytes) failNow(`${name}: could not parse peak RSS from /usr/bin/time`);
-  return { elapsedMs, peakRssBytes };
+  const outputBytes = captureOutput ? Buffer.byteLength(result.stdout ?? "") : undefined;
+  return {
+    elapsedMs,
+    peakRssBytes,
+    ...(captureOutput ? { outputBytes, stdout: result.stdout ?? "" } : {}),
+  };
+}
+
+function measureProcessRepeated(name, args, count, captureOutput = false) {
+  const samples = Array.from(
+    { length: count },
+    () => measureProcess(name, args, captureOutput),
+  );
+  const elapsedSamplesMs = samples
+    .map((sample) => sample.elapsedMs)
+    .sort((left, right) => left - right);
+  const peakRssSamplesBytes = samples.map((sample) => sample.peakRssBytes);
+  return {
+    medianMs: elapsedSamplesMs[Math.floor(elapsedSamplesMs.length / 2)],
+    maxElapsedMs: Math.max(...elapsedSamplesMs),
+    peakRssBytes: Math.max(...peakRssSamplesBytes),
+    ...(captureOutput
+      ? { outputBytes: Math.max(...samples.map((sample) => sample.outputBytes)) }
+      : {}),
+    elapsedSamplesMs,
+    peakRssSamplesBytes,
+  };
 }
 
 function parsePeakRss(stderr) {
@@ -278,9 +508,9 @@ function benchmarkLargestIndexedTranscript() {
   );
   gate(
     "largest-transcript",
-    measured.peakRssBytes <= rssLimit,
+    measured.elapsedMs <= thresholds.transcriptMs && measured.peakRssBytes <= rssLimit,
     { ...measured, inputBytes: selected.size, inputPath: selected.path },
-    `RSS <= max(${formatBytes(thresholds.transcriptRssFloorBytes)}, input × ${thresholds.transcriptRssRatio})`,
+    `<= ${formatMs(thresholds.transcriptMs)}, RSS <= max(${formatBytes(thresholds.transcriptRssFloorBytes)}, input × ${thresholds.transcriptRssRatio})`,
   );
 }
 
@@ -319,7 +549,18 @@ function skip(name, reason) {
 
 function comparableMetrics(previous, current) {
   const comparison = {};
-  for (const key of ["medianMs", "elapsedMs", "peakRssBytes", "averageCpu", "maxCpu"]) {
+  for (const key of [
+    "medianMs",
+    "maxElapsedMs",
+    "elapsedMs",
+    "operationMs",
+    "processElapsedMs",
+    "peakRssBytes",
+    "outputBytes",
+    "payloadBytes",
+    "averageCpu",
+    "maxCpu",
+  ]) {
     if (Number.isFinite(previous[key]) && Number.isFinite(current[key]) && previous[key] !== 0) {
       comparison[key] = {
         value: previous[key],
@@ -333,8 +574,13 @@ function comparableMetrics(previous, current) {
 function formatMetrics(result) {
   const values = [];
   if (Number.isFinite(result.medianMs)) values.push(`median ${formatMs(result.medianMs)}`);
+  if (Number.isFinite(result.maxElapsedMs)) values.push(`elapsed max ${formatMs(result.maxElapsedMs)}`);
   if (Number.isFinite(result.elapsedMs)) values.push(formatMs(result.elapsedMs));
+  if (Number.isFinite(result.operationMs)) values.push(`operation ${formatMs(result.operationMs)}`);
+  if (Number.isFinite(result.processElapsedMs)) values.push(`process ${formatMs(result.processElapsedMs)}`);
   if (Number.isFinite(result.peakRssBytes)) values.push(`RSS ${formatBytes(result.peakRssBytes)}`);
+  if (Number.isFinite(result.outputBytes)) values.push(`output ${formatBytes(result.outputBytes)}`);
+  if (Number.isFinite(result.payloadBytes)) values.push(`payload ${formatBytes(result.payloadBytes)}`);
   if (Number.isFinite(result.averageCpu)) values.push(`CPU avg ${result.averageCpu.toFixed(1)}%`);
   if (Number.isFinite(result.maxCpu)) values.push(`max ${result.maxCpu.toFixed(1)}%`);
   const baselineChanges = Object.entries(result.baseline ?? {})

@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useMemo, useState, type ComponentType, type ReactNode } from "react";
 import { ContextMenu, DropdownMenu } from "radix-ui";
-import { MoreHorizontal } from "lucide-react";
 
 import { DataTable } from "../components/DataTable.tsx";
 import type { ColumnDef } from "../components/DataTable.types";
@@ -8,6 +7,7 @@ import { ContentTopDragStrip } from "../components/shared/ContentTopDragStrip.ts
 import { CopyPathMenuItem, RevealInFinderMenuItem } from "../components/shared/DataTableMenus.tsx";
 import { CopyButton } from "../components/shared/CopyButton.tsx";
 import { LoadingInline } from "../components/shared/LoadingInline.tsx";
+import { MoreActionsButton } from "../components/shared/MoreActionsButton.tsx";
 import { PageHeader } from "../components/shared/PageHeader.tsx";
 import { mcpColumns as defaultMcpColumns } from "../lib/tableColumns.tsx";
 import { MCP_FREEZE_COLUMN, TauriCommand, safeInvoke } from "../lib/index.ts";
@@ -60,9 +60,7 @@ function McpActionsCell({ row }: { row: McpRow }) {
   return (
     <DropdownMenu.Root>
       <DropdownMenu.Trigger asChild>
-        <button className="iconButton" aria-label={`MCP actions for ${row.name ?? "server"}`}>
-          <MoreHorizontal size={16} />
-        </button>
+        <MoreActionsButton aria-label={`MCP actions for ${row.name ?? "server"}`} />
       </DropdownMenu.Trigger>
       <DropdownMenu.Portal>
         <DropdownMenu.Content className="skillMenuContent" align="end" sideOffset={6}>

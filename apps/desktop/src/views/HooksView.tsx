@@ -3,7 +3,7 @@ import { lazy, Suspense, useCallback, useEffect, useMemo, useState, type Compone
 import { invoke } from "@tauri-apps/api/core";
 import { Group as PanelGroup, Panel } from "react-resizable-panels";
 import { ContextMenu, Dialog, DropdownMenu } from "radix-ui";
-import { Crosshair, MoreHorizontal, RefreshCw, Search, Trash2 } from "lucide-react";
+import { Crosshair, RefreshCw, Trash2 } from "lucide-react";
 
 import { DataTable } from "../components/DataTable.tsx";
 import type { ColumnDef, SortState } from "../components/DataTable.types";
@@ -11,8 +11,12 @@ import { AgentBadge } from "../components/shared/AgentBadge.tsx";
 import { CopyButton } from "../components/shared/CopyButton.tsx";
 import { DetailPanel } from "../components/shared/DetailPanel.tsx";
 import { DetailPanelHost } from "../components/shared/DetailPanelHost.tsx";
+import { DialogActionButton } from "../components/shared/DialogActionButton.tsx";
+import { LoadingIcon } from "../components/shared/LoadingIcon.tsx";
 import { LoadingInline } from "../components/shared/LoadingInline.tsx";
+import { MoreActionsButton } from "../components/shared/MoreActionsButton.tsx";
 import { PageHeader } from "../components/shared/PageHeader.tsx";
+import { SearchField } from "../components/shared/SearchField.tsx";
 import "../components/shared/confirm-dialog.css";
 import "./HooksView.css";
 
@@ -31,6 +35,7 @@ import {
   hookSourceTitle,
   hookTrustHash,
   hookTypeLabel,
+  isWebSource,
   safeInvoke,
   suppressNextClick,
 } from "../lib/index.ts";
@@ -42,6 +47,7 @@ type HookRecord = {
   event?: string | null;
   matcher?: string | null;
   enabled?: boolean | null;
+  needs_review?: boolean | null;
   command?: string | null;
   script?: string | null;
   url?: string | null;
@@ -107,7 +113,9 @@ type HooksViewProps = {
   rows: HookRecord[];
   loadingRows?: boolean;
   onDeleteHook?: (hook: HookRecord) => Promise<unknown>;
+  onDeleteHooks?: (hooks: HookRecord[]) => Promise<unknown>;
   onSetHookEnabled?: (hook: HookRecord, enabled: boolean) => Promise<unknown>;
+  onReviewHook?: (hook: HookRecord) => Promise<unknown>;
 };
 
 const defaultSort: SortState = { key: "event", direction: "asc" };
@@ -122,15 +130,18 @@ function hookOperationError(result: unknown): string | undefined {
 
 export function HookDetailRow({ label, value, mono = false, copyable = false }: HookDetailRowProps) {
   const text = `${value ?? ""}`;
+  const content = (
+    <div className={`hookDetailValue ${mono ? "mono" : ""}`}>
+      <span>{text || "-"}</span>
+      {copyable && text ? (
+        <CopyButton className="hookCopyButton" value={text} copyLabel={`Copy ${label}`} copiedLabel={`${label} copied`} />
+      ) : null}
+    </div>
+  );
   return (
     <div className="hookDetailRow">
       <span className="hookDetailLabel">{label}</span>
-      <Tooltip content={text || undefined} onlyWhenTruncated><div className={`hookDetailValue ${mono ? "mono" : ""}`}>
-        <span>{text || "-"}</span>
-        {copyable && text ? (
-          <CopyButton className="hookCopyButton" value={text} copyLabel={`Copy ${label}`} copiedLabel={`${label} copied`} />
-        ) : null}
-      </div></Tooltip>
+      {isWebSource(text.trim()) ? content : <Tooltip content={text || undefined} onlyWhenTruncated>{content}</Tooltip>}
     </div>
   );
 }
@@ -139,7 +150,7 @@ function hookEnableDisabledReason(hook: HookRecord | null): string {
   if (!hook) return "Missing hook source path";
   const path = hookSourcePath(hook);
   if (!path) return "Missing hook source path";
-  if (path.startsWith("/etc/cursor/") || path.startsWith("/etc/claude-code/") || path.startsWith("/Library/Application Support/ClaudeCode/")) {
+  if (path.startsWith("/etc/cursor/") || path.startsWith("/Library/Application Support/Cursor/") || path.startsWith("/etc/claude-code/") || path.startsWith("/Library/Application Support/ClaudeCode/")) {
     return "Managed hook source";
   }
   if (path.includes("/.claude/plugins/")) {
@@ -148,6 +159,11 @@ function hookEnableDisabledReason(hook: HookRecord | null): string {
   if (!path.endsWith(".json") && !path.endsWith(".toml")) {
     return "Hook source cannot be changed";
   }
+  return "";
+}
+
+function hookReviewDisabledReason(hook: HookRecord | null): string {
+  if (!hook?.needs_review) return "Hook does not need review";
   return "";
 }
 
@@ -230,9 +246,7 @@ function HookActionsCell({
   return (
     <DropdownMenu.Root onOpenChange={(open) => { if (!open) suppressNextClick(); }}>
       <DropdownMenu.Trigger asChild>
-        <button className="iconButton" aria-label={`Hook actions for ${hook.event ?? "hook"}`}>
-          <MoreHorizontal size={16} />
-        </button>
+        <MoreActionsButton aria-label={`Hook actions for ${hook.event ?? "hook"}`} />
       </DropdownMenu.Trigger>
       <DropdownMenu.Portal>
         <DropdownMenu.Content className="skillMenuContent" align="end" sideOffset={6}>
@@ -255,12 +269,10 @@ function hookParameterRows(hook: HookRecord | null, enabledControl: ReactNode): 
   if (hook.url) rows.push({ label: "URL", value: hook.url, mono: true, copyable: true });
   if (hook.prompt) rows.push({ label: "Prompt", value: hook.prompt, mono: true, copyable: true });
   if (hook.filter) rows.push({ label: "If", value: hook.filter, mono: true });
-  const status = hook.status_message ?? hook.statusMessage;
-  if (status) rows.push({ label: "Status", value: status });
   return rows;
 }
 
-export function HooksView({ rows, loadingRows = false, onDeleteHook, onSetHookEnabled }: HooksViewProps) {
+export function HooksView({ rows, loadingRows = false, onDeleteHook, onDeleteHooks, onSetHookEnabled, onReviewHook }: HooksViewProps) {
   const hookItems = useMemo(() => hookItemsFromRows(rows), [rows]);
   const [activeKey, setActiveKey] = useState(hookItems[0]?.key ?? "");
   const [selected, setSelected] = useState<string[]>([]);
@@ -268,6 +280,8 @@ export function HooksView({ rows, loadingRows = false, onDeleteHook, onSetHookEn
   const [detailCollapsed, setDetailCollapsed] = useState(false);
   const [deletingKey, setDeletingKey] = useState("");
   const [updatingEnabledKey, setUpdatingEnabledKey] = useState("");
+  const [reviewingKey, setReviewingKey] = useState("");
+  const [pendingReviewItem, setPendingReviewItem] = useState<HookItem | null>(null);
   const [deleteError, setDeleteError] = useState("");
   const [pendingDeleteItems, setPendingDeleteItems] = useState<HookItem[]>([]);
   const [sourceState, setSourceState] = useState<HookSourceState>({ key: "", loading: false, showLoading: false, data: null, error: "" });
@@ -286,8 +300,30 @@ export function HooksView({ rows, loadingRows = false, onDeleteHook, onSetHookEn
     setUpdatingEnabledKey("");
     const updateError = hookOperationError(result);
     if (updateError) setDeleteError(updateError);
-    else if (!result) setDeleteError("Could not update hook. Refresh hooks and try again.");
+    else if (!result) setDeleteError("Could not update hook.");
   }, [onSetHookEnabled, updatingEnabledKey]);
+  const reviewHook = useCallback(async (item: HookItem) => {
+    if (!item?.hook || reviewingKey) return;
+    const disabledReason = hookReviewDisabledReason(item.hook);
+    if (disabledReason) return;
+    setReviewingKey(item.key);
+    setDeleteError("");
+    const result = await onReviewHook?.(item.hook);
+    setReviewingKey("");
+    const reviewError = hookOperationError(result);
+    if (reviewError) setDeleteError(reviewError);
+    else if (!result) setDeleteError("Could not review hook.");
+  }, [onReviewHook, reviewingKey]);
+  const requestReviewHook = useCallback((item: HookItem) => {
+    if (hookReviewDisabledReason(item.hook)) return;
+    setPendingReviewItem(item);
+  }, []);
+  const confirmReviewHook = useCallback(async () => {
+    const item = pendingReviewItem;
+    if (!item) return;
+    setPendingReviewItem(null);
+    await reviewHook(item);
+  }, [pendingReviewItem, reviewHook]);
   const requestDeleteHooks = useCallback((items: HookItem[]) => {
     const deletable = items.filter((item) => !hookDeleteDisabledReason(item.hook));
     if (deletable.length === 0) return;
@@ -298,6 +334,16 @@ export function HooksView({ rows, loadingRows = false, onDeleteHook, onSetHookEn
     if (targets.length === 0 || deletingKey) return;
     setPendingDeleteItems([]);
     setDeleteError("");
+    if (targets.length > 1 && onDeleteHooks) {
+      setDeletingKey("batch");
+      const result = await onDeleteHooks(targets.map((item) => item.hook));
+      const deleteResultError = hookOperationError(result);
+      if (deleteResultError) setDeleteError(deleteResultError);
+      else if (!result) setDeleteError("Could not delete hooks.");
+      setDeletingKey("");
+      setSelected([]);
+      return;
+    }
     let latestRows = rows;
     for (const item of targets) {
       const identity = hookDeleteIdentity(item.hook);
@@ -311,14 +357,14 @@ export function HooksView({ rows, loadingRows = false, onDeleteHook, onSetHookEn
         break;
       }
       if (!result) {
-        setDeleteError("Could not delete hook. Refresh hooks and try again.");
+        setDeleteError("Could not delete hook.");
         break;
       }
       if (Array.isArray(result)) latestRows = result as HookRecord[];
     }
     setDeletingKey("");
     setSelected([]);
-  }, [deletingKey, onDeleteHook, pendingDeleteItems, rows]);
+  }, [deletingKey, onDeleteHook, onDeleteHooks, pendingDeleteItems, rows]);
   const pendingDeleteMessage = pendingDeleteItems.length === 1
     ? `Delete this hook from ${hookSourcePath(pendingDeleteItems[0]?.hook)}?`
     : `Delete ${pendingDeleteItems.length} selected hooks?`;
@@ -337,7 +383,22 @@ export function HooksView({ rows, loadingRows = false, onDeleteHook, onSetHookEn
         const handler = hookHandlerText(hook);
         return (
           <>
-            <span className="dataCellTitle">{hook.event || "Hook"}</span>
+            <span className="hookEventTitle">
+              <span className="dataCellTitle">{hook.event || "Hook"}</span>
+              {hook.needs_review ? (
+                <button
+                  type="button"
+                  className="hookReviewBadge"
+                  aria-label={`Review ${hook.event || "hook"}`}
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    requestReviewHook(item);
+                  }}
+                >
+                  {reviewingKey === item.key ? "Reviewing…" : "Review"}
+                </button>
+              ) : null}
+            </span>
             <Tooltip content={handler} onlyWhenTruncated><span className="dataCellSub">{compactCommand(handler) || hookSourceTitle(hook)}</span></Tooltip>
           </>
         );
@@ -352,25 +413,6 @@ export function HooksView({ rows, loadingRows = false, onDeleteHook, onSetHookEn
       sortValue: (item) => friendlyAgent(item.hook.agent),
       width: "78px",
       render: (item) => <span className="ruleAgentCell"><AgentBadge agent={friendlyAgent(item.hook.agent)} /></span>,
-    },
-    {
-      key: "type",
-      header: "Type",
-      type: "enum",
-      sortable: true,
-      sortValue: (item) => hookTypeLabel(item.hook),
-      width: "112px",
-      value: (item) => hookTypeLabel(item.hook),
-    },
-    {
-      key: "matcher",
-      header: "Matcher",
-      type: "enum",
-      sortable: true,
-      sortValue: (item) => item.hook.matcher || "",
-      width: "190px",
-      value: (item) => item.hook.matcher || "*",
-      title: (item) => item.hook.matcher || "",
     },
     {
       key: "enabled",
@@ -395,7 +437,7 @@ export function HooksView({ rows, loadingRows = false, onDeleteHook, onSetHookEn
       width: "40px",
       render: (item) => <HookActionsCell item={item} onDeleteHooks={requestDeleteHooks} />,
     },
-  ], [requestDeleteHooks, setHookEnabled, updatingEnabledKey]);
+  ], [requestDeleteHooks, requestReviewHook, reviewingKey, setHookEnabled, updatingEnabledKey]);
   const activeItem = useMemo(() => hookItems.find((item) => item.key === activeKey), [activeKey, hookItems]);
   const activeHook = activeItem?.hook ?? null;
   const activeEnableControl = useMemo(() => activeItem ? (
@@ -439,7 +481,7 @@ export function HooksView({ rows, loadingRows = false, onDeleteHook, onSetHookEn
         disabled={deletable.length === 0 || Boolean(deletingKey)}
         onClick={() => requestDeleteHooks(deletable)}
       >
-        {deletingKey ? <RefreshCw className="loadingSpinner" size={15} /> : <Trash2 size={15} />}
+        {deletingKey ? <LoadingIcon size={15} /> : <Trash2 size={15} />}
         Delete
       </button>
     );
@@ -511,7 +553,7 @@ export function HooksView({ rows, loadingRows = false, onDeleteHook, onSetHookEn
       <Panel className="sessionListPanel hookListPanel" defaultSize="54%" minSize="360px">
         <div className="sessionListPane hookListPane">
           <PageHeader title="Hooks" compact>
-            <div className="searchBox"><Search size={15} /><input placeholder="Search hooks" value={query} onChange={(event) => setQuery(event.target.value)} /></div>
+            <SearchField placeholder="Search hooks" value={query} onChange={(event) => setQuery(event.target.value)} />
           </PageHeader>
           <div className="sessionListBody">
             <DataTable
@@ -635,14 +677,36 @@ export function HooksView({ rows, loadingRows = false, onDeleteHook, onSetHookEn
           <Dialog.Title className="confirmDialogTitle">Delete hook{pendingDeleteItems.length === 1 ? "" : "s"}?</Dialog.Title>
           <p id="hook-delete-description" className="confirmDialogDescription">{pendingDeleteMessage}</p>
           <div className="confirmDialogActions">
-            <button className="secondary" onClick={() => setPendingDeleteItems([])}>Cancel</button>
-            <button className="danger" disabled={Boolean(deletingKey)} onClick={() => void confirmDeleteHooks()}>
+            <DialogActionButton variant="secondary" onClick={() => setPendingDeleteItems([])}>Cancel</DialogActionButton>
+            <DialogActionButton variant="danger" disabled={Boolean(deletingKey)} onClick={() => void confirmDeleteHooks()}>
               {deletingKey
                 ? "Deleting…"
                 : pendingDeleteItems.length === 1
                   ? "Delete hook"
                   : "Delete hooks"}
-            </button>
+            </DialogActionButton>
+          </div>
+        </Dialog.Content>
+      </Dialog.Portal>
+    </Dialog.Root>
+    <Dialog.Root open={Boolean(pendingReviewItem)} onOpenChange={(open) => !open && setPendingReviewItem(null)}>
+      <Dialog.Portal>
+        <Dialog.Overlay className="dialogOverlay" />
+        <Dialog.Content className="confirmDialogPanel" aria-describedby="hook-review-description" data-no-drag onMouseDown={(event) => event.stopPropagation()}>
+          <Dialog.Title className="confirmDialogTitle">Approve hook?</Dialog.Title>
+          <p id="hook-review-description" className="confirmDialogDescription">
+            Approve the current configuration for this {pendingReviewItem?.hook.agent ?? "agent"} hook?
+          </p>
+          <div className="hookReviewDialogDetails">
+            <strong>{pendingReviewItem?.hook.event ?? "Hook"}</strong>
+            <span>{hookSourcePath(pendingReviewItem?.hook)}</span>
+            <code>{compactCommand(hookHandlerText(pendingReviewItem?.hook)) || "No command"}</code>
+          </div>
+          <div className="confirmDialogActions">
+            <DialogActionButton variant="secondary" onClick={() => setPendingReviewItem(null)}>Cancel</DialogActionButton>
+            <DialogActionButton variant="primary" disabled={Boolean(reviewingKey)} onClick={() => void confirmReviewHook()}>
+              {reviewingKey ? "Approving…" : "Approve"}
+            </DialogActionButton>
           </div>
         </Dialog.Content>
       </Dialog.Portal>

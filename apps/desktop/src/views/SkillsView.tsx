@@ -5,10 +5,8 @@ import { invoke } from "@tauri-apps/api/core";
 import { ContextMenu, Dialog, DropdownMenu, Select, ToggleGroup } from "radix-ui";
 import {
   Check,
-  ChevronDown,
   ChevronRight,
   Hammer,
-  MoreHorizontal,
   PackagePlus,
   Plus,
   RefreshCw,
@@ -22,9 +20,13 @@ import { ContentTopDragStrip } from "../components/shared/ContentTopDragStrip.ts
 import { DialogActionBar } from "../components/shared/DialogActionBar.tsx";
 import { DialogAdvanceButton } from "../components/shared/DialogAdvanceButton.tsx";
 import { DialogTextField } from "../components/shared/DialogTextField.tsx";
+import { LoadingIcon } from "../components/shared/LoadingIcon.tsx";
 import { LoadingInline } from "../components/shared/LoadingInline.tsx";
+import { MoreActionsButton } from "../components/shared/MoreActionsButton.tsx";
 import { PageHeader } from "../components/shared/PageHeader.tsx";
 import { SelectionCheckbox } from "../components/shared/SelectionCheckbox.tsx";
+import { SearchField } from "../components/shared/SearchField.tsx";
+import { SelectTrigger } from "../components/shared/SelectTrigger.tsx";
 import { Visibility } from "../components/shared/Visibility.tsx";
 import { DataTable } from "../components/DataTable.tsx";
 import type { ColumnDef, SortState } from "../components/DataTable.types";
@@ -113,6 +115,7 @@ type SkillAddPlan = {
 };
 
 export type SkillInstallResult = {
+  skills?: SkillRecord[];
   report?: {
     plan?: SkillAddPlan;
     results?: Array<{ target?: string }>;
@@ -342,7 +345,7 @@ export function SkillMainCell({ skill, openSkill, onApplyUpdates }: SkillMainCel
               onApplyUpdates([skill.name]);
             }}
           >
-            Update available
+            Update
           </button>
         )}
         {sourceAction && (
@@ -381,9 +384,7 @@ export function SkillActionsCell({ skill, onApplyUpdates, onDeleteSkills }: Skil
   return (
     <DropdownMenu.Root onOpenChange={(open) => { if (!open) suppressNextClick(); }}>
       <DropdownMenu.Trigger asChild>
-        <button className="iconButton" aria-label={`Skill actions for ${skill.name}`}>
-          <MoreHorizontal size={16} />
-        </button>
+        <MoreActionsButton aria-label={`Skill actions for ${skill.name}`} />
       </DropdownMenu.Trigger>
       <DropdownMenu.Portal>
         <DropdownMenu.Content className="skillMenuContent" align="end" sideOffset={6}>
@@ -635,11 +636,23 @@ export type AddSkillDialogProps = {
   onRequestWrapper: (skills: SkillRecord[]) => void;
 };
 
+type InstallTargetOption = {
+  id: string;
+  displayName: string;
+  supportsGlobal: boolean;
+};
+
 export function AddSkillDialog({ onClose, onInstalled, onRequestWrapper }: AddSkillDialogProps) {
   const [source, setSource] = useState("");
   const [target, setTarget] = useState("shared");
+  const [scope, setScope] = useState("global");
+  const [installTargets, setInstallTargets] = useState<InstallTargetOption[]>([
+    { id: "shared", displayName: "Shared", supportsGlobal: true },
+  ]);
   const [copy, setCopy] = useState(false);
+  const [visibility, setVisibility] = useState<SkillVisibility>(SkillVisibility.Auto);
   const [plan, setPlan] = useState<SkillAddPlan | null>(null);
+  const [previewId, setPreviewId] = useState("");
   const [selectedRoots, setSelectedRoots] = useState<string[]>([]);
   const [createWrapper, setCreateWrapper] = useState(false);
   const [skillSearch, setSkillSearch] = useState("");
@@ -647,6 +660,12 @@ export function AddSkillDialog({ onClose, onInstalled, onRequestWrapper }: AddSk
   const [error, setError] = useState("");
   const skillItemRefs = useRef(new Map<string, HTMLDivElement>());
   const busy = busyAction !== "";
+  const visibleInstallTargets = useMemo(
+    () => installTargets.filter((option) => scope === "project" || option.supportsGlobal),
+    [installTargets, scope],
+  );
+  const targetDisplayName = installTargets.find((option) => option.id === target)?.displayName
+    ?? targetAgentLabel(target);
   const available = plan?.available ?? [];
   const showSkillSearch = available.length > 10;
   const normalizedSkillSearch = skillSearch.trim().toLowerCase();
@@ -732,14 +751,17 @@ export function AddSkillDialog({ onClose, onInstalled, onRequestWrapper }: AddSk
       const response = await invoke(TauriCommand.SkillsAdd, {
         source: source.trim(),
         target,
+        scope,
         skills: [],
         copy,
         overwrite: false,
+        visibility: visibility.toLowerCase(),
         dryRun: true,
-      }) as { plan?: SkillAddPlan } | null;
+      }) as { plan?: SkillAddPlan; previewId?: string } | null;
       const nextPlan = normalizeSkillAddPlan(response?.plan);
       const nextOperations = new Map((nextPlan?.operations ?? []).map((operation) => [operation.name, operation]));
       setPlan(nextPlan);
+      setPreviewId(response?.previewId ?? "");
       setCreateWrapper(false);
       setSkillSearch("");
       setSelectedRoots((nextPlan?.available ?? [])
@@ -750,6 +772,7 @@ export function AddSkillDialog({ onClose, onInstalled, onRequestWrapper }: AddSk
         .map((skill) => skill.name));
     } catch (previewError) {
       setPlan(null);
+      setPreviewId("");
       setSelectedRoots([]);
       setError(`${previewError}`);
     } finally {
@@ -765,9 +788,12 @@ export function AddSkillDialog({ onClose, onInstalled, onRequestWrapper }: AddSk
       const result = await invoke<SkillInstallResult>(TauriCommand.SkillsAdd, {
         source: source.trim(),
         target,
+        scope,
         skills: selected,
         copy,
         overwrite: selectedHasExisting,
+        visibility: visibility.toLowerCase(),
+        previewId,
         dryRun: false,
       });
       onInstalled(result);
@@ -793,6 +819,16 @@ export function AddSkillDialog({ onClose, onInstalled, onRequestWrapper }: AddSk
     if (plan) install();
     else preview();
   };
+
+  useEffect(() => {
+    void safeInvoke<InstallTargetOption[]>(TauriCommand.SkillsTargets).then((targets) => {
+      if (!targets?.length) return;
+      setInstallTargets([
+        { id: "shared", displayName: "Shared", supportsGlobal: true },
+        ...targets.filter((option) => option.id !== "shared"),
+      ]);
+    });
+  }, []);
 
   useEffect(() => {
     if (!firstSearchMatch) return;
@@ -863,14 +899,11 @@ export function AddSkillDialog({ onClose, onInstalled, onRequestWrapper }: AddSk
               setSkillSearch("");
             }}
           >
-            <Select.Trigger className="addSkillSelectTrigger" aria-label="Skill install target">
+            <SelectTrigger className="addSkillSelectTrigger" label="Skill install target">
               <Select.Value>
-                <AgentOptionLabel agent={target} label={targetAgentLabel(target)} />
+                <AgentOptionLabel agent={target} label={targetDisplayName} />
               </Select.Value>
-              <Select.Icon asChild>
-                <ChevronDown size={14} />
-              </Select.Icon>
-            </Select.Trigger>
+            </SelectTrigger>
             <Select.Portal>
               <Select.Content
                 className="skillMenuContent addSkillSelectContent"
@@ -880,16 +913,79 @@ export function AddSkillDialog({ onClose, onInstalled, onRequestWrapper }: AddSk
                 sideOffset={6}
               >
                 <Select.Viewport>
-                  {([
-                    ["shared", "Shared"],
-                    ["codex", "Codex"],
-                    ["cursor", "Cursor"],
-                    ["claude", "Claude"],
-                  ] as const).map(([value, label]) => (
-                    <Select.Item className="skillMenuItem" value={value} key={value}>
+                  {visibleInstallTargets.map((option) => (
+                    <Select.Item className="skillMenuItem" value={option.id} key={option.id}>
                       <Select.ItemText>
-                        <AgentOptionLabel agent={value} label={label} />
+                        <AgentOptionLabel agent={option.id} label={option.displayName} />
                       </Select.ItemText>
+                      <Select.ItemIndicator className="selectItemIndicator">
+                        <Check size={13} strokeWidth={2.6} />
+                      </Select.ItemIndicator>
+                    </Select.Item>
+                  ))}
+                </Select.Viewport>
+              </Select.Content>
+            </Select.Portal>
+          </Select.Root>
+        </div>
+        <div className="dialogField">
+          <span>Scope</span>
+          <Select.Root
+            value={scope}
+            onValueChange={(value) => {
+              setScope(value);
+              const selected = installTargets.find((option) => option.id === target);
+              if (value === "global" && selected && !selected.supportsGlobal) setTarget("shared");
+              setPlan(null);
+              setSelectedRoots([]);
+              setCreateWrapper(false);
+              setSkillSearch("");
+            }}
+          >
+            <SelectTrigger className="addSkillSelectTrigger" label="Skill install scope">
+              <Select.Value>{scope}</Select.Value>
+            </SelectTrigger>
+            <Select.Portal>
+              <Select.Content className="skillMenuContent addSkillSelectContent" position="popper" side="bottom" align="start" sideOffset={6}>
+                <Select.Viewport>
+                  {["global", "project"].map((value) => (
+                    <Select.Item className="skillMenuItem" value={value} key={value}>
+                      <Select.ItemText>{value}</Select.ItemText>
+                      <Select.ItemIndicator className="selectItemIndicator"><Check size={13} strokeWidth={2.6} /></Select.ItemIndicator>
+                    </Select.Item>
+                  ))}
+                </Select.Viewport>
+              </Select.Content>
+            </Select.Portal>
+          </Select.Root>
+        </div>
+        <div className="dialogField">
+          <span>Visibility</span>
+          <Select.Root
+            value={visibility}
+            onValueChange={(value) => {
+              setVisibility(value as SkillVisibility);
+              setPlan(null);
+              setSelectedRoots([]);
+              setCreateWrapper(false);
+              setSkillSearch("");
+            }}
+          >
+            <SelectTrigger className="addSkillSelectTrigger" label="Skill visibility">
+              <Select.Value>{visibility}</Select.Value>
+            </SelectTrigger>
+            <Select.Portal>
+              <Select.Content
+                className="skillMenuContent addSkillSelectContent"
+                position="popper"
+                side="bottom"
+                align="start"
+                sideOffset={6}
+              >
+                <Select.Viewport>
+                  {editableSkillVisibilities.map((option) => (
+                    <Select.Item className="skillMenuItem" value={option} key={option}>
+                      <Select.ItemText>{option}</Select.ItemText>
                       <Select.ItemIndicator className="selectItemIndicator">
                         <Check size={13} strokeWidth={2.6} />
                       </Select.ItemIndicator>
@@ -1237,17 +1333,14 @@ export function SkillsView({
     <section className="content skillsPage">
       <ContentTopDragStrip />
       <PageHeader title="Skills">
-        <div className="searchBox">
-          <Search size={15} />
-          <input placeholder="Search skills" value={query} onChange={(event) => setQuery(event.target.value)} />
-        </div>
+        <SearchField placeholder="Search skills" value={query} onChange={(event) => setQuery(event.target.value)} />
         <button
           className="iconButton"
           disabled={loadingSkills}
           onClick={onRefresh}
           aria-label="Refresh skills and check updates"
         >
-          <RefreshCw className={checkingUpdates ? "skillRefreshSpinning" : undefined} size={16} />
+          {checkingUpdates ? <LoadingIcon size={16} /> : <RefreshCw size={16} />}
         </button>
         {updateError && <span className="skillUpdateError" role="alert">{updateError}</span>}
         <Dialog.Root open={showAddSkill} onOpenChange={setShowAddSkill}>

@@ -12,8 +12,6 @@
   line-height: 1;
   overflow: hidden;
   background: var(--panel-bg);
-  outline: 1px solid var(--image-outline);
-  outline-offset: -1px;
 }
 
 .chip,

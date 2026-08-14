@@ -6,6 +6,7 @@ import { normalizeSession } from "../../lib/index.ts";
 import { DataTable } from "../DataTable.tsx";
 import { createSessionTableColumns } from "./createSessionTableColumns.tsx";
 import { LoadingInline } from "./LoadingInline.tsx";
+import { RadialConvergenceChart } from "./RadialConvergenceChart.tsx";
 import "./linked-sessions.css";
 
 export type LinkedSessionLink = Record<string, unknown> & {
@@ -115,6 +116,13 @@ export function LinkedSessionsDrawer({ open, onOpenChange, links, loading, onOpe
       updatedAt: "104px",
     },
   }), []);
+  const convergenceNodes = useMemo(
+    () => sessionRows.map((session, index) => ({
+      key: `${session.agent}-${session.id}-${session.path}-${index}`,
+      label: session.title || session.id || "Untitled session",
+    })),
+    [sessionRows],
+  );
   return (
     <Dialog.Root open={open} onOpenChange={onOpenChange} modal={false}>
       <Dialog.Portal>
@@ -132,6 +140,15 @@ export function LinkedSessionsDrawer({ open, onOpenChange, links, loading, onOpe
               </Dialog.Close>
             </div>
           </div>
+          {convergenceNodes.length > 0 ? (
+            <div className="linkedSessionsDrawerChart">
+              <RadialConvergenceChart
+                nodes={convergenceNodes}
+                centerLabel="LINKED"
+                ariaLabel={`${convergenceNodes.length} linked sessions`}
+              />
+            </div>
+          ) : null}
           <div className="linkedSessionsDrawerTable">
             <DataTable
               rows={sessionRows}
@@ -140,7 +157,6 @@ export function LinkedSessionsDrawer({ open, onOpenChange, links, loading, onOpe
               getRowLabel={(session) => session.title}
               defaultSort={{ key: "updatedAt", direction: "desc" }}
               onRowClick={(session) => onOpenSession?.(session.linkedSessionLink ?? session)}
-              rowProps={(session) => ({ title: session.linkedSessionLink?.evidence_text ?? session.linkedSessionLink?.evidenceText ?? "" })}
               loading={loading}
               loadingLabel={<LoadingInline label="Loading linked sessions" />}
               emptyState="No linked sessions. Links appear when this session references others."

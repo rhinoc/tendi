@@ -1,9 +1,10 @@
 import { Tooltip } from "./Tooltip.tsx";
-import { Check, ChevronDown, PanelLeftClose, PanelLeftOpen } from "lucide-react";
+import { Check, PanelLeftClose, PanelLeftOpen } from "lucide-react";
 import { Select } from "radix-ui";
 
 import { navItems, startWindowDrag } from "../../lib/index.ts";
 import { AgentFilterOptionLabel } from "./AgentFilterOptionLabel.tsx";
+import { SelectTrigger } from "./SelectTrigger.tsx";
 
 export type SidebarSource = {
   label: string;
@@ -66,19 +67,15 @@ export function Sidebar<TView extends string = string>({
         <div className="agentSelectGroup">
           <Select.Root value={agentFilter} onValueChange={setAgentFilter}>
             <Tooltip content={collapsed ? selectedAgentLabel : undefined}>
-              <Select.Trigger
+              <SelectTrigger
                 className="agentSelectTrigger"
-                aria-label="Agent filter"
+                label="Agent filter"
+                showChevron={!collapsed}
               >
                 <Select.Value>
                   <AgentFilterOptionLabel agent={agentFilter} label={selectedAgentLabel} collapsed={collapsed} />
                 </Select.Value>
-                {!collapsed && (
-                  <Select.Icon asChild>
-                    <ChevronDown size={14} />
-                  </Select.Icon>
-                )}
-              </Select.Trigger>
+              </SelectTrigger>
             </Tooltip>
             <Select.Portal>
               <Select.Content

@@ -1,9 +1,10 @@
 import { useEffect, useState, type ButtonHTMLAttributes, type MouseEvent, type ReactNode } from "react";
-import { AlertCircle, Check, Copy } from "lucide-react";
+import { AlertCircle } from "lucide-react";
 
 import { copyText } from "../../lib/index.ts";
+import { CopyFeedbackIcon, useCopyFeedback } from "./useCopyFeedback.tsx";
 
-export type CopyButtonProps = Omit<ButtonHTMLAttributes<HTMLButtonElement>, "onClick" | "children"> & {
+export type CopyButtonProps = Omit<ButtonHTMLAttributes<HTMLButtonElement>, "onClick" | "children" | "title"> & {
   value?: string | null;
   onCopy?: () => Promise<unknown> | unknown;
   copyLabel: string;
@@ -22,20 +23,13 @@ export function CopyButton({
   iconSize = 13,
   stopPropagation = false,
   className = "",
-  title,
   disabled,
   children,
   copiedChildren,
   ...props
 }: CopyButtonProps) {
-  const [copied, setCopied] = useState(false);
+  const { copied, markCopied, resetCopied } = useCopyFeedback();
   const [copyError, setCopyError] = useState(false);
-
-  useEffect(() => {
-    if (!copied) return undefined;
-    const timer = window.setTimeout(() => setCopied(false), 1400);
-    return () => window.clearTimeout(timer);
-  }, [copied]);
 
   useEffect(() => {
     if (!copyError) return undefined;
@@ -54,9 +48,9 @@ export function CopyButton({
       } else {
         await copyText(value);
       }
-      setCopied(true);
+      markCopied();
     } catch {
-      setCopied(false);
+      resetCopied();
       setCopyError(true);
     }
   };
@@ -80,22 +74,15 @@ export function CopyButton({
           {hasCustomChildren ? children : null}
         </>
       ) : !hasCustomChildren ? (
-        <span className={`copyIconSwap${copied ? " isCopied" : ""}`} aria-hidden="true">
-          <span className="copyIconSwapLayer copyIconSwapActive">
-            <Check size={iconSize} strokeWidth={2.6} />
-          </span>
-          <span className="copyIconSwapLayer copyIconSwapIdle">
-            <Copy size={iconSize} strokeWidth={2} />
-          </span>
-        </span>
+        <CopyFeedbackIcon copied={copied} size={iconSize} />
       ) : copied ? (
         <>
-          <Check size={iconSize} strokeWidth={2.6} />
+          <CopyFeedbackIcon copied size={iconSize} swap={false} />
           {copiedChildren ?? children}
         </>
       ) : (
         <>
-          <Copy size={iconSize} strokeWidth={2} />
+          <CopyFeedbackIcon copied={false} size={iconSize} swap={false} />
           {children}
         </>
       )}

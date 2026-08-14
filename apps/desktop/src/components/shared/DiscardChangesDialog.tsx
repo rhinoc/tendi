@@ -1,5 +1,6 @@
 import { Dialog } from "radix-ui";
 
+import { DialogActionButton } from "./DialogActionButton.tsx";
 import "./confirm-dialog.css";
 
 export type DiscardChangesDialogProps = {
@@ -19,16 +20,16 @@ export function DiscardChangesDialog({ open, onOpenChange, onDiscard }: DiscardC
             This file has edits that have not been saved.
           </p>
           <div className="confirmDialogActions">
-            <button className="secondary" onClick={() => onOpenChange(false)}>Cancel</button>
-            <button
-              className="danger"
+            <DialogActionButton variant="secondary" onClick={() => onOpenChange(false)}>Cancel</DialogActionButton>
+            <DialogActionButton
+              variant="danger"
               onClick={() => {
                 onOpenChange(false);
                 onDiscard();
               }}
             >
               Discard changes
-            </button>
+            </DialogActionButton>
           </div>
         </Dialog.Content>
       </Dialog.Portal>

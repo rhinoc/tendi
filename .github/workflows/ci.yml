@@ -26,6 +26,9 @@ jobs:
       - name: Install frontend dependencies
         run: npm ci --prefix apps/desktop
 
+      - name: Check for native title tooltips
+        run: npm run check:no-title-tooltips --prefix apps/desktop
+
       - name: Rust tests
         run: cargo test --workspace
 

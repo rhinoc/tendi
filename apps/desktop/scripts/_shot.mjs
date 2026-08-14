@@ -43,7 +43,7 @@ function buildReport() {
   return {
     skills: { skills: [] }, prompts: { prompts: [] }, sessions: { sessions },
     rules: { rules: [] }, hooks: { hooks }, mcp: { servers: [] }, agents: { agents: [] },
-    settings: { appearance: "system", terminal: "auto", additionalSessionRoots: [], configProfiles: {} },
+    settings: { appearance: "system", terminal: "auto", editor: "vscode", additionalSessionRoots: [], configProfiles: {} },
   };
 }
 
@@ -140,15 +140,15 @@ try {
   await page.getByRole("button", { name: "Settings", exact: true }).click();
   await page.getByRole("heading", { name: "Settings", exact: true }).waitFor();
   await page.screenshot({ path: join(dir, `${shotPrefix}_4_settings.png`) });
-  const followSystemControl = page.locator(".settingsAppearanceItem", { hasText: "Follow system" });
+  const systemControl = page.locator(".settingsAppearanceItem", { hasText: "System" });
   const lightControl = page.locator(".settingsAppearanceItem", { hasText: "Light" });
   const darkControl = page.locator(".settingsAppearanceItem", { hasText: "Dark" });
-  await followSystemControl.waitFor({ timeout: 5000 });
+  await systemControl.waitFor({ timeout: 5000 });
   await darkControl.click();
   await page.waitForFunction(() => document.documentElement.dataset.theme === "dark");
   await lightControl.click();
   await page.waitForFunction(() => document.documentElement.dataset.theme === "light");
-  await followSystemControl.click();
+  await systemControl.click();
   await page.waitForFunction(() => {
     const expected = matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
     return document.documentElement.dataset.theme === expected;

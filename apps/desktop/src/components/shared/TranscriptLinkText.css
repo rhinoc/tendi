@@ -1,0 +1,64 @@
+.transcriptSearchMark {
+  padding: 0 1px;
+  border-radius: 2px;
+  background: var(--tone-warn-soft);
+  color: inherit;
+  -webkit-user-select: text;
+  user-select: text;
+}
+
+.transcriptLink {
+  display: inline-flex;
+  align-items: center;
+  max-width: 100%;
+  color: var(--link);
+  font-weight: 500;
+  text-decoration-line: underline;
+  text-decoration-color: color-mix(in oklch, currentColor 45%, transparent);
+  text-underline-offset: 2px;
+  vertical-align: baseline;
+}
+
+.transcriptStaticLink .transcriptLink {
+  color: inherit;
+  font-weight: inherit;
+  text-decoration: none;
+}
+
+.transcriptLink:hover,
+.transcriptLink:focus-visible {
+  text-decoration-color: currentColor;
+  text-decoration-thickness: 2px;
+}
+
+.transcriptLink:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+
+.transcriptLinkContent {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+}
+
+.transcriptLinkIcon {
+  flex: 0 0 auto;
+}
+
+.transcriptLinkLabel {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fromUser .transcriptLink {
+  color: inherit;
+  text-decoration-color: color-mix(in oklch, currentColor 60%, transparent);
+}
+
+.transcriptLink.isSearchMatch {
+  text-decoration-color: var(--tone-warn);
+}

@@ -38,13 +38,16 @@ export const codeMirrorBaseTheme = EditorView.theme({
     fontSize: "13px",
   },
   ".cm-scroller": {
-    fontFamily: "\"Geist Mono\", ui-monospace, Menlo, monospace",
+    fontFamily: "var(--font-mono)",
     lineHeight: "1.55",
   },
   ".cm-content": {
     minHeight: "100%",
     padding: "18px 20px 48px",
     caretColor: "var(--accent)",
+  },
+  ".cm-cursor, .cm-dropCursor": {
+    borderLeftColor: "var(--accent)",
   },
   ".cm-line": {
     padding: "0 8px",

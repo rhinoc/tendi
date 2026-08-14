@@ -1,16 +1,8 @@
-import { Tooltip } from "../components/shared/Tooltip.tsx";
 import type { ColumnDef } from "../components/DataTable.types";
-import { agentClassName, agentIcon, basename, friendlyAgent, titleValue } from "./index.ts";
+import { AgentBadge } from "../components/shared/AgentBadge.tsx";
+import { basename, friendlyAgent, titleValue } from "./index.ts";
 
 type AgentRow = { agent?: string | null };
-
-function AgentBadge({ agent, small = false }: { agent: string; small?: boolean }) {
-  return (
-    <Tooltip content={agent}><span className={`agentIconSurface agentPill ${agentClassName(agent)} ${small ? "small" : ""}`}>
-      {agentIcon(agent)}
-    </span></Tooltip>
-  );
-}
 
 export const agentColumn: ColumnDef<AgentRow> = {
   key: "agent",

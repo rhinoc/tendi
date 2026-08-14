@@ -4,6 +4,11 @@
   gap: 8px;
 }
 
+.settingsPage {
+  overflow-x: hidden;
+  overflow-y: auto;
+}
+
 .settingsGroup {
   border-top: 1px solid var(--line);
 }
@@ -15,7 +20,7 @@
 }
 
 .settingsAppearanceControl {
-  width: min(100%, 360px);
+  width: min(100%, 280px);
   max-width: 100%;
   display: inline-flex;
   gap: 2px;
@@ -65,21 +70,63 @@
 .settingsAppearanceItem[data-state="on"] {
   color: var(--text);
   background: var(--panel-bg);
-  box-shadow: var(--shadow-border);
+  box-shadow: inset 0 0 0 1px var(--line);
 }
 
 .settingsAppearanceItem:focus-visible {
   outline: 2px solid var(--focus-ring);
-  outline-offset: 1px;
+  outline-offset: -2px;
 }
 
-.settingsTerminalRow {
+.settingsThemeControls {
+  width: min(100%, 420px);
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.settingsThemePicker {
+  display: grid;
+  gap: 6px;
+}
+
+.settingsThemePickerLabel {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 650;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.settingsThemeSelect {
+  height: 38px;
+  width: 100%;
+  padding: 0 10px;
+  border: 1px solid var(--control-border);
+  border-radius: var(--radius-md);
+  background: var(--panel-bg);
+  box-shadow: var(--shadow-border);
+  color: var(--text);
+  font-size: 13px;
+  text-align: left;
+}
+
+.settingsThemeSelect:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: -2px;
+}
+
+.settingsThemeSelectContent {
+  min-width: 180px;
+}
+
+.settingsApplicationRow {
   display: flex;
   align-items: center;
   gap: 8px;
 }
 
-.settingsTerminalInput {
+.settingsApplicationInput {
   position: relative;
   min-width: 0;
   flex: 1 1 auto;
@@ -129,13 +176,13 @@
   box-sizing: border-box;
 }
 
-.settingsTerminalMenuButton {
+.settingsApplicationMenuButton {
   position: absolute;
   top: 5px;
   right: 5px;
 }
 
-.settingsTerminalTestButton {
+.settingsApplicationTestButton {
   flex: 0 0 38px;
   width: 38px;
   height: 38px;
@@ -144,15 +191,15 @@
   background: var(--control-fill);
 }
 
-.settingsTerminalTestButton.isSuccess,
-.settingsTerminalTestButton.isSuccess:hover {
+.settingsApplicationTestButton.isSuccess,
+.settingsApplicationTestButton.isSuccess:hover {
   border-color: var(--green-soft-strong);
   color: var(--green);
   background: var(--green-soft);
 }
 
-.settingsTerminalTestButton.isError,
-.settingsTerminalTestButton.isError:hover {
+.settingsApplicationTestButton.isError,
+.settingsApplicationTestButton.isError:hover {
   border-color: var(--danger-soft-strong);
   color: var(--danger);
   background: var(--danger-soft);
@@ -170,7 +217,7 @@
 }
 
 .settingsUpdateButton:hover:not(:disabled) {
-  background: var(--control-fill-hover);
+  background: var(--hover-fill-strong);
 }
 
 .settingsUpdateButton.isSuccess {
@@ -202,6 +249,53 @@
   font-size: 14px;
   font-weight: 650;
   line-height: 1.25;
+}
+
+.settingsSectionText p {
+  margin: 5px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.settingsAgentRow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.settingsAgentRow > svg {
+  flex: 0 0 14px;
+}
+
+.settingsAgentStatus {
+  min-width: 0;
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 16px;
+  color: var(--muted);
+}
+
+.settingsAgentStatus strong {
+  color: var(--text);
+  font-size: 12px;
+}
+
+.settingsAgentRow > svg.isSuccess {
+  color: var(--green);
+}
+
+.settingsAgentRow > svg.isAttention {
+  color: var(--danger);
+}
+
+.settingsCliActions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  flex: 0 0 auto;
 }
 
 .settingsControlGroup {

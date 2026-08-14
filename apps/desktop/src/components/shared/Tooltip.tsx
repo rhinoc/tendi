@@ -12,6 +12,7 @@ const TOOLTIP_DELAY = 500;
 export interface TooltipProps {
   children: ReactElement;
   content: ReactNode;
+  interactive?: boolean;
   onlyWhenTruncated?: boolean;
 }
 
@@ -23,27 +24,21 @@ function isTruncated(element: HTMLElement | null) {
   ));
 }
 
-function TooltipPopup({ content }: { content: ReactNode }) {
+function TooltipPopup({ content, interactive = false }: Pick<TooltipProps, "content" | "interactive">) {
   return (
     <RadixTooltip.Portal>
       <RadixTooltip.Content
-        className="appTooltip"
+        className={`appTooltip${interactive ? " isInteractive" : ""}`}
         sideOffset={6}
         collisionPadding={8}
       >
         {content}
-        <RadixTooltip.Arrow asChild width={8} height={4}>
-          <svg className="appTooltipArrow" viewBox="0 0 30 10" aria-hidden="true">
-            <polygon points="0,-2 30,-2 15,10" />
-            <polyline points="0,-2 15,10 30,-2" />
-          </svg>
-        </RadixTooltip.Arrow>
       </RadixTooltip.Content>
     </RadixTooltip.Portal>
   );
 }
 
-function TruncatedTooltip({ children, content }: Omit<TooltipProps, "onlyWhenTruncated">) {
+function TruncatedTooltip({ children, content, interactive }: Omit<TooltipProps, "onlyWhenTruncated">) {
   const [open, setOpen] = useState(false);
   const triggerRef = useRef<HTMLButtonElement>(null);
 
@@ -53,24 +48,24 @@ function TruncatedTooltip({ children, content }: Omit<TooltipProps, "onlyWhenTru
       onOpenChange={(nextOpen) => setOpen(nextOpen && isTruncated(triggerRef.current))}
     >
       <RadixTooltip.Trigger asChild ref={triggerRef}>{children}</RadixTooltip.Trigger>
-      <TooltipPopup content={content} />
+      <TooltipPopup content={content} interactive={interactive} />
     </RadixTooltip.Root>
   );
 }
 
-export function Tooltip({ children, content, onlyWhenTruncated = false }: TooltipProps) {
+export function Tooltip({ children, content, interactive = false, onlyWhenTruncated = false }: TooltipProps) {
   if (content === null || content === undefined || content === false || content === "") {
     return children;
   }
 
   if (onlyWhenTruncated) {
-    return <TruncatedTooltip content={content}>{children}</TruncatedTooltip>;
+    return <TruncatedTooltip content={content} interactive={interactive}>{children}</TruncatedTooltip>;
   }
 
   return (
     <RadixTooltip.Root>
       <RadixTooltip.Trigger asChild>{children}</RadixTooltip.Trigger>
-      <TooltipPopup content={content} />
+      <TooltipPopup content={content} interactive={interactive} />
     </RadixTooltip.Root>
   );
 }

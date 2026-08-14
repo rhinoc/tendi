@@ -1,7 +1,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
-    fs::{self, File},
-    io::{BufRead, BufReader, Seek, SeekFrom},
+    fs::File,
+    io::{BufRead, BufReader, Read, Seek, SeekFrom},
     path::{Path, PathBuf},
     time::UNIX_EPOCH,
 };
@@ -10,6 +10,7 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, Duration, Local, NaiveDate};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 
 use crate::{sessions::SessionRecord, skills::AgentKind};
 
@@ -169,6 +170,48 @@ impl SessionAnalytics {
         }
         runs
     }
+
+    pub(crate) fn overview_index(&self, state: &AnalyticsParserState) -> AnalyticsOverviewIndex {
+        let mut first = None;
+        let mut last = None;
+        for timestamp in self
+            .responses
+            .iter()
+            .map(|event| event.timestamp.as_str())
+            .chain(self.runs.iter().map(|run| run.start.as_str()))
+            .chain(self.tools.iter().map(|event| event.timestamp.as_str()))
+            .chain(self.skills.iter().map(|event| event.timestamp.as_str()))
+            .chain(self.aborts.iter().map(String::as_str))
+            .chain(self.compactions.iter().map(String::as_str))
+            .chain(
+                self.limit_samples
+                    .iter()
+                    .map(|event| event.timestamp.as_str()),
+            )
+            .chain(state.open_run.iter().map(String::as_str))
+        {
+            update_coverage(timestamp, &mut first, &mut last);
+        }
+        AnalyticsOverviewIndex {
+            first,
+            last,
+            has_activity: !self.responses.is_empty()
+                || !self.runs.is_empty()
+                || !self.tools.is_empty()
+                || !self.aborts.is_empty()
+                || !self.compactions.is_empty()
+                || state.open_run.is_some(),
+            capabilities: self.capabilities(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AnalyticsOverviewIndex {
+    pub first: Option<String>,
+    pub last: Option<String>,
+    pub has_activity: bool,
+    pub capabilities: AnalyticsCapabilities,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
@@ -183,6 +226,14 @@ pub(crate) struct AnalyticsParserState {
     seen_tool_ids: BTreeSet<String>,
     response_index: u64,
     approximate_runs: bool,
+    #[serde(default)]
+    source_device: u64,
+    #[serde(default)]
+    source_inode: u64,
+    #[serde(default)]
+    source_prefix_hash: String,
+    #[serde(default)]
+    source_boundary_hash: String,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -235,6 +286,14 @@ pub struct AnalyticsModelUsage {
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct AnalyticsCallUsage {
+    pub name: String,
+    pub server: String,
+    pub calls: u64,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct AnalyticsDay {
     pub date: String,
     pub usage: AnalyticsTokenUsage,
@@ -244,6 +303,8 @@ pub struct AnalyticsDay {
     pub aborted: u64,
     pub compacted: u64,
     pub models: Vec<AnalyticsModelUsage>,
+    pub tools: Vec<AnalyticsCallUsage>,
+    pub skills: Vec<AnalyticsCallUsage>,
     pub rate_limits: BTreeMap<u32, f64>,
 }
 
@@ -285,11 +346,13 @@ pub struct AnalyticsCoverage {
     pub last: Option<String>,
     pub total_sessions: usize,
     pub analyzed_sessions: usize,
+    pub indexing_sessions: usize,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OverviewAnalytics {
+    pub revision: u64,
     pub generated_at: String,
     pub days_requested: u32,
     pub rank_days: u32,
@@ -348,6 +411,8 @@ struct DayAccumulator {
     aborted: u64,
     compacted: u64,
     models: BTreeMap<String, u64>,
+    tools: BTreeMap<(String, String), u64>,
+    skills: BTreeMap<String, u64>,
     rate_limits: BTreeMap<u32, f64>,
     sessions: BTreeSet<String>,
 }
@@ -366,7 +431,9 @@ pub(crate) fn aggregate_overview(
     rank_days: u32,
     warnings: Vec<String>,
 ) -> OverviewAnalytics {
-    let days_requested = days_requested.clamp(1, 730);
+    // The overview UI requests the exact span back to the earliest transcript.
+    // Keep a defensive 100-year ceiling for malformed direct command calls.
+    let days_requested = days_requested.clamp(1, 365);
     let rank_days = rank_days.clamp(1, 730);
     let today = Local::now().date_naive();
     let since = today - Duration::days(i64::from(days_requested.saturating_sub(1)));
@@ -473,7 +540,18 @@ pub(crate) fn aggregate_overview(
             let Some(date) = analytics_date(&call.timestamp) else {
                 continue;
             };
-            if date < rank_since || call.name.is_empty() {
+            if call.name.is_empty() {
+                continue;
+            }
+            if date >= since {
+                let slot = by_day.entry(date.to_string()).or_default();
+                *slot
+                    .tools
+                    .entry((call.server.clone(), call.name.clone()))
+                    .or_default() += 1;
+                slot.sessions.insert(identity.clone());
+            }
+            if date < rank_since {
                 continue;
             }
             let key = format!("{}\0{}", call.server, call.name);
@@ -490,7 +568,15 @@ pub(crate) fn aggregate_overview(
             let Some(date) = analytics_date(&call.timestamp) else {
                 continue;
             };
-            if date < rank_since || call.name.is_empty() {
+            if call.name.is_empty() {
+                continue;
+            }
+            if date >= since {
+                let slot = by_day.entry(date.to_string()).or_default();
+                *slot.skills.entry(call.name.clone()).or_default() += 1;
+                slot.sessions.insert(identity.clone());
+            }
+            if date < rank_since {
                 continue;
             }
             let slot = skills.entry(call.name.clone()).or_default();
@@ -519,6 +605,24 @@ pub(crate) fn aggregate_overview(
                 .map(|(model, total_tokens)| AnalyticsModelUsage {
                     model,
                     total_tokens,
+                })
+                .collect(),
+            tools: slot
+                .tools
+                .into_iter()
+                .map(|((server, name), calls)| AnalyticsCallUsage {
+                    name,
+                    server,
+                    calls,
+                })
+                .collect(),
+            skills: slot
+                .skills
+                .into_iter()
+                .map(|(name, calls)| AnalyticsCallUsage {
+                    name,
+                    server: String::new(),
+                    calls,
                 })
                 .collect(),
             rate_limits: slot.rate_limits,
@@ -567,6 +671,7 @@ pub(crate) fn aggregate_overview(
     };
 
     OverviewAnalytics {
+        revision: 0,
         generated_at: Local::now().to_rfc3339(),
         days_requested,
         rank_days,
@@ -575,6 +680,7 @@ pub(crate) fn aggregate_overview(
             last,
             total_sessions: records.len(),
             analyzed_sessions,
+            indexing_sessions: 0,
         },
         capabilities: capabilities
             .into_iter()
@@ -701,7 +807,10 @@ pub(crate) fn analyze_session(
     session: &SessionRecord,
     previous: Option<&SessionAnalyticsRecord>,
 ) -> Result<SessionAnalyticsRecord> {
-    let (file_mtime, file_size) = analytics_file_state(&session.path)?;
+    let mut file = File::open(&session.path)
+        .with_context(|| format!("failed to open {}", session.path.display()))?;
+    let (file_mtime, file_size) = analytics_file_state(&file, &session.path)?;
+    let (source_device, source_inode) = analytics_file_identity(&file)?;
     let is_jsonl = session
         .path
         .extension()
@@ -710,15 +819,27 @@ pub(crate) fn analyze_session(
         return Ok(empty_record(session, file_mtime, file_size));
     }
 
-    let can_append = previous.is_some_and(|record| {
-        record.file_size >= 0
-            && record.file_size < file_size
-            && record.file_mtime <= file_mtime
-            && record.analytics.session_id == session.id
-            && record.analytics.agent == session.agent
-            && record.analytics.session_path == session.path
-            && is_line_boundary(&session.path, record.file_size as u64)
-    });
+    let append_fingerprint = previous
+        .filter(|record| record.file_size >= 0)
+        .map(|record| analytics_source_hashes(&mut file, record.file_size as u64))
+        .transpose()?;
+    let can_append = previous
+        .zip(append_fingerprint.as_ref())
+        .is_some_and(|(record, hashes)| {
+            !record.state.source_prefix_hash.is_empty()
+                && !record.state.source_boundary_hash.is_empty()
+                && record.state.source_device == source_device
+                && record.state.source_inode == source_inode
+                && record.state.source_prefix_hash == hashes.0
+                && record.state.source_boundary_hash == hashes.1
+                && record.file_size >= 0
+                && record.file_size < file_size
+                && record.file_mtime <= file_mtime
+                && record.analytics.session_id == session.id
+                && record.analytics.agent == session.agent
+                && record.analytics.session_path == session.path
+                && is_line_boundary(&session.path, record.file_size as u64)
+        });
     let mut record = if can_append {
         previous.cloned().expect("append record checked")
     } else {
@@ -732,21 +853,26 @@ pub(crate) fn analyze_session(
     } else {
         0
     };
-    let mut file = File::open(&session.path)
-        .with_context(|| format!("failed to open {}", session.path.display()))?;
     file.seek(SeekFrom::Start(offset))
         .with_context(|| format!("failed to seek {}", session.path.display()))?;
-    let reader = BufReader::new(file);
-    for line in reader.lines() {
-        let line = match line {
-            Ok(line) => line,
-            Err(_) => {
-                record.analytics.malformed_lines += 1;
-                continue;
-            }
-        };
+    let remaining = (file_size as u64).saturating_sub(offset);
+    let mut reader = BufReader::new(file.take(remaining));
+    let mut line = String::new();
+    let mut indexed_size = file_size;
+    loop {
+        line.clear();
+        let bytes = reader.read_line(&mut line)?;
+        if bytes == 0 {
+            break;
+        }
+        let has_trailing_newline = line.ends_with('\n');
+        let line = line.trim_end_matches(['\r', '\n']);
         if line.trim().is_empty() {
             continue;
+        }
+        if !has_trailing_newline && serde_json::from_str::<Value>(line).is_err() {
+            indexed_size = file_size.saturating_sub(bytes as i64);
+            break;
         }
         match session.agent {
             AgentKind::Codex => parse_codex_line(&line, &mut record),
@@ -754,6 +880,10 @@ pub(crate) fn analyze_session(
             AgentKind::Shared | AgentKind::Unknown => {}
         }
     }
+
+    let mut file = reader.into_inner().into_inner();
+    let (source_prefix_hash, source_boundary_hash) =
+        analytics_source_hashes(&mut file, indexed_size.max(0) as u64)?;
 
     if record.state.current_model.is_empty()
         && let Some(model) = session
@@ -764,7 +894,11 @@ pub(crate) fn analyze_session(
         set_model(&mut record, model);
     }
     record.file_mtime = file_mtime;
-    record.file_size = file_size;
+    record.file_size = indexed_size;
+    record.state.source_device = source_device;
+    record.state.source_inode = source_inode;
+    record.state.source_prefix_hash = source_prefix_hash;
+    record.state.source_boundary_hash = source_boundary_hash;
     Ok(record)
 }
 
@@ -797,8 +931,9 @@ fn empty_record(
     }
 }
 
-fn analytics_file_state(path: &Path) -> Result<(i64, i64)> {
-    let metadata = fs::metadata(path)
+fn analytics_file_state(file: &File, path: &Path) -> Result<(i64, i64)> {
+    let metadata = file
+        .metadata()
         .with_context(|| format!("failed to inspect analytics source {}", path.display()))?;
     let file_mtime = metadata
         .modified()
@@ -808,6 +943,37 @@ fn analytics_file_state(path: &Path) -> Result<(i64, i64)> {
         .unwrap_or(0);
     let file_size = i64::try_from(metadata.len()).unwrap_or(i64::MAX);
     Ok((file_mtime, file_size))
+}
+
+fn analytics_file_identity(file: &File) -> Result<(u64, u64)> {
+    let metadata = file.metadata()?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        Ok((metadata.dev(), metadata.ino()))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = metadata;
+        Ok((0, 0))
+    }
+}
+
+fn analytics_source_hashes(file: &mut File, boundary: u64) -> Result<(String, String)> {
+    const HASH_BYTES: u64 = 4 * 1024;
+    fn hash_range(file: &mut File, start: u64, length: u64) -> Result<String> {
+        file.seek(SeekFrom::Start(start))?;
+        let mut bytes = Vec::with_capacity(length as usize);
+        file.take(length).read_to_end(&mut bytes)?;
+        let mut digest = Sha256::new();
+        digest.update(&bytes);
+        Ok(format!("{:x}", digest.finalize()))
+    }
+
+    let prefix = hash_range(file, 0, HASH_BYTES)?;
+    let boundary_start = boundary.saturating_sub(HASH_BYTES);
+    let boundary_hash = hash_range(file, boundary_start, boundary - boundary_start)?;
+    Ok((prefix, boundary_hash))
 }
 
 fn is_line_boundary(path: &Path, offset: u64) -> bool {
@@ -1379,6 +1545,7 @@ mod tests {
     };
 
     use super::*;
+    use chrono::{Offset, TimeZone};
 
     fn temp_dir(name: &str) -> PathBuf {
         let suffix = SystemTime::now()
@@ -1402,6 +1569,9 @@ mod tests {
             started_at: None,
             updated_at: None,
             message_count: None,
+            first_user_message: None,
+            last_user_message: None,
+            last_assistant_message: None,
             turn_count: None,
             model: None,
             mode: None,
@@ -1534,6 +1704,75 @@ mod tests {
     }
 
     #[test]
+    fn snapshot_parser_defers_partial_trailing_line_and_resumes_once() {
+        let root = temp_dir("tendi-analytics-partial-append");
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("rollout-session-1.jsonl");
+        let first = "{\"timestamp\":\"2026-08-01T01:00:00Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\",\"info\":{\"total_token_usage\":{\"input_tokens\":10,\"total_tokens\":10}}}}\n";
+        let second = "{\"timestamp\":\"2026-08-01T01:00:01Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\",\"info\":{\"total_token_usage\":{\"input_tokens\":25,\"total_tokens\":25}}}}\n";
+        let split = second.len() / 2;
+        fs::write(&path, format!("{first}{}", &second[..split])).unwrap();
+        let session = session(&path, AgentKind::Codex);
+
+        let partial = analyze_session(&session, None).unwrap();
+        assert_eq!(partial.analytics.responses.len(), 1);
+        assert_eq!(partial.file_size as usize, first.len());
+
+        let mut file = OpenOptions::new().append(true).open(&path).unwrap();
+        write!(file, "{}", &second[split..]).unwrap();
+        let resumed = analyze_session(&session, Some(&partial)).unwrap();
+
+        assert_eq!(resumed.analytics.responses.len(), 2);
+        assert_eq!(resumed.analytics.responses[1].usage.total_tokens, 15);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn snapshot_parser_accepts_valid_final_json_without_newline() {
+        let root = temp_dir("tendi-analytics-final-line");
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("rollout-session-1.jsonl");
+        fs::write(
+            &path,
+            "{\"timestamp\":\"2026-08-01T01:00:00Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\",\"info\":{\"total_token_usage\":{\"input_tokens\":10,\"total_tokens\":10}}}}",
+        )
+        .unwrap();
+
+        let parsed = analyze_session(&session(&path, AgentKind::Codex), None).unwrap();
+        assert_eq!(parsed.analytics.responses.len(), 1);
+        assert_eq!(parsed.file_size, fs::metadata(&path).unwrap().len() as i64);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn rewritten_larger_source_does_not_append_to_old_analytics() {
+        let root = temp_dir("tendi-analytics-rewrite");
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("rollout-session-1.jsonl");
+        fs::write(
+            &path,
+            "{\"timestamp\":\"2026-08-01T01:00:00Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\",\"info\":{\"total_token_usage\":{\"input_tokens\":10,\"total_tokens\":10}}}}\n",
+        )
+        .unwrap();
+        let session = session(&path, AgentKind::Codex);
+        let first = analyze_session(&session, None).unwrap();
+        fs::write(
+            &path,
+            "{\"timestamp\":\"2026-08-02T01:00:00Z\",\"type\":\"event_msg\",\"padding\":\"rewritten-file-is-longer-than-the-original\",\"payload\":{\"type\":\"token_count\",\"info\":{\"total_token_usage\":{\"input_tokens\":50,\"total_tokens\":50}}}}\n",
+        )
+        .unwrap();
+
+        let rewritten = analyze_session(&session, Some(&first)).unwrap();
+        assert_eq!(rewritten.analytics.responses.len(), 1);
+        assert_eq!(rewritten.analytics.responses[0].usage.total_tokens, 50);
+        assert_eq!(
+            rewritten.analytics.responses[0].timestamp,
+            "2026-08-02T01:00:00Z"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn skill_extraction_requires_a_path_boundary_and_normalizes_versions() {
         assert_eq!(
             extract_skill_names("cat /tmp/skills/foo-1.2.3/SKILL.md"),
@@ -1575,11 +1814,15 @@ mod tests {
                         server: "alpha".to_string(),
                     },
                     AnalyticsToolCall {
-                        timestamp,
+                        timestamp: timestamp.clone(),
                         name: "search".to_string(),
                         server: "beta".to_string(),
                     },
                 ],
+                skills: vec![AnalyticsSkillCall {
+                    timestamp,
+                    name: "debugging".to_string(),
+                }],
                 ..SessionAnalytics::default()
             },
             state: AnalyticsParserState::default(),
@@ -1590,8 +1833,74 @@ mod tests {
         let overview = aggregate_overview(&[record], 1, 1, Vec::new());
         assert_eq!(overview.summary.usage.total_tokens, 10);
         assert_eq!(overview.days[0].models[0].model, "gpt-test");
+        assert_eq!(overview.days[0].tools.len(), 2);
+        assert_eq!(
+            overview.days[0]
+                .tools
+                .iter()
+                .map(|tool| tool.calls)
+                .sum::<u64>(),
+            2
+        );
+        assert_eq!(overview.days[0].skills[0].name, "debugging");
+        assert_eq!(overview.days[0].skills[0].calls, 1);
         assert_eq!(overview.tools.len(), 2);
         assert_eq!(overview.tools[0].name, "search");
         assert_ne!(overview.tools[0].server, overview.tools[1].server);
+    }
+
+    #[test]
+    fn overview_index_uses_local_calendar_dates_across_midnight_offsets() {
+        let local = Local::now().offset().fix();
+        let first_local = local
+            .from_local_datetime(
+                &NaiveDate::from_ymd_opt(2026, 8, 12)
+                    .unwrap()
+                    .and_hms_opt(23, 59, 0)
+                    .unwrap(),
+            )
+            .single()
+            .unwrap();
+        let last_local = local
+            .from_local_datetime(
+                &NaiveDate::from_ymd_opt(2026, 8, 13)
+                    .unwrap()
+                    .and_hms_opt(0, 1, 0)
+                    .unwrap(),
+            )
+            .single()
+            .unwrap();
+        let record = SessionAnalytics {
+            responses: vec![
+                AnalyticsResponseUsage {
+                    index: 1,
+                    timestamp: first_local.to_rfc3339(),
+                    model: String::new(),
+                    usage: AnalyticsTokenUsage::default(),
+                    cumulative: AnalyticsTokenUsage::default(),
+                },
+                AnalyticsResponseUsage {
+                    index: 2,
+                    timestamp: last_local.to_rfc3339(),
+                    model: String::new(),
+                    usage: AnalyticsTokenUsage::default(),
+                    cumulative: AnalyticsTokenUsage::default(),
+                },
+            ],
+            ..SessionAnalytics::default()
+        };
+
+        let index = record.overview_index(&AnalyticsParserState::default());
+
+        assert_eq!(index.first.as_deref(), Some("2026-08-12"));
+        assert_eq!(index.last.as_deref(), Some("2026-08-13"));
+    }
+
+    #[test]
+    fn overview_hard_caps_extreme_history_to_one_year() {
+        let overview = aggregate_overview(&[], 36_500, 30, Vec::new());
+
+        assert_eq!(overview.days_requested, 365);
+        assert_eq!(overview.days.len(), 365);
     }
 }

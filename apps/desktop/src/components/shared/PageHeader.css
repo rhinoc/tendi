@@ -11,6 +11,10 @@
   margin-bottom: 20px;
 }
 
+.pageHeader h1 {
+  font-family: var(--font-brand);
+}
+
 .headerTools {
   display: flex;
   align-items: center;

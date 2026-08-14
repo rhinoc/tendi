@@ -57,7 +57,7 @@
 - 搜索使用 `hookSearchText`，覆盖 agent、event、matcher、filter、status message、type、handler、path/source、trust hash，见 `apps/desktop/src/lib/helpers.jsx:1706-1718`。
 - 详情操作：Reveal in Finder、Delete hook、Collapse，见 `apps/desktop/src/views/HooksView.jsx:272-289`。
 - 详情字段：
-  - Match: Event、Matcher、If、Status
+  - Match: Event、Matcher、If
   - Handler: Type、Command、URL、Prompt
   - Source: Path、Trust
   - 对应实现见 `apps/desktop/src/views/HooksView.jsx:296-314`。
@@ -66,12 +66,13 @@
 ### 后端数据
 
 - Tauri 命令包括 `hooks_list` 与 `hook_delete`，见 `apps/desktop/src-tauri/src/lib.rs:269-310`。
-- `HookRecord` 字段包括 `agent`、`event`、`matcher`、`hook_type`、`command`、`url`、`prompt`、`filter`、`status_message`、`enabled`、`path`、`trust_hash`，见 `crates/tendi-core/src/hooks.rs:14-28`。
+- `HookRecord` 字段包括 `agent`、`event`、`matcher`、`hook_type`、`command`、`url`、`prompt`、`filter`、`status_message`、`enabled`、`path`、`trust_hash`、`needs_review`，见 `crates/tendi-core/src/hooks.rs:14-28`。
 - 扫描来源包括：
   - Codex: `$CODEX_HOME/hooks.json`、`$CODEX_HOME/config.toml`、项目 ancestors 下 `.codex/hooks.json`、`.codex/config.toml`
-  - Cursor: `~/.cursor/hooks.json`、`/etc/cursor/hooks.json`、项目 ancestors 下 `.cursor/hooks.json`
+  - Cursor: `~/.cursor/hooks.json`、`/etc/cursor/hooks.json`、`/Library/Application Support/Cursor/hooks.json`、项目 ancestors 下 `.cursor/hooks.json`
   - Claude: `~/.claude/settings.json`、`.claude/settings(.local).json`、`.claude/plugins`、`.claude/skills`、`.claude/agents`、系统 managed settings
   - 对应实现见 `crates/tendi-core/src/hooks.rs:50-143`。
+- `needs_review` 对 Codex 映射官方 hook trust 状态；Cursor 和 Claude 使用 Tendi 的源码 hash 审批记录（`~/Library/Application Support/tendi/hook-reviews.json`），托管和插件来源不要求 review。Claude 的 `disableAllHooks` 会反映到 `enabled`。
 - 删除前会校验当前文件 sha256 是否等于 `trust_hash`，然后只支持 json/toml 源，见 `crates/tendi-core/src/hooks.rs:146-180`。
 
 ### Hooks 详情页已具备和缺失能力

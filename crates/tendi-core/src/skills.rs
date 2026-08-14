@@ -3,18 +3,22 @@ use std::{
     env, fs,
     path::{Path, PathBuf},
     process::Command,
+    sync::atomic::{AtomicU64, Ordering},
 };
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use serde_yaml::Value;
+use sha2::{Digest, Sha256};
 use toml_edit::{ArrayOfTables, DocumentMut, Item, Table, value};
 use walkdir::WalkDir;
 
-use crate::fsutil::{atomic_write, sha256_text};
+use crate::fsutil::{atomic_write, sha256_file, sha256_text};
+use crate::skill_targets::{SkillInstallScope, SkillTarget, skill_target_root};
 
 const WRAPPER_CATALOG_START: &str = "<catalog>";
 const WRAPPER_CATALOG_END: &str = "</catalog>";
+static GIT_UPDATE_CHECK_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
@@ -76,6 +80,7 @@ pub struct SkillPath {
     pub install_target: String,
     pub source_kind: String,
     pub source: Option<String>,
+    pub source_ref: Option<String>,
     pub source_version: Option<String>,
     pub source_relative_path: Option<String>,
     pub symlink_status: String,
@@ -89,6 +94,20 @@ pub struct SkillPath {
     pub cursor_disable_model_invocation: Option<bool>,
     pub plugin_id: Option<String>,
     pub plugin_enabled: Option<bool>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct SkillSourceRecord {
+    pub skill_name: String,
+    pub skill_path: PathBuf,
+    pub source_kind: String,
+    pub source: Option<String>,
+    #[serde(default)]
+    pub source_ref: Option<String>,
+    pub source_version: Option<String>,
+    pub source_relative_path: Option<String>,
+    pub update_status: String,
+    pub origin: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -139,18 +158,22 @@ pub struct MaterializeResult {
 #[derive(Debug, Clone, Serialize)]
 pub struct SkillAddOptions {
     pub source: String,
-    pub target: AgentKind,
+    pub target: SkillTarget,
+    pub scope: SkillInstallScope,
     pub skills: Vec<String>,
     pub copy: bool,
     pub overwrite: bool,
+    pub visibility: SkillVisibility,
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub struct SkillAddPlan {
     pub source: String,
     pub source_kind: String,
+    pub source_ref: Option<String>,
     pub source_root: PathBuf,
-    pub target: AgentKind,
+    pub target: SkillTarget,
+    pub scope: SkillInstallScope,
     pub mode: String,
     pub available: Vec<InstallableSkill>,
     pub selected: Vec<InstallableSkill>,
@@ -224,11 +247,22 @@ pub struct GitUpdateAction {
     pub name: String,
     pub repo: PathBuf,
     pub source: String,
+    pub source_ref: Option<String>,
     pub current_version: Option<String>,
     pub latest_version: Option<String>,
     pub diff: String,
     pub files: Vec<GitUpdateFile>,
     pub tendi_settings: Vec<GitSkillVisibility>,
+    pub materialized_targets: Vec<MaterializedGitTarget>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct MaterializedGitTarget {
+    pub name: String,
+    pub target: PathBuf,
+    pub source_relative_path: Option<String>,
+    pub visibility: SkillVisibility,
+    pub shared_or_codex: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -272,22 +306,37 @@ struct CodexPolicy {
 }
 
 pub fn scan_skills(cwd: &Path) -> Result<SkillScan> {
+    let store = crate::storage::Store::open_default()?;
+    scan_skills_with_source_store(cwd, &store)
+}
+
+fn scan_skills_with_source_store(cwd: &Path, store: &crate::storage::Store) -> Result<SkillScan> {
+    let source_records = store.skill_source_records()?;
+    let mut provenance_resolver = ProvenanceResolver::managed(cwd, source_records);
+    let scan = scan_skills_with_resolver(cwd, &mut provenance_resolver)?;
+    store.insert_skill_source_records_if_missing(&provenance_resolver.migrations)?;
+    Ok(scan)
+}
+
+#[cfg(test)]
+fn scan_skills_without_source_database(cwd: &Path) -> Result<SkillScan> {
+    scan_skills_with_resolver(cwd, &mut ProvenanceResolver::default())
+}
+
+fn scan_skills_with_resolver(
+    cwd: &Path,
+    provenance_resolver: &mut ProvenanceResolver,
+) -> Result<SkillScan> {
     let mut warnings = Vec::new();
     let mut roots = discover_roots(cwd);
     let codex_skill_enabled = codex_skill_enabled_by_path(codex_config_path().as_deref());
-    let mut provenance_resolver = ProvenanceResolver::default();
     let mut raw_skills = Vec::new();
     let mut scanned_files = BTreeSet::new();
     let mut referenced_files = VecDeque::new();
 
     for root in &roots {
         for skill_file in find_skill_files(&root.path) {
-            match read_skill(
-                root,
-                &skill_file,
-                &codex_skill_enabled,
-                &mut provenance_resolver,
-            ) {
+            match read_skill(root, &skill_file, &codex_skill_enabled, provenance_resolver) {
                 Ok(skill) => {
                     scanned_files.insert(skill_file_key(&skill_file));
                     referenced_files.extend(skill.dependency_files.iter().cloned());
@@ -316,7 +365,7 @@ pub fn scan_skills(cwd: &Path) -> Result<SkillScan> {
             &root,
             &skill_file,
             &codex_skill_enabled,
-            &mut provenance_resolver,
+            provenance_resolver,
         ) {
             Ok(skill) => {
                 referenced_files.extend(skill.dependency_files.iter().cloned());
@@ -345,11 +394,27 @@ pub fn scan_skills(cwd: &Path) -> Result<SkillScan> {
         .map(|(name, raws)| merge_skill(name, raws))
         .collect::<Vec<_>>();
     resolve_scanned_skill_relations(&mut skills);
+    warnings.append(&mut provenance_resolver.lock_warnings);
 
     Ok(SkillScan {
         roots,
         skills,
         warnings,
+    })
+}
+
+pub fn skill_dir_matches_name(skill_dir: &Path, expected_name: &str) -> bool {
+    let Ok(text) = fs::read_to_string(skill_dir.join("SKILL.md")) else {
+        return false;
+    };
+    let frontmatter = parse_frontmatter(&text);
+    let name = frontmatter
+        .as_ref()
+        .and_then(|value| value.get("name"))
+        .and_then(Value::as_str)
+        .or_else(|| skill_dir.file_name().and_then(|name| name.to_str()));
+    name.is_some_and(|name| {
+        normalize_skill_match_name(name) == normalize_skill_match_name(expected_name)
     })
 }
 
@@ -361,6 +426,171 @@ pub fn scan_skills_synced(cwd: &Path) -> Result<SkillScan> {
     }
     apply_changes(&changeset)?;
     scan_skills(cwd)
+}
+
+pub fn refresh_skill_scan(
+    _cwd: &Path,
+    scan: &SkillScan,
+    names: &[String],
+    extra_skill_dirs: &[PathBuf],
+) -> Result<SkillScan> {
+    let names = names.iter().cloned().collect::<BTreeSet<_>>();
+    let mut refresh_dirs = extra_skill_dirs.iter().cloned().collect::<BTreeSet<_>>();
+    let mut roots_by_dir = BTreeMap::<PathBuf, SkillRoot>::new();
+    let mut remaining = Vec::new();
+
+    for skill in &scan.skills {
+        if names.contains(&skill.name)
+            || skill
+                .paths
+                .iter()
+                .any(|path| refresh_dirs.contains(&path.path))
+        {
+            for path in &skill.paths {
+                refresh_dirs.insert(path.path.clone());
+                roots_by_dir.insert(
+                    path.path.clone(),
+                    SkillRoot {
+                        path: path.root.clone(),
+                        scope: path.scope.clone(),
+                        agent: path.agent,
+                        plugin_id: path.plugin_id.clone(),
+                        plugin_enabled: path.plugin_enabled,
+                    },
+                );
+            }
+        } else {
+            remaining.push(skill.clone());
+        }
+    }
+
+    let codex_skill_enabled = codex_skill_enabled_by_path(codex_config_path().as_deref());
+    let mut provenance_resolver = ProvenanceResolver::from_scan(scan);
+    let mut refreshed_raw = Vec::new();
+    let known_files = remaining
+        .iter()
+        .flat_map(|skill| {
+            skill
+                .paths
+                .iter()
+                .map(|path| skill_file_key(&path.path.join("SKILL.md")))
+        })
+        .collect::<BTreeSet<_>>();
+    let mut refreshed_files = BTreeSet::new();
+    let mut referenced_files = VecDeque::new();
+    for skill_dir in refresh_dirs {
+        let skill_file = skill_dir.join("SKILL.md");
+        if !skill_file.is_file() {
+            continue;
+        }
+        let root = roots_by_dir.get(&skill_dir).cloned().or_else(|| {
+            scan.roots
+                .iter()
+                .filter(|root| skill_dir.starts_with(&root.path))
+                .max_by_key(|root| root.path.components().count())
+                .cloned()
+        });
+        let root = root.unwrap_or_else(|| SkillRoot {
+            path: skill_dir.clone(),
+            scope: "referenced".to_string(),
+            agent: AgentKind::Unknown,
+            plugin_id: None,
+            plugin_enabled: None,
+        });
+        let skill = read_skill(
+            &root,
+            &skill_file,
+            &codex_skill_enabled,
+            &mut provenance_resolver,
+        )?;
+        refreshed_files.insert(skill_file_key(&skill_file));
+        referenced_files.extend(skill.dependency_files.iter().cloned());
+        refreshed_raw.push(skill);
+    }
+    while let Some(skill_file) = referenced_files.pop_front() {
+        let key = skill_file_key(&skill_file);
+        if known_files.contains(&key) || !skill_file.is_file() || !refreshed_files.insert(key) {
+            continue;
+        }
+        let Some(skill_dir) = skill_file.parent() else {
+            continue;
+        };
+        let root = SkillRoot {
+            path: skill_dir.to_path_buf(),
+            scope: "referenced".to_string(),
+            agent: AgentKind::Unknown,
+            plugin_id: None,
+            plugin_enabled: None,
+        };
+        let skill = read_skill(
+            &root,
+            &skill_file,
+            &codex_skill_enabled,
+            &mut provenance_resolver,
+        )?;
+        referenced_files.extend(skill.dependency_files.iter().cloned());
+        refreshed_raw.push(skill);
+    }
+
+    let mut names_by_file = remaining
+        .iter()
+        .flat_map(|skill| {
+            skill.paths.iter().map(|path| {
+                (
+                    skill_file_key(&path.path.join("SKILL.md")),
+                    skill.name.clone(),
+                )
+            })
+        })
+        .collect::<BTreeMap<_, _>>();
+    names_by_file.extend(refreshed_raw.iter().map(|skill| {
+        (
+            skill_file_key(&skill.path.path.join("SKILL.md")),
+            skill.name.clone(),
+        )
+    }));
+    for skill in &mut refreshed_raw {
+        let mut dependencies = skill.dependencies.iter().cloned().collect::<BTreeSet<_>>();
+        dependencies.extend(
+            skill
+                .dependency_files
+                .iter()
+                .filter_map(|path| names_by_file.get(&skill_file_key(path)).cloned()),
+        );
+        skill.dependencies = dependencies.into_iter().collect();
+    }
+
+    let mut refreshed_by_name = BTreeMap::<String, Vec<RawSkill>>::new();
+    for skill in refreshed_raw {
+        refreshed_by_name
+            .entry(skill.name.clone())
+            .or_default()
+            .push(skill);
+    }
+    remaining.extend(
+        refreshed_by_name
+            .into_iter()
+            .map(|(name, raws)| merge_skill(name, raws)),
+    );
+    remaining.sort_by(|left, right| left.name.cmp(&right.name));
+    resolve_scanned_skill_relations(&mut remaining);
+    loop {
+        let before_len = remaining.len();
+        remaining.retain(|skill| {
+            !skill.paths.iter().all(|path| path.scope == "referenced")
+                || !skill.dependents.is_empty()
+        });
+        if remaining.len() == before_len {
+            break;
+        }
+        resolve_scanned_skill_relations(&mut remaining);
+    }
+
+    Ok(SkillScan {
+        roots: scan.roots.clone(),
+        skills: remaining,
+        warnings: scan.warnings.clone(),
+    })
 }
 
 pub fn plan_visibility(
@@ -377,17 +607,7 @@ pub fn plan_visibility(
     let mut changes = Vec::new();
     for skill in &matches {
         for path in &skill.paths {
-            changes.push(plan_skill_frontmatter(
-                path.path.join("SKILL.md"),
-                visibility,
-            )?);
-            changes.push(plan_codex_policy(
-                path.path.join("agents/openai.yaml"),
-                visibility,
-            )?);
-            if let Some(change) = plan_codex_skill_config(path.path.join("SKILL.md"), visibility)? {
-                changes.push(change);
-            }
+            changes.extend(plan_skill_visibility_at_path(&path.path, visibility, true)?);
         }
     }
 
@@ -402,6 +622,14 @@ pub fn plan_visibility_many(
     visibility: SkillVisibility,
 ) -> Result<ChangeSet> {
     let scan = scan_skills(cwd)?;
+    plan_visibility_many_for_scan(&scan, names, visibility)
+}
+
+pub fn plan_visibility_many_for_scan(
+    scan: &SkillScan,
+    names: &[String],
+    visibility: SkillVisibility,
+) -> Result<ChangeSet> {
     let matches = scan
         .skills
         .iter()
@@ -414,17 +642,7 @@ pub fn plan_visibility_many(
     let mut changes = Vec::new();
     for skill in &matches {
         for path in &skill.paths {
-            changes.push(plan_skill_frontmatter(
-                path.path.join("SKILL.md"),
-                visibility,
-            )?);
-            changes.push(plan_codex_policy(
-                path.path.join("agents/openai.yaml"),
-                visibility,
-            )?);
-            if let Some(change) = plan_codex_skill_config(path.path.join("SKILL.md"), visibility)? {
-                changes.push(change);
-            }
+            changes.extend(plan_skill_visibility_at_path(&path.path, visibility, true)?);
         }
     }
 
@@ -520,14 +738,23 @@ pub fn plan_wrapper_from_names(
     manual_children: bool,
 ) -> Result<ChangeSet> {
     let scan = scan_skills(cwd)?;
+    plan_wrapper_from_names_for_scan(&scan, name, names, description, manual_children)
+}
+
+pub fn plan_wrapper_from_names_for_scan(
+    scan: &SkillScan,
+    name: &str,
+    names: &[String],
+    description: Option<&str>,
+    manual_children: bool,
+) -> Result<ChangeSet> {
     let matches = scan
         .skills
         .iter()
         .filter(|skill| names.iter().any(|selected| selected == &skill.name))
         .collect::<Vec<_>>();
-    plan_wrapper_for_matches(&scan, name, matches, description, manual_children)
+    plan_wrapper_for_matches(scan, name, matches, description, manual_children)
 }
-
 pub fn refresh_wrapper_from_names(
     cwd: &Path,
     name: &str,
@@ -535,6 +762,15 @@ pub fn refresh_wrapper_from_names(
     manual_children: bool,
 ) -> Result<ChangeSet> {
     let scan = scan_skills(cwd)?;
+    refresh_wrapper_from_names_for_scan(&scan, name, names, manual_children)
+}
+
+pub fn refresh_wrapper_from_names_for_scan(
+    scan: &SkillScan,
+    name: &str,
+    names: &[String],
+    manual_children: bool,
+) -> Result<ChangeSet> {
     let wrapper_exists = scan.skills.iter().any(|skill| skill.name == name);
     if !wrapper_exists {
         bail!("wrapper skill {name:?} does not exist");
@@ -549,6 +785,13 @@ pub fn refresh_wrapper_from_names(
 
 pub fn plan_skill_delete_many(cwd: &Path, names: &[String]) -> Result<SkillDeletePlan> {
     let scan = scan_skills(cwd)?;
+    plan_skill_delete_many_for_scan(&scan, names)
+}
+
+pub fn plan_skill_delete_many_for_scan(
+    scan: &SkillScan,
+    names: &[String],
+) -> Result<SkillDeletePlan> {
     let matches = scan
         .skills
         .iter()
@@ -743,6 +986,28 @@ pub fn materialize_skill_dir_mode(
     overwrite: bool,
     dry_run: bool,
 ) -> Result<MaterializeResult> {
+    materialize_skill_dir_for_target(
+        source,
+        &agent.into(),
+        SkillInstallScope::Global,
+        Path::new("."),
+        name,
+        copy,
+        overwrite,
+        dry_run,
+    )
+}
+
+pub fn materialize_skill_dir_for_target(
+    source: &Path,
+    target: &SkillTarget,
+    scope: SkillInstallScope,
+    cwd: &Path,
+    name: Option<&str>,
+    copy: bool,
+    overwrite: bool,
+    dry_run: bool,
+) -> Result<MaterializeResult> {
     let source = source
         .canonicalize()
         .with_context(|| format!("failed to canonicalize {}", source.display()))?;
@@ -759,7 +1024,7 @@ pub fn materialize_skill_dir_mode(
                 .map(str::to_string)
         })
         .context("could not infer skill name")?;
-    let target_root = global_agent_skill_root(agent)?;
+    let target_root = skill_target_root(cwd, target, scope)?;
     materialize_skill_dir_to_root(&source, &target_root, &skill_name, copy, overwrite, dry_run)
 }
 
@@ -861,8 +1126,10 @@ pub fn list_installable_skills(cwd: &Path, source: &str) -> Result<SkillAddPlan>
     let plan = SkillAddPlan {
         source: resolved.display_source.clone(),
         source_kind: resolved.kind.clone(),
+        source_ref: resolved.git_ref.clone(),
         source_root: resolved.root.clone(),
-        target: AgentKind::Shared,
+        target: AgentKind::Shared.into(),
+        scope: SkillInstallScope::Global,
         mode: "list".to_string(),
         available: available.clone(),
         selected: available,
@@ -873,27 +1140,159 @@ pub fn list_installable_skills(cwd: &Path, source: &str) -> Result<SkillAddPlan>
 }
 
 pub fn plan_skill_add(cwd: &Path, options: &SkillAddOptions) -> Result<SkillAddPlan> {
-    let resolved = resolve_add_source(cwd, &options.source, false)?;
-    let result = build_skill_add_plan(&resolved, options, true);
+    let resolved = resolve_add_source(cwd, &options.source, true)?;
+    let result = build_skill_add_plan(cwd, &resolved, options, true);
     cleanup_resolved_source(&resolved);
     result
 }
 
 pub fn apply_skill_add(cwd: &Path, options: &SkillAddOptions) -> Result<SkillAddApplyReport> {
+    let target_root = skill_target_root(cwd, &options.target, options.scope)?;
+    apply_skill_add_with_target_root(cwd, options, &target_root)
+}
+
+pub fn skill_add_catalog_fingerprint(plan: &SkillAddPlan) -> Result<String> {
+    let mut catalog = BTreeSet::new();
+    for skill in &plan.available {
+        for entry in WalkDir::new(&skill.path).follow_links(true) {
+            let entry = entry?;
+            if !entry.file_type().is_file() {
+                continue;
+            }
+            catalog.insert(format!(
+                "{}:{}",
+                entry.path().display(),
+                sha256_file(entry.path())?
+            ));
+        }
+    }
+    Ok(sha256_text(
+        &catalog.into_iter().collect::<Vec<_>>().join("\n"),
+    ))
+}
+
+pub fn apply_skill_add_preview(
+    preview: &SkillAddPlan,
+    options: &SkillAddOptions,
+) -> Result<SkillAddApplyReport> {
+    // `source` is normalized in the preview (for example GitHub shorthand becomes
+    // a clone URL). The preview already owns the resolved catalog and source root,
+    // so compare the options that can still change the resulting installation.
+    if preview.target != options.target
+        || preview.scope != options.scope
+        || preview.mode != if options.copy { "copy" } else { "symlink" }
+    {
+        bail!("skill add options changed; preview the installation again");
+    }
+    let target_root = preview
+        .operations
+        .first()
+        .and_then(|operation| operation.target.parent())
+        .map(Path::to_path_buf)
+        .context("skill add preview contains no target operations")?;
+    let resolved = ResolvedAddSource {
+        root: preview.source_root.clone(),
+        kind: preview.source_kind.clone(),
+        display_source: preview.source.clone(),
+        git_ref: preview.source_ref.clone(),
+        temporary: false,
+    };
+    let plan = build_skill_add_plan_from_available(
+        &resolved,
+        options,
+        false,
+        &target_root,
+        preview.available.clone(),
+    )?;
+    apply_built_skill_add_plan(plan, options, &target_root)
+}
+
+pub fn skill_source_records_for_add(report: &SkillAddApplyReport) -> Vec<SkillSourceRecord> {
+    let git_source = matches!(
+        report.plan.source_kind.as_str(),
+        "github" | "git" | "gitlab" | "huggingface"
+    );
+    let source_version = git_source
+        .then(|| git_output(&report.plan.source_root, &["rev-parse", "HEAD"]))
+        .flatten();
+    let source_repo = git_source
+        .then(|| git_repository_boundary(&report.plan.source_root))
+        .flatten();
+    report
+        .plan
+        .selected
+        .iter()
+        .zip(&report.results)
+        .map(|(skill, result)| SkillSourceRecord {
+            skill_name: skill.name.clone(),
+            skill_path: result.target.clone(),
+            source_kind: report.plan.source_kind.clone(),
+            source: Some(report.plan.source.clone()),
+            source_ref: report.plan.source_ref.clone(),
+            source_version: source_version.clone(),
+            source_relative_path: source_repo
+                .as_deref()
+                .and_then(|repo| {
+                    skill
+                        .path
+                        .canonicalize()
+                        .ok()
+                        .and_then(|path| path.strip_prefix(repo).ok().map(Path::to_path_buf))
+                })
+                .map(|path| path.to_string_lossy().replace('\\', "/"))
+                .or_else(|| (!skill.relative_path.is_empty()).then(|| skill.relative_path.clone())),
+            update_status: if matches!(
+                report.plan.source_kind.as_str(),
+                "github" | "git" | "gitlab" | "huggingface"
+            ) {
+                "tracked"
+            } else {
+                "local"
+            }
+            .to_string(),
+            origin: "tendi-install".to_string(),
+        })
+        .collect()
+}
+
+fn apply_skill_add_with_target_root(
+    cwd: &Path,
+    options: &SkillAddOptions,
+    target_root: &Path,
+) -> Result<SkillAddApplyReport> {
     let resolved = resolve_add_source(cwd, &options.source, true)?;
-    let plan = build_skill_add_plan(&resolved, options, false)?;
+    let plan = build_skill_add_plan_with_target_root(&resolved, options, false, target_root)?;
+    let report = apply_built_skill_add_plan(plan, options, target_root);
+    cleanup_resolved_source(&resolved);
+    report
+}
+
+fn apply_built_skill_add_plan(
+    plan: SkillAddPlan,
+    options: &SkillAddOptions,
+    target_root: &Path,
+) -> Result<SkillAddApplyReport> {
     let mut results = Vec::new();
+    let mut visibility_changes = Vec::new();
     for skill in &plan.selected {
-        results.push(materialize_skill_dir_mode(
+        let result = materialize_skill_dir_to_root(
             &skill.path,
-            options.target,
-            Some(&skill.name),
+            target_root,
+            &skill.name,
             options.copy,
             options.overwrite,
             false,
+        )?;
+        visibility_changes.extend(plan_skill_visibility_at_path(
+            &result.target,
+            options.visibility,
+            options.target.is_shared_or_codex(),
         )?);
+        results.push(result);
     }
-    cleanup_resolved_source(&resolved);
+    apply_changes(&ChangeSet {
+        changes: dedupe_changes(visibility_changes),
+    })?;
     Ok(SkillAddApplyReport { plan, results })
 }
 
@@ -902,15 +1301,17 @@ struct ResolvedAddSource {
     root: PathBuf,
     kind: String,
     display_source: String,
+    git_ref: Option<String>,
     temporary: bool,
 }
 
 fn build_skill_add_plan(
+    cwd: &Path,
     resolved: &ResolvedAddSource,
     options: &SkillAddOptions,
     dry_run: bool,
 ) -> Result<SkillAddPlan> {
-    let target_root = global_agent_skill_root(options.target)?;
+    let target_root = skill_target_root(cwd, &options.target, options.scope)?;
     build_skill_add_plan_with_target_root(resolved, options, dry_run, &target_root)
 }
 
@@ -921,6 +1322,16 @@ fn build_skill_add_plan_with_target_root(
     target_root: &Path,
 ) -> Result<SkillAddPlan> {
     let available = discover_installable_skills(&resolved.root)?;
+    build_skill_add_plan_from_available(resolved, options, dry_run, target_root, available)
+}
+
+fn build_skill_add_plan_from_available(
+    resolved: &ResolvedAddSource,
+    options: &SkillAddOptions,
+    dry_run: bool,
+    target_root: &Path,
+    available: Vec<InstallableSkill>,
+) -> Result<SkillAddPlan> {
     if available.is_empty() {
         bail!("no skills found in {}", resolved.display_source);
     }
@@ -968,8 +1379,10 @@ fn build_skill_add_plan_with_target_root(
     Ok(SkillAddPlan {
         source: resolved.display_source.clone(),
         source_kind: resolved.kind.clone(),
+        source_ref: resolved.git_ref.clone(),
         source_root: resolved.root.clone(),
-        target: options.target,
+        target: options.target.clone(),
+        scope: options.scope,
         mode,
         available,
         selected,
@@ -1076,13 +1489,18 @@ fn resolve_add_source(
             root: parsed.root,
             kind: "local".to_string(),
             display_source: source.to_string(),
+            git_ref: None,
             temporary: false,
         }),
-        "github" | "git" => {
+        "github" | "git" | "gitlab" | "huggingface" => {
+            let cache_key = match &parsed.git_ref {
+                Some(git_ref) => format!("{}#{git_ref}", parsed.url),
+                None => parsed.url.clone(),
+            };
             let root = if persistent_remote {
-                persistent_source_root(&parsed.url)?
+                persistent_source_root(&cache_key)?
             } else {
-                temporary_source_root(&parsed.url)?
+                temporary_source_root(&cache_key)?
             };
             if !root.join(".git").is_dir() {
                 if root.exists() {
@@ -1092,12 +1510,54 @@ fn resolve_add_source(
                 if let Some(parent) = root.parent() {
                     fs::create_dir_all(parent)?;
                 }
-                run_git_clone(&parsed.url, &root)?;
+                run_git_clone(&parsed.url, parsed.git_ref.as_deref(), &root)?;
+            }
+            let discovery_root = match parsed.subpath {
+                Some(subpath) => {
+                    let candidate = root.join(subpath);
+                    let canonical_root = root.canonicalize()?;
+                    let canonical_candidate = candidate.canonicalize().with_context(|| {
+                        format!(
+                            "skill source subpath does not exist: {}",
+                            candidate.display()
+                        )
+                    })?;
+                    if !canonical_candidate.starts_with(&canonical_root) {
+                        bail!("skill source subpath escapes the cloned repository");
+                    }
+                    canonical_candidate
+                }
+                None => root,
+            };
+            Ok(ResolvedAddSource {
+                root: discovery_root,
+                kind: parsed.kind,
+                display_source: parsed.url,
+                git_ref: parsed.git_ref,
+                temporary: !persistent_remote,
+            })
+        }
+        "well-known" => {
+            let root = if persistent_remote {
+                persistent_source_root(&parsed.url)?
+            } else {
+                temporary_source_root(&parsed.url)?
+            };
+            if !root.exists() {
+                if let Some(parent) = root.parent() {
+                    fs::create_dir_all(parent)?;
+                }
+                if let Err(error) = crate::skill_source::materialize_well_known(&parsed.url, &root)
+                {
+                    let _ = fs::remove_dir_all(&root);
+                    return Err(error);
+                }
             }
             Ok(ResolvedAddSource {
                 root,
                 kind: parsed.kind,
                 display_source: parsed.url,
+                git_ref: None,
                 temporary: !persistent_remote,
             })
         }
@@ -1110,56 +1570,19 @@ struct ParsedAddSource {
     kind: String,
     root: PathBuf,
     url: String,
+    git_ref: Option<String>,
+    subpath: Option<PathBuf>,
 }
 
 fn parse_add_source(cwd: &Path, source: &str) -> Result<ParsedAddSource> {
-    let candidate = PathBuf::from(source);
-    let path = if candidate.is_absolute() {
-        candidate
-    } else {
-        cwd.join(candidate)
-    };
-    if path.exists() {
-        return Ok(ParsedAddSource {
-            kind: "local".to_string(),
-            root: path
-                .canonicalize()
-                .with_context(|| format!("failed to canonicalize {}", path.display()))?,
-            url: source.to_string(),
-        });
-    }
-
-    if let Some((owner, repo)) = parse_github_shorthand(source) {
-        return Ok(ParsedAddSource {
-            kind: "github".to_string(),
-            root: PathBuf::new(),
-            url: format!("https://github.com/{owner}/{repo}.git"),
-        });
-    }
-
-    if source.starts_with("git@") || source.starts_with("ssh://") || source.ends_with(".git") {
-        return Ok(ParsedAddSource {
-            kind: if source.contains("github.com") {
-                "github"
-            } else {
-                "git"
-            }
-            .to_string(),
-            root: PathBuf::new(),
-            url: source.to_string(),
-        });
-    }
-
-    if source.starts_with("https://github.com/") || source.starts_with("http://github.com/") {
-        let url = normalize_github_url(source)?;
-        return Ok(ParsedAddSource {
-            kind: "github".to_string(),
-            root: PathBuf::new(),
-            url,
-        });
-    }
-
-    bail!("unsupported skill source {source:?}")
+    let parsed = crate::skill_source::parse(cwd, source)?;
+    Ok(ParsedAddSource {
+        kind: parsed.kind,
+        root: parsed.local_root.unwrap_or_default(),
+        url: parsed.url,
+        git_ref: parsed.git_ref,
+        subpath: parsed.subpath,
+    })
 }
 
 fn parse_github_shorthand(source: &str) -> Option<(String, String)> {
@@ -1182,25 +1605,6 @@ fn parse_github_shorthand(source: &str) -> Option<(String, String)> {
         return None;
     }
     Some((owner.to_string(), repo.trim_end_matches(".git").to_string()))
-}
-
-fn normalize_github_url(source: &str) -> Result<String> {
-    let without_query = source.split(['?', '#']).next().unwrap_or(source);
-    let Some(rest) = without_query
-        .strip_prefix("https://github.com/")
-        .or_else(|| without_query.strip_prefix("http://github.com/"))
-    else {
-        bail!("not a GitHub URL: {source}");
-    };
-    let parts = rest
-        .split('/')
-        .filter(|part| !part.is_empty())
-        .collect::<Vec<_>>();
-    if parts.len() < 2 {
-        bail!("GitHub URL must include owner and repository");
-    }
-    let repo = parts[1].trim_end_matches(".git");
-    Ok(format!("https://github.com/{}/{}.git", parts[0], repo))
 }
 
 fn persistent_source_root(source: &str) -> Result<PathBuf> {
@@ -1231,13 +1635,23 @@ fn temporary_source_root(source: &str) -> Result<PathBuf> {
 
 fn cleanup_resolved_source(source: &ResolvedAddSource) {
     if source.temporary {
-        let _ = fs::remove_dir_all(&source.root);
+        let cleanup_root = source
+            .root
+            .ancestors()
+            .find(|path| path.join(".git").is_dir())
+            .unwrap_or(&source.root);
+        let _ = fs::remove_dir_all(cleanup_root);
     }
 }
 
-fn run_git_clone(source: &str, target: &Path) -> Result<()> {
-    let status = Command::new("git")
-        .args(["clone", "--depth", "1", source])
+fn run_git_clone(source: &str, git_ref: Option<&str>, target: &Path) -> Result<()> {
+    let mut command = Command::new("git");
+    command.args(["clone", "--depth", "1"]);
+    if let Some(git_ref) = git_ref {
+        command.args(["--branch", git_ref]);
+    }
+    let status = command
+        .arg(source)
         .arg(target)
         .status()
         .with_context(|| format!("failed to run git clone for {source}"))?;
@@ -1432,8 +1846,12 @@ fn resolve_installable_dependencies(skills: &mut [InstallableSkillCandidate]) {
 }
 pub fn check_skill_updates(cwd: &Path) -> Result<Vec<SkillUpdateReport>> {
     let scan = scan_skills(cwd)?;
+    Ok(check_skill_updates_for_scan(&scan))
+}
+
+pub fn check_skill_updates_for_scan(scan: &SkillScan) -> Vec<SkillUpdateReport> {
     let skills = scan.skills.iter().collect::<Vec<_>>();
-    Ok(check_skill_updates_for_skills(&skills))
+    check_skill_updates_for_skills(&skills)
 }
 
 pub fn plan_skill_updates(cwd: &Path, pattern: &str) -> Result<SkillUpdatePlan> {
@@ -1516,7 +1934,7 @@ fn plan_skill_updates_for_matches(
         };
 
         match path.source_kind.as_str() {
-            "git" | "github" => {
+            "git" | "github" | "gitlab" | "huggingface" => {
                 if let Some(action) = plan_git_update(scan, skill, path, &update) {
                     git_updates
                         .entry(action.repo.clone())
@@ -1525,6 +1943,9 @@ fn plan_skill_updates_for_matches(
                                 existing.diff.push_str(&action.diff);
                             }
                             existing.files.extend(action.files.clone());
+                            existing
+                                .materialized_targets
+                                .extend(action.materialized_targets.clone());
                         })
                         .or_insert(action);
                 } else {
@@ -1549,9 +1970,17 @@ fn plan_skill_updates_for_matches(
 }
 
 pub fn apply_skill_update_plan(plan: &SkillUpdatePlan) -> Result<()> {
+    let store = crate::storage::Store::open_default()?;
+    apply_skill_update_plan_with_store(plan, &store)
+}
+
+pub fn apply_skill_update_plan_with_store(
+    plan: &SkillUpdatePlan,
+    store: &crate::storage::Store,
+) -> Result<()> {
     apply_changes(&plan.file_changes)?;
     for action in &plan.git_updates {
-        apply_git_update(action)?;
+        apply_git_update_with_store(action, Some(store))?;
     }
     Ok(())
 }
@@ -1684,7 +2113,7 @@ fn discover_roots(cwd: &Path) -> Vec<SkillRoot> {
     roots
 }
 
-fn global_agent_skill_root(agent: AgentKind) -> Result<PathBuf> {
+pub(crate) fn global_agent_skill_root(agent: AgentKind) -> Result<PathBuf> {
     let home = dirs::home_dir().context("could not resolve home directory")?;
     match agent {
         AgentKind::Codex => Ok(home.join(".codex/skills")),
@@ -1873,7 +2302,14 @@ fn read_skill(
     let provenance_dir = skill_dir
         .canonicalize()
         .unwrap_or_else(|_| skill_dir.to_path_buf());
-    let provenance = provenance_resolver.infer(&provenance_dir, &frontmatter);
+    let provenance = provenance_resolver.infer_installed(
+        skill_dir,
+        &provenance_dir,
+        &root.path,
+        &root.scope,
+        &name,
+        &frontmatter,
+    );
     let symlink_status = symlink_status(&root.path, skill_dir);
 
     let sha256 = sha256_text(&text);
@@ -1897,6 +2333,7 @@ fn read_skill(
             install_target: install_target(root.agent, &root.path),
             source_kind: provenance.kind,
             source: provenance.source,
+            source_ref: provenance.source_ref,
             source_version: provenance.version,
             source_relative_path: provenance.relative_path,
             symlink_status,
@@ -2465,6 +2902,7 @@ pub fn format_skill_table(skills: &[SkillRecord]) -> String {
 struct Provenance {
     kind: String,
     source: Option<String>,
+    source_ref: Option<String>,
     version: Option<String>,
     relative_path: Option<String>,
     update_status: String,
@@ -2477,67 +2915,152 @@ struct GitRepositoryProvenance {
     head: Option<String>,
 }
 
+#[derive(Debug, Default, Deserialize)]
+struct SkillsCliLockFile {
+    version: u64,
+    #[serde(default)]
+    skills: BTreeMap<String, SkillsCliLockEntry>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SkillsCliLockEntry {
+    source: String,
+    source_type: String,
+    source_url: Option<String>,
+    r#ref: Option<String>,
+    skill_path: Option<String>,
+    skill_folder_hash: Option<String>,
+    computed_hash: Option<String>,
+}
+
+#[derive(Debug, Default)]
+struct SkillsCliLockDatabase {
+    global: BTreeMap<String, SkillsCliLockEntry>,
+    projects: Vec<(PathBuf, BTreeMap<String, SkillsCliLockEntry>)>,
+}
+
 #[derive(Debug, Default)]
 struct ProvenanceResolver {
     repositories: BTreeMap<PathBuf, Option<GitRepositoryProvenance>>,
+    source_records: BTreeMap<PathBuf, SkillSourceRecord>,
+    lock_cwd: Option<PathBuf>,
+    skills_cli_locks: Option<SkillsCliLockDatabase>,
+    lock_warnings: Vec<String>,
+    migrations: Vec<SkillSourceRecord>,
 }
 
 impl ProvenanceResolver {
+    fn managed(cwd: &Path, records: Vec<SkillSourceRecord>) -> Self {
+        Self {
+            source_records: records
+                .into_iter()
+                .map(|record| (record.skill_path.clone(), record))
+                .collect(),
+            lock_cwd: Some(cwd.to_path_buf()),
+            ..Self::default()
+        }
+    }
+
+    fn from_scan(scan: &SkillScan) -> Self {
+        let source_records = scan
+            .skills
+            .iter()
+            .flat_map(|skill| {
+                skill.paths.iter().map(|path| SkillSourceRecord {
+                    skill_name: skill.name.clone(),
+                    skill_path: path.path.clone(),
+                    source_kind: path.source_kind.clone(),
+                    source: path.source.clone(),
+                    source_ref: path.source_ref.clone(),
+                    source_version: path.source_version.clone(),
+                    source_relative_path: path.source_relative_path.clone(),
+                    update_status: path.update_status.clone(),
+                    origin: "scan-cache".to_string(),
+                })
+            })
+            .map(|record| (record.skill_path.clone(), record))
+            .collect();
+        Self {
+            source_records,
+            ..Self::default()
+        }
+    }
+
+    #[cfg(test)]
     fn infer(&mut self, skill_dir: &Path, frontmatter: &Option<Value>) -> Provenance {
-        if let Some(source) = frontmatter
-            .as_ref()
-            .and_then(|value| value.get("source").or_else(|| value.get("source_url")))
-            .and_then(Value::as_str)
-        {
-            return Provenance {
-                kind: if source.contains("github.com") {
-                    "github".to_string()
-                } else {
-                    "registry".to_string()
-                },
-                source: Some(source.to_string()),
-                version: frontmatter
-                    .as_ref()
-                    .and_then(|value| value.get("version"))
-                    .and_then(Value::as_str)
-                    .map(str::to_string),
-                relative_path: None,
-                update_status: "checkable".to_string(),
-            };
+        if let Some(provenance) = frontmatter_provenance(frontmatter) {
+            return provenance;
         }
 
         if let Some(repository) = self.repository_for(skill_dir) {
-            let relative_path = skill_dir
-                .strip_prefix(&repository.root)
-                .ok()
-                .map(|path| path.display().to_string())
-                .filter(|path| !path.is_empty());
-            return Provenance {
-                kind: if repository
-                    .remote
-                    .as_deref()
-                    .is_some_and(|remote| remote.contains("github.com"))
-                {
-                    "github".to_string()
-                } else {
-                    "git".to_string()
-                },
-                source: repository
-                    .remote
-                    .or_else(|| Some(repository.root.display().to_string())),
-                version: repository.head,
-                relative_path,
-                update_status: "checkable".to_string(),
-            };
+            return repository_provenance(skill_dir, repository);
         }
 
-        Provenance {
-            kind: "local".to_string(),
-            source: Some(skill_dir.display().to_string()),
-            version: None,
-            relative_path: None,
-            update_status: "local".to_string(),
+        local_provenance(skill_dir)
+    }
+
+    fn infer_installed(
+        &mut self,
+        installed_dir: &Path,
+        provenance_dir: &Path,
+        install_root: &Path,
+        scope: &str,
+        name: &str,
+        frontmatter: &Option<Value>,
+    ) -> Provenance {
+        if let Some(record) = self.source_records.get(installed_dir).filter(|record| {
+            normalize_skill_match_name(&record.skill_name) == normalize_skill_match_name(name)
+        }) {
+            return record.provenance();
         }
+
+        if let Some(provenance) = frontmatter_provenance(frontmatter) {
+            return provenance;
+        }
+
+        let repository = self.repository_for(provenance_dir);
+        let canonical_root = install_root
+            .canonicalize()
+            .unwrap_or_else(|_| install_root.to_path_buf());
+        let is_materialized_inside_root = provenance_dir.starts_with(&canonical_root);
+
+        if !is_materialized_inside_root {
+            if let Some(repository) = repository.clone() {
+                return repository_provenance(provenance_dir, repository);
+            }
+        }
+
+        if let Some(provenance) = self.lock_provenance(name, scope, installed_dir) {
+            self.migrations.push(SkillSourceRecord::from_provenance(
+                name,
+                installed_dir,
+                &provenance,
+                "skills-cli-lock",
+            ));
+            return provenance;
+        }
+
+        repository
+            .map(|repository| repository_provenance(provenance_dir, repository))
+            .unwrap_or_else(|| local_provenance(provenance_dir))
+    }
+
+    fn lock_provenance(
+        &mut self,
+        name: &str,
+        scope: &str,
+        installed_dir: &Path,
+    ) -> Option<Provenance> {
+        if self.skills_cli_locks.is_none() {
+            let cwd = self.lock_cwd.as_deref()?;
+            let (locks, mut warnings) = SkillsCliLockDatabase::load(cwd);
+            self.skills_cli_locks = Some(locks);
+            self.lock_warnings.append(&mut warnings);
+        }
+        self.skills_cli_locks
+            .as_ref()?
+            .provenance(name, scope, installed_dir)
     }
 
     fn repository_for(&mut self, skill_dir: &Path) -> Option<GitRepositoryProvenance> {
@@ -2552,6 +3075,246 @@ impl ProvenanceResolver {
                 })
             })
             .clone()
+    }
+}
+
+impl SkillSourceRecord {
+    fn from_provenance(name: &str, path: &Path, provenance: &Provenance, origin: &str) -> Self {
+        Self {
+            skill_name: name.to_string(),
+            skill_path: path.to_path_buf(),
+            source_kind: provenance.kind.clone(),
+            source: provenance.source.clone(),
+            source_ref: provenance.source_ref.clone(),
+            source_version: provenance.version.clone(),
+            source_relative_path: provenance.relative_path.clone(),
+            update_status: provenance.update_status.clone(),
+            origin: origin.to_string(),
+        }
+    }
+
+    fn provenance(&self) -> Provenance {
+        Provenance {
+            kind: self.source_kind.clone(),
+            source: self.source.clone(),
+            source_ref: self.source_ref.clone(),
+            version: self.source_version.clone(),
+            relative_path: self.source_relative_path.clone(),
+            update_status: self.update_status.clone(),
+        }
+    }
+}
+
+impl SkillsCliLockDatabase {
+    fn load(cwd: &Path) -> (Self, Vec<String>) {
+        let mut database = Self::default();
+        let mut warnings = Vec::new();
+
+        if let Some(path) = global_skills_cli_lock_path() {
+            if let Some(lock) = read_skills_cli_lock(&path, 3, &mut warnings) {
+                database.global = lock.skills;
+            }
+        }
+
+        for project_dir in skill_project_dirs(cwd) {
+            let path = project_dir.join("skills-lock.json");
+            if let Some(lock) = read_skills_cli_lock(&path, 1, &mut warnings) {
+                database.projects.push((project_dir, lock.skills));
+            }
+        }
+
+        (database, warnings)
+    }
+
+    fn provenance(&self, name: &str, scope: &str, skill_dir: &Path) -> Option<Provenance> {
+        let entry = match scope {
+            "global" => matching_skills_cli_lock_entry(&self.global, name),
+            "project" => self
+                .projects
+                .iter()
+                .filter(|(root, _)| skill_dir.starts_with(root))
+                .max_by_key(|(root, _)| root.components().count())
+                .and_then(|(_, skills)| matching_skills_cli_lock_entry(skills, name)),
+            _ => None,
+        }?;
+
+        Some(entry.provenance())
+    }
+}
+
+impl SkillsCliLockEntry {
+    fn provenance(&self) -> Provenance {
+        let kind = self.source_type.trim().to_ascii_lowercase();
+        let source = self
+            .source_url
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or(self.source.as_str());
+        let source = normalize_locked_source(source, &kind);
+        let version = self
+            .skill_folder_hash
+            .as_deref()
+            .and_then(|value| non_empty(Some(value)))
+            .or_else(|| non_empty(self.computed_hash.as_deref()));
+
+        Provenance {
+            kind: if kind.is_empty() {
+                "unknown".to_string()
+            } else {
+                kind
+            },
+            source: non_empty(Some(&source)),
+            source_ref: non_empty(self.r#ref.as_deref()),
+            version,
+            relative_path: non_empty(self.skill_path.as_deref()),
+            update_status: "tracked".to_string(),
+        }
+    }
+}
+
+fn read_skills_cli_lock(
+    path: &Path,
+    expected_version: u64,
+    warnings: &mut Vec<String>,
+) -> Option<SkillsCliLockFile> {
+    let text = match fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(err) => {
+            warnings.push(format!(
+                "{}: failed to read skills CLI lock: {err}",
+                path.display()
+            ));
+            return None;
+        }
+    };
+    let lock = match serde_json::from_str::<SkillsCliLockFile>(&text) {
+        Ok(lock) => lock,
+        Err(err) => {
+            warnings.push(format!(
+                "{}: invalid skills CLI lock: {err}",
+                path.display()
+            ));
+            return None;
+        }
+    };
+    if lock.version != expected_version {
+        warnings.push(format!(
+            "{}: unsupported skills CLI lock version {}; expected {}",
+            path.display(),
+            lock.version,
+            expected_version
+        ));
+        return None;
+    }
+    Some(lock)
+}
+
+fn global_skills_cli_lock_path() -> Option<PathBuf> {
+    env::var_os("XDG_STATE_HOME")
+        .map(PathBuf::from)
+        .map(|root| root.join("skills/.skill-lock.json"))
+        .or_else(|| dirs::home_dir().map(|home| home.join(".agents/.skill-lock.json")))
+}
+
+fn skill_project_dirs(cwd: &Path) -> Vec<PathBuf> {
+    let root = cwd
+        .ancestors()
+        .find(|path| path.join(".git").exists())
+        .unwrap_or(cwd);
+    let mut dirs = cwd
+        .ancestors()
+        .take_while(|path| *path != root)
+        .map(Path::to_path_buf)
+        .collect::<Vec<_>>();
+    dirs.push(root.to_path_buf());
+    dirs
+}
+
+fn matching_skills_cli_lock_entry<'a>(
+    skills: &'a BTreeMap<String, SkillsCliLockEntry>,
+    name: &str,
+) -> Option<&'a SkillsCliLockEntry> {
+    skills.get(name).or_else(|| {
+        let normalized_name = normalize_skill_match_name(name);
+        skills.iter().find_map(|(candidate, entry)| {
+            (normalize_skill_match_name(candidate) == normalized_name).then_some(entry)
+        })
+    })
+}
+
+fn normalize_locked_source(source: &str, kind: &str) -> String {
+    let source = source.trim();
+    if kind == "github" && parse_github_shorthand(source).is_some() {
+        return format!("https://github.com/{source}.git");
+    }
+    source.to_string()
+}
+
+fn non_empty(value: Option<&str>) -> Option<String> {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+fn frontmatter_provenance(frontmatter: &Option<Value>) -> Option<Provenance> {
+    let source = frontmatter
+        .as_ref()
+        .and_then(|value| value.get("source").or_else(|| value.get("source_url")))
+        .and_then(Value::as_str)?;
+    Some(Provenance {
+        kind: if source.contains("github.com") {
+            "github".to_string()
+        } else {
+            "registry".to_string()
+        },
+        source: Some(source.to_string()),
+        source_ref: None,
+        version: frontmatter
+            .as_ref()
+            .and_then(|value| value.get("version"))
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        relative_path: None,
+        update_status: "checkable".to_string(),
+    })
+}
+
+fn repository_provenance(skill_dir: &Path, repository: GitRepositoryProvenance) -> Provenance {
+    let relative_path = skill_dir
+        .strip_prefix(&repository.root)
+        .ok()
+        .map(|path| path.display().to_string())
+        .filter(|path| !path.is_empty());
+    Provenance {
+        kind: if repository
+            .remote
+            .as_deref()
+            .is_some_and(|remote| remote.contains("github.com"))
+        {
+            "github".to_string()
+        } else {
+            "git".to_string()
+        },
+        source: repository
+            .remote
+            .or_else(|| Some(repository.root.display().to_string())),
+        source_ref: None,
+        version: repository.head,
+        relative_path,
+        update_status: "checkable".to_string(),
+    }
+}
+
+fn local_provenance(skill_dir: &Path) -> Provenance {
+    Provenance {
+        kind: "local".to_string(),
+        source: Some(skill_dir.display().to_string()),
+        source_ref: None,
+        version: None,
+        relative_path: None,
+        update_status: "local".to_string(),
     }
 }
 
@@ -2632,43 +3395,64 @@ fn summarize_update_status(statuses: BTreeSet<String>) -> String {
 
 fn check_skill_updates_for_skills(skills: &[&SkillRecord]) -> Vec<SkillUpdateReport> {
     let mut git_remote_heads = fetch_git_remote_heads(skills);
-    skills
+    let reports = skills
         .iter()
         .map(|skill| check_skill_update(skill, &mut git_remote_heads))
-        .collect()
+        .collect();
+    cleanup_git_remote_heads(git_remote_heads);
+    reports
 }
 
-fn fetch_git_remote_heads(skills: &[&SkillRecord]) -> BTreeMap<PathBuf, Option<String>> {
+#[derive(Clone)]
+struct GitRemoteHead {
+    oid: String,
+    reference: String,
+}
+
+fn fetch_git_remote_heads(skills: &[&SkillRecord]) -> BTreeMap<PathBuf, Option<GitRemoteHead>> {
     let remotes = skills
         .iter()
         .filter_map(|skill| {
             let path = skill
                 .paths
                 .iter()
-                .find(|path| path.update_status == "checkable")?;
-            matches!(path.source_kind.as_str(), "git" | "github")
-                .then(|| Some((git_repository_boundary(&path.path)?, path.source.clone()?)))?
+                .find(|path| matches!(path.update_status.as_str(), "checkable" | "tracked"))?;
+            is_git_source_kind(&path.source_kind).then(|| {
+                Some((
+                    git_checkout_for_skill_path(path)?,
+                    (path.source.clone()?, path.source_ref.clone()),
+                ))
+            })?
         })
         .collect::<BTreeMap<_, _>>();
-    let handles = remotes
-        .into_iter()
-        .map(|(repo, source)| {
-            let task_repo = repo.clone();
-            std::thread::spawn(move || {
-                let latest = fetch_git_remote_head(&task_repo, &source);
-                (repo, latest)
-            })
-        })
-        .collect::<Vec<_>>();
-    handles
-        .into_iter()
-        .filter_map(|handle| handle.join().ok())
-        .collect()
+    const MAX_CONCURRENT_FETCHES: usize = 4;
+    let remotes = remotes.into_iter().collect::<Vec<_>>();
+    let mut heads = BTreeMap::new();
+    for batch in remotes.chunks(MAX_CONCURRENT_FETCHES) {
+        let results = std::thread::scope(|scope| {
+            batch
+                .iter()
+                .map(|(repo, (source, source_ref))| {
+                    scope.spawn(move || {
+                        (
+                            repo.clone(),
+                            fetch_git_remote_head(repo, source, source_ref.as_deref()),
+                        )
+                    })
+                })
+                .collect::<Vec<_>>()
+                .into_iter()
+                .filter_map(|handle| handle.join().ok())
+                .collect::<Vec<_>>()
+        });
+        heads.extend(results);
+    }
+    heads
 }
 
 fn check_skill_update(
     skill: &SkillRecord,
-    git_remote_heads: &mut BTreeMap<PathBuf, Option<String>>,
+    git_remote_heads: &mut BTreeMap<PathBuf, Option<GitRemoteHead>>,
 ) -> SkillUpdateReport {
     let Some(path) = skill
         .paths
@@ -2687,7 +3471,9 @@ fn check_skill_update(
     };
 
     match path.source_kind.as_str() {
-        "git" | "github" => check_git_update(skill, path, git_remote_heads),
+        "git" | "github" | "gitlab" | "huggingface" => {
+            check_git_update(skill, path, git_remote_heads)
+        }
         "registry" => check_registry_update(skill, path),
         _ => SkillUpdateReport {
             name: skill.name.clone(),
@@ -2703,7 +3489,7 @@ fn check_skill_update(
 fn check_git_update(
     skill: &SkillRecord,
     path: &SkillPath,
-    git_remote_heads: &mut BTreeMap<PathBuf, Option<String>>,
+    git_remote_heads: &mut BTreeMap<PathBuf, Option<GitRemoteHead>>,
 ) -> SkillUpdateReport {
     let Some(source) = path.source.clone() else {
         return SkillUpdateReport {
@@ -2716,19 +3502,26 @@ fn check_git_update(
         };
     };
 
-    let repo = git_repository_boundary(&path.path);
+    let materialized = git_repository_boundary(&path.path).is_none();
+    let repo = git_checkout_for_skill_path(path);
     let latest = repo.as_ref().and_then(|repo| {
         git_remote_heads
             .entry(repo.clone())
-            .or_insert_with(|| fetch_git_remote_head(repo, &source))
+            .or_insert_with(|| fetch_git_remote_head(repo, &source, path.source_ref.as_deref()))
             .clone()
     });
-    let status = match (&path.source_version, &latest) {
-        (Some(current), Some(latest)) if latest.starts_with(current) => "up-to-date",
-        (Some(_), Some(_))
+    let latest_oid = latest.as_ref().map(|head| head.oid.as_str());
+    let current_matches = repo
+        .as_ref()
+        .zip(latest_oid)
+        .is_some_and(|(repo, latest)| materialized_source_matches(repo, path, latest));
+    let status = match (&path.source_version, latest_oid) {
+        (_, Some(_)) if current_matches => "up-to-date",
+        (Some(_), Some(_)) if materialized => "update-available",
+        (Some(_), Some(latest))
             if repo
                 .as_ref()
-                .is_some_and(|repo| git_path_changed(repo, path)) =>
+                .is_some_and(|repo| git_path_changed(repo, path, latest)) =>
         {
             "update-available"
         }
@@ -2741,7 +3534,7 @@ fn check_git_update(
         name: skill.name.clone(),
         status: status.to_string(),
         current_version: path.source_version.clone(),
-        latest_version: latest,
+        latest_version: latest.map(|head| head.oid),
         source: Some(source),
         source_kind: path.source_kind.clone(),
     }
@@ -2753,19 +3546,44 @@ fn plan_git_update(
     path: &SkillPath,
     update: &SkillUpdateReport,
 ) -> Option<GitUpdateAction> {
-    let repo = git_repository_boundary(&path.path)?;
-    let tendi_settings = git_tendi_settings(scan, &repo);
-    let diff = git_path_diff(&repo, path);
-    let files = git_path_files(&repo, path);
+    let materialized = git_repository_boundary(&path.path).is_none();
+    let repo = git_checkout_for_skill_path(path)?;
+    let tendi_settings = if materialized {
+        Vec::new()
+    } else {
+        git_tendi_settings(scan, &repo)
+    };
+    let latest = update.latest_version.as_deref()?;
+    let diff = if materialized {
+        String::new()
+    } else {
+        git_path_diff(&repo, path, latest)
+    };
+    let files = if materialized {
+        git_materialized_path_files(&repo, &path.path, normalized_skill_repo_path(path), latest)
+    } else {
+        git_path_files(&repo, path, latest)
+    };
     Some(GitUpdateAction {
         name: skill.name.clone(),
         repo,
         source: path.source.clone()?,
+        source_ref: path.source_ref.clone(),
         current_version: update.current_version.clone(),
         latest_version: update.latest_version.clone(),
         diff,
         files,
         tendi_settings,
+        materialized_targets: materialized
+            .then(|| MaterializedGitTarget {
+                name: skill.name.clone(),
+                target: path.path.clone(),
+                source_relative_path: path.source_relative_path.clone(),
+                visibility: path.effective_visibility,
+                shared_or_codex: matches!(path.agent, AgentKind::Shared | AgentKind::Codex),
+            })
+            .into_iter()
+            .collect(),
     })
 }
 
@@ -2805,9 +3623,24 @@ fn plan_registry_update(path: &SkillPath) -> Result<Option<FileChange>> {
     }))
 }
 
+#[cfg(test)]
 fn apply_git_update(action: &GitUpdateAction) -> Result<()> {
+    apply_git_update_with_store(action, None)
+}
+
+fn apply_git_update_with_store(
+    action: &GitUpdateAction,
+    store: Option<&crate::storage::Store>,
+) -> Result<()> {
+    if !action.materialized_targets.is_empty() {
+        return apply_materialized_git_update(action, store);
+    }
     clear_tendi_git_changes(action)?;
-    let update_result = run_git(&action.repo, &["fetch", "origin"])
+    let update_result = action
+        .source_ref
+        .as_deref()
+        .map(|source_ref| run_git(&action.repo, &["fetch", "origin", source_ref]))
+        .unwrap_or_else(|| run_git(&action.repo, &["fetch", "origin"]))
         .and_then(|_| run_git(&action.repo, &["merge", "--ff-only", "FETCH_HEAD"]));
     let restore_result = restore_tendi_git_settings(action);
     match (update_result, restore_result) {
@@ -2817,6 +3650,63 @@ fn apply_git_update(action: &GitUpdateAction) -> Result<()> {
         (Err(update_error), _) => Err(update_error),
         (Ok(_), restore_result) => restore_result,
     }
+}
+
+fn apply_materialized_git_update(
+    action: &GitUpdateAction,
+    store: Option<&crate::storage::Store>,
+) -> Result<()> {
+    let latest = action
+        .latest_version
+        .as_deref()
+        .context("materialized skill update has no remote revision")?;
+    run_git(&action.repo, &["reset", "--hard", latest])?;
+    let mut changes = Vec::new();
+    for target in &action.materialized_targets {
+        let relative = target
+            .source_relative_path
+            .as_deref()
+            .unwrap_or(".")
+            .trim_end_matches("/SKILL.md")
+            .trim_end_matches("SKILL.md")
+            .trim_end_matches('/');
+        let source_dir = if relative.is_empty() || relative == "." {
+            action.repo.clone()
+        } else {
+            action.repo.join(relative)
+        };
+        let target_root = target
+            .target
+            .parent()
+            .context("materialized skill target has no parent")?;
+        let target_name = target
+            .target
+            .file_name()
+            .and_then(|name| name.to_str())
+            .context("materialized skill target has no valid name")?;
+        materialize_skill_dir_to_root(&source_dir, target_root, target_name, true, true, false)?;
+        changes.extend(plan_skill_visibility_at_path(
+            &target.target,
+            target.visibility,
+            target.shared_or_codex,
+        )?);
+    }
+    apply_changes(&ChangeSet {
+        changes: dedupe_changes(changes),
+    })?;
+
+    let mut records = Vec::new();
+    if let Some(store) = store {
+        for target in &action.materialized_targets {
+            if let Some(mut record) = store.skill_source_record(&target.target)? {
+                record.source_version = Some(latest.to_string());
+                record.update_status = "tracked".to_string();
+                records.push(record);
+            }
+        }
+        store.upsert_skill_source_records(&records)?;
+    }
+    Ok(())
 }
 
 fn clear_tendi_git_changes(action: &GitUpdateAction) -> Result<()> {
@@ -3011,28 +3901,150 @@ fn check_registry_update(skill: &SkillRecord, path: &SkillPath) -> SkillUpdateRe
     }
 }
 
-fn fetch_git_remote_head(repo: &Path, source: &str) -> Option<String> {
+fn fetch_git_remote_head(
+    repo: &Path,
+    source: &str,
+    source_ref: Option<&str>,
+) -> Option<GitRemoteHead> {
+    let reference = format!(
+        "refs/tendi/update-check/{}-{}",
+        std::process::id(),
+        GIT_UPDATE_CHECK_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+    );
+    let requested = source_ref.unwrap_or("HEAD");
     let output = Command::new("git")
-        .args(["fetch", "--no-tags", source, "HEAD"])
+        .args(["fetch", "--no-write-fetch-head", "--no-tags", source])
+        .arg(format!("+{requested}:{reference}"))
         .current_dir(repo)
         .output()
         .ok()?;
     if !output.status.success() {
         return None;
     }
-    git_output(repo, &["rev-parse", "FETCH_HEAD"])
+    let oid = match git_output(repo, &["rev-parse", &reference]) {
+        Some(oid) => oid,
+        None => {
+            let _ = Command::new("git")
+                .args(["update-ref", "-d", &reference])
+                .current_dir(repo)
+                .output();
+            return None;
+        }
+    };
+    Some(GitRemoteHead { oid, reference })
 }
 
-fn git_path_changed(repo: &Path, path: &SkillPath) -> bool {
+fn is_git_source_kind(kind: &str) -> bool {
+    matches!(kind, "git" | "github" | "gitlab" | "huggingface")
+}
+
+fn git_checkout_for_skill_path(path: &SkillPath) -> Option<PathBuf> {
+    if let Some(repo) = git_repository_boundary(&path.path) {
+        return Some(repo);
+    }
+    let source = path.source.as_deref()?;
+    let cache_key = path
+        .source_ref
+        .as_deref()
+        .map(|source_ref| format!("{source}#{source_ref}"))
+        .unwrap_or_else(|| source.to_string());
+    let repo = persistent_source_root(&cache_key).ok()?;
+    if !repo.join(".git").is_dir() {
+        if repo.exists() {
+            fs::remove_dir_all(&repo).ok()?;
+        }
+        fs::create_dir_all(repo.parent()?).ok()?;
+        run_git_clone(source, path.source_ref.as_deref(), &repo).ok()?;
+    }
+    Some(repo)
+}
+
+fn normalized_skill_repo_path(path: &SkillPath) -> &str {
+    path.source_relative_path
+        .as_deref()
+        .unwrap_or(".")
+        .trim_end_matches("/SKILL.md")
+        .trim_end_matches("SKILL.md")
+        .trim_end_matches('/')
+}
+
+fn materialized_source_matches(repo: &Path, path: &SkillPath, latest: &str) -> bool {
+    let Some(current) = path.source_version.as_deref() else {
+        return false;
+    };
+    if current.len() == 64 && current.chars().all(|ch| ch.is_ascii_hexdigit()) {
+        return git_folder_sha256(repo, latest, normalized_skill_repo_path(path))
+            .is_some_and(|fingerprint| fingerprint.eq_ignore_ascii_case(current));
+    }
+    if current.len() == 40 && current.chars().all(|ch| ch.is_ascii_hexdigit()) {
+        if latest.eq_ignore_ascii_case(current) {
+            return true;
+        }
+        return git_tree_oid(repo, latest, normalized_skill_repo_path(path))
+            .is_some_and(|oid| oid.eq_ignore_ascii_case(current));
+    }
+    false
+}
+
+fn git_tree_oid(repo: &Path, revision: &str, relative: &str) -> Option<String> {
+    let spec = if relative.is_empty() || relative == "." {
+        format!("{revision}^{{tree}}")
+    } else {
+        format!("{revision}:{relative}")
+    };
+    git_output(repo, &["rev-parse", &spec])
+}
+
+fn git_folder_sha256(repo: &Path, revision: &str, relative: &str) -> Option<String> {
+    let mut args = vec!["ls-tree", "-r", "--name-only", revision];
+    if !relative.is_empty() && relative != "." {
+        args.extend(["--", relative]);
+    }
+    let listing = git_output(repo, &args)?;
+    let prefix = relative.trim_matches('/');
+    let mut files = listing.lines().map(str::to_string).collect::<Vec<_>>();
+    files.sort();
+    let mut hasher = Sha256::new();
+    for file in files {
+        let relative_file = file
+            .strip_prefix(prefix)
+            .unwrap_or(&file)
+            .trim_start_matches('/');
+        hasher.update(relative_file.as_bytes());
+        let output = Command::new("git")
+            .args(["show", &format!("{revision}:{file}")])
+            .current_dir(repo)
+            .output()
+            .ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        hasher.update(&output.stdout);
+    }
+    Some(format!("{:x}", hasher.finalize()))
+}
+
+fn cleanup_git_remote_heads(heads: BTreeMap<PathBuf, Option<GitRemoteHead>>) {
+    for (repo, head) in heads {
+        if let Some(head) = head {
+            let _ = Command::new("git")
+                .args(["update-ref", "-d", &head.reference])
+                .current_dir(repo)
+                .output();
+        }
+    }
+}
+
+fn git_path_changed(repo: &Path, path: &SkillPath, remote_head: &str) -> bool {
     let relative = path.source_relative_path.as_deref().unwrap_or(".");
     let output = Command::new("git")
-        .args(["diff", "--quiet", "HEAD", "FETCH_HEAD", "--", relative])
+        .args(["diff", "--quiet", "HEAD", remote_head, "--", relative])
         .current_dir(repo)
         .output();
     matches!(output.ok().and_then(|output| output.status.code()), Some(1))
 }
 
-fn git_path_diff(repo: &Path, path: &SkillPath) -> String {
+fn git_path_diff(repo: &Path, path: &SkillPath, remote_head: &str) -> String {
     let relative = path.source_relative_path.as_deref().unwrap_or(".");
     let output = Command::new("git")
         .args([
@@ -3040,7 +4052,7 @@ fn git_path_diff(repo: &Path, path: &SkillPath) -> String {
             "--no-ext-diff",
             "--unified=3",
             "HEAD",
-            "FETCH_HEAD",
+            remote_head,
             "--",
             relative,
         ])
@@ -3053,10 +4065,10 @@ fn git_path_diff(repo: &Path, path: &SkillPath) -> String {
         .unwrap_or_default()
 }
 
-fn git_path_files(repo: &Path, path: &SkillPath) -> Vec<GitUpdateFile> {
+fn git_path_files(repo: &Path, path: &SkillPath, remote_head: &str) -> Vec<GitUpdateFile> {
     let relative = path.source_relative_path.as_deref().unwrap_or(".");
     let output = Command::new("git")
-        .args(["diff", "--name-only", "HEAD", "FETCH_HEAD", "--", relative])
+        .args(["diff", "--name-only", "HEAD", remote_head, "--", relative])
         .current_dir(repo)
         .output();
     let Ok(output) = output else {
@@ -3069,9 +4081,74 @@ fn git_path_files(repo: &Path, path: &SkillPath) -> Vec<GitUpdateFile> {
         .lines()
         .filter_map(|path| {
             let before = git_show_revision_file(repo, "HEAD", path);
-            let after = git_show_revision_file(repo, "FETCH_HEAD", path);
+            let after = git_show_revision_file(repo, remote_head, path);
             (!before.contains('\0') && !after.contains('\0')).then_some(GitUpdateFile {
                 path: path.to_string(),
+                before,
+                after,
+            })
+        })
+        .collect()
+}
+
+fn git_materialized_path_files(
+    repo: &Path,
+    installed_dir: &Path,
+    repo_relative: &str,
+    remote_head: &str,
+) -> Vec<GitUpdateFile> {
+    let mut remote_files = BTreeSet::new();
+    let mut args = vec!["ls-tree", "-r", "--name-only", remote_head];
+    if !repo_relative.is_empty() && repo_relative != "." {
+        args.extend(["--", repo_relative]);
+    }
+    if let Some(listing) = git_output(repo, &args) {
+        remote_files.extend(listing.lines().map(str::to_string));
+    }
+
+    let mut local_files = BTreeSet::new();
+    for entry in WalkDir::new(installed_dir)
+        .follow_links(false)
+        .into_iter()
+        .filter_map(Result::ok)
+    {
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        let Ok(relative) = entry.path().strip_prefix(installed_dir) else {
+            continue;
+        };
+        let repo_file = if repo_relative.is_empty() || repo_relative == "." {
+            relative.to_path_buf()
+        } else {
+            Path::new(repo_relative).join(relative)
+        };
+        local_files.insert(repo_file.to_string_lossy().replace('\\', "/"));
+    }
+
+    remote_files
+        .union(&local_files)
+        .filter_map(|repo_file| {
+            let local_relative = if repo_relative.is_empty() || repo_relative == "." {
+                PathBuf::from(repo_file)
+            } else {
+                Path::new(repo_file)
+                    .strip_prefix(repo_relative)
+                    .ok()?
+                    .to_path_buf()
+            };
+            let local_path = installed_dir.join(local_relative);
+            let before_exists = local_files.contains(repo_file);
+            let before = fs::read(&local_path)
+                .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+                .unwrap_or_default();
+            let after = git_show_revision_file(repo, remote_head, repo_file);
+            let after_exists = remote_files.contains(repo_file);
+            if before_exists == after_exists && before == after {
+                return None;
+            }
+            Some(GitUpdateFile {
+                path: repo_file.clone(),
                 before,
                 after,
             })
@@ -3269,6 +4346,27 @@ fn plan_skill_frontmatter(path: PathBuf, visibility: SkillVisibility) -> Result<
         before: Some(before),
         after,
     })
+}
+
+fn plan_skill_visibility_at_path(
+    skill_dir: &Path,
+    visibility: SkillVisibility,
+    update_codex_config: bool,
+) -> Result<Vec<FileChange>> {
+    let mut changes = vec![plan_skill_frontmatter(
+        skill_dir.join("SKILL.md"),
+        visibility,
+    )?];
+    changes.push(plan_codex_policy(
+        skill_dir.join("agents/openai.yaml"),
+        visibility,
+    )?);
+    if update_codex_config {
+        if let Some(change) = plan_codex_skill_config(skill_dir.join("SKILL.md"), visibility)? {
+            changes.push(change);
+        }
+    }
+    Ok(changes)
 }
 
 fn render_skill_frontmatter_for_visibility(
@@ -3974,25 +5072,30 @@ fn canonical_change_path(path: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use std::{
+        collections::BTreeMap,
         fs,
         path::{Path, PathBuf},
         process::Command,
         time::{SystemTime, UNIX_EPOCH},
     };
 
+    use crate::skill_targets::SkillInstallScope;
     use serde_yaml::Value;
 
     use super::{
         AgentKind, ChangeSet, FileChange, GitSkillVisibility, GitUpdateAction, MarkdownDoc,
-        ResolvedAddSource, SkillPath, SkillRecord, SkillVisibility, WRAPPER_CATALOG_END,
-        WRAPPER_CATALOG_START, apply_git_update, apply_skill_delete_plan,
+        MaterializedGitTarget, ResolvedAddSource, SkillPath, SkillRecord, SkillRoot, SkillScan,
+        SkillSourceRecord, SkillUpdatePlan, SkillVisibility, WRAPPER_CATALOG_END,
+        WRAPPER_CATALOG_START, apply_git_update, apply_skill_add_with_target_root,
+        apply_skill_delete_plan, apply_skill_update_plan_with_store,
         build_skill_add_plan_with_target_root, check_skill_updates, clear_tendi_git_changes,
-        discover_installable_skills, format_changeset, format_delete_plan,
-        materialize_skill_dir_to_root, parse_add_source, parse_frontmatter, parse_frontmatter_tags,
-        parse_skill_file_references, parse_tendi_visibility, plan_codex_policy, plan_skill_add,
-        plan_skill_delete_many, plan_skill_frontmatter, plan_wrapper_from_names,
+        copy_dir, discover_installable_skills, format_changeset, format_delete_plan,
+        git_materialized_path_files, materialize_skill_dir_to_root, parse_add_source,
+        parse_frontmatter, parse_frontmatter_tags, parse_skill_file_references,
+        parse_tendi_visibility, plan_codex_policy, plan_skill_add, plan_skill_delete_many,
+        plan_skill_frontmatter, plan_wrapper_from_names, refresh_skill_scan,
         registry_latest_fingerprint, render_wrapper_after, render_wrapper_skill,
-        sanitize_skill_dir_name, scan_skills,
+        sanitize_skill_dir_name, scan_skills_without_source_database as scan_skills,
     };
 
     fn temp_dir(prefix: &str) -> PathBuf {
@@ -4046,6 +5149,125 @@ mod tests {
     }
 
     #[test]
+    fn git_clone_checks_out_requested_ref() {
+        let root = temp_dir("tendi-clone-ref-test");
+        let repository = root.join("repository");
+        let checkout = root.join("checkout");
+        fs::create_dir_all(&repository).unwrap();
+        run_test_git(&repository, &["init", "-b", "main"]);
+        run_test_git(&repository, &["config", "user.email", "test@example.com"]);
+        run_test_git(&repository, &["config", "user.name", "Test"]);
+        fs::write(repository.join("branch.txt"), "main").unwrap();
+        fs::create_dir_all(repository.join("skills/demo")).unwrap();
+        fs::write(
+            repository.join("skills/demo/SKILL.md"),
+            "---\nname: demo\ndescription: Demo\n---\n",
+        )
+        .unwrap();
+        run_test_git(&repository, &["add", "."]);
+        run_test_git(&repository, &["commit", "-m", "main"]);
+        run_test_git(&repository, &["checkout", "-b", "release"]);
+        fs::write(repository.join("branch.txt"), "release").unwrap();
+        run_test_git(&repository, &["commit", "-am", "release"]);
+
+        super::run_git_clone(repository.to_str().unwrap(), Some("release"), &checkout).unwrap();
+
+        assert_eq!(
+            fs::read_to_string(checkout.join("branch.txt")).unwrap(),
+            "release"
+        );
+        assert_eq!(
+            run_test_git(&checkout, &["branch", "--show-current"]),
+            "release"
+        );
+        let source_root = checkout.join("skills/demo");
+        let installed = root.join("installed/demo");
+        let report = super::SkillAddApplyReport {
+            plan: super::SkillAddPlan {
+                source: "https://github.com/example/repo.git".to_string(),
+                source_kind: "github".to_string(),
+                source_ref: Some("release".to_string()),
+                source_root: source_root.clone(),
+                target: AgentKind::Shared.into(),
+                scope: SkillInstallScope::Project,
+                mode: "copy".to_string(),
+                available: Vec::new(),
+                selected: vec![super::InstallableSkill {
+                    name: "demo".to_string(),
+                    description: None,
+                    path: source_root,
+                    relative_path: String::new(),
+                    dependencies: Vec::new(),
+                }],
+                operations: Vec::new(),
+            },
+            results: vec![super::MaterializeResult {
+                source: checkout.join("skills/demo"),
+                target: installed,
+                mode: "copy".to_string(),
+                health: "copy-ok".to_string(),
+                applied: true,
+            }],
+        };
+        let records = super::skill_source_records_for_add(&report);
+        assert_eq!(
+            records[0].source_relative_path.as_deref(),
+            Some("skills/demo")
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn materialized_git_preview_compares_installed_files_with_remote_tree() {
+        let root = temp_dir("tendi-materialized-git-preview-test");
+        let repository = root.join("repository");
+        let installed = root.join("installed/demo");
+        fs::create_dir_all(repository.join("skills/demo/agents")).unwrap();
+        fs::create_dir_all(installed.join("agents")).unwrap();
+        run_test_git(&repository, &["init", "-b", "main"]);
+        run_test_git(&repository, &["config", "user.email", "test@example.com"]);
+        run_test_git(&repository, &["config", "user.name", "Test"]);
+        fs::write(
+            repository.join("skills/demo/SKILL.md"),
+            "---\nname: demo\n---\n\nnew\n",
+        )
+        .unwrap();
+        fs::write(
+            repository.join("skills/demo/agents/openai.yaml"),
+            "new-policy\n",
+        )
+        .unwrap();
+        run_test_git(&repository, &["add", "."]);
+        run_test_git(&repository, &["commit", "-m", "new"]);
+
+        fs::write(installed.join("SKILL.md"), "---\nname: demo\n---\n\nold\n").unwrap();
+        fs::write(installed.join("local.txt"), "removed\n").unwrap();
+
+        let files = git_materialized_path_files(&repository, &installed, "skills/demo", "HEAD");
+        let by_path = files
+            .into_iter()
+            .map(|file| (file.path.clone(), file))
+            .collect::<BTreeMap<_, _>>();
+        assert_eq!(
+            by_path["skills/demo/SKILL.md"].before,
+            "---\nname: demo\n---\n\nold\n"
+        );
+        assert_eq!(
+            by_path["skills/demo/SKILL.md"].after,
+            "---\nname: demo\n---\n\nnew\n"
+        );
+        assert_eq!(by_path["skills/demo/agents/openai.yaml"].before, "");
+        assert_eq!(
+            by_path["skills/demo/agents/openai.yaml"].after,
+            "new-policy\n"
+        );
+        assert_eq!(by_path["skills/demo/local.txt"].before, "removed\n");
+        assert_eq!(by_path["skills/demo/local.txt"].after, "");
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn discover_installable_skills_finds_catalog_and_agent_dirs() {
         let root = temp_dir("tendi-discover-add-skills-test");
         let alpha = root.join("skills/frontend/alpha");
@@ -4089,10 +5311,12 @@ mod tests {
             &root,
             &super::SkillAddOptions {
                 source: "repo".to_string(),
-                target: AgentKind::Shared,
+                target: AgentKind::Shared.into(),
+                scope: SkillInstallScope::Global,
                 skills: vec!["demo".to_string()],
                 copy: true,
                 overwrite: false,
+                visibility: SkillVisibility::Auto,
             },
         )
         .unwrap();
@@ -4100,6 +5324,56 @@ mod tests {
         assert_eq!(plan.operations[0].name, "demo");
         assert_eq!(plan.operations[0].mode, "copy");
         assert_eq!(plan.operations[0].status, "planned");
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn apply_add_sets_selected_visibility_on_installed_skill() {
+        let root = temp_dir("tendi-apply-add-visibility-test");
+        let repo = root.join("repo");
+        let target_root = root.join("installed");
+        let skill_dir = repo.join("skills/demo");
+        fs::create_dir_all(&skill_dir).unwrap();
+        fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: demo\ndescription: Demo skill\n---\n\n# demo\n",
+        )
+        .unwrap();
+
+        let report = apply_skill_add_with_target_root(
+            &root,
+            &super::SkillAddOptions {
+                source: "repo".to_string(),
+                target: AgentKind::Cursor.into(),
+                scope: SkillInstallScope::Global,
+                skills: vec!["demo".to_string()],
+                copy: true,
+                overwrite: false,
+                visibility: SkillVisibility::Manual,
+            },
+            &target_root,
+        )
+        .unwrap();
+
+        let installed_skill = target_root.join("demo/SKILL.md");
+        let installed_policy = target_root.join("demo/agents/openai.yaml");
+        let frontmatter = fs::read_to_string(installed_skill).unwrap();
+        let policy = fs::read_to_string(installed_policy).unwrap();
+        assert!(frontmatter.contains("disable-model-invocation: true"));
+        assert!(frontmatter.contains("visibility: manual"));
+        assert!(policy.contains("allow_implicit_invocation: false"));
+        assert_eq!(report.results.len(), 1);
+        let source_records = super::skill_source_records_for_add(&report);
+        assert_eq!(source_records.len(), 1);
+        assert_eq!(source_records[0].skill_name, "demo");
+        assert_eq!(source_records[0].skill_path, target_root.join("demo"));
+        assert_eq!(source_records[0].source_kind, "local");
+        assert_eq!(
+            source_records[0].source_relative_path.as_deref(),
+            Some("skills/demo")
+        );
+        assert_eq!(source_records[0].origin, "tendi-install");
 
         let _ = fs::remove_dir_all(root);
     }
@@ -4134,10 +5408,12 @@ mod tests {
             &root,
             &super::SkillAddOptions {
                 source: "repo".to_string(),
-                target: AgentKind::Shared,
+                target: AgentKind::Shared.into(),
+                scope: SkillInstallScope::Global,
                 skills: vec!["grill-with-docs".to_string()],
                 copy: true,
                 overwrite: false,
+                visibility: SkillVisibility::Auto,
             },
         )
         .unwrap();
@@ -4186,10 +5462,12 @@ mod tests {
             &root,
             &super::SkillAddOptions {
                 source: "repo".to_string(),
-                target: AgentKind::Shared,
+                target: AgentKind::Shared.into(),
+                scope: SkillInstallScope::Global,
                 skills: vec!["parent".to_string()],
                 copy: true,
                 overwrite: false,
+                visibility: SkillVisibility::Auto,
             },
         )
         .unwrap();
@@ -4230,10 +5508,12 @@ mod tests {
             &root,
             &super::SkillAddOptions {
                 source: "repo".to_string(),
-                target: AgentKind::Shared,
+                target: AgentKind::Shared.into(),
+                scope: SkillInstallScope::Global,
                 skills: vec!["lark-im".to_string(), "lark-sheets".to_string()],
                 copy: true,
                 overwrite: false,
+                visibility: SkillVisibility::Auto,
             },
         )
         .unwrap();
@@ -4487,16 +5767,19 @@ mod tests {
             root: repo.canonicalize().unwrap(),
             kind: "local".to_string(),
             display_source: "repo".to_string(),
+            git_ref: None,
             temporary: false,
         };
         let plan = build_skill_add_plan_with_target_root(
             &resolved,
             &super::SkillAddOptions {
                 source: "repo".to_string(),
-                target: AgentKind::Shared,
+                target: AgentKind::Shared.into(),
+                scope: SkillInstallScope::Global,
                 skills: vec!["demo".to_string()],
                 copy: false,
                 overwrite: false,
+                visibility: SkillVisibility::Auto,
             },
             true,
             &target_root,
@@ -4538,16 +5821,19 @@ mod tests {
             root: repo.canonicalize().unwrap(),
             kind: "local".to_string(),
             display_source: "repo".to_string(),
+            git_ref: None,
             temporary: false,
         };
         let plan = build_skill_add_plan_with_target_root(
             &resolved,
             &super::SkillAddOptions {
                 source: "repo".to_string(),
-                target: AgentKind::Shared,
+                target: AgentKind::Shared.into(),
+                scope: SkillInstallScope::Global,
                 skills: vec!["demo".to_string()],
                 copy: false,
                 overwrite: true,
+                visibility: SkillVisibility::Auto,
             },
             true,
             &target_root,
@@ -4701,6 +5987,63 @@ mod tests {
     }
 
     #[test]
+    fn remote_update_check_does_not_touch_fetch_head() {
+        let root = temp_dir("tendi-update-check-fetch-head");
+        let remote = root.join("remote");
+        let local = root.join("local");
+        fs::create_dir_all(remote.join("skills/demo")).unwrap();
+        fs::write(
+            remote.join("skills/demo/SKILL.md"),
+            "---\nname: demo\ndescription: one\n---\n",
+        )
+        .unwrap();
+        run_test_git(&remote, &["init", "--quiet"]);
+        run_test_git(&remote, &["config", "user.email", "tendi@example.test"]);
+        run_test_git(&remote, &["config", "user.name", "Tendi Test"]);
+        run_test_git(&remote, &["add", "."]);
+        run_test_git(&remote, &["commit", "--quiet", "-m", "one"]);
+        let output = Command::new("git")
+            .args(["clone", "--quiet"])
+            .arg(&remote)
+            .arg(&local)
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        fs::write(
+            remote.join("skills/demo/SKILL.md"),
+            "---\nname: demo\ndescription: two\n---\n",
+        )
+        .unwrap();
+        run_test_git(&remote, &["add", "."]);
+        run_test_git(&remote, &["commit", "--quiet", "-m", "two"]);
+        let fetch_head = local.join(".git/FETCH_HEAD");
+        fs::write(&fetch_head, "sentinel\n").unwrap();
+
+        let remote_head = super::fetch_git_remote_head(&local, &remote.display().to_string(), None)
+            .expect("fetch remote head");
+
+        assert_eq!(fs::read_to_string(&fetch_head).unwrap(), "sentinel\n");
+        assert_ne!(
+            run_test_git(&local, &["rev-parse", "HEAD"]),
+            remote_head.oid
+        );
+        assert!(
+            !run_test_git(&local, &["diff", "--name-only", "HEAD", &remote_head.oid])
+                .trim()
+                .is_empty()
+        );
+        let reference = remote_head.reference.clone();
+        super::cleanup_git_remote_heads(BTreeMap::from([(local.clone(), Some(remote_head))]));
+        let status = Command::new("git")
+            .args(["show-ref", "--verify", "--quiet", &reference])
+            .current_dir(&local)
+            .status()
+            .unwrap();
+        assert!(!status.success());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn git_update_clears_tracked_and_untracked_tendi_policy_changes() {
         let root = temp_dir("tendi-git-update-settings-test");
         let tracked_skill = root.join("skills/tracked-policy");
@@ -4761,6 +6104,7 @@ mod tests {
             name: "demo".to_string(),
             repo: root.clone(),
             source: root.display().to_string(),
+            source_ref: None,
             current_version: None,
             latest_version: None,
             diff: String::new(),
@@ -4775,6 +6119,7 @@ mod tests {
                     visibility: SkillVisibility::Manual,
                 },
             ],
+            materialized_targets: Vec::new(),
         })
         .unwrap();
 
@@ -4817,6 +6162,7 @@ mod tests {
             name: "demo".to_string(),
             repo: root.clone(),
             source: root.display().to_string(),
+            source_ref: None,
             current_version: None,
             latest_version: None,
             diff: String::new(),
@@ -4825,6 +6171,7 @@ mod tests {
                 skill_dir: skill_dir.clone(),
                 visibility: SkillVisibility::Manual,
             }],
+            materialized_targets: Vec::new(),
         };
 
         let error = apply_git_update(&action).unwrap_err();
@@ -4835,6 +6182,97 @@ mod tests {
         assert!(restored_policy.contains("allow_implicit_invocation: false"));
 
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn materialized_git_update_replaces_copy_and_advances_database_source() {
+        let root = temp_dir("tendi-materialized-git-update-test");
+        let repo = root.join("repo");
+        let source_skill = repo.join("skills/demo");
+        let target = root.join("project/.agents/skills/demo");
+        fs::create_dir_all(&source_skill).unwrap();
+        fs::write(
+            source_skill.join("SKILL.md"),
+            "---\nname: demo\ndescription: old\n---\n\n# old\n",
+        )
+        .unwrap();
+        run_test_git(&repo, &["init", "--quiet"]);
+        run_test_git(&repo, &["config", "user.email", "tendi@example.test"]);
+        run_test_git(&repo, &["config", "user.name", "Tendi Test"]);
+        run_test_git(&repo, &["add", "."]);
+        run_test_git(&repo, &["commit", "--quiet", "-m", "old"]);
+        copy_dir(&source_skill, &target).unwrap();
+        let old = run_test_git(&repo, &["rev-parse", "HEAD"]);
+
+        fs::write(
+            source_skill.join("SKILL.md"),
+            "---\nname: demo\ndescription: new\n---\n\n# new\n",
+        )
+        .unwrap();
+        run_test_git(&repo, &["add", "."]);
+        run_test_git(&repo, &["commit", "--quiet", "-m", "new"]);
+        let latest = run_test_git(&repo, &["rev-parse", "HEAD"]);
+
+        let store = crate::storage::Store::open(root.join("tendi.sqlite3")).unwrap();
+        store
+            .upsert_skill_source_records(&[SkillSourceRecord {
+                skill_name: "demo".to_string(),
+                skill_path: target.clone(),
+                source_kind: "github".to_string(),
+                source: Some(repo.display().to_string()),
+                source_ref: None,
+                source_version: Some(old),
+                source_relative_path: Some("skills/demo/SKILL.md".to_string()),
+                update_status: "tracked".to_string(),
+                origin: "skills-cli-lock".to_string(),
+            }])
+            .unwrap();
+        let action = GitUpdateAction {
+            name: "demo".to_string(),
+            repo: repo.clone(),
+            source: repo.display().to_string(),
+            source_ref: None,
+            current_version: None,
+            latest_version: Some(latest.clone()),
+            diff: String::new(),
+            files: Vec::new(),
+            tendi_settings: Vec::new(),
+            materialized_targets: vec![MaterializedGitTarget {
+                name: "demo".to_string(),
+                target: target.clone(),
+                source_relative_path: Some("skills/demo/SKILL.md".to_string()),
+                visibility: SkillVisibility::Auto,
+                shared_or_codex: true,
+            }],
+        };
+
+        apply_skill_update_plan_with_store(
+            &SkillUpdatePlan {
+                file_changes: ChangeSet {
+                    changes: Vec::new(),
+                },
+                git_updates: vec![action],
+                skipped: Vec::new(),
+            },
+            &store,
+        )
+        .unwrap();
+
+        assert!(
+            fs::read_to_string(target.join("SKILL.md"))
+                .unwrap()
+                .contains("# new")
+        );
+        assert_eq!(
+            store
+                .skill_source_record(&target)
+                .unwrap()
+                .unwrap()
+                .source_version
+                .as_deref(),
+            Some(latest.as_str())
+        );
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -5553,6 +6991,196 @@ Keep this handmade intro.
         let _ = fs::remove_dir_all(root);
     }
 
+    #[test]
+    fn project_skills_cli_lock_migrates_once_into_source_database() {
+        let root = temp_dir("tendi-project-skills-cli-lock-test");
+        let skill_dir = root.join(".agents/skills/demo");
+        fs::create_dir_all(&skill_dir).unwrap();
+        fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: demo\ndescription: Demo\n---\n\n# demo\n",
+        )
+        .unwrap();
+        fs::write(
+            root.join("skills-lock.json"),
+            r#"{
+  "version": 1,
+  "skills": {
+    "demo": {
+      "source": "example/agent-skills",
+      "sourceType": "github",
+      "ref": "release",
+      "skillPath": "skills/demo/SKILL.md",
+      "computedHash": "content-hash"
+    }
+  }
+}
+"#,
+        )
+        .unwrap();
+        run_test_git(&root, &["init"]);
+        run_test_git(
+            &root,
+            &[
+                "remote",
+                "add",
+                "origin",
+                "https://github.com/example/host-project.git",
+            ],
+        );
+
+        let store = crate::storage::Store::open(root.join("tendi.sqlite3")).unwrap();
+        let scan = super::scan_skills_with_source_store(&root, &store).unwrap();
+        let path = &scan
+            .skills
+            .iter()
+            .find(|skill| skill.name == "demo")
+            .unwrap()
+            .paths[0];
+        assert_eq!(path.source_kind, "github");
+        assert_eq!(
+            path.source.as_deref(),
+            Some("https://github.com/example/agent-skills.git")
+        );
+        assert_eq!(
+            path.source_relative_path.as_deref(),
+            Some("skills/demo/SKILL.md")
+        );
+        assert_eq!(path.source_version.as_deref(), Some("content-hash"));
+        assert_eq!(path.update_status, "tracked");
+
+        let records = store.skill_source_records().unwrap();
+        let migrated = records
+            .iter()
+            .filter(|record| record.skill_name == "demo")
+            .collect::<Vec<_>>();
+        assert_eq!(migrated.len(), 1, "{records:#?}");
+        assert_eq!(migrated[0].origin, "skills-cli-lock");
+        assert_eq!(migrated[0].source_ref.as_deref(), Some("release"));
+
+        fs::write(
+            root.join("skills-lock.json"),
+            r#"{
+  "version": 1,
+  "skills": {
+    "demo": {
+      "source": "example/changed-after-migration",
+      "sourceType": "github",
+      "skillPath": "skills/changed/SKILL.md",
+      "computedHash": "changed-hash"
+    }
+  }
+}
+"#,
+        )
+        .unwrap();
+        let rescanned = super::scan_skills_with_source_store(&root, &store).unwrap();
+        let persisted_path = &rescanned
+            .skills
+            .iter()
+            .find(|skill| skill.name == "demo")
+            .unwrap()
+            .paths[0];
+        assert_eq!(
+            persisted_path.source.as_deref(),
+            Some("https://github.com/example/agent-skills.git")
+        );
+        assert_eq!(
+            persisted_path.source_relative_path.as_deref(),
+            Some("skills/demo/SKILL.md")
+        );
+        assert_eq!(
+            persisted_path.source_version.as_deref(),
+            Some("content-hash")
+        );
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn global_skills_cli_v3_lock_uses_source_url_and_tree_hash() {
+        let root = temp_dir("tendi-global-skills-cli-lock-test");
+        let lock_path = root.join(".skill-lock.json");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(
+            &lock_path,
+            r#"{
+  "version": 3,
+  "skills": {
+    "demo": {
+      "source": "example/agent-skills",
+      "sourceType": "github",
+      "sourceUrl": "https://github.com/example/agent-skills.git",
+      "ref": "main",
+      "skillPath": "skills/demo/SKILL.md",
+      "skillFolderHash": "tree-hash",
+      "installedAt": "2026-08-01T00:00:00Z",
+      "updatedAt": "2026-08-01T00:00:00Z"
+    }
+  }
+}
+"#,
+        )
+        .unwrap();
+        let mut warnings = Vec::new();
+        let lock = super::read_skills_cli_lock(&lock_path, 3, &mut warnings).unwrap();
+        let provenance = lock.skills["demo"].provenance();
+
+        assert!(warnings.is_empty());
+        assert_eq!(provenance.kind, "github");
+        assert_eq!(
+            provenance.source.as_deref(),
+            Some("https://github.com/example/agent-skills.git")
+        );
+        assert_eq!(provenance.version.as_deref(), Some("tree-hash"));
+        assert_eq!(provenance.source_ref.as_deref(), Some("main"));
+        assert_eq!(
+            provenance.relative_path.as_deref(),
+            Some("skills/demo/SKILL.md")
+        );
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn existing_source_database_record_does_not_read_lock_file() {
+        let root = temp_dir("tendi-source-database-authority-test");
+        let skill_dir = root.join(".agents/skills/demo");
+        fs::create_dir_all(&skill_dir).unwrap();
+        fs::write(root.join("skills-lock.json"), "not valid json").unwrap();
+        let record = super::SkillSourceRecord {
+            skill_name: "demo".to_string(),
+            skill_path: skill_dir.clone(),
+            source_kind: "github".to_string(),
+            source: Some("https://github.com/example/database-source.git".to_string()),
+            source_ref: Some("main".to_string()),
+            source_version: Some("database-hash".to_string()),
+            source_relative_path: Some("skills/demo/SKILL.md".to_string()),
+            update_status: "tracked".to_string(),
+            origin: "skills-cli-lock".to_string(),
+        };
+        let mut resolver = super::ProvenanceResolver::managed(&root, vec![record]);
+
+        let provenance = resolver.infer_installed(
+            &skill_dir,
+            &skill_dir,
+            &root.join(".agents/skills"),
+            "project",
+            "demo",
+            &None,
+        );
+
+        assert_eq!(
+            provenance.source.as_deref(),
+            Some("https://github.com/example/database-source.git")
+        );
+        assert!(resolver.skills_cli_locks.is_none());
+        assert!(resolver.lock_warnings.is_empty());
+        assert!(resolver.migrations.is_empty());
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
     fn test_skill(name: &str, description: &str, path: &Path) -> SkillRecord {
         SkillRecord {
             name: name.to_string(),
@@ -5570,6 +7198,7 @@ Keep this handmade intro.
                 install_target: "shared:/tmp/tendi-skills".to_string(),
                 source_kind: "local".to_string(),
                 source: None,
+                source_ref: None,
                 source_version: None,
                 source_relative_path: None,
                 symlink_status: "direct".to_string(),
@@ -5589,6 +7218,59 @@ Keep this handmade intro.
             update_status: "local".to_string(),
             is_system: false,
         }
+    }
+
+    #[test]
+    fn refresh_skill_scan_reads_only_requested_skill_paths() {
+        let root = temp_dir("tendi-skill-delta-refresh");
+        let alpha = root.join("alpha");
+        let beta = root.join("beta");
+        fs::create_dir_all(&alpha).unwrap();
+        fs::create_dir_all(&beta).unwrap();
+        fs::write(
+            alpha.join("SKILL.md"),
+            "---\nname: alpha\ndescription: changed alpha\n---\n",
+        )
+        .unwrap();
+        fs::write(
+            beta.join("SKILL.md"),
+            "---\nname: beta\ndescription: externally changed beta\n---\n",
+        )
+        .unwrap();
+        let before = SkillScan {
+            roots: vec![SkillRoot {
+                path: root.clone(),
+                scope: "global".to_string(),
+                agent: AgentKind::Shared,
+                plugin_id: None,
+                plugin_enabled: None,
+            }],
+            skills: vec![
+                test_skill("alpha", "old alpha", &alpha),
+                test_skill("beta", "indexed beta", &beta),
+            ],
+            warnings: Vec::new(),
+        };
+
+        let refreshed = refresh_skill_scan(&root, &before, &["alpha".to_string()], &[]).unwrap();
+
+        assert_eq!(
+            refreshed
+                .skills
+                .iter()
+                .find(|skill| skill.name == "alpha")
+                .and_then(|skill| skill.description.as_deref()),
+            Some("changed alpha")
+        );
+        assert_eq!(
+            refreshed
+                .skills
+                .iter()
+                .find(|skill| skill.name == "beta")
+                .and_then(|skill| skill.description.as_deref()),
+            Some("indexed beta")
+        );
+        fs::remove_dir_all(root).unwrap();
     }
 
     fn test_skill_path(
@@ -5611,6 +7293,7 @@ Keep this handmade intro.
             install_target: format!("{}:{}", agent.label(), root.display()),
             source_kind: "local".to_string(),
             source: None,
+            source_ref: None,
             source_version: None,
             source_relative_path: None,
             symlink_status: "direct".to_string(),

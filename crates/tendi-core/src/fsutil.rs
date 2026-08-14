@@ -1,7 +1,14 @@
-use std::{fs, io::Write, path::Path};
+use std::{
+    fs,
+    io::Write,
+    path::Path,
+    sync::atomic::{AtomicU64, Ordering},
+};
 
 use anyhow::{Context, Result};
 use sha2::{Digest, Sha256};
+
+static ATOMIC_WRITE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 pub fn sha256_text(text: &str) -> String {
     let mut hasher = Sha256::new();
@@ -21,8 +28,9 @@ pub fn atomic_write(path: &Path, text: &str) -> Result<()> {
         .with_context(|| format!("{} has no parent directory", path.display()))?;
     fs::create_dir_all(parent).with_context(|| format!("failed to create {}", parent.display()))?;
 
+    let sequence = ATOMIC_WRITE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
     let tmp_path = parent.join(format!(
-        ".{}.tendi-tmp-{}",
+        ".{}.tendi-tmp-{}-{sequence}",
         path.file_name()
             .and_then(|name| name.to_str())
             .unwrap_or("write"),

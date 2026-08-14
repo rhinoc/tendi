@@ -1,4 +1,7 @@
-import { ChevronRight, RefreshCw } from "lucide-react";
+import { ChevronRight } from "lucide-react";
+
+import { DialogActionButton } from "./DialogActionButton.tsx";
+import { LoadingIcon } from "./LoadingIcon.tsx";
 
 export type DialogAdvanceButtonProps = {
   label: string;
@@ -19,15 +22,16 @@ export function DialogAdvanceButton({
 }: DialogAdvanceButtonProps) {
   const currentLabel = busy ? busyLabel : label;
   return (
-    <button
-      className={`primary dialogAdvanceButton ${busy ? "isBusy" : ""}`}
+    <DialogActionButton
+      variant="primary"
+      className={`dialogAdvanceButton ${busy ? "isBusy" : ""}`}
       aria-label={ariaLabel ?? currentLabel}
       aria-busy={busy}
       onClick={onClick}
       disabled={disabled || busy}
     >
       <span>{currentLabel}</span>
-      {busy ? <RefreshCw className="dialogLoadingIcon" size={16} /> : <ChevronRight size={16} />}
-    </button>
+      {busy ? <LoadingIcon size={16} /> : <ChevronRight size={16} />}
+    </DialogActionButton>
   );
 }

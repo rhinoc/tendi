@@ -67,7 +67,7 @@ const EMPTY_GROUP_KEY = "__empty__";
 const DATA_TABLE_ROW_HEIGHT = 58;
 const DATA_TABLE_VIRTUAL_THRESHOLD = 40;
 const DATA_TABLE_VIRTUAL_OVERSCAN = 8;
-const DATA_TABLE_INTERACTIVE_SELECTOR = "button, a, input, textarea, select, [role='button'], [data-no-row-click]";
+const DATA_TABLE_INTERACTIVE_SELECTOR = "button, a, input, textarea, select, [role='button'], [role='menuitem'], [role='menuitemcheckbox'], [role='menuitemradio'], [data-no-row-click]";
 
 function columnDisplayValue<TRow>(column: ColumnDef<TRow>, row: TRow): ReactNode {
   const raw = column.value ? column.value(row) : row[column.key as keyof TRow];
@@ -204,6 +204,7 @@ export function DataTable<TRow extends Record<string, unknown>>({
   sort: controlledSort,
   onSortChange,
   manualSorting = false,
+  rowHeight = DATA_TABLE_ROW_HEIGHT,
   freezeColumn,
   onRowClick,
   rowProps,
@@ -373,17 +374,17 @@ export function DataTable<TRow extends Record<string, unknown>>({
     if (!virtualizedRows) {
       return { rows: modelRows, top: 0, bottom: 0 };
     }
-    const start = Math.max(0, Math.floor(scrollTop / DATA_TABLE_ROW_HEIGHT) - DATA_TABLE_VIRTUAL_OVERSCAN);
+    const start = Math.max(0, Math.floor(scrollTop / rowHeight) - DATA_TABLE_VIRTUAL_OVERSCAN);
     const end = Math.min(
       modelRows.length,
-      Math.ceil((scrollTop + virtualViewportHeight) / DATA_TABLE_ROW_HEIGHT) + DATA_TABLE_VIRTUAL_OVERSCAN,
+      Math.ceil((scrollTop + virtualViewportHeight) / rowHeight) + DATA_TABLE_VIRTUAL_OVERSCAN,
     );
     return {
       rows: modelRows.slice(start, end),
-      top: start * DATA_TABLE_ROW_HEIGHT,
-      bottom: Math.max(0, (modelRows.length - end) * DATA_TABLE_ROW_HEIGHT),
+      top: start * rowHeight,
+      bottom: Math.max(0, (modelRows.length - end) * rowHeight),
     };
-  }, [modelRows, scrollTop, virtualViewportHeight, virtualizedRows]);
+  }, [modelRows, rowHeight, scrollTop, virtualViewportHeight, virtualizedRows]);
   const selectableRows = useMemo(() => leafRows.filter((row) => row.getCanSelect()), [leafRows]);
   const selectableIds = useMemo(() => selectableRows.map((row) => row.id), [selectableRows]);
   const selectedRows = useMemo(
@@ -598,10 +599,12 @@ export function DataTable<TRow extends Record<string, unknown>>({
     "--data-grid-columns"?: string;
     "--data-scroll-grid-columns"?: string;
     "--data-freeze-column-width"?: string;
+    "--data-table-table-row-height"?: string;
   } = {
     "--data-grid-columns": gridColumns,
     "--data-scroll-grid-columns": scrollGridColumns,
     ...(freezeColumn ? { "--data-freeze-column-width": `${freeze.width}px` } : {}),
+    "--data-table-table-row-height": `${rowHeight}px`,
   };
 
   const renderHeaderCell = (header: ReturnType<typeof table.getHeaderGroups>[number]["headers"][number]) => {
@@ -720,7 +723,7 @@ export function DataTable<TRow extends Record<string, unknown>>({
   const renderDataRow = (row: Row<TRow>) => {
     const id = row.id;
     const rowSelectable = row.getCanSelect();
-    const { className: extraClassName, ...restExtra } = rowProps?.(row.original) ?? {};
+    const extraClassName = rowProps?.(row.original)?.className;
     const body = (
       <div
         className={rowClassName(row, extraClassName)}
@@ -733,7 +736,6 @@ export function DataTable<TRow extends Record<string, unknown>>({
           if (target instanceof Element && target.closest(DATA_TABLE_INTERACTIVE_SELECTOR)) return;
           onRowClick(row.original);
         } : undefined}
-        {...restExtra}
       >
         {renderSelectionCell(row)}
         {row.getVisibleCells().map(renderDataCell)}
@@ -750,7 +752,7 @@ export function DataTable<TRow extends Record<string, unknown>>({
   const renderSplitDataRow = (row: Row<TRow>, pane: "frozen" | "scroll") => {
     const id = row.id;
     const rowSelectable = row.getCanSelect();
-    const { className: extraClassName, ...restExtra } = rowProps?.(row.original) ?? {};
+    const extraClassName = rowProps?.(row.original)?.className;
     const cells = row.getVisibleCells().filter((cell) => (
       pane === "frozen" ? cell.column.getIsPinned() : !cell.column.getIsPinned()
     ));
@@ -766,7 +768,6 @@ export function DataTable<TRow extends Record<string, unknown>>({
           if (target instanceof Element && target.closest(DATA_TABLE_INTERACTIVE_SELECTOR)) return;
           onRowClick(row.original);
         } : undefined}
-        {...restExtra}
       >
         {pane === "frozen" ? renderSelectionCell(row) : null}
         {cells.map(renderDataCell)}

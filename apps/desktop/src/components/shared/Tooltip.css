@@ -9,7 +9,7 @@
   line-height: 1.4;
   white-space: pre-wrap;
   background: var(--surface-3);
-  border: 1px solid var(--line-strong);
+  border: 0;
   border-radius: var(--radius-sm);
   box-shadow: var(--shadow-menu);
   pointer-events: none;
@@ -17,19 +17,8 @@
   animation: appTooltipIn 100ms var(--ease-out-soft);
 }
 
-.appTooltipArrow {
-  overflow: visible;
-}
-
-.appTooltipArrow polygon {
-  fill: var(--surface-3);
-}
-
-.appTooltipArrow polyline {
-  fill: none;
-  stroke: var(--line-strong);
-  stroke-width: 1px;
-  vector-effect: non-scaling-stroke;
+.appTooltip.isInteractive {
+  pointer-events: auto;
 }
 
 @keyframes appTooltipIn {

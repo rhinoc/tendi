@@ -6,6 +6,7 @@ import { Dialog } from "radix-ui";
 
 import { buildFileTreeRows, displayFileName, isYamlPath, SkillChangeCommand } from "../../lib/index.ts";
 import { CodeMirrorFileEditor } from "./CodeMirrorFileEditor.tsx";
+import { DialogActionButton } from "./DialogActionButton.tsx";
 import { LoadingInline } from "./LoadingInline.tsx";
 import { ResizeSeparator } from "./ResizeSeparator.tsx";
 import "./confirm-dialog.css";
@@ -59,14 +60,38 @@ function deleteRelations(preview: Record<string, unknown> | null | undefined, ke
 
 type UpdateFile = { path: string; before: string; after: string };
 
+function normalizeUpdateFile(value: unknown): UpdateFile | null {
+  if (!value || typeof value !== "object") return null;
+  const file = value as { path?: unknown; before?: unknown; after?: unknown };
+  const path = `${file.path ?? ""}`;
+  if (!path) return null;
+  return {
+    path,
+    before: typeof file.before === "string" ? file.before : "",
+    after: typeof file.after === "string" ? file.after : "",
+  };
+}
+
 function updateFiles(preview: Record<string, unknown> | null | undefined): UpdateFile[] {
   const plan = preview?.plan as Record<string, unknown> | undefined;
   const updates = plan?.git_updates;
-  if (!Array.isArray(updates)) return [];
-  const files = updates
-    .flatMap((update) => (update as { files?: unknown }).files as UpdateFile[] ?? [])
-    .filter((file) => file.path);
+  const fileChanges = (plan?.file_changes as Record<string, unknown> | undefined)?.changes;
+  const gitFiles = Array.isArray(updates)
+    ? updates.flatMap((update) => {
+      if (!update || typeof update !== "object") return [];
+      const files = (update as { files?: unknown }).files;
+      return Array.isArray(files) ? files : [];
+    })
+    : [];
+  const files = [...gitFiles, ...(Array.isArray(fileChanges) ? fileChanges : [])]
+    .map(normalizeUpdateFile)
+    .filter((file): file is UpdateFile => file !== null);
   return [...new Map(files.map((file) => [file.path, file])).values()];
+}
+
+function updatePreviewSummary(preview: Record<string, unknown> | null | undefined): string {
+  const summary = preview?.summary;
+  return typeof summary === "string" && summary.trim() ? summary : "No applicable updates.";
 }
 
 function SkillUpdateDiffPreview({ files }: { files: UpdateFile[] }) {
@@ -155,7 +180,7 @@ export function ConfirmSkillChangesDialog({
   onConfirm,
   onConfirmRelated,
 }: ConfirmSkillChangesDialogProps) {
-  const previewLoading = command === SkillChangeCommand.UpdateMany && !preview && !previewError;
+  const previewLoading = (command === SkillChangeCommand.UpdateMany || command === SkillChangeCommand.DeleteMany) && !preview && !previewError;
   const actionLabel = skillConfirmActionLabel(command);
   const busyLabel = skillConfirmBusyLabel(command);
   const dependencies = command === SkillChangeCommand.DeleteMany ? deleteRelations(preview, "dependencies") : [];
@@ -164,6 +189,7 @@ export function ConfirmSkillChangesDialog({
     () => command === SkillChangeCommand.UpdateMany ? updateFiles(preview) : [],
     [command, preview],
   );
+  const emptyPreview = command === SkillChangeCommand.UpdateMany && preview && !previewError && files.length === 0;
   return (
     <Dialog.Root open={open} onOpenChange={onOpenChange}>
       <Dialog.Portal>
@@ -173,10 +199,11 @@ export function ConfirmSkillChangesDialog({
           <p id="skill-changes-description" className="confirmDialogDescription">
             {skillChangeDescription(command)}
           </p>
-          {previewLoading && <div className="skillUpdatePreviewLoading"><LoadingInline label="Preparing update preview" /></div>}
+          {previewLoading && <div className="skillUpdatePreviewLoading"><LoadingInline label={command === SkillChangeCommand.DeleteMany ? "Preparing deletion preview" : "Preparing update preview"} /></div>}
           {previewError && <p className="skillUpdatePreviewError" role="alert">{previewError}</p>}
           {applyError && <p className="skillUpdatePreviewError" role="alert">{applyError}</p>}
           {files.length > 0 && <SkillUpdateDiffPreview files={files} />}
+          {emptyPreview && <div className="skillUpdatePreviewEmpty" data-selectable-text>{updatePreviewSummary(preview)}</div>}
           {(dependencies.length > 0 || dependents.length > 0) && (
             <div className="confirmDialogImpact" data-selectable-text>
               {dependents.length > 0 && (
@@ -198,15 +225,15 @@ export function ConfirmSkillChangesDialog({
             </div>
           )}
           <div className="confirmDialogActions">
-            <button className="secondary" disabled={busy} onClick={() => onOpenChange(false)}>Cancel</button>
+            <DialogActionButton variant="secondary" disabled={busy} onClick={() => onOpenChange(false)}>Cancel</DialogActionButton>
             {command === SkillChangeCommand.DeleteMany && (dependencies.length > 0 || dependents.length > 0) && onConfirmRelated && (
-              <button className="danger subtle" disabled={busy} onClick={onConfirmRelated}>
+              <DialogActionButton variant="danger-subtle" disabled={busy} onClick={onConfirmRelated}>
                 {busy ? "Deleting…" : "Delete related too"}
-              </button>
+              </DialogActionButton>
             )}
-            <button className={command === SkillChangeCommand.DeleteMany ? "danger" : "primary"} disabled={busy || previewLoading || Boolean(previewError)} onClick={onConfirm}>
+            <DialogActionButton variant={command === SkillChangeCommand.DeleteMany ? "danger" : "primary"} disabled={busy || previewLoading || Boolean(previewError)} onClick={onConfirm}>
               {busy ? busyLabel : actionLabel}
-            </button>
+            </DialogActionButton>
           </div>
         </Dialog.Content>
       </Dialog.Portal>

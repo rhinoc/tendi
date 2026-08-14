@@ -8,6 +8,7 @@ import {
   SkillVisibility,
   skillSourceDetails,
   skillTargets,
+  isWebSource,
   sourceIconDetails,
   sourceOpenUrl,
   TauriCommand,
@@ -16,6 +17,7 @@ import {
 import { AgentBadge } from "./AgentBadge.tsx";
 import { AgentChips } from "./AgentChips.tsx";
 import { CopyButton } from "./CopyButton.tsx";
+import { InfoSection } from "./InfoSection.tsx";
 import type { SkillDependencyRecord } from "./SkillDependencyGraph.tsx";
 import { Visibility } from "./Visibility.tsx";
 
@@ -100,9 +102,7 @@ export function SkillInfoMenu({ skill, skills = [], onOpenSkill }: SkillInfoMenu
             <strong>{skill.name}</strong>
           </div>
           <div className="skillInfoSections">
-            <section className="skillInfoSection">
-              <span>Source</span>
-              <div className="skillInfoValueLine">
+            <InfoSection label="Source">
                 {sourceValue ? (
                   <Tooltip content={sourceUrl ? `Open ${sourceIcon.label} source` : `Reveal ${sourceIcon.label} source in Finder`}><button
                     className="skillInfoSourceIcon"
@@ -116,7 +116,9 @@ export function SkillInfoMenu({ skill, skills = [], onOpenSkill }: SkillInfoMenu
                     {sourceIcon.icon}
                   </span></Tooltip>
                 )}
-                {sourceValue && <Tooltip content={sourceValue} onlyWhenTruncated><code>{sourceValue}</code></Tooltip>}
+                {sourceValue && (isWebSource(sourceValue.trim())
+                  ? <code>{sourceValue}</code>
+                  : <Tooltip content={sourceValue} onlyWhenTruncated><code>{sourceValue}</code></Tooltip>)}
                 {sourceValue && (
                   <>
                     <button
@@ -129,24 +131,19 @@ export function SkillInfoMenu({ skill, skills = [], onOpenSkill }: SkillInfoMenu
                     <CopyButton className="skillInfoIconButton" value={sourceValue} copyLabel="Copy source" copiedLabel="Source copied" />
                   </>
                 )}
-              </div>
-            </section>
-            <section className="skillInfoSection">
-              <span>Visibility</span>
+            </InfoSection>
+            <InfoSection label="Visibility" valueLine={false}>
               <Visibility value={skill.visibility ?? SkillVisibility.Auto} skill={skill} readOnly />
-            </section>
-            <section className="skillInfoSection">
-              <span>Agents</span>
+            </InfoSection>
+            <InfoSection label="Agents" valueLine={false}>
               <div className="skillInfoAgents"><AgentChips agents={skill.agents ?? []} /></div>
-            </section>
+            </InfoSection>
             {relationRows.length > 0 && (
-              <section className="skillInfoSection">
-                <span>Relationships</span>
+              <InfoSection label="Relationships" valueLine={false}>
                 <SkillInfoRelations rows={relationRows} onOpenSkill={onOpenSkill} />
-              </section>
+              </InfoSection>
             )}
-            <section className="skillInfoSection">
-              <span>Install location</span>
+            <InfoSection label="Install location" valueLine={false}>
               <div className="skillInfoPathList">
                 {installLocations.map((target) => (
                   <div className="skillInfoPathRow" key={target.id}>
@@ -167,12 +164,11 @@ export function SkillInfoMenu({ skill, skills = [], onOpenSkill }: SkillInfoMenu
                       copyLabel={`Copy ${target.label} path`}
                       copiedLabel={`${target.label} path copied`}
                       disabled={!target.path}
-                      title="Copy path"
                     />
                   </div>
                 ))}
               </div>
-            </section>
+            </InfoSection>
           </div>
         </DropdownMenu.Content>
       </DropdownMenu.Portal>

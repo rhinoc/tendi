@@ -47,6 +47,12 @@ pub struct SessionRecord {
     pub updated_at: Option<String>,
     pub message_count: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_user_message: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_user_message: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_assistant_message: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub turn_count: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
@@ -247,6 +253,8 @@ fn scan_sessions_with_additional_roots_with_cache(
     scan_additional_session_roots(additional_session_roots, &mut sessions, cache);
 
     let mut sessions = merge_sessions(sessions);
+    sessions.retain(|session| !is_index_path(&session.path));
+    normalize_session_projects(&mut sessions);
     enrich_session_repositories(&mut sessions);
     sessions.sort_by(|a, b| {
         b.updated_at
@@ -407,6 +415,7 @@ pub fn scan_session_paths(paths: &[PathBuf], cache: &SessionScanCache) -> Sessio
         }
     }
     let mut sessions = merge_sessions(sessions);
+    normalize_session_projects(&mut sessions);
     enrich_session_repositories(&mut sessions);
     sessions.sort_by(|left, right| {
         right
@@ -435,10 +444,69 @@ pub fn enrich_session_repositories(sessions: &mut [SessionRecord]) {
     }
 }
 
+pub fn normalize_session_projects(sessions: &mut [SessionRecord]) {
+    for session in sessions {
+        let Some(project) = session.project.as_ref() else {
+            continue;
+        };
+        let Some(root) = ephemeral_chat_root(project) else {
+            continue;
+        };
+        session.project = Some(root);
+    }
+}
+
+fn ephemeral_chat_root(path: &Path) -> Option<PathBuf> {
+    let parent = path.parent()?;
+    let parent_name = parent.file_name()?.to_str()?;
+    let root = parent.parent()?;
+
+    if parent_name == "tutti"
+        && root.file_name()?.to_str()? == "Documents"
+        && path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.strip_prefix("session-").is_some_and(is_uuid))
+    {
+        return Some(parent.to_path_buf());
+    }
+
+    if root.file_name()?.to_str()? == "Codex"
+        && root.parent()?.file_name()?.to_str()? == "Documents"
+        && is_date_directory(parent_name)
+        && !path.file_name()?.to_str()?.is_empty()
+    {
+        return Some(root.to_path_buf());
+    }
+
+    None
+}
+
+fn is_date_directory(value: &str) -> bool {
+    value.len() == 10
+        && value.bytes().enumerate().all(|(index, byte)| match index {
+            4 | 7 => byte == b'-',
+            _ => byte.is_ascii_digit(),
+        })
+}
+
+fn is_uuid(value: &str) -> bool {
+    let lengths = [8, 4, 4, 4, 12];
+    let mut parts = value.split('-');
+    lengths.into_iter().all(|length| {
+        parts.next().is_some_and(|part| {
+            part.len() == length && part.bytes().all(|byte| byte.is_ascii_hexdigit())
+        })
+    }) && parts.next().is_none()
+}
+
 #[derive(Debug, Default)]
 struct SessionRepositoryResolver {
     workspaces: BTreeMap<PathBuf, (Option<PathBuf>, Option<String>)>,
     repositories: BTreeMap<PathBuf, (Option<PathBuf>, Option<String>)>,
+    ancestor_boundaries: BTreeMap<PathBuf, Option<PathBuf>>,
+    #[cfg(test)]
+    metadata_probes: usize,
 }
 
 impl SessionRepositoryResolver {
@@ -456,11 +524,7 @@ impl SessionRepositoryResolver {
         let canonical = workspace
             .canonicalize()
             .unwrap_or_else(|_| workspace.to_path_buf());
-        let Some(boundary) = canonical
-            .ancestors()
-            .find(|ancestor| fs::symlink_metadata(ancestor.join(".git")).is_ok())
-            .map(Path::to_path_buf)
-        else {
+        let Some(boundary) = self.repository_boundary(&canonical) else {
             return (None, None);
         };
         self.repositories
@@ -472,6 +536,28 @@ impl SessionRepositoryResolver {
                 )
             })
             .clone()
+    }
+
+    fn repository_boundary(&mut self, workspace: &Path) -> Option<PathBuf> {
+        let mut visited = Vec::new();
+        let boundary = workspace.ancestors().find_map(|ancestor| {
+            if let Some(boundary) = self.ancestor_boundaries.get(ancestor) {
+                return Some(boundary.clone());
+            }
+            #[cfg(test)]
+            {
+                self.metadata_probes += 1;
+            }
+            visited.push(ancestor.to_path_buf());
+            fs::symlink_metadata(ancestor.join(".git"))
+                .is_ok()
+                .then(|| Some(ancestor.to_path_buf()))
+        });
+        let boundary = boundary.flatten();
+        for ancestor in visited {
+            self.ancestor_boundaries.insert(ancestor, boundary.clone());
+        }
+        boundary
     }
 }
 
@@ -668,7 +754,12 @@ pub fn infer_session_project(path: &Path, agent: AgentKind) -> Option<PathBuf> {
         None
     };
 
-    project.filter(|path| path.is_absolute())
+    let project = project.filter(|path| path.is_absolute());
+    if agent == AgentKind::Codex {
+        project.map(|path| ephemeral_chat_root(&path).unwrap_or(path))
+    } else {
+        project
+    }
 }
 
 pub(crate) fn scan_codex_index(
@@ -711,6 +802,9 @@ pub(crate) fn scan_codex_index(
                             .and_then(Value::as_str)
                             .map(str::to_string),
                         message_count: None,
+                        first_user_message: None,
+                        last_user_message: None,
+                        last_assistant_message: None,
                         turn_count: None,
                         model: None,
                         mode: None,
@@ -758,8 +852,9 @@ pub(crate) fn scan_codex_jsonl(
         } else {
             raw_id.to_string()
         };
-        if let Some(session) =
-            cache.and_then(|cache| cache.session_if_current(AgentKind::Codex, &path))
+        if let Some(session) = cache
+            .and_then(|cache| cache.session_if_current(AgentKind::Codex, &path))
+            .filter(session_is_known_non_empty)
         {
             sessions.push(session);
             continue;
@@ -773,6 +868,9 @@ pub(crate) fn scan_codex_jsonl(
             }
         }
         let meta = scan_jsonl_meta(&path);
+        if !meta.has_content {
+            continue;
+        }
         sessions.push(SessionRecord {
             id,
             agent: AgentKind::Codex,
@@ -786,6 +884,9 @@ pub(crate) fn scan_codex_jsonl(
             started_at: meta.started_at,
             updated_at: meta.updated_at,
             message_count: meta.message_count,
+            first_user_message: meta.first_user_message,
+            last_user_message: meta.last_user_message,
+            last_assistant_message: meta.last_assistant_message,
             turn_count: meta.turn_count,
             model: meta.model,
             mode: None,
@@ -795,6 +896,7 @@ pub(crate) fn scan_codex_jsonl(
             token_usage: meta.token_usage,
         });
     }
+    normalize_session_projects(sessions);
 }
 
 pub(crate) fn scan_additional_session_roots(
@@ -895,7 +997,10 @@ fn scan_detected_jsonl_session(
     else {
         return;
     };
-    if let Some(session) = cache.and_then(|cache| cache.session_if_current(agent, path)) {
+    if let Some(session) = cache
+        .and_then(|cache| cache.session_if_current(agent, path))
+        .filter(session_is_known_non_empty)
+    {
         sessions.push(session);
         return;
     }
@@ -910,6 +1015,9 @@ fn scan_detected_jsonl_session(
         }
     }
     let meta = scan_jsonl_meta(path);
+    if !meta.has_content {
+        return;
+    }
     let file_updated_at = file_modified_iso(path);
     let project = match agent {
         AgentKind::Claude => meta
@@ -941,6 +1049,9 @@ fn scan_detected_jsonl_session(
         started_at: meta.started_at.or_else(|| file_updated_at.clone()),
         updated_at: meta.updated_at.or(file_updated_at),
         message_count: meta.message_count,
+        first_user_message: meta.first_user_message,
+        last_user_message: meta.last_user_message,
+        last_assistant_message: meta.last_assistant_message,
         turn_count: meta.turn_count,
         model: meta.model,
         mode: None,
@@ -1017,13 +1128,17 @@ pub(crate) fn scan_claude_projects(
             .and_then(|name| name.to_str())
             .unwrap_or("claude-session")
             .to_string();
-        if let Some(session) =
-            cache.and_then(|cache| cache.session_if_current(AgentKind::Claude, &path))
+        if let Some(session) = cache
+            .and_then(|cache| cache.session_if_current(AgentKind::Claude, &path))
+            .filter(session_is_known_non_empty)
         {
             sessions.push(session);
             continue;
         }
         let meta = scan_jsonl_meta(&path);
+        if !meta.has_content {
+            continue;
+        }
         sessions.push(SessionRecord {
             id,
             agent: AgentKind::Claude,
@@ -1039,6 +1154,9 @@ pub(crate) fn scan_claude_projects(
             started_at: meta.started_at,
             updated_at: meta.updated_at,
             message_count: meta.message_count,
+            first_user_message: meta.first_user_message,
+            last_user_message: meta.last_user_message,
+            last_assistant_message: meta.last_assistant_message,
             turn_count: meta.turn_count,
             model: meta.model,
             mode: None,
@@ -1084,6 +1202,15 @@ fn merge_session(existing: &mut SessionRecord, incoming: &SessionRecord) {
     }
     if existing.message_count.is_none() {
         existing.message_count = incoming.message_count;
+    }
+    if existing.first_user_message.is_none() {
+        existing.first_user_message = incoming.first_user_message.clone();
+    }
+    if incoming.last_user_message.is_some() {
+        existing.last_user_message = incoming.last_user_message.clone();
+    }
+    if incoming.last_assistant_message.is_some() {
+        existing.last_assistant_message = incoming.last_assistant_message.clone();
     }
     if existing.turn_count.is_none() {
         existing.turn_count = incoming.turn_count;
@@ -1136,7 +1263,11 @@ fn is_index_path(path: &Path) -> bool {
 
 #[derive(Default)]
 struct JsonlMeta {
+    has_content: bool,
     message_count: Option<usize>,
+    first_user_message: Option<String>,
+    last_user_message: Option<String>,
+    last_assistant_message: Option<String>,
     turn_count: Option<usize>,
     started_at: Option<String>,
     updated_at: Option<String>,
@@ -1153,6 +1284,7 @@ fn scan_jsonl_meta(path: &Path) -> JsonlMeta {
         return JsonlMeta::default();
     };
     let mut meta = JsonlMeta {
+        has_content: false,
         message_count: Some(0),
         turn_count: Some(0),
         ..Default::default()
@@ -1181,7 +1313,11 @@ fn scan_jsonl_meta_from_offset(
     file.seek(SeekFrom::Start(offset)).ok()?;
 
     let mut meta = JsonlMeta {
+        has_content: session_is_known_non_empty(&session),
         message_count: session.message_count,
+        first_user_message: session.first_user_message,
+        last_user_message: session.last_user_message,
+        last_assistant_message: session.last_assistant_message,
         turn_count: session.turn_count,
         started_at: session.started_at,
         updated_at: session.updated_at,
@@ -1199,6 +1335,10 @@ fn scan_jsonl_meta_from_offset(
         &mut claude_message_usage,
     );
 
+    if !meta.has_content {
+        return None;
+    }
+
     Some(SessionRecord {
         title: meta.title,
         project: meta.project,
@@ -1206,6 +1346,9 @@ fn scan_jsonl_meta_from_offset(
         started_at: meta.started_at,
         updated_at: meta.updated_at,
         message_count: meta.message_count,
+        first_user_message: meta.first_user_message,
+        last_user_message: meta.last_user_message,
+        last_assistant_message: meta.last_assistant_message,
         turn_count: meta.turn_count,
         model: meta.model,
         parent_session_id: meta.parent_session_id,
@@ -1229,6 +1372,7 @@ fn scan_jsonl_meta_lines<I, S>(
         }
         meta.message_count = meta.message_count.map(|count| count + 1);
         let prefix = metadata_hint_prefix(line);
+        meta.has_content |= line_has_session_content(prefix);
         if !line_requires_full_metadata_parse(prefix, meta) {
             if let Some(timestamp) = json_string_field(prefix, "\"timestamp\"") {
                 apply_time_bounds(meta, timestamp);
@@ -1240,6 +1384,20 @@ fn scan_jsonl_meta_lines<I, S>(
         };
         if extract_session_title(&value).is_some() {
             meta.turn_count = meta.turn_count.map(|count| count + 1);
+        }
+        if let Some((role, body)) = extract_session_message(&value) {
+            if let Some(body) = clean_preview_text(&body) {
+                match role {
+                    "user" => {
+                        if meta.first_user_message.is_none() {
+                            meta.first_user_message = Some(body.clone());
+                        }
+                        meta.last_user_message = Some(body);
+                    }
+                    "assistant" => meta.last_assistant_message = Some(body),
+                    _ => {}
+                }
+            }
         }
         if let Some(timestamp) =
             json_str(&value, &["timestamp"]).or_else(|| json_str(&value, &["payload", "timestamp"]))
@@ -1296,19 +1454,79 @@ fn line_requires_full_metadata_parse(prefix: &str, meta: &JsonlMeta) -> bool {
         Some("event_msg") => {
             prefix.contains("\"thread_settings_applied\"")
                 || prefix.contains("\"token_count\"")
-                || line_has_user_role(prefix)
+                || line_has_message_role(prefix)
         }
-        Some("response_item") => line_has_user_role(prefix),
+        Some("response_item") => line_has_message_role(prefix),
         _ => {
-            line_has_user_role(prefix)
+            line_has_message_role(prefix)
                 || (meta.project.is_none() && prefix.contains("\"cwd\""))
                 || (meta.repository_url.is_none() && prefix.contains("\"repository_url\""))
         }
     }
 }
 
+fn line_has_session_content(prefix: &str) -> bool {
+    match json_string_field(prefix, "\"type\"") {
+        Some("session_meta" | "turn_context" | "world_state") => false,
+        Some("response_item") => !matches!(
+            json_string_field(prefix, "\"role\""),
+            Some("developer" | "system")
+        ),
+        Some("event_msg") => [
+            "user_message",
+            "agent_message",
+            "agent_reasoning",
+            "sub_agent_activity",
+            "context_compacted",
+        ]
+        .iter()
+        .any(|kind| line_contains_json_string_value(prefix, kind)),
+        Some("compacted" | "user" | "assistant") => true,
+        _ => matches!(
+            json_string_field(prefix, "\"role\""),
+            Some("user" | "assistant")
+        ),
+    }
+}
+
+fn line_contains_json_string_value(line: &str, expected: &str) -> bool {
+    let marker = "\"type\"";
+    let mut search_from = 0;
+    while let Some(offset) = line[search_from..].find(marker) {
+        let start = search_from + offset;
+        search_from = start + marker.len();
+        if is_escaped_at(line, start) {
+            continue;
+        }
+        let value = line[search_from..].trim_start();
+        let Some(value) = value.strip_prefix(':').map(str::trim_start) else {
+            continue;
+        };
+        let Some(value) = value.strip_prefix('"') else {
+            continue;
+        };
+        let Some(end) = value.find('"') else {
+            continue;
+        };
+        if !value[..end].contains('\\') && &value[..end] == expected {
+            return true;
+        }
+    }
+    false
+}
+
+fn session_is_known_non_empty(session: &SessionRecord) -> bool {
+    session.title.is_some()
+        || session.turn_count.is_some_and(|count| count > 0)
+        || session.token_usage.is_some()
+}
+
 fn line_has_user_role(prefix: &str) -> bool {
     prefix.contains("\"role\"") && prefix.contains("\"user\"")
+}
+
+fn line_has_message_role(prefix: &str) -> bool {
+    line_has_user_role(prefix) || (prefix.contains("\"role\"") && prefix.contains("\"assistant\""))
 }
 
 fn is_escaped_at(line: &str, start: usize) -> bool {
@@ -1562,6 +1780,9 @@ fn scan_cursor_meta_file(
         && store_meta.approval_mode.is_none()
         && store_meta.is_run_everything.is_none()
         && store_meta.parent_session_id.is_none()
+        && store_meta.first_user_message.is_none()
+        && store_meta.last_user_message.is_none()
+        && store_meta.last_assistant_message.is_none()
     {
         return;
     }
@@ -1587,6 +1808,9 @@ fn scan_cursor_meta_file(
             .or(store_meta.updated_at)
             .or(file_updated_at),
         message_count: store_meta.message_count.or(Some(0)),
+        first_user_message: store_meta.first_user_message,
+        last_user_message: store_meta.last_user_message,
+        last_assistant_message: store_meta.last_assistant_message,
         turn_count: store_meta.turn_count.or(Some(0)),
         model: store_meta.model.clone(),
         mode: store_meta.mode.clone(),
@@ -1624,6 +1848,9 @@ fn scan_cursor_store_file(
         && store_meta.approval_mode.is_none()
         && store_meta.is_run_everything.is_none()
         && store_meta.parent_session_id.is_none()
+        && store_meta.first_user_message.is_none()
+        && store_meta.last_user_message.is_none()
+        && store_meta.last_assistant_message.is_none()
     {
         return;
     }
@@ -1643,6 +1870,9 @@ fn scan_cursor_store_file(
         started_at: store_meta.started_at,
         updated_at: store_meta.updated_at.or(file_updated_at),
         message_count: store_meta.message_count,
+        first_user_message: store_meta.first_user_message,
+        last_user_message: store_meta.last_user_message,
+        last_assistant_message: store_meta.last_assistant_message,
         turn_count: store_meta.turn_count,
         model: store_meta.model,
         mode: store_meta.mode,
@@ -1689,8 +1919,9 @@ pub(crate) fn scan_cursor_agent_transcripts(
             .and_then(|name| name.to_str())
             .unwrap_or("cursor-session")
             .to_string();
-        if let Some(session) =
-            cache.and_then(|cache| cache.session_if_current(AgentKind::Cursor, &path))
+        if let Some(session) = cache
+            .and_then(|cache| cache.session_if_current(AgentKind::Cursor, &path))
+            .filter(session_is_known_non_empty)
         {
             sessions.push(session);
             continue;
@@ -1705,6 +1936,9 @@ pub(crate) fn scan_cursor_agent_transcripts(
         }
         let file_updated_at = file_modified_iso(&path);
         let meta = scan_jsonl_meta(&path);
+        if !meta.has_content {
+            continue;
+        }
         sessions.push(SessionRecord {
             id,
             agent: AgentKind::Cursor,
@@ -1720,6 +1954,9 @@ pub(crate) fn scan_cursor_agent_transcripts(
             started_at: meta.started_at.or_else(|| file_updated_at.clone()),
             updated_at: meta.updated_at.or(file_updated_at),
             message_count: meta.message_count,
+            first_user_message: meta.first_user_message,
+            last_user_message: meta.last_user_message,
+            last_assistant_message: meta.last_assistant_message,
             turn_count: meta.turn_count,
             model: meta.model,
             mode: None,
@@ -1734,6 +1971,9 @@ pub(crate) fn scan_cursor_agent_transcripts(
 #[derive(Default)]
 struct CursorStoreMeta {
     message_count: Option<usize>,
+    first_user_message: Option<String>,
+    last_user_message: Option<String>,
+    last_assistant_message: Option<String>,
     turn_count: Option<usize>,
     started_at: Option<String>,
     updated_at: Option<String>,
@@ -1804,6 +2044,9 @@ fn scan_cursor_store_db(path: Option<PathBuf>) -> CursorStoreMeta {
 
     let mut message_count = 0usize;
     let mut turn_count = 0usize;
+    let mut first_user_message = None;
+    let mut last_user_message = None;
+    let mut last_assistant_message = None;
     if let Ok(mut statement) = connection.prepare("select data from blobs") {
         if let Ok(rows) = statement.query_map([], |row| row.get::<_, Vec<u8>>(0)) {
             for bytes in rows.filter_map(Result::ok) {
@@ -1822,12 +2065,29 @@ fn scan_cursor_store_db(path: Option<PathBuf>) -> CursorStoreMeta {
                 if model.is_none() {
                     model = extract_cursor_blob_model(&value);
                 }
+                if let Some((role, body)) = extract_session_message(&value) {
+                    if let Some(body) = clean_preview_text(&body) {
+                        match role {
+                            "user" => {
+                                if first_user_message.is_none() {
+                                    first_user_message = Some(body.clone());
+                                }
+                                last_user_message = Some(body);
+                            }
+                            "assistant" => last_assistant_message = Some(body),
+                            _ => {}
+                        }
+                    }
+                }
             }
         }
     }
 
     CursorStoreMeta {
         message_count: (message_count > 0).then_some(message_count),
+        first_user_message,
+        last_user_message,
+        last_assistant_message,
         turn_count: (turn_count > 0).then_some(turn_count),
         started_at,
         updated_at: None,
@@ -1980,6 +2240,71 @@ fn extract_session_title(value: &Value) -> Option<String> {
     clean_title(&text)
 }
 
+fn extract_session_message(value: &Value) -> Option<(&'static str, String)> {
+    let role = json_str(value, &["role"])
+        .or_else(|| json_str(value, &["message", "role"]))
+        .or_else(|| json_str(value, &["payload", "role"]))?;
+    let role = match role {
+        "user" => "user",
+        "assistant" => "assistant",
+        _ => return None,
+    };
+    let content = value
+        .pointer("/message/content")
+        .or_else(|| value.get("content"))
+        .or_else(|| value.pointer("/payload/content"))
+        .or_else(|| value.get("message"));
+    Some((role, extract_user_text(content)?))
+}
+
+pub(crate) const SESSION_PREVIEW_MAX_CHARS: usize = 256;
+
+pub(crate) fn bound_session_preview(value: Option<String>) -> Option<String> {
+    value.and_then(|value| bound_session_preview_text(&value))
+}
+
+fn bound_session_preview_text(text: &str) -> Option<String> {
+    let text = text.trim();
+    if text.is_empty() {
+        return None;
+    }
+    let mut chars = text.chars();
+    let mut value: String = chars.by_ref().take(SESSION_PREVIEW_MAX_CHARS).collect();
+    if chars.next().is_some() {
+        value.push('…');
+    }
+    Some(value)
+}
+
+fn clean_preview_text(text: &str) -> Option<String> {
+    let mut text = text.trim();
+    if let Some(inner) = extract_tag_body(text, "user_query") {
+        text = inner.trim();
+    }
+    if text.is_empty()
+        || [
+            "# AGENTS.md instructions",
+            "<codex_internal_context",
+            "<local-command-caveat>",
+            "<command-name>",
+            "<local-command-stdout>",
+            "<task-notification>",
+            "<environment_context>",
+            "<permissions instructions>",
+            "<app-context>",
+            "<collaboration_mode>",
+            "<skills_instructions>",
+            "<plugins_instructions>",
+            "<system-reminder>",
+        ]
+        .iter()
+        .any(|prefix| text.starts_with(prefix))
+    {
+        return None;
+    }
+    bound_session_preview_text(text)
+}
+
 fn extract_user_text(value: Option<&Value>) -> Option<String> {
     match value? {
         Value::Array(items) => {
@@ -2124,11 +2449,12 @@ mod tests {
     use crate::skills::AgentKind;
 
     use super::{
-        SessionRecord, SessionRepositoryResolver, SessionScanCache, SessionScanCacheEntry,
-        clean_title, collect_recent_codex_paths, collect_tutti_run_session_paths,
-        cursor_store_model, cursor_time_field, decode_cursor_project_dir,
-        extract_cursor_blob_model, extract_parent_session_id, extract_session_title, file_state,
-        git_repository_root, infer_session_project, merge_sessions, scan_additional_session_roots,
+        SESSION_PREVIEW_MAX_CHARS, SessionRecord, SessionRepositoryResolver, SessionScanCache,
+        SessionScanCacheEntry, clean_preview_text, clean_title, collect_recent_codex_paths,
+        collect_tutti_run_session_paths, cursor_store_model, cursor_time_field,
+        decode_cursor_project_dir, extract_cursor_blob_model, extract_parent_session_id,
+        extract_session_title, file_state, git_repository_root, infer_session_project,
+        merge_sessions, normalize_session_projects, scan_additional_session_roots,
         scan_codex_jsonl, scan_cursor_agent_transcripts, scan_cursor_meta, scan_jsonl_meta,
         session_watch_plan, should_replace_session_path, title_from_project_path, unix_ms_to_iso,
     };
@@ -2190,6 +2516,15 @@ mod tests {
             git_repository_root(&linked).as_deref(),
             Some(expected.as_path())
         );
+        let mut resolver = SessionRepositoryResolver::default();
+        assert_eq!(
+            resolver.resolve(&repo).0.as_deref(),
+            Some(expected.as_path())
+        );
+        assert_eq!(
+            resolver.resolve(&linked).0.as_deref(),
+            Some(expected.as_path())
+        );
 
         fs::remove_dir_all(root).unwrap();
     }
@@ -2198,10 +2533,12 @@ mod tests {
     fn session_repository_resolver_skips_non_git_and_caches_repository() {
         let root = temp_dir("tendi-session-repository-cache-test");
         let plain = root.join("plain/project");
+        let plain_sibling = root.join("plain/sibling");
         let repo = root.join("repo");
         let alpha = repo.join("packages/alpha");
         let beta = repo.join("packages/beta");
         fs::create_dir_all(&plain).unwrap();
+        fs::create_dir_all(&plain_sibling).unwrap();
         fs::create_dir_all(&alpha).unwrap();
         fs::create_dir_all(&beta).unwrap();
         git(&repo, &["init", "--quiet"]);
@@ -2218,11 +2555,16 @@ mod tests {
         let mut resolver = SessionRepositoryResolver::default();
         assert_eq!(resolver.resolve(&plain), (None, None));
         assert!(resolver.repositories.is_empty());
+        let probes_after_plain = resolver.metadata_probes;
+        assert_eq!(resolver.resolve(&plain_sibling), (None, None));
+        assert_eq!(resolver.metadata_probes, probes_after_plain + 1);
 
         let alpha_result = resolver.resolve(&alpha);
         assert_eq!(resolver.resolve(&alpha), alpha_result);
+        let probes_after_alpha = resolver.metadata_probes;
         let beta_result = resolver.resolve(&beta);
-        assert_eq!(resolver.workspaces.len(), 3);
+        assert_eq!(resolver.metadata_probes, probes_after_alpha + 1);
+        assert_eq!(resolver.workspaces.len(), 4);
         assert_eq!(resolver.repositories.len(), 1);
         assert_eq!(alpha_result, beta_result);
         assert_eq!(alpha_result.0, Some(fs::canonicalize(&repo).unwrap()));
@@ -2230,6 +2572,28 @@ mod tests {
             alpha_result.1.as_deref(),
             Some("https://github.com/example/tendi-test.git")
         );
+
+        let nested_repo = repo.join("vendor/nested");
+        let nested_workspace = nested_repo.join("src");
+        fs::create_dir_all(&nested_workspace).unwrap();
+        git(&nested_repo, &["init", "--quiet"]);
+        let nested_result = resolver.resolve(&nested_workspace);
+        assert_eq!(
+            nested_result.0,
+            Some(fs::canonicalize(&nested_repo).unwrap())
+        );
+        assert_ne!(nested_result, alpha_result);
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::symlink;
+
+            let alpha_link = root.join("alpha-link");
+            symlink(&alpha, &alpha_link).unwrap();
+            let probes_before_link = resolver.metadata_probes;
+            assert_eq!(resolver.resolve(&alpha_link), alpha_result);
+            assert_eq!(resolver.metadata_probes, probes_before_link);
+        }
 
         fs::remove_dir_all(root).unwrap();
     }
@@ -2308,7 +2672,11 @@ mod tests {
         fs::create_dir_all(codex_session.parent().unwrap()).unwrap();
         fs::write(
             &codex_session,
-            r#"{"timestamp":"2026-07-30T10:00:00Z","type":"session_meta","payload":{"cwd":"/Users/test/dev/example-workspace","git":{"repository_url":"https://github.com/tutti-os/tutti.git"}}}"#,
+            concat!(
+                r#"{"timestamp":"2026-07-30T10:00:00Z","type":"session_meta","payload":{"cwd":"/Users/test/dev/example-workspace","git":{"repository_url":"https://github.com/tutti-os/tutti.git"}}}"#,
+                "\n",
+                r#"{"timestamp":"2026-07-30T10:00:01Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Hello"}]}}"#
+            ),
         )
         .unwrap();
         fs::write(
@@ -2349,6 +2717,74 @@ mod tests {
                 .iter()
                 .any(|session| session.agent == AgentKind::Cursor)
         );
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn skips_codex_session_with_only_session_metadata() {
+        let root = temp_dir("tendi-empty-codex-session-test");
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("rollout-empty-session-id.jsonl");
+        fs::write(
+            &path,
+            r#"{"timestamp":"2026-08-13T11:58:34.979Z","type":"session_meta","payload":{"cwd":"/Users/test/dev/tendi"}}"#,
+        )
+        .unwrap();
+
+        let mut sessions = Vec::new();
+        scan_codex_jsonl(&root, &mut sessions, None);
+
+        assert!(sessions.is_empty());
+        assert!(!scan_jsonl_meta(&path).has_content);
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn cached_empty_codex_session_is_rechecked_instead_of_reused() {
+        let root = temp_dir("tendi-cached-empty-codex-session-test");
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("rollout-empty-session-id.jsonl");
+        fs::write(
+            &path,
+            r#"{"timestamp":"2026-08-13T11:58:34.979Z","type":"session_meta","payload":{"cwd":"/Users/test/dev/tendi"}}"#,
+        )
+        .unwrap();
+        let (file_mtime, file_size) = file_state(&path).unwrap();
+        let cache = SessionScanCache::from_entries([SessionScanCacheEntry {
+            session: SessionRecord {
+                id: "empty-session-id".to_string(),
+                agent: AgentKind::Codex,
+                title: None,
+                project: None,
+                repository: None,
+                repository_url: None,
+                logical_project_id: None,
+                logical_project_name: None,
+                path: path.clone(),
+                started_at: None,
+                updated_at: None,
+                message_count: Some(1),
+                first_user_message: None,
+                last_user_message: None,
+                last_assistant_message: None,
+                turn_count: Some(0),
+                model: None,
+                mode: None,
+                approval_mode: None,
+                is_run_everything: None,
+                parent_session_id: None,
+                token_usage: None,
+            },
+            file_mtime,
+            file_size,
+        }]);
+
+        let mut sessions = Vec::new();
+        scan_codex_jsonl(&root, &mut sessions, Some(&cache));
+
+        assert!(sessions.is_empty());
 
         fs::remove_dir_all(root).unwrap();
     }
@@ -2470,6 +2906,9 @@ mod tests {
             started_at: None,
             updated_at: None,
             message_count: Some(1),
+            first_user_message: None,
+            last_user_message: None,
+            last_assistant_message: None,
             turn_count: Some(1),
             model: None,
             mode: None,
@@ -2557,6 +2996,19 @@ mod tests {
             ),
             Some("Use the Cursor transcript title".to_string())
         );
+        assert_eq!(
+            clean_preview_text(
+                "<environment_context>hidden</environment_context>\n<user_query>\nShow the session preview\n</user_query>"
+            ),
+            Some("Show the session preview".to_string())
+        );
+        let oversized_preview = "界".repeat(SESSION_PREVIEW_MAX_CHARS + 1);
+        let bounded_preview = clean_preview_text(&oversized_preview).unwrap();
+        assert_eq!(
+            bounded_preview.chars().count(),
+            SESSION_PREVIEW_MAX_CHARS + 1
+        );
+        assert!(bounded_preview.ends_with('…'));
         assert_eq!(clean_title("# AGENTS.md instructions\nhidden"), None);
     }
 
@@ -2582,6 +3034,9 @@ mod tests {
 
         assert_eq!(meta.message_count, Some(5));
         assert_eq!(meta.turn_count, Some(2));
+        assert_eq!(meta.first_user_message.as_deref(), Some("First question"));
+        assert_eq!(meta.last_user_message.as_deref(), Some("Second question"));
+        assert_eq!(meta.last_assistant_message.as_deref(), Some("First answer"));
         let _ = fs::remove_dir_all(root);
     }
 
@@ -2837,6 +3292,9 @@ mod tests {
                 started_at: None,
                 updated_at: Some("2026-06-23T14:54:04.092592Z".to_string()),
                 message_count: None,
+                first_user_message: None,
+                last_user_message: None,
+                last_assistant_message: None,
                 turn_count: None,
                 model: None,
                 mode: None,
@@ -2860,6 +3318,9 @@ mod tests {
                 started_at: Some("2026-06-23T14:53:56.489Z".to_string()),
                 updated_at: Some("2026-06-23T14:53:56.489Z".to_string()),
                 message_count: Some(8),
+                first_user_message: None,
+                last_user_message: None,
+                last_assistant_message: None,
                 turn_count: Some(2),
                 model: Some("gpt-5.6-sol".to_string()),
                 mode: None,
@@ -2906,6 +3367,83 @@ mod tests {
         );
 
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn normalizes_ephemeral_chat_projects_without_touching_real_workspaces() {
+        let mut sessions = vec![
+            SessionRecord {
+                id: "agent-chat".to_string(),
+                agent: AgentKind::Claude,
+                title: None,
+                project: Some(PathBuf::from(
+                    "/Users/test/Documents/tutti/session-c98d1ced-5371-43cc-8173-9416c349a776",
+                )),
+                repository: None,
+                repository_url: None,
+                logical_project_id: None,
+                logical_project_name: None,
+                path: PathBuf::from("/tmp/codex-chat.jsonl"),
+                started_at: None,
+                updated_at: None,
+                message_count: None,
+                first_user_message: None,
+                last_user_message: None,
+                last_assistant_message: None,
+                turn_count: None,
+                model: None,
+                mode: None,
+                approval_mode: None,
+                is_run_everything: None,
+                parent_session_id: None,
+                token_usage: None,
+            },
+            SessionRecord {
+                id: "real-workspace".to_string(),
+                agent: AgentKind::Codex,
+                title: None,
+                project: Some(PathBuf::from("/Users/test/dev/tendi")),
+                repository: None,
+                repository_url: None,
+                logical_project_id: None,
+                logical_project_name: None,
+                path: PathBuf::from("/tmp/real-workspace.jsonl"),
+                started_at: None,
+                updated_at: None,
+                message_count: None,
+                first_user_message: None,
+                last_user_message: None,
+                last_assistant_message: None,
+                turn_count: None,
+                model: None,
+                mode: None,
+                approval_mode: None,
+                is_run_everything: None,
+                parent_session_id: None,
+                token_usage: None,
+            },
+        ];
+
+        let mut archive = sessions[0].clone();
+        archive.id = "codex-archive".to_string();
+        archive.agent = AgentKind::Codex;
+        archive.project = Some(PathBuf::from("/Users/test/Documents/Codex/2026-08-09/c"));
+        archive.path = PathBuf::from("/tmp/codex-archive.jsonl");
+        sessions.push(archive);
+        normalize_session_projects(&mut sessions);
+
+        assert_eq!(
+            sessions[0].project.as_deref(),
+            Some(Path::new("/Users/test/Documents/tutti"))
+        );
+        assert_eq!(
+            sessions[1].project.as_deref(),
+            Some(Path::new("/Users/test/dev/tendi"))
+        );
+        assert_eq!(
+            sessions[2].project.as_deref(),
+            Some(Path::new("/Users/test/Documents/Codex"))
+        );
     }
 
     #[test]

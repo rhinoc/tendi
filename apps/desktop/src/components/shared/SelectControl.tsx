@@ -1,6 +1,7 @@
 import { Tooltip } from "./Tooltip.tsx";
-import { Check, ChevronDown } from "lucide-react";
+import { Check } from "lucide-react";
 import { Select } from "radix-ui";
+import { SelectTrigger } from "./SelectTrigger.tsx";
 
 export type SelectOption = {
   value: string;
@@ -27,14 +28,11 @@ export function SelectControl({
   const selectedLabel = options.find((option) => option.value === value)?.label ?? value;
   return (
     <Select.Root value={value} onValueChange={onValueChange}>
-      <Select.Trigger className={className} aria-label={label}>
+      <SelectTrigger className={className} label={label}>
         <Select.Value>
           <span className="selectValueText">{selectedLabel}</span>
         </Select.Value>
-        <Select.Icon asChild>
-          <ChevronDown size={14} />
-        </Select.Icon>
-      </Select.Trigger>
+      </SelectTrigger>
       <Select.Portal>
         <Select.Content className={`skillMenuContent ${contentClassName}`} position="popper" sideOffset={6}>
           <Select.Viewport className="selectViewport">

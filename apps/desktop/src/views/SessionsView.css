@@ -105,6 +105,11 @@
 
 .sessionUsageTable tbody tr:last-child td { border-bottom: 0; }
 .sessionUsageTable tbody tr:hover td { background: var(--hover-fill); }
+.sessionUsageTable tbody tr.sessionUsageRowClickable { cursor: pointer; }
+.sessionUsageTable tbody tr.sessionUsageRowClickable:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: -2px;
+}
 
 .sessionUsageEmpty,
 .sessionUsageNote {
@@ -218,6 +223,25 @@
   max-width: 100%;
   content-visibility: auto;
   contain-intrinsic-block-size: auto 120px;
+}
+
+/* `content-visibility: auto` adds paint containment. The selected message's
+   ring intentionally extends outside the bubble, so let that item paint out
+   of its containment box while it is highlighted. */
+.transcriptItemShell:has(.transcriptTarget) {
+  content-visibility: visible;
+}
+
+.sessionTranscriptLoadMore {
+  display: flex;
+  justify-content: center;
+  padding: 16px 0 4px;
+}
+
+.sessionTranscriptLoadMoreSentinel {
+  width: 100%;
+  height: 1px;
+  pointer-events: none;
 }
 
 .transcript.withSessionLocator {
@@ -428,6 +452,148 @@
   outline: none;
 }
 
+.sessionSearchControls {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.sessionProjectFilter {
+  width: auto;
+  min-width: 0;
+  flex: 0 0 auto;
+  height: 32px;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: var(--radius-md);
+  background: var(--panel-bg);
+  box-shadow: var(--shadow-border);
+  color: var(--muted);
+  cursor: pointer;
+  font: inherit;
+  font-size: 11px;
+}
+
+.sessionProjectFilter:hover,
+.sessionProjectFilter[data-state="open"] {
+  color: var(--text);
+  background: var(--hover-fill-strong);
+}
+
+.sessionProjectFilter:focus-visible {
+  outline: 0;
+  box-shadow: 0 0 0 2px var(--focus-ring-soft);
+}
+
+.sessionProjectFilterLabel {
+  min-width: 0;
+  flex: 1 1 auto;
+  overflow: hidden;
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sessionProjectFilterCount {
+  min-width: 22px;
+  height: 22px;
+  display: inline-grid;
+  place-items: center;
+  padding: 0 6px;
+  border-radius: 999px;
+  background: var(--hover-fill-strong);
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.sessionProjectFilterMenu {
+  width: min(300px, calc(100vw - 32px));
+  max-height: min(460px, calc(100vh - 96px));
+  padding: 0;
+  overflow: hidden;
+}
+
+.sessionProjectFilterSearch {
+  height: 40px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  padding: 0 12px;
+  border: 0;
+  border-bottom: 1px solid var(--hover-fill-strong);
+  color: var(--faint);
+}
+
+.sessionProjectFilterSearch:focus-within {
+  box-shadow: 0 2px 0 var(--focus-ring);
+}
+
+.sessionProjectFilterSearch input {
+  min-width: 0;
+  flex: 1 1 auto;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 12px;
+}
+
+.sessionProjectFilterSearch input::placeholder {
+  color: var(--faint);
+}
+
+.sessionProjectFilterOptions {
+  max-height: min(390px, calc(100vh - 136px));
+  overflow: auto;
+}
+
+.sessionProjectFilterEmpty {
+  display: block;
+  padding: 8px 9px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.sessionProjectFilterItem {
+  height: 36px;
+  gap: 8px;
+  padding: 0 10px;
+  border-radius: calc(var(--radius-lg) - 6px);
+}
+
+.sessionProjectFilterItem .selectionCheckbox {
+  width: 16px;
+  height: 16px;
+  border-radius: 4px;
+  pointer-events: none;
+}
+
+.sessionProjectFilterItem .selectionCheckboxIndicator svg {
+  width: 12px;
+  height: 12px;
+}
+
+.sessionProjectFilterItemLabel {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sessionProjectFilterItemCount {
+  margin-left: auto;
+  color: var(--muted);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
 .transcriptSearch input::placeholder {
   color: var(--faint);
 }
@@ -469,15 +635,6 @@
   cursor: default;
 }
 
-.transcriptSearchMark {
-  padding: 0 1px;
-  border-radius: 2px;
-  background: var(--tone-warn-soft);
-  color: inherit;
-  -webkit-user-select: text;
-  user-select: text;
-}
-
 .chatLine {
   min-width: 0;
   max-width: 100%;
@@ -493,10 +650,10 @@
   min-width: 0;
   max-width: min(80%, 600px);
   padding: 12px 16px 14px;
+  border: 1px solid var(--line);
   border-radius: 13px;
   background: var(--chat-assistant-bg);
   color: var(--text);
-  box-shadow: var(--shadow-border);
   overflow-wrap: anywhere;
   word-break: break-word;
   -webkit-user-select: text;
@@ -504,9 +661,9 @@
 }
 
 .fromUser .bubble {
+  border-color: transparent;
   background: var(--chat-user-bg);
   color: var(--chat-user-fg);
-  box-shadow: 0 1px 2px oklch(0.45 0.14 250 / 0.22);
 }
 
 .bubble p {
@@ -717,6 +874,16 @@
   box-shadow: inset 0 0 0 1px var(--line);
 }
 
+.contextBlock.developer {
+  background: var(--amber-soft);
+  box-shadow: inset 0 0 0 1px var(--amber-soft-strong);
+}
+
+.contextBlock.system {
+  background: var(--tone-info-soft);
+  box-shadow: inset 0 0 0 1px color-mix(in oklch, var(--tone-info) 36%, transparent);
+}
+
 .toolCall.nested {
   margin: 8px 0;
   background: var(--inset-fill);
@@ -834,6 +1001,11 @@
 .contextBadge {
   background: var(--amber-soft);
   color: var(--amber);
+}
+
+.contextBlock.system .contextBadge {
+  background: var(--tone-info-soft);
+  color: var(--tone-info);
 }
 
 .thinkingPreview {

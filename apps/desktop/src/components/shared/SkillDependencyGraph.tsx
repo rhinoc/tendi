@@ -1,4 +1,3 @@
-import { Tooltip } from "./Tooltip.tsx";
 export type SkillDependencyRecord = {
   name: string;
   description?: string;
@@ -37,7 +36,7 @@ function SkillRelationSection({
       {skills.length > 0 ? (
         <div className="skillGraphList">
           {skills.map((skill) => (
-            <Tooltip key={skill.name} content={skill.description || skill.name}><button
+            <button
               className="skillGraphNode"
               key={skill.name}
               disabled={!onOpenSkill}
@@ -45,7 +44,7 @@ function SkillRelationSection({
             >
               <strong>{skill.name}</strong>
               {skill.description && <span>{skill.description}</span>}
-            </button></Tooltip>
+            </button>
           ))}
         </div>
       ) : (

@@ -1,0 +1,360 @@
+/* Non-Gruvbox palettes share the same semantic token mapping. */
+
+:root[data-color-theme="dracula"] {
+  --theme-bg: #f8f8f2;
+  --theme-window: #ffffff;
+  --theme-sidebar: #f1f2f8;
+  --theme-sidebar-2: #e6e8f0;
+  --theme-surface: #ffffff;
+  --theme-surface-2: #f1f2f8;
+  --theme-surface-3: #e6e8f0;
+  --theme-text: #282a36;
+  --theme-muted: #6272a4;
+  --theme-faint: #7885ad;
+  --theme-link: #6272a4;
+  --theme-accent: #8a63d2;
+  --theme-accent-hover: #744fc6;
+  --theme-accent-active: #6844b5;
+  --theme-accent-contrast: #f8f8f2;
+  --theme-green: #238b55;
+  --theme-orange: #d9781b;
+  --theme-red: #d13b4f;
+  --theme-blue: #3b82f6;
+  --theme-cyan: #008baf;
+  --theme-yellow: #a87800;
+  --theme-purple: #8a63d2;
+  --theme-comment: #6272a4;
+  --theme-syntax-text: #282a36;
+  --theme-overlay: #282a36;
+  --theme-icon-filter: none;
+  --theme-on-chat: #f8f8f2;
+}
+
+:root[data-theme="dark"][data-color-theme="dracula"] {
+  --theme-bg: #282a36;
+  --theme-window: #21222c;
+  --theme-sidebar: #343746;
+  --theme-sidebar-2: #44475a;
+  --theme-surface: #343746;
+  --theme-surface-2: #44475a;
+  --theme-surface-3: #6272a4;
+  --theme-text: #f8f8f2;
+  --theme-muted: #bdc4e5;
+  --theme-faint: #8890b2;
+  --theme-link: #8be9fd;
+  --theme-accent: #bd93f9;
+  --theme-accent-hover: #c9a7fb;
+  --theme-accent-active: #a77be7;
+  --theme-accent-contrast: #282a36;
+  --theme-green: #50fa7b;
+  --theme-orange: #ffb86c;
+  --theme-red: #ff5555;
+  --theme-blue: #8be9fd;
+  --theme-cyan: #8be9fd;
+  --theme-yellow: #f1fa8c;
+  --theme-purple: #bd93f9;
+  --theme-comment: #6272a4;
+  --theme-syntax-text: #f8f8f2;
+  --theme-overlay: #000000;
+  --theme-icon-filter: invert(1) sepia(0.12) brightness(0.92);
+  --theme-on-chat: #282a36;
+}
+
+:root[data-color-theme="nord"] {
+  --theme-bg: #eceff4;
+  --theme-window: #e5e9f0;
+  --theme-sidebar: #d8dee9;
+  --theme-sidebar-2: #c8d0df;
+  --theme-surface: #e5e9f0;
+  --theme-surface-2: #d8dee9;
+  --theme-surface-3: #c8d0df;
+  --theme-text: #2e3440;
+  --theme-muted: #5e6878;
+  --theme-faint: #7b8799;
+  --theme-link: #5e81ac;
+  --theme-accent: #5e81ac;
+  --theme-accent-hover: #4c6f99;
+  --theme-accent-active: #3f608c;
+  --theme-accent-contrast: #eceff4;
+  --theme-green: #5f8a4d;
+  --theme-orange: #b85c38;
+  --theme-red: #bf616a;
+  --theme-blue: #5e81ac;
+  --theme-cyan: #4f8f9a;
+  --theme-yellow: #a87822;
+  --theme-purple: #8f6b9f;
+  --theme-comment: #7b8799;
+  --theme-syntax-text: #2e3440;
+  --theme-overlay: #2e3440;
+  --theme-icon-filter: none;
+  --theme-on-chat: #eceff4;
+}
+
+:root[data-theme="dark"][data-color-theme="nord"] {
+  --theme-bg: #2e3440;
+  --theme-window: #3b4252;
+  --theme-sidebar: #3b4252;
+  --theme-sidebar-2: #434c5e;
+  --theme-surface: #434c5e;
+  --theme-surface-2: #3b4252;
+  --theme-surface-3: #4c566a;
+  --theme-text: #eceff4;
+  --theme-muted: #d8dee9;
+  --theme-faint: #aeb8c8;
+  --theme-link: #88c0d0;
+  --theme-accent: #88c0d0;
+  --theme-accent-hover: #9acbda;
+  --theme-accent-active: #73b2c4;
+  --theme-accent-contrast: #2e3440;
+  --theme-green: #a3be8c;
+  --theme-orange: #d08770;
+  --theme-red: #bf616a;
+  --theme-blue: #81a1c1;
+  --theme-cyan: #8fbcbb;
+  --theme-yellow: #ebcb8b;
+  --theme-purple: #b48ead;
+  --theme-comment: #616e88;
+  --theme-syntax-text: #eceff4;
+  --theme-overlay: #000000;
+  --theme-icon-filter: invert(1) sepia(0.08) brightness(0.94);
+  --theme-on-chat: #2e3440;
+}
+
+:root[data-color-theme="catppuccin"] {
+  --theme-bg: #eff1f5;
+  --theme-window: #e6e9ef;
+  --theme-sidebar: #dce0e8;
+  --theme-sidebar-2: #ccd0da;
+  --theme-surface: #e6e9ef;
+  --theme-surface-2: #dce0e8;
+  --theme-surface-3: #ccd0da;
+  --theme-text: #4c4f69;
+  --theme-muted: #6c6f85;
+  --theme-faint: #8c8fa1;
+  --theme-link: #1e66f5;
+  --theme-accent: #8839ef;
+  --theme-accent-hover: #7627df;
+  --theme-accent-active: #641fc2;
+  --theme-accent-contrast: #eff1f5;
+  --theme-green: #40a02b;
+  --theme-orange: #fe640b;
+  --theme-red: #d20f39;
+  --theme-blue: #1e66f5;
+  --theme-cyan: #179299;
+  --theme-yellow: #df8e1d;
+  --theme-purple: #8839ef;
+  --theme-comment: #8c8fa1;
+  --theme-syntax-text: #4c4f69;
+  --theme-overlay: #4c4f69;
+  --theme-icon-filter: none;
+  --theme-on-chat: #eff1f5;
+}
+
+:root[data-theme="dark"][data-color-theme="catppuccin"] {
+  --theme-bg: #1e1e2e;
+  --theme-window: #181825;
+  --theme-sidebar: #181825;
+  --theme-sidebar-2: #313244;
+  --theme-surface: #313244;
+  --theme-surface-2: #1e1e2e;
+  --theme-surface-3: #45475a;
+  --theme-text: #cdd6f4;
+  --theme-muted: #a6adc8;
+  --theme-faint: #7f849c;
+  --theme-link: #89b4fa;
+  --theme-accent: #cba6f7;
+  --theme-accent-hover: #d5b9fa;
+  --theme-accent-active: #b78eea;
+  --theme-accent-contrast: #1e1e2e;
+  --theme-green: #a6e3a1;
+  --theme-orange: #fab387;
+  --theme-red: #f38ba8;
+  --theme-blue: #89b4fa;
+  --theme-cyan: #94e2d5;
+  --theme-yellow: #f9e2af;
+  --theme-purple: #cba6f7;
+  --theme-comment: #7f849c;
+  --theme-syntax-text: #cdd6f4;
+  --theme-overlay: #000000;
+  --theme-icon-filter: invert(1) sepia(0.1) brightness(0.92);
+  --theme-on-chat: #1e1e2e;
+}
+
+:root[data-color-theme="tokyo-night"] {
+  --theme-bg: #e1e2e7;
+  --theme-window: #d5d6db;
+  --theme-sidebar: #cbccd1;
+  --theme-sidebar-2: #b9bac1;
+  --theme-surface: #d5d6db;
+  --theme-surface-2: #cbccd1;
+  --theme-surface-3: #b9bac1;
+  --theme-text: #3760bf;
+  --theme-muted: #6172a8;
+  --theme-faint: #7a86b5;
+  --theme-link: #2e7de9;
+  --theme-accent: #9854f1;
+  --theme-accent-hover: #8542de;
+  --theme-accent-active: #7338c5;
+  --theme-accent-contrast: #e1e2e7;
+  --theme-green: #587539;
+  --theme-orange: #b15c00;
+  --theme-red: #f52a65;
+  --theme-blue: #2e7de9;
+  --theme-cyan: #007197;
+  --theme-yellow: #8c6c3e;
+  --theme-purple: #9854f1;
+  --theme-comment: #848cb5;
+  --theme-syntax-text: #3760bf;
+  --theme-overlay: #3760bf;
+  --theme-icon-filter: none;
+  --theme-on-chat: #e1e2e7;
+}
+
+:root[data-theme="dark"][data-color-theme="tokyo-night"] {
+  --theme-bg: #1a1b26;
+  --theme-window: #16161e;
+  --theme-sidebar: #1f2335;
+  --theme-sidebar-2: #24283b;
+  --theme-surface: #24283b;
+  --theme-surface-2: #1f2335;
+  --theme-surface-3: #414868;
+  --theme-text: #c0caf5;
+  --theme-muted: #a9b1d6;
+  --theme-faint: #787fa6;
+  --theme-link: #7aa2f7;
+  --theme-accent: #bb9af7;
+  --theme-accent-hover: #c8adfa;
+  --theme-accent-active: #a780e9;
+  --theme-accent-contrast: #1a1b26;
+  --theme-green: #9ece6a;
+  --theme-orange: #ff9e64;
+  --theme-red: #f7768e;
+  --theme-blue: #7aa2f7;
+  --theme-cyan: #7dcfff;
+  --theme-yellow: #e0af68;
+  --theme-purple: #bb9af7;
+  --theme-comment: #565f89;
+  --theme-syntax-text: #c0caf5;
+  --theme-overlay: #000000;
+  --theme-icon-filter: invert(1) sepia(0.1) brightness(0.92);
+  --theme-on-chat: #1a1b26;
+}
+
+:root[data-theme][data-color-theme]:not([data-color-theme="gruvbox"]) {
+  --bg: var(--theme-bg);
+  --window: var(--theme-window);
+  --sidebar: var(--theme-sidebar);
+  --sidebar-2: var(--theme-sidebar-2);
+  --surface: var(--theme-surface);
+  --surface-2: var(--theme-surface-2);
+  --surface-3: var(--theme-surface-3);
+  --content-bg: var(--theme-bg);
+  --panel-bg: var(--theme-window);
+  --editor-bg: var(--theme-bg);
+  --file-tree-bg: var(--theme-sidebar);
+
+  --line: color-mix(in oklch, var(--theme-text) 20%, transparent);
+  --line-strong: color-mix(in oklch, var(--theme-text) 32%, transparent);
+  --text: var(--theme-text);
+  --muted: var(--theme-muted);
+  --faint: var(--theme-faint);
+  --disabled: color-mix(in oklch, var(--theme-text) 42%, transparent);
+  --link: var(--theme-link);
+
+  --amber: var(--theme-yellow);
+  --amber-soft: color-mix(in oklch, var(--theme-yellow) 16%, transparent);
+  --amber-soft-strong: color-mix(in oklch, var(--theme-yellow) 28%, transparent);
+  --amber-ink: var(--theme-text);
+  --amber-bright: var(--theme-yellow);
+
+  --accent: var(--theme-accent);
+  --accent-hover: var(--theme-accent-hover);
+  --accent-active: var(--theme-accent-active);
+  --accent-contrast: var(--theme-accent-contrast);
+  --accent-soft: color-mix(in oklch, var(--theme-accent) 16%, transparent);
+  --accent-soft-strong: color-mix(in oklch, var(--theme-accent) 28%, transparent);
+  --selection-fill: color-mix(in oklch, var(--theme-yellow) 22%, transparent);
+  --selection-fill-strong: color-mix(in oklch, var(--theme-yellow) 36%, transparent);
+  --file-tree-selected-bg: var(--accent-soft);
+  --focus-ring: color-mix(in oklch, var(--theme-accent) 55%, transparent);
+  --focus-ring-soft: color-mix(in oklch, var(--theme-accent) 16%, transparent);
+
+  --green: var(--theme-green);
+  --green-soft: color-mix(in oklch, var(--theme-green) 20%, transparent);
+  --green-soft-strong: color-mix(in oklch, var(--theme-green) 36%, transparent);
+  --orange: var(--theme-orange);
+  --orange-soft: color-mix(in oklch, var(--theme-orange) 20%, transparent);
+  --orange-soft-strong: color-mix(in oklch, var(--theme-orange) 36%, transparent);
+  --danger: var(--theme-red);
+  --danger-soft: color-mix(in oklch, var(--theme-red) 22%, transparent);
+  --danger-soft-strong: color-mix(in oklch, var(--theme-red) 36%, transparent);
+  --danger-text: var(--theme-red);
+
+  --tone-info: var(--theme-cyan);
+  --tone-info-soft: color-mix(in oklch, var(--theme-cyan) 22%, transparent);
+  --tone-ok: var(--theme-green);
+  --tone-ok-soft: color-mix(in oklch, var(--theme-green) 22%, transparent);
+  --tone-warn: var(--theme-yellow);
+  --tone-warn-soft: color-mix(in oklch, var(--theme-yellow) 24%, transparent);
+  --tone-alert: var(--theme-accent);
+  --tone-danger: var(--theme-red);
+  --tone-meta: var(--theme-cyan);
+  --tone-meta-soft: color-mix(in oklch, var(--theme-cyan) 24%, transparent);
+  --tone-meta-ink: var(--theme-cyan);
+
+  --agent-codex: var(--theme-green);
+  --agent-cursor: var(--theme-purple);
+  --agent-claude: var(--theme-accent);
+
+  --chat-user-bg: var(--theme-blue);
+  --chat-user-fg: var(--theme-on-chat);
+  --chat-user-muted: color-mix(in oklch, var(--theme-on-chat) 76%, transparent);
+  --chat-user-ring: color-mix(in oklch, var(--theme-blue) 40%, transparent);
+  --chat-assistant-bg: var(--theme-window);
+  --chat-tool-bg: var(--theme-sidebar);
+
+  --syntax-text: var(--theme-syntax-text);
+  --syntax-muted: var(--theme-comment);
+  --syntax-comment: var(--theme-comment);
+  --syntax-keyword: var(--theme-red);
+  --syntax-string: var(--theme-green);
+  --syntax-number: var(--theme-purple);
+  --syntax-atom: var(--theme-purple);
+  --syntax-property: var(--theme-blue);
+  --syntax-tag: var(--theme-green);
+  --syntax-bracket: var(--theme-muted);
+  --syntax-link: var(--theme-blue);
+  --syntax-mono: var(--theme-orange);
+  --syntax-variable: var(--theme-orange);
+  --syntax-xml-0: var(--theme-green);
+  --syntax-xml-0-soft: color-mix(in oklch, var(--theme-green) 22%, transparent);
+  --syntax-xml-1: var(--theme-red);
+  --syntax-xml-1-soft: color-mix(in oklch, var(--theme-red) 22%, transparent);
+  --syntax-xml-2: var(--theme-purple);
+  --syntax-xml-2-soft: color-mix(in oklch, var(--theme-purple) 22%, transparent);
+  --syntax-xml-3: var(--theme-blue);
+  --syntax-xml-3-soft: color-mix(in oklch, var(--theme-blue) 22%, transparent);
+  --syntax-xml-4: var(--theme-orange);
+  --syntax-xml-4-soft: color-mix(in oklch, var(--theme-orange) 22%, transparent);
+  --syntax-xml-5: var(--theme-cyan);
+  --syntax-xml-5-soft: color-mix(in oklch, var(--theme-cyan) 22%, transparent);
+
+  --overlay-scrim: color-mix(in oklch, var(--theme-overlay) 66%, transparent);
+  --hover-fill: color-mix(in oklch, var(--theme-text) 6%, transparent);
+  --hover-fill-strong: color-mix(in oklch, var(--theme-text) 10%, transparent);
+  --active-fill: color-mix(in oklch, var(--theme-text) 14%, transparent);
+  --inset-fill: color-mix(in oklch, var(--theme-text) 5%, transparent);
+  --control-fill: color-mix(in oklch, var(--theme-text) 7%, transparent);
+  --control-border: color-mix(in oklch, var(--theme-text) 18%, transparent);
+  --shadow-border: 0 0 0 1px color-mix(in oklch, var(--theme-text) 8%, transparent);
+  --shadow-border-hover: 0 0 0 1px color-mix(in oklch, var(--theme-text) 14%, transparent);
+  --shadow-elevated: 0 0 0 1px color-mix(in oklch, var(--theme-text) 10%, transparent), 0 20px 52px color-mix(in oklch, var(--theme-overlay) 52%, transparent);
+  --shadow-menu: 0 0 0 1px color-mix(in oklch, var(--theme-text) 10%, transparent), 0 14px 38px color-mix(in oklch, var(--theme-overlay) 48%, transparent);
+  --row-frame-line: color-mix(in oklch, var(--theme-text) 14%, transparent);
+  --row-frame-bg: color-mix(in oklch, var(--theme-text) 6%, transparent);
+  --data-table-frozen-cell-hover-bg: var(--theme-sidebar);
+  --data-table-frozen-divider-color: color-mix(in oklch, var(--theme-text) 20%, transparent);
+  --image-outline: color-mix(in oklch, var(--theme-text) 16%, transparent);
+  --control-thumb-shadow: 0 1px 3px color-mix(in oklch, var(--theme-overlay) 24%, transparent);
+  --monochrome-icon-filter: var(--theme-icon-filter);
+}

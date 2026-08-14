@@ -39,9 +39,8 @@
   height: min(62vh, 640px);
   margin: -4px 22px 20px;
   overflow: hidden;
-  border: 0;
+  border: 1px solid var(--line);
   border-radius: var(--radius-md);
-  box-shadow: var(--shadow-border);
 }
 
 .skillUpdateDiff {
@@ -146,13 +145,27 @@
   margin: -4px 22px 20px;
   display: grid;
   place-items: center;
-  border: 0;
+  border: 1px solid var(--line);
   border-radius: var(--radius-md);
-  box-shadow: var(--shadow-border);
 }
 
 .skillUpdatePreviewError {
   color: var(--danger-text);
+  white-space: pre-wrap;
+}
+
+.skillUpdatePreviewEmpty {
+  min-height: min(18vh, 180px);
+  margin: -4px 22px 20px;
+  padding: 20px;
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.45;
+  text-align: center;
   white-space: pre-wrap;
 }
 
@@ -164,84 +177,6 @@
   padding: 14px 24px;
   border-top: 1px solid var(--line);
   background: var(--surface-2);
-}
-
-.confirmDialogActions button {
-  height: 38px;
-  min-width: 104px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  padding: 0 14px;
-  border: 0;
-  border-radius: var(--radius-md);
-  color: var(--text);
-  background: var(--panel-bg);
-  box-shadow: var(--shadow-border);
-  cursor: pointer;
-  font-size: 13px;
-  font-weight: 600;
-  transition-property: box-shadow, background-color, color, transform;
-  transition-duration: 140ms;
-  transition-timing-function: ease-out;
-}
-
-.confirmDialogActions button:hover {
-  box-shadow: var(--shadow-border-hover);
-}
-
-.confirmDialogActions button:active:not(:disabled) {
-  transform: scale(var(--press-scale));
-}
-
-.confirmDialogActions button:focus-visible {
-  outline: 2px solid var(--focus-ring);
-  outline-offset: 2px;
-}
-
-.confirmDialogActions button.primary {
-  color: var(--accent-contrast);
-  background: var(--accent);
-  box-shadow: none;
-}
-
-.confirmDialogActions button.primary:hover {
-  background: var(--accent-hover);
-}
-
-.confirmDialogActions button.danger {
-  color: var(--panel-bg);
-  background: var(--orange);
-  box-shadow: none;
-}
-
-.confirmDialogActions button.danger:hover {
-  background: var(--danger);
-}
-
-.confirmDialogActions button.danger.subtle {
-  color: var(--danger-text);
-  background: var(--danger-soft);
-  box-shadow: 0 0 0 1px var(--danger-soft-strong);
-}
-
-.confirmDialogActions button.danger.subtle:hover {
-  color: var(--panel-bg);
-  background: var(--orange);
-  box-shadow: none;
-}
-
-.confirmDialogActions button.secondary {
-  min-width: 0;
-  padding: 0 4px;
-  color: var(--muted);
-  background: transparent;
-  box-shadow: none;
-}
-
-.confirmDialogActions button.secondary:hover {
-  color: var(--text);
-  background: transparent;
 }
 
 .confirmDialogDescription {
@@ -257,10 +192,9 @@
   gap: 10px;
   margin: -8px 22px 18px;
   padding: 10px;
-  border: 0;
+  border: 1px solid var(--danger-soft-strong);
   border-radius: var(--radius-md);
   background: var(--danger-soft);
-  box-shadow: 0 0 0 1px var(--danger-soft-strong);
 }
 
 .confirmDialogImpact section {

@@ -65,7 +65,7 @@ export type SkillEditorViewProps = {
   skillIndexStatus?: SkillIndexStatus | null;
   onOpenSession?: (link: Record<string, unknown>) => void;
   onOpenSkill?: (name: string) => void;
-  onSaved?: () => void;
+  onSaved?: (skills?: SkillDependencyRecord[]) => void;
 };
 
 type SkillDraft = {
@@ -82,6 +82,7 @@ type SkillFileReadResult = {
 type SkillFileWriteResult = {
   content?: string;
   sha256?: string;
+  skills?: SkillDependencyRecord[];
 };
 
 export function SkillEditorView({ skill, skills = [], back, skillIndexStatus, onOpenSession, onOpenSkill, onSaved }: SkillEditorViewProps) {
@@ -215,7 +216,7 @@ export function SkillEditorView({ skill, skills = [], back, skillIndexStatus, on
         [activePath]: { content: result.content ?? content, originalContent: result.content ?? content, sha256: savedSha256 },
       }));
       setSaveState("saved");
-      onSaved?.();
+      onSaved?.(result.skills);
     } catch (error) {
       const message = error instanceof Error ? error.message : `${error}`;
       setSaveError(message);
@@ -266,7 +267,7 @@ export function SkillEditorView({ skill, skills = [], back, skillIndexStatus, on
     if (selectedEntry?.path) safeInvoke(TauriCommand.RevealInFinder, { path: selectedEntry.path });
   };
   const beginRename = (entry: SkillFileEntry | null = selectedEntry) => {
-    if (readOnly || !entry) return;
+    if (readOnly || !entry || entry.name === "SKILL.md") return;
     setSelectedPath(entry.name);
     setRenamingPath(entry.name);
     setRenameValue(displayFileName(entry.name));
@@ -342,7 +343,7 @@ export function SkillEditorView({ skill, skills = [], back, skillIndexStatus, on
     beginRename({ name: relativePath, kind: kind as SkillFileEntry["kind"] });
   };
   const deleteEntry = async (entry: SkillFileEntry | null = selectedEntry) => {
-    if (readOnly || !entry) return;
+    if (readOnly || !entry || entry.name === "SKILL.md") return;
     await safeInvoke(TauriCommand.SkillPathDelete, { name: currentSkill.name, relativePath: entry.name });
     const next = await reloadFiles(activePath === entry.name ? "" : activePath);
     if (activePath === entry.name || entry.kind === "folder" && activePath.startsWith(`${entry.name}/`)) {
@@ -408,6 +409,7 @@ export function SkillEditorView({ skill, skills = [], back, skillIndexStatus, on
   }, [save]);
 
   useEffect(() => {
+    if (!showLinkedSessions) return;
     let cancelled = false;
     setLoadingLinkedSessions(true);
     safeInvoke(TauriCommand.SkillSessionLinks, { skillName: currentSkill.name }).then((links) => {
@@ -417,7 +419,7 @@ export function SkillEditorView({ skill, skills = [], back, skillIndexStatus, on
       }
     });
     return () => { cancelled = true; };
-  }, [currentSkill.name, skillIndexStatus?.indexed, skillIndexStatus?.running]);
+  }, [currentSkill.name, showLinkedSessions, skillIndexStatus?.indexed, skillIndexStatus?.running]);
 
   return (
     <section className="editorPage">
@@ -550,7 +552,7 @@ export function SkillEditorView({ skill, skills = [], back, skillIndexStatus, on
                         <FileTreeContextMenuItems
                           Menu={ContextMenu}
                           entry={file}
-                          readOnly={readOnly}
+                          readOnly={readOnly || file.name === "SKILL.md"}
                           onNewFile={() => createEntry("file", file)}
                           onNewFolder={() => createEntry("folder", file)}
                           onReveal={() => {
@@ -571,7 +573,7 @@ export function SkillEditorView({ skill, skills = [], back, skillIndexStatus, on
                   <FileTreeContextMenuItems
                     Menu={ContextMenu}
                     entry={null}
-                    readOnly={readOnly}
+                    readOnly={readOnly || selectedEntry?.name === "SKILL.md"}
                     onNewFile={() => createEntry("file", null)}
                     onNewFolder={() => createEntry("folder", null)}
                     onReveal={revealSelected}

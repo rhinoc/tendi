@@ -7,8 +7,3 @@
   color: inherit;
   line-height: 1;
 }
-
-.loadingSpinner {
-  flex: 0 0 auto;
-  animation: loadingSpin 0.9s linear infinite;
-}

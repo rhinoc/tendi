@@ -1,5 +1,7 @@
 export { LoadingInline } from "./LoadingInline.tsx";
 export type { LoadingInlineProps } from "./LoadingInline.tsx";
+export { LoadingIcon } from "./LoadingIcon.tsx";
+export type { LoadingIconProps } from "./LoadingIcon.tsx";
 
 export { Tooltip, TooltipProvider } from "./Tooltip.tsx";
 export type { TooltipProps, TooltipProviderProps } from "./Tooltip.tsx";
@@ -44,6 +46,14 @@ export { CopyableSessionId } from "./CopyableSessionId.tsx";
 export type { CopyableSessionIdProps } from "./CopyableSessionId.tsx";
 export { CopyButton } from "./CopyButton.tsx";
 export type { CopyButtonProps } from "./CopyButton.tsx";
+export { InfoSection } from "./InfoSection.tsx";
+export type { InfoSectionProps } from "./InfoSection.tsx";
+export { MoreActionsButton } from "./MoreActionsButton.tsx";
+export type { MoreActionsButtonProps } from "./MoreActionsButton.tsx";
+export { SearchField } from "./SearchField.tsx";
+export type { SearchFieldProps } from "./SearchField.tsx";
+export { CopyFeedbackIcon, useCopyFeedback } from "./useCopyFeedback.tsx";
+export type { CopyFeedbackIconProps } from "./useCopyFeedback.tsx";
 
 export { createSessionTableColumns } from "./createSessionTableColumns.tsx";
 export type {
@@ -70,9 +80,14 @@ export type { DataTableMenuComponents } from "./DataTableMenus.tsx";
 
 export { SelectControl } from "./SelectControl.tsx";
 export type { SelectControlProps, SelectOption } from "./SelectControl.tsx";
+export { SelectTrigger } from "./SelectTrigger.tsx";
+export type { SelectTriggerProps } from "./SelectTrigger.tsx";
 
 export { DialogAdvanceButton } from "./DialogAdvanceButton.tsx";
 export type { DialogAdvanceButtonProps } from "./DialogAdvanceButton.tsx";
+
+export { DialogActionButton } from "./DialogActionButton.tsx";
+export type { DialogActionButtonProps, DialogActionButtonVariant } from "./DialogActionButton.tsx";
 
 export { DialogActionBar } from "./DialogActionBar.tsx";
 export type { DialogActionBarProps } from "./DialogActionBar.tsx";
@@ -150,6 +165,8 @@ export type {
 } from "./FileTreeContextMenuItems.tsx";
 
 export { SettingsView } from "./SettingsView.tsx";
+export { SettingsApplicationPicker } from "./SettingsApplicationPicker.tsx";
+export type { SettingsApplicationOption, SettingsApplicationPickerProps } from "./SettingsApplicationPicker.tsx";
 
 export { PlaceholderView } from "./PlaceholderView.tsx";
 export type { PlaceholderViewProps } from "./PlaceholderView.tsx";

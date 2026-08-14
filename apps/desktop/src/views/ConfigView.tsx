@@ -9,8 +9,10 @@ import { DataTable } from "../components/DataTable.tsx";
 import type { ColumnDef } from "../components/DataTable.types.ts";
 import { AgentFilterOptionLabel } from "../components/shared/AgentFilterOptionLabel.tsx";
 import { DialogActionBar } from "../components/shared/DialogActionBar.tsx";
+import { DialogActionButton } from "../components/shared/DialogActionButton.tsx";
 import { DiscardChangesDialog } from "../components/shared/DiscardChangesDialog.tsx";
 import { DialogTextField } from "../components/shared/DialogTextField.tsx";
+import { LoadingIcon } from "../components/shared/LoadingIcon.tsx";
 import { LoadingInline } from "../components/shared/LoadingInline.tsx";
 import { PageHeader } from "../components/shared/PageHeader.tsx";
 import { ResizeSeparator } from "../components/shared/ResizeSeparator.tsx";
@@ -319,14 +321,15 @@ export function ConfigView() {
               {profileError ? <div className="addSkillError">{profileError}</div> : null}
             </div>
             <DialogActionBar cancelDisabled={profileSaving} onCancel={() => setProfileDialogOpen(false)}>
-              <button
-                className="primary dialogAdvanceButton"
+              <DialogActionButton
+                variant="primary"
+                className="dialogAdvanceButton"
                 disabled={!profileName.trim() || profileSaving}
                 onClick={() => { void createProfile(); }}
               >
                 <span>{profileSaving ? "Creating" : "Create"}</span>
-                {profileSaving ? <RefreshCw className="dialogLoadingIcon" size={16} /> : <Save size={16} />}
-              </button>
+                {profileSaving ? <LoadingIcon size={16} /> : <Save size={16} />}
+              </DialogActionButton>
             </DialogActionBar>
           </Dialog.Content>
         </Dialog.Portal>
@@ -340,7 +343,7 @@ export function ConfigView() {
               disabled={loading}
               onClick={reload}
             >
-              <RefreshCw size={14} className={loading ? "spin" : ""} />
+              {loading ? <LoadingIcon size={14} /> : <RefreshCw size={14} />}
             </button>
           </PageHeader>
           <div className="sessionListBody">
@@ -387,7 +390,7 @@ export function ConfigView() {
                   disabled={!profileSelectionChanged || dirty || profileSwitching || profileSaving}
                   onClick={() => { void activateProfile(profileAgent, selectedProfileValue); }}
                 >
-                  {profileSwitching ? <RefreshCw className="dialogLoadingIcon" size={14} /> : profileSelectionChanged ? <ArrowRightLeft size={14} /> : <Check size={14} />}
+                  {profileSwitching ? <LoadingIcon size={14} /> : profileSelectionChanged ? <ArrowRightLeft size={14} /> : <Check size={14} />}
                   <span>{profileSwitching ? "Switching…" : profileSelectionChanged ? "Activate" : "Active"}</span>
                 </button></Tooltip>
                 <button

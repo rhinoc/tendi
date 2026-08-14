@@ -5,6 +5,18 @@
   overflow: hidden;
   /* Wider trailing inset so the body scroller track can sit outside content. */
   --page-right-inset: 20px;
+  --chart-ink: var(--tone-info);
+  --chart-mid: color-mix(in oklch, var(--tone-info) 72%, var(--content-bg));
+  --chart-soft: color-mix(in oklch, var(--tone-info) 48%, var(--content-bg));
+  --chart-faint: color-mix(in oklch, var(--tone-info) 28%, var(--content-bg));
+  --chart-other: var(--faint);
+  --chart-track: color-mix(in oklch, var(--text) 12%, var(--content-bg));
+  --chart-grid: color-mix(in oklch, var(--text) 16%, transparent);
+  --chart-hero: var(--accent);
+  --chart-cat-0: var(--syntax-property);
+  --chart-cat-1: var(--syntax-number);
+  --chart-cat-2: var(--syntax-string);
+  --chart-cat-3: var(--syntax-mono);
 }
 
 .overviewPage .pageHeader {
@@ -15,14 +27,17 @@
   flex: 1 1 auto;
   min-width: 0;
   min-height: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 24px;
+  display: grid;
+  grid-template-rows: auto auto auto;
+  align-content: start;
+  gap: 0;
   overflow-x: hidden;
   overflow-y: auto;
   /* Pull the scroller into the page's right inset so the track sits
      outside content; keep padding so View all aligns with the header. */
+  margin-inline-start: calc(var(--page-left-inset) * -1);
   margin-inline-end: calc(var(--page-right-inset) * -1);
+  padding-inline-start: var(--page-left-inset);
   padding-inline-end: var(--page-right-inset);
   padding-block-end: 8px;
   container-type: inline-size;
@@ -34,6 +49,14 @@
   grid-template-columns: repeat(6, minmax(72px, 1fr));
   gap: 16px 24px;
   flex: 0 0 auto;
+  width: calc(100% + var(--page-left-inset) + var(--page-right-inset));
+  box-sizing: border-box;
+  margin-inline-start: calc(var(--page-left-inset) * -1);
+  padding-inline-start: var(--page-left-inset);
+  padding-inline-end: var(--page-right-inset);
+  padding-block: 16px 20px;
+  border-block-start: 1px solid var(--line);
+  border-block-end: 1px solid var(--line);
 }
 
 .overviewInventoryItem {
@@ -75,7 +98,7 @@
 
 .overviewInventoryItem:focus-visible {
   outline: 2px solid var(--focus-ring);
-  outline-offset: 4px;
+  outline-offset: -2px;
   border-radius: 2px;
 }
 
@@ -86,6 +109,26 @@
   letter-spacing: 0.02em;
   text-transform: uppercase;
   line-height: 1.2;
+}
+
+.overviewInventoryLabelRow {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.overviewSkillUpdateBadge {
+  flex: 0 0 auto;
+  padding: 2px 5px;
+  border-radius: 999px;
+  background: var(--tone-warn-soft);
+  color: var(--tone-warn);
+  font-size: 9px;
+  font-weight: 700;
+  line-height: 1.1;
+  text-transform: none;
+  white-space: nowrap;
 }
 
 .overviewInventoryValue {
@@ -105,6 +148,13 @@
   display: flex;
   flex-direction: column;
   gap: 24px;
+  width: calc(100% + var(--page-left-inset) + var(--page-right-inset));
+  box-sizing: border-box;
+  margin-inline-start: calc(var(--page-left-inset) * -1);
+  padding-inline-start: var(--page-left-inset);
+  padding-inline-end: var(--page-right-inset);
+  padding-block: 24px;
+  border-block-end: 1px solid var(--line);
 }
 
 .overviewAnalyticsHeader {
@@ -114,8 +164,7 @@
   gap: 16px;
 }
 
-.overviewAnalyticsHeader h2,
-.overviewRankPane h3 {
+.overviewAnalyticsHeader h2 {
   margin: 0;
   color: var(--text);
   font-size: var(--text-title);
@@ -123,13 +172,14 @@
   letter-spacing: -0.015em;
 }
 
-.overviewAnalyticsHeader p {
-  margin: 3px 0 0;
-  color: var(--muted);
-  font-size: 12px;
+.overviewAnalyticsHeader h2,
+.overviewPaneTitle {
+  font-family: var(--font-brand);
 }
 
 .overviewAnalyticsControls {
+  --overview-control-radius: var(--radius-md);
+  --overview-granularity-button-width: 52px;
   display: flex;
   align-items: center;
   gap: 10px;
@@ -137,32 +187,38 @@
   justify-content: flex-end;
 }
 
-.overviewRangeControl {
-  display: inline-flex;
-  align-items: center;
-  gap: 7px;
-  color: var(--muted);
-  font-size: 11px;
-  font-weight: 600;
-}
-
-.overviewRangeControl select {
-  height: 30px;
-  padding-block: 0;
-  padding-inline: 9px 28px;
-  border: 1px solid var(--line);
-  border-radius: var(--radius-md);
-  background: var(--surface-2);
-  color: var(--text);
-  font: inherit;
-  font-size: 11px;
-}
-
-.overviewRangeControl select:focus-visible,
+.overviewMetricSelect:focus-visible,
 .overviewGranularityControl button:focus-visible,
 .overviewRetryButton:focus-visible {
   outline: 2px solid var(--focus-ring);
-  outline-offset: 2px;
+  outline-offset: -2px;
+}
+
+.overviewMetricSelect {
+  display: inline-block;
+  height: 30px;
+  min-width: 112px;
+  padding: 2px;
+  border: 1px solid var(--line);
+  border-radius: var(--overview-control-radius);
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 11px;
+  font-weight: 650;
+  text-align: start;
+  cursor: pointer;
+}
+
+.overviewMetricSelectInner {
+  display: grid;
+  height: 24px;
+  padding-inline: 7px 5px;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  border-radius: calc(var(--overview-control-radius) - 2px);
+  background: var(--hover-fill-strong);
 }
 
 .overviewGranularityControl {
@@ -170,15 +226,14 @@
   align-items: center;
   padding: 2px;
   border: 1px solid var(--line);
-  border-radius: var(--radius-md);
+  border-radius: var(--overview-control-radius);
 }
 
 .overviewGranularityControl button {
-  min-width: 48px;
   height: 24px;
-  padding: 0 8px;
+  padding-inline: 9px;
   border: 0;
-  border-radius: var(--radius-sm);
+  border-radius: calc(var(--overview-control-radius) - 2px);
   background: transparent;
   color: var(--muted);
   font: inherit;
@@ -186,8 +241,17 @@
   cursor: pointer;
 }
 
+.overviewGranularityControl button {
+  flex: 0 0 var(--overview-granularity-button-width);
+  width: var(--overview-granularity-button-width);
+  min-width: var(--overview-granularity-button-width);
+  padding-inline: 0;
+}
+
+.overviewMetricSelect:hover,
 .overviewGranularityControl button:hover {
   color: var(--text);
+  border-color: var(--line-strong);
 }
 
 .overviewGranularityControl button.isActive {
@@ -196,83 +260,22 @@
   font-weight: 650;
 }
 
-.overviewAnalyticsProgress {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
+.overviewMetricMenu {
+  min-width: 144px;
 }
 
-.overviewAnalyticsProgressLabel {
-  display: flex;
-  justify-content: space-between;
-  gap: 12px;
-  color: var(--muted);
-  font-size: 11px;
-  font-variant-numeric: tabular-nums;
-}
-
-.overviewAnalyticsProgressLabel strong {
-  color: var(--text);
-  font-weight: 600;
-}
-
-.overviewAnalyticsProgressTrack {
-  overflow: hidden;
-  height: 5px;
-  border-radius: 999px;
-  background: color-mix(in oklch, var(--line) 75%, transparent);
-}
-
-.overviewAnalyticsProgressTrack > span {
-  display: block;
-  height: 100%;
-  border-radius: inherit;
-  background: var(--accent);
-  transition-property: width;
-  transition-duration: 160ms;
-  transition-timing-function: var(--ease-out-soft);
-}
-
-.overviewAnalyticsProgressDetail {
-  color: var(--muted);
-  font-size: 10px;
-  font-variant-numeric: tabular-nums;
-}
-
-.overviewAnalyticsMetrics {
+.overviewMetricMenuItem {
   display: grid;
-  grid-template-columns: repeat(6, minmax(0, 1fr));
-  gap: 16px 24px;
-  margin: 0;
+  grid-template-columns: 16px minmax(0, 1fr);
 }
 
-.overviewAnalyticsMetrics > div,
-.overviewHealth > div {
-  display: flex;
-  flex-direction: column;
-  gap: 3px;
-  min-width: 0;
+.overviewMetricMenuIndicator {
+  display: inline-flex;
+  align-items: center;
+  color: var(--accent);
 }
 
-.overviewAnalyticsMetrics dt,
-.overviewHealth dt {
-  color: var(--muted);
-  font-size: 11px;
-  text-transform: uppercase;
-  letter-spacing: 0.03em;
-}
-
-.overviewAnalyticsMetrics dd,
-.overviewHealth dd {
-  margin: 0;
-  font-size: 16px;
-  font-weight: 620;
-  font-variant-numeric: tabular-nums;
-}
-
-.overviewTrendBlock,
-.overviewHeatmapBlock,
-.overviewHealthBlock {
+.overviewTrendBlock {
   display: flex;
   flex-direction: column;
   gap: 12px;
@@ -295,31 +298,12 @@
   line-height: 1.25;
 }
 
-.overviewSectionHeader p {
+.overviewSectionHeader p,
+.overviewChartSubtitle {
   margin: 3px 0 0;
   color: var(--muted);
-  font-size: 11px;
-}
-
-.overviewTrendSelection {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-end;
-  gap: 1px;
-  min-width: 88px;
-  font-variant-numeric: tabular-nums;
-}
-
-.overviewTrendSelection span {
-  color: var(--muted);
-  font-size: 11px;
-}
-
-.overviewTrendSelection strong {
-  font-size: 20px;
-  font-weight: 650;
-  letter-spacing: -0.02em;
-  line-height: 1.1;
+  font-size: 10px;
+  line-height: 1.35;
 }
 
 .overviewTrendLegend {
@@ -337,17 +321,101 @@
   gap: 5px;
 }
 
-.overviewTrendLegend strong {
-  color: var(--muted);
-  font-weight: 500;
-  font-variant-numeric: tabular-nums;
+.overviewTrendLegendEmpty {
+  min-height: 14px;
+}
+
+.overviewAnalyticsLoadingDots {
+  width: 100%;
+  height: 208px;
+  background-image: radial-gradient(circle, var(--chart-track) 0 1.5px, transparent 1.5px);
+  background-position: center;
+  background-size: 14px 14px;
+  -webkit-mask-image: radial-gradient(
+    ellipse at center,
+    rgb(0 0 0 / 100%) 0%,
+    rgb(0 0 0 / 88%) 34%,
+    rgb(0 0 0 / 42%) 72%,
+    rgb(0 0 0 / 8%) 100%
+  );
+  mask-image: radial-gradient(
+    ellipse at center,
+    rgb(0 0 0 / 100%) 0%,
+    rgb(0 0 0 / 88%) 34%,
+    rgb(0 0 0 / 42%) 72%,
+    rgb(0 0 0 / 8%) 100%
+  );
+  animation: overviewLoadingDotsPulse 1.8s ease-in-out infinite;
 }
 
 .overviewTrendSwatch {
-  width: 8px;
-  height: 8px;
+  width: 12px;
+  height: 2px;
   flex: 0 0 auto;
-  border-radius: 2px;
+  border-radius: 999px;
+}
+
+.overviewTrendTooltip {
+  display: grid;
+  min-width: 220px;
+  max-height: min(360px, calc(var(--radix-tooltip-content-available-height) - 12px));
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+  gap: 7px;
+}
+
+.overviewTrendTooltipHeader {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.overviewTrendTooltipHeader > strong {
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.overviewTrendTooltipHeader > span {
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.overviewTrendTooltipModels {
+  display: grid;
+  gap: 4px;
+}
+
+.overviewTrendTooltipModels > div {
+  display: grid;
+  grid-template-columns: 12px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 7px;
+}
+
+.overviewTrendTooltipModels > div > span:nth-child(2) {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.overviewTrendTooltipModels strong {
+  color: var(--text);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.overviewTrendTooltipMeta {
+  margin: 0;
+  padding-block-start: 6px;
+  border-block-start: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
 }
 
 .overviewTrendPlotLayout {
@@ -403,6 +471,30 @@
 .overviewTrendGrid span:nth-child(2) { inset-block-start: 50%; }
 .overviewTrendGrid span:nth-child(3) { inset-block-end: 0; }
 
+.overviewTrendEmptyMessage {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-direction: column;
+  gap: 4px;
+  color: var(--muted);
+  text-align: center;
+}
+
+.overviewTrendEmptyMessage h3 {
+  margin: 0;
+  color: var(--text);
+  font-size: 14px;
+  font-weight: 650;
+}
+
+.overviewTrendEmptyMessage p {
+  margin: 0;
+  font-size: 10px;
+}
+
 .overviewTrendBars,
 .overviewTrendXAxis {
   display: grid;
@@ -411,7 +503,7 @@
 
 .overviewTrendBars {
   position: relative;
-  z-index: var(--z-content);
+  z-index: var(--z-raised);
   height: 100%;
 }
 
@@ -419,13 +511,13 @@
   position: relative;
   display: flex;
   align-items: flex-end;
-  justify-content: stretch;
+  justify-content: center;
   min-width: 24px;
   height: 100%;
   margin: 0;
-  padding: 0 4px 1px;
+  padding: 0 3px 1px;
   border: 0;
-  border-radius: 3px 3px 0 0;
+  border-radius: 3px;
   background: transparent;
   color: inherit;
   cursor: pointer;
@@ -435,8 +527,8 @@
   background: var(--hover-fill);
 }
 
-.overviewTrendBarButton.isActive {
-  box-shadow: inset 0 -2px var(--accent);
+.overviewTrendBarButton.isHovered {
+  background: var(--hover-fill);
 }
 
 .overviewTrendBarButton:focus-visible {
@@ -453,34 +545,77 @@
 }
 
 .overviewTrendBar {
+  position: relative;
   display: flex;
-  flex-direction: column-reverse;
+  width: min(86%, 22px);
+  overflow: visible;
+  align-items: stretch;
+}
+
+.overviewTrendRungs {
+  display: flex;
   width: 100%;
-  overflow: hidden;
-  border-radius: 3px 3px 0 0;
-  background: color-mix(in oklch, var(--accent) 40%, var(--surface-3));
+  height: 100%;
+  flex-direction: column-reverse;
+  align-items: center;
+  justify-content: space-between;
 }
 
-.overviewTrendBarButton:focus-visible .overviewTrendBar {
-  outline: 2px solid var(--focus-ring);
-  outline-offset: 1px;
-}
-
-.overviewTrendSegment {
+.overviewTrendRung {
   display: block;
-  min-height: 1px;
+  flex: 0 0 2px;
+  min-width: 8px;
+  border-radius: 999px;
+  opacity: 0;
+  transform-origin: center;
+  animation: overviewRungReveal 440ms var(--ease-out-soft) both;
 }
 
-.overviewTrendSegment.model0,
-.overviewTrendSwatch.model0 { background: var(--tone-info); }
-.overviewTrendSegment.model1,
-.overviewTrendSwatch.model1 { background: var(--tone-ok); }
-.overviewTrendSegment.model2,
-.overviewTrendSwatch.model2 { background: var(--tone-warn); }
-.overviewTrendSegment.model3,
-.overviewTrendSwatch.model3 { background: var(--tone-alert); }
-.overviewTrendSegment.modelOther,
-.overviewTrendSwatch.modelOther { background: var(--faint); }
+.overviewTrendRung.isSegmentStart {
+  margin-block-end: 3px;
+}
+
+.overviewTrendPeakValue {
+  position: absolute;
+  inset-block-start: -18px;
+  inset-inline-start: 50%;
+  color: var(--chart-hero);
+  font-size: 10px;
+  font-weight: 800;
+  white-space: nowrap;
+  transform: translateX(-50%);
+}
+
+.overviewTrendBarButton.isPeak .overviewTrendRungs::after {
+  content: "";
+  position: absolute;
+  inset-inline: 0;
+  inset-block-start: -4px;
+  height: 2px;
+  border-radius: 999px;
+  background: var(--chart-hero);
+}
+
+.overviewTrendRung.category0,
+.overviewTrendSwatch.category0 { background: var(--chart-cat-0, var(--syntax-property)); }
+.overviewTrendRung.category1,
+.overviewTrendSwatch.category1 { background: var(--chart-cat-1, var(--syntax-number)); }
+.overviewTrendRung.category2,
+.overviewTrendSwatch.category2 { background: var(--chart-cat-2, var(--syntax-string)); }
+.overviewTrendRung.category3,
+.overviewTrendSwatch.category3 { background: var(--chart-cat-3, var(--syntax-mono)); }
+.overviewTrendRung.categoryOther,
+.overviewTrendSwatch.categoryOther { background: var(--chart-other, var(--faint)); }
+.overviewTrendRung.sessionActive,
+.overviewTrendSwatch.sessionActive { background: var(--chart-ink, var(--tone-info)); }
+.overviewTrendRung.cacheRate,
+.overviewTrendSwatch.cacheRate { background: var(--chart-hero, var(--accent)); }
+.overviewTrendRung.statusCompleted,
+.overviewTrendSwatch.statusCompleted { background: var(--tone-ok); }
+.overviewTrendRung.statusAborted,
+.overviewTrendSwatch.statusAborted { background: var(--tone-alert); }
+.overviewTrendRung.statusUnclosed,
+.overviewTrendSwatch.statusUnclosed { background: var(--tone-warn); }
 
 .overviewTrendXAxis {
   height: 24px;
@@ -499,261 +634,6 @@
 .overviewTrendXAxis > span:first-child { text-align: start; }
 .overviewTrendXAxis > span:last-child { text-align: end; }
 
-.overviewTrendScrollHint {
-  display: none;
-  margin: -4px 0 0 58px;
-  color: var(--muted);
-  font-size: 10px;
-}
-
-.overviewTrendPartialNote {
-  margin: -4px 0 0 58px;
-  color: var(--muted);
-  font-size: 10px;
-}
-
-.overviewTrendDetail {
-  display: grid;
-  grid-template-columns: minmax(140px, 0.55fr) minmax(0, 1.45fr);
-  gap: 24px;
-  padding-block-start: 4px;
-}
-
-.overviewTrendDetailSummary {
-  display: flex;
-  min-width: 0;
-  flex-direction: column;
-  gap: 2px;
-}
-
-.overviewTrendDetailSummary > span {
-  color: var(--muted);
-  font-size: 10px;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-}
-
-.overviewTrendDetailSummary > strong {
-  font-size: 13px;
-  font-weight: 650;
-}
-
-.overviewTrendDetailSummary p {
-  margin: 0;
-  color: var(--muted);
-  font-size: 11px;
-}
-
-.overviewTrendBreakdown {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 8px 24px;
-  min-width: 0;
-}
-
-.overviewTrendBreakdown > div {
-  display: grid;
-  grid-template-columns: 8px minmax(0, 1fr) auto auto;
-  align-items: center;
-  gap: 7px;
-  min-width: 0;
-  font-size: 11px;
-}
-
-.overviewTrendBreakdown > div > span:nth-child(2) {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.overviewTrendBreakdown strong,
-.overviewTrendBreakdown > div > span:last-child {
-  font-variant-numeric: tabular-nums;
-}
-
-.overviewTrendBreakdown strong {
-  color: var(--text);
-  font-weight: 600;
-}
-
-.overviewTrendBreakdown > div > span:last-child {
-  min-width: 3ch;
-  color: var(--muted);
-  text-align: end;
-}
-
-.overviewAnalyticsSecondary {
-  display: grid;
-  grid-template-columns: minmax(320px, 1.2fr) minmax(280px, 1fr);
-  gap: 40px;
-  min-width: 0;
-  padding-block-start: 8px;
-}
-
-.overviewActivitySummary {
-  color: var(--muted);
-  font-size: 11px;
-  font-weight: 600;
-  font-variant-numeric: tabular-nums;
-  white-space: nowrap;
-}
-
-.overviewHeatmapViewport {
-  max-width: 100%;
-  overflow-x: auto;
-  overflow-y: hidden;
-  scrollbar-width: thin;
-}
-
-.overviewHeatmapChart {
-  display: grid;
-  grid-template-columns: 24px max-content;
-  grid-template-rows: 13px auto;
-  gap: 4px 7px;
-  width: max-content;
-  min-width: 100%;
-}
-
-.overviewHeatmapMonths {
-  display: grid;
-  grid-column: 2;
-  grid-row: 1;
-  grid-template-columns: repeat(var(--overview-heatmap-weeks), 10px);
-  gap: 3px;
-  color: var(--muted);
-  font-size: 9px;
-  line-height: 1;
-}
-
-.overviewHeatmapMonths > span {
-  white-space: nowrap;
-}
-
-.overviewHeatmapWeekdays {
-  display: grid;
-  grid-column: 1;
-  grid-row: 2;
-  grid-template-rows: repeat(7, 10px);
-  gap: 3px;
-  color: var(--muted);
-  font-size: 9px;
-  line-height: 10px;
-}
-
-.overviewHeatmapWeekdays > span:nth-child(1) { grid-row: 1; }
-.overviewHeatmapWeekdays > span:nth-child(2) { grid-row: 3; }
-.overviewHeatmapWeekdays > span:nth-child(3) { grid-row: 5; }
-
-.overviewHeatmapScrollHint {
-  display: none;
-  margin: -6px 0 0;
-  color: var(--muted);
-  font-size: 10px;
-}
-
-.overviewHeatmap {
-  display: grid;
-  grid-column: 2;
-  grid-row: 2;
-  grid-template-rows: repeat(7, 10px);
-  grid-auto-flow: column;
-  grid-auto-columns: 10px;
-  gap: 3px;
-  width: max-content;
-}
-
-.overviewHeatCell {
-  display: inline-block;
-  width: 10px;
-  height: 10px;
-  border-radius: 2px;
-  background: var(--surface-3);
-}
-
-.overviewHeatCell.isEmpty { visibility: hidden; }
-.overviewHeatCell.level1 { background: color-mix(in oklch, var(--tone-ok) 28%, var(--surface-3)); }
-.overviewHeatCell.level2 { background: color-mix(in oklch, var(--tone-ok) 50%, var(--surface-3)); }
-.overviewHeatCell.level3 { background: color-mix(in oklch, var(--tone-ok) 72%, var(--surface-3)); }
-.overviewHeatCell.level4 { background: var(--tone-ok); }
-
-.overviewHeatLegend {
-  display: flex;
-  align-items: center;
-  justify-content: flex-end;
-  gap: 4px;
-  color: var(--muted);
-  font-size: 10px;
-}
-
-.overviewHeatLegend .overviewHeatCell {
-  width: 8px;
-  height: 8px;
-}
-
-.overviewHealth {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 16px 20px;
-  margin: 0;
-}
-
-.overviewHealth dd { font-size: 13px; }
-
-.overviewRanks {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 40px;
-  padding-block-start: 8px;
-}
-
-.overviewRankPane {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-  min-width: 0;
-}
-
-.overviewRankPane h3 { font-size: 14px; }
-
-.overviewRankTable {
-  width: 100%;
-  border-collapse: collapse;
-  table-layout: fixed;
-  font-size: 11px;
-  font-variant-numeric: tabular-nums;
-}
-
-.overviewRankTable th,
-.overviewRankTable td {
-  padding: 5px 0;
-  text-align: end;
-  white-space: nowrap;
-}
-
-.overviewRankTable th {
-  color: var(--muted);
-  font-size: 10px;
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.03em;
-}
-
-.overviewRankTable th:first-child,
-.overviewRankTable td:first-child {
-  width: 52%;
-  padding-inline-end: 12px;
-  text-align: start;
-}
-
-.overviewRankName {
-  overflow: hidden;
-  color: var(--text);
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-size: 12px;
-}
-
-.overviewCapabilityNote,
 .overviewAnalyticsWarning {
   margin: 0;
   color: var(--muted);
@@ -812,36 +692,28 @@
 
 @container overview (max-width: 800px) {
   .overviewInventory { grid-template-columns: repeat(3, minmax(72px, 1fr)); }
-  .overviewAnalyticsMetrics { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   .overviewAnalyticsHeader { flex-direction: column; }
   .overviewAnalyticsControls { justify-content: flex-start; }
-  .overviewAnalyticsSecondary,
-  .overviewRanks { grid-template-columns: 1fr; }
-  .overviewHealth { grid-template-columns: repeat(3, minmax(0, 1fr)); }
-  .overviewTrendScrollHint { display: block; }
 }
 
 @container overview (max-width: 520px) {
-  .overviewInventory,
-  .overviewAnalyticsMetrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .overviewInventory { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .overviewAnalyticsHeader,
   .overviewTrendHeader { flex-direction: column; }
   .overviewAnalyticsControls { justify-content: flex-start; }
-  .overviewTrendSelection { align-items: flex-start; }
-  .overviewTrendDetail,
-  .overviewTrendBreakdown { grid-template-columns: 1fr; }
-  .overviewHealth { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .overviewHeatmapScrollHint { display: block; }
   .overviewPaneHeader { flex-direction: column; }
-  .overviewPaneActions { justify-content: flex-start; }
 }
 
 .overviewWorkbench {
-  flex: 1 1 auto;
   min-height: 0;
   display: grid;
-  grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr);
-  gap: 24px;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 0;
+  width: calc(100% + var(--page-left-inset) + var(--page-right-inset));
+  box-sizing: border-box;
+  margin-inline-start: calc(var(--page-left-inset) * -1);
+  padding-inline-start: var(--page-left-inset);
+  padding-inline-end: var(--page-right-inset);
   align-items: start;
 }
 
@@ -856,6 +728,28 @@
   display: flex;
   flex-direction: column;
   gap: 12px;
+  padding-block: 24px;
+}
+
+.overviewPane:first-child {
+  padding-inline-end: 0;
+}
+
+.overviewPane + .overviewPane {
+  padding-inline-start: 24px;
+  border-inline-start: 1px solid var(--line);
+}
+
+@container overview (max-width: 720px) {
+  .overviewPane:first-child {
+    padding-inline-end: 0;
+  }
+
+  .overviewPane + .overviewPane {
+    padding-inline-start: 0;
+    border-block-start: 1px solid var(--line);
+    border-inline-start: 0;
+  }
 }
 
 .overviewPaneHeader {
@@ -893,51 +787,6 @@
   cursor: pointer;
 }
 
-.overviewPaneActions {
-  display: flex;
-  align-items: center;
-  gap: 16px;
-  flex-wrap: wrap;
-  justify-content: flex-end;
-  flex: 0 0 auto;
-  padding-block-start: 2px;
-}
-
-@container overview (max-width: 520px) {
-  .overviewPaneActions { justify-content: flex-start; }
-}
-
-.overviewUpdateAllButton {
-  flex: 0 0 auto;
-  height: 26px;
-  padding: 0 10px;
-  border: 0;
-  border-radius: var(--radius-md);
-  background: var(--tone-warn-soft);
-  color: var(--tone-warn);
-  font: inherit;
-  font-size: 11px;
-  font-weight: 700;
-  white-space: nowrap;
-  cursor: pointer;
-}
-
-.overviewUpdateAllButton:hover:not(:disabled),
-.overviewUpdateAllButton:focus-visible:not(:disabled) {
-  background: color-mix(in oklch, var(--tone-warn) 28%, transparent);
-  color: var(--amber-bright);
-}
-
-.overviewUpdateAllButton:focus-visible {
-  outline: 2px solid var(--focus-ring);
-  outline-offset: 1px;
-}
-
-.overviewUpdateAllButton:disabled {
-  opacity: 0.45;
-  cursor: default;
-}
-
 .overviewPaneAction:hover,
 .overviewPaneAction:focus-visible {
   text-decoration: underline;
@@ -951,187 +800,8 @@
 
 .overviewPaneAction:focus-visible {
   outline: 2px solid var(--focus-ring);
-  outline-offset: 2px;
+  outline-offset: -2px;
   border-radius: 2px;
-}
-
-.overviewMetrics {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px 20px;
-  align-items: baseline;
-}
-
-.overviewMetric {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  min-width: 0;
-}
-
-.overviewMetricLabel {
-  color: var(--muted);
-  font-size: 11px;
-  font-weight: 500;
-}
-
-.overviewMetricValue {
-  font-size: 16px;
-  font-weight: 600;
-  font-variant-numeric: tabular-nums;
-  letter-spacing: -0.02em;
-  line-height: 1.2;
-}
-
-.overviewMetricHint {
-  color: var(--muted);
-  font-size: 11px;
-}
-
-.overviewSessionCharts {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 24px;
-  align-items: start;
-}
-
-.overviewSessionChart {
-  min-width: 0;
-  margin: 0;
-}
-
-.overviewSessionChartHeader {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 8px;
-  margin-block-end: 10px;
-  color: var(--muted);
-  font-size: 11px;
-  font-weight: 600;
-}
-
-.overviewSessionChartHeader > span {
-  white-space: nowrap;
-}
-
-.overviewSessionChartHeader strong {
-  font-size: 16px;
-  font-variant-numeric: tabular-nums;
-  letter-spacing: -0.02em;
-}
-
-.overviewTokenDonutBody {
-  display: grid;
-  grid-template-columns: 68px minmax(0, 1fr);
-  gap: 12px;
-  align-items: center;
-}
-
-.overviewTokenDonut {
-  display: block;
-  width: 68px;
-  height: 68px;
-  transform: rotate(-90deg);
-}
-
-.overviewTokenDonutTrack,
-.overviewTokenDonutSegment {
-  fill: none;
-  stroke-width: 9;
-}
-
-.overviewTokenDonutTrack {
-  stroke: var(--surface-3);
-}
-
-.overviewTokenDonutSegment.cached { stroke: var(--tone-ok); }
-.overviewTokenDonutSegment.uncached { stroke: var(--tone-info); }
-.overviewTokenDonutSegment.output { stroke: var(--tone-warn); }
-
-.overviewTokenLegend {
-  display: flex;
-  flex-direction: column;
-  gap: 5px;
-  min-width: 0;
-  color: var(--muted);
-  font-size: 10px;
-  font-variant-numeric: tabular-nums;
-}
-
-.overviewTokenLegendRow {
-  display: grid;
-  grid-template-columns: 7px minmax(0, 1fr) auto;
-  gap: 6px;
-  align-items: center;
-  white-space: nowrap;
-}
-
-.overviewTokenLegendRow strong {
-  color: var(--text);
-  font-weight: 600;
-}
-
-.overviewTokenLegendSwatch {
-  width: 7px;
-  height: 7px;
-  border-radius: 2px;
-}
-
-.overviewTokenLegendSwatch.cached { background: var(--tone-ok); }
-.overviewTokenLegendSwatch.uncached { background: var(--tone-info); }
-.overviewTokenLegendSwatch.output { background: var(--tone-warn); }
-
-.overviewSparkline {
-  display: block;
-  width: 100%;
-  height: auto;
-  overflow: visible;
-  color: var(--accent);
-}
-
-.overviewCacheGuide line {
-  stroke: var(--line);
-  stroke-width: 1;
-  stroke-dasharray: 2 3;
-}
-
-.overviewCacheGuide text {
-  fill: var(--muted);
-  font-size: 8px;
-  font-variant-numeric: tabular-nums;
-}
-
-.overviewCacheArea {
-  fill: color-mix(in oklch, var(--accent) 16%, transparent);
-}
-
-.overviewCacheLine {
-  fill: none;
-  stroke: currentColor;
-  stroke-width: 1.75;
-  stroke-linecap: round;
-  stroke-linejoin: round;
-}
-
-.overviewCachePoint {
-  fill: var(--surface);
-  stroke: currentColor;
-  stroke-width: 1.5;
-}
-
-.overviewCachePoint.latest {
-  fill: currentColor;
-  stroke: var(--surface);
-  stroke-width: 2;
-}
-
-@container overview (max-width: 520px) {
-  .overviewSessionCharts { grid-template-columns: minmax(0, 1.15fr) minmax(0, 0.85fr); gap: 12px; }
-  .overviewTokenDonutBody { grid-template-columns: 44px minmax(0, 1fr); gap: 8px; }
-  .overviewTokenDonut { width: 44px; height: 44px; }
-  .overviewTokenDonutTrack,
-  .overviewTokenDonutSegment { stroke-width: 11; }
 }
 
 .overviewQuiet {
@@ -1141,29 +811,28 @@
   line-height: 1.4;
 }
 
-.overviewList {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
+.overviewSessionGrid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-rows: repeat(5, auto);
+  grid-auto-flow: column;
+  grid-auto-columns: minmax(0, 1fr);
+  gap: 12px 24px;
   min-width: 0;
-  margin-inline-start: -10px;
-  padding-inline-start: 10px;
 }
 
-.overviewRow {
+.overviewSessionRow {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  align-items: center;
-  gap: 8px 12px;
-  width: 100%;
+  grid-template-rows: auto auto auto auto;
+  align-content: start;
+  gap: 7px;
+  width: calc(100% - 8px);
   max-width: none;
   box-sizing: border-box;
-  margin: 0;
-  margin-inline-start: -10px;
-  padding-block: 8px;
-  padding-inline: 10px 0;
+  margin-inline: 4px;
+  padding: 6px 8px;
   border: 0;
-  border-radius: var(--radius-md);
+  border-block-end: 1px solid var(--line);
   background: transparent;
   color: inherit;
   font: inherit;
@@ -1171,164 +840,125 @@
   cursor: pointer;
 }
 
-.overviewRow:hover,
-.overviewRow:focus-visible {
+.overviewSessionRow:hover,
+.overviewSessionRow:focus-visible {
   background: var(--hover-fill-strong);
-}
-
-.overviewRow:focus-visible {
-  outline: 2px solid var(--focus-ring);
-  outline-offset: 1px;
-}
-
-.overviewRowMain {
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
-
-.overviewRowTitle {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-size: 13px;
-  font-weight: 600;
-  line-height: 1.3;
-}
-
-.overviewRowMeta {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  color: var(--muted);
-  font-size: 11px;
-  line-height: 1.3;
-}
-
-.overviewRowTrailing {
-  display: flex;
-  align-items: center;
-  justify-content: end;
-  gap: 8px;
-  flex: 0 0 auto;
-}
-
-.overviewRowStat {
-  font-size: 12px;
-  font-weight: 600;
-  font-variant-numeric: tabular-nums;
-  white-space: nowrap;
-}
-
-.overviewMiniCache {
-  width: 36px;
-  height: 4px;
-  overflow: hidden;
-  border-radius: 999px;
-  background: var(--surface-3);
-}
-
-.overviewMiniCacheFill {
-  height: 100%;
-  border-radius: inherit;
-  background: currentColor;
-}
-
-.overviewSkillRow {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  align-items: center;
-  gap: 8px 12px;
-  width: 100%;
-  max-width: none;
-  box-sizing: border-box;
-  margin-inline-start: -10px;
-  padding-block: 4px;
-  padding-inline: 10px 0;
-  border-radius: var(--radius-md);
-}
-
-.overviewSkillRow:hover {
-  background: var(--hover-fill);
-}
-
-.overviewSkillMain {
-  display: flex;
-  align-items: center;
-  min-width: 0;
-  max-width: 100%;
-  width: 100%;
-  overflow: hidden;
-  margin: 0;
-  padding: 4px 0;
-  border: 0;
-  background: transparent;
-  color: inherit;
-  font: inherit;
-  text-align: start;
-  cursor: pointer;
   border-radius: var(--radius-sm);
 }
 
-.overviewSkillMain:focus-visible {
+.overviewSessionRow:focus-visible {
   outline: 2px solid var(--focus-ring);
-  outline-offset: 1px;
+  outline-offset: -2px;
 }
 
-.overviewSkillUpdateButton {
-  flex: 0 0 auto;
-  height: 26px;
-  padding: 0 10px;
-  border: 0;
-  border-radius: var(--radius-md);
-  background: var(--tone-warn-soft);
-  color: var(--tone-warn);
-  font: inherit;
-  font-size: 11px;
-  font-weight: 700;
-  white-space: nowrap;
-  cursor: pointer;
-}
-
-.overviewSkillUpdateButton:hover:not(:disabled),
-.overviewSkillUpdateButton:focus-visible:not(:disabled) {
-  background: color-mix(in oklch, var(--tone-warn) 28%, transparent);
-  color: var(--amber-bright);
-}
-
-.overviewSkillUpdateButton:focus-visible {
-  outline: 2px solid var(--focus-ring);
-  outline-offset: 1px;
-}
-
-.overviewSkillUpdateButton:disabled {
-  opacity: 0.45;
-  cursor: default;
-}
-
-.overviewEmpty {
+.overviewSessionRowHeader,
+.overviewSessionTitleLine,
+.overviewSessionMessage {
   display: flex;
-  flex-direction: column;
+  align-items: center;
+  min-width: 0;
+}
+
+.overviewSessionRowHeader {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 8px;
+}
+
+.overviewSessionTitleLine {
+  gap: 6px;
+  align-items: flex-start;
+}
+
+.overviewSessionTitleLine .agentPill {
+  margin-block-start: 1px;
+}
+
+.overviewSessionProject {
+  max-width: 35%;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.35;
+  text-align: end;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.overviewSessionRowTitle {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+  font-weight: 650;
+  line-height: 1.35;
+}
+
+.overviewSessionMessage {
   align-items: flex-start;
   gap: 8px;
-  padding-block: 4px;
+  line-height: 1.35;
 }
 
-.overviewEmptyText {
-  margin: 0;
-  color: var(--muted);
+.overviewSessionMessageLabel {
+  flex: 0 0 16px;
+  color: var(--faint);
   font-size: 13px;
-  line-height: 1.4;
+  font-weight: 700;
+  line-height: 1.5;
+  text-align: center;
 }
 
-.overviewUpdateError {
-  margin: 0;
-  color: var(--danger-text);
+.overviewSessionMessageText {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--muted);
   font-size: 11px;
-  line-height: 1.4;
+  text-overflow: ellipsis;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+@container overview (max-width: 560px) {
+  .overviewSessionGrid {
+    grid-template-columns: 1fr;
+    grid-template-rows: none;
+    grid-auto-flow: row;
+  }
+}
+
+@keyframes overviewBarRise {
+  from { transform: scaleY(0); opacity: 0; }
+}
+
+@keyframes overviewRungReveal {
+  from { transform: scaleX(0); opacity: 0; }
+  to { transform: scaleX(1); opacity: 1; }
+}
+
+@keyframes overviewDotReveal {
+  from { transform: scale(0); opacity: 0; }
+}
+
+@keyframes overviewTickReveal {
+  from { opacity: 0; transform: scaleY(0.2); }
+}
+
+@keyframes overviewLoadingDotsPulse {
+  0%, 70%, 100% { opacity: 0.42; }
+  35% { opacity: 0.78; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .overviewAnalyticsLoadingDots {
+    animation: none;
+    opacity: 0.58;
+  }
 }
 
 .overviewTone-tiny,

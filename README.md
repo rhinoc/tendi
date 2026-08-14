@@ -1,6 +1,6 @@
 <div align="center">
   <br />
-  <img src="./apps/desktop/src-tauri/icons/icon.png" alt="Tendi app icon" width="112" height="112" />
+  <img src="./apps/desktop/src-tauri/icons/tendi-icon.svg" alt="Tendi app icon" width="112" height="112" />
   <h1>tendi</h1>
   <p>A local-first control plane for coding-agent sessions, skills, rules, hooks, MCP servers, and configuration.</p>
   <p>
@@ -68,6 +68,10 @@ The artifact is written to `dist/tendi-<version>-<arch>.dmg`. The DMG contains `
 **Applications** shortcut, and the checked-in background at
 `apps/desktop/src-tauri/res/dmg-background.png`.
 
+Release builds bundle the matching `tendi` CLI inside the app. The first-run setup or the
+**Command line** section in Settings can register it on the user's shell `PATH`; the DMG does not
+silently modify shell configuration.
+
 Published releases also include Tauri updater artifacts and `latest.json`. Installed apps can
 check for updates from **Settings → Updates**. Release signing requires a repository secret named
 `TAURI_SIGNING_PRIVATE_KEY`; an optional
@@ -98,6 +102,8 @@ are:
 ```text
 tendi scan [--json]
 tendi agents list [--json]
+tendi skills guide [--json]
+tendi setup skills [--to <shared|codex|cursor|claude>] [options]
 tendi skills list [--json]
 tendi skills add <source> [--visibility <auto|manual|off>] [options]
 tendi skills set <pattern> --visibility <auto|manual|off> [options]
@@ -115,6 +121,12 @@ tendi mcp list [--json]
 
 Commands that change files show a plan first. Use `--dry-run` to inspect a change without
 applying it and `--yes` to confirm non-interactively.
+
+On the first interactive CLI run, Tendi offers to install its bundled agent skill into
+`~/.agents/skills/tendi`. The desktop app shows the same one-time prompt. The installed skill is
+a small discovery stub: it asks the current `tendi` binary for `tendi skills guide`, then uses
+the version-matched guide to search sessions, inspect agent inventory, and preview or apply skill
+changes. Existing files with different content require an explicit `--overwrite`.
 
 ### Desktop app
 

@@ -108,14 +108,20 @@ export {
   compareSessions,
   sessionTimeMs,
 } from "./sessions.ts";
+export { sessionExternalKey, resolveInitialSession, resolveInitialSessionId } from "./session-selection.ts";
 export type { SessionIdentityRecord } from "./sessions.ts";
 export type { SessionKind, SessionRecord, SessionTokenUsage } from "./sessions.ts";
+export { applySessionProjectDelta } from "./session-project-delta.ts";
+export type { SessionProjectDelta } from "./session-project-delta.ts";
 
-export { summarizeSessionUsage } from "./overview.ts";
+export { summarizeRecentSession, summarizeSessionUsage } from "./overview.ts";
+export { summarizeSessionPreview, summarizeSessionPreviewRecord } from "./session-preview.ts";
+export type { RecentSessionPreview } from "./session-preview.ts";
 export type { SessionUsageSummary, TokenMix } from "./overview.ts";
 
-export { analyticsHeatLevels, groupAnalyticsDays } from "./analytics.ts";
+export { groupAnalyticsDays } from "./analytics.ts";
 export type {
+  AnalyticsCallUsage,
   AnalyticsCapabilities,
   AnalyticsDay,
   AnalyticsGranularity,
@@ -158,21 +164,26 @@ export {
 export type { HookRecord } from "./hooks.ts";
 
 export {
+  createLatestRequestAuthority,
+  mergeTranscriptItems,
+  transcriptItemsSize,
   normalizeTranscript,
+  normalizeTranscriptPage,
   parseJsonlTranscript,
   transcriptItemType,
   groupTranscriptItems,
 } from "./transcript.ts";
-export type { JsonlTranscriptParseResult, TranscriptItem, TranscriptGroup } from "./transcript.ts";
+export type { JsonlTranscriptParseResult, TranscriptItem, TranscriptGroup, TranscriptPage } from "./transcript.ts";
 
 
 export {
   fallbackData,
   emptyRuntimeData,
   initialData,
+  normalizeDomainRows,
   normalizeReport,
 } from "./data.ts";
-export type { RuntimeData } from "./data.ts";
+export type { RuntimeData, RuntimeDomainKey } from "./data.ts";
 
 export {
   buildFileTreeRows,
@@ -221,5 +232,11 @@ export {
 } from "./window-drag.ts";
 
 export { TauriCommand, safeInvoke, copyText } from "./tauri.ts";
+export type {
+  BundledSkillInstallReport,
+  BundledSkillStatus,
+  CliInstallState,
+  CliInstallStatus,
+} from "./tauri.ts";
 
 export { textMatchRank, boostedTextMatchRank } from "./text-search.ts";
