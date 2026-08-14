@@ -924,6 +924,7 @@ export function TranscriptPanel({
       </div>
       <SessionLocator
         items={locatorItems}
+        loading={loading}
         scrollRootRef={transcriptRef}
         onSelect={selectLocatorItem}
       />
@@ -944,10 +945,12 @@ export function TranscriptPanel({
 
 const SessionLocator = memo(function SessionLocator({
   items,
+  loading,
   scrollRootRef,
   onSelect,
 }: {
   items: SessionLocatorItem[];
+  loading: boolean;
   scrollRootRef: { current: HTMLDivElement | null };
   onSelect: (key: string, behavior?: ScrollBehavior) => void;
 }) {
@@ -958,7 +961,7 @@ const SessionLocator = memo(function SessionLocator({
   const itemKeys = useMemo(() => items.map((item) => item.key).join("\0"), [items]);
 
   useEffect(() => {
-    if (items.length < SESSION_LOCATOR_MIN_ITEMS) {
+    if (loading || items.length < SESSION_LOCATOR_MIN_ITEMS) {
       setVisibleKeys(new Set());
       return;
     }
@@ -981,7 +984,7 @@ const SessionLocator = memo(function SessionLocator({
     return () => {
       observer.disconnect();
     };
-  }, [itemKeys, items, scrollRootRef]);
+  }, [itemKeys, items, loading, scrollRootRef]);
 
   if (items.length < SESSION_LOCATOR_MIN_ITEMS) return null;
 

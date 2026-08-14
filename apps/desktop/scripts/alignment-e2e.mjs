@@ -351,6 +351,10 @@ async function runSessionLocatorChecks(page) {
   await page.locator(".dataRow--frozenPane .sessionTitleText").first().click();
   const locatorRows = page.locator(".sessionLocatorRow");
   await locatorRows.first().waitFor();
+  await page.waitForFunction(
+    () => document.querySelectorAll('.sessionLocatorRow[aria-current="true"]').length > 0,
+    { timeout: 2000 },
+  ).catch(() => {});
   const locatorCount = await locatorRows.count();
   const currentLocatorCount = await page.locator('.sessionLocatorRow[aria-current="true"]').count();
   check(
@@ -999,6 +1003,7 @@ try {
         }
         if (command === "plugin:event|unlisten") return null;
         if (command === "scan") return report;
+        if (command === "skills_refresh") return { skills: report.skills.skills, updateCheck: "completed" };
         if (command === "skills_list") return report.skills.skills;
         if (command === "prompts_list") return report.prompts.prompts;
         if (command === "sessions_list") {
@@ -1078,6 +1083,7 @@ try {
   }, buildReport());
 
   await page.goto(`http://127.0.0.1:${PORT}/`);
+  await page.getByRole("button", { name: "Skills", exact: true }).click();
   await page.getByRole("heading", { name: "Skills" }).waitFor();
 
   console.log("\n== installed agent filter ==");
