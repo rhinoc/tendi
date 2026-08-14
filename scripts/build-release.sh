@@ -80,7 +80,6 @@ build_arch() {
     local expected_arch
     case "$target_triple" in
       aarch64-apple-darwin) expected_arch="arm64" ;;
-      x86_64-apple-darwin) expected_arch="x86_64" ;;
       *) echo "error: unsupported target triple: $target_triple" >&2; exit 1 ;;
     esac
     file "$bundled_cli" | grep -q "Mach-O 64-bit executable $expected_arch" || {
@@ -103,13 +102,9 @@ for requested_arch in $RELEASE_ARCHES; do
     arm64|aarch64)
       build_arch aarch64-apple-darwin aarch64
       ;;
-    x86_64|x64)
-      build_arch x86_64-apple-darwin x64
-      ;;
     host)
       case "$(uname -m)" in
         arm64) build_arch host aarch64 ;;
-        x86_64) build_arch host x64 ;;
         *) echo "error: unsupported host architecture: $(uname -m)" >&2; exit 1 ;;
       esac
       ;;
@@ -120,7 +115,7 @@ for requested_arch in $RELEASE_ARCHES; do
   esac
 done
 
-if [[ "$UPDATER_ENABLED" == "1" && -f "$ROOT/dist/tendi-${VERSION}-aarch64.app.tar.gz.sig" && -f "$ROOT/dist/tendi-${VERSION}-x64.app.tar.gz.sig" ]]; then
+if [[ "$UPDATER_ENABLED" == "1" && -f "$ROOT/dist/tendi-${VERSION}-aarch64.app.tar.gz.sig" ]]; then
   "$ROOT/scripts/write-latest-json.sh"
 fi
 

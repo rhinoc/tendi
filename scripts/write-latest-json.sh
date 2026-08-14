@@ -18,8 +18,6 @@ const releaseUrl = process.env.RELEASE_URL;
 const artifacts = {
   "darwin-aarch64": "aarch64",
   "darwin-aarch64-app": "aarch64",
-  "darwin-x86_64": "x64",
-  "darwin-x86_64-app": "x64",
 };
 
 const platforms = {};

@@ -31,7 +31,7 @@
 - Node.js and npm
 - Git, for Git-backed skill sources and update checks
 - `sqlite3` on `PATH` when running the full acceptance script
-- macOS for the current desktop development workflow
+- Apple Silicon macOS for the current desktop development workflow
 
 ## Install
 

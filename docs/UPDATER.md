@@ -26,9 +26,9 @@ This produces the DMG, `tendi-<version>-<arch>.app.tar.gz`, and its `.sig` file 
 
 ## Release artifacts
 
-`.github/workflows/release.yml` builds Apple Silicon and Intel artifacts, publishes the DMGs to a
-GitHub Release, and uploads the updater archives, signatures, and `latest.json` to the same
-release. The app checks:
+`.github/workflows/release.yml` builds the Apple Silicon artifact, publishes the DMG to a GitHub
+Release, and uploads the updater archive, signature, and `latest.json` to the same release. The
+app checks:
 
 ```text
 https://github.com/rhinoc/tendi/releases/latest/download/latest.json
@@ -39,8 +39,8 @@ Configure these GitHub Actions secrets before running a release:
 - `TAURI_SIGNING_PRIVATE_KEY`: full contents of the private key file.
 - `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`: optional password, if the key is protected.
 
-The updater manifest includes both `darwin-aarch64` and `darwin-x86_64` platform entries. A release
-must publish both architecture packages so either macOS architecture can update.
+The updater manifest includes Apple Silicon entries (`darwin-aarch64` and
+`darwin-aarch64-app`) only. Releases support Apple Silicon Macs.
 
 ## Application behavior
 
