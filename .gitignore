@@ -6,6 +6,8 @@ dist
 
 .DS_Store
 *.log
+CONTEXT.md
+.claude/settings.local.json
 
 apps/desktop/src-tauri/gen
 apps/desktop/src-tauri/binaries/
