@@ -22,8 +22,8 @@ try {
   const [{ groupAnalyticsDays, selectAnalyticsGranularity }, { OverviewTrendChart, buildTrendPeriodModel }, { SkillSessionProjectChart, groupSkillSessionProjectItems }, { SkillRelationshipMap, buildRelationshipGraphForPerformance }, { TooltipProvider }] = await Promise.all([
     vite.ssrLoadModule("/src/lib/analytics.ts"),
     vite.ssrLoadModule("/src/views/OverviewTrendChart.tsx"),
-    vite.ssrLoadModule("/src/components/shared/SkillSessionProjectChart.tsx"),
-    vite.ssrLoadModule("/src/components/shared/SkillRelationshipMap.tsx"),
+    vite.ssrLoadModule("/src/features/sessions/SkillSessionProjectChart.tsx"),
+    vite.ssrLoadModule("/src/features/skills/SkillRelationshipMap.tsx"),
     vite.ssrLoadModule("/src/components/shared/Tooltip.tsx"),
   ]);
   const runner = {
