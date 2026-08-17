@@ -1,12 +1,17 @@
-import type { ButtonHTMLAttributes } from "react";
+import { forwardRef } from "react";
 import { MoreHorizontal } from "lucide-react";
 
-export type MoreActionsButtonProps = Omit<ButtonHTMLAttributes<HTMLButtonElement>, "children">;
+import { IconButton, type IconButtonProps } from "./IconButton.tsx";
 
-export function MoreActionsButton({ className = "", ...props }: MoreActionsButtonProps) {
+export type MoreActionsButtonProps = Omit<IconButtonProps, "children">;
+
+export const MoreActionsButton = forwardRef<HTMLButtonElement, MoreActionsButtonProps>(function MoreActionsButton(
+  { className = "", ...props },
+  ref,
+) {
   return (
-    <button type="button" {...props} className={`iconButton${className ? ` ${className}` : ""}`}>
+    <IconButton ref={ref} {...props} className={className}>
       <MoreHorizontal size={16} />
-    </button>
+    </IconButton>
   );
-}
+});

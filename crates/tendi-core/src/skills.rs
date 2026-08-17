@@ -2,11 +2,11 @@ use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     env, fs,
     path::{Path, PathBuf},
-    process::Command,
-    sync::atomic::{AtomicU64, Ordering},
+    sync::atomic::{AtomicBool, AtomicU64, Ordering},
 };
 
 use anyhow::{Context, Result, bail};
+use chrono::{SecondsFormat, TimeZone, Utc};
 use serde::{Deserialize, Serialize};
 use serde_yaml::Value;
 use sha2::{Digest, Sha256};
@@ -14,10 +14,12 @@ use toml_edit::{ArrayOfTables, DocumentMut, Item, Table, value};
 use walkdir::WalkDir;
 
 use crate::fsutil::{atomic_write, sha256_file, sha256_text};
+use crate::git::{self, CommandFailure};
 use crate::skill_targets::{SkillInstallScope, SkillTarget, skill_target_root};
 
 const WRAPPER_CATALOG_START: &str = "<catalog>";
 const WRAPPER_CATALOG_END: &str = "</catalog>";
+const MAX_CONCURRENT_GIT_FETCHES: usize = 4;
 static GIT_UPDATE_CHECK_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd, Deserialize, Serialize)]
@@ -32,17 +34,11 @@ pub enum AgentKind {
 
 impl AgentKind {
     fn label(self) -> &'static str {
-        match self {
-            AgentKind::Codex => "codex",
-            AgentKind::Cursor => "cursor",
-            AgentKind::Claude => "claude",
-            AgentKind::Shared => "shared",
-            AgentKind::Unknown => "unknown",
-        }
+        crate::providers::agent_provider(self).storage_key()
     }
 }
 
-#[derive(Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd, Serialize)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum SkillVisibility {
     Auto,
@@ -71,7 +67,7 @@ pub struct SkillRoot {
     pub plugin_enabled: Option<bool>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct SkillPath {
     pub path: PathBuf,
     pub root: PathBuf,
@@ -110,7 +106,7 @@ pub struct SkillSourceRecord {
     pub origin: String,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct SkillRecord {
     pub name: String,
     pub description: Option<String>,
@@ -124,6 +120,8 @@ pub struct SkillRecord {
     pub install_targets: Vec<String>,
     pub update_status: String,
     pub is_system: bool,
+    pub ctime: Option<String>,
+    pub mtime: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1510,7 +1508,12 @@ fn resolve_add_source(
                 if let Some(parent) = root.parent() {
                     fs::create_dir_all(parent)?;
                 }
-                run_git_clone(&parsed.url, parsed.git_ref.as_deref(), &root)?;
+                run_git_clone(
+                    &parsed.url,
+                    parsed.git_ref.as_deref(),
+                    &root,
+                    git::never_cancelled(),
+                )?;
             }
             let discovery_root = match parsed.subpath {
                 Some(subpath) => {
@@ -1537,7 +1540,7 @@ fn resolve_add_source(
                 temporary: !persistent_remote,
             })
         }
-        "well-known" => {
+        "well-known" | "clawhub" => {
             let root = if persistent_remote {
                 persistent_source_root(&parsed.url)?
             } else {
@@ -1644,19 +1647,25 @@ fn cleanup_resolved_source(source: &ResolvedAddSource) {
     }
 }
 
-fn run_git_clone(source: &str, git_ref: Option<&str>, target: &Path) -> Result<()> {
-    let mut command = Command::new("git");
-    command.args(["clone", "--depth", "1"]);
+fn run_git_clone(
+    source: &str,
+    git_ref: Option<&str>,
+    target: &Path,
+    cancelled: &AtomicBool,
+) -> Result<()> {
+    let mut args = vec!["clone".to_string(), "--depth".to_string(), "1".to_string()];
     if let Some(git_ref) = git_ref {
-        command.args(["--branch", git_ref]);
+        args.extend(["--branch".to_string(), git_ref.to_string()]);
     }
-    let status = command
-        .arg(source)
-        .arg(target)
-        .status()
+    args.extend([source.to_string(), target.display().to_string()]);
+    let cwd = target.parent().unwrap_or_else(|| Path::new("."));
+    let output = git::run_git(cwd, args, git::NETWORK_COMMAND_TIMEOUT, cancelled)
         .with_context(|| format!("failed to run git clone for {source}"))?;
-    if !status.success() {
-        bail!("git clone failed for {source}");
+    if !output.status.success() {
+        bail!(
+            "git clone failed for {source}: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
     }
     Ok(())
 }
@@ -1850,8 +1859,15 @@ pub fn check_skill_updates(cwd: &Path) -> Result<Vec<SkillUpdateReport>> {
 }
 
 pub fn check_skill_updates_for_scan(scan: &SkillScan) -> Vec<SkillUpdateReport> {
+    check_skill_updates_for_scan_with_cancel(scan, git::never_cancelled())
+}
+
+pub fn check_skill_updates_for_scan_with_cancel(
+    scan: &SkillScan,
+    cancelled: &AtomicBool,
+) -> Vec<SkillUpdateReport> {
     let skills = scan.skills.iter().collect::<Vec<_>>();
-    check_skill_updates_for_skills(&skills)
+    check_skill_updates_for_skills(&skills, cancelled)
 }
 
 pub fn plan_skill_updates(cwd: &Path, pattern: &str) -> Result<SkillUpdatePlan> {
@@ -1908,7 +1924,7 @@ fn plan_skill_updates_for_matches(
     let mut file_changes = Vec::new();
     let mut git_updates = BTreeMap::new();
     let mut skipped = Vec::new();
-    let updates_by_name = check_skill_updates_for_skills(&matches)
+    let updates_by_name = check_skill_updates_for_skills(&matches, git::never_cancelled())
         .into_iter()
         .map(|update| (update.name.clone(), update))
         .collect::<BTreeMap<_, _>>();
@@ -1917,7 +1933,14 @@ fn plan_skill_updates_for_matches(
         let update = updates_by_name
             .get(&skill.name)
             .cloned()
-            .unwrap_or_else(|| check_skill_update(skill, &mut BTreeMap::new()));
+            .unwrap_or_else(|| {
+                check_skill_update(
+                    skill,
+                    &BTreeMap::new(),
+                    &BTreeMap::new(),
+                    git::never_cancelled(),
+                )
+            });
         if update.status != "update-available" {
             skipped.push(update);
             continue;
@@ -2115,13 +2138,9 @@ fn discover_roots(cwd: &Path) -> Vec<SkillRoot> {
 
 pub(crate) fn global_agent_skill_root(agent: AgentKind) -> Result<PathBuf> {
     let home = dirs::home_dir().context("could not resolve home directory")?;
-    match agent {
-        AgentKind::Codex => Ok(home.join(".codex/skills")),
-        AgentKind::Cursor => Ok(home.join(".cursor/skills")),
-        AgentKind::Claude => Ok(home.join(".claude/skills")),
-        AgentKind::Shared => Ok(home.join(".agents/skills")),
-        AgentKind::Unknown => bail!("unknown agent target"),
-    }
+    crate::providers::agent_provider(agent)
+        .global_skill_root(&home)
+        .ok_or_else(|| anyhow::anyhow!("unknown agent target"))
 }
 
 #[cfg(unix)]
@@ -2753,6 +2772,8 @@ fn merge_skill(name: String, raws: Vec<RawSkill>) -> SkillRecord {
     let mut source_summaries = BTreeSet::new();
     let mut install_targets = BTreeSet::new();
     let mut update_statuses = BTreeSet::new();
+    let mut ctime = None;
+    let mut mtime = None;
     let mut visibility = SkillVisibility::Auto;
     let mut is_system = true;
     let description = raws.iter().find_map(|raw| raw.description.clone());
@@ -2770,6 +2791,9 @@ fn merge_skill(name: String, raws: Vec<RawSkill>) -> SkillRecord {
     }
 
     for raw in raws {
+        let (raw_ctime, raw_mtime) = skill_directory_times(&raw.path.path);
+        update_latest_timestamp(&mut ctime, raw_ctime);
+        update_latest_timestamp(&mut mtime, raw_mtime);
         is_system &= raw.is_system;
         tags.extend(raw.tags);
         dependencies.extend(raw.dependencies);
@@ -2805,6 +2829,47 @@ fn merge_skill(name: String, raws: Vec<RawSkill>) -> SkillRecord {
         install_targets: install_targets.into_iter().collect(),
         update_status: summarize_update_status(update_statuses),
         is_system,
+        ctime,
+        mtime,
+    }
+}
+
+fn skill_directory_times(path: &Path) -> (Option<String>, Option<String>) {
+    let metadata = fs::symlink_metadata(path).ok();
+    (
+        metadata
+            .as_ref()
+            .and_then(|value| value.created().ok())
+            .and_then(system_time_to_iso),
+        metadata
+            .as_ref()
+            .and_then(|value| value.modified().ok())
+            .and_then(system_time_to_iso),
+    )
+}
+
+fn system_time_to_iso(value: std::time::SystemTime) -> Option<String> {
+    let millis = i64::try_from(
+        value
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()?
+            .as_millis(),
+    )
+    .ok()?;
+    Utc.timestamp_millis_opt(millis)
+        .single()
+        .map(|value| value.to_rfc3339_opts(SecondsFormat::Millis, true))
+}
+
+fn update_latest_timestamp(current: &mut Option<String>, candidate: Option<String>) {
+    let Some(candidate) = candidate else {
+        return;
+    };
+    if current
+        .as_deref()
+        .is_none_or(|value| candidate.as_str() > value)
+    {
+        *current = Some(candidate);
     }
 }
 
@@ -3319,11 +3384,13 @@ fn local_provenance(skill_dir: &Path) -> Provenance {
 }
 
 fn git_output(cwd: &Path, args: &[&str]) -> Option<String> {
-    let output = Command::new("git")
-        .args(args)
-        .current_dir(cwd)
-        .output()
-        .ok()?;
+    let output = git::run_git(
+        cwd,
+        args,
+        git::LOCAL_COMMAND_TIMEOUT,
+        git::never_cancelled(),
+    )
+    .ok()?;
     if !output.status.success() {
         return None;
     }
@@ -3340,10 +3407,12 @@ fn git_repository_boundary(path: &Path) -> Option<PathBuf> {
 }
 
 fn run_git(cwd: &Path, args: &[&str]) -> Result<()> {
-    let output = Command::new("git")
-        .args(args)
-        .current_dir(cwd)
-        .output()
+    let timeout = if is_network_git_command(args) {
+        git::NETWORK_COMMAND_TIMEOUT
+    } else {
+        git::LOCAL_COMMAND_TIMEOUT
+    };
+    let output = git::run_git(cwd, args, timeout, git::never_cancelled())
         .with_context(|| format!("failed to run git in {}", cwd.display()))?;
     if output.status.success() {
         return Ok(());
@@ -3355,6 +3424,10 @@ fn run_git(cwd: &Path, args: &[&str]) -> Result<()> {
         cwd.display(),
         stderr.trim()
     )
+}
+
+fn is_network_git_command(args: &[&str]) -> bool {
+    matches!(args.first().copied(), Some("clone" | "fetch" | "pull"))
 }
 
 fn symlink_status(root: &Path, skill_dir: &Path) -> String {
@@ -3393,11 +3466,15 @@ fn summarize_update_status(statuses: BTreeSet<String>) -> String {
     }
 }
 
-fn check_skill_updates_for_skills(skills: &[&SkillRecord]) -> Vec<SkillUpdateReport> {
-    let mut git_remote_heads = fetch_git_remote_heads(skills);
+fn check_skill_updates_for_skills(
+    skills: &[&SkillRecord],
+    cancelled: &AtomicBool,
+) -> Vec<SkillUpdateReport> {
+    let git_remote_heads = fetch_git_remote_heads(skills, cancelled);
+    let git_changed_paths = fetch_git_changed_paths(skills, &git_remote_heads, cancelled);
     let reports = skills
         .iter()
-        .map(|skill| check_skill_update(skill, &mut git_remote_heads))
+        .map(|skill| check_skill_update(skill, &git_remote_heads, &git_changed_paths, cancelled))
         .collect();
     cleanup_git_remote_heads(git_remote_heads);
     reports
@@ -3409,7 +3486,10 @@ struct GitRemoteHead {
     reference: String,
 }
 
-fn fetch_git_remote_heads(skills: &[&SkillRecord]) -> BTreeMap<PathBuf, Option<GitRemoteHead>> {
+fn fetch_git_remote_heads(
+    skills: &[&SkillRecord],
+    cancelled: &AtomicBool,
+) -> BTreeMap<PathBuf, Option<GitRemoteHead>> {
     let remotes = skills
         .iter()
         .filter_map(|skill| {
@@ -3419,16 +3499,18 @@ fn fetch_git_remote_heads(skills: &[&SkillRecord]) -> BTreeMap<PathBuf, Option<G
                 .find(|path| matches!(path.update_status.as_str(), "checkable" | "tracked"))?;
             is_git_source_kind(&path.source_kind).then(|| {
                 Some((
-                    git_checkout_for_skill_path(path)?,
+                    git_checkout_for_skill_path(path, cancelled)?,
                     (path.source.clone()?, path.source_ref.clone()),
                 ))
             })?
         })
         .collect::<BTreeMap<_, _>>();
-    const MAX_CONCURRENT_FETCHES: usize = 4;
     let remotes = remotes.into_iter().collect::<Vec<_>>();
     let mut heads = BTreeMap::new();
-    for batch in remotes.chunks(MAX_CONCURRENT_FETCHES) {
+    for batch in remotes.chunks(MAX_CONCURRENT_GIT_FETCHES) {
+        if cancelled.load(Ordering::Acquire) {
+            break;
+        }
         let results = std::thread::scope(|scope| {
             batch
                 .iter()
@@ -3436,7 +3518,7 @@ fn fetch_git_remote_heads(skills: &[&SkillRecord]) -> BTreeMap<PathBuf, Option<G
                     scope.spawn(move || {
                         (
                             repo.clone(),
-                            fetch_git_remote_head(repo, source, source_ref.as_deref()),
+                            fetch_git_remote_head(repo, source, source_ref.as_deref(), cancelled),
                         )
                     })
                 })
@@ -3450,9 +3532,84 @@ fn fetch_git_remote_heads(skills: &[&SkillRecord]) -> BTreeMap<PathBuf, Option<G
     heads
 }
 
+fn fetch_git_changed_paths(
+    skills: &[&SkillRecord],
+    git_remote_heads: &BTreeMap<PathBuf, Option<GitRemoteHead>>,
+    cancelled: &AtomicBool,
+) -> BTreeMap<PathBuf, Option<BTreeSet<String>>> {
+    let mut requests = BTreeMap::<PathBuf, (String, BTreeSet<String>)>::new();
+    for skill in skills {
+        let Some(path) = skill
+            .paths
+            .iter()
+            .find(|path| matches!(path.update_status.as_str(), "checkable" | "tracked"))
+        else {
+            continue;
+        };
+        if !is_git_source_kind(&path.source_kind) || git_repository_boundary(&path.path).is_none() {
+            continue;
+        }
+        let Some(repo) = git_checkout_for_skill_path(path, cancelled) else {
+            continue;
+        };
+        let Some(Some(head)) = git_remote_heads.get(&repo) else {
+            continue;
+        };
+        if source_revision_matches(path.source_version.as_deref(), &head.oid) {
+            continue;
+        }
+        requests
+            .entry(repo)
+            .and_modify(|(_, paths)| {
+                paths.insert(
+                    path.source_relative_path
+                        .as_deref()
+                        .unwrap_or(".")
+                        .to_string(),
+                );
+            })
+            .or_insert_with(|| {
+                (
+                    head.oid.clone(),
+                    BTreeSet::from([path
+                        .source_relative_path
+                        .as_deref()
+                        .unwrap_or(".")
+                        .to_string()]),
+                )
+            });
+    }
+
+    let requests = requests.into_iter().collect::<Vec<_>>();
+    let mut changed_paths = BTreeMap::new();
+    for batch in requests.chunks(MAX_CONCURRENT_GIT_FETCHES) {
+        if cancelled.load(Ordering::Acquire) {
+            break;
+        }
+        let results = std::thread::scope(|scope| {
+            batch
+                .iter()
+                .map(|(repo, (remote_head, paths))| {
+                    scope.spawn(move || {
+                        let result = git_diff_changed_paths(repo, remote_head, paths, cancelled);
+                        (repo.clone(), result.ok())
+                    })
+                })
+                .collect::<Vec<_>>()
+                .into_iter()
+                .filter_map(|handle| handle.join().ok())
+                .collect::<Vec<_>>()
+        });
+        changed_paths.extend(results);
+    }
+    changed_paths
+}
+
 fn check_skill_update(
     skill: &SkillRecord,
-    git_remote_heads: &mut BTreeMap<PathBuf, Option<GitRemoteHead>>,
+    git_remote_heads: &BTreeMap<PathBuf, Option<GitRemoteHead>>,
+    git_changed_paths: &BTreeMap<PathBuf, Option<BTreeSet<String>>>,
+    cancelled: &AtomicBool,
 ) -> SkillUpdateReport {
     let Some(path) = skill
         .paths
@@ -3472,7 +3629,7 @@ fn check_skill_update(
 
     match path.source_kind.as_str() {
         "git" | "github" | "gitlab" | "huggingface" => {
-            check_git_update(skill, path, git_remote_heads)
+            check_git_update(skill, path, git_remote_heads, git_changed_paths, cancelled)
         }
         "registry" => check_registry_update(skill, path),
         _ => SkillUpdateReport {
@@ -3489,7 +3646,9 @@ fn check_skill_update(
 fn check_git_update(
     skill: &SkillRecord,
     path: &SkillPath,
-    git_remote_heads: &mut BTreeMap<PathBuf, Option<GitRemoteHead>>,
+    git_remote_heads: &BTreeMap<PathBuf, Option<GitRemoteHead>>,
+    git_changed_paths: &BTreeMap<PathBuf, Option<BTreeSet<String>>>,
+    cancelled: &AtomicBool,
 ) -> SkillUpdateReport {
     let Some(source) = path.source.clone() else {
         return SkillUpdateReport {
@@ -3503,29 +3662,31 @@ fn check_git_update(
     };
 
     let materialized = git_repository_boundary(&path.path).is_none();
-    let repo = git_checkout_for_skill_path(path);
-    let latest = repo.as_ref().and_then(|repo| {
-        git_remote_heads
-            .entry(repo.clone())
-            .or_insert_with(|| fetch_git_remote_head(repo, &source, path.source_ref.as_deref()))
-            .clone()
-    });
-    let latest_oid = latest.as_ref().map(|head| head.oid.as_str());
-    let current_matches = repo
+    let repo = git_checkout_for_skill_path(path, cancelled);
+    let latest = repo
         .as_ref()
-        .zip(latest_oid)
-        .is_some_and(|(repo, latest)| materialized_source_matches(repo, path, latest));
+        .and_then(|repo| git_remote_heads.get(repo).cloned())
+        .flatten();
+    let latest_oid = latest.as_ref().map(|head| head.oid.as_str());
+    let current_matches = repo.as_ref().zip(latest_oid).is_some_and(|(repo, latest)| {
+        if materialized {
+            materialized_source_matches(repo, path, latest)
+        } else {
+            source_revision_matches(path.source_version.as_deref(), latest)
+        }
+    });
     let status = match (&path.source_version, latest_oid) {
         (_, Some(_)) if current_matches => "up-to-date",
         (Some(_), Some(_)) if materialized => "update-available",
-        (Some(_), Some(latest))
-            if repo
-                .as_ref()
-                .is_some_and(|repo| git_path_changed(repo, path, latest)) =>
+        (Some(_), Some(_)) => match repo
+            .as_ref()
+            .and_then(|repo| git_path_changed(git_changed_paths, repo, path))
         {
-            "update-available"
-        }
-        (Some(_), Some(_)) => "up-to-date",
+            Some(true) => "update-available",
+            Some(false) => "up-to-date",
+            None if cancelled.load(Ordering::Acquire) => "cancelled",
+            None => "unreachable",
+        },
         (None, Some(_)) => "unknown-current",
         (_, None) => "unreachable",
     };
@@ -3547,7 +3708,7 @@ fn plan_git_update(
     update: &SkillUpdateReport,
 ) -> Option<GitUpdateAction> {
     let materialized = git_repository_boundary(&path.path).is_none();
-    let repo = git_checkout_for_skill_path(path)?;
+    let repo = git_checkout_for_skill_path(path, git::never_cancelled())?;
     let tendi_settings = if materialized {
         Vec::new()
     } else {
@@ -3580,7 +3741,8 @@ fn plan_git_update(
                 target: path.path.clone(),
                 source_relative_path: path.source_relative_path.clone(),
                 visibility: path.effective_visibility,
-                shared_or_codex: matches!(path.agent, AgentKind::Shared | AgentKind::Codex),
+                shared_or_codex: crate::providers::agent_provider(path.agent)
+                    .materialized_skill_is_shared_or_codex(),
             })
             .into_iter()
             .collect(),
@@ -3836,11 +3998,13 @@ fn restore_tendi_git_settings(action: &GitUpdateAction) -> Result<()> {
 
 fn git_show_file(repo: &Path, path: &Path) -> Result<String> {
     let path = path.to_string_lossy();
-    let output = Command::new("git")
-        .args(["show", &format!("HEAD:{path}")])
-        .current_dir(repo)
-        .output()
-        .with_context(|| format!("failed to read {} from {}", path, repo.display()))?;
+    let output = git::run_git(
+        repo,
+        ["show".to_string(), format!("HEAD:{path}")],
+        git::LOCAL_COMMAND_TIMEOUT,
+        git::never_cancelled(),
+    )
+    .with_context(|| format!("failed to read {} from {}", path, repo.display()))?;
     if !output.status.success() {
         bail!("git show failed for {} in {}", path, repo.display());
     }
@@ -3849,11 +4013,19 @@ fn git_show_file(repo: &Path, path: &Path) -> Result<String> {
 
 fn git_show_optional_file(repo: &Path, path: &Path) -> Result<Option<String>> {
     let path_text = path.to_string_lossy().to_string();
-    let output = Command::new("git")
-        .args(["ls-tree", "--name-only", "HEAD", "--", &path_text])
-        .current_dir(repo)
-        .output()
-        .with_context(|| format!("failed to inspect {} in {}", path.display(), repo.display()))?;
+    let output = git::run_git(
+        repo,
+        [
+            "ls-tree".to_string(),
+            "--name-only".to_string(),
+            "HEAD".to_string(),
+            "--".to_string(),
+            path_text.clone(),
+        ],
+        git::LOCAL_COMMAND_TIMEOUT,
+        git::never_cancelled(),
+    )
+    .with_context(|| format!("failed to inspect {} in {}", path.display(), repo.display()))?;
     if !output.status.success() {
         bail!(
             "git ls-tree failed for {} in {}",
@@ -3905,6 +4077,7 @@ fn fetch_git_remote_head(
     repo: &Path,
     source: &str,
     source_ref: Option<&str>,
+    cancelled: &AtomicBool,
 ) -> Option<GitRemoteHead> {
     let reference = format!(
         "refs/tendi/update-check/{}-{}",
@@ -3912,22 +4085,38 @@ fn fetch_git_remote_head(
         GIT_UPDATE_CHECK_SEQUENCE.fetch_add(1, Ordering::Relaxed)
     );
     let requested = source_ref.unwrap_or("HEAD");
-    let output = Command::new("git")
-        .args(["fetch", "--no-write-fetch-head", "--no-tags", source])
-        .arg(format!("+{requested}:{reference}"))
-        .current_dir(repo)
-        .output()
-        .ok()?;
+    let output = git::run_git(
+        repo,
+        [
+            "fetch".to_string(),
+            "--no-write-fetch-head".to_string(),
+            "--no-tags".to_string(),
+            source.to_string(),
+            format!("+{requested}:{reference}"),
+        ],
+        git::NETWORK_COMMAND_TIMEOUT,
+        cancelled,
+    )
+    .ok()?;
     if !output.status.success() {
+        delete_git_ref(repo, &reference);
         return None;
     }
-    let oid = match git_output(repo, &["rev-parse", &reference]) {
+    let oid = match git::run_git(
+        repo,
+        ["rev-parse", reference.as_str()],
+        git::LOCAL_COMMAND_TIMEOUT,
+        cancelled,
+    )
+    .ok()
+    .filter(|output| output.status.success())
+    .and_then(|output| String::from_utf8(output.stdout).ok())
+    .map(|value| value.trim().to_string())
+    .filter(|value| !value.is_empty())
+    {
         Some(oid) => oid,
         None => {
-            let _ = Command::new("git")
-                .args(["update-ref", "-d", &reference])
-                .current_dir(repo)
-                .output();
+            delete_git_ref(repo, &reference);
             return None;
         }
     };
@@ -3938,7 +4127,7 @@ fn is_git_source_kind(kind: &str) -> bool {
     matches!(kind, "git" | "github" | "gitlab" | "huggingface")
 }
 
-fn git_checkout_for_skill_path(path: &SkillPath) -> Option<PathBuf> {
+fn git_checkout_for_skill_path(path: &SkillPath, cancelled: &AtomicBool) -> Option<PathBuf> {
     if let Some(repo) = git_repository_boundary(&path.path) {
         return Some(repo);
     }
@@ -3954,7 +4143,7 @@ fn git_checkout_for_skill_path(path: &SkillPath) -> Option<PathBuf> {
             fs::remove_dir_all(&repo).ok()?;
         }
         fs::create_dir_all(repo.parent()?).ok()?;
-        run_git_clone(source, path.source_ref.as_deref(), &repo).ok()?;
+        run_git_clone(source, path.source_ref.as_deref(), &repo, cancelled).ok()?;
     }
     Some(repo)
 }
@@ -3986,6 +4175,15 @@ fn materialized_source_matches(repo: &Path, path: &SkillPath, latest: &str) -> b
     false
 }
 
+fn source_revision_matches(current: Option<&str>, latest: &str) -> bool {
+    let Some(current) = current else {
+        return false;
+    };
+    (7..=40).contains(&current.len())
+        && current.chars().all(|ch| ch.is_ascii_hexdigit())
+        && latest.starts_with(current)
+}
+
 fn git_tree_oid(repo: &Path, revision: &str, relative: &str) -> Option<String> {
     let spec = if relative.is_empty() || relative == "." {
         format!("{revision}^{{tree}}")
@@ -4011,11 +4209,13 @@ fn git_folder_sha256(repo: &Path, revision: &str, relative: &str) -> Option<Stri
             .unwrap_or(&file)
             .trim_start_matches('/');
         hasher.update(relative_file.as_bytes());
-        let output = Command::new("git")
-            .args(["show", &format!("{revision}:{file}")])
-            .current_dir(repo)
-            .output()
-            .ok()?;
+        let output = git::run_git(
+            repo,
+            ["show".to_string(), format!("{revision}:{file}")],
+            git::LOCAL_COMMAND_TIMEOUT,
+            git::never_cancelled(),
+        )
+        .ok()?;
         if !output.status.success() {
             return None;
         }
@@ -4027,27 +4227,68 @@ fn git_folder_sha256(repo: &Path, revision: &str, relative: &str) -> Option<Stri
 fn cleanup_git_remote_heads(heads: BTreeMap<PathBuf, Option<GitRemoteHead>>) {
     for (repo, head) in heads {
         if let Some(head) = head {
-            let _ = Command::new("git")
-                .args(["update-ref", "-d", &head.reference])
-                .current_dir(repo)
-                .output();
+            delete_git_ref(&repo, &head.reference);
         }
     }
 }
 
-fn git_path_changed(repo: &Path, path: &SkillPath, remote_head: &str) -> bool {
+fn delete_git_ref(repo: &Path, reference: &str) {
+    let _ = git::run_git(
+        repo,
+        ["update-ref", "-d", reference],
+        git::LOCAL_COMMAND_TIMEOUT,
+        git::never_cancelled(),
+    );
+}
+
+fn git_diff_changed_paths(
+    repo: &Path,
+    remote_head: &str,
+    pathspecs: &BTreeSet<String>,
+    cancelled: &AtomicBool,
+) -> Result<BTreeSet<String>, CommandFailure> {
+    let mut args = vec![
+        "diff".to_string(),
+        "--name-only".to_string(),
+        "HEAD".to_string(),
+        remote_head.to_string(),
+        "--".to_string(),
+    ];
+    args.extend(pathspecs.iter().cloned());
+    let output = git::run_git(repo, args, git::LOCAL_COMMAND_TIMEOUT, cancelled)
+        .map_err(|error| error.kind)?;
+    if !output.status.success() {
+        return Err(CommandFailure::Wait);
+    }
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(str::to_string)
+        .collect())
+}
+
+fn git_path_changed(
+    changed_paths: &BTreeMap<PathBuf, Option<BTreeSet<String>>>,
+    repo: &Path,
+    path: &SkillPath,
+) -> Option<bool> {
+    let changed_paths = changed_paths.get(repo)?.as_ref()?;
     let relative = path.source_relative_path.as_deref().unwrap_or(".");
-    let output = Command::new("git")
-        .args(["diff", "--quiet", "HEAD", remote_head, "--", relative])
-        .current_dir(repo)
-        .output();
-    matches!(output.ok().and_then(|output| output.status.code()), Some(1))
+    Some(
+        relative == "."
+            || changed_paths.iter().any(|changed| {
+                changed == relative
+                    || changed
+                        .strip_prefix(relative)
+                        .is_some_and(|suffix| suffix.starts_with('/'))
+            }),
+    )
 }
 
 fn git_path_diff(repo: &Path, path: &SkillPath, remote_head: &str) -> String {
     let relative = path.source_relative_path.as_deref().unwrap_or(".");
-    let output = Command::new("git")
-        .args([
+    let output = git::run_git(
+        repo,
+        [
             "diff",
             "--no-ext-diff",
             "--unified=3",
@@ -4055,9 +4296,10 @@ fn git_path_diff(repo: &Path, path: &SkillPath, remote_head: &str) -> String {
             remote_head,
             "--",
             relative,
-        ])
-        .current_dir(repo)
-        .output();
+        ],
+        git::LOCAL_COMMAND_TIMEOUT,
+        git::never_cancelled(),
+    );
     output
         .ok()
         .filter(|output| output.status.success() || output.status.code() == Some(1))
@@ -4067,10 +4309,12 @@ fn git_path_diff(repo: &Path, path: &SkillPath, remote_head: &str) -> String {
 
 fn git_path_files(repo: &Path, path: &SkillPath, remote_head: &str) -> Vec<GitUpdateFile> {
     let relative = path.source_relative_path.as_deref().unwrap_or(".");
-    let output = Command::new("git")
-        .args(["diff", "--name-only", "HEAD", remote_head, "--", relative])
-        .current_dir(repo)
-        .output();
+    let output = git::run_git(
+        repo,
+        ["diff", "--name-only", "HEAD", remote_head, "--", relative],
+        git::LOCAL_COMMAND_TIMEOUT,
+        git::never_cancelled(),
+    );
     let Ok(output) = output else {
         return Vec::new();
     };
@@ -4157,10 +4401,12 @@ fn git_materialized_path_files(
 }
 
 fn git_show_revision_file(repo: &Path, revision: &str, path: &str) -> String {
-    let output = Command::new("git")
-        .args(["show", &format!("{revision}:{path}")])
-        .current_dir(repo)
-        .output();
+    let output = git::run_git(
+        repo,
+        ["show".to_string(), format!("{revision}:{path}")],
+        git::LOCAL_COMMAND_TIMEOUT,
+        git::never_cancelled(),
+    );
     output
         .ok()
         .filter(|output| output.status.success())
@@ -5170,7 +5416,13 @@ mod tests {
         fs::write(repository.join("branch.txt"), "release").unwrap();
         run_test_git(&repository, &["commit", "-am", "release"]);
 
-        super::run_git_clone(repository.to_str().unwrap(), Some("release"), &checkout).unwrap();
+        super::run_git_clone(
+            repository.to_str().unwrap(),
+            Some("release"),
+            &checkout,
+            super::git::never_cancelled(),
+        )
+        .unwrap();
 
         assert_eq!(
             fs::read_to_string(checkout.join("branch.txt")).unwrap(),
@@ -5306,6 +5558,7 @@ mod tests {
             "---\nname: demo\ndescription: Demo skill\n---\n\n# demo\n",
         )
         .unwrap();
+        fs::write(skill_dir.join("Archive.zip"), [0_u8, 0xff, 0x00]).unwrap();
 
         let plan = plan_skill_add(
             &root,
@@ -5324,6 +5577,7 @@ mod tests {
         assert_eq!(plan.operations[0].name, "demo");
         assert_eq!(plan.operations[0].mode, "copy");
         assert_eq!(plan.operations[0].status, "planned");
+        assert!(super::skill_add_catalog_fingerprint(&plan).is_ok());
 
         let _ = fs::remove_dir_all(root);
     }
@@ -6019,8 +6273,13 @@ mod tests {
         let fetch_head = local.join(".git/FETCH_HEAD");
         fs::write(&fetch_head, "sentinel\n").unwrap();
 
-        let remote_head = super::fetch_git_remote_head(&local, &remote.display().to_string(), None)
-            .expect("fetch remote head");
+        let remote_head = super::fetch_git_remote_head(
+            &local,
+            &remote.display().to_string(),
+            None,
+            super::git::never_cancelled(),
+        )
+        .expect("fetch remote head");
 
         assert_eq!(fs::read_to_string(&fetch_head).unwrap(), "sentinel\n");
         assert_ne!(
@@ -7217,6 +7476,8 @@ Keep this handmade intro.
             install_targets: vec!["shared:/tmp/tendi-skills".to_string()],
             update_status: "local".to_string(),
             is_system: false,
+            ctime: None,
+            mtime: None,
         }
     }
 

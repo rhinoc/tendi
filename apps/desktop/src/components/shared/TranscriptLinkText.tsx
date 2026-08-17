@@ -2,15 +2,8 @@ import { Link2 } from "lucide-react";
 import type { MouseEvent as ReactMouseEvent, ReactNode } from "react";
 
 import { safeInvoke, TauriCommand } from "../../lib/tauri.ts";
+import { formatMarkdownLinkLabels, transcriptLinkLabel, transcriptLinkTokens } from "../../lib/transcript-format.ts";
 import "./TranscriptLinkText.css";
-
-type TranscriptLinkToken = {
-  end: number;
-  label?: string;
-  start: number;
-  trailing: string;
-  url: string;
-};
 
 export type TranscriptLinkTextProps = {
   interactive?: boolean;
@@ -18,7 +11,9 @@ export type TranscriptLinkTextProps = {
   value: string;
 };
 
-const TRANSCRIPT_LINK_PATTERN = /\[([^\]\n]+)\]\((https?:\/\/[^)\s]+)\)|https?:\/\/[^\s<>"'`]+/gi;
+export type SessionTitleTextProps = Omit<TranscriptLinkTextProps, "value"> & {
+  value: string | null | undefined;
+};
 
 function highlightText(value: string, query: string): ReactNode {
   const needle = query.trim().toLowerCase();
@@ -38,51 +33,6 @@ function highlightText(value: string, query: string): ReactNode {
   return parts;
 }
 
-function trimLinkEnd(value: string) {
-  let end = value.length;
-  while (end > 0 && /[.,!?;:，。！？；：、）》）】］}…"'`]/.test(value[end - 1])) end -= 1;
-  return { value: value.slice(0, end), trailing: value.slice(end) };
-}
-
-function linkTokens(value: string): TranscriptLinkToken[] {
-  const tokens: TranscriptLinkToken[] = [];
-  for (const match of value.matchAll(TRANSCRIPT_LINK_PATTERN)) {
-    const raw = match[0];
-    const markdownUrl = match[2];
-    const trimmed = trimLinkEnd(markdownUrl ?? raw);
-    if (!trimmed.value) continue;
-    tokens.push({
-      end: match.index! + raw.length,
-      label: markdownUrl ? match[1] : undefined,
-      start: match.index!,
-      trailing: trimmed.trailing,
-      url: trimmed.value,
-    });
-  }
-  return tokens;
-}
-
-function shortenLinkPart(value: string, limit = 24) {
-  if (value.length <= limit) return value;
-  return `${value.slice(0, Math.max(8, limit - 8))}…${value.slice(-6)}`;
-}
-
-function linkLabel(url: string, providedLabel?: string) {
-  const label = providedLabel?.trim();
-  if (label && label !== url) return label;
-
-  try {
-    const parsed = new URL(url);
-    const hostParts = parsed.hostname.replace(/^www\./, "").split(".");
-    const host = hostParts.slice(-2).join(".") || parsed.hostname;
-    const segments = parsed.pathname.split("/").filter(Boolean);
-    const path = shortenLinkPart(segments.slice(-2).join("/") || host);
-    return path === host ? host : `${host} · ${path}`;
-  } catch {
-    return "链接";
-  }
-}
-
 function openLink(event: ReactMouseEvent<HTMLAnchorElement>, url: string) {
   event.preventDefault();
   event.stopPropagation();
@@ -90,7 +40,7 @@ function openLink(event: ReactMouseEvent<HTMLAnchorElement>, url: string) {
 }
 
 export function TranscriptLinkText({ interactive = true, query = "", value }: TranscriptLinkTextProps) {
-  const tokens = linkTokens(value);
+  const tokens = transcriptLinkTokens(value);
   if (tokens.length === 0) return highlightText(value, query);
 
   const nodes: ReactNode[] = [];
@@ -98,7 +48,7 @@ export function TranscriptLinkText({ interactive = true, query = "", value }: Tr
   const needle = query.trim().toLowerCase();
   tokens.forEach((token, index) => {
     if (token.start > offset) nodes.push(highlightText(value.slice(offset, token.start), query));
-    const label = linkLabel(token.url, token.label);
+    const label = transcriptLinkLabel(token.url, token.label);
     const isSearchMatch = Boolean(needle && `${token.label ?? ""} ${token.url}`.toLowerCase().includes(needle));
     const linkContent = (
       <span className="transcriptLinkContent">
@@ -126,4 +76,8 @@ export function TranscriptLinkText({ interactive = true, query = "", value }: Tr
   });
   if (offset < value.length) nodes.push(highlightText(value.slice(offset), query));
   return nodes;
+}
+
+export function SessionTitleText({ value, ...props }: SessionTitleTextProps) {
+  return <TranscriptLinkText {...props} value={formatMarkdownLinkLabels(value ?? "")} />;
 }

@@ -4,7 +4,7 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use walkdir::WalkDir;
 
 use crate::{
@@ -12,7 +12,7 @@ use crate::{
     skills::AgentKind,
 };
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct RuleRecord {
     pub agent: AgentKind,
     pub kind: String,

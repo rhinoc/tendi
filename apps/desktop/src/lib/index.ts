@@ -3,8 +3,6 @@ export {
   fallbackAgents,
   fallbackSkills,
   fallbackSkillFiles,
-  fallbackSessions,
-  fallbackTranscript,
   SIDEBAR_SIZE,
   COLLAPSED_SIDEBAR_SIZE,
   SESSION_FREEZE_COLUMN,
@@ -20,6 +18,8 @@ export type { NavItem, FreezeColumnConfig } from "./constants.ts";
 export {
   agentIcons,
   normalizedAgentKey,
+  agentIdentityKey,
+  isConcreteAgent,
   agentClassName,
   agentIcon,
   friendlyAgent,
@@ -80,6 +80,7 @@ export {
   skillChangeActionLabel,
   applySkillUpdateReports,
   mergeSkillListPreservingUpdates,
+  replaceSkillReportPreservingUpdates,
   clearSkillUpdateAvailability,
   applyVisibilityState,
 } from "./skills.ts";
@@ -114,8 +115,8 @@ export type { SessionKind, SessionRecord, SessionTokenUsage } from "./sessions.t
 export { applySessionProjectDelta } from "./session-project-delta.ts";
 export type { SessionProjectDelta } from "./session-project-delta.ts";
 
-export { summarizeRecentSession, summarizeSessionUsage } from "./overview.ts";
-export { summarizeSessionPreview, summarizeSessionPreviewRecord } from "./session-preview.ts";
+export { summarizeSessionUsage } from "./overview.ts";
+export { formatSessionTitle, formatTranscriptPreview, summarizeSessionPreviewRecord } from "./session-preview.ts";
 export type { RecentSessionPreview } from "./session-preview.ts";
 export type { SessionUsageSummary, TokenMix } from "./overview.ts";
 
@@ -129,7 +130,6 @@ export type {
   AnalyticsRankItem,
   AnalyticsTokenUsage,
   OverviewAnalytics,
-  SessionAnalyticsDetail,
 } from "./analytics.ts";
 
 export {
@@ -169,15 +169,23 @@ export {
   transcriptItemsSize,
   normalizeTranscript,
   normalizeTranscriptPage,
+  normalizeTranscriptSearchResult,
   parseJsonlTranscript,
   transcriptItemType,
   groupTranscriptItems,
 } from "./transcript.ts";
-export type { JsonlTranscriptParseResult, TranscriptItem, TranscriptGroup, TranscriptPage } from "./transcript.ts";
+export type {
+  JsonlTranscriptParseResult,
+  TranscriptItem,
+  TranscriptGroup,
+  TranscriptPage,
+  TranscriptSearchHit,
+  TranscriptSearchResult,
+  TranscriptSearchScopes,
+} from "./transcript.ts";
 
 
 export {
-  fallbackData,
   emptyRuntimeData,
   initialData,
   normalizeDomainRows,
@@ -197,6 +205,7 @@ export {
   splitMarkdownFrontmatter,
   isMarkdownPath,
   isYamlPath,
+  isJsonPath,
   normalizeLinkHref,
 } from "./file-tree.ts";
 export type { SkillFileEntry, FileTreeRow } from "./file-tree.ts";
@@ -231,7 +240,7 @@ export {
   startWindowDrag,
 } from "./window-drag.ts";
 
-export { TauriCommand, safeInvoke, copyText } from "./tauri.ts";
+export { TauriCommand, invokeCommand, isTauriRuntime, safeInvoke, safeListen, copyText } from "./tauri.ts";
 export type {
   BundledSkillInstallReport,
   BundledSkillStatus,

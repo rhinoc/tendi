@@ -12,12 +12,13 @@ import { CopyPathMenuItem, RevealInFinderMenuItem } from "../components/shared/D
 import { DetailPanel } from "../components/shared/DetailPanel.tsx";
 import { DetailPanelHost } from "../components/shared/DetailPanelHost.tsx";
 import { DiscardChangesDialog } from "../components/shared/DiscardChangesDialog.tsx";
-import { LoadingInline } from "../components/shared/LoadingInline.tsx";
+import { EditorStatePlaceholder } from "../components/shared/EditorStatePlaceholder.tsx";
+import { InfoDropdownMenu } from "../components/shared/InfoDropdownMenu.tsx";
 import { InfoSection } from "../components/shared/InfoSection.tsx";
-import { MoreActionsButton } from "../components/shared/MoreActionsButton.tsx";
 import { PageHeader } from "../components/shared/PageHeader.tsx";
+import { RowActionsMenu } from "../components/shared/RowActionsMenu.tsx";
 import { SearchField } from "../components/shared/SearchField.tsx";
-import type { SkillDependencyRecord } from "../components/shared/SkillDependencyGraph.tsx";
+import type { SkillDependencyRecord } from "../features/skills/SkillDependencyGraph.tsx";
 import { ruleColumns as sharedRuleColumns } from "../lib/tableColumns.tsx";
 import { RULE_FREEZE_COLUMN, TauriCommand, diffPreview, friendlyAgent, ruleKey, ruleSearchText, ruleSortValue, ruleTitle, safeInvoke, suppressNextClick } from "../lib/index.ts";
 
@@ -63,16 +64,12 @@ function RuleActionsMenuItems({ Menu, rule }: { Menu: RuleMenuComponents; rule: 
 
 function RuleActionsCell({ rule }: { rule: RuleRecord }) {
   return (
-    <DropdownMenu.Root onOpenChange={(open) => { if (!open) suppressNextClick(); }}>
-      <DropdownMenu.Trigger asChild>
-        <MoreActionsButton aria-label={`Rule actions for ${ruleTitle(rule)}`} />
-      </DropdownMenu.Trigger>
-      <DropdownMenu.Portal>
-        <DropdownMenu.Content className="skillMenuContent" align="end" sideOffset={6}>
-          <RuleActionsMenuItems Menu={DropdownMenu} rule={rule} />
-        </DropdownMenu.Content>
-      </DropdownMenu.Portal>
-    </DropdownMenu.Root>
+    <RowActionsMenu
+      ariaLabel={`Rule actions for ${ruleTitle(rule)}`}
+      onOpenChange={(open) => { if (!open) suppressNextClick(); }}
+    >
+      <RuleActionsMenuItems Menu={DropdownMenu} rule={rule} />
+    </RowActionsMenu>
   );
 }
 
@@ -107,19 +104,16 @@ function RuleInfoMenu({
   const kind = rule.kind && rule.kind !== title ? rule.kind : "";
   const order = typeof rule.order === "number" && rule.order !== 0 ? `${rule.order}` : "";
   return (
-    <DropdownMenu.Root>
-      <DropdownMenu.Trigger asChild>
+    <InfoDropdownMenu
+      trigger={(
         <button className="threadPanelToggle" aria-label="Show rule info">
           <Info size={15} />
         </button>
-      </DropdownMenu.Trigger>
-      <DropdownMenu.Portal>
-        <DropdownMenu.Content className="skillInfoContent ruleInfoContent" align="end" sideOffset={8} data-no-drag onMouseDown={(event) => event.stopPropagation()}>
-          <div className="skillInfoHeader">
-            <span>Rule info</span>
-            <strong>{title}</strong>
-          </div>
-          <div className="skillInfoSections">
+      )}
+      label="Rule info"
+      title={title}
+      contentClassName="ruleInfoContent"
+    >
             <InfoSection label="Agent">
                 <AgentBadge agent={agent} small />
                 <span className="ruleInfoValue">{agent}</span>
@@ -164,10 +158,7 @@ function RuleInfoMenu({
                 </div>
               </InfoSection>
             )}
-          </div>
-        </DropdownMenu.Content>
-      </DropdownMenu.Portal>
-    </DropdownMenu.Root>
+    </InfoDropdownMenu>
   );
 }
 
@@ -388,7 +379,7 @@ export function RulesView({
       <Panel className="sessionListPanel ruleListPanel" defaultSize="54%" minSize="360px">
         <div className="sessionListPane ruleListPane">
           <PageHeader title="Rules" compact>
-            <SearchField placeholder="Search rules" value={query} onChange={(event) => setQuery(event.target.value)} />
+            <SearchField placeholder="Search rules" value={query} onChange={(event) => setQuery(event.target.value)} onClear={() => setQuery("")} />
           </PageHeader>
           <div className="sessionListBody">
             <DataTable
@@ -410,7 +401,7 @@ export function RulesView({
               bottomBarCheckboxLabel="Select visible rules from toolbar"
               selectionLabel="rules"
               loading={loadingRows}
-              loadingLabel={<LoadingInline label="Loading rules" />}
+              loadingLabel="Loading rules"
               emptyState={normalizedQuery
                 ? "No rules match this search. Try another search."
                 : "No rules found. Try another agent filter."}
@@ -442,9 +433,9 @@ export function RulesView({
             )}
           >
             {loading ? (
-              <div className="emptyState ruleEditorLoading"><LoadingInline label="Loading rule" /></div>
+              <EditorStatePlaceholder className="ruleEditorLoading" label="Loading rule" />
             ) : (
-              <Suspense fallback={<div className="emptyState ruleEditorLoading"><LoadingInline label="Loading editor" /></div>}>
+              <Suspense fallback={<EditorStatePlaceholder className="ruleEditorLoading" label="Loading editor" />}>
                 <MarkdownFilePane
                   activePath={activeRule.path ?? ruleTitle(activeRule)}
                   dirty={dirty}

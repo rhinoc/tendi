@@ -1,14 +1,15 @@
 import { Tooltip } from "./shared/Tooltip.tsx";
 import { Info } from "lucide-react";
-import { useDeferredValue, useMemo, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 
+import { createTokenizerWorker, type TokenizerWorkerClient } from "../lib/tokenizer-client.ts";
+import { formatTokenCount } from "../lib/token-format.ts";
 import {
   TOKENIZER_PACKAGE,
   TOKENIZER_URL,
-  formatTokenCount,
-  markdownTokenStats,
   type TokenBreakdownDetail,
-} from "../lib/tokenizer";
+  type TokenBreakdownSegment,
+} from "../lib/tokenizer-types.ts";
 import { tokenToneClass, type TokenTone } from "../lib/token-style.ts";
 import { TauriCommand, safeInvoke } from "../lib/tauri";
 import "./TokenStatusBar.css";
@@ -165,37 +166,52 @@ export function TokenSegments({ segments, usageSource = "estimated" }: { segment
 
 export function TokenMetrics({ metrics }: { metrics: TokenMetricProps[] }) {
   return metrics.map((metric) => (
-    <Tooltip key={metric.label} content={metric.title}><span className="tokenMetricWrap" key={metric.label}>
+    <span className="tokenMetricWrap" key={metric.label}>
       <span className="tokenSegmentDivider">|</span>
       <span className="tokenMetric">
         <span className="tokenSegmentLabel">{metric.label}</span>{" "}
         <span className={`tokenMetricValue ${metric.tone ? `tokenTone-${metric.tone}` : ""}`}>{metric.value}</span>
       </span>
-    </span></Tooltip>
+    </span>
   ));
 }
 
-function markdownTokenSegments(activePath: string, content: string, selectionText: string): TokenSegmentProps[] {
-  const stats = markdownTokenStats(activePath, content, selectionText);
-  const segments: TokenSegmentProps[] = [];
-  if (stats.selection > 0) segments.push({ label: "Selection", value: stats.selection });
-  if (stats.isSkillMarkdown) {
-    segments.push({ label: "Desc", value: stats.description ?? 0 });
-    segments.push({ label: "Content", value: stats.content ?? 0 });
-  } else {
-    segments.push({ label: "File", value: stats.file });
-  }
-  return segments;
-}
-
 export function TokenStatusBar({ activePath = "", content = "", selectionText = "", segments: providedSegments, metrics = [], usageSource = "estimated", leadingSlot }: TokenStatusBarProps) {
-  const deferredContent = useDeferredValue(content);
-  const deferredSelectionText = useDeferredValue(selectionText);
-  const markdownSegments = useMemo(
-    () => markdownTokenSegments(activePath, deferredContent, deferredSelectionText),
-    [activePath, deferredContent, deferredSelectionText],
-  );
-  const segments = providedSegments ?? markdownSegments;
+  const workerRef = useRef<TokenizerWorkerClient | null>(null);
+  const latestRequestRef = useRef(0);
+  const [estimatedSegments, setEstimatedSegments] = useState<TokenBreakdownSegment[] | null>(null);
+
+  useEffect(() => {
+    if (providedSegments) return;
+    const worker = createTokenizerWorker(
+      (response) => {
+        if (response.id !== latestRequestRef.current) return;
+        if (response.type === "result") setEstimatedSegments(response.segments);
+        else setEstimatedSegments([]);
+      },
+      () => {
+        if (latestRequestRef.current > 0) setEstimatedSegments([]);
+      },
+    );
+    workerRef.current = worker;
+    return () => {
+      workerRef.current = null;
+      worker.dispose();
+    };
+  }, [providedSegments]);
+
+  useEffect(() => {
+    if (providedSegments || !workerRef.current) return;
+    setEstimatedSegments(null);
+    latestRequestRef.current = workerRef.current.request({
+      kind: "markdown",
+      activePath,
+      content,
+      selectionText,
+    });
+  }, [activePath, content, providedSegments, selectionText]);
+
+  const segments = providedSegments ?? estimatedSegments ?? [];
 
   return (
     <div className={`tokenStatusCluster ${leadingSlot ? "hasLeadingSlot" : ""}`}>

@@ -1,6 +1,4 @@
 import { sessionKind, sessionTimeMs, type SessionRecord } from "./sessions.ts";
-export { summarizeSessionPreview as summarizeRecentSession } from "./session-preview.ts";
-export type { RecentSessionPreview } from "./session-preview.ts";
 
 export type TokenMix = {
   cachedInput: number;

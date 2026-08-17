@@ -1,15 +1,16 @@
 use std::{
+    collections::{HashMap, VecDeque},
     fs,
     io::{BufRead, BufReader, Read, Seek, SeekFrom},
     path::{Path, PathBuf},
+    sync::{LazyLock, Mutex},
 };
 
 use anyhow::{Context, Result};
-use rusqlite::{Connection, OpenFlags};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::{sessions::extract_cursor_blob_model, skills::AgentKind};
+use crate::{providers::agent_provider, skills::AgentKind};
 
 #[derive(Debug, Clone, Serialize)]
 pub struct TranscriptItem {
@@ -53,11 +54,137 @@ pub struct TranscriptPage {
     pub unchanged: bool,
 }
 
+#[derive(Debug, Clone, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TranscriptSearchScopes {
+    pub user: bool,
+    pub assistant: bool,
+    pub system: bool,
+    pub tool: bool,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TranscriptSearchHit {
+    pub group_index: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_index: Option<usize>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TranscriptSearchResult {
+    pub hits: Vec<TranscriptSearchHit>,
+    pub warnings: Vec<String>,
+    pub source_version: String,
+}
+
 const TRANSCRIPT_PAGE_DEFAULT_LIMIT: usize = 160;
 const TRANSCRIPT_PAGE_MAX_LIMIT: usize = 400;
 const TRANSCRIPT_PAGE_MAX_SOURCE_BYTES: u64 = 8 * 1024 * 1024;
 const TRANSCRIPT_PAGE_MAX_SOURCE_LINES: usize = 2_000;
 const TRANSCRIPT_PAGE_MAX_LINE_BYTES: usize = 2 * 1024 * 1024;
+const TRANSCRIPT_SEARCH_CACHE_MAX_ENTRIES: usize = 16;
+const TRANSCRIPT_SEARCH_CACHE_MAX_BYTES: usize = 512 * 1024;
+const TRANSCRIPT_CHUNK_CACHE_MAX_ENTRIES: usize = 256;
+const TRANSCRIPT_CHUNK_CACHE_MAX_BYTES: usize = 32 * 1024 * 1024;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TranscriptChunkOffset {
+    start: u64,
+    end: u64,
+}
+
+#[derive(Debug, Clone)]
+struct TranscriptOffsetIndex {
+    chunks: Vec<TranscriptChunkOffset>,
+    valid: bool,
+}
+
+impl TranscriptOffsetIndex {
+    fn new() -> Self {
+        Self {
+            chunks: Vec::new(),
+            valid: true,
+        }
+    }
+
+    fn record(&mut self, start: u64, end: u64) {
+        let contiguous = self
+            .chunks
+            .last()
+            .map_or(start == 0, |chunk| chunk.end == start);
+        if !contiguous || end < start {
+            self.valid = false;
+            return;
+        }
+        self.chunks.push(TranscriptChunkOffset { start, end });
+    }
+
+    fn is_complete(&self, source_size: u64) -> bool {
+        if !self.valid {
+            return false;
+        }
+        if source_size == 0 {
+            return self.chunks == [TranscriptChunkOffset { start: 0, end: 0 }];
+        }
+        self.chunks.first().is_some_and(|chunk| chunk.start == 0)
+            && self
+                .chunks
+                .last()
+                .is_some_and(|chunk| chunk.end == source_size)
+            && self
+                .chunks
+                .windows(2)
+                .all(|chunks| chunks[0].end == chunks[1].start)
+    }
+}
+
+#[derive(Debug, Clone)]
+struct CachedTranscriptSearch {
+    path: PathBuf,
+    agent: AgentKind,
+    query: String,
+    scopes: TranscriptSearchScopes,
+    source_version: String,
+    offset_index: TranscriptOffsetIndex,
+    result: TranscriptSearchResult,
+    weight: usize,
+}
+
+#[derive(Debug, Default)]
+struct TranscriptSearchCache {
+    entries: VecDeque<CachedTranscriptSearch>,
+    bytes: usize,
+}
+
+static TRANSCRIPT_SEARCH_CACHE: LazyLock<Mutex<TranscriptSearchCache>> =
+    LazyLock::new(|| Mutex::new(TranscriptSearchCache::default()));
+
+#[derive(Debug, Clone)]
+struct CachedTranscriptChunk {
+    path: PathBuf,
+    agent: AgentKind,
+    source_version: String,
+    start: u64,
+    end: u64,
+    next_cursor: Option<String>,
+    done: bool,
+    items: Vec<TranscriptItem>,
+    warnings: Vec<String>,
+    weight: usize,
+    #[cfg(test)]
+    hits: usize,
+}
+
+#[derive(Debug, Default)]
+struct TranscriptChunkCache {
+    entries: VecDeque<CachedTranscriptChunk>,
+    bytes: usize,
+}
+
+static TRANSCRIPT_CHUNK_CACHE: LazyLock<Mutex<TranscriptChunkCache>> =
+    LazyLock::new(|| Mutex::new(TranscriptChunkCache::default()));
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 struct TranscriptCursor {
@@ -183,6 +310,9 @@ fn transcript_source_snapshot(
 }
 
 fn transcript_boundary_hash(path: &Path, offset: u64) -> Result<u64> {
+    if offset == 0 {
+        return Ok(0xcbf29ce484222325);
+    }
     let mut file = fs::File::open(path)?;
     let start = offset.saturating_sub(4 * 1024);
     file.seek(SeekFrom::Start(start))?;
@@ -213,6 +343,23 @@ pub fn parse_transcript_page(
     parse_transcript_page_with_cursor_store(path, agent, cursor, limit, None)
 }
 
+pub fn parse_transcript_page_if_changed(
+    path: &Path,
+    agent: AgentKind,
+    cursor: Option<&str>,
+    limit: Option<usize>,
+    known_source_version: Option<&str>,
+) -> Result<TranscriptPage> {
+    parse_transcript_page_with_known_source_version(
+        path,
+        agent,
+        cursor,
+        limit,
+        None,
+        known_source_version,
+    )
+}
+
 pub fn transcript_source_version(path: &Path) -> Result<String> {
     let mut file =
         fs::File::open(path).with_context(|| format!("failed to read {}", path.display()))?;
@@ -226,6 +373,17 @@ fn parse_transcript_page_with_cursor_store(
     limit: Option<usize>,
     cursor_store: Option<&Path>,
 ) -> Result<TranscriptPage> {
+    parse_transcript_page_with_known_source_version(path, agent, cursor, limit, cursor_store, None)
+}
+
+fn parse_transcript_page_with_known_source_version(
+    path: &Path,
+    agent: AgentKind,
+    cursor: Option<&str>,
+    limit: Option<usize>,
+    cursor_store: Option<&Path>,
+    known_source_version: Option<&str>,
+) -> Result<TranscriptPage> {
     let cursor = cursor.map(TranscriptCursor::parse).transpose()?;
     let mut file =
         fs::File::open(path).with_context(|| format!("failed to read {}", path.display()))?;
@@ -235,6 +393,17 @@ fn parse_transcript_page_with_cursor_store(
     )
     .with_context(|| format!("failed to inspect {}", path.display()))?;
     let source_version = source.version();
+    if cursor.is_none() && known_source_version == Some(source_version.as_str()) {
+        return Ok(TranscriptPage {
+            items: Vec::new(),
+            warnings: Vec::new(),
+            next_cursor: None,
+            done: true,
+            source_version,
+            restart_required: false,
+            unchanged: true,
+        });
+    }
     let cursor_stale = if let Some(cursor) = cursor.as_ref() {
         cursor.source != source.identity
             || cursor.offset > source.size
@@ -320,12 +489,12 @@ fn parse_transcript_page_with_cursor_store(
 
     let offset = reader.stream_position()?;
     let done = reader.fill_buf()?.is_empty();
-    if done && agent == AgentKind::Cursor {
+    if done && !agent_provider(agent).transcript_cacheable() {
         if let Some(store_path) = cursor_store
             .map(Path::to_path_buf)
-            .or_else(|| find_cursor_store_db(path))
+            .or_else(|| agent_provider(agent).transcript_metadata_store_path(path))
         {
-            append_cursor_model_configs_from_store(&store_path, &mut items);
+            agent_provider(agent).append_transcript_metadata_from_store(&store_path, &mut items)?;
         }
     }
     let next_cursor = if done {
@@ -402,13 +571,7 @@ fn read_bounded_jsonl_line<R: BufRead>(
 }
 
 fn collect_transcript_value(value: &Value, agent: AgentKind, items: &mut Vec<TranscriptItem>) {
-    match agent {
-        AgentKind::Codex => collect_codex_item(value, items),
-        AgentKind::Claude => collect_claude_item(value, items),
-        AgentKind::Cursor | AgentKind::Shared | AgentKind::Unknown => {
-            collect_generic_item(value, items)
-        }
-    }
+    agent_provider(agent).parse_transcript_value(value, items);
 }
 
 pub fn parse_transcript(path: &Path, agent: AgentKind) -> Result<TranscriptScan> {
@@ -439,17 +602,28 @@ pub fn parse_transcript(path: &Path, agent: AgentKind) -> Result<TranscriptScan>
         collect_transcript_value(&value, agent, &mut items);
     }
 
-    if agent == AgentKind::Cursor {
-        append_cursor_model_configs(path, &mut items);
-    }
+    agent_provider(agent).append_transcript_metadata(path, &mut items)?;
 
     Ok(TranscriptScan { items, warnings })
 }
 
+#[cfg(test)]
 pub(crate) fn parse_search_transcript(path: &Path, agent: AgentKind) -> Result<TranscriptScan> {
+    let mut items = Vec::new();
+    let warnings = for_each_search_item(path, agent, |item| items.push(item))?;
+    Ok(TranscriptScan { items, warnings })
+}
+
+pub(crate) fn for_each_search_item<F>(
+    path: &Path,
+    agent: AgentKind,
+    mut visit: F,
+) -> Result<Vec<String>>
+where
+    F: FnMut(TranscriptItem),
+{
     let file =
         fs::File::open(path).with_context(|| format!("failed to read {}", path.display()))?;
-    let mut items = Vec::new();
     let mut warnings = Vec::new();
 
     for (index, line) in BufReader::new(file).lines().enumerate() {
@@ -460,7 +634,7 @@ pub(crate) fn parse_search_transcript(path: &Path, agent: AgentKind) -> Result<T
                 continue;
             }
         };
-        if line.trim().is_empty() || !line_may_contain_search_message(&line, agent) {
+        if line.trim().is_empty() || !agent_provider(agent).transcript_search_hint(&line) {
             continue;
         }
         let value = match serde_json::from_str::<Value>(&line) {
@@ -471,41 +645,520 @@ pub(crate) fn parse_search_transcript(path: &Path, agent: AgentKind) -> Result<T
             }
         };
 
+        let mut items = Vec::new();
         collect_transcript_value(&value, agent, &mut items);
+        for item in items {
+            if matches!(item.kind.as_str(), "user" | "assistant") {
+                visit(item);
+            }
+        }
     }
-    items.retain(|item| matches!(item.kind.as_str(), "user" | "assistant"));
-    Ok(TranscriptScan { items, warnings })
+    Ok(warnings)
+}
+
+fn transcript_cursor_offset(cursor: Option<&str>) -> Result<u64> {
+    Ok(cursor
+        .map(TranscriptCursor::parse)
+        .transpose()?
+        .map_or(0, |cursor| cursor.offset))
+}
+
+fn transcript_item_weight(item: &TranscriptItem) -> usize {
+    item.kind
+        .len()
+        .saturating_add(item.body.len())
+        .saturating_add(item.tag.as_deref().map_or(0, str::len))
+        .saturating_add(item.command.as_deref().map_or(0, str::len))
+        .saturating_add(item.result.as_deref().map_or(0, str::len))
+        .saturating_add(item.time.as_deref().map_or(0, str::len))
+        .saturating_add(item.linked_session_id.as_deref().map_or(0, str::len))
+        .saturating_add(item.model.as_deref().map_or(0, str::len))
+        .saturating_add(item.effort.as_deref().map_or(0, str::len))
+        .saturating_add(item.call_id.as_deref().map_or(0, str::len))
+        .saturating_add(std::mem::size_of::<TranscriptItem>())
+}
+
+fn transcript_chunk_weight(items: &[TranscriptItem], warnings: &[String]) -> usize {
+    items
+        .iter()
+        .map(transcript_item_weight)
+        .chain(warnings.iter().map(String::len))
+        .sum()
+}
+
+fn transcript_chunk_cache_get(
+    path: &Path,
+    agent: AgentKind,
+    source_version: &str,
+    start: u64,
+    source_size: u64,
+) -> Option<CachedTranscriptChunk> {
+    let mut cache = TRANSCRIPT_CHUNK_CACHE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let index = cache.entries.iter().position(|entry| {
+        entry.path == path
+            && entry.agent == agent
+            && entry.source_version == source_version
+            && entry.start == start
+            && entry.end <= source_size
+    })?;
+    let entry = cache.entries.remove(index)?;
+    #[cfg(test)]
+    let entry = {
+        let mut entry = entry;
+        entry.hits = entry.hits.saturating_add(1);
+        entry
+    };
+    cache.entries.push_front(entry.clone());
+    Some(entry)
+}
+
+fn transcript_chunk_cache_put(
+    path: &Path,
+    agent: AgentKind,
+    source_version: &str,
+    source_size: u64,
+    start: u64,
+    end: u64,
+    next_cursor: Option<String>,
+    done: bool,
+    items: Vec<TranscriptItem>,
+    warnings: Vec<String>,
+) {
+    if end < start || end > source_size {
+        return;
+    }
+    let weight = transcript_chunk_weight(&items, &warnings);
+    if weight > TRANSCRIPT_CHUNK_CACHE_MAX_BYTES {
+        return;
+    }
+
+    let mut cache = TRANSCRIPT_CHUNK_CACHE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+    let mut retained = VecDeque::with_capacity(cache.entries.len());
+    while let Some(entry) = cache.entries.pop_front() {
+        if entry.path == path && entry.agent == agent && entry.source_version != source_version {
+            cache.bytes = cache.bytes.saturating_sub(entry.weight);
+        } else {
+            retained.push_back(entry);
+        }
+    }
+    cache.entries = retained;
+
+    if let Some(index) = cache.entries.iter().position(|entry| {
+        entry.path == path
+            && entry.agent == agent
+            && entry.source_version == source_version
+            && entry.start == start
+    }) {
+        if let Some(entry) = cache.entries.remove(index) {
+            cache.bytes = cache.bytes.saturating_sub(entry.weight);
+        }
+    }
+    while cache.entries.len() >= TRANSCRIPT_CHUNK_CACHE_MAX_ENTRIES
+        || cache.bytes.saturating_add(weight) > TRANSCRIPT_CHUNK_CACHE_MAX_BYTES
+    {
+        let Some(entry) = cache.entries.pop_back() else {
+            break;
+        };
+        cache.bytes = cache.bytes.saturating_sub(entry.weight);
+    }
+
+    cache.bytes = cache.bytes.saturating_add(weight);
+    cache.entries.push_front(CachedTranscriptChunk {
+        path: path.to_path_buf(),
+        agent,
+        source_version: source_version.to_string(),
+        start,
+        end,
+        next_cursor,
+        done,
+        items,
+        warnings,
+        weight,
+        #[cfg(test)]
+        hits: 0,
+    });
+}
+
+fn transcript_search_cache_get(
+    path: &Path,
+    agent: AgentKind,
+    query: &str,
+    scopes: &TranscriptSearchScopes,
+    source_version: &str,
+) -> Option<TranscriptSearchResult> {
+    let source_size = fs::metadata(path).ok()?.len();
+    let mut cache = TRANSCRIPT_SEARCH_CACHE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let index = cache.entries.iter().position(|entry| {
+        entry.path == path
+            && entry.agent == agent
+            && entry.query == query
+            && entry.scopes == *scopes
+            && entry.source_version == source_version
+    })?;
+    let entry = cache.entries.remove(index)?;
+    if !entry.offset_index.is_complete(source_size) {
+        cache.bytes = cache.bytes.saturating_sub(entry.weight);
+        return None;
+    }
+    let result = entry.result.clone();
+    cache.entries.push_front(entry);
+    Some(result)
+}
+
+fn transcript_search_result_weight(
+    query: &str,
+    result: &TranscriptSearchResult,
+    offset_index: &TranscriptOffsetIndex,
+) -> usize {
+    query
+        .len()
+        .saturating_add(result.hits.len().saturating_mul(24))
+        .saturating_add(result.warnings.iter().map(String::len).sum::<usize>())
+        .saturating_add(offset_index.chunks.len().saturating_mul(16))
+}
+
+fn transcript_search_cache_put(
+    path: &Path,
+    agent: AgentKind,
+    query: &str,
+    scopes: &TranscriptSearchScopes,
+    source_version: &str,
+    source_size: u64,
+    offset_index: TranscriptOffsetIndex,
+    result: TranscriptSearchResult,
+) {
+    if !offset_index.is_complete(source_size) {
+        return;
+    }
+    let weight = transcript_search_result_weight(query, &result, &offset_index);
+    if weight > TRANSCRIPT_SEARCH_CACHE_MAX_BYTES {
+        return;
+    }
+
+    let mut cache = TRANSCRIPT_SEARCH_CACHE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(index) = cache.entries.iter().position(|entry| {
+        entry.path == path
+            && entry.agent == agent
+            && entry.query == query
+            && entry.scopes == *scopes
+    }) {
+        if let Some(entry) = cache.entries.remove(index) {
+            cache.bytes = cache.bytes.saturating_sub(entry.weight);
+        }
+    }
+    while cache.entries.len() >= TRANSCRIPT_SEARCH_CACHE_MAX_ENTRIES
+        || cache.bytes.saturating_add(weight) > TRANSCRIPT_SEARCH_CACHE_MAX_BYTES
+    {
+        let Some(entry) = cache.entries.pop_back() else {
+            break;
+        };
+        cache.bytes = cache.bytes.saturating_sub(entry.weight);
+    }
+    cache.bytes = cache.bytes.saturating_add(weight);
+    cache.entries.push_front(CachedTranscriptSearch {
+        path: path.to_path_buf(),
+        agent,
+        query: query.to_string(),
+        scopes: scopes.clone(),
+        source_version: source_version.to_string(),
+        offset_index,
+        result,
+        weight,
+    });
+}
+
+#[cfg(test)]
+fn transcript_search_cache_offsets(
+    path: &Path,
+    agent: AgentKind,
+    query: &str,
+    scopes: &TranscriptSearchScopes,
+    source_version: &str,
+) -> Option<Vec<(u64, u64)>> {
+    let cache = TRANSCRIPT_SEARCH_CACHE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    cache
+        .entries
+        .iter()
+        .find(|entry| {
+            entry.path == path
+                && entry.agent == agent
+                && entry.query == query
+                && entry.scopes == *scopes
+                && entry.source_version == source_version
+        })
+        .map(|entry| {
+            entry
+                .offset_index
+                .chunks
+                .iter()
+                .map(|chunk| (chunk.start, chunk.end))
+                .collect()
+        })
+}
+
+#[cfg(test)]
+fn transcript_chunk_cache_offsets(
+    path: &Path,
+    agent: AgentKind,
+    source_version: &str,
+) -> Vec<(u64, u64)> {
+    let cache = TRANSCRIPT_CHUNK_CACHE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    cache
+        .entries
+        .iter()
+        .filter(|entry| {
+            entry.path == path && entry.agent == agent && entry.source_version == source_version
+        })
+        .map(|entry| (entry.start, entry.end))
+        .collect()
+}
+
+#[cfg(test)]
+fn transcript_chunk_cache_hits(path: &Path, agent: AgentKind, source_version: &str) -> usize {
+    let cache = TRANSCRIPT_CHUNK_CACHE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    cache
+        .entries
+        .iter()
+        .filter(|entry| {
+            entry.path == path && entry.agent == agent && entry.source_version == source_version
+        })
+        .map(|entry| entry.hits)
+        .sum()
+}
+
+pub fn search_transcript(
+    path: &Path,
+    agent: AgentKind,
+    query: &str,
+    scopes: &TranscriptSearchScopes,
+) -> Result<TranscriptSearchResult> {
+    let needle = query.trim().to_lowercase();
+    if needle.is_empty() {
+        return Ok(TranscriptSearchResult {
+            hits: Vec::new(),
+            warnings: Vec::new(),
+            source_version: transcript_source_version(path)?,
+        });
+    }
+
+    let initial_source_version = transcript_source_version(path)?;
+    let source_size = fs::metadata(path)?.len();
+    let cache_source_version = agent_provider(agent)
+        .transcript_cacheable()
+        .then_some(initial_source_version.as_str());
+    if let Some(source_version) = cache_source_version
+        && let Some(result) =
+            transcript_search_cache_get(path, agent, &needle, scopes, source_version)
+    {
+        return Ok(result);
+    }
+
+    let mut cursor = None;
+    let mut group_index = 0usize;
+    let mut previous_tool_group = None;
+    let mut next_tool_index = 0usize;
+    let mut tool_groups = HashMap::<String, (usize, usize)>::new();
+    let mut hits = Vec::new();
+    let mut warnings = Vec::new();
+    let mut offset_index = TranscriptOffsetIndex::new();
+    let source_version = loop {
+        let chunk_start = transcript_cursor_offset(cursor.as_deref())?;
+        let cached_chunk = if !agent_provider(agent).transcript_cacheable() {
+            None
+        } else {
+            transcript_chunk_cache_get(
+                path,
+                agent,
+                &initial_source_version,
+                chunk_start,
+                source_size,
+            )
+        };
+        let (items, page_warnings, page_source_version, page_done, page_next_cursor, chunk_end) =
+            if let Some(chunk) = cached_chunk {
+                (
+                    chunk.items,
+                    chunk.warnings,
+                    chunk.source_version,
+                    chunk.done,
+                    chunk.next_cursor,
+                    chunk.end,
+                )
+            } else {
+                let page = parse_transcript_page(path, agent, cursor.as_deref(), Some(400))?;
+                if page.restart_required {
+                    anyhow::bail!("transcript changed while searching; retry the search")
+                }
+                let page_source_version = page.source_version.clone();
+                if page_source_version != initial_source_version {
+                    anyhow::bail!("transcript changed while searching; retry the search")
+                }
+                let chunk_end = match page.next_cursor.as_deref() {
+                    Some(next_cursor) => transcript_cursor_offset(Some(next_cursor))?,
+                    None => source_size,
+                };
+                if agent_provider(agent).transcript_cacheable() {
+                    transcript_chunk_cache_put(
+                        path,
+                        agent,
+                        &initial_source_version,
+                        source_size,
+                        chunk_start,
+                        chunk_end,
+                        page.next_cursor.clone(),
+                        page.done,
+                        page.items.clone(),
+                        page.warnings.clone(),
+                    );
+                }
+                (
+                    page.items,
+                    page.warnings,
+                    page_source_version,
+                    page.done,
+                    page.next_cursor,
+                    chunk_end,
+                )
+            };
+        if page_source_version != initial_source_version {
+            anyhow::bail!("transcript changed while searching; retry the search")
+        }
+        warnings.extend(page_warnings);
+        offset_index.record(chunk_start, chunk_end);
+
+        for item in &items {
+            let kind = item.kind.as_str();
+            let mapped_tool = if kind == "tool_result" {
+                item.call_id
+                    .as_ref()
+                    .and_then(|call_id| tool_groups.get(call_id).copied())
+            } else {
+                None
+            };
+            let (item_group_index, tool_index, is_tool_scope) =
+                if let Some((group, index)) = mapped_tool {
+                    (group, Some(index), true)
+                } else if kind == "tool" {
+                    let group = previous_tool_group.unwrap_or_else(|| {
+                        let current = group_index;
+                        group_index += 1;
+                        current
+                    });
+                    let index = if previous_tool_group == Some(group) {
+                        next_tool_index
+                    } else {
+                        0
+                    };
+                    previous_tool_group = Some(group);
+                    next_tool_index = index + 1;
+                    if let Some(call_id) = item.call_id.as_ref() {
+                        tool_groups.insert(call_id.clone(), (group, index));
+                    }
+                    (group, Some(index), true)
+                } else {
+                    previous_tool_group = None;
+                    next_tool_index = 0;
+                    let current = group_index;
+                    group_index += 1;
+                    (current, None, false)
+                };
+
+            if !scope_enabled(kind, is_tool_scope, scopes) {
+                continue;
+            }
+            if transcript_item_contains(item, &needle) {
+                hits.push(TranscriptSearchHit {
+                    group_index: item_group_index,
+                    tool_index,
+                });
+            }
+        }
+
+        if page_done {
+            break page_source_version;
+        }
+        cursor = page_next_cursor;
+        if cursor.is_none() {
+            break page_source_version;
+        }
+    };
+
+    hits.sort_by_key(|hit| (hit.group_index, hit.tool_index.unwrap_or(0)));
+    let current_source_version = transcript_source_version(path)?;
+    if current_source_version != source_version {
+        anyhow::bail!("transcript changed while searching; retry the search")
+    }
+    let result = TranscriptSearchResult {
+        hits,
+        warnings,
+        source_version: current_source_version,
+    };
+    if agent_provider(agent).transcript_cacheable() {
+        if let Ok(source_size) = fs::metadata(path).map(|metadata| metadata.len()) {
+            transcript_search_cache_put(
+                path,
+                agent,
+                &needle,
+                scopes,
+                &result.source_version,
+                source_size,
+                offset_index,
+                result.clone(),
+            );
+        }
+    }
+    Ok(result)
+}
+
+fn scope_enabled(kind: &str, mapped_tool: bool, scopes: &TranscriptSearchScopes) -> bool {
+    if mapped_tool || kind == "tool" || kind == "toolGroup" {
+        return scopes.tool;
+    }
+    match kind {
+        "user" | "notification" => scopes.user,
+        "context" | "compaction" | "model_config" => scopes.system,
+        _ => scopes.assistant,
+    }
+}
+
+fn transcript_item_contains(item: &TranscriptItem, needle: &str) -> bool {
+    [
+        item.body.as_str(),
+        item.tag.as_deref().unwrap_or_default(),
+        item.command.as_deref().unwrap_or_default(),
+        item.result.as_deref().unwrap_or_default(),
+        item.time.as_deref().unwrap_or_default(),
+    ]
+    .into_iter()
+    .any(|value| value.to_lowercase().contains(needle))
 }
 
 const SEARCH_MESSAGE_HINT_BYTES: usize = 16 * 1024;
 
-fn line_may_contain_search_message(line: &str, agent: AgentKind) -> bool {
+pub(crate) fn search_json_hint(line: &str) -> &str {
     let mut end = line.len().min(SEARCH_MESSAGE_HINT_BYTES);
     while !line.is_char_boundary(end) {
         end -= 1;
     }
-    let hint = &line[..end];
-    let role = json_string_hint(hint, "\"role\"");
-    match agent {
-        AgentKind::Codex => {
-            json_string_hint(hint, "\"type\"") == Some("response_item")
-                && matches!(role, Some("user" | "assistant"))
-                && hint.contains("\"message\"")
-        }
-        AgentKind::Claude => {
-            matches!(
-                json_string_hint(hint, "\"type\""),
-                Some("user" | "assistant")
-            ) && !hint.contains("\"tool_result\"")
-        }
-        AgentKind::Cursor | AgentKind::Shared | AgentKind::Unknown => matches!(
-            role.or_else(|| json_string_hint(hint, "\"type\"")),
-            Some("user" | "assistant")
-        ),
-    }
+    &line[..end]
 }
 
-fn json_string_hint<'a>(line: &'a str, marker: &str) -> Option<&'a str> {
+pub(crate) fn json_string_hint<'a>(line: &'a str, marker: &str) -> Option<&'a str> {
     let start = line.find(marker)? + marker.len();
     let value = line[start..].trim_start().strip_prefix(':')?.trim_start();
     let value = value.strip_prefix('"')?;
@@ -517,521 +1170,23 @@ fn json_string_hint<'a>(line: &'a str, marker: &str) -> Option<&'a str> {
     }
 }
 
-fn collect_codex_item(value: &Value, items: &mut Vec<TranscriptItem>) {
-    let record_type = value.get("type").and_then(Value::as_str);
-    if record_type == Some("compacted") {
-        push_codex_compaction(items, value);
-        return;
-    }
-    if record_type == Some("event_msg") {
-        if value.pointer("/payload/type").and_then(Value::as_str) == Some("context_compacted") {
-            push_codex_compaction(items, value);
-            return;
-        }
-        if value.pointer("/payload/type").and_then(Value::as_str) == Some("thread_settings_applied")
-        {
-            push_codex_model_config(items, value);
-            return;
-        }
-        attach_codex_subagent_session(value, items);
-        return;
-    }
-    if record_type == Some("turn_context") {
-        push_codex_model_config(items, value);
-        return;
-    }
-    if record_type != Some("response_item") {
-        return;
-    }
-
-    let Some(payload) = value.get("payload") else {
-        return;
-    };
-    let time = value
-        .get("timestamp")
-        .and_then(Value::as_str)
-        .map(compact_time);
-    let timestamp_ms = value
-        .get("timestamp")
-        .and_then(Value::as_str)
-        .and_then(parse_timestamp_ms);
-
-    match payload.get("type").and_then(Value::as_str) {
-        Some("message") => {
-            let role = payload.get("role").and_then(Value::as_str).unwrap_or("");
-            let content = payload.get("content");
-            if role == "developer" || role == "system" {
-                if let Some(body) = extract_raw_content_text(content) {
-                    push_item(
-                        items,
-                        "context",
-                        body,
-                        Some(
-                            if role == "system" {
-                                "System"
-                            } else {
-                                "Developer"
-                            }
-                            .to_string(),
-                        ),
-                        time,
-                    );
-                }
-                return;
-            }
-            if role != "user" && role != "assistant" {
-                return;
-            }
-            if role == "user" {
-                collect_internal_context_items(content, items, time.clone());
-            }
-            if let Some(body) = extract_content_text(content) {
-                let item_kind = if role == "user" && is_subagent_notification(&body) {
-                    "notification"
-                } else {
-                    role
-                };
-                let tag = (item_kind == "notification").then(|| "Subagent".to_string());
-                push_item(items, item_kind, body, tag, time);
-            }
-        }
-        Some("reasoning") | Some("thinking") => {
-            let kind = payload
-                .get("type")
-                .and_then(Value::as_str)
-                .unwrap_or("reasoning");
-            if let Some(body) = extract_thinking_text(
-                payload
-                    .get("summary")
-                    .or_else(|| payload.get("content"))
-                    .or(Some(payload)),
-            ) {
-                push_item(items, kind, body, None, time);
-            }
-        }
-        Some("function_call") | Some("custom_tool_call") | Some("local_shell_call") => {
-            let name = payload
-                .get("name")
-                .or_else(|| payload.pointer("/action/type"))
-                .and_then(Value::as_str)
-                .unwrap_or("tool_call");
-            push_tool_item(
-                items,
-                "tool",
-                summarize_tool_call(payload, name),
-                Some(name.to_string()),
-                time,
-                extract_tool_command(payload),
-                None,
-                extract_duration_ms(payload, None),
-                extract_call_id(payload),
-                timestamp_ms,
-            );
-        }
-        Some("function_call_output") | Some("custom_tool_call_output") => {
-            let result = extract_tool_result(payload);
-            let call_id = extract_call_id(payload);
-            if !attach_tool_result(
-                items,
-                call_id.as_deref(),
-                result.clone(),
-                extract_duration_ms(payload, result.as_deref()),
-                timestamp_ms,
-            ) {
-                push_tool_item(
-                    items,
-                    "tool_result",
-                    "Tool result".to_string(),
-                    Some("tool_result".to_string()),
-                    time,
-                    None,
-                    result,
-                    extract_duration_ms(payload, None),
-                    call_id,
-                    timestamp_ms,
-                );
-            }
-        }
-        Some("web_search_call") | Some("image_generation_call") => {
-            let kind = payload
-                .get("type")
-                .and_then(Value::as_str)
-                .unwrap_or("tool_call");
-            push_item(
-                items,
-                "tool",
-                kind.replace('_', " "),
-                Some(kind.to_string()),
-                time,
-            );
-        }
-        _ => {}
-    }
+#[cfg(test)]
+pub(crate) fn collect_codex_item(value: &Value, items: &mut Vec<TranscriptItem>) {
+    crate::providers::agent_provider(AgentKind::Codex).parse_transcript_value(value, items);
 }
 
-fn push_codex_compaction(items: &mut Vec<TranscriptItem>, value: &Value) {
-    let time = value
-        .get("timestamp")
-        .and_then(Value::as_str)
-        .map(compact_time);
-    if items
-        .last()
-        .is_some_and(|item| item.kind == "compaction" && item.time == time)
-    {
-        return;
-    }
-    push_item(
-        items,
-        "compaction",
-        "Context compacted".to_string(),
-        None,
-        time,
-    );
+#[cfg(test)]
+pub(crate) fn collect_claude_item(value: &Value, items: &mut Vec<TranscriptItem>) {
+    crate::providers::agent_provider(AgentKind::Claude).parse_transcript_value(value, items);
 }
 
-fn push_codex_model_config(items: &mut Vec<TranscriptItem>, value: &Value) {
-    let settings = if value.get("type").and_then(Value::as_str) == Some("turn_context") {
-        value.get("payload")
-    } else {
-        value.pointer("/payload/thread_settings")
-    };
-    let previous = items.iter().rev().find(|item| item.kind == "model_config");
-    let model = settings
-        .and_then(|settings| settings.get("model"))
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_string)
-        .or_else(|| previous.and_then(|item| item.model.clone()));
-    let effort = settings
-        .and_then(|settings| {
-            settings
-                .get("effort")
-                .or_else(|| settings.get("reasoning_effort"))
-        })
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_string)
-        .or_else(|| previous.and_then(|item| item.effort.clone()));
-    let time = value
-        .get("timestamp")
-        .and_then(Value::as_str)
-        .map(compact_time);
-    push_model_config(items, model, effort, time);
+#[cfg(test)]
+pub(crate) fn append_cursor_model_configs_from_store(path: &Path, items: &mut Vec<TranscriptItem>) {
+    let _ = crate::providers::agent_provider(AgentKind::Cursor)
+        .append_transcript_metadata_from_store(path, items);
 }
 
-fn push_model_config(
-    items: &mut Vec<TranscriptItem>,
-    model: Option<String>,
-    effort: Option<String>,
-    time: Option<String>,
-) {
-    let previous = items.iter().rev().find(|item| item.kind == "model_config");
-    if model.is_none() && effort.is_none()
-        || previous.is_some_and(|item| item.model == model && item.effort == effort)
-    {
-        return;
-    }
-
-    items.push(model_config_item(model, effort, time));
-}
-
-fn model_config_item(
-    model: Option<String>,
-    effort: Option<String>,
-    time: Option<String>,
-) -> TranscriptItem {
-    let body = [
-        model.as_ref().map(|value| format!("Model: {value}")),
-        effort.as_ref().map(|value| format!("Effort: {value}")),
-    ]
-    .into_iter()
-    .flatten()
-    .collect::<Vec<_>>()
-    .join("\n");
-    TranscriptItem {
-        kind: "model_config".to_string(),
-        body,
-        tag: None,
-        time,
-        command: None,
-        result: None,
-        duration_ms: None,
-        linked_session_id: None,
-        model,
-        effort,
-        call_id: None,
-        started_at_ms: None,
-    }
-}
-
-fn append_cursor_model_configs(path: &Path, items: &mut Vec<TranscriptItem>) {
-    let Some(store_path) = find_cursor_store_db(path) else {
-        return;
-    };
-    append_cursor_model_configs_from_store(&store_path, items);
-}
-
-fn find_cursor_store_db(path: &Path) -> Option<PathBuf> {
-    let session_id = path.file_stem()?.to_str()?.trim();
-    if session_id.is_empty() {
-        return None;
-    }
-    let chats_root = dirs::home_dir()?.join(".cursor/chats");
-    let entries = fs::read_dir(chats_root).ok()?;
-    entries.filter_map(Result::ok).find_map(|entry| {
-        let candidate = entry.path().join(session_id).join("store.db");
-        candidate.is_file().then_some(candidate)
-    })
-}
-
-fn append_cursor_model_configs_from_store(path: &Path, items: &mut Vec<TranscriptItem>) {
-    let Ok(connection) = Connection::open_with_flags(
-        path,
-        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    ) else {
-        return;
-    };
-    let Ok(mut statement) = connection.prepare(
-        "select data from blobs
-         where instr(data, 'modelName') > 0
-         order by rowid",
-    ) else {
-        return;
-    };
-    let Ok(rows) = statement.query_map([], |row| row.get::<_, Vec<u8>>(0)) else {
-        return;
-    };
-
-    let mut models = Vec::new();
-    for bytes in rows.filter_map(Result::ok) {
-        let Ok(value) = serde_json::from_slice::<Value>(&bytes) else {
-            continue;
-        };
-        let Some(model) = extract_cursor_blob_model(&value) else {
-            continue;
-        };
-        models.push(model);
-    }
-
-    insert_cursor_model_configs(items, &models);
-}
-
-fn insert_cursor_model_configs(items: &mut Vec<TranscriptItem>, models: &[String]) {
-    if models.is_empty() {
-        return;
-    }
-    let assistant_positions = items
-        .iter()
-        .enumerate()
-        .filter_map(|(index, item)| (item.kind == "assistant").then_some(index))
-        .collect::<Vec<_>>();
-    let mut previous_model: Option<&str> = None;
-    let model_count = models.len();
-    let assistant_count = assistant_positions.len();
-    let mut insertions = Vec::new();
-    for (sample_index, model) in models.iter().enumerate() {
-        if previous_model == Some(model.as_str()) {
-            continue;
-        }
-        previous_model = Some(model);
-        let assistant_index = sample_index
-            .saturating_mul(assistant_count)
-            .checked_div(model_count)
-            .unwrap_or(0);
-        let item_index = assistant_positions
-            .get(assistant_index)
-            .copied()
-            .unwrap_or(items.len());
-        insertions.push((item_index, model.clone()));
-    }
-    let mut offset = 0usize;
-    for (item_index, model) in insertions {
-        items.insert(
-            item_index + offset,
-            model_config_item(Some(model), None, None),
-        );
-        offset += 1;
-    }
-}
-
-fn attach_codex_subagent_session(value: &Value, items: &mut [TranscriptItem]) -> bool {
-    let Some(payload) = value.get("payload") else {
-        return false;
-    };
-    if payload.get("type").and_then(Value::as_str) != Some("sub_agent_activity")
-        || payload.get("kind").and_then(Value::as_str) != Some("started")
-    {
-        return false;
-    }
-    let Some(event_id) = payload.get("event_id").and_then(Value::as_str) else {
-        return false;
-    };
-    let Some(session_id) = payload.get("agent_thread_id").and_then(Value::as_str) else {
-        return false;
-    };
-    let Some(item) = items.iter_mut().rev().find(|item| {
-        item.kind == "tool"
-            && item.tag.as_deref() == Some("spawn_agent")
-            && item.call_id.as_deref() == Some(event_id)
-    }) else {
-        return false;
-    };
-    item.linked_session_id = Some(session_id.to_string());
-    true
-}
-
-fn collect_claude_item(value: &Value, items: &mut Vec<TranscriptItem>) {
-    let Some(kind) = value.get("type").and_then(Value::as_str) else {
-        return;
-    };
-    let time = value
-        .get("timestamp")
-        .and_then(Value::as_str)
-        .map(compact_time);
-    let timestamp_ms = value
-        .get("timestamp")
-        .and_then(Value::as_str)
-        .and_then(parse_timestamp_ms);
-
-    if kind == "user" || kind == "assistant" {
-        let content = value
-            .get("message")
-            .and_then(|message| message.get("content"));
-        if kind == "user" {
-            collect_internal_context_items(content, items, time.clone());
-        }
-        if kind == "user"
-            && attach_claude_tool_results(value, content, items, time.clone(), timestamp_ms)
-        {
-            return;
-        }
-        if kind == "assistant" {
-            if let Some(body) = extract_thinking_text(content) {
-                push_item(items, "thinking", body, None, time.clone());
-            }
-        }
-        if let Some(body) = value
-            .get("message")
-            .and_then(|message| extract_content_text(message.get("content")))
-        {
-            let item_kind = if kind == "user" && is_subagent_notification(&body) {
-                "notification"
-            } else {
-                kind
-            };
-            let tag = (item_kind == "notification").then(|| "Subagent".to_string());
-            push_item(items, item_kind, body, tag, time.clone());
-        }
-
-        if let Some(Value::Array(content_items)) = content {
-            for item in content_items {
-                if item.get("type").and_then(Value::as_str) == Some("tool_use") {
-                    let name = item
-                        .get("name")
-                        .and_then(Value::as_str)
-                        .unwrap_or("tool_call");
-                    push_tool_item(
-                        items,
-                        "tool",
-                        summarize_tool_call(item, name),
-                        Some(name.to_string()),
-                        time.clone(),
-                        extract_tool_command(item),
-                        None,
-                        extract_duration_ms(item, None),
-                        item.get("id").and_then(Value::as_str).map(str::to_string),
-                        timestamp_ms,
-                    );
-                }
-            }
-        }
-    }
-
-    if let Some(result) = value.get("toolUseResult") {
-        let body = extract_content_text(Some(result)).unwrap_or_else(|| "tool result".to_string());
-        let call_id = value
-            .get("toolUseID")
-            .or_else(|| value.get("tool_use_id"))
-            .or_else(|| value.get("toolUseId"))
-            .and_then(Value::as_str);
-        if !attach_tool_result(
-            items,
-            call_id,
-            Some(body.clone()),
-            extract_duration_ms(value, None),
-            timestamp_ms,
-        ) {
-            push_tool_item(
-                items,
-                "tool_result",
-                "Tool result".to_string(),
-                Some("tool_result".to_string()),
-                time,
-                None,
-                Some(body),
-                extract_duration_ms(value, None),
-                call_id.map(str::to_string),
-                timestamp_ms,
-            );
-        }
-    }
-}
-
-fn attach_claude_tool_results(
-    value: &Value,
-    content: Option<&Value>,
-    items: &mut Vec<TranscriptItem>,
-    time: Option<String>,
-    timestamp_ms: Option<i64>,
-) -> bool {
-    let Some(Value::Array(content_items)) = content else {
-        return false;
-    };
-    let mut handled = false;
-    for item in content_items {
-        if item.get("type").and_then(Value::as_str) != Some("tool_result") {
-            continue;
-        }
-        handled = true;
-        let body = extract_content_text(item.get("content"))
-            .or_else(|| {
-                value
-                    .get("toolUseResult")
-                    .and_then(|result| extract_content_text(Some(result)))
-            })
-            .unwrap_or_else(|| "tool result".to_string());
-        let call_id = item
-            .get("tool_use_id")
-            .or_else(|| item.get("toolUseID"))
-            .or_else(|| item.get("toolUseId"))
-            .and_then(Value::as_str);
-        if !attach_tool_result(
-            items,
-            call_id,
-            Some(body.clone()),
-            extract_duration_ms(value, Some(&body)),
-            timestamp_ms,
-        ) {
-            push_tool_item(
-                items,
-                "tool_result",
-                "Tool result".to_string(),
-                Some("tool_result".to_string()),
-                time.clone(),
-                None,
-                Some(body.clone()),
-                extract_duration_ms(value, Some(&body)),
-                call_id.map(str::to_string),
-                timestamp_ms,
-            );
-        }
-    }
-    handled
-}
-
-fn collect_generic_item(value: &Value, items: &mut Vec<TranscriptItem>) {
+pub(crate) fn collect_generic_item(value: &Value, items: &mut Vec<TranscriptItem>) {
     let kind = value
         .get("role")
         .or_else(|| value.get("type"))
@@ -1075,18 +1230,7 @@ fn collect_generic_item(value: &Value, items: &mut Vec<TranscriptItem>) {
         .pointer("/message/content")
         .or_else(|| value.get("content"))
         .or_else(|| value.get("message"));
-    if kind == "user" {
-        collect_internal_context_items(content, items, time.clone());
-    }
-    if let Some(body) = extract_content_text(content) {
-        let item_kind = if kind == "user" && is_subagent_notification(&body) {
-            "notification"
-        } else {
-            kind
-        };
-        let tag = (item_kind == "notification").then(|| "Subagent".to_string());
-        push_item(items, item_kind, body, tag, time.clone());
-    }
+    collect_message_content(content, items, kind, time.clone());
 
     if let Some(Value::Array(content_items)) = content {
         for item in content_items {
@@ -1115,7 +1259,7 @@ fn collect_generic_item(value: &Value, items: &mut Vec<TranscriptItem>) {
     }
 }
 
-fn extract_content_text(value: Option<&Value>) -> Option<String> {
+pub(crate) fn extract_content_text(value: Option<&Value>) -> Option<String> {
     let value = value?;
     match value {
         Value::String(text) => clean_body(text),
@@ -1141,7 +1285,7 @@ fn extract_content_text(value: Option<&Value>) -> Option<String> {
     }
 }
 
-fn extract_raw_content_text(value: Option<&Value>) -> Option<String> {
+pub(crate) fn extract_raw_content_text(value: Option<&Value>) -> Option<String> {
     let value = value?;
     let text = match value {
         Value::String(text) => text.trim().to_string(),
@@ -1168,9 +1312,10 @@ fn extract_raw_content_text(value: Option<&Value>) -> Option<String> {
     (!text.trim().is_empty()).then(|| text.trim().to_string())
 }
 
-fn collect_internal_context_items(
+pub(crate) fn collect_message_content(
     content: Option<&Value>,
     items: &mut Vec<TranscriptItem>,
+    role: &str,
     time: Option<String>,
 ) {
     let Some(content) = content else {
@@ -1180,24 +1325,54 @@ fn collect_internal_context_items(
         Value::Array(content_items) => content_items.as_slice(),
         _ => std::slice::from_ref(content),
     };
+    let mut pending_body = Vec::new();
+
     for content_item in content_items {
-        let Some(body) = extract_raw_content_text(Some(content_item)) else {
+        if is_non_message_content_item(content_item) {
+            continue;
+        }
+        let Some(raw_body) = extract_raw_content_text(Some(content_item)) else {
             continue;
         };
-        let Some(label) = internal_context_label(&body) else {
-            continue;
-        };
-        push_item(
-            items,
-            "context",
-            body,
-            Some(label.to_string()),
-            time.clone(),
-        );
+        for (label, segment) in split_internal_context_segments(&raw_body) {
+            if let Some(label) = label {
+                push_message_body(&mut pending_body, items, role, time.clone());
+                push_item(
+                    items,
+                    "context",
+                    segment,
+                    Some(label.to_string()),
+                    time.clone(),
+                );
+            } else if let Some(body) = clean_body(&segment) {
+                pending_body.push(body);
+            }
+        }
     }
+    push_message_body(&mut pending_body, items, role, time);
 }
 
-fn extract_thinking_text(value: Option<&Value>) -> Option<String> {
+fn push_message_body(
+    pending_body: &mut Vec<String>,
+    items: &mut Vec<TranscriptItem>,
+    role: &str,
+    time: Option<String>,
+) {
+    if pending_body.is_empty() {
+        return;
+    }
+    let body = pending_body.join("\n");
+    pending_body.clear();
+    let item_kind = if role == "user" && is_subagent_notification(&body) {
+        "notification"
+    } else {
+        role
+    };
+    let tag = (item_kind == "notification").then(|| "Subagent".to_string());
+    push_item(items, item_kind, body, tag, time);
+}
+
+pub(crate) fn extract_thinking_text(value: Option<&Value>) -> Option<String> {
     let value = value?;
     match value {
         Value::String(text) => clean_body(text),
@@ -1227,22 +1402,35 @@ fn extract_thinking_text(value: Option<&Value>) -> Option<String> {
     }
 }
 
-fn is_thinking_content_item(value: &Value) -> bool {
+pub(crate) fn is_thinking_content_item(value: &Value) -> bool {
     matches!(
         value.get("type").and_then(Value::as_str),
         Some("thinking" | "reasoning" | "summary_text")
     )
 }
 
-fn clean_body(text: &str) -> Option<String> {
+pub(crate) fn is_non_message_content_item(value: &Value) -> bool {
+    matches!(
+        value.get("type").and_then(Value::as_str),
+        Some(
+            "tool_result"
+                | "tool_use"
+                | "function_call"
+                | "function_call_output"
+                | "custom_tool_call"
+                | "custom_tool_call_output"
+        )
+    )
+}
+
+pub(crate) fn clean_body(text: &str) -> Option<String> {
+    let text = split_internal_context_segments(text)
+        .into_iter()
+        .filter_map(|(label, segment)| label.is_none().then_some(segment))
+        .collect::<Vec<_>>()
+        .join("\n");
     let mut text = text.trim();
-    if text.is_empty()
-        || text.starts_with("<local-command-caveat>")
-        || text.starts_with("<command-name>")
-        || text.starts_with("<local-command-stdout>")
-        || text.starts_with("<task-notification>")
-        || internal_context_label(text).is_some()
-    {
+    if text.is_empty() {
         return None;
     }
 
@@ -1253,7 +1441,40 @@ fn clean_body(text: &str) -> Option<String> {
     Some(text.to_string())
 }
 
-fn is_subagent_notification(text: &str) -> bool {
+pub(crate) fn split_internal_context_segments(text: &str) -> Vec<(Option<&'static str>, String)> {
+    let mut segments = Vec::new();
+    let mut cursor = 0;
+    while let Some((start, label, prefix, closing)) = find_internal_context_marker(text, cursor) {
+        if start > cursor {
+            segments.push((None, text[cursor..start].to_string()));
+        }
+        let block_end = closing
+            .and_then(|closing| {
+                text[start..]
+                    .find(closing)
+                    .map(|offset| start + offset + closing.len())
+            })
+            .or_else(|| {
+                find_internal_context_marker(text, start + prefix.len())
+                    .map(|(next_start, _, _, _)| next_start)
+            })
+            .unwrap_or(text.len());
+        if block_end <= start {
+            break;
+        }
+        segments.push((Some(label), text[start..block_end].trim().to_string()));
+        cursor = block_end;
+    }
+    if cursor < text.len() {
+        segments.push((None, text[cursor..].to_string()));
+    }
+    if segments.is_empty() && !text.trim().is_empty() {
+        segments.push((None, text.trim().to_string()));
+    }
+    segments
+}
+
+pub(crate) fn is_subagent_notification(text: &str) -> bool {
     let normalized = text.split_whitespace().collect::<Vec<_>>().join(" ");
     normalized
         == "Briefly inform the user about the task result and perform any follow-up actions (if needed)."
@@ -1271,24 +1492,113 @@ fn extract_tag_body<'a>(text: &'a str, tag: &str) -> Option<&'a str> {
     (!inner.is_empty()).then_some(inner)
 }
 
-fn internal_context_label(text: &str) -> Option<&'static str> {
-    [
-        ("# AGENTS.md instructions", "AGENTS.md"),
-        ("<codex_internal_context", "Codex internal"),
-        ("<environment_context>", "Environment"),
-        ("<permissions instructions>", "Permissions"),
-        ("<app-context>", "App context"),
-        ("<collaboration_mode>", "Collaboration"),
-        ("<skills_instructions>", "Skills"),
-        ("<plugins_instructions>", "Plugins"),
-        ("<system-reminder>", "System reminder"),
-        ("<available_subagent_types>", "Subagent types"),
-    ]
-    .into_iter()
-    .find_map(|(prefix, label)| text.starts_with(prefix).then_some(label))
+fn find_internal_context_marker(
+    text: &str,
+    offset: usize,
+) -> Option<(usize, &'static str, &'static str, Option<&'static str>)> {
+    INTERNAL_CONTEXT_MARKERS
+        .iter()
+        .filter_map(|(prefix, label, closing)| {
+            let mut search_from = offset;
+            while let Some(relative_start) = text[search_from..].find(prefix) {
+                let start = search_from + relative_start;
+                if start == 0 || text.as_bytes().get(start.wrapping_sub(1)) == Some(&b'\n') {
+                    return Some((start, *label, *prefix, *closing));
+                }
+                search_from = start + prefix.len();
+            }
+            None
+        })
+        .min_by_key(|(start, _, _, _)| *start)
 }
 
-fn summarize_tool_call(payload: &Value, name: &str) -> String {
+const INTERNAL_CONTEXT_MARKERS: [(&str, &str, Option<&str>); 19] = [
+    (
+        "# AGENTS.md instructions",
+        "AGENTS.md",
+        Some("</INSTRUCTIONS>"),
+    ),
+    (
+        "<codex_internal_context",
+        "Codex internal",
+        Some("</codex_internal_context>"),
+    ),
+    (
+        "<recommended_plugins>",
+        "Recommended plugins",
+        Some("</recommended_plugins>"),
+    ),
+    (
+        "<environment_context>",
+        "Environment",
+        Some("</environment_context>"),
+    ),
+    (
+        "<permissions instructions>",
+        "Permissions",
+        Some("</permissions instructions>"),
+    ),
+    ("<app-context>", "App context", Some("</app-context>")),
+    (
+        "<collaboration_mode>",
+        "Collaboration",
+        Some("</collaboration_mode>"),
+    ),
+    (
+        "<skills_instructions>",
+        "Skills",
+        Some("</skills_instructions>"),
+    ),
+    (
+        "<plugins_instructions>",
+        "Plugins",
+        Some("</plugins_instructions>"),
+    ),
+    (
+        "<system-reminder>",
+        "System reminder",
+        Some("</system-reminder>"),
+    ),
+    (
+        "<available_subagent_types>",
+        "Subagent types",
+        Some("</available_subagent_types>"),
+    ),
+    (
+        "<user_instructions>",
+        "User instructions",
+        Some("</user_instructions>"),
+    ),
+    (
+        "<local-command-caveat>",
+        "Local command",
+        Some("</local-command-caveat>"),
+    ),
+    ("<command-name>", "Command", Some("</command-name>")),
+    (
+        "<local-command-stdout>",
+        "Command output",
+        Some("</local-command-stdout>"),
+    ),
+    (
+        "<task-notification>",
+        "Task notification",
+        Some("</task-notification>"),
+    ),
+    (
+        "<subagent_notification>",
+        "Subagent",
+        Some("</subagent_notification>"),
+    ),
+    ("<turn_aborted>", "Turn aborted", Some("</turn_aborted>")),
+    (
+        "<in-app-browser-context",
+        "Browser context",
+        Some("</in-app-browser-context>"),
+    ),
+];
+
+pub(crate) fn summarize_tool_call(payload: &Value, name: &str) -> String {
     if let Some(command) = extract_tool_command(payload) {
         return command.chars().take(220).collect();
     }
@@ -1315,7 +1625,7 @@ fn summarize_tool_call(payload: &Value, name: &str) -> String {
     name.to_string()
 }
 
-fn push_item(
+pub(crate) fn push_item(
     items: &mut Vec<TranscriptItem>,
     kind: &str,
     body: String,
@@ -1325,7 +1635,7 @@ fn push_item(
     push_tool_item(items, kind, body, tag, time, None, None, None, None, None);
 }
 
-fn push_tool_item(
+pub(crate) fn push_tool_item(
     items: &mut Vec<TranscriptItem>,
     kind: &str,
     body: String,
@@ -1353,7 +1663,7 @@ fn push_tool_item(
     });
 }
 
-fn attach_tool_result(
+pub(crate) fn attach_tool_result(
     items: &mut [TranscriptItem],
     call_id: Option<&str>,
     result: Option<String>,
@@ -1388,7 +1698,7 @@ fn attach_tool_result(
     true
 }
 
-fn extract_call_id(payload: &Value) -> Option<String> {
+pub(crate) fn extract_call_id(payload: &Value) -> Option<String> {
     payload
         .get("call_id")
         .or_else(|| payload.get("callId"))
@@ -1397,7 +1707,7 @@ fn extract_call_id(payload: &Value) -> Option<String> {
         .map(str::to_string)
 }
 
-fn extract_tool_command(payload: &Value) -> Option<String> {
+pub(crate) fn extract_tool_command(payload: &Value) -> Option<String> {
     if let Some(command) = payload
         .pointer("/arguments/cmd")
         .or_else(|| payload.pointer("/arguments/command"))
@@ -1418,7 +1728,7 @@ fn extract_tool_command(payload: &Value) -> Option<String> {
         .map(|command| truncate_text(command.trim(), 4_000))
 }
 
-fn extract_tool_result(payload: &Value) -> Option<String> {
+pub(crate) fn extract_tool_result(payload: &Value) -> Option<String> {
     payload
         .get("output")
         .or_else(|| payload.get("result"))
@@ -1432,7 +1742,7 @@ fn extract_tool_result(payload: &Value) -> Option<String> {
         .filter(|text| !text.is_empty())
 }
 
-fn extract_duration_ms(payload: &Value, output: Option<&str>) -> Option<u64> {
+pub(crate) fn extract_duration_ms(payload: &Value, output: Option<&str>) -> Option<u64> {
     for pointer in ["/duration_ms", "/durationMs", "/elapsed_ms", "/elapsedMs"] {
         if let Some(value) = payload.pointer(pointer) {
             if let Some(ms) = value.as_u64() {
@@ -1458,7 +1768,7 @@ fn parse_wall_time_ms(output: &str) -> Option<u64> {
     })
 }
 
-fn parse_timestamp_ms(value: &str) -> Option<i64> {
+pub(crate) fn parse_timestamp_ms(value: &str) -> Option<i64> {
     let text = value.trim();
     let year = text.get(0..4)?.parse::<i32>().ok()?;
     let month = text.get(5..7)?.parse::<u32>().ok()?;
@@ -1512,7 +1822,7 @@ fn truncate_text(value: &str, limit: usize) -> String {
     text
 }
 
-fn compact_time(value: &str) -> String {
+pub(crate) fn compact_time(value: &str) -> String {
     value
         .split('T')
         .nth(1)
@@ -1524,18 +1834,22 @@ fn compact_time(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use std::{
+        fmt::Write as _,
         fs,
+        io::Write as _,
         path::PathBuf,
-        time::{SystemTime, UNIX_EPOCH},
+        time::{Instant, SystemTime, UNIX_EPOCH},
     };
 
     use rusqlite::Connection;
     use serde_json::json;
 
     use super::{
-        append_cursor_model_configs_from_store, collect_claude_item, collect_codex_item,
-        collect_generic_item, parse_search_transcript, parse_transcript_page,
-        parse_transcript_page_with_cursor_store, summarize_tool_call,
+        TranscriptSearchScopes, append_cursor_model_configs_from_store, collect_claude_item,
+        collect_codex_item, collect_generic_item, parse_search_transcript, parse_transcript_page,
+        parse_transcript_page_if_changed, parse_transcript_page_with_cursor_store,
+        search_transcript, summarize_tool_call, transcript_chunk_cache_hits,
+        transcript_chunk_cache_offsets, transcript_search_cache_offsets, transcript_source_version,
     };
 
     fn temp_path(prefix: &str) -> PathBuf {
@@ -1620,6 +1934,58 @@ mod tests {
             ["one", "two", "three", "four", "five"],
         );
 
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn transcript_cursor_preserves_utf8_line_boundaries() {
+        let path = temp_path("tendi-transcript-page-utf8-offset-test.jsonl");
+        fs::write(
+            &path,
+            [
+                codex_message("user", "第一条🙂"),
+                codex_message("assistant", "第二条之后"),
+            ]
+            .join("\n"),
+        )
+        .unwrap();
+
+        let first =
+            parse_transcript_page(&path, crate::skills::AgentKind::Codex, None, Some(1)).unwrap();
+        let second = parse_transcript_page(
+            &path,
+            crate::skills::AgentKind::Codex,
+            first.next_cursor.as_deref(),
+            Some(1),
+        )
+        .unwrap();
+
+        assert_eq!(first.items[0].body, "第一条🙂");
+        assert_eq!(second.items[0].body, "第二条之后");
+        assert!(second.done);
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn transcript_page_if_changed_skips_an_unchanged_source() {
+        let path = temp_path("tendi-transcript-page-unchanged-test.jsonl");
+        fs::write(&path, codex_message("user", "cached page")).unwrap();
+
+        let first =
+            parse_transcript_page(&path, crate::skills::AgentKind::Codex, None, Some(1)).unwrap();
+        let unchanged = parse_transcript_page_if_changed(
+            &path,
+            crate::skills::AgentKind::Codex,
+            None,
+            Some(1),
+            Some(&first.source_version),
+        )
+        .unwrap();
+
+        assert!(unchanged.unchanged);
+        assert!(unchanged.done);
+        assert!(unchanged.items.is_empty());
+        assert_eq!(unchanged.source_version, first.source_version);
         fs::remove_file(path).unwrap();
     }
 
@@ -1987,6 +2353,271 @@ mod tests {
                 .iter()
                 .all(|item| !item.body.contains("tool-output-only"))
         );
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn transcript_search_streams_large_files_and_returns_logical_indices() {
+        let path = temp_path("tendi-transcript-search-large-test.jsonl");
+        let filler = "x".repeat(1024);
+        let mut contents = String::new();
+        for index in 0..4_000 {
+            let body = if index == 3_999 {
+                format!("needle-user-{index} {filler}")
+            } else {
+                format!("ordinary-user-{index} {filler}")
+            };
+            writeln!(contents, "{}", codex_message("user", &body)).unwrap();
+            writeln!(
+                contents,
+                "{}",
+                codex_message("assistant", &format!("ordinary-assistant-{index} {filler}"))
+            )
+            .unwrap();
+        }
+        fs::write(&path, &contents).unwrap();
+
+        let started = Instant::now();
+        let result = search_transcript(
+            &path,
+            crate::skills::AgentKind::Codex,
+            "needle-user",
+            &TranscriptSearchScopes {
+                user: true,
+                assistant: false,
+                system: false,
+                tool: false,
+            },
+        )
+        .unwrap();
+        let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
+
+        eprintln!(
+            "[transcript-search] bytes={} hits={} elapsed_ms={elapsed_ms:.2}",
+            contents.len(),
+            result.hits.len(),
+        );
+        assert_eq!(result.hits.len(), 1);
+        assert_eq!(result.hits[0].group_index, 7_998);
+        assert!(result.hits[0].tool_index.is_none());
+
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn transcript_search_maps_consecutive_tools_to_one_group() {
+        let path = temp_path("tendi-transcript-search-tool-group-test.jsonl");
+        let call = |call_id: &str, command: &str| {
+            json!({
+                "type": "response_item",
+                "payload": {
+                    "type": "function_call",
+                    "call_id": call_id,
+                    "name": "exec_command",
+                    "arguments": json!({ "cmd": command }).to_string(),
+                }
+            })
+            .to_string()
+        };
+        fs::write(
+            &path,
+            [
+                codex_message("user", "before tools"),
+                call("call-1", "ordinary command"),
+                call("call-2", "needle-tool command"),
+            ]
+            .join("\n"),
+        )
+        .unwrap();
+
+        let result = search_transcript(
+            &path,
+            crate::skills::AgentKind::Codex,
+            "needle-tool",
+            &TranscriptSearchScopes {
+                user: false,
+                assistant: false,
+                system: false,
+                tool: true,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(result.hits.len(), 1);
+        assert_eq!(result.hits[0].group_index, 1);
+        assert_eq!(result.hits[0].tool_index, Some(1));
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn transcript_search_reuses_unchanged_offset_index_and_invalidates_on_append() {
+        let path = temp_path("tendi-transcript-search-offset-index-test.jsonl");
+        let mut contents = String::new();
+        for index in 0..900 {
+            writeln!(
+                contents,
+                "{}",
+                codex_message(
+                    "user",
+                    if index == 700 {
+                        "needle-before-cache"
+                    } else {
+                        "ordinary-message"
+                    },
+                )
+            )
+            .unwrap();
+        }
+        fs::write(&path, contents).unwrap();
+
+        let scopes = TranscriptSearchScopes {
+            user: true,
+            assistant: false,
+            system: false,
+            tool: false,
+        };
+        let first = search_transcript(
+            &path,
+            crate::skills::AgentKind::Codex,
+            "needle-before-cache",
+            &scopes,
+        )
+        .unwrap();
+        let offsets = transcript_search_cache_offsets(
+            &path,
+            crate::skills::AgentKind::Codex,
+            "needle-before-cache",
+            &scopes,
+            &first.source_version,
+        )
+        .unwrap();
+        assert!(offsets.len() >= 3);
+        assert_eq!(offsets.first().copied(), Some((0, offsets[0].1)));
+        assert_eq!(
+            offsets.last().map(|(_, end)| *end),
+            Some(fs::metadata(&path).unwrap().len())
+        );
+        assert!(offsets.windows(2).all(|chunks| chunks[0].1 == chunks[1].0));
+
+        let cached = search_transcript(
+            &path,
+            crate::skills::AgentKind::Codex,
+            "needle-before-cache",
+            &scopes,
+        )
+        .unwrap();
+        assert_eq!(cached, first);
+
+        fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap()
+            .write_all(format!("\n{}", codex_message("user", "needle-after-append")).as_bytes())
+            .unwrap();
+        let after_append = search_transcript(
+            &path,
+            crate::skills::AgentKind::Codex,
+            "needle-before-cache",
+            &scopes,
+        )
+        .unwrap();
+        assert_eq!(after_append.hits, first.hits);
+        assert_ne!(after_append.source_version, first.source_version);
+        assert_eq!(
+            transcript_source_version(&path).unwrap(),
+            after_append.source_version
+        );
+
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn transcript_search_reuses_chunks_for_new_queries_and_invalidates_on_rewrite() {
+        let path = temp_path("tendi-transcript-search-chunk-cache-test.jsonl");
+        let mut contents = String::new();
+        for index in 0..900 {
+            let body = match index {
+                100 => "needle-first-query",
+                700 => "needle-second-query",
+                _ => "ordinary-message",
+            };
+            writeln!(contents, "{}", codex_message("user", body)).unwrap();
+        }
+        fs::write(&path, &contents).unwrap();
+
+        let scopes = TranscriptSearchScopes {
+            user: true,
+            assistant: false,
+            system: false,
+            tool: false,
+        };
+        let first = search_transcript(
+            &path,
+            crate::skills::AgentKind::Codex,
+            "needle-first-query",
+            &scopes,
+        )
+        .unwrap();
+        assert_eq!(first.hits.len(), 1);
+        let chunks = transcript_chunk_cache_offsets(
+            &path,
+            crate::skills::AgentKind::Codex,
+            &first.source_version,
+        );
+        assert!(
+            chunks.len() >= 3,
+            "expected several cached pages: {chunks:?}"
+        );
+
+        let second = search_transcript(
+            &path,
+            crate::skills::AgentKind::Codex,
+            "needle-second-query",
+            &scopes,
+        )
+        .unwrap();
+        assert_eq!(second.hits.len(), 1);
+        assert_eq!(second.source_version, first.source_version);
+        assert!(
+            transcript_chunk_cache_hits(
+                &path,
+                crate::skills::AgentKind::Codex,
+                &first.source_version,
+            ) > 0
+        );
+
+        fs::write(
+            &path,
+            contents.replace("needle-first-query", "replacement-first-query"),
+        )
+        .unwrap();
+        let rewritten = search_transcript(
+            &path,
+            crate::skills::AgentKind::Codex,
+            "replacement-first-query",
+            &scopes,
+        )
+        .unwrap();
+        assert_eq!(rewritten.hits.len(), 1);
+        assert_ne!(rewritten.source_version, first.source_version);
+        assert_eq!(
+            transcript_chunk_cache_hits(
+                &path,
+                crate::skills::AgentKind::Codex,
+                &rewritten.source_version,
+            ),
+            0
+        );
+
+        let removed = search_transcript(
+            &path,
+            crate::skills::AgentKind::Codex,
+            "needle-first-query",
+            &scopes,
+        )
+        .unwrap();
+        assert!(removed.hits.is_empty());
+
         fs::remove_file(path).unwrap();
     }
 
@@ -2426,7 +3057,7 @@ mod tests {
     }
 
     #[test]
-    fn skips_claude_task_notifications() {
+    fn classifies_claude_task_notifications_as_context() {
         let value = json!({
             "type": "user",
             "timestamp": "2026-06-19T10:11:12.000Z",
@@ -2440,7 +3071,9 @@ mod tests {
 
         collect_claude_item(&value, &mut items);
 
-        assert!(items.is_empty());
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].kind, "context");
+        assert_eq!(items[0].tag.as_deref(), Some("Task notification"));
     }
 
     #[test]
@@ -2549,6 +3182,10 @@ mod tests {
                     {
                         "type": "input_text",
                         "text": "# AGENTS.md instructions\n\n<INSTRUCTIONS>hidden</INSTRUCTIONS>"
+                    },
+                    {
+                        "type": "input_text",
+                        "text": "<recommended_plugins>\nplugin metadata\n</recommended_plugins>"
                     }
                 ]
             }
@@ -2572,7 +3209,7 @@ mod tests {
         collect_codex_item(&internal, &mut items);
         collect_codex_item(&user, &mut items);
 
-        assert_eq!(items.len(), 2);
+        assert_eq!(items.len(), 3);
         assert_eq!(items[0].kind, "context");
         assert_eq!(items[0].tag.as_deref(), Some("AGENTS.md"));
         assert!(
@@ -2580,8 +3217,39 @@ mod tests {
                 .body
                 .contains("<INSTRUCTIONS>hidden</INSTRUCTIONS>")
         );
-        assert_eq!(items[1].kind, "user");
-        assert_eq!(items[1].body, "What happened in this session?");
-        assert_eq!(items[1].time.as_deref(), Some("10:12"));
+        assert_eq!(items[1].kind, "context");
+        assert_eq!(items[1].tag.as_deref(), Some("Recommended plugins"));
+        assert!(items[1].body.contains("plugin metadata"));
+        assert_eq!(items[2].kind, "user");
+        assert_eq!(items[2].body, "What happened in this session?");
+        assert_eq!(items[2].time.as_deref(), Some("10:12"));
+    }
+
+    #[test]
+    fn splits_embedded_codex_lifecycle_context_from_user_text() {
+        let value = json!({
+            "type": "response_item",
+            "timestamp": "2026-06-19T10:11:12.000Z",
+            "payload": {
+                "type": "message",
+                "role": "user",
+                "content": "Real request\n<subagent_notification>\n{\"status\":\"shutdown\"}\n</subagent_notification>\n<turn_aborted>\nThe user interrupted the previous turn on purpose.\n</turn_aborted>\n<in-app-browser-context source=\"ambient-ui-state\">\nUI state\n</in-app-browser-context>\nNext request"
+            }
+        });
+        let mut items = Vec::new();
+
+        collect_codex_item(&value, &mut items);
+
+        assert_eq!(items.len(), 5);
+        assert_eq!(items[0].kind, "user");
+        assert_eq!(items[0].body, "Real request");
+        assert_eq!(items[1].kind, "context");
+        assert_eq!(items[1].tag.as_deref(), Some("Subagent"));
+        assert_eq!(items[2].kind, "context");
+        assert_eq!(items[2].tag.as_deref(), Some("Turn aborted"));
+        assert_eq!(items[3].kind, "context");
+        assert_eq!(items[3].tag.as_deref(), Some("Browser context"));
+        assert_eq!(items[4].kind, "user");
+        assert_eq!(items[4].body, "Next request");
     }
 }

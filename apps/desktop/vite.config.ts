@@ -6,6 +6,9 @@ export default defineConfig({
     include: ["react", "react-dom/client"],
   },
   server: {
+    proxy: {
+      "/__tendi": "http://127.0.0.1:5188",
+    },
     warmup: {
       clientFiles: ["./src/main.tsx"],
     },

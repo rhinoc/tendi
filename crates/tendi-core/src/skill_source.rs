@@ -67,11 +67,21 @@ pub(crate) fn parse(cwd: &Path, input: &str) -> Result<ParsedSkillSource> {
     if let Some((scheme, rest)) = strip_http_scheme(source) {
         let (host, path) = rest.split_once('/').unwrap_or((rest, ""));
         let host_lower = host.to_ascii_lowercase();
+        let path_without_query = path.split(['?', '#']).next().unwrap_or(path);
         if host_lower == "gitlab.com" || path.contains("/-/tree/") {
             return parse_gitlab_path(scheme, host, path, git_ref);
         }
         if host_lower == "huggingface.co" {
             return parse_hugging_face(scheme, host, path, git_ref);
+        }
+        if host_lower == "clawhub.ai" && path_without_query == "api/v1/download" {
+            return Ok(ParsedSkillSource {
+                kind: "clawhub".to_string(),
+                local_root: None,
+                url: source.to_string(),
+                git_ref: None,
+                subpath: None,
+            });
         }
         if source.ends_with(".git") {
             return Ok(git_source(source, classify_git_host(host), git_ref));
@@ -432,6 +442,15 @@ struct DiscoveryEntry {
 }
 
 pub(crate) fn materialize_well_known(source: &str, target: &Path) -> Result<()> {
+    if source
+        .strip_prefix("https://clawhub.ai/api/v1/download")
+        .is_some()
+    {
+        let bytes = fetch_bytes(source)?;
+        extract_skill_archive(&bytes, source, target)?;
+        return Ok(());
+    }
+
     let candidates = discovery_index_candidates(source)?;
     for index_url in candidates {
         let Some(index_text) = fetch_text_optional(&index_url)? else {
@@ -445,12 +464,25 @@ pub(crate) fn materialize_well_known(source: &str, target: &Path) -> Result<()> 
         }
     }
 
-    // Match skills CLI's direct-download fallback for a standalone SKILL.md URL.
-    if let Some(content) = fetch_text_optional(source)? {
-        if content.contains("---") && content.contains("name:") {
-            fs::create_dir_all(target)?;
-            fs::write(target.join("SKILL.md"), content)?;
+    // Match skills CLI's direct-download fallback for a standalone SKILL.md URL
+    // and registry endpoints that return a skill ZIP directly (for example
+    // ClawHub's /api/v1/download endpoint).
+    if let Some(bytes) = fetch_bytes_optional(source)? {
+        if bytes.starts_with(b"PK")
+            || bytes.starts_with(&[0x1f, 0x8b])
+            || source.to_ascii_lowercase().ends_with(".zip")
+            || source.to_ascii_lowercase().ends_with(".tar.gz")
+            || source.to_ascii_lowercase().ends_with(".tgz")
+        {
+            extract_skill_archive(&bytes, source, target)?;
             return Ok(());
+        }
+        if let Ok(content) = String::from_utf8(bytes) {
+            if content.contains("---") && content.contains("name:") {
+                fs::create_dir_all(target)?;
+                fs::write(target.join("SKILL.md"), content)?;
+                return Ok(());
+            }
         }
     }
     bail!(
@@ -776,6 +808,20 @@ mod tests {
         let fragment = parse(cwd, "acme/skills/skills/demo#feature%2Finstall").unwrap();
         assert_eq!(fragment.git_ref.as_deref(), Some("feature/install"));
         assert_eq!(fragment.subpath.as_deref(), Some(Path::new("skills/demo")));
+    }
+
+    #[test]
+    fn parses_clawhub_download_source() {
+        let source = parse(
+            Path::new("/tmp/missing-tendi-source-parser"),
+            "https://clawhub.ai/api/v1/download?slug=demo&version=1.0.0",
+        )
+        .unwrap();
+        assert_eq!(source.kind, "clawhub");
+        assert_eq!(
+            source.url,
+            "https://clawhub.ai/api/v1/download?slug=demo&version=1.0.0"
+        );
     }
 
     #[test]

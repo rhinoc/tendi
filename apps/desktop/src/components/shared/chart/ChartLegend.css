@@ -1,0 +1,25 @@
+.chartLegend {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px 16px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.chartLegendItem {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.chartLegendEmpty {
+  min-height: 14px;
+}
+
+.chartLegendSwatch {
+  width: 12px;
+  height: 2px;
+  flex: 0 0 auto;
+  border-radius: 999px;
+}

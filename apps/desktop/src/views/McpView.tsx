@@ -6,9 +6,8 @@ import type { ColumnDef } from "../components/DataTable.types";
 import { ContentTopDragStrip } from "../components/shared/ContentTopDragStrip.tsx";
 import { CopyPathMenuItem, RevealInFinderMenuItem } from "../components/shared/DataTableMenus.tsx";
 import { CopyButton } from "../components/shared/CopyButton.tsx";
-import { LoadingInline } from "../components/shared/LoadingInline.tsx";
-import { MoreActionsButton } from "../components/shared/MoreActionsButton.tsx";
 import { PageHeader } from "../components/shared/PageHeader.tsx";
+import { RowActionsMenu } from "../components/shared/RowActionsMenu.tsx";
 import { mcpColumns as defaultMcpColumns } from "../lib/tableColumns.tsx";
 import { MCP_FREEZE_COLUMN, TauriCommand, safeInvoke } from "../lib/index.ts";
 
@@ -58,16 +57,9 @@ function McpActionsMenuItems({
 
 function McpActionsCell({ row }: { row: McpRow }) {
   return (
-    <DropdownMenu.Root>
-      <DropdownMenu.Trigger asChild>
-        <MoreActionsButton aria-label={`MCP actions for ${row.name ?? "server"}`} />
-      </DropdownMenu.Trigger>
-      <DropdownMenu.Portal>
-        <DropdownMenu.Content className="skillMenuContent" align="end" sideOffset={6}>
-          <McpActionsMenuItems Menu={DropdownMenu} row={row} />
-        </DropdownMenu.Content>
-      </DropdownMenu.Portal>
-    </DropdownMenu.Root>
+    <RowActionsMenu ariaLabel={`MCP actions for ${row.name ?? "server"}`}>
+      <McpActionsMenuItems Menu={DropdownMenu} row={row} />
+    </RowActionsMenu>
   );
 }
 
@@ -145,7 +137,7 @@ export function DataListView({ title, rows, columns = defaultMcpColumns, loading
         bottomBarCheckboxLabel={`Select visible ${title.toLowerCase()}`}
         selectionLabel="servers"
         loading={loading}
-        loadingLabel={<LoadingInline label={`Loading ${title.toLowerCase()}`} />}
+        loadingLabel={`Loading ${title.toLowerCase()}`}
         emptyState="No MCP servers found. Adjust the agent filter to see more."
       />
     </section>

@@ -16,12 +16,20 @@
 - If a shared component cannot express the scenario, document the difference first. Extend the shared component and reuse it instead of creating a parallel implementation.
 - States with the same visual semantics must use the same component and CSS rules. Keep separate components only when behavior, Radix semantics, or layout are demonstrably different.
 
+## Session Title Formatting
+
+- Any chart or graph that displays a session title or label must pass it through the shared `formatSessionTitle` helper from `apps/desktop/src/lib/session-preview.ts`; do not render raw session title text. This keeps image and URL handling consistent.
+- Reuse `TranscriptLinkText` for regular HTML session-title previews. Do not duplicate image or URL parsing in a page or chart.
+
 ## Loading UI
 
 - Use `LoadingIcon` for loading icons inside buttons.
 - Use `LoadingInline` when an icon and text are needed. Do not hand-write `RefreshCw` with a separate spinner class in icon, action, or editor buttons.
 - Do not add `loadingSpinner`, `dialogLoadingIcon`, `skillRefreshSpinning`, `editorSaveSpinner`, or equivalent duplicate animation classes. Pass sizes through the `LoadingIcon` `size` prop.
 - Loading buttons must correctly handle `disabled`, `aria-busy`, icon alignment, and existing success/error states.
+- A button's idle, loading, success, and error states must preserve its geometry to prevent layout shift. Use a stable width when the normal labels differ, center the contents, and do not size the button from a transient loading label.
+- For button actions, loading states should render only `LoadingIcon`; keep the loading description in `aria-label` and expose the state with `aria-busy` instead of adding visible `Loading…`, `Saving…`, or similar text.
+- Use concise action labels that describe the actual operation. For switching the active profile, use `Switch` rather than `Activate`.
 
 ## Verification
 

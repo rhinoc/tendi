@@ -251,7 +251,7 @@
   --content-bg: var(--theme-bg);
   --panel-bg: var(--theme-window);
   --editor-bg: var(--theme-bg);
-  --file-tree-bg: var(--theme-sidebar);
+  --file-tree-bg: var(--surface);
 
   --line: color-mix(in oklch, var(--theme-text) 20%, transparent);
   --line-strong: color-mix(in oklch, var(--theme-text) 32%, transparent);
@@ -273,8 +273,8 @@
   --accent-contrast: var(--theme-accent-contrast);
   --accent-soft: color-mix(in oklch, var(--theme-accent) 16%, transparent);
   --accent-soft-strong: color-mix(in oklch, var(--theme-accent) 28%, transparent);
-  --selection-fill: color-mix(in oklch, var(--theme-yellow) 22%, transparent);
-  --selection-fill-strong: color-mix(in oklch, var(--theme-yellow) 36%, transparent);
+  --selection-fill: color-mix(in oklch, var(--theme-accent) 22%, transparent);
+  --selection-fill-strong: color-mix(in oklch, var(--theme-accent) 36%, transparent);
   --file-tree-selected-bg: var(--accent-soft);
   --focus-ring: color-mix(in oklch, var(--theme-accent) 55%, transparent);
   --focus-ring-soft: color-mix(in oklch, var(--theme-accent) 16%, transparent);

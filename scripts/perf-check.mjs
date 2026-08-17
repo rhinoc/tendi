@@ -17,6 +17,7 @@ import { performance } from "node:perf_hooks";
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const binary = join(root, "target/debug/tendi");
 const perfBinary = join(root, "target/debug/tendi-perf");
+const chartPerformanceRunner = join(root, "apps/desktop/scripts/chart-performance.mjs");
 const outputDir = join(root, "target/perf");
 const defaultBaselinePath = join(outputDir, "baseline.json");
 const latestPath = join(outputDir, "latest.json");
@@ -88,6 +89,16 @@ const thresholds = {
   tertiarySettingsSaveMs: envNumber("TENDI_PERF_TERTIARY_SETTINGS_SAVE_MS", 3),
   tertiarySettingsSaveRssBytes: envNumber("TENDI_PERF_TERTIARY_SETTINGS_SAVE_RSS_MIB", 16) * mib,
   tertiarySettingsSavePayloadBytes: envNumber("TENDI_PERF_TERTIARY_SETTINGS_SAVE_PAYLOAD_MIB", 0.015625) * mib,
+  // Production chart computations loaded through Vite SSR. Defaults leave headroom
+  // above the current local p95 while remaining sensitive to a regression.
+  chartOverviewTrendMs: envNumber("TENDI_PERF_CHART_OVERVIEW_TREND_MS", 70),
+  chartOverviewTrendP95Ms: envNumber("TENDI_PERF_CHART_OVERVIEW_TREND_P95_MS", 120),
+  chartOverviewTrendZoomedMs: envNumber("TENDI_PERF_CHART_OVERVIEW_TREND_ZOOMED_MS", 70),
+  chartOverviewTrendZoomedP95Ms: envNumber("TENDI_PERF_CHART_OVERVIEW_TREND_ZOOMED_P95_MS", 120),
+  chartSkillSessionProjectMs: envNumber("TENDI_PERF_CHART_SKILL_SESSION_PROJECT_MS", 15),
+  chartSkillSessionProjectP95Ms: envNumber("TENDI_PERF_CHART_SKILL_SESSION_PROJECT_P95_MS", 30),
+  chartRelationshipGraphMs: envNumber("TENDI_PERF_CHART_RELATIONSHIP_GRAPH_MS", 60),
+  chartRelationshipGraphP95Ms: envNumber("TENDI_PERF_CHART_RELATIONSHIP_GRAPH_P95_MS", 100),
 };
 
 const results = [];
@@ -196,6 +207,22 @@ benchmarkCoreScenario("tertiary-settings-save", {
   maxOperationMs: thresholds.tertiarySettingsSaveMs,
   maxRssBytes: thresholds.tertiarySettingsSaveRssBytes,
   maxPayloadBytes: thresholds.tertiarySettingsSavePayloadBytes,
+});
+benchmarkFrontendScenario("chart-overview-trend", "overview-trend", {
+  maxMedianMs: thresholds.chartOverviewTrendMs,
+  maxP95Ms: thresholds.chartOverviewTrendP95Ms,
+});
+benchmarkFrontendScenario("chart-overview-trend-zoomed", "overview-trend-zoomed", {
+  maxMedianMs: thresholds.chartOverviewTrendZoomedMs,
+  maxP95Ms: thresholds.chartOverviewTrendZoomedP95Ms,
+});
+benchmarkFrontendScenario("chart-skill-session-project", "skill-session-project", {
+  maxMedianMs: thresholds.chartSkillSessionProjectMs,
+  maxP95Ms: thresholds.chartSkillSessionProjectP95Ms,
+});
+benchmarkFrontendScenario("chart-relationship-graph", "relationship-graph", {
+  maxMedianMs: thresholds.chartRelationshipGraphMs,
+  maxP95Ms: thresholds.chartRelationshipGraphP95Ms,
 });
 
 if (options.profile === "full") {
@@ -362,6 +389,48 @@ function benchmarkCoreScenario(name, limits) {
       && metrics.payloadBytes <= limits.maxPayloadBytes,
     metrics,
     `operation <= ${formatMs(limits.maxOperationMs)}, RSS <= ${formatBytes(limits.maxRssBytes)}, payload <= ${formatBytes(limits.maxPayloadBytes)}`,
+  );
+}
+
+function benchmarkFrontendScenario(name, scenario, limits) {
+  if (!existsSync(chartPerformanceRunner)) failNow(`missing chart performance runner: ${chartPerformanceRunner}`);
+  const measured = measureExecutable(
+    name,
+    process.execPath,
+    [chartPerformanceRunner, scenario],
+    true,
+  );
+  let scenarioResult;
+  try {
+    scenarioResult = JSON.parse(measured.stdout.trim());
+  } catch (error) {
+    failNow(`${name}: invalid chart performance output: ${error.message}`);
+  }
+  for (const key of ["operationMs", "p95Ms", "iterations", "warmupIterations", "checksum"]) {
+    if (!Number.isFinite(scenarioResult[key]) || scenarioResult[key] < 0) {
+      failNow(`${name}: invalid ${key}: ${scenarioResult[key]}`);
+    }
+  }
+  if (scenarioResult.scenario !== scenario) {
+    failNow(`${name}: expected scenario ${scenario}, got ${scenarioResult.scenario}`);
+  }
+  const metrics = {
+    operationMs: scenarioResult.operationMs,
+    p95Ms: scenarioResult.p95Ms,
+    processElapsedMs: measured.elapsedMs,
+    peakRssBytes: measured.peakRssBytes,
+    outputBytes: measured.outputBytes,
+    iterations: scenarioResult.iterations,
+    warmupIterations: scenarioResult.warmupIterations,
+    input: scenarioResult.input,
+    output: scenarioResult.output,
+    checksum: scenarioResult.checksum,
+  };
+  gate(
+    name,
+    metrics.operationMs <= limits.maxMedianMs && metrics.p95Ms <= limits.maxP95Ms,
+    metrics,
+    `median <= ${formatMs(limits.maxMedianMs)}, p95 <= ${formatMs(limits.maxP95Ms)}`,
   );
 }
 
@@ -554,6 +623,7 @@ function comparableMetrics(previous, current) {
     "maxElapsedMs",
     "elapsedMs",
     "operationMs",
+    "p95Ms",
     "processElapsedMs",
     "peakRssBytes",
     "outputBytes",
@@ -577,6 +647,7 @@ function formatMetrics(result) {
   if (Number.isFinite(result.maxElapsedMs)) values.push(`elapsed max ${formatMs(result.maxElapsedMs)}`);
   if (Number.isFinite(result.elapsedMs)) values.push(formatMs(result.elapsedMs));
   if (Number.isFinite(result.operationMs)) values.push(`operation ${formatMs(result.operationMs)}`);
+  if (Number.isFinite(result.p95Ms)) values.push(`p95 ${formatMs(result.p95Ms)}`);
   if (Number.isFinite(result.processElapsedMs)) values.push(`process ${formatMs(result.processElapsedMs)}`);
   if (Number.isFinite(result.peakRssBytes)) values.push(`RSS ${formatBytes(result.peakRssBytes)}`);
   if (Number.isFinite(result.outputBytes)) values.push(`output ${formatBytes(result.outputBytes)}`);

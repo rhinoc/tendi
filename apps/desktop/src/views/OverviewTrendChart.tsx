@@ -1,11 +1,21 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent, type WheelEvent } from "react";
 
+import { ChartFrame } from "../components/shared/chart/ChartFrame.tsx";
+import { ChartLegend, type ChartLegendItem } from "../components/shared/chart/ChartLegend.tsx";
+import { ChartTooltipContent, type ChartTooltipDetail } from "../components/shared/chart/ChartTooltipContent.tsx";
 import { Tooltip } from "../components/shared/Tooltip.tsx";
-import { groupAnalyticsDays, type AnalyticsGranularity, type AnalyticsPeriod, type OverviewAnalytics } from "../lib/analytics.ts";
+import { formatDayGroupLabel, friendlyAgent, normalizedAgentKey } from "../lib/index.ts";
+import { groupAnalyticsDays, stepAnalyticsGranularity, type AnalyticsGranularity, type AnalyticsPeriod, type OverviewAnalytics } from "../lib/analytics.ts";
 import { formatTokenCount } from "../lib/token-format.ts";
+import { trackpadZoomDirection, useTrackpadZoom } from "../lib/zoom-gesture.ts";
 
 const MAX_RUNG_COUNT = 28;
 const MAX_CATEGORY_COUNT = 4;
+const TREND_COLUMN_WIDTH = 24;
+const TREND_EDGE_PADDING = 32;
+const TREND_WINDOW_OVERSCAN = 8;
+const TREND_VIRTUALIZATION_LIMIT = 80;
+const TREND_INITIAL_WINDOW_COLUMNS = 64;
 
 export type OverviewUsageMetric = "sessions" | "turns" | "tokens" | "cache" | "tools" | "skills";
 
@@ -22,12 +32,58 @@ type BreakdownItem = {
   value: number;
 };
 
+type TrendRung = {
+  key: string;
+  className: string;
+  isSegmentStart: boolean;
+  width: number;
+};
+
+type TrendPeriodModel = {
+  period: AnalyticsPeriod;
+  index: number;
+  total: number;
+  totalRungs: number;
+  segments: TrendSegment[];
+  rungs: TrendRung[];
+  tooltipSegments: Array<BreakdownItem & { className: string }>;
+};
+
 type ScrollSnapshot = {
   firstKey: string;
   left: number;
   viewKey: string;
   width: number;
 };
+
+type TrendWindow = {
+  start: number;
+  end: number;
+};
+
+function periodStartTimestamp(key: string, granularity: AnalyticsGranularity): number {
+  const normalizedKey = granularity === "month" ? `${key}-01` : key;
+  return new Date(`${normalizedKey}T00:00:00`).getTime();
+}
+
+function periodIndexAtTimestamp(
+  periods: AnalyticsPeriod[],
+  timestamp: number,
+  granularity: AnalyticsGranularity,
+): number {
+  if (!periods.length || !Number.isFinite(timestamp)) return -1;
+  let candidate = 0;
+  for (let index = 0; index < periods.length; index += 1) {
+    const start = periodStartTimestamp(periods[index].key, granularity);
+    if (timestamp < start) break;
+    candidate = index;
+    const nextStart = periods[index + 1]
+      ? periodStartTimestamp(periods[index + 1].key, granularity)
+      : Number.POSITIVE_INFINITY;
+    if (timestamp < nextStart) return index;
+  }
+  return candidate;
+}
 
 function apportionRungs(values: number[], totalRungs: number): number[] {
   const total = values.reduce((sum, value) => sum + value, 0);
@@ -82,6 +138,42 @@ function metricLabel(metric: OverviewUsageMetric, granularity?: AnalyticsGranula
   return metric;
 }
 
+const SESSION_AGENT_ORDER = ["codex", "claude", "cursor", "shared", "unknown"];
+
+function sessionAgentSort(left: string, right: string): number {
+  const leftKey = normalizedAgentKey(left);
+  const rightKey = normalizedAgentKey(right);
+  const leftIndex = SESSION_AGENT_ORDER.indexOf(leftKey);
+  const rightIndex = SESSION_AGENT_ORDER.indexOf(rightKey);
+  return (leftIndex < 0 ? SESSION_AGENT_ORDER.length : leftIndex)
+    - (rightIndex < 0 ? SESSION_AGENT_ORDER.length : rightIndex)
+    || leftKey.localeCompare(rightKey);
+}
+
+function sessionAgentLabel(agent: string): string {
+  return normalizedAgentKey(agent) === "shared" ? "Shared" : friendlyAgent(agent) || "Unknown";
+}
+
+function sessionAgentClass(agent: string): string {
+  const key = normalizedAgentKey(agent);
+  if (key === "codex") return "agentCodex";
+  if (key === "claude" || key === "claudecode") return "agentClaude";
+  if (key === "cursor") return "agentCursor";
+  return "agentOther";
+}
+
+function sessionSegments(period: AnalyticsPeriod): TrendSegment[] {
+  return Object.entries(period.sessionsByAgent)
+    .filter(([, value]) => value > 0)
+    .sort(([left], [right]) => sessionAgentSort(left, right))
+    .map(([agent, value]) => ({
+      key: `session-agent:${agent}`,
+      label: sessionAgentLabel(agent),
+      value,
+      className: sessionAgentClass(agent),
+    }));
+}
+
 function breakdownItems(period: AnalyticsPeriod, metric: OverviewUsageMetric): BreakdownItem[] {
   if (metric === "tokens") {
     return period.models.map((model) => ({
@@ -113,7 +205,10 @@ function periodAriaLabel(
     .filter((segment) => segment.value > 0)
     .map((segment) => `${segment.label} ${formatMetricValue(segment.value, metric)}`)
     .join(", ");
-  return `${period.label}: ${formatMetricValue(metricValue(period, metric), metric)} ${metricLabel(metric, granularity)}.${coverage}${breakdown ? ` ${breakdown}.` : ""}`;
+  const peakDate = metric === "sessions" && granularity !== "day" && period.sessionPeakDate
+    ? ` Peak day ${formatDayGroupLabel(period.sessionPeakDate)}.`
+    : "";
+  return `${period.label}: ${formatMetricValue(metricValue(period, metric), metric)} ${metricLabel(metric, granularity)}.${coverage}${peakDate}${breakdown ? ` ${breakdown}.` : ""}`;
 }
 
 function turnSegments(period: AnalyticsPeriod): TrendSegment[] {
@@ -125,6 +220,88 @@ function turnSegments(period: AnalyticsPeriod): TrendSegment[] {
   ];
 }
 
+function trendWindowForScroll(
+  count: number,
+  scrollLeft: number,
+  viewportWidth: number,
+): TrendWindow {
+  if (count <= TREND_VIRTUALIZATION_LIMIT) return { start: 0, end: count };
+  const firstVisible = Math.max(0, Math.floor(Math.max(0, scrollLeft - TREND_EDGE_PADDING) / TREND_COLUMN_WIDTH));
+  const visibleColumns = Math.max(
+    1,
+    Math.ceil(Math.max(TREND_COLUMN_WIDTH, viewportWidth - TREND_EDGE_PADDING * 2) / TREND_COLUMN_WIDTH),
+  );
+  return {
+    start: Math.max(0, firstVisible - TREND_WINDOW_OVERSCAN),
+    end: Math.min(count, firstVisible + visibleColumns + TREND_WINDOW_OVERSCAN),
+  };
+}
+
+function initialTrendWindow(count: number): TrendWindow {
+  if (count <= TREND_VIRTUALIZATION_LIMIT) return { start: 0, end: count };
+  return {
+    start: Math.max(0, count - TREND_INITIAL_WINDOW_COLUMNS - TREND_WINDOW_OVERSCAN),
+    end: count,
+  };
+}
+
+export function buildTrendPeriodModel(
+  period: AnalyticsPeriod,
+  index: number,
+  metric: OverviewUsageMetric,
+  topCategories: BreakdownItem[],
+  hasOtherCategories: boolean,
+  rungUnit: number,
+): TrendPeriodModel {
+  const periodBreakdown = breakdownItems(period, metric);
+  const periodValues = new Map(periodBreakdown.map((item) => [item.key, item.value]));
+  const knownValue = topCategories.reduce((sum, item) => sum + (periodValues.get(item.key) ?? 0), 0);
+  const otherValue = Math.max(0, metricValue(period, metric) - knownValue);
+  const segments: TrendSegment[] = metric === "tokens" || metric === "tools" || metric === "skills"
+    ? [
+        ...topCategories.map((item, categoryIndex) => ({
+          key: item.key,
+          label: item.label,
+          value: periodValues.get(item.key) ?? 0,
+          className: `category${categoryIndex}`,
+        })),
+        ...(hasOtherCategories ? [{ key: "other", label: "Other", value: otherValue, className: "categoryOther" }] : []),
+      ]
+    : metric === "sessions"
+      ? sessionSegments(period)
+      : metric === "cache"
+        ? [{ key: "cache", label: "Cached input rate", value: cacheRate(period), className: "cacheRate" }]
+        : turnSegments(period);
+  const total = metricValue(period, metric);
+  const totalRungs = total ? Math.max(1, Math.round(total / rungUnit)) : 0;
+  const segmentRungs = apportionRungs(segments.map((segment) => segment.value), totalRungs);
+  const rungs = segmentRungs.flatMap((count, segmentIndex) => (
+    Array.from({ length: count }, (_, rungIndex) => ({
+      key: `${segments[segmentIndex].key}-${rungIndex}`,
+      className: segments[segmentIndex].className,
+      isSegmentStart: segmentIndex > 0 && rungIndex === 0,
+      width: rungWidth(index, rungIndex, segmentIndex),
+    }))
+  ));
+  const tooltipSegments = metric === "cache"
+    ? []
+    : metric === "tokens" || metric === "tools" || metric === "skills"
+      ? periodBreakdown
+        .filter((item) => item.value > 0)
+        .map((item) => {
+          const categoryIndex = topCategories.findIndex((category) => category.key === item.key);
+          return {
+            ...item,
+            className: categoryIndex >= 0 ? `category${categoryIndex}` : "categoryOther",
+          };
+        })
+        .sort((left, right) => right.value - left.value || left.label.localeCompare(right.label))
+      : [...segments]
+        .filter((segment) => segment.value > 0)
+        .sort((left, right) => right.value - left.value || left.label.localeCompare(right.label));
+  return { period, index, total, totalRungs, segments, rungs, tooltipSegments };
+}
+
 // Lieflat F7 · Stacked Rungs · templates/basics-gallery.html · "Where each region's revenue sits"
 export function OverviewTrendChart({
   analytics,
@@ -133,6 +310,7 @@ export function OverviewTrendChart({
   loadingOlder,
   metric,
   onLoadOlder,
+  onGranularityChange,
 }: {
   analytics: OverviewAnalytics;
   granularity: AnalyticsGranularity;
@@ -140,6 +318,7 @@ export function OverviewTrendChart({
   loadingOlder: boolean;
   metric: OverviewUsageMetric;
   onLoadOlder: () => void;
+  onGranularityChange?: (granularity: AnalyticsGranularity) => void;
 }) {
   const chartDays = useMemo(() => {
     const firstAvailableDate = analytics.coverage.first;
@@ -166,6 +345,13 @@ export function OverviewTrendChart({
     [categoryTotals],
   );
   const topCategorySet = useMemo(() => new Set(topCategories.map((item) => item.key)), [topCategories]);
+  const sessionAgentKeys = useMemo(() => {
+    const keys = new Set<string>();
+    for (const period of visible) {
+      for (const agent of Object.keys(period.sessionsByAgent)) keys.add(agent);
+    }
+    return [...keys].sort(sessionAgentSort);
+  }, [visible]);
   const expectedDays = (period: AnalyticsPeriod) => {
     if (granularity === "day") return 1;
     if (granularity === "week") return 7;
@@ -204,14 +390,47 @@ export function OverviewTrendChart({
   const loadRequestedRef = useRef(false);
   const scrollSnapshotRef = useRef<ScrollSnapshot | null>(null);
   const viewportRef = useRef<HTMLDivElement>(null);
+  const [trendWindow, setTrendWindow] = useState<TrendWindow>(() => initialTrendWindow(visible.length));
+  const pendingFocusIndexRef = useRef<number | null>(null);
+  const zoomScaleRef = useRef(1);
+  const zoomFocusTimestampRef = useRef<number | null>(null);
+  const windowStart = Math.min(trendWindow.start, Math.max(0, visible.length));
+  const windowEnd = Math.max(windowStart, Math.min(trendWindow.end, visible.length));
+  const windowed = visible.length > TREND_VIRTUALIZATION_LIMIT;
+  const periodModels = useMemo(
+    () => visible.slice(windowStart, windowEnd).map((period, localIndex) => buildTrendPeriodModel(
+      period,
+      windowStart + localIndex,
+      metric,
+      topCategories,
+      hasOtherCategories,
+      rungUnit,
+    )),
+    [hasOtherCategories, metric, rungUnit, topCategories, visible, windowStart, windowEnd],
+  );
+
+  const syncTrendWindow = (viewport: HTMLDivElement) => {
+    const next = trendWindowForScroll(visible.length, viewport.scrollLeft, viewport.clientWidth);
+    setTrendWindow((current) => current.start === next.start && current.end === next.end ? current : next);
+  };
 
   useEffect(() => {
+    const focusTimestamp = zoomFocusTimestampRef.current;
+    if (focusTimestamp !== null) {
+      const focusIndex = periodIndexAtTimestamp(visible, focusTimestamp, granularity);
+      zoomFocusTimestampRef.current = null;
+      if (focusIndex >= 0) {
+        pendingFocusIndexRef.current = focusIndex;
+        setActiveKey(visible[focusIndex].key);
+        return;
+      }
+    }
     setActiveKey((current) => (
       visible.some((period) => period.key === current)
         ? current
         : visible[visible.length - 1]?.key ?? ""
     ));
-  }, [visible]);
+  }, [granularity, visible]);
 
   useLayoutEffect(() => {
     const viewport = viewportRef.current;
@@ -220,7 +439,22 @@ export function OverviewTrendChart({
     const firstKey = visible[0]?.key ?? "";
     const previous = scrollSnapshotRef.current;
     if (!previous || previous.viewKey !== viewKey) {
-      viewport.scrollLeft = viewport.scrollWidth;
+      const focusTimestamp = zoomFocusTimestampRef.current;
+      const focusIndex = focusTimestamp === null
+        ? -1
+        : periodIndexAtTimestamp(visible, focusTimestamp, granularity);
+      if (focusIndex >= 0) {
+        pendingFocusIndexRef.current = focusIndex;
+        const button = barsRef.current?.querySelector<HTMLButtonElement>(`[data-trend-index="${focusIndex}"]`);
+        if (!button && windowed) {
+          const maxScrollLeft = Math.max(0, viewport.scrollWidth - viewport.clientWidth);
+          const targetScrollLeft = TREND_EDGE_PADDING + focusIndex * TREND_COLUMN_WIDTH
+            - Math.max(0, (viewport.clientWidth - TREND_COLUMN_WIDTH) / 2);
+          viewport.scrollLeft = Math.max(0, Math.min(maxScrollLeft, targetScrollLeft));
+        }
+      } else {
+        viewport.scrollLeft = viewport.scrollWidth;
+      }
     } else if (previous.firstKey !== firstKey) {
       viewport.scrollLeft = previous.left + Math.max(0, viewport.scrollWidth - previous.width);
     } else {
@@ -232,6 +466,7 @@ export function OverviewTrendChart({
       viewKey,
       width: viewport.scrollWidth,
     };
+    syncTrendWindow(viewport);
 
     if (!loadingOlder) loadRequestedRef.current = false;
     if (
@@ -243,7 +478,47 @@ export function OverviewTrendChart({
       loadRequestedRef.current = true;
       onLoadOlder();
     }
-  }, [granularity, hasOlder, loadingOlder, metric, onLoadOlder, visible]);
+  }, [granularity, hasOlder, loadingOlder, metric, onLoadOlder, visible, windowed]);
+
+  useEffect(() => {
+    const pendingIndex = pendingFocusIndexRef.current;
+    if (pendingIndex === null) return;
+    const button = barsRef.current?.querySelector<HTMLButtonElement>(`[data-trend-index="${pendingIndex}"]`);
+    if (!button) return;
+    pendingFocusIndexRef.current = null;
+    button.focus();
+  }, [granularity, trendWindow, visible]);
+
+  const handleTrackpadZoom = useTrackpadZoom<HTMLDivElement>(({ factor }) => {
+    if (!onGranularityChange || !visible.length) return;
+    zoomScaleRef.current *= factor;
+    const direction = trackpadZoomDirection(zoomScaleRef.current);
+    if (direction === 0) return;
+    zoomScaleRef.current = 1;
+    const nextGranularity = stepAnalyticsGranularity(granularity, direction);
+    if (nextGranularity === granularity) return;
+
+    const focusedKey = hoveredKey ?? activeKey;
+    const focusedPeriod = visible.find((period) => period.key === focusedKey);
+    zoomFocusTimestampRef.current = focusedPeriod
+      ? periodStartTimestamp(focusedPeriod.key, granularity)
+      : null;
+    onGranularityChange(nextGranularity);
+  });
+
+  const handleViewportWheel = (event: WheelEvent<HTMLDivElement>) => {
+    handleTrackpadZoom(event);
+  };
+
+  const handlePeriodClick = (period: AnalyticsPeriod) => {
+    setActiveKey(period.key);
+    if (!onGranularityChange || granularity === "day") return;
+    const nextGranularity = stepAnalyticsGranularity(granularity, -1);
+    if (nextGranularity === granularity) return;
+    zoomScaleRef.current = 1;
+    zoomFocusTimestampRef.current = periodStartTimestamp(period.key, granularity);
+    onGranularityChange(nextGranularity);
+  };
 
   const handleViewportScroll = () => {
     const viewport = viewportRef.current;
@@ -253,6 +528,7 @@ export function OverviewTrendChart({
       snapshot.left = viewport.scrollLeft;
       snapshot.width = viewport.scrollWidth;
     }
+    syncTrendWindow(viewport);
     if (viewport.scrollLeft > 48 || !hasOlder || loadingOlder || loadRequestedRef.current) return;
     loadRequestedRef.current = true;
     onLoadOlder();
@@ -260,31 +536,36 @@ export function OverviewTrendChart({
 
   if (!visible.length || !hasMetricActivity) {
     return (
-      <section className="overviewTrendBlock" aria-labelledby="overview-trend-title">
-        <div className="overviewTrendLegend overviewTrendLegendEmpty" aria-hidden="true" />
-        <div className="overviewTrendPlotLayout">
-          <div className="overviewTrendYAxis" aria-hidden="true">
-            <span>—</span>
-            <span>—</span>
-            <span>—</span>
-          </div>
-          <div className="overviewTrendViewport">
-            <div
-              className="overviewTrendCanvas"
-              style={{ "--trend-columns": 1 } as CSSProperties}
-            >
-              <div className="overviewTrendGrid" aria-hidden="true"><span /><span /><span /></div>
-              <div className="overviewTrendEmptyMessage">
-                <h3 id="overview-trend-title">No {metricLabel(metric, granularity)} activity</h3>
-                <p>No activity in the selected range.</p>
+      <ChartFrame
+        ariaLabelledBy="overview-trend-title"
+        legend={<ChartLegend items={[]} />}
+        emptyState={(
+          <div className="overviewTrendPlotLayout">
+            <div className="overviewTrendYAxis" aria-hidden="true">
+              <span>—</span>
+              <span>—</span>
+              <span>—</span>
+            </div>
+            <div className="overviewTrendViewport">
+              <div
+                className="overviewTrendCanvas"
+                style={{ "--trend-columns": 1 } as CSSProperties}
+              >
+                <div className="overviewTrendGrid" aria-hidden="true"><span /><span /><span /></div>
+                <div className="overviewTrendEmptyMessage">
+                  <h3 id="overview-trend-title">No {metricLabel(metric, granularity)} activity</h3>
+                  <p>No activity in the selected range.</p>
+                </div>
+              </div>
+              <div className="overviewTrendXAxis" style={{ "--trend-columns": 1 } as CSSProperties} aria-hidden="true">
+                <span />
               </div>
             </div>
-            <div className="overviewTrendXAxis" style={{ "--trend-columns": 1 } as CSSProperties} aria-hidden="true">
-              <span />
-            </div>
           </div>
-        </div>
-      </section>
+        )}
+      >
+        {null}
+      </ChartFrame>
     );
   }
 
@@ -298,38 +579,60 @@ export function OverviewTrendChart({
     else return;
     event.preventDefault();
     setActiveKey(visible[nextIndex].key);
-    const button = barsRef.current?.querySelectorAll<HTMLButtonElement>(".overviewTrendBarButton")[nextIndex];
-    button?.focus();
-    button?.scrollIntoView({ block: "nearest", inline: "nearest" });
+    const button = barsRef.current?.querySelector<HTMLButtonElement>(`[data-trend-index="${nextIndex}"]`);
+    if (button) {
+      button.focus();
+      button.scrollIntoView({ block: "nearest", inline: "nearest" });
+    } else {
+      pendingFocusIndexRef.current = nextIndex;
+      viewportRef.current?.scrollTo({ left: TREND_EDGE_PADDING + nextIndex * TREND_COLUMN_WIDTH, behavior: "auto" });
+    }
   };
 
-  const legend = metric === "tokens" || metric === "tools" || metric === "skills"
+  const legend: ChartLegendItem[] = metric === "tokens" || metric === "tools" || metric === "skills"
     ? [
-        ...topCategories.map((item, index) => ({ key: item.key, label: item.label, className: `category${index}` })),
-        ...(hasOtherCategories ? [{ key: "other", label: "Other", className: "categoryOther" }] : []),
+        ...topCategories.map((item, index) => ({ key: item.key, label: item.label, swatchClassName: `category${index}` })),
+        ...(hasOtherCategories ? [{ key: "other", label: "Other", swatchClassName: "categoryOther" }] : []),
       ]
     : metric === "sessions"
-      ? [{ key: "sessions", label: granularity === "day" ? "Active sessions" : "Peak active sessions per day", className: "sessionActive" }]
+      ? sessionAgentKeys.map((agent) => ({
+          key: `session-agent:${agent}`,
+          label: sessionAgentLabel(agent),
+          swatchClassName: sessionAgentClass(agent),
+        }))
       : metric === "cache"
-        ? [{ key: "cache", label: "Cached input rate", className: "cacheRate" }]
+        ? [{ key: "cache", label: "Cached input rate", swatchClassName: "cacheRate" }]
         : [
-          { key: "completed", label: "Completed", className: "statusCompleted" },
-          { key: "aborted", label: "Aborted", className: "statusAborted" },
-          { key: "unclosed", label: "Other unclosed", className: "statusUnclosed" },
+          { key: "completed", label: "Completed", swatchClassName: "statusCompleted" },
+          { key: "aborted", label: "Aborted", swatchClassName: "statusAborted" },
+          { key: "unclosed", label: "Other unclosed", swatchClassName: "statusUnclosed" },
         ];
+  const renderedModels = periodModels;
+  const renderedPeriods = visible.slice(windowStart, windowEnd);
+  const windowStyle = windowed
+    ? {
+        minWidth: 0,
+        gridTemplateColumns: `repeat(${Math.max(1, windowEnd - windowStart)}, minmax(${TREND_COLUMN_WIDTH}px, 1fr))`,
+        width: `${Math.max(1, windowEnd - windowStart) * TREND_COLUMN_WIDTH}px`,
+        marginInlineStart: `${windowStart * TREND_COLUMN_WIDTH}px`,
+      }
+    : undefined;
 
   return (
-    <section className="overviewTrendBlock" aria-label={`${metricLabel(metric, granularity)} trend`}>
-      <div className="overviewTrendLegend" aria-label={`${metricLabel(metric, granularity)} chart legend`}>
-        {legend.map((item) => (
-          <span key={item.key}>
-            <span className={`overviewTrendSwatch ${item.className}`} aria-hidden="true" />
-            <span>{item.label}</span>
-          </span>
-        ))}
-      </div>
-
+    <ChartFrame
+      ariaLabel={`${metricLabel(metric, granularity)} trend`}
+      legend={(
+        <ChartLegend
+          items={legend.map((item) => ({
+            ...item,
+            swatchClassName: item.swatchClassName,
+          }))}
+          ariaLabel={`${metricLabel(metric, granularity)} chart legend`}
+        />
+      )}
+    >
       <p id="overview-trend-instructions" className="overviewVisuallyHidden">
+        {granularity === "day" ? null : "Click a period to zoom in. "}
         Use Left and Right Arrow keys to inspect periods. Use Home and End to jump to the first or last period.
       </p>
       <div className="overviewTrendPlotLayout">
@@ -342,6 +645,7 @@ export function OverviewTrendChart({
           className="overviewTrendViewport"
           ref={viewportRef}
           onScroll={handleViewportScroll}
+          onWheel={handleViewportWheel}
           aria-busy={loadingOlder}
         >
           <div
@@ -355,105 +659,60 @@ export function OverviewTrendChart({
               role="listbox"
               aria-label={`${granularity} ${metricLabel(metric, granularity)}`}
               aria-describedby="overview-trend-instructions"
+              style={windowStyle}
             >
-              {visible.map((period, index) => {
-                const periodBreakdown = breakdownItems(period, metric);
-                const periodValues = new Map(periodBreakdown.map((item) => [item.key, item.value]));
-                const knownValue = topCategories.reduce((sum, item) => sum + (periodValues.get(item.key) ?? 0), 0);
-                const otherValue = Math.max(0, metricValue(period, metric) - knownValue);
-                const segments: TrendSegment[] = metric === "tokens" || metric === "tools" || metric === "skills"
-                  ? [
-                      ...topCategories.map((item, categoryIndex) => ({
-                        key: item.key,
-                        label: item.label,
-                        value: periodValues.get(item.key) ?? 0,
-                        className: `category${categoryIndex}`,
-                      })),
-                      ...(hasOtherCategories ? [{ key: "other", label: "Other", value: otherValue, className: "categoryOther" }] : []),
-                    ]
-                  : metric === "sessions"
-                    ? [{ key: "sessions", label: "Active sessions", value: period.sessions, className: "sessionActive" }]
-                    : metric === "cache"
-                      ? [{ key: "cache", label: "Cached input rate", value: cacheRate(period), className: "cacheRate" }]
-                      : turnSegments(period);
-                const total = metricValue(period, metric);
-                const totalRungs = total ? Math.max(1, Math.round(total / rungUnit)) : 0;
-                const segmentRungs = apportionRungs(segments.map((segment) => segment.value), totalRungs);
-                const rungs = segmentRungs.flatMap((count, segmentIndex) => (
-                  Array.from({ length: count }, (_, rungIndex) => ({
-                    key: `${segments[segmentIndex].key}-${rungIndex}`,
-                    className: segments[segmentIndex].className,
-                    isSegmentStart: segmentIndex > 0 && rungIndex === 0,
-                    width: rungWidth(index, rungIndex, segmentIndex),
-                  }))
-                ));
+              {renderedModels.map(({ period, index, total, totalRungs, segments, rungs, tooltipSegments }) => {
                 const isActive = period.key === activeKey;
                 const isHovered = period.key === hoveredKey;
                 const isPeak = period.key === peakPeriod.key;
-                const tooltipSegments = metric === "cache"
-                  ? []
-                  : metric === "tokens" || metric === "tools" || metric === "skills"
-                    ? periodBreakdown
-                      .filter((item) => item.value > 0)
-                      .map((item) => {
-                        const categoryIndex = topCategories.findIndex((category) => category.key === item.key);
-                        return {
-                          ...item,
-                          className: categoryIndex >= 0 ? `category${categoryIndex}` : "categoryOther",
-                        };
-                      })
-                      .sort((left, right) => right.value - left.value || left.label.localeCompare(right.label))
-                    : [...segments]
-                      .filter((segment) => segment.value > 0)
-                      .sort((left, right) => right.value - left.value || left.label.localeCompare(right.label));
                 return (
                   <Tooltip
                     key={period.key}
                     interactive
                     content={(
-                      <div className="overviewTrendTooltip">
-                        <div className="overviewTrendTooltipHeader">
-                          <strong>{period.label}</strong>
-                          <span>{formatMetricValue(total, metric)} {metricLabel(metric, granularity)}</span>
-                        </div>
-                        <div className="overviewTrendTooltipModels">
-                          {tooltipSegments.map((segment) => (
-                            <div key={segment.key}>
-                              <span className={`overviewTrendSwatch ${segment.className}`} aria-hidden="true" />
-                              <span>{segment.label}</span>
-                              <strong>
-                                {formatMetricValue(segment.value, metric)}
-                                {tooltipSegments.length > 1 && total > 0 ? ` · ${Math.round(segment.value / total * 100)}%` : ""}
-                              </strong>
-                            </div>
-                          ))}
-                        </div>
-                        {metric === "cache" ? (
-                          <p className="overviewTrendTooltipMeta">
+                      <ChartTooltipContent
+                        title={period.label}
+                        value={`${formatMetricValue(total, metric)} ${metricLabel(metric, granularity)}`}
+                        details={tooltipSegments.map((segment): ChartTooltipDetail => ({
+                          key: segment.key,
+                          label: segment.label,
+                          swatchClassName: segment.className,
+                          value: (
+                            <>
+                              {formatMetricValue(segment.value, metric)}
+                              {tooltipSegments.length > 1 && total > 0 ? ` · ${Math.round(segment.value / total * 100)}%` : ""}
+                            </>
+                          ),
+                        }))}
+                        footer={metric === "sessions" && granularity !== "day" ? (
+                          <p className="chartTooltipMeta">
+                            Peak day {formatDayGroupLabel(period.sessionPeakDate)}
+                          </p>
+                        ) : metric === "cache" ? (
+                            <p className="chartTooltipMeta">
                             {period.cachedInputTokens.toLocaleString()} cached of {period.inputTokens.toLocaleString()} input tokens
                           </p>
-                        ) : null}
-                        {metric === "tokens" ? (
-                          <p className="overviewTrendTooltipMeta">
+                        ) : metric === "tokens" ? (
+                            <p className="chartTooltipMeta">
                             {period.responses.toLocaleString()} responses · {period.compacted.toLocaleString()} compactions
                           </p>
-                        ) : null}
-                        {metric === "turns" ? (
-                          <p className="overviewTrendTooltipMeta">
+                        ) : metric === "turns" ? (
+                            <p className="chartTooltipMeta">
                             Longest {period.maxRunMs ? `${Math.round(period.maxRunMs / 1000)}s` : "—"}
                           </p>
                         ) : null}
-                      </div>
+                      />
                     )}
                   >
                     <button
                       type="button"
                       role="option"
+                      data-trend-index={index}
                       aria-selected={isActive}
                       aria-label={periodAriaLabel(period, metric, segments, periodDayCounts.get(period.key) ?? 0, expectedDays(period), granularity)}
                       tabIndex={isActive ? 0 : -1}
                       className={`overviewTrendBarButton${isHovered ? " isHovered" : ""}${isPeak ? " isPeak" : ""}`}
-                      onClick={() => setActiveKey(period.key)}
+                      onClick={() => handlePeriodClick(period)}
                       onFocus={() => setActiveKey(period.key)}
                       onMouseEnter={() => setHoveredKey(period.key)}
                       onMouseLeave={() => setHoveredKey(null)}
@@ -486,16 +745,17 @@ export function OverviewTrendChart({
           </div>
           <div
             className="overviewTrendXAxis"
-            style={{ "--trend-columns": visible.length } as CSSProperties}
+            style={{ "--trend-columns": visible.length, ...windowStyle } as CSSProperties}
             aria-hidden="true"
           >
-            {visible.map((period, index) => {
+            {renderedPeriods.map((period, localIndex) => {
+              const index = windowStart + localIndex;
               const showLabel = index === 0 || index === visible.length - 1 || index % labelStep === 0;
               return <span key={period.key}>{showLabel ? period.label : ""}</span>;
             })}
           </div>
         </div>
       </div>
-    </section>
+    </ChartFrame>
   );
 }

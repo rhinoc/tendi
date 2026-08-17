@@ -1,5 +1,6 @@
 #[path = "cli_install.rs"]
 mod cli_registration;
+mod terminals;
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -25,6 +26,7 @@ use tendi_core::AgentKind;
 
 static SESSION_SKILL_INDEX_RUNNING: AtomicBool = AtomicBool::new(false);
 static SKILL_UPDATE_CHECK_RUNNING: AtomicBool = AtomicBool::new(false);
+static SKILL_UPDATE_CHECK_CANCELLED: AtomicBool = AtomicBool::new(false);
 static SKILL_UPDATE_CACHE: LazyLock<Mutex<BTreeMap<PathBuf, SkillUpdateCache>>> =
     LazyLock::new(|| Mutex::new(BTreeMap::new()));
 static SESSION_ANALYTICS_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
@@ -137,6 +139,8 @@ async fn check_for_updates(app: tauri::AppHandle) -> Result<UpdateCheckResult, S
 struct SessionScanRuntime {
     generation: Arc<AtomicU64>,
     scan_running: Arc<AtomicBool>,
+    watch_revision: Arc<AtomicU64>,
+    completed_revision: Arc<AtomicU64>,
     watcher: Arc<Mutex<SessionWatcherState>>,
     watch_tx: Sender<notify::Result<Event>>,
     analytics_tx: Sender<AnalyticsRefreshJob>,
@@ -161,9 +165,12 @@ impl SessionScanRuntime {
         let (analytics_tx, analytics_rx) = mpsc::channel();
         let generation = Arc::new(AtomicU64::new(0));
         let scan_running = Arc::new(AtomicBool::new(false));
+        let watch_revision = Arc::new(AtomicU64::new(0));
+        let completed_revision = Arc::new(AtomicU64::new(0));
         let watcher = Arc::new(Mutex::new(SessionWatcherState::default()));
         let worker_generation = Arc::clone(&generation);
         let worker_scan_running = Arc::clone(&scan_running);
+        let worker_watch_revision = Arc::clone(&watch_revision);
         let worker_watcher = Arc::clone(&watcher);
         let watch_analytics_tx = analytics_tx.clone();
         let watch_app = app.clone();
@@ -173,6 +180,7 @@ impl SessionScanRuntime {
                 watch_rx,
                 worker_generation,
                 worker_scan_running,
+                worker_watch_revision,
                 worker_watcher,
                 watch_analytics_tx,
             )
@@ -181,6 +189,8 @@ impl SessionScanRuntime {
         Self {
             generation,
             scan_running,
+            watch_revision,
+            completed_revision,
             watcher,
             watch_tx,
             analytics_tx,
@@ -455,6 +465,31 @@ fn take_skill_add_preview(
     Ok(stored.take().expect("checked skill add preview").plan)
 }
 
+fn read_skill_add_preview(preview_id: &str, skill_name: &str) -> Result<serde_json::Value, String> {
+    let stored = SKILL_ADD_PREVIEW
+        .lock()
+        .map_err(|_| "skill add preview store is unavailable".to_string())?;
+    let preview = stored
+        .as_ref()
+        .ok_or_else(|| "skill add preview expired; preview the installation again".to_string())?;
+    if preview.id != preview_id {
+        return Err("skill add preview expired; preview the installation again".to_string());
+    }
+    let skill = preview
+        .plan
+        .available
+        .iter()
+        .find(|skill| skill.name == skill_name)
+        .ok_or_else(|| format!("skill {skill_name:?} is not in the current preview"))?;
+    let content = fs::read_to_string(skill.path.join("SKILL.md"))
+        .map_err(|err| format!("failed to read {skill_name:?}/SKILL.md: {err}"))?;
+    Ok(serde_json::json!({
+        "name": skill.name,
+        "relativePath": "SKILL.md",
+        "content": content,
+    }))
+}
+
 fn store_skill_delete_preview(
     names: &[String],
     plan: tendi_core::skills::SkillDeletePlan,
@@ -543,6 +578,19 @@ fn cache_skill_scan(cwd: &Path, scan: &tendi_core::skills::SkillScan) {
         cache.insert(cwd.to_path_buf(), scan.clone());
         SKILL_AUTHORITY_REVISION.fetch_add(1, Ordering::AcqRel);
     }
+    if let Ok(mut cache) = SKILL_UPDATE_CACHE.lock() {
+        cache.remove(cwd);
+    }
+}
+
+fn invalidate_skill_projection(cwd: &Path) -> Result<(), String> {
+    if let Ok(mut cache) = SKILL_SCAN_CACHE.lock() {
+        cache.remove(cwd);
+    }
+    let store = tendi_core::storage::Store::open_default().map_err(|err| format!("{err:#}"))?;
+    store
+        .invalidate_projection("skills", cwd)
+        .map_err(|err| format!("{err:#}"))
 }
 
 fn lock_skill_authority() -> Result<std::sync::MutexGuard<'static, ()>, String> {
@@ -555,7 +603,9 @@ fn skill_scan_snapshot(cwd: &Path) -> Result<tendi_core::skills::SkillScan, Stri
     cached_or_load_skill_scan(cwd, || {
         let scan = tendi_core::skills::scan_skills_synced(cwd).map_err(|err| format!("{err:#}"))?;
         let store = tendi_core::storage::Store::open_default().map_err(|err| format!("{err:#}"))?;
-        store.save_skills(&scan).map_err(|err| format!("{err:#}"))?;
+        store
+            .save_skills_for_workspace(cwd, &scan)
+            .map_err(|err| format!("{err:#}"))?;
         Ok(scan)
     })
 }
@@ -618,8 +668,9 @@ fn commit_skill_refresh(
         .cloned()
         .collect::<Vec<_>>();
     let store = tendi_core::storage::Store::open_default().map_err(|err| format!("{err:#}"))?;
+    let _ = (upserts, removed);
     store
-        .save_skill_delta(&upserts, &removed)
+        .save_skills_for_workspace(cwd, &refreshed)
         .map_err(|err| format!("{err:#}"))?;
     cache_skill_scan(cwd, &refreshed);
     Ok(refreshed)
@@ -643,6 +694,25 @@ fn start_skill_update_check(
     scan: Option<(tendi_core::skills::SkillScan, u64)>,
     use_cache: bool,
 ) -> &'static str {
+    if use_cache {
+        let cached = SKILL_UPDATE_CACHE
+            .lock()
+            .ok()
+            .and_then(|cache| cache.get(&cwd).cloned())
+            .filter(|cache| cache.checked_at.elapsed() < SKILL_UPDATE_CACHE_TTL);
+        if let Some(cached) = cached {
+            let _ = app.emit(
+                SKILL_UPDATE_EVENT,
+                SkillUpdateCheckEvent {
+                    status: "completed",
+                    skills: None,
+                    updates: cached.updates,
+                    error: None,
+                },
+            );
+            return "cached";
+        }
+    }
     if SKILL_UPDATE_CHECK_RUNNING
         .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
         .is_err()
@@ -650,6 +720,7 @@ fn start_skill_update_check(
         return "already-running";
     }
 
+    SKILL_UPDATE_CHECK_CANCELLED.store(false, Ordering::Release);
     let app = app.clone();
     tauri::async_runtime::spawn_blocking(move || {
         let scan = match scan {
@@ -672,9 +743,22 @@ fn start_skill_update_check(
                         cache.fingerprint == fingerprint
                             && cache.checked_at.elapsed() < SKILL_UPDATE_CACHE_TTL
                     });
+                let cache_hit = cached.is_some();
                 let updates = cached.map(|cache| cache.updates).unwrap_or_else(|| {
-                    let updates = tendi_core::skills::check_skill_updates_for_scan(&scan);
-                    if use_cache {
+                    tendi_core::skills::check_skill_updates_for_scan_with_cancel(
+                        &scan,
+                        &SKILL_UPDATE_CHECK_CANCELLED,
+                    )
+                });
+                if SKILL_UPDATE_CHECK_CANCELLED.load(Ordering::Acquire) {
+                    SkillUpdateCheckEvent {
+                        status: "failed",
+                        skills: None,
+                        updates: Vec::new(),
+                        error: Some("skill update check cancelled".to_string()),
+                    }
+                } else {
+                    if !cache_hit && use_cache {
                         if let Ok(mut cache) = SKILL_UPDATE_CACHE.lock() {
                             cache.insert(
                                 cwd.clone(),
@@ -686,14 +770,13 @@ fn start_skill_update_check(
                             );
                         }
                     }
-                    updates
-                });
-                skill_update_event_for_revision(
-                    scan.skills,
-                    updates,
-                    base_revision,
-                    SKILL_AUTHORITY_REVISION.load(Ordering::Acquire),
-                )
+                    skill_update_event_for_revision(
+                        scan.skills,
+                        updates,
+                        base_revision,
+                        SKILL_AUTHORITY_REVISION.load(Ordering::Acquire),
+                    )
+                }
             }
             Err(error) => SkillUpdateCheckEvent {
                 status: "failed",
@@ -707,6 +790,14 @@ fn start_skill_update_check(
     });
 
     "started"
+}
+
+fn cancel_skill_update_check() -> &'static str {
+    if !SKILL_UPDATE_CHECK_RUNNING.load(Ordering::Acquire) {
+        return "not-running";
+    }
+    SKILL_UPDATE_CHECK_CANCELLED.store(true, Ordering::Release);
+    "cancellation-requested"
 }
 
 fn skill_update_event_for_revision(
@@ -820,14 +911,6 @@ impl From<HookDeleteInput> for tendi_core::hooks::HookDeleteRequest {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct TerminalApp {
-    id: &'static str,
-    label: &'static str,
-    available: bool,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
 struct SessionResumeLaunch {
     agent: AgentKind,
     terminal: String,
@@ -861,6 +944,15 @@ where
     serde_json::to_value(result?).map_err(|err| err.to_string())
 }
 
+async fn blocking_value<F>(job: F) -> Result<serde_json::Value, String>
+where
+    F: FnOnce() -> Result<serde_json::Value, String> + Send + 'static,
+{
+    tauri::async_runtime::spawn_blocking(job)
+        .await
+        .map_err(|err| format!("background task failed: {err}"))?
+}
+
 async fn blocking_unit<F>(job: F) -> Result<(), String>
 where
     F: FnOnce() -> Result<(), String> + Send + 'static,
@@ -870,20 +962,167 @@ where
         .map_err(|err| format!("background task failed: {err}"))?
 }
 
+fn ensure_projection<T, Ready, Refresh>(
+    store: &tendi_core::storage::Store,
+    ready: Ready,
+    mut refresh: Refresh,
+) -> Result<T, String>
+where
+    Ready: Fn() -> Result<Option<T>, String>,
+    Refresh: FnMut() -> Result<T, String>,
+{
+    for _ in 0..100 {
+        if let Some(value) = ready()? {
+            return Ok(value);
+        }
+        let result = store
+            .with_projection_refresh_lock(|| refresh().map_err(anyhow::Error::msg))
+            .map_err(|err| format!("{err:#}"))?;
+        if let Some(result) = result {
+            return Ok(result);
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    Err("timed out waiting for another projection refresh".to_string())
+}
+
+fn projection_root(cwd: &Path) -> PathBuf {
+    tendi_core::storage::canonical_workspace_root(cwd)
+}
+
+fn ensure_agents_projection(cwd: &Path) -> Result<tendi_core::AgentScan, String> {
+    let store = tendi_core::storage::Store::open_default().map_err(|err| format!("{err:#}"))?;
+    let root = projection_root(cwd);
+    ensure_projection(
+        &store,
+        || {
+            store
+                .list_agents_for_workspace(&root)
+                .map_err(|err| format!("{err:#}"))
+        },
+        || {
+            let scan = tendi_core::agents::scan_agents(cwd).map_err(|err| format!("{err:#}"))?;
+            store
+                .save_agents_for_workspace(&root, &scan)
+                .map_err(|err| format!("{err:#}"))?;
+            Ok(scan)
+        },
+    )
+}
+
+fn ensure_skills_projection(cwd: &Path) -> Result<tendi_core::SkillScan, String> {
+    let store = tendi_core::storage::Store::open_default().map_err(|err| format!("{err:#}"))?;
+    let root = projection_root(cwd);
+    ensure_projection(
+        &store,
+        || {
+            store
+                .list_skills_for_workspace(&root)
+                .map_err(|err| format!("{err:#}"))
+        },
+        || {
+            let scan =
+                tendi_core::skills::scan_skills_synced(cwd).map_err(|err| format!("{err:#}"))?;
+            store
+                .save_skills_for_workspace(&root, &scan)
+                .map_err(|err| format!("{err:#}"))?;
+            Ok(scan)
+        },
+    )
+}
+
+fn ensure_rules_projection(cwd: &Path) -> Result<tendi_core::RuleScan, String> {
+    let store = tendi_core::storage::Store::open_default().map_err(|err| format!("{err:#}"))?;
+    let root = projection_root(cwd);
+    ensure_projection(
+        &store,
+        || {
+            store
+                .list_rules_for_workspace(&root)
+                .map_err(|err| format!("{err:#}"))
+        },
+        || {
+            let scan = tendi_core::rules::scan_rules(cwd).map_err(|err| format!("{err:#}"))?;
+            store
+                .save_rules_for_workspace(&root, &scan)
+                .map_err(|err| format!("{err:#}"))?;
+            Ok(scan)
+        },
+    )
+}
+
+fn ensure_hooks_projection(cwd: &Path) -> Result<tendi_core::HookScan, String> {
+    let store = tendi_core::storage::Store::open_default().map_err(|err| format!("{err:#}"))?;
+    let root = projection_root(cwd);
+    ensure_projection(
+        &store,
+        || {
+            store
+                .list_hooks_for_workspace(&root)
+                .map_err(|err| format!("{err:#}"))
+        },
+        || {
+            let scan = tendi_core::hooks::scan_hooks(cwd).map_err(|err| format!("{err:#}"))?;
+            store
+                .save_hooks_for_workspace(&root, &scan)
+                .map_err(|err| format!("{err:#}"))?;
+            Ok(scan)
+        },
+    )
+}
+
+fn persist_hooks_projection(cwd: &Path, scan: &tendi_core::HookScan) -> Result<(), String> {
+    let store = tendi_core::storage::Store::open_default().map_err(|err| format!("{err:#}"))?;
+    store
+        .save_hooks_for_workspace(cwd, scan)
+        .map_err(|err| format!("{err:#}"))
+}
+
+fn ensure_mcp_projection(cwd: &Path) -> Result<tendi_core::McpScan, String> {
+    let store = tendi_core::storage::Store::open_default().map_err(|err| format!("{err:#}"))?;
+    let root = projection_root(cwd);
+    ensure_projection(
+        &store,
+        || {
+            store
+                .list_mcp_for_workspace(&root)
+                .map_err(|err| format!("{err:#}"))
+        },
+        || {
+            let scan = tendi_core::mcp::scan_mcp(cwd).map_err(|err| format!("{err:#}"))?;
+            store
+                .save_mcp_for_workspace(&root, &scan)
+                .map_err(|err| format!("{err:#}"))?;
+            Ok(scan)
+        },
+    )
+}
+
+fn run_full_projection_scan(cwd: &Path) -> Result<tendi_core::ScanReport, String> {
+    let store = tendi_core::storage::Store::open_default().map_err(|err| format!("{err:#}"))?;
+    ensure_projection(
+        &store,
+        || Ok(None),
+        || {
+            let report = tendi_core::scan(cwd).map_err(|err| format!("{err:#}"))?;
+            store
+                .save_scan_for_workspace(cwd, &report)
+                .map_err(|err| format!("{err:#}"))?;
+            Ok(report)
+        },
+    )
+}
+
 #[tauri::command(rename_all = "camelCase")]
 async fn scan() -> Result<serde_json::Value, String> {
     let cwd = active_cwd()?;
-    blocking_json(move || tendi_core::scan_and_persist(cwd).map_err(|err| format!("{err:#}"))).await
+    blocking_json(move || run_full_projection_scan(&cwd)).await
 }
 
 #[tauri::command(rename_all = "camelCase")]
 async fn agents_list() -> Result<serde_json::Value, String> {
     let cwd = active_cwd()?;
-    blocking_json(move || {
-        let report = tendi_core::agents::scan_agents(&cwd).map_err(|err| format!("{err:#}"))?;
-        Ok(report.agents)
-    })
-    .await
+    blocking_json(move || Ok(ensure_agents_projection(&cwd)?.agents)).await
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -909,13 +1148,22 @@ async fn agent_config_save(
     expected_sha256: String,
     content: String,
 ) -> Result<serde_json::Value, String> {
+    let cwd = active_cwd()?;
     blocking_json(move || {
-        tendi_core::config::save_agent_config(
+        let result = tendi_core::config::save_agent_config(
             std::path::Path::new(&path),
             &expected_sha256,
             &content,
         )
-        .map_err(|err| format!("{err:#}"))
+        .map_err(|err| format!("{err:#}"))?;
+        invalidate_skill_projection(&cwd)?;
+        let store = tendi_core::storage::Store::open_default().map_err(|err| format!("{err:#}"))?;
+        for domain in ["agents", "rules", "hooks", "mcp"] {
+            store
+                .invalidate_projection(domain, &cwd)
+                .map_err(|err| format!("{err:#}"))?;
+        }
+        Ok(result)
     })
     .await
 }
@@ -941,7 +1189,7 @@ async fn config_profile_set(
 ) -> Result<serde_json::Value, String> {
     blocking_json(move || {
         let agent = parse_agent_result(&agent)?;
-        let agent_key = config_profile_key(agent)
+        let agent_key = tendi_core::config_profile_key(agent)
             .ok_or_else(|| "config profiles are not supported for this agent".to_string())?;
         let profile = profile
             .map(|value| value.trim().to_string())
@@ -973,18 +1221,7 @@ async fn config_profile_set(
 #[tauri::command(rename_all = "camelCase")]
 async fn skills_list() -> Result<serde_json::Value, String> {
     let cwd = active_cwd()?;
-    blocking_json(move || {
-        let _authority = lock_skill_authority()?;
-        let report =
-            tendi_core::skills::scan_skills_synced(&cwd).map_err(|err| format!("{err:#}"))?;
-        let store = tendi_core::storage::Store::open_default().map_err(|err| format!("{err:#}"))?;
-        store
-            .save_skills(&report)
-            .map_err(|err| format!("{err:#}"))?;
-        cache_skill_scan(&cwd, &report);
-        Ok(report.skills)
-    })
-    .await
+    blocking_json(move || Ok(ensure_skills_projection(&cwd)?.skills)).await
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -996,7 +1233,7 @@ async fn skills_refresh(app: tauri::AppHandle) -> Result<serde_json::Value, Stri
             tendi_core::skills::scan_skills_synced(&cwd).map_err(|err| format!("{err:#}"))?;
         let store = tendi_core::storage::Store::open_default().map_err(|err| format!("{err:#}"))?;
         store
-            .save_skills(&report)
+            .save_skills_for_workspace(&cwd, &report)
             .map_err(|err| format!("{err:#}"))?;
         cache_skill_scan(&cwd, &report);
         let report_revision = SKILL_AUTHORITY_REVISION.load(Ordering::Acquire);
@@ -1166,47 +1403,6 @@ async fn analytics_revision() -> Result<serde_json::Value, String> {
 }
 
 #[tauri::command(rename_all = "camelCase")]
-async fn session_analytics(
-    app: tauri::AppHandle,
-    session_id: String,
-    agent: String,
-    path: String,
-) -> Result<serde_json::Value, String> {
-    let agent = parse_agent_result(&agent)?;
-    blocking_json(move || {
-        let store = tendi_core::storage::Store::open_default().map_err(|err| format!("{err:#}"))?;
-        let session = store
-            .list_sessions()
-            .map_err(|err| format!("{err:#}"))?
-            .sessions
-            .into_iter()
-            .find(|session| {
-                session.id == session_id
-                    && session.agent == agent
-                    && session.path == PathBuf::from(&path)
-            })
-            .ok_or_else(|| format!("session analytics source not found: {path}"))?;
-        refresh_session_analytics_serialized(
-            &app,
-            "session",
-            &store,
-            std::slice::from_ref(&session),
-        )?;
-        let detail = store
-            .cached_session_analytics_detail(&session)
-            .map_err(|err| format!("{err:#}"))?;
-        emit_analytics_revision(
-            &app,
-            store
-                .analytics_revision()
-                .map_err(|err| format!("{err:#}"))?,
-        );
-        Ok(detail)
-    })
-    .await
-}
-
-#[tauri::command(rename_all = "camelCase")]
 async fn sessions_scan_start(
     app: tauri::AppHandle,
     runtime: tauri::State<'_, SessionScanRuntime>,
@@ -1225,6 +1421,12 @@ async fn sessions_scan_start(
         .collect::<Vec<_>>();
     let watch_plan = tendi_core::sessions::session_watch_plan(&cwd, &additional_session_roots);
     runtime.configure_watcher(&watch_plan)?;
+    let observed_revision = runtime.watch_revision.load(Ordering::Acquire);
+    let completed_revision = runtime.completed_revision.load(Ordering::Acquire);
+    let current_generation = runtime.generation.load(Ordering::Acquire);
+    if session_scan_is_current(current_generation, observed_revision, completed_revision) {
+        return Ok(current_generation);
+    }
     if runtime
         .scan_running
         .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
@@ -1233,16 +1435,22 @@ async fn sessions_scan_start(
         return Ok(runtime.generation.load(Ordering::SeqCst));
     }
     let generation = runtime.generation.fetch_add(1, Ordering::SeqCst) + 1;
+    let scan_revision = observed_revision;
     let scan_running = Arc::clone(&runtime.scan_running);
+    let completed_revision = Arc::clone(&runtime.completed_revision);
     let analytics_tx = runtime.analytics_tx.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        if let Err(error) = run_session_scan(
+        let result = run_session_scan(
             &app,
             &cwd,
             &additional_session_roots,
             generation,
             &analytics_tx,
-        ) {
+        );
+        if result.is_ok() {
+            completed_revision.store(scan_revision, Ordering::Release);
+        }
+        if let Err(error) = result {
             emit_session_scan_event(
                 &app,
                 SessionScanEvent {
@@ -1358,6 +1566,14 @@ fn run_session_scan(
     Ok(())
 }
 
+fn session_scan_is_current(
+    generation: u64,
+    observed_revision: u64,
+    completed_revision: u64,
+) -> bool {
+    generation != 0 && observed_revision == completed_revision
+}
+
 fn session_root_priority(root: &Path) -> u8 {
     let path = root.to_string_lossy();
     if path.contains("/.codex/sessions") {
@@ -1380,6 +1596,7 @@ fn session_watch_loop(
     receiver: Receiver<notify::Result<Event>>,
     generation: Arc<AtomicU64>,
     scan_running: Arc<AtomicBool>,
+    watch_revision: Arc<AtomicU64>,
     watcher: Arc<Mutex<SessionWatcherState>>,
     analytics_tx: Sender<AnalyticsRefreshJob>,
 ) {
@@ -1388,16 +1605,22 @@ fn session_watch_loop(
     loop {
         match receiver.recv_timeout(SESSION_WATCH_DEBOUNCE) {
             Ok(Ok(event)) => {
+                let mut relevant_event = false;
                 for path in event.paths {
                     if let Some(session_root) = advance_tutti_session_watcher(&watcher, &path) {
+                        relevant_event = true;
                         pending.extend(tendi_core::sessions::recent_session_paths_in_root(
                             &session_root,
                             None,
                         ));
                     }
                     if tendi_core::sessions::is_session_candidate_path(&path) || !path.exists() {
+                        relevant_event = true;
                         pending.insert(path);
                     }
+                }
+                if relevant_event {
+                    watch_revision.fetch_add(1, Ordering::AcqRel);
                 }
                 if !pending.is_empty() && pending_since.is_none() {
                     pending_since = Some(Instant::now());
@@ -1649,7 +1872,7 @@ async fn session_skill_links(
     session_id: String,
     agent: String,
 ) -> Result<serde_json::Value, String> {
-    let agent = parse_agent(&agent);
+    let agent = tendi_core::parse_agent(&agent).unwrap_or(AgentKind::Unknown);
     blocking_json(move || {
         let store = tendi_core::storage::Store::open_default().map_err(|err| format!("{err:#}"))?;
         store
@@ -1686,6 +1909,7 @@ async fn settings_save(
     dark_theme: String,
     terminal: String,
     editor: String,
+    developer_mode: bool,
     additional_session_roots: Vec<String>,
     config_profiles: BTreeMap<String, String>,
 ) -> Result<serde_json::Value, String> {
@@ -1698,6 +1922,7 @@ async fn settings_save(
                 dark_theme,
                 terminal,
                 editor,
+                developer_mode,
                 additional_session_roots,
                 config_profiles,
             })
@@ -1708,15 +1933,15 @@ async fn settings_save(
 
 #[tauri::command(rename_all = "camelCase")]
 async fn terminal_apps_list() -> Result<serde_json::Value, String> {
-    blocking_json(move || Ok(terminal_apps())).await
+    blocking_json(move || Ok(terminals::terminal_apps())).await
 }
 
 #[tauri::command(rename_all = "camelCase")]
 async fn terminal_app_test(terminal: String) -> Result<serde_json::Value, String> {
     blocking_json(move || {
-        let terminal = resolve_terminal(&terminal);
-        let app_name = terminal_application_name(&terminal);
-        open_terminal_application(&app_name)?;
+        let terminal = terminals::resolve_terminal(&terminal);
+        let app_name = terminals::terminal_application_name(&terminal);
+        terminals::open_terminal_application(&app_name)?;
         Ok(app_name)
     })
     .await
@@ -1768,53 +1993,15 @@ async fn session_resume_in_terminal(
             tendi_core::plan_session_resume(&record).map_err(|err| format!("{err:#}"))?;
         let store = tendi_core::storage::Store::open_default().map_err(|err| format!("{err:#}"))?;
         let settings = store.app_settings().map_err(|err| format!("{err:#}"))?;
-        if let Some(profile) = config_profile_key(plan.agent)
+        if let Some(profile) = tendi_core::config_profile_key(plan.agent)
             .and_then(|agent| settings.config_profiles.get(agent))
             .map(String::as_str)
         {
-            match plan.agent {
-                AgentKind::Codex => {
-                    if !tendi_core::config::config_profile_exists(AgentKind::Codex, profile)
-                        .map_err(|err| format!("{err:#}"))?
-                    {
-                        return Err(format!("Codex profile not found: {profile}"));
-                    }
-                    plan.command
-                        .args
-                        .splice(0..0, ["--profile".to_string(), profile.to_string()]);
-                }
-                AgentKind::Claude => {
-                    let profile_path =
-                        tendi_core::config::config_profile_path(AgentKind::Claude, profile)
-                            .map_err(|err| format!("{err:#}"))?;
-                    if !profile_path.is_file() {
-                        return Err(format!("Claude Code profile not found: {profile}"));
-                    }
-                    plan.command.args.splice(
-                        0..0,
-                        ["--settings".to_string(), profile_path.display().to_string()],
-                    );
-                }
-                AgentKind::Cursor => {
-                    let profile_path =
-                        tendi_core::config::config_profile_path(AgentKind::Cursor, profile)
-                            .map_err(|err| format!("{err:#}"))?;
-                    if !profile_path.is_file() {
-                        return Err(format!("Cursor profile not found: {profile}"));
-                    }
-                    let config_dir = profile_path
-                        .parent()
-                        .ok_or_else(|| "Cursor profile directory is unavailable".to_string())?;
-                    plan.command.env.push((
-                        "CURSOR_CONFIG_DIR".to_string(),
-                        config_dir.display().to_string(),
-                    ));
-                }
-                _ => {}
-            }
+            tendi_core::apply_session_config_profile(plan.agent, &mut plan.command, profile)
+                .map_err(|err| format!("{err:#}"))?;
         }
-        let terminal = resolve_terminal(&settings.terminal);
-        let command_line = launch_command_in_terminal(&plan.command, &terminal)?;
+        let terminal = terminals::resolve_terminal(&settings.terminal);
+        let command_line = terminals::launch_command_in_terminal(&plan.command, &terminal)?;
         Ok(SessionResumeLaunch {
             agent: plan.agent,
             terminal,
@@ -1828,9 +2015,9 @@ async fn session_resume_in_terminal(
 async fn rules_list() -> Result<serde_json::Value, String> {
     let cwd = active_cwd()?;
     blocking_json(move || {
-        let report = tendi_core::rules::scan_rules(&cwd).map_err(|err| format!("{err:#}"))?;
-        replace_rule_path_cache(&cwd, &report.rules);
-        Ok(report.rules)
+        let rules = ensure_rules_projection(&cwd)?.rules;
+        replace_rule_path_cache(&cwd, &rules);
+        Ok(rules)
     })
     .await
 }
@@ -1864,7 +2051,14 @@ async fn rule_file_save(
         } else {
             tendi_core::rules::save_rule_file(&cwd, path, &expected_sha256, &content)
         };
-        result.map_err(|err| format!("{err:#}"))
+        let result = result.map_err(|err| format!("{err:#}"))?;
+        let scan = tendi_core::rules::scan_rules(&cwd).map_err(|err| format!("{err:#}"))?;
+        let store = tendi_core::storage::Store::open_default().map_err(|err| format!("{err:#}"))?;
+        store
+            .save_rules_for_workspace(&cwd, &scan)
+            .map_err(|err| format!("{err:#}"))?;
+        replace_rule_path_cache(&cwd, &scan.rules);
+        Ok(result)
     })
     .await
 }
@@ -1873,9 +2067,9 @@ async fn rule_file_save(
 async fn hooks_list() -> Result<serde_json::Value, String> {
     let cwd = active_cwd()?;
     blocking_json(move || {
-        let report = tendi_core::hooks::scan_hooks(&cwd).map_err(|err| format!("{err:#}"))?;
-        replace_hook_path_cache(&cwd, &report.hooks);
-        Ok(report.hooks)
+        let hooks = ensure_hooks_projection(&cwd)?.hooks;
+        replace_hook_path_cache(&cwd, &hooks);
+        Ok(hooks)
     })
     .await
 }
@@ -1912,6 +2106,7 @@ async fn hook_delete(
         })
         .map_err(|err| format!("{err:#}"))?;
         let report = tendi_core::hooks::scan_hooks(&cwd).map_err(|err| format!("{err:#}"))?;
+        persist_hooks_projection(&cwd, &report)?;
         replace_hook_path_cache(&cwd, &report.hooks);
         Ok(report.hooks)
     })
@@ -1928,6 +2123,7 @@ async fn hook_delete_many(requests: Vec<HookDeleteInput>) -> Result<serde_json::
         tendi_core::hooks::delete_hooks(requests.into_iter().map(Into::into).collect())
             .map_err(|err| format!("{err:#}"))?;
         let report = tendi_core::hooks::scan_hooks(&cwd).map_err(|err| format!("{err:#}"))?;
+        persist_hooks_projection(&cwd, &report)?;
         replace_hook_path_cache(&cwd, &report.hooks);
         Ok(report.hooks)
     })
@@ -1968,6 +2164,7 @@ async fn hook_set_enabled(
         })
         .map_err(|err| format!("{err:#}"))?;
         let report = tendi_core::hooks::scan_hooks(&cwd).map_err(|err| format!("{err:#}"))?;
+        persist_hooks_projection(&cwd, &report)?;
         replace_hook_path_cache(&cwd, &report.hooks);
         Ok(report.hooks)
     })
@@ -2008,6 +2205,7 @@ async fn hook_review(
             },
         )
         .map_err(|err| format!("{err:#}"))?;
+        persist_hooks_projection(&cwd, &report)?;
         replace_hook_path_cache(&cwd, &report.hooks);
         Ok(report.hooks)
     })
@@ -2064,11 +2262,7 @@ async fn hook_source_read(
 #[tauri::command(rename_all = "camelCase")]
 async fn mcp_list() -> Result<serde_json::Value, String> {
     let cwd = active_cwd()?;
-    blocking_json(move || {
-        let report = tendi_core::mcp::scan_mcp(&cwd).map_err(|err| format!("{err:#}"))?;
-        Ok(report.servers)
-    })
-    .await
+    blocking_json(move || Ok(ensure_mcp_projection(&cwd)?.servers)).await
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -2121,31 +2315,37 @@ async fn session_transcript(
     limit: Option<usize>,
     known_source_version: Option<String>,
 ) -> Result<serde_json::Value, String> {
-    let agent = parse_agent(&agent);
+    let agent = tendi_core::parse_agent(&agent).unwrap_or(AgentKind::Unknown);
     blocking_json(move || {
-        if cursor.is_none() {
-            let source_version =
-                tendi_core::transcript::transcript_source_version(std::path::Path::new(&path))
-                    .map_err(|err| format!("{err:#}"))?;
-            if known_source_version.as_deref() == Some(&source_version) {
-                return Ok(tendi_core::transcript::TranscriptPage {
-                    items: Vec::new(),
-                    warnings: Vec::new(),
-                    next_cursor: None,
-                    done: true,
-                    source_version,
-                    restart_required: false,
-                    unchanged: true,
-                });
-            }
-        }
-        tendi_core::transcript::parse_transcript_page(
+        tendi_core::transcript::parse_transcript_page_if_changed(
             std::path::Path::new(&path),
             agent,
             cursor.as_deref(),
             limit,
+            known_source_version.as_deref(),
         )
         .map_err(|err| format!("{err:#}"))
+    })
+    .await
+}
+
+#[tauri::command(rename_all = "camelCase")]
+async fn session_transcript_search(
+    path: String,
+    agent: String,
+    query: String,
+    scopes: tendi_core::transcript::TranscriptSearchScopes,
+) -> Result<serde_json::Value, String> {
+    let agent = tendi_core::parse_agent(&agent).unwrap_or(AgentKind::Unknown);
+    blocking_value(move || {
+        let result = tendi_core::transcript::search_transcript(
+            std::path::Path::new(&path),
+            agent,
+            &query,
+            &scopes,
+        )
+        .map_err(|err| format!("{err:#}"))?;
+        serde_json::to_value(result).map_err(|err| err.to_string())
     })
     .await
 }
@@ -2264,7 +2464,7 @@ async fn skills_updates(app: tauri::AppHandle, check: bool) -> Result<serde_json
     let cwd = active_cwd()?;
     blocking_json(move || {
         if check {
-            let update_check = start_skill_update_check(&app, cwd, None, false);
+            let update_check = start_skill_update_check(&app, cwd, None, true);
             Ok(serde_json::json!({ "updateCheck": update_check }))
         } else {
             let _authority = lock_skill_authority()?;
@@ -2273,13 +2473,18 @@ async fn skills_updates(app: tauri::AppHandle, check: bool) -> Result<serde_json
             let store =
                 tendi_core::storage::Store::open_default().map_err(|err| format!("{err:#}"))?;
             store
-                .save_skills(&report)
+                .save_skills_for_workspace(&cwd, &report)
                 .map_err(|err| format!("{err:#}"))?;
             cache_skill_scan(&cwd, &report);
             serde_json::to_value(report.skills).map_err(|err| err.to_string())
         }
     })
     .await
+}
+
+#[tauri::command(rename_all = "camelCase")]
+fn skills_updates_cancel() -> serde_json::Value {
+    serde_json::json!({ "status": cancel_skill_update_check() })
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -2393,8 +2598,9 @@ async fn skills_update_many(
 }
 
 #[tauri::command(rename_all = "camelCase")]
-fn skills_targets() -> serde_json::Value {
-    serde_json::Value::Array(
+fn skills_targets() -> Result<serde_json::Value, String> {
+    let cwd = active_cwd()?;
+    Ok(serde_json::Value::Array(
         tendi_core::skill_targets::target_catalog()
             .iter()
             .map(|target| {
@@ -2402,11 +2608,22 @@ fn skills_targets() -> serde_json::Value {
                     "id": target.id,
                     "displayName": target.display_name,
                     "projectSkillsDir": target.project_skills_dir,
+                    "projectPath": cwd.join(target.project_skills_dir),
                     "supportsGlobal": target.supports_global(),
                 })
             })
             .collect(),
-    )
+    ))
+}
+
+#[tauri::command(rename_all = "camelCase")]
+async fn skills_marketplace_search(query: String) -> Result<serde_json::Value, String> {
+    blocking_value(move || {
+        let skills =
+            tendi_core::skill_marketplace::search(&query).map_err(|err| format!("{err:#}"))?;
+        serde_json::to_value(skills).map_err(|err| err.to_string())
+    })
+    .await
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -2466,7 +2683,7 @@ async fn skills_add(
         let refreshed =
             tendi_core::skills::scan_skills_synced(&cwd).map_err(|err| format!("{err:#}"))?;
         store
-            .save_skills(&refreshed)
+            .save_skills_for_workspace(&cwd, &refreshed)
             .map_err(|err| format!("{err:#}"))?;
         cache_skill_scan(&cwd, &refreshed);
         Ok(serde_json::json!({
@@ -2478,6 +2695,14 @@ async fn skills_add(
         }))
     })
     .await
+}
+
+#[tauri::command(rename_all = "camelCase")]
+async fn skills_add_preview_read(
+    preview_id: String,
+    skill_name: String,
+) -> Result<serde_json::Value, String> {
+    blocking_value(move || read_skill_add_preview(&preview_id, &skill_name)).await
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -2570,7 +2795,7 @@ async fn skill_file_save(
 ) -> Result<serde_json::Value, String> {
     let cwd = active_cwd()?;
     let cached_skill_dir = cached_skill_dir(&cwd, &name);
-    blocking_json(move || {
+    blocking_value(move || {
         let _authority = (relative_path == "SKILL.md")
             .then(lock_skill_authority)
             .transpose()?;
@@ -2594,6 +2819,9 @@ async fn skill_file_save(
             })
             .transpose()?
             .map(|scan| scan.skills);
+        if before.is_none() {
+            invalidate_skill_projection(&cwd)?;
+        }
         let mut value = serde_json::to_value(result).map_err(|err| err.to_string())?;
         if let (Some(skills), Some(object)) = (skills, value.as_object_mut()) {
             object.insert(
@@ -2617,13 +2845,15 @@ async fn skill_file_create(
     let cwd = active_cwd()?;
     let cached_skill_dir = cached_skill_dir(&cwd, &name);
     blocking_json(move || {
-        tendi_core::files::create_skill_file(
+        let result = tendi_core::files::create_skill_file(
             &cwd,
             &name,
             &relative_path,
             cached_skill_dir.as_deref(),
         )
-        .map_err(|err| format!("{err:#}"))
+        .map_err(|err| format!("{err:#}"))?;
+        invalidate_skill_projection(&cwd)?;
+        Ok(result)
     })
     .await
 }
@@ -2639,7 +2869,8 @@ async fn skill_folder_create(name: String, relative_path: String) -> Result<(), 
             &relative_path,
             cached_skill_dir.as_deref(),
         )
-        .map_err(|err| format!("{err:#}"))
+        .map_err(|err| format!("{err:#}"))?;
+        invalidate_skill_projection(&cwd)
     })
     .await
 }
@@ -2663,7 +2894,8 @@ async fn skill_path_rename(
             &to_relative_path,
             cached_skill_dir.as_deref(),
         )
-        .map_err(|err| format!("{err:#}"))
+        .map_err(|err| format!("{err:#}"))?;
+        invalidate_skill_projection(&cwd)
     })
     .await
 }
@@ -2682,7 +2914,8 @@ async fn skill_path_delete(name: String, relative_path: String) -> Result<(), St
             &relative_path,
             cached_skill_dir.as_deref(),
         )
-        .map_err(|err| format!("{err:#}"))
+        .map_err(|err| format!("{err:#}"))?;
+        invalidate_skill_projection(&cwd)
     })
     .await
 }
@@ -2844,263 +3077,6 @@ fn open_url(url: String) -> Result<(), String> {
     }
 }
 
-fn terminal_apps() -> Vec<TerminalApp> {
-    vec![
-        TerminalApp {
-            id: "auto",
-            label: "Auto",
-            available: true,
-        },
-        TerminalApp {
-            id: "terminal",
-            label: "Terminal",
-            available: app_available(
-                "Terminal",
-                &[
-                    "/System/Applications/Utilities/Terminal.app",
-                    "/Applications/Utilities/Terminal.app",
-                ],
-            ),
-        },
-        TerminalApp {
-            id: "iterm",
-            label: "iTerm",
-            available: app_available(
-                "iTerm",
-                &["/Applications/iTerm.app", "/Applications/iTerm2.app"],
-            ),
-        },
-        TerminalApp {
-            id: "ghostty",
-            label: "Ghostty",
-            available: app_available("Ghostty", &["/Applications/Ghostty.app"]),
-        },
-        TerminalApp {
-            id: "warp",
-            label: "Warp",
-            available: app_available("Warp", &["/Applications/Warp.app"]),
-        },
-    ]
-}
-
-fn app_available(app_name: &str, paths: &[&str]) -> bool {
-    let _ = app_name;
-    if paths.iter().any(|path| PathBuf::from(path).exists()) {
-        return true;
-    }
-    false
-}
-
-fn resolve_terminal(value: &str) -> String {
-    match value.trim().to_ascii_lowercase().as_str() {
-        "terminal" => "terminal".to_string(),
-        "iterm" | "iterm2" => "iterm".to_string(),
-        "ghostty" => "ghostty".to_string(),
-        "warp" => "warp".to_string(),
-        "" | "auto" => {
-            if terminal_apps()
-                .iter()
-                .any(|app| app.id == "terminal" && app.available)
-            {
-                "terminal".to_string()
-            } else {
-                "auto".to_string()
-            }
-        }
-        _ => value.trim().to_string(),
-    }
-}
-
-fn terminal_application_name(terminal: &str) -> String {
-    match terminal {
-        "auto" | "terminal" => "Terminal".to_string(),
-        "iterm" => "iTerm".to_string(),
-        "ghostty" => "Ghostty".to_string(),
-        "warp" => "Warp".to_string(),
-        app_name => app_name.to_string(),
-    }
-}
-
-fn open_terminal_application(app_name: &str) -> Result<(), String> {
-    #[cfg(target_os = "macos")]
-    {
-        let status = Command::new("open")
-            .args(["-a", app_name])
-            .status()
-            .map_err(|err| format!("failed to open {app_name}: {err}"))?;
-        return command_status(status, &format!("open {app_name}"));
-    }
-
-    #[cfg(not(target_os = "macos"))]
-    {
-        let _ = app_name;
-        Err("testing terminal applications is only supported on macOS".to_string())
-    }
-}
-
-fn launch_command_in_terminal(
-    command: &tendi_core::SessionCommand,
-    terminal: &str,
-) -> Result<String, String> {
-    let script = terminal_script(command);
-    match terminal {
-        "iterm" => run_iterm_script(&script)?,
-        "terminal" | "auto" => run_terminal_script(&script)?,
-        "ghostty" => open_command_file("Ghostty", &script)?,
-        "warp" => open_command_file("Warp", &script)?,
-        app_name => open_command_file(app_name, &script)?,
-    }
-    Ok(shell_command(command))
-}
-
-fn terminal_script(command: &tendi_core::SessionCommand) -> String {
-    match &command.cwd {
-        Some(cwd) => format!(
-            "cd {} && exec {}",
-            shell_quote(&cwd.display().to_string()),
-            shell_command(command)
-        ),
-        None => format!("exec {}", shell_command(command)),
-    }
-}
-
-fn shell_command(command: &tendi_core::SessionCommand) -> String {
-    let command_line = std::iter::once(command.executable.as_str())
-        .chain(command.args.iter().map(String::as_str))
-        .map(shell_quote)
-        .collect::<Vec<_>>()
-        .join(" ");
-    if command.env.is_empty() {
-        command_line
-    } else {
-        let env = command
-            .env
-            .iter()
-            .map(|(key, value)| format!("{}={}", shell_quote(key), shell_quote(value)))
-            .collect::<Vec<_>>()
-            .join(" ");
-        format!("{env} {command_line}")
-    }
-}
-
-fn shell_quote(value: &str) -> String {
-    if value
-        .chars()
-        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.' | '/' | ':'))
-    {
-        value.to_string()
-    } else {
-        format!("'{}'", value.replace('\'', "'\\''"))
-    }
-}
-
-fn applescript_quote(value: &str) -> String {
-    value.replace('\\', "\\\\").replace('"', "\\\"")
-}
-
-fn run_terminal_script(script: &str) -> Result<(), String> {
-    #[cfg(target_os = "macos")]
-    {
-        let status = Command::new("osascript")
-            .args([
-                "-e",
-                "tell application \"Terminal\"",
-                "-e",
-                "activate",
-                "-e",
-                &format!("do script \"{}\"", applescript_quote(script)),
-                "-e",
-                "end tell",
-            ])
-            .status()
-            .map_err(|err| format!("failed to open Terminal: {err}"))?;
-        return command_status(status, "open Terminal");
-    }
-
-    #[cfg(not(target_os = "macos"))]
-    {
-        open_command_file("Terminal", script)
-    }
-}
-
-fn run_iterm_script(script: &str) -> Result<(), String> {
-    #[cfg(target_os = "macos")]
-    {
-        let status = Command::new("osascript")
-            .args([
-                "-e",
-                "tell application \"iTerm\"",
-                "-e",
-                "activate",
-                "-e",
-                "set newWindow to (create window with default profile)",
-                "-e",
-                "tell current session of newWindow",
-                "-e",
-                &format!("write text \"{}\"", applescript_quote(script)),
-                "-e",
-                "end tell",
-                "-e",
-                "end tell",
-            ])
-            .status()
-            .map_err(|err| format!("failed to open iTerm: {err}"))?;
-        return command_status(status, "open iTerm");
-    }
-
-    #[cfg(not(target_os = "macos"))]
-    {
-        open_command_file("iTerm", script)
-    }
-}
-
-fn open_command_file(app_name: &str, script: &str) -> Result<(), String> {
-    let path = env::temp_dir().join(format!("tendi-session-{}.command", std::process::id()));
-    fs::write(&path, format!("#!/bin/zsh\n{script}\n"))
-        .map_err(|err| format!("failed to write command file: {err}"))?;
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mut permissions = fs::metadata(&path)
-            .map_err(|err| format!("failed to stat command file: {err}"))?
-            .permissions();
-        permissions.set_mode(0o700);
-        fs::set_permissions(&path, permissions)
-            .map_err(|err| format!("failed to make command file executable: {err}"))?;
-    }
-
-    #[cfg(target_os = "macos")]
-    let status = Command::new("open")
-        .args(["-a", app_name])
-        .arg(&path)
-        .status()
-        .map_err(|err| format!("failed to open {app_name}: {err}"))?;
-
-    #[cfg(all(unix, not(target_os = "macos")))]
-    let status = Command::new("xdg-open")
-        .arg(&path)
-        .status()
-        .map_err(|err| format!("failed to open command file: {err}"))?;
-
-    #[cfg(windows)]
-    let status = Command::new("cmd")
-        .args(["/C", "start", ""])
-        .arg(&path)
-        .status()
-        .map_err(|err| format!("failed to open command file: {err}"))?;
-
-    command_status(status, &format!("open {app_name}"))
-}
-
-fn command_status(status: std::process::ExitStatus, action: &str) -> Result<(), String> {
-    if status.success() {
-        Ok(())
-    } else {
-        Err(format!("{action} exited with {status}"))
-    }
-}
-
 fn build_main_window(app: &tauri::AppHandle) -> tauri::Result<tauri::WebviewWindow> {
     // Keep in sync with TRAFFIC_LIGHT_* in apps/desktop/src/lib/constants.ts.
     // Visual top/left inset are equal (aligns with expanded tab icons).
@@ -3192,7 +3168,6 @@ pub fn run() {
             sessions_scan_start,
             analytics_overview,
             analytics_revision,
-            session_analytics,
             sessions_search,
             session_skill_index_status,
             session_skill_index_run,
@@ -3218,13 +3193,17 @@ pub fn run() {
             prompt_save,
             prompts_delete_many,
             session_transcript,
+            session_transcript_search,
             skills_set,
             skills_wrap,
             skills_updates,
+            skills_updates_cancel,
             skills_update,
             skills_update_many,
             skills_targets,
+            skills_marketplace_search,
             skills_add,
+            skills_add_preview_read,
             skills_delete_many,
             skill_files,
             skill_file_read,
@@ -3241,46 +3220,23 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error while building tendi desktop");
     app.set_activation_policy(ActivationPolicy::Regular);
-    app.run(|app, event| {
-        if let RunEvent::Ready = event {
+    app.run(|app, event| match event {
+        RunEvent::Ready => {
             if let Some(window) = app.get_webview_window("main") {
                 let _ = window.show();
                 activate_native_window(&window);
                 let _ = window.set_focus();
             }
         }
+        RunEvent::Exit => {
+            SKILL_UPDATE_CHECK_CANCELLED.store(true, Ordering::Release);
+        }
+        _ => {}
     });
 }
 
-fn config_profile_key(agent: AgentKind) -> Option<&'static str> {
-    match agent {
-        AgentKind::Codex => Some("codex"),
-        AgentKind::Claude => Some("claude"),
-        AgentKind::Cursor => Some("cursor"),
-        AgentKind::Shared | AgentKind::Unknown => None,
-    }
-}
-
-fn parse_agent(value: &str) -> AgentKind {
-    let normalized = value
-        .to_ascii_lowercase()
-        .chars()
-        .filter(|ch| ch.is_ascii_alphanumeric())
-        .collect::<String>();
-    match normalized.as_str() {
-        "codex" => AgentKind::Codex,
-        "cursor" => AgentKind::Cursor,
-        "claude" | "claudecode" => AgentKind::Claude,
-        "shared" => AgentKind::Shared,
-        _ => AgentKind::Unknown,
-    }
-}
-
 fn parse_agent_result(value: &str) -> Result<AgentKind, String> {
-    match parse_agent(value) {
-        AgentKind::Unknown => Err(format!("unknown agent target {value}")),
-        agent => Ok(agent),
-    }
+    tendi_core::parse_agent(value).map_err(|err| format!("{err:#}"))
 }
 
 fn absolute_project_path(value: Option<String>) -> Result<Option<PathBuf>, String> {
@@ -3330,11 +3286,46 @@ mod tests {
     };
 
     use super::{
-        cached_or_load_skill_scan, cached_skill_dir, editor_file_args, normalize_editor,
-        resolve_terminal, session_root_priority, skill_update_event_for_revision,
-        store_skill_add_preview, store_skill_delete_preview, take_skill_add_preview,
-        take_skill_delete_preview, terminal_application_name,
+        cached_or_load_skill_scan, cached_skill_dir, editor_file_args, ensure_projection,
+        normalize_editor, session_root_priority, session_scan_is_current,
+        skill_update_event_for_revision, store_skill_add_preview, store_skill_delete_preview,
+        take_skill_add_preview, take_skill_delete_preview, terminals,
     };
+
+    #[test]
+    fn route_projection_helper_runs_one_refresh_under_database_lock() {
+        let root = std::env::temp_dir().join(format!(
+            "tendi-route-projection-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let store = tendi_core::storage::Store::open(root.join("tendi.sqlite3")).unwrap();
+        let refreshes = Cell::new(0);
+        let value = ensure_projection(
+            &store,
+            || Ok(None),
+            || {
+                refreshes.set(refreshes.get() + 1);
+                Ok(42_u8)
+            },
+        )
+        .unwrap();
+        assert_eq!(value, 42);
+        assert_eq!(refreshes.get(), 1);
+        drop(store);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn unchanged_session_revision_skips_recursive_scan() {
+        assert!(!session_scan_is_current(0, 0, 0));
+        assert!(session_scan_is_current(1, 0, 0));
+        assert!(!session_scan_is_current(1, 2, 1));
+    }
 
     #[test]
     fn skill_write_cache_miss_loads_authoritative_snapshot_once() {
@@ -3506,21 +3497,26 @@ mod tests {
 
     #[test]
     fn terminal_resolution_preserves_custom_application_names() {
-        assert_eq!(resolve_terminal(" CustomTerm "), "CustomTerm");
+        assert_eq!(terminals::resolve_terminal(" CustomTerm "), "CustomTerm");
     }
 
     #[test]
     fn terminal_resolution_normalizes_known_application_names() {
-        assert_eq!(resolve_terminal("iTerm2"), "iterm");
-        assert_eq!(resolve_terminal("GHOSTTY"), "ghostty");
-        assert_eq!(resolve_terminal("Warp"), "warp");
+        assert_eq!(terminals::resolve_terminal("iTerm2"), "iterm");
+        assert_eq!(terminals::resolve_terminal("GHOSTTY"), "ghostty");
+        assert_eq!(terminals::resolve_terminal("Warp"), "warp");
+        assert_eq!(terminals::resolve_terminal("Orca"), "orca");
     }
 
     #[test]
     fn terminal_application_names_match_macos_apps() {
-        assert_eq!(terminal_application_name("auto"), "Terminal");
-        assert_eq!(terminal_application_name("iterm"), "iTerm");
-        assert_eq!(terminal_application_name("CustomTerm"), "CustomTerm");
+        assert_eq!(terminals::terminal_application_name("auto"), "Terminal");
+        assert_eq!(terminals::terminal_application_name("iterm"), "iTerm");
+        assert_eq!(
+            terminals::terminal_application_name("CustomTerm"),
+            "CustomTerm"
+        );
+        assert_eq!(terminals::terminal_application_name("orca"), "Orca");
     }
 
     #[test]

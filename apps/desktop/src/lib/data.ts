@@ -1,6 +1,4 @@
 import {
-  fallbackAgents,
-  fallbackSessions,
   fallbackSkills,
 } from "./constants.ts";
 import { normalizePrompt } from "./prompt-model.ts";
@@ -98,7 +96,7 @@ export function normalizeReport(
   const mcpList = Array.isArray(mcp) ? mcp : (mcp as { servers?: unknown[] }).servers ?? [];
 
   const normalizedAgents = agentsList as Record<string, unknown>[];
-  const normalizedSessions = sessions.length || !fallback ? sessions : fallbackSessions.map((session, index) => normalizeSession(session as Record<string, unknown>, index));
+  const normalizedSessions = sessions;
   const normalizedSkills = skills.length || !fallback ? skills : fallbackSkills.map((skill, index) => normalizeSkill(skill as Record<string, unknown>, index));
   return {
     agents: normalizedAgents,
@@ -109,19 +107,6 @@ export function normalizeReport(
     hooks: hooksList as Record<string, unknown>[],
     mcp: mcpList as Record<string, unknown>[],
     sources: sourcesFor(normalizedAgents, normalizedSkills, normalizedSessions),
-  };
-}
-
-export function fallbackData(): RuntimeData {
-  return {
-    agents: [],
-    skills: fallbackSkills.map((skill, index) => normalizeSkill(skill as Record<string, unknown>, index)),
-    prompts: [],
-    sessions: fallbackSessions.map((session, index) => normalizeSession(session as Record<string, unknown>, index)),
-    rules: [],
-    hooks: [],
-    mcp: [],
-    sources: fallbackAgents,
   };
 }
 

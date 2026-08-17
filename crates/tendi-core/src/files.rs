@@ -1,10 +1,12 @@
 use std::{
     fs,
+    io::Read,
     path::{Component, Path, PathBuf},
 };
 
 use anyhow::{Context, Result, bail};
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 use walkdir::WalkDir;
 
 use crate::{
@@ -103,9 +105,7 @@ pub fn save_skill_file(
 ) -> Result<SkillFileContent> {
     let skill_dir = resolve_skill_dir(cwd, skill_name, cached_skill_dir)?;
     let path = safe_join(&skill_dir, relative_path)?;
-    let before =
-        fs::read_to_string(&path).with_context(|| format!("failed to read {}", path.display()))?;
-    let current_sha = sha256_text(&before);
+    let current_sha = sha256_file_streaming(&path)?;
     if current_sha != expected_sha256 {
         bail!("refusing to overwrite changed file {}", path.display());
     }
@@ -117,6 +117,21 @@ pub fn save_skill_file(
         content: content.to_string(),
         sha256: sha256_text(content),
     })
+}
+
+fn sha256_file_streaming(path: &Path) -> Result<String> {
+    let mut file =
+        fs::File::open(path).with_context(|| format!("failed to read {}", path.display()))?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0u8; 64 * 1024];
+    loop {
+        let read = file.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Ok(format!("{:x}", hasher.finalize()))
 }
 
 pub fn create_skill_file(
@@ -299,7 +314,7 @@ mod tests {
 
     use super::{
         create_skill_file, create_skill_folder, delete_skill_path, read_skill_file,
-        rename_skill_path, save_skill_file,
+        rename_skill_path, save_skill_file, sha256_file_streaming, sha256_text,
     };
 
     #[test]
@@ -412,6 +427,29 @@ mod tests {
         assert!(delete_skill_path(&root, "demo", ".", Some(cached_skill_dir)).is_err());
         assert!(delete_skill_path(&root, "demo", "", Some(cached_skill_dir)).is_err());
         assert!(skill_dir.join("SKILL.md").is_file());
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn large_skill_file_hash_matches_text_hash() {
+        let root = std::env::temp_dir().join(format!(
+            "tendi-large-skill-hash-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("system time before epoch")
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).expect("create temp dir");
+        let content = "large skill content\n".repeat(512 * 1024);
+        let path = root.join("large.md");
+        fs::write(&path, &content).expect("write large skill");
+
+        assert_eq!(
+            sha256_file_streaming(&path).expect("hash large skill"),
+            sha256_text(&content),
+        );
 
         let _ = fs::remove_dir_all(root);
     }

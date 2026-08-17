@@ -28,6 +28,9 @@ export const codeMirrorHighlightStyle = HighlightStyle.define([
   { tag: highlightTags.operator, color: "var(--syntax-keyword)" },
   { tag: highlightTags.meta, color: "var(--syntax-comment)" },
   { tag: highlightTags.punctuation, color: "var(--syntax-muted)" },
+  { tag: highlightTags.separator, color: "var(--syntax-muted)" },
+  { tag: highlightTags.squareBracket, color: "var(--syntax-bracket)" },
+  { tag: highlightTags.brace, color: "var(--syntax-bracket)" },
 ]);
 
 export const codeMirrorBaseTheme = EditorView.theme({

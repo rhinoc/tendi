@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { listen, type EventCallback, type EventName, type Options, type UnlistenFn } from "@tauri-apps/api/event";
 
 import type { SkillChangeCommand } from "./skills.ts";
 
@@ -50,7 +51,6 @@ export enum TauriCommand {
   SessionsScanStart = "sessions_scan_start",
   AnalyticsOverview = "analytics_overview",
   AnalyticsRevision = "analytics_revision",
-  SessionAnalytics = "session_analytics",
   SessionsSearch = "sessions_search",
   SessionSkillIndexStatus = "session_skill_index_status",
   SessionSkillIndexRun = "session_skill_index_run",
@@ -76,10 +76,13 @@ export enum TauriCommand {
   PromptSave = "prompt_save",
   PromptsDeleteMany = "prompts_delete_many",
   SessionTranscript = "session_transcript",
+  SessionTranscriptSearch = "session_transcript_search",
   SkillsUpdates = "skills_updates",
   SkillsUpdate = "skills_update",
   SkillsTargets = "skills_targets",
+  SkillsMarketplaceSearch = "skills_marketplace_search",
   SkillsAdd = "skills_add",
+  SkillsAddPreviewRead = "skills_add_preview_read",
   SkillFiles = "skill_files",
   SkillFileRead = "skill_file_read",
   SkillFileSave = "skill_file_save",
@@ -93,13 +96,55 @@ export enum TauriCommand {
   CheckForUpdates = "check_for_updates",
 }
 
+type TauriWindow = Window & {
+  __TAURI_INTERNALS__?: {
+    invoke?: unknown;
+    transformCallback?: unknown;
+  };
+};
+
+export function isTauriRuntime(): boolean {
+  if (typeof window === "undefined") return false;
+  const internals = (window as TauriWindow).__TAURI_INTERNALS__;
+  return typeof internals?.invoke === "function" && typeof internals.transformCallback === "function";
+}
+
+type WebInvokeResponse<T> = {
+  ok: boolean;
+  result?: T;
+  error?: string;
+};
+
+async function invokeWeb<T>(command: TauriCommand | SkillChangeCommand, args?: Record<string, unknown>): Promise<T> {
+  const response = await fetch("/__tendi/invoke", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ command, args }),
+  });
+  const payload = await response.json() as WebInvokeResponse<T>;
+  if (!response.ok || !payload.ok) {
+    throw new Error(payload.error || `Web bridge request failed (${response.status})`);
+  }
+  return payload.result as T;
+}
+
+export async function invokeCommand<T = unknown>(command: TauriCommand | SkillChangeCommand, args?: Record<string, unknown>): Promise<T> {
+  if (!isTauriRuntime()) return invokeWeb<T>(command, args);
+  return invoke<T>(command, args);
+}
+
 export async function safeInvoke<T = unknown>(command: TauriCommand | SkillChangeCommand, args?: Record<string, unknown>): Promise<T | null> {
   try {
-    return await invoke<T>(command, args);
+    return await invokeCommand<T>(command, args);
   } catch (error) {
     console.warn(`tendi command failed: ${command}`, error);
     return null;
   }
+}
+
+export function safeListen<T>(event: EventName, handler: EventCallback<T>, options?: Options): Promise<UnlistenFn> {
+  if (!isTauriRuntime()) return Promise.resolve(() => {});
+  return listen(event, handler, options);
 }
 
 export async function copyText(value: string | null | undefined): Promise<void> {

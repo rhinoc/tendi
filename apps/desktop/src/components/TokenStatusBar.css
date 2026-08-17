@@ -19,7 +19,7 @@
   border-radius: 8px;
   color: var(--muted);
   background: var(--panel-bg);
-  box-shadow: var(--shadow-border);
+  box-shadow: 0 1px 3px color-mix(in oklch, var(--overlay-scrim) 18%, transparent);
   font-family: var(--font-mono);
   font-size: 11px;
   line-height: 1.2;

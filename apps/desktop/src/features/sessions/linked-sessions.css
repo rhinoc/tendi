@@ -1,0 +1,238 @@
+.linkedSessionsSummary {
+  flex: 0 0 auto;
+  margin: 0 18px 12px;
+  min-height: 46px;
+  display: grid;
+  grid-template-columns: minmax(150px, auto) minmax(0, 1fr) 34px;
+  align-items: center;
+  gap: 14px;
+  padding: 9px 10px 9px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--panel-bg);
+}
+
+.linkedSessionsSummary div:first-child {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.linkedSessionsSummary span,
+.linkedSessionsMeta {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.linkedSessionsSummary strong {
+  color: var(--text);
+  font-size: 14px;
+}
+
+.linkedSessionsMeta {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  overflow: hidden;
+}
+
+.linkedSessionsMeta span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.linkedSessionsDrawer {
+  position: fixed;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: min(720px, 54vw);
+  min-width: 520px;
+  display: flex;
+  flex-direction: column;
+  background: var(--content-bg);
+  border-left: 1px solid var(--control-border);
+  box-shadow: -20px 0 60px var(--overlay-scrim);
+  z-index: var(--z-drawer);
+}
+
+.linkedSessionsDrawerHeader {
+  flex: 0 0 auto;
+  min-height: 58px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 0 18px;
+  border-bottom: 1px solid var(--line);
+}
+
+.linkedSessionsDrawerTitle {
+  min-width: 0;
+  margin: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 18px;
+  line-height: 1.15;
+  font-weight: 720;
+}
+
+.linkedSessionsDrawerActions {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.linkedSessionsDrawerChart {
+  flex: 1 1 0;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  overflow: hidden;
+  padding: 0 16px 12px;
+}
+
+.skillSessionProjectChart {
+  --graph-skill: color-mix(in oklch, var(--accent) 78%, var(--surface));
+  --graph-session: color-mix(in oklch, var(--tone-info) 78%, var(--surface));
+  --graph-project: color-mix(in oklch, var(--tone-ok) 78%, var(--surface));
+  flex: 1 1 0;
+  min-width: 0;
+  min-height: 0;
+  width: 100%;
+  height: 100%;
+  display: flex;
+  overflow: hidden;
+}
+
+.skillSessionProjectChart svg {
+  flex: 1 1 0;
+  min-width: 0;
+  display: block;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+}
+
+.skillSessionProjectItem,
+.skillSessionProjectSkill,
+.skillSessionProjectProject {
+  outline: none;
+}
+
+.skillSessionProjectItem {
+  cursor: pointer;
+}
+
+.skillSessionProjectPath {
+  fill: none;
+  stroke: var(--line-strong);
+  stroke-width: 0.75;
+  opacity: 0.7;
+  stroke-linecap: round;
+  path-length: 1;
+  animation: sessionRelationPathReveal 700ms var(--ease-out-soft) both;
+}
+
+.skillSessionProjectItem:hover .skillSessionProjectPath,
+.skillSessionProjectItem:focus-visible .skillSessionProjectPath,
+.skillSessionProjectItem.isActive .skillSessionProjectPath {
+  stroke: var(--text);
+  stroke-width: 1.2;
+  opacity: 1;
+}
+
+.skillSessionProjectItem.isDimmed {
+  opacity: 0.16;
+}
+
+.skillSessionProjectSessionNode {
+  fill: var(--graph-session);
+}
+
+.skillSessionProjectSessionLabel {
+  fill: var(--graph-session);
+  font-family: var(--font-sans);
+  font-weight: 600;
+  transition: opacity 140ms ease-out;
+}
+
+.skillSessionProjectSkill,
+.skillSessionProjectProject {
+  cursor: pointer;
+}
+
+.skillSessionProjectSkillNode,
+.skillSessionProjectProjectNode {
+  fill: var(--graph-skill);
+  stroke: transparent;
+  stroke-width: 1;
+  transition: transform 160ms ease, fill 160ms ease;
+  transform-box: fill-box;
+  transform-origin: center;
+}
+
+.skillSessionProjectSkillLabel,
+.skillSessionProjectProjectLabel {
+  font-family: var(--font-sans);
+  font-weight: 700;
+  transition: opacity 140ms ease-out;
+}
+
+.skillSessionProjectSkillLabel {
+  fill: var(--graph-skill);
+}
+
+.skillSessionProjectProjectNode {
+  fill: var(--graph-project);
+}
+
+.skillSessionProjectProjectLabel {
+  fill: var(--graph-project);
+}
+
+.skillSessionProjectSkill.isActive .skillSessionProjectSkillNode {
+  stroke: var(--text);
+  stroke-width: 1.5;
+  transform: scale(1.08);
+}
+
+.skillSessionProjectProject.isActive .skillSessionProjectProjectNode,
+.skillSessionProjectProject:hover .skillSessionProjectProjectNode {
+  stroke: var(--text);
+  stroke-width: 1.5;
+  transform: scale(1.08);
+}
+
+.skillSessionProjectProject:focus-visible .skillSessionProjectProjectNode,
+.skillSessionProjectSkill:focus-visible .skillSessionProjectSkillNode {
+  stroke: var(--text);
+  stroke-width: 1.5;
+}
+
+.linkedSessionsDrawerEmpty {
+  flex: 1;
+  display: grid;
+  place-items: center;
+  padding: 32px;
+  color: var(--muted);
+}
+
+@keyframes sessionRelationPathReveal {
+  from { opacity: 0; }
+  to { opacity: 0.72; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .skillSessionProjectPath,
+  .skillSessionProjectSkillNode,
+  .skillSessionProjectProjectNode {
+    animation: none;
+    transition: none;
+  }
+}

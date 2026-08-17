@@ -63,9 +63,22 @@
 }
 
 .dialogActionButton.dialogAdvanceButton {
-  min-width: 84px;
+  width: 112px;
+  min-width: 112px;
   gap: 6px;
   padding: 0 12px;
+  white-space: nowrap;
+}
+
+.dialogActionButton.dialogStatefulButton {
+  width: 132px;
+  min-width: 132px;
+  white-space: nowrap;
+}
+
+.dialogActionButton.dialogStatefulButtonWide {
+  width: 152px;
+  min-width: 152px;
 }
 
 .dialogActionButton:disabled,

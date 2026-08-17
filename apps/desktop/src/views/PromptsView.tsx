@@ -1,6 +1,7 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useState, type KeyboardEvent } from "react";
 import { ContextMenu, Dialog } from "radix-ui";
 import {
+  Copy,
   FileText,
   Pencil,
   Plus,
@@ -14,17 +15,20 @@ import { ContentTopDragStrip } from "../components/shared/ContentTopDragStrip.ts
 import { CopyButton } from "../components/shared/CopyButton.tsx";
 import { CopyTextMenuItem, DeleteMenuItem } from "../components/shared/DataTableMenus.tsx";
 import { DialogActionBar } from "../components/shared/DialogActionBar.tsx";
-import { DialogActionButton } from "../components/shared/DialogActionButton.tsx";
+import { DialogStatefulButton } from "../components/shared/DialogStatefulButton.tsx";
+import { DialogShell } from "../components/shared/DialogShell.tsx";
 import { DialogTextField } from "../components/shared/DialogTextField.tsx";
+import { IconButton } from "../components/shared/IconButton.tsx";
 import { LoadingIcon } from "../components/shared/LoadingIcon.tsx";
-import { LoadingInline } from "../components/shared/LoadingInline.tsx";
+import { LoadingState } from "../components/shared/LoadingState.tsx";
 import { PageHeader } from "../components/shared/PageHeader.tsx";
 import { SearchField } from "../components/shared/SearchField.tsx";
+import { StatefulButton } from "../components/shared/StatefulButton.tsx";
 import { DataTable } from "../components/DataTable.tsx";
 import type { ColumnDef } from "../components/DataTable.types";
 import { TauriCommand, compactDateTime, normalizePromptTags, promptPreview, promptTagsLabel, safeInvoke } from "../lib/index.ts";
 
-const PromptBodyEditor = lazy(() => import("../components/shared/PromptBodyEditor.tsx").then(({ PromptBodyEditor: component }) => ({ default: component })));
+const PromptBodyEditor = lazy(() => import("../features/prompts/PromptBodyEditor.tsx").then(({ PromptBodyEditor: component }) => ({ default: component })));
 
 type PromptRecord = {
   id: string;
@@ -133,39 +137,41 @@ export function PromptDialog({ open, prompt, busy, error, onOpenChange, onSave }
 
   const canSave = title.trim() && body.trim();
   return (
-    <Dialog.Root open={open} onOpenChange={onOpenChange}>
-      <Dialog.Portal>
-        <Dialog.Overlay className="dialogOverlay" />
-        <Dialog.Content className="promptDialogPanel" aria-describedby="prompt-dialog-description" data-no-drag onMouseDown={(event) => event.stopPropagation()}>
-          <Dialog.Title className="confirmDialogTitle">{editing ? "Edit prompt" : "New prompt"}</Dialog.Title>
-          <p id="prompt-dialog-description" className="confirmDialogDescription">
-            Save a reusable prompt for quick copying later.
-          </p>
-          <div className="promptDialogBody">
-            <DialogTextField label="Title" value={title} onChange={setTitle} placeholder="Code review checklist" />
-            <TagInput label="Tags" value={tags} onChange={setTags} placeholder="review, planning" />
-            <div className="dialogField promptBodyField">
-              <span>Prompt</span>
-              <Suspense fallback={<div className="promptCodeMirrorEditor"><LoadingInline label="Loading editor" /></div>}>
-                <PromptBodyEditor value={body} onChange={setBody} />
-              </Suspense>
-            </div>
-            {error ? <div className="addSkillError promptDialogError">{error}</div> : null}
-          </div>
-          <DialogActionBar cancelDisabled={busy} onCancel={() => onOpenChange(false)}>
-            <DialogActionButton
-              variant="primary"
-              className="dialogAdvanceButton"
-              disabled={!canSave || busy}
-              onClick={() => onSave({ id: prompt?.id, title, tags, body })}
-            >
-              <span>{busy ? "Saving" : "Save"}</span>
-              {busy ? <LoadingIcon size={16} /> : <Save size={16} />}
-            </DialogActionButton>
-          </DialogActionBar>
-        </Dialog.Content>
-      </Dialog.Portal>
-    </Dialog.Root>
+    <DialogShell
+      open={open}
+      onOpenChange={onOpenChange}
+      className="promptDialogPanel"
+      descriptionId="prompt-dialog-description"
+    >
+      <Dialog.Title className="confirmDialogTitle">{editing ? "Edit prompt" : "New prompt"}</Dialog.Title>
+      <p id="prompt-dialog-description" className="confirmDialogDescription">
+        Save a reusable prompt for quick copying later.
+      </p>
+      <div className="promptDialogBody">
+        <DialogTextField label="Title" value={title} onChange={setTitle} placeholder="Code review checklist" />
+        <TagInput label="Tags" value={tags} onChange={setTags} placeholder="review, planning" />
+        <div className="dialogField promptBodyField">
+          <span>Prompt</span>
+          <Suspense fallback={<div className="promptCodeMirrorEditor"><LoadingState label="Loading editor" /></div>}>
+            <PromptBodyEditor value={body} onChange={setBody} />
+          </Suspense>
+        </div>
+        {error ? <div className="dialogError">{error}</div> : null}
+      </div>
+      <DialogActionBar cancelDisabled={busy} onCancel={() => onOpenChange(false)}>
+        <DialogStatefulButton
+          state={busy ? "loading" : "idle"}
+          loadingLabel="Saving prompt"
+          variant="primary"
+          className="dialogAdvanceButton"
+          aria-label="Save prompt"
+          disabled={!canSave}
+          onClick={() => onSave({ id: prompt?.id, title, tags, body })}
+        >
+          <><span>Save</span><Save size={16} /></>
+        </DialogStatefulButton>
+      </DialogActionBar>
+    </DialogShell>
   );
 }
 
@@ -304,76 +310,87 @@ export function PromptsView({ prompts, loadingPrompts = false, onRefreshPrompts,
       key: "actions",
       header: "",
       width: "108px",
-      render: (prompt) => (
-        <div className="rowActions">
-          <CopyButton
-            className="iconButton"
-            copyLabel={`Copy ${prompt.title}`}
-            copiedLabel="Prompt copied"
-            iconSize={15}
-            stopPropagation
-            onCopy={() => copyPrompts([prompt])}
-          />
-          <button
-            className="iconButton"
-            aria-label={`Edit ${prompt.title}`}
-            onClick={(event) => {
-              event.stopPropagation();
-              openEditPrompt(prompt);
-            }}
-          >
-            <Pencil size={15} />
-          </button>
-          <button
-            className={`iconButton dangerIcon${deletingPromptIds.includes(prompt.id) ? " isBusy" : ""}`}
-            aria-label={`Delete ${prompt.title}`}
-            aria-busy={deletingPromptIds.includes(prompt.id)}
-            aria-disabled={deletingPromptIds.includes(prompt.id) || undefined}
-            data-no-row-click
-            onClick={(event) => {
-              event.stopPropagation();
-              if (deletingPromptIds.includes(prompt.id)) return;
-              deleteSelected([prompt.id]);
-            }}
-          >
-            {deletingPromptIds.includes(prompt.id)
-              ? <LoadingIcon size={15} />
-              : <Trash2 size={15} />}
-          </button>
-        </div>
-      ),
+      render: (prompt) => {
+        const isDeleting = deletingPromptIds.includes(prompt.id);
+        return (
+          <div className="rowActions">
+            <CopyButton
+              className="iconButton"
+              copyLabel={`Copy ${prompt.title}`}
+              copiedLabel="Prompt copied"
+              iconSize={15}
+              stopPropagation
+              onCopy={() => copyPrompts([prompt])}
+            />
+            <IconButton
+              aria-label={`Edit ${prompt.title}`}
+              onClick={(event) => {
+                event.stopPropagation();
+                openEditPrompt(prompt);
+              }}
+            >
+              <Pencil size={15} />
+            </IconButton>
+            <StatefulButton
+              state={isDeleting ? "loading" : "idle"}
+              size="sm"
+              width={28}
+              minWidth={28}
+              variant="ghost"
+              className={`iconButton dangerIcon${isDeleting ? " isBusy" : ""}`}
+              aria-label={`Delete ${prompt.title}`}
+              aria-disabled={isDeleting || undefined}
+              data-no-row-click
+              onClick={(event) => {
+                event.stopPropagation();
+                if (isDeleting) return;
+                deleteSelected([prompt.id]);
+              }}
+              loadingContent={<LoadingIcon size={15} />}
+            >
+              <Trash2 size={15} />
+            </StatefulButton>
+          </div>
+        );
+      },
     },
   ], [copyPrompts, deleteSelected, deletingPromptIds, openEditPrompt]);
 
-  const bottomBar = useCallback((selectedRows: PromptRecord[]) => (
-    <>
-      <CopyButton
-        copyLabel="Copy selected prompts"
-        copiedLabel="Selected prompts copied"
-        iconSize={15}
-        onCopy={() => copyPrompts(selectedRows)}
-      >
-        Copy
-      </CopyButton>
-      <button
-        className="danger"
-        aria-label="Delete selected prompts"
-        aria-busy={selectedRows.some((prompt) => deletingPromptIds.includes(prompt.id))}
-        disabled={selectedRows.some((prompt) => deletingPromptIds.includes(prompt.id))}
-        onClick={() => deleteSelected(selectedRows.map((prompt) => prompt.id))}
-      >
-        {selectedRows.some((prompt) => deletingPromptIds.includes(prompt.id))
-          ? <LoadingIcon size={15} />
-          : <Trash2 size={15} />}
-        {selectedRows.some((prompt) => deletingPromptIds.includes(prompt.id)) ? "Deleting" : "Delete"}
-      </button>
-    </>
-  ), [copyPrompts, deleteSelected, deletingPromptIds]);
+  const bottomBar = useCallback((selectedRows: PromptRecord[]) => {
+    const isDeleting = selectedRows.some((prompt) => deletingPromptIds.includes(prompt.id));
+    return (
+      <>
+        <CopyButton
+          copyLabel="Copy selected prompts"
+          copiedLabel="Selected prompts copied"
+          iconSize={15}
+          onCopy={() => copyPrompts(selectedRows)}
+        >
+          Copy
+        </CopyButton>
+        <StatefulButton
+          state={isDeleting ? "loading" : "idle"}
+          size="sm"
+          width={94}
+          minWidth={94}
+          variant="ghost"
+          className="danger promptsDeleteSelectedButton"
+          aria-label="Delete selected prompts"
+          disabled={isDeleting}
+          onClick={() => deleteSelected(selectedRows.map((prompt) => prompt.id))}
+          loadingContent={<LoadingIcon size={15} />}
+        >
+          <><Trash2 size={15} /><span>Delete</span></>
+        </StatefulButton>
+      </>
+    );
+  }, [copyPrompts, deleteSelected, deletingPromptIds]);
   const rowContextMenu = useCallback((prompt: PromptRecord, { selectedRows, selected: isSelected }: { selectedRows: PromptRecord[]; selected: boolean }) => {
     const showBulk = isSelected && selectedRows.length > 1;
     return showBulk ? (
       <>
         <ContextMenu.Item className="skillMenuItem" onSelect={() => copyPrompts(selectedRows)}>
+          <Copy size={14} />
           Copy selected
         </ContextMenu.Item>
         <ContextMenu.Separator className="skillMenuSeparator" />
@@ -388,6 +405,7 @@ export function PromptsView({ prompts, loadingPrompts = false, onRefreshPrompts,
       <>
         <CopyTextMenuItem Menu={ContextMenu} text={prompt.body} label="Copy prompt" />
         <ContextMenu.Item className="skillMenuItem" onSelect={() => openEditPrompt(prompt)}>
+          <Pencil size={14} />
           Edit prompt
         </ContextMenu.Item>
         <ContextMenu.Separator className="skillMenuSeparator" />
@@ -405,9 +423,9 @@ export function PromptsView({ prompts, loadingPrompts = false, onRefreshPrompts,
     <section className="content dataPage promptsPage">
       <ContentTopDragStrip />
       <PageHeader title="Prompts">
-        <SearchField placeholder="Search prompts" value={query} onChange={(event) => setQuery(event.target.value)} />
-        <button className="iconButton" aria-label="Refresh prompts" onClick={onRefreshPrompts}><RefreshCw size={16} /></button>
-        <button className="iconButton filled" aria-label="Add prompt" onClick={openNewPrompt}><Plus size={16} /></button>
+        <SearchField placeholder="Search prompts" value={query} onChange={(event) => setQuery(event.target.value)} onClear={() => setQuery("")} />
+        <IconButton aria-label="Refresh prompts" onClick={onRefreshPrompts}><RefreshCw size={16} /></IconButton>
+        <IconButton className="filled" aria-label="Add prompt" onClick={openNewPrompt}><Plus size={16} /></IconButton>
       </PageHeader>
       <DataTable
         rows={visiblePrompts}
@@ -424,7 +442,7 @@ export function PromptsView({ prompts, loadingPrompts = false, onRefreshPrompts,
         bottomBarCheckboxLabel="Select visible prompts from toolbar"
         selectionLabel="prompts"
         loading={loadingPrompts}
-        loadingLabel={<LoadingInline label="Loading prompts" />}
+        loadingLabel="Loading prompts"
         emptyState={normalizedQuery ? (
           <><FileText size={20} /><span>No prompts match this search</span><span>Try another search.</span></>
         ) : (

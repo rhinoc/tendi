@@ -3,7 +3,7 @@ import { lazy, Suspense, useCallback, useEffect, useMemo, useState, type Compone
 import { invoke } from "@tauri-apps/api/core";
 import { Group as PanelGroup, Panel } from "react-resizable-panels";
 import { ContextMenu, Dialog, DropdownMenu } from "radix-ui";
-import { Crosshair, RefreshCw, Trash2 } from "lucide-react";
+import { Copy, Crosshair, FolderOpen, RefreshCw, Trash2 } from "lucide-react";
 
 import { DataTable } from "../components/DataTable.tsx";
 import type { ColumnDef, SortState } from "../components/DataTable.types";
@@ -12,12 +12,13 @@ import { CopyButton } from "../components/shared/CopyButton.tsx";
 import { DetailPanel } from "../components/shared/DetailPanel.tsx";
 import { DetailPanelHost } from "../components/shared/DetailPanelHost.tsx";
 import { DialogActionButton } from "../components/shared/DialogActionButton.tsx";
+import { DialogShell } from "../components/shared/DialogShell.tsx";
+import { DialogStatefulButton } from "../components/shared/DialogStatefulButton.tsx";
 import { LoadingIcon } from "../components/shared/LoadingIcon.tsx";
-import { LoadingInline } from "../components/shared/LoadingInline.tsx";
-import { MoreActionsButton } from "../components/shared/MoreActionsButton.tsx";
+import { LoadingState } from "../components/shared/LoadingState.tsx";
 import { PageHeader } from "../components/shared/PageHeader.tsx";
+import { RowActionsMenu } from "../components/shared/RowActionsMenu.tsx";
 import { SearchField } from "../components/shared/SearchField.tsx";
-import "../components/shared/confirm-dialog.css";
 import "./HooksView.css";
 
 import {
@@ -40,7 +41,7 @@ import {
   suppressNextClick,
 } from "../lib/index.ts";
 
-const HookSourcePreview = lazy(() => import("../components/shared/HookSourcePreview.tsx").then(({ HookSourcePreview: component }) => ({ default: component })));
+const HookSourcePreview = lazy(() => import("../features/hooks/HookSourcePreview.tsx").then(({ HookSourcePreview: component }) => ({ default: component })));
 
 type HookRecord = {
   agent?: string | null;
@@ -171,7 +172,7 @@ function HookEnabledSwitch({ checked, disabledReason = "", updating = false, onT
   // Use aria-disabled (not native disabled) so clicks still hit this control and do not fall through to row onClick.
   const disabled = Boolean(disabledReason) || updating;
   return (
-    <Tooltip content={disabledReason || (checked ? "Disable hook" : "Enable hook")}><button
+    <Tooltip content={disabledReason || undefined}><button
       type="button"
       className={`hookEnabledSwitch ${checked ? "on" : "off"} ${updating ? "updating" : ""}`}
       role="switch"
@@ -217,9 +218,11 @@ function HookActionsMenuItems({
         disabled={!path}
         onSelect={() => path && safeInvoke(TauriCommand.RevealInFinder, { path })}
       >
+        <FolderOpen size={14} />
         Reveal in Finder
       </Menu.Item>
       <Menu.Item className="skillMenuItem" disabled={!path} onSelect={() => path && copyText(path)}>
+        <Copy size={14} />
         Copy path
       </Menu.Item>
       <Menu.Separator className="skillMenuSeparator" />
@@ -244,16 +247,12 @@ function HookActionsCell({
 }) {
   const hook = item.hook;
   return (
-    <DropdownMenu.Root onOpenChange={(open) => { if (!open) suppressNextClick(); }}>
-      <DropdownMenu.Trigger asChild>
-        <MoreActionsButton aria-label={`Hook actions for ${hook.event ?? "hook"}`} />
-      </DropdownMenu.Trigger>
-      <DropdownMenu.Portal>
-        <DropdownMenu.Content className="skillMenuContent" align="end" sideOffset={6}>
-          <HookActionsMenuItems Menu={DropdownMenu} item={item} onDeleteHooks={onDeleteHooks} />
-        </DropdownMenu.Content>
-      </DropdownMenu.Portal>
-    </DropdownMenu.Root>
+    <RowActionsMenu
+      ariaLabel={`Hook actions for ${hook.event ?? "hook"}`}
+      onOpenChange={(open) => { if (!open) suppressNextClick(); }}
+    >
+      <HookActionsMenuItems Menu={DropdownMenu} item={item} onDeleteHooks={onDeleteHooks} />
+    </RowActionsMenu>
   );
 }
 
@@ -476,8 +475,10 @@ export function HooksView({ rows, loadingRows = false, onDeleteHook, onDeleteHoo
     const deletable = selectedRows.filter((item) => !hookDeleteDisabledReason(item.hook));
     return (
       <button
+        type="button"
         className="danger"
         aria-label="Delete selected hooks"
+        aria-busy={Boolean(deletingKey)}
         disabled={deletable.length === 0 || Boolean(deletingKey)}
         onClick={() => requestDeleteHooks(deletable)}
       >
@@ -553,7 +554,7 @@ export function HooksView({ rows, loadingRows = false, onDeleteHook, onDeleteHoo
       <Panel className="sessionListPanel hookListPanel" defaultSize="54%" minSize="360px">
         <div className="sessionListPane hookListPane">
           <PageHeader title="Hooks" compact>
-            <SearchField placeholder="Search hooks" value={query} onChange={(event) => setQuery(event.target.value)} />
+            <SearchField placeholder="Search hooks" value={query} onChange={(event) => setQuery(event.target.value)} onClear={() => setQuery("")} />
           </PageHeader>
           <div className="sessionListBody">
             <DataTable
@@ -576,7 +577,7 @@ export function HooksView({ rows, loadingRows = false, onDeleteHook, onDeleteHoo
                 setDetailCollapsed(false);
               }}
               loading={loadingRows}
-              loadingLabel={<LoadingInline label="Loading hooks" />}
+              loadingLabel="Loading hooks"
               emptyState={normalizedQuery
                 ? "No hooks match this search. Try another search."
                 : "No hooks configured. They appear here when an agent defines them."}
@@ -592,7 +593,7 @@ export function HooksView({ rows, loadingRows = false, onDeleteHook, onDeleteHoo
         hasSelection={Boolean(activeHook)}
         emptyState={(
           <div className="emptyState">
-            {loadingRows ? <LoadingInline label="Loading hooks" /> : "Select a hook to view its details."}
+            {loadingRows ? <LoadingState label="Loading hooks" /> : "Select a hook to view its details."}
           </div>
         )}
         hostClassName="hookDetailPanelHost"
@@ -652,12 +653,12 @@ export function HooksView({ rows, loadingRows = false, onDeleteHook, onDeleteHoo
                   </div>
                 </div>
                 {sourceState.loading && sourceState.showLoading ? (
-                  <div className="hookSourcePlaceholder"><LoadingInline label="Loading source" /></div>
+                  <LoadingState className="hookSourceLoading" label="Loading source" />
                 ) : sourceState.loading ? null : sourceState.error ? (
                   <div className="hookSourcePreviewError">{sourceState.error}</div>
                 ) : sourceState.data?.content ? (
                   <div className="hookSourcePreview">
-                    <Suspense fallback={<div className="hookSourcePlaceholder"><LoadingInline label="Loading preview" /></div>}>
+                    <Suspense fallback={<LoadingState className="hookSourceLoading" label="Loading preview" />}>
                       <HookSourcePreview content={sourceState.data.content} />
                     </Suspense>
                   </div>
@@ -670,29 +671,31 @@ export function HooksView({ rows, loadingRows = false, onDeleteHook, onDeleteHoo
         ) : null}
       </DetailPanelHost>
     </PanelGroup>
-    <Dialog.Root open={pendingDeleteItems.length > 0} onOpenChange={(open) => !open && setPendingDeleteItems([])}>
-      <Dialog.Portal>
-        <Dialog.Overlay className="dialogOverlay" />
-        <Dialog.Content className="confirmDialogPanel" aria-describedby="hook-delete-description" data-no-drag onMouseDown={(event) => event.stopPropagation()}>
+    <DialogShell
+      open={pendingDeleteItems.length > 0}
+      onOpenChange={(open) => !open && setPendingDeleteItems([])}
+      descriptionId="hook-delete-description"
+    >
           <Dialog.Title className="confirmDialogTitle">Delete hook{pendingDeleteItems.length === 1 ? "" : "s"}?</Dialog.Title>
           <p id="hook-delete-description" className="confirmDialogDescription">{pendingDeleteMessage}</p>
           <div className="confirmDialogActions">
             <DialogActionButton variant="secondary" onClick={() => setPendingDeleteItems([])}>Cancel</DialogActionButton>
-            <DialogActionButton variant="danger" disabled={Boolean(deletingKey)} onClick={() => void confirmDeleteHooks()}>
-              {deletingKey
-                ? "Deleting…"
-                : pendingDeleteItems.length === 1
-                  ? "Delete hook"
-                  : "Delete hooks"}
-            </DialogActionButton>
+            <DialogStatefulButton
+              state={deletingKey ? "loading" : "idle"}
+              loadingLabel="Deleting hooks"
+              variant="danger"
+              aria-label={pendingDeleteItems.length === 1 ? "Delete hook" : "Delete hooks"}
+              onClick={() => void confirmDeleteHooks()}
+            >
+              {pendingDeleteItems.length === 1 ? "Delete hook" : "Delete hooks"}
+            </DialogStatefulButton>
           </div>
-        </Dialog.Content>
-      </Dialog.Portal>
-    </Dialog.Root>
-    <Dialog.Root open={Boolean(pendingReviewItem)} onOpenChange={(open) => !open && setPendingReviewItem(null)}>
-      <Dialog.Portal>
-        <Dialog.Overlay className="dialogOverlay" />
-        <Dialog.Content className="confirmDialogPanel" aria-describedby="hook-review-description" data-no-drag onMouseDown={(event) => event.stopPropagation()}>
+    </DialogShell>
+    <DialogShell
+      open={Boolean(pendingReviewItem)}
+      onOpenChange={(open) => !open && setPendingReviewItem(null)}
+      descriptionId="hook-review-description"
+    >
           <Dialog.Title className="confirmDialogTitle">Approve hook?</Dialog.Title>
           <p id="hook-review-description" className="confirmDialogDescription">
             Approve the current configuration for this {pendingReviewItem?.hook.agent ?? "agent"} hook?
@@ -704,13 +707,17 @@ export function HooksView({ rows, loadingRows = false, onDeleteHook, onDeleteHoo
           </div>
           <div className="confirmDialogActions">
             <DialogActionButton variant="secondary" onClick={() => setPendingReviewItem(null)}>Cancel</DialogActionButton>
-            <DialogActionButton variant="primary" disabled={Boolean(reviewingKey)} onClick={() => void confirmReviewHook()}>
-              {reviewingKey ? "Approving…" : "Approve"}
-            </DialogActionButton>
+            <DialogStatefulButton
+              state={reviewingKey ? "loading" : "idle"}
+              loadingLabel="Approving hook"
+              variant="primary"
+              aria-label="Approve hook"
+              onClick={() => void confirmReviewHook()}
+            >
+              Approve
+            </DialogStatefulButton>
           </div>
-        </Dialog.Content>
-      </Dialog.Portal>
-    </Dialog.Root>
+    </DialogShell>
     </>
   );
 }

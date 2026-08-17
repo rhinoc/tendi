@@ -7,13 +7,15 @@ import { Group as PanelGroup, Panel } from "react-resizable-panels";
 
 import { DataTable } from "../components/DataTable.tsx";
 import type { ColumnDef } from "../components/DataTable.types.ts";
-import { AgentFilterOptionLabel } from "../components/shared/AgentFilterOptionLabel.tsx";
+import { AgentOptionLabel } from "../components/shared/AgentOptionLabel.tsx";
 import { DialogActionBar } from "../components/shared/DialogActionBar.tsx";
-import { DialogActionButton } from "../components/shared/DialogActionButton.tsx";
+import { DialogShell } from "../components/shared/DialogShell.tsx";
 import { DiscardChangesDialog } from "../components/shared/DiscardChangesDialog.tsx";
 import { DialogTextField } from "../components/shared/DialogTextField.tsx";
+import { DialogStatefulButton } from "../components/shared/DialogStatefulButton.tsx";
+import { IconButton } from "../components/shared/IconButton.tsx";
 import { LoadingIcon } from "../components/shared/LoadingIcon.tsx";
-import { LoadingInline } from "../components/shared/LoadingInline.tsx";
+import { LoadingState } from "../components/shared/LoadingState.tsx";
 import { PageHeader } from "../components/shared/PageHeader.tsx";
 import { ResizeSeparator } from "../components/shared/ResizeSeparator.tsx";
 import { SelectControl } from "../components/shared/SelectControl.tsx";
@@ -93,7 +95,7 @@ export function ConfigView() {
       width: "minmax(180px, 1fr)",
       render: (config) => (
         <div className="configAgentCell">
-          <AgentFilterOptionLabel agent={config.agent} collapsed />
+          <AgentOptionLabel agent={config.agent} variant="filter" collapsed />
           <span className="configAgentText">
             <strong>{config.label}</strong>
             <Tooltip content={config.path} onlyWhenTruncated><span>{config.path}</span></Tooltip>
@@ -292,59 +294,53 @@ export function ConfigView() {
         onOpenChange={setShowDiscardDialog}
         onDiscard={discardPendingChanges}
       />
-      <Dialog.Root
+      <DialogShell
         open={profileDialogOpen}
         onOpenChange={(open) => {
           if (!profileSaving) setProfileDialogOpen(open);
         }}
+        className="confirmDialogPanel configProfileDialog"
+        descriptionId="config-profile-description"
       >
-        <Dialog.Portal>
-          <Dialog.Overlay className="dialogOverlay" />
-          <Dialog.Content
-            className="confirmDialogPanel configProfileDialog"
-            aria-describedby="config-profile-description"
-            data-no-drag
-            onMouseDown={(event) => event.stopPropagation()}
+        <Dialog.Title className="confirmDialogTitle">Create config profile</Dialog.Title>
+        <p id="config-profile-description" className="confirmDialogDescription">
+          Save the current {profileAgent ? friendlyAgent(profileAgent) : "agent"} {activeConfig?.format.toUpperCase() ?? "config"} as a named profile.
+        </p>
+        <div className="configProfileDialogBody">
+          <DialogTextField
+            label="Profile name"
+            value={profileName}
+            onChange={setProfileName}
+            placeholder="deep-review"
+          />
+          <p className="configProfileHint">Use letters, numbers, hyphens, or underscores.</p>
+          {profileError ? <div className="dialogError">{profileError}</div> : null}
+        </div>
+        <DialogActionBar cancelDisabled={profileSaving} onCancel={() => setProfileDialogOpen(false)}>
+          <DialogStatefulButton
+            state={profileSaving ? "loading" : "idle"}
+            loadingLabel="Creating config profile"
+            variant="primary"
+            className="dialogAdvanceButton"
+            aria-label="Create config profile"
+            disabled={!profileName.trim()}
+            onClick={() => { void createProfile(); }}
           >
-            <Dialog.Title className="confirmDialogTitle">Create config profile</Dialog.Title>
-            <p id="config-profile-description" className="confirmDialogDescription">
-              Save the current {profileAgent ? friendlyAgent(profileAgent) : "agent"} {activeConfig?.format.toUpperCase() ?? "config"} as a named profile.
-            </p>
-            <div className="configProfileDialogBody">
-              <DialogTextField
-                label="Profile name"
-                value={profileName}
-                onChange={setProfileName}
-                placeholder="deep-review"
-              />
-              <p className="configProfileHint">Use letters, numbers, hyphens, or underscores.</p>
-              {profileError ? <div className="addSkillError">{profileError}</div> : null}
-            </div>
-            <DialogActionBar cancelDisabled={profileSaving} onCancel={() => setProfileDialogOpen(false)}>
-              <DialogActionButton
-                variant="primary"
-                className="dialogAdvanceButton"
-                disabled={!profileName.trim() || profileSaving}
-                onClick={() => { void createProfile(); }}
-              >
-                <span>{profileSaving ? "Creating" : "Create"}</span>
-                {profileSaving ? <LoadingIcon size={16} /> : <Save size={16} />}
-              </DialogActionButton>
-            </DialogActionBar>
-          </Dialog.Content>
-        </Dialog.Portal>
-      </Dialog.Root>
+            <><span>Create</span><Save size={16} /></>
+          </DialogStatefulButton>
+        </DialogActionBar>
+      </DialogShell>
       <Panel className="sessionListPanel configListPanel" defaultSize="36%" minSize="280px">
         <div className="sessionListPane configListPane">
           <PageHeader title="Config" compact>
-            <button
-              className="iconButton"
+            <IconButton
               aria-label="Reload config"
+              aria-busy={loading}
               disabled={loading}
               onClick={reload}
             >
               {loading ? <LoadingIcon size={14} /> : <RefreshCw size={14} />}
-            </button>
+            </IconButton>
           </PageHeader>
           <div className="sessionListBody">
             <DataTable
@@ -358,7 +354,7 @@ export function ConfigView() {
                 "aria-current": config.path === activePath ? "true" : undefined,
               })}
               loading={loading && configs.length === 0}
-              loadingLabel={<LoadingInline label="Loading configs" />}
+              loadingLabel="Loading configs"
               emptyState="No supported agent configs found. Open a supported agent, then refresh."
             />
           </div>
@@ -384,30 +380,29 @@ export function ConfigView() {
                   onValueChange={setSelectedProfileValue}
                   options={profileOptions}
                 />
-                <Tooltip content={dirty ? "Save or discard current changes before activating a profile" : profileSelectionChanged ? "Activate selected config profile" : "Active config profile"}><button
-                  className={`configProfileSwitchButton ${profileSelectionChanged ? "" : "isActive"}`}
-                  aria-label={dirty ? "Save or discard changes before activating a config profile" : profileSelectionChanged ? "Activate selected config profile" : "Active config profile"}
+                <Tooltip content={dirty ? "Save or discard current changes before switching a profile" : undefined}><button
+                  className={`configProfileSwitchButton configProfileStateButton ${profileSelectionChanged ? "" : "isActive"}`}
+                  aria-label={dirty ? "Save or discard changes before switching a config profile" : profileSwitching ? "Switching config profile" : profileSelectionChanged ? "Switch selected config profile" : "Active config profile"}
+                  aria-busy={profileSwitching}
                   disabled={!profileSelectionChanged || dirty || profileSwitching || profileSaving}
                   onClick={() => { void activateProfile(profileAgent, selectedProfileValue); }}
                 >
-                  {profileSwitching ? <LoadingIcon size={14} /> : profileSelectionChanged ? <ArrowRightLeft size={14} /> : <Check size={14} />}
-                  <span>{profileSwitching ? "Switching…" : profileSelectionChanged ? "Activate" : "Active"}</span>
+                  {profileSwitching ? <LoadingIcon size={14} /> : profileSelectionChanged ? <><ArrowRightLeft size={14} /><span>Switch</span></> : <><Check size={14} /><span>Active</span></>}
                 </button></Tooltip>
-                <button
-                  className="iconButton"
+                <IconButton
                   aria-label="Create config profile"
                   disabled={profileSaving}
                   onClick={openProfileDialog}
                 >
                   <Plus size={14} />
-                </button>
+                </IconButton>
               </div>
             ) : null}
           </header>
           {loading ? (
-            <div className="configEditorMessage"><LoadingInline label="Loading config" /></div>
+            <div className="configEditorMessage"><LoadingState label="Loading config" /></div>
           ) : activeConfig ? (
-            <Suspense fallback={<div className="configEditorMessage"><LoadingInline label="Loading editor" /></div>}>
+            <Suspense fallback={<div className="configEditorMessage"><LoadingState label="Loading editor" /></div>}>
               <MarkdownFilePane
                 activePath={activeConfig.path}
                 dirty={dirty}

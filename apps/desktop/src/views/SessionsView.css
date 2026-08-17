@@ -27,164 +27,12 @@
   box-shadow: var(--shadow-menu);
 }
 
-.sessionUsagePopover {
-  z-index: var(--z-popover);
-  width: min(780px, calc(100vw - 32px));
-  max-height: min(520px, calc(100vh - 96px));
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-  padding: 12px;
-  overflow: hidden;
-  border: 0;
-  border-radius: var(--radius-lg);
-  background: var(--panel-bg);
-  box-shadow: var(--shadow-menu);
-}
-
-.sessionUsageHeader {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 12px;
-  color: var(--faint);
-  font-size: 10px;
-}
-
-.sessionUsageHeader > div {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
-
-.sessionUsageHeader strong {
-  color: var(--text);
-  font-size: 12px;
-}
-
-.sessionUsageTableWrap {
-  min-height: 0;
-  overflow: auto;
-  border: 1px solid var(--line);
-  border-radius: var(--radius-md);
-}
-
-.sessionUsageTable {
-  width: 100%;
-  border-collapse: collapse;
-  font-size: 10px;
-  font-variant-numeric: tabular-nums;
-  white-space: nowrap;
-}
-
-.sessionUsageTable th,
-.sessionUsageTable td {
-  padding: 6px 8px;
-  border-bottom: 1px solid var(--line);
-  text-align: right;
-}
-
-.sessionUsageTable th {
-  position: sticky;
-  top: 0;
-  z-index: 1;
-  background: var(--surface-2);
-  color: var(--muted);
-  font-weight: 650;
-}
-
-.sessionUsageTable th:nth-child(2),
-.sessionUsageTable th:nth-child(3),
-.sessionUsageTable td:nth-child(2),
-.sessionUsageTable td:nth-child(3) {
-  max-width: 150px;
-  overflow: hidden;
-  text-align: left;
-  text-overflow: ellipsis;
-}
-
-.sessionUsageTable tbody tr:last-child td { border-bottom: 0; }
-.sessionUsageTable tbody tr:hover td { background: var(--hover-fill); }
-.sessionUsageTable tbody tr.sessionUsageRowClickable { cursor: pointer; }
-.sessionUsageTable tbody tr.sessionUsageRowClickable:focus-visible {
-  outline: 2px solid var(--focus-ring);
-  outline-offset: -2px;
-}
-
-.sessionUsageEmpty,
-.sessionUsageNote {
-  margin: 0;
-  color: var(--muted);
-  font-size: 11px;
-  line-height: 1.4;
-}
-
-.sessionUsageNote { color: var(--tone-warn); }
-
 .sessionRelationsHeader {
   padding: 2px 4px 9px;
   color: var(--muted);
   font-size: 11px;
   font-weight: 700;
   text-transform: uppercase;
-}
-
-.sessionRelationsList {
-  display: grid;
-  gap: 6px;
-}
-
-.sessionRelationButton {
-  min-width: 0;
-  width: 100%;
-  display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto;
-  align-items: center;
-  gap: 9px;
-  padding: 8px 9px;
-  border: 1px solid var(--active-fill);
-  border-radius: 7px;
-  background: var(--inset-fill);
-  color: var(--text);
-  text-align: left;
-  cursor: pointer;
-}
-
-.sessionRelationButton:hover {
-  border-color: var(--control-border);
-  background: var(--hover-fill-strong);
-}
-
-.sessionRelationRole {
-  padding: 3px 6px;
-  border-radius: 5px;
-  background: var(--amber-soft);
-  color: var(--amber);
-  font-size: 10px;
-  font-weight: 700;
-  text-transform: uppercase;
-}
-
-.sessionRelationText {
-  min-width: 0;
-  display: grid;
-  gap: 3px;
-}
-
-.sessionRelationText strong,
-.sessionRelationText code {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.sessionRelationText strong {
-  font-size: 12px;
-}
-
-.sessionRelationText code {
-  color: var(--faint);
-  font-size: 10px;
 }
 
 .sessionImportInput {
@@ -209,6 +57,14 @@
   background: var(--danger-soft);
 }
 
+.transcriptViewport {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+}
+
 .transcript {
   flex: 1;
   min-width: 0;
@@ -218,9 +74,54 @@
   user-select: text;
 }
 
+.transcriptScrollControls {
+  position: absolute;
+  inset: 0;
+  z-index: var(--z-selection-bar);
+  pointer-events: none;
+}
+
+.transcriptScrollControls .threadPanelToggle {
+  position: absolute;
+  left: 50%;
+  width: 32px;
+  height: 32px;
+  margin-left: 0;
+  border: 1px solid var(--line);
+  border-radius: 50%;
+  background: var(--panel-bg);
+  box-shadow: 0 1px 3px color-mix(in oklch, var(--overlay-scrim) 18%, transparent);
+  pointer-events: auto;
+}
+
+.transcriptScrollControls .transcriptScrollTop {
+  top: 12px;
+  transform: translateX(-50%);
+}
+
+.transcriptScrollControls .transcriptScrollBottom {
+  bottom: 56px;
+  transform: translateX(-50%);
+}
+
+.transcriptScrollControls .threadPanelToggle:hover {
+  background: var(--panel-bg);
+  color: var(--text);
+  box-shadow: 0 1px 3px color-mix(in oklch, var(--overlay-scrim) 18%, transparent);
+}
+
+.transcriptScrollControls .threadPanelToggle:disabled,
+.transcriptScrollControls .threadPanelToggle:disabled:hover {
+  background: var(--panel-bg);
+  color: var(--disabled);
+  border-color: var(--line);
+  box-shadow: 0 1px 3px color-mix(in oklch, var(--overlay-scrim) 18%, transparent);
+}
+
 .transcriptItemShell {
   min-width: 0;
   max-width: 100%;
+  padding-block: 3px;
   content-visibility: auto;
   contain-intrinsic-block-size: auto 120px;
 }
@@ -228,8 +129,14 @@
 /* `content-visibility: auto` adds paint containment. The selected message's
    ring intentionally extends outside the bubble, so let that item paint out
    of its containment box while it is highlighted. */
-.transcriptItemShell:has(.transcriptTarget) {
+.transcriptItemShell.isHighlighted {
   content-visibility: visible;
+}
+
+.transcriptVirtualSpacer {
+  width: 100%;
+  flex: 0 0 auto;
+  pointer-events: none;
 }
 
 .sessionTranscriptLoadMore {
@@ -269,6 +176,12 @@
 
 .sessionLocatorList::-webkit-scrollbar {
   display: none;
+}
+
+.sessionLocatorVirtualSpacer {
+  width: 36px;
+  flex: 0 0 auto;
+  pointer-events: none;
 }
 
 .sessionLocatorRow {
@@ -475,7 +388,7 @@
   color: var(--muted);
   cursor: pointer;
   font: inherit;
-  font-size: 11px;
+  font-size: 14px;
 }
 
 .sessionProjectFilter:hover,
@@ -487,15 +400,6 @@
 .sessionProjectFilter:focus-visible {
   outline: 0;
   box-shadow: 0 0 0 2px var(--focus-ring-soft);
-}
-
-.sessionProjectFilterLabel {
-  min-width: 0;
-  flex: 1 1 auto;
-  overflow: hidden;
-  text-align: left;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
 .sessionProjectFilterCount {
@@ -639,16 +543,34 @@
   min-width: 0;
   max-width: 100%;
   display: flex;
-  margin: 14px 0;
+  margin: 0;
+}
+
+.chatLine.withTopSpacing {
+  padding-top: 22px;
 }
 
 .chatLine.fromUser {
   justify-content: flex-end;
 }
 
+.chatMessage {
+  min-width: 0;
+  width: fit-content;
+  max-width: min(80%, 600px);
+  display: flex;
+  flex-direction: column;
+}
+
+.chatLine.fromUser .chatMessage {
+  margin-left: auto;
+}
+
 .bubble {
   min-width: 0;
-  max-width: min(80%, 600px);
+  width: 100%;
+  max-width: 100%;
+  box-sizing: border-box;
   padding: 12px 16px 14px;
   border: 1px solid var(--line);
   border-radius: 13px;
@@ -680,8 +602,9 @@
 }
 
 .bubbleFooter {
-  min-height: 24px;
-  margin-top: 8px;
+  min-height: 20px;
+  width: 100%;
+  margin-top: 2px;
   display: flex;
   align-items: center;
   gap: 8px;
@@ -691,7 +614,7 @@
   flex: 1 1 auto;
 }
 
-.bubble time {
+.bubbleFooter time {
   display: inline-block;
   flex: 1 1 auto;
   width: auto;
@@ -708,20 +631,19 @@
   user-select: text;
 }
 
-.bubble:hover time,
-.bubble:focus-within time {
+.chatMessage:hover .bubbleFooter time,
+.chatMessage:focus-within .bubbleFooter time {
   opacity: 1;
 }
 
-.fromUser .bubble time {
-  color: var(--chat-user-muted);
+.chatLine.fromUser .bubbleFooter time {
   text-align: right;
 }
 
 .messageCopyButton {
-  width: 24px;
-  height: 24px;
-  flex: 0 0 24px;
+  width: 20px;
+  height: 20px;
+  flex: 0 0 20px;
   display: grid;
   place-items: center;
   padding: 0;
@@ -734,8 +656,8 @@
   transition: opacity 140ms ease-out, background-color 140ms ease-out, color 140ms ease-out;
 }
 
-.bubble:hover .messageCopyButton,
-.bubble:focus-within .messageCopyButton,
+.chatMessage:hover .messageCopyButton,
+.chatMessage:focus-within .messageCopyButton,
 .messageCopyButton:focus-visible {
   opacity: 1;
 }
@@ -757,24 +679,20 @@
   color: var(--danger);
 }
 
-.fromUser .messageCopyButton {
-  color: var(--chat-user-muted);
-}
-
-.fromUser .messageCopyButton:hover,
-.fromUser .messageCopyButton:focus-visible {
+.chatLine.fromUser .messageCopyButton:hover,
+.chatLine.fromUser .messageCopyButton:focus-visible {
   background: color-mix(in oklch, var(--chat-user-fg) 14%, transparent);
   color: var(--chat-user-fg);
 }
 
-.fromUser .messageCopyButton.isCopied,
-.fromUser .messageCopyButton.isCopied:hover {
+.chatLine.fromUser .messageCopyButton.isCopied,
+.chatLine.fromUser .messageCopyButton.isCopied:hover {
   background: color-mix(in oklch, var(--chat-user-fg) 18%, transparent);
   color: var(--chat-user-fg);
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .bubble time {
+  .bubbleFooter time {
     transition: none;
   }
 }
@@ -785,7 +703,7 @@
   display: flex;
   align-items: center;
   gap: 8px;
-  margin: 18px 0;
+  margin: 0;
   color: var(--faint);
   font-size: 11px;
   font-weight: 600;
@@ -816,7 +734,7 @@
   align-items: baseline;
   flex-wrap: wrap;
   gap: 7px;
-  margin: 14px 0;
+  margin: 0;
   padding: 5px 9px;
   border: 0;
   border-radius: 6px;
@@ -857,7 +775,7 @@
 .thinkingBlock {
   min-width: 0;
   max-width: 100%;
-  margin: 14px 0;
+  margin: 0;
   border-radius: var(--radius-md);
   background: var(--chat-tool-bg);
   color: var(--muted);
@@ -870,18 +788,9 @@
 }
 
 .contextBlock {
-  background: var(--chat-tool-bg);
+  margin: 0;
+  background: var(--surface-2);
   box-shadow: inset 0 0 0 1px var(--line);
-}
-
-.contextBlock.developer {
-  background: var(--amber-soft);
-  box-shadow: inset 0 0 0 1px var(--amber-soft-strong);
-}
-
-.contextBlock.system {
-  background: var(--tone-info-soft);
-  box-shadow: inset 0 0 0 1px color-mix(in oklch, var(--tone-info) 36%, transparent);
 }
 
 .toolCall.nested {
@@ -999,13 +908,8 @@
 }
 
 .contextBadge {
-  background: var(--amber-soft);
-  color: var(--amber);
-}
-
-.contextBlock.system .contextBadge {
-  background: var(--tone-info-soft);
-  color: var(--tone-info);
+  background: var(--surface-3);
+  color: var(--text);
 }
 
 .thinkingPreview {

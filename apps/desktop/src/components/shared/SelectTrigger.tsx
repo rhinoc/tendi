@@ -1,24 +1,32 @@
-import type { ReactNode } from "react";
+import { forwardRef, type ComponentPropsWithoutRef, type ReactNode } from "react";
 import { ChevronDown } from "lucide-react";
 import { Select } from "radix-ui";
 
-export type SelectTriggerProps = {
+type RadixSelectTriggerProps = ComponentPropsWithoutRef<typeof Select.Trigger>;
+
+export type SelectTriggerProps = Omit<RadixSelectTriggerProps, "children"> & {
   label: string;
   children: ReactNode;
-  className?: string;
   showChevron?: boolean;
   chevronSize?: number;
 };
 
-export function SelectTrigger({
+export const SelectTrigger = forwardRef<HTMLButtonElement, SelectTriggerProps>(function SelectTrigger({
   label,
   children,
   className = "",
   showChevron = true,
   chevronSize = 14,
-}: SelectTriggerProps) {
+  "aria-label": ariaLabel,
+  ...triggerProps
+}, ref) {
   return (
-    <Select.Trigger className={`selectControlTrigger ${className}`.trim()} aria-label={label}>
+    <Select.Trigger
+      {...triggerProps}
+      ref={ref}
+      className={`selectControlTrigger ${className}`.trim()}
+      aria-label={ariaLabel ?? label}
+    >
       {children}
       {showChevron ? (
         <Select.Icon asChild>
@@ -27,4 +35,4 @@ export function SelectTrigger({
       ) : null}
     </Select.Trigger>
   );
-}
+});

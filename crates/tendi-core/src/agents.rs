@@ -5,11 +5,11 @@ use std::{
 };
 
 use anyhow::Result;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::{providers::ProviderContext, skills::AgentKind};
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct AgentRecord {
     pub kind: AgentKind,
     pub name: String,

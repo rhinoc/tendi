@@ -9,7 +9,6 @@
 }
 
 .backButton,
-.editorActions .quietButton,
 .headerGhostButton {
   display: inline-flex;
   align-items: center;

@@ -103,57 +103,15 @@ fn codex_home_for_environment(home: &Path) -> PathBuf {
 }
 
 fn configs_for_roots(home: &Path, codex_home: &Path) -> Vec<AgentConfigFile> {
-    let mut configs = [
-        (
-            AgentKind::Codex,
-            "Codex",
-            codex_home.join("config.toml"),
-            "toml",
-        ),
-        (
-            AgentKind::Claude,
-            "Claude",
-            home.join(".claude/settings.json"),
-            "json",
-        ),
-        (
-            AgentKind::Cursor,
-            "Cursor",
-            home.join(".cursor/cli-config.json"),
-            "json",
-        ),
-    ]
-    .into_iter()
-    .map(|(agent, label, path, format)| AgentConfigFile {
-        agent,
-        label: label.to_string(),
-        exists: path.is_file(),
-        path,
-        format: format.to_string(),
-        profile: None,
-    })
-    .collect::<Vec<_>>();
-    configs.extend(profile_configs_for_root(
-        AgentKind::Codex,
-        codex_home,
-        ".config.toml",
-        "toml",
-        "Codex",
-    ));
-    configs.extend(profile_configs_for_root(
-        AgentKind::Claude,
-        &home.join(".claude/tendi-profiles"),
-        ".settings.json",
-        "json",
-        "Claude Code",
-    ));
-    configs.extend(cursor_profile_configs_for_root(
-        &home.join(".cursor/tendi-profiles"),
-    ));
+    let mut configs = crate::providers::agent_providers()
+        .into_iter()
+        .flat_map(|provider| provider.config_files(home, codex_home))
+        .collect::<Vec<_>>();
+    configs.sort_by_key(|config| crate::providers::agent_provider(config.agent).config_order());
     configs
 }
 
-fn profile_configs_for_root(
+pub(crate) fn profile_configs_for_root(
     agent: AgentKind,
     root: &Path,
     suffix: &str,
@@ -189,7 +147,7 @@ fn profile_configs_for_root(
         .collect()
 }
 
-fn cursor_profile_configs_for_root(root: &Path) -> Vec<AgentConfigFile> {
+pub(crate) fn cursor_profile_configs_for_root(root: &Path) -> Vec<AgentConfigFile> {
     let Ok(entries) = fs::read_dir(root) else {
         return Vec::new();
     };
@@ -226,17 +184,9 @@ fn config_profile_path_for_roots(
     name: &str,
 ) -> Result<PathBuf> {
     validate_profile_name(name)?;
-    match agent {
-        AgentKind::Codex => Ok(codex_home.join(format!("{name}.config.toml"))),
-        AgentKind::Claude => Ok(home
-            .join(".claude/tendi-profiles")
-            .join(format!("{name}.settings.json"))),
-        AgentKind::Cursor => Ok(home
-            .join(".cursor/tendi-profiles")
-            .join(name)
-            .join("cli-config.json")),
-        _ => bail!("config profiles are not supported for this agent"),
-    }
+    crate::providers::agent_provider(agent)
+        .config_profile_path(home, codex_home, name)
+        .ok_or_else(|| anyhow::anyhow!("config profiles are not supported for this agent"))
 }
 
 fn resolve_config(configs: &[AgentConfigFile], path: &Path) -> Result<AgentConfigFile> {
@@ -315,11 +265,9 @@ fn create_profile_for_roots(
     name: &str,
     content: &str,
 ) -> Result<AgentConfigContent> {
-    let format = match agent {
-        AgentKind::Codex => "toml",
-        AgentKind::Claude | AgentKind::Cursor => "json",
-        _ => bail!("config profiles are not supported for this agent"),
-    };
+    let format = crate::providers::agent_provider(agent)
+        .config_profile_format()
+        .ok_or_else(|| anyhow::anyhow!("config profiles are not supported for this agent"))?;
     let path = config_profile_path_for_roots(agent, home, codex_home, name)?;
     validate_config(format, content)?;
     if fs::symlink_metadata(&path).is_ok() {

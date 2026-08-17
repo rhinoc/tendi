@@ -1,0 +1,27 @@
+These agent marks are copied from the following public repositories and official product sites:
+
+- `adal.svg`: official AdaL asset at `adal.sylph.ai`.
+- `aider.svg`, `augment.svg`: `agentsmd/agents.md`, MIT License.
+- `codemaker.svg`: official CodeMaker AI GitHub organization mark at `github.com/codemakerai`.
+- `commandcode.svg`: `CommandCodeAI/command-code`, official Command Code mark.
+- `continue.svg`: `continuedev/continue`, Apache-2.0 License.
+- `crush.svg`: `charmbracelet/crush`, official Crush asset.
+- `dexto.svg`: `truffle-ai/dexto`, official Dexto asset.
+- `eve.svg`: `vercel/eve`, Apache-2.0 License.
+- `forgecode.svg`: official ForgeCode asset at `forgecode.dev`.
+- `factory.svg`, `ona.svg`, `warp.svg`, `zed.svg`: `agentsmd/agents.md`, MIT License.
+- `autohand.svg`: `agentskills/agentskills`, Apache-2.0 License.
+- `firebender.svg`, `mux.svg`, `tabnine.svg`: `agentskills/agentskills`, Apache-2.0 License.
+- `astrbot.svg`: `AstrBotDevs/AstrBot`, AGPL-3.0 repository asset.
+- `kimchi.svg`: official Kimchi asset at `kimchi.dev`.
+- `lingma.svg`: official Lingma asset at `lingma.aliyun.com`.
+- `loaf.svg`: official Loaf asset at `loaf.dev`.
+- `mcpjam.svg`: official MCPJam asset at `mcpjam.com`.
+- `moxby.svg`: official Moxby mark at `moxby.com`.
+- `neovate.svg`: official Neovate mark published by Neovate.
+- `pochi.svg`: `TabbyML/pochi`, Apache-2.0 License.
+- `promptscript.svg`: `mrwogu/promptscript`, public PromptScript asset.
+- `reasonix.svg`: `futureflowtech/reasonix`, MIT License.
+- `rovodev.svg`: `atlassian/atlascode`, official Rovo Dev asset.
+- `tinycloud.svg`: official Tinycloud asset at `tinycloud.sh`.
+- `zcode.svg`: official ZCode asset at `zcode.z.ai`.

@@ -1,4 +1,3 @@
-import { Tooltip } from "./Tooltip.tsx";
 import { agentClassName, agentIcon } from "../../lib/index.ts";
 import "./agent-surface.css";
 
@@ -9,8 +8,8 @@ export type AgentBadgeProps = {
 
 export function AgentBadge({ agent, small = false }: AgentBadgeProps) {
   return (
-    <Tooltip content={agent}><span className={`agentIconSurface agentPill ${agentClassName(agent)} ${small ? "small" : ""}`}>
+    <span className={`agentIconSurface agentPill ${agentClassName(agent)} ${small ? "small" : ""}`} aria-label={agent}>
       {agentIcon(agent)}
-    </span></Tooltip>
+    </span>
   );
 }

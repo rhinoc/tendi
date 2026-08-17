@@ -70,6 +70,6 @@ export type DataTableProps<TRow> = {
   bottomBarCheckboxLabel?: string;
   selectionLabel?: string;
   loading?: boolean;
-  loadingLabel?: ReactNode;
+  loadingLabel?: string;
   emptyState?: ReactNode;
 };

@@ -1,18 +1,27 @@
 use std::{
-    collections::BTreeMap,
-    env, fs,
+    collections::HashSet,
     path::{Path, PathBuf},
 };
 
-use anyhow::{Result, bail};
-use toml::Value as TomlValue;
-use walkdir::WalkDir;
+use anyhow::{Context, Result, bail};
+use serde_json::Value;
 
 use crate::{
+    analytics::{AnalyticsCapabilities, SessionAnalyticsRecord},
+    hooks::HookRecord,
+    mcp::McpServerRecord,
     rules::{self, RuleRecord},
+    session_skills::Evidence,
     sessions::{self, SessionRecord, SessionScanCache},
     skills::{AgentKind, SkillRoot},
+    transcript::TranscriptItem,
 };
+
+pub(crate) mod claude;
+pub(crate) mod codex;
+pub(crate) mod cursor;
+pub(crate) mod shared;
+mod unknown;
 
 pub(crate) struct ProviderContext {
     pub home: Option<PathBuf>,
@@ -35,6 +44,16 @@ impl ProviderContext {
 pub(crate) trait AgentProvider: Sync {
     fn kind(&self) -> AgentKind;
 
+    fn storage_key(&self) -> &'static str;
+
+    fn discoverable(&self) -> bool {
+        false
+    }
+
+    fn matches_name(&self, _normalized: &str) -> bool {
+        false
+    }
+
     fn display_name(&self) -> Option<&'static str> {
         None
     }
@@ -49,6 +68,35 @@ pub(crate) trait AgentProvider: Sync {
 
     fn skill_roots(&self, _ctx: &ProviderContext) -> Vec<SkillRoot> {
         Vec::new()
+    }
+
+    fn global_skill_root(&self, _home: &Path) -> Option<PathBuf> {
+        None
+    }
+
+    fn config_profile_path(
+        &self,
+        _home: &Path,
+        _codex_home: &Path,
+        _name: &str,
+    ) -> Option<PathBuf> {
+        None
+    }
+
+    fn config_profile_format(&self) -> Option<&'static str> {
+        None
+    }
+
+    fn config_files(
+        &self,
+        _home: &Path,
+        _codex_home: &Path,
+    ) -> Vec<crate::config::AgentConfigFile> {
+        Vec::new()
+    }
+
+    fn config_order(&self) -> usize {
+        usize::MAX
     }
 
     fn scan_sessions(
@@ -77,6 +125,159 @@ pub(crate) trait AgentProvider: Sync {
     fn resume_session_command(&self, _session: &SessionRecord) -> Option<SessionCommand> {
         None
     }
+
+    fn config_profile_key(&self) -> Option<&'static str> {
+        None
+    }
+
+    fn apply_config_profile(&self, _command: &mut SessionCommand, _profile: &str) -> Result<()> {
+        Ok(())
+    }
+
+    fn parse_transcript_value(&self, value: &Value, items: &mut Vec<TranscriptItem>);
+
+    fn append_transcript_metadata(
+        &self,
+        _path: &Path,
+        _items: &mut Vec<TranscriptItem>,
+    ) -> Result<()> {
+        Ok(())
+    }
+
+    fn append_transcript_metadata_from_store(
+        &self,
+        path: &Path,
+        items: &mut Vec<TranscriptItem>,
+    ) -> Result<()> {
+        self.append_transcript_metadata(path, items)
+    }
+
+    fn transcript_metadata_store_path(&self, _path: &Path) -> Option<PathBuf> {
+        None
+    }
+
+    fn transcript_search_hint(&self, _line: &str) -> bool {
+        true
+    }
+
+    fn transcript_cacheable(&self) -> bool {
+        true
+    }
+
+    fn recognizes_transcript(&self, _value: &Value) -> bool {
+        false
+    }
+
+    fn session_supports_append_cache(&self) -> bool {
+        false
+    }
+
+    fn infer_session_project(&self, _path: &Path, project: Option<PathBuf>) -> Option<PathBuf> {
+        project
+    }
+
+    fn infer_meta_project(&self, _value: &Value) -> Option<PathBuf> {
+        None
+    }
+
+    fn session_id_from_path(&self, path: &Path) -> String {
+        path.file_stem()
+            .and_then(|name| name.to_str())
+            .unwrap_or("session")
+            .to_string()
+    }
+
+    fn session_project_aliases(&self, _path: &str) -> Vec<String> {
+        Vec::new()
+    }
+
+    fn materialized_skill_is_shared_or_codex(&self) -> bool {
+        false
+    }
+
+    fn scan_explicit_session_path(
+        &self,
+        _path: &Path,
+        _sessions: &mut Vec<SessionRecord>,
+        _cache: Option<&SessionScanCache>,
+    ) -> bool {
+        false
+    }
+
+    fn analytics_capabilities(&self) -> AnalyticsCapabilities {
+        AnalyticsCapabilities {
+            token_usage: false,
+            reasoning_tokens: false,
+            explicit_runs: false,
+            rate_limit_history: false,
+        }
+    }
+
+    fn parse_analytics_line(&self, _line: &str, _record: &mut SessionAnalyticsRecord) {}
+
+    fn extract_skill_tool_payloads<'a>(&self, _value: &'a Value) -> Vec<(&'a Value, Evidence)> {
+        Vec::new()
+    }
+
+    fn scan_mcp(
+        &self,
+        _ctx: &ProviderContext,
+        _servers: &mut Vec<McpServerRecord>,
+        _warnings: &mut Vec<String>,
+    ) -> Result<()> {
+        Ok(())
+    }
+
+    fn scan_hooks(
+        &self,
+        _ctx: &ProviderContext,
+        _scanned_files: &mut HashSet<PathBuf>,
+        _hooks: &mut Vec<HookRecord>,
+        _warnings: &mut Vec<String>,
+    ) {
+    }
+
+    fn managed_hook_path(&self, _path: &Path) -> bool {
+        false
+    }
+
+    fn uses_tendi_hook_review_state(&self) -> bool {
+        true
+    }
+
+    fn disables_hooks_from_config(&self, _value: &Value) -> bool {
+        false
+    }
+
+    fn parse_hook_file(
+        &self,
+        _path: &Path,
+        _trust_hash: &str,
+        _hooks: &mut Vec<HookRecord>,
+        _warnings: &mut Vec<String>,
+    ) -> bool {
+        false
+    }
+
+    fn codex_hook_metadata(
+        &self,
+        _path: &Path,
+        _event: &str,
+        _group_index: usize,
+        _handler_index: usize,
+        _matcher: Option<&str>,
+        _command: Option<&str>,
+        _configured_timeout: Option<u64>,
+        _is_async: bool,
+        _status_message: Option<&str>,
+        _additional_context_limit: Option<usize>,
+    ) -> (Option<String>, Option<String>) {
+        (None, None)
+    }
+
+    fn review_hook(&self, _hook: &HookRecord) -> Result<()> {
+        bail!("this hook does not support review")
+    }
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -94,24 +295,27 @@ pub struct SessionResumePlan {
     pub command: SessionCommand,
 }
 
-struct SharedProvider;
-struct CodexProvider;
-struct CursorProvider;
-struct ClaudeProvider;
-
-static SHARED: SharedProvider = SharedProvider;
-static CODEX: CodexProvider = CodexProvider;
-static CURSOR: CursorProvider = CursorProvider;
-static CLAUDE: ClaudeProvider = ClaudeProvider;
+static SHARED: shared::SharedProvider = shared::SharedProvider;
+static CODEX: codex::CodexProvider = codex::CodexProvider;
+static CURSOR: cursor::CursorProvider = cursor::CursorProvider;
+static CLAUDE: claude::ClaudeProvider = claude::ClaudeProvider;
+static UNKNOWN: unknown::UnknownProvider = unknown::UnknownProvider;
 
 pub(crate) fn all_providers() -> Vec<&'static dyn AgentProvider> {
-    vec![&SHARED, &CODEX, &CURSOR, &CLAUDE]
+    vec![&SHARED, &CODEX, &CURSOR, &CLAUDE, &UNKNOWN]
+}
+
+pub(crate) fn agent_provider(agent: AgentKind) -> &'static dyn AgentProvider {
+    all_providers()
+        .into_iter()
+        .find(|provider| provider.kind() == agent)
+        .unwrap_or(&UNKNOWN)
 }
 
 pub(crate) fn agent_providers() -> Vec<&'static dyn AgentProvider> {
     all_providers()
         .into_iter()
-        .filter(|provider| provider.display_name().is_some())
+        .filter(|provider| provider.discoverable())
         .collect()
 }
 
@@ -151,422 +355,29 @@ pub fn plan_session_resume(session: &SessionRecord) -> Result<SessionResumePlan>
     })
 }
 
-impl AgentProvider for SharedProvider {
-    fn kind(&self) -> AgentKind {
-        AgentKind::Shared
-    }
-
-    fn skill_roots(&self, ctx: &ProviderContext) -> Vec<SkillRoot> {
-        let mut roots = Vec::new();
-        if let Some(home) = &ctx.home {
-            push_skill_root(
-                &mut roots,
-                home.join(".agents/skills"),
-                "global",
-                self.kind(),
-            );
-        }
-        for dir in ctx.project_dirs() {
-            push_skill_root(
-                &mut roots,
-                dir.join(".agents/skills"),
-                "project",
-                self.kind(),
-            );
-        }
-        roots
-    }
+pub fn config_profile_key(agent: AgentKind) -> Option<&'static str> {
+    agent_provider(agent).config_profile_key()
 }
 
-impl AgentProvider for CodexProvider {
-    fn kind(&self) -> AgentKind {
-        AgentKind::Codex
-    }
-
-    fn display_name(&self) -> Option<&'static str> {
-        Some("Codex")
-    }
-
-    fn executable_names(&self) -> &'static [&'static str] {
-        &["codex"]
-    }
-
-    fn config_dir(&self, ctx: &ProviderContext) -> Option<PathBuf> {
-        Some(codex_home(ctx))
-    }
-
-    fn skill_roots(&self, ctx: &ProviderContext) -> Vec<SkillRoot> {
-        let home = codex_home(ctx);
-        codex_skill_roots(&home, ctx.project_dirs(), self.kind())
-    }
-
-    fn scan_sessions(
-        &self,
-        ctx: &ProviderContext,
-        sessions_out: &mut Vec<SessionRecord>,
-        warnings: &mut Vec<String>,
-        cache: Option<&SessionScanCache>,
-    ) -> Result<()> {
-        let root = codex_home(ctx);
-        sessions::scan_codex_index(&root.join("session_index.jsonl"), sessions_out, warnings)?;
-        sessions::scan_codex_jsonl(&root.join("sessions"), sessions_out, cache);
-        sessions::scan_codex_jsonl(&root.join("archived_sessions"), sessions_out, cache);
-        Ok(())
-    }
-
-    fn session_roots(&self, ctx: &ProviderContext) -> Vec<PathBuf> {
-        let root = codex_home(ctx);
-        vec![
-            root.join("session_index.jsonl"),
-            root.join("sessions"),
-            root.join("archived_sessions"),
-        ]
-    }
-
-    fn scan_rules(
-        &self,
-        ctx: &ProviderContext,
-        rules_out: &mut Vec<RuleRecord>,
-        warnings: &mut Vec<String>,
-        order: &mut usize,
-    ) {
-        let codex_home = codex_home(ctx);
-        rules::add_first_rule_file(
-            rules_out,
-            warnings,
-            order,
-            self.kind(),
-            "global",
-            vec![
-                (
-                    "AGENTS.override.md".to_string(),
-                    codex_home.join("AGENTS.override.md"),
-                ),
-                ("AGENTS.md".to_string(), codex_home.join("AGENTS.md")),
-            ],
-        );
-
-        let fallback_names = codex_project_doc_fallbacks(ctx);
-        for dir in ctx.project_dirs() {
-            let mut candidates = vec![
-                (
-                    "AGENTS.override.md".to_string(),
-                    dir.join("AGENTS.override.md"),
-                ),
-                ("AGENTS.md".to_string(), dir.join("AGENTS.md")),
-            ];
-            candidates.extend(
-                fallback_names
-                    .iter()
-                    .map(|name| (name.clone(), dir.join(name))),
-            );
-            rules::add_first_rule_file(
-                rules_out,
-                warnings,
-                order,
-                self.kind(),
-                "project",
-                candidates,
-            );
-        }
-    }
-
-    fn resume_session_command(&self, session: &SessionRecord) -> Option<SessionCommand> {
-        let project = absolute_project(session);
-        let mut args = Vec::new();
-        if let Some(project) = project.as_ref() {
-            args.push("-C".to_string());
-            args.push(project.display().to_string());
-        }
-        args.push("resume".to_string());
-        args.push(session.id.clone());
-        Some(SessionCommand {
-            executable: "codex".to_string(),
-            args,
-            cwd: project,
-            env: Vec::new(),
-        })
-    }
+pub fn apply_session_config_profile(
+    agent: AgentKind,
+    command: &mut SessionCommand,
+    profile: &str,
+) -> Result<()> {
+    agent_provider(agent).apply_config_profile(command, profile)
 }
 
-impl AgentProvider for CursorProvider {
-    fn kind(&self) -> AgentKind {
-        AgentKind::Cursor
-    }
-
-    fn display_name(&self) -> Option<&'static str> {
-        Some("Cursor")
-    }
-
-    fn executable_names(&self) -> &'static [&'static str] {
-        &["cursor"]
-    }
-
-    fn config_dir(&self, ctx: &ProviderContext) -> Option<PathBuf> {
-        ctx.home.as_ref().map(|home| home.join(".cursor"))
-    }
-
-    fn skill_roots(&self, ctx: &ProviderContext) -> Vec<SkillRoot> {
-        let mut roots = Vec::new();
-        if let Some(home) = &ctx.home {
-            push_skill_root(
-                &mut roots,
-                home.join(".cursor/skills"),
-                "global",
-                self.kind(),
-            );
-        }
-        for dir in ctx.project_dirs() {
-            push_skill_root(
-                &mut roots,
-                dir.join(".cursor/skills"),
-                "project",
-                self.kind(),
-            );
-        }
-        roots
-    }
-
-    fn scan_sessions(
-        &self,
-        ctx: &ProviderContext,
-        sessions_out: &mut Vec<SessionRecord>,
-        _warnings: &mut Vec<String>,
-        cache: Option<&SessionScanCache>,
-    ) -> Result<()> {
-        if let Some(home) = &ctx.home {
-            sessions::scan_cursor_meta(
-                &home.join(".cursor/acp-sessions"),
-                sessions_out,
-                self.kind(),
-                cache,
-            );
-            sessions::scan_cursor_meta(
-                &home.join(".cursor/chats"),
-                sessions_out,
-                self.kind(),
-                cache,
-            );
-            sessions::scan_cursor_agent_transcripts(
-                &home.join(".cursor/projects"),
-                sessions_out,
-                cache,
-            );
-        }
-        Ok(())
-    }
-
-    fn session_roots(&self, ctx: &ProviderContext) -> Vec<PathBuf> {
-        let Some(home) = &ctx.home else {
-            return Vec::new();
-        };
-        vec![
-            home.join(".cursor/acp-sessions"),
-            home.join(".cursor/chats"),
-            home.join(".cursor/projects"),
-        ]
-    }
-
-    fn scan_rules(
-        &self,
-        ctx: &ProviderContext,
-        rules_out: &mut Vec<RuleRecord>,
-        warnings: &mut Vec<String>,
-        order: &mut usize,
-    ) {
-        for dir in ctx.project_dirs() {
-            rules::add_rule_file(
-                rules_out,
-                warnings,
-                order,
-                self.kind(),
-                "AGENTS.md",
-                "project",
-                dir.join("AGENTS.md"),
-            );
-            rules::add_rule_tree(
-                rules_out,
-                warnings,
-                order,
-                self.kind(),
-                "cursor-rule",
-                "project",
-                &dir.join(".cursor/rules"),
-                Some("mdc"),
-                6,
-            );
-        }
-    }
-
-    fn resume_session_command(&self, session: &SessionRecord) -> Option<SessionCommand> {
-        let project = absolute_project(session);
-        let mut args = vec![
-            "agent".to_string(),
-            "--resume".to_string(),
-            session.id.clone(),
-        ];
-        if let Some(project) = project.as_ref() {
-            args.push("--workspace".to_string());
-            args.push(project.display().to_string());
-        }
-        Some(SessionCommand {
-            executable: "cursor".to_string(),
-            args,
-            cwd: project,
-            env: Vec::new(),
-        })
-    }
-}
-
-impl AgentProvider for ClaudeProvider {
-    fn kind(&self) -> AgentKind {
-        AgentKind::Claude
-    }
-
-    fn display_name(&self) -> Option<&'static str> {
-        Some("Claude Code")
-    }
-
-    fn executable_names(&self) -> &'static [&'static str] {
-        &["claude"]
-    }
-
-    fn config_dir(&self, ctx: &ProviderContext) -> Option<PathBuf> {
-        ctx.home.as_ref().map(|home| home.join(".claude"))
-    }
-
-    fn skill_roots(&self, ctx: &ProviderContext) -> Vec<SkillRoot> {
-        let mut roots = Vec::new();
-        if let Some(home) = &ctx.home {
-            push_skill_root(
-                &mut roots,
-                home.join(".claude/skills"),
-                "global",
-                self.kind(),
-            );
-        }
-        for dir in ctx.project_dirs() {
-            push_skill_root(
-                &mut roots,
-                dir.join(".claude/skills"),
-                "project",
-                self.kind(),
-            );
-        }
-        roots
-    }
-
-    fn scan_sessions(
-        &self,
-        ctx: &ProviderContext,
-        sessions_out: &mut Vec<SessionRecord>,
-        _warnings: &mut Vec<String>,
-        cache: Option<&SessionScanCache>,
-    ) -> Result<()> {
-        if let Some(home) = &ctx.home {
-            sessions::scan_claude_projects(&home.join(".claude/projects"), sessions_out, cache);
-        }
-        Ok(())
-    }
-
-    fn session_roots(&self, ctx: &ProviderContext) -> Vec<PathBuf> {
-        ctx.home
-            .as_ref()
-            .map(|home| vec![home.join(".claude/projects")])
-            .unwrap_or_default()
-    }
-
-    fn scan_rules(
-        &self,
-        ctx: &ProviderContext,
-        rules_out: &mut Vec<RuleRecord>,
-        warnings: &mut Vec<String>,
-        order: &mut usize,
-    ) {
-        if let Some(home) = &ctx.home {
-            rules::add_rule_file(
-                rules_out,
-                warnings,
-                order,
-                self.kind(),
-                "CLAUDE.md",
-                "global",
-                home.join(".claude/CLAUDE.md"),
-            );
-            rules::add_rule_tree(
-                rules_out,
-                warnings,
-                order,
-                self.kind(),
-                "claude-rule",
-                "global",
-                &home.join(".claude/rules"),
-                Some("md"),
-                6,
-            );
-        }
-
-        for dir in ctx.project_dirs() {
-            rules::add_rule_file(
-                rules_out,
-                warnings,
-                order,
-                self.kind(),
-                "CLAUDE.md",
-                "project",
-                dir.join("CLAUDE.md"),
-            );
-            rules::add_rule_file(
-                rules_out,
-                warnings,
-                order,
-                self.kind(),
-                ".claude/CLAUDE.md",
-                "project",
-                dir.join(".claude/CLAUDE.md"),
-            );
-            rules::add_rule_file(
-                rules_out,
-                warnings,
-                order,
-                self.kind(),
-                "CLAUDE.local.md",
-                "local",
-                dir.join("CLAUDE.local.md"),
-            );
-            rules::add_rule_tree(
-                rules_out,
-                warnings,
-                order,
-                self.kind(),
-                "claude-rule",
-                "project",
-                &dir.join(".claude/rules"),
-                Some("md"),
-                6,
-            );
-        }
-
-        rules::add_rule_file(
-            rules_out,
-            warnings,
-            order,
-            self.kind(),
-            "managed-CLAUDE.md",
-            "managed",
-            PathBuf::from("/Library/Application Support/ClaudeCode/CLAUDE.md"),
-        );
-    }
-
-    fn resume_session_command(&self, session: &SessionRecord) -> Option<SessionCommand> {
-        let project = absolute_project(session);
-        Some(SessionCommand {
-            executable: "claude".to_string(),
-            args: vec!["--resume".to_string(), session.id.clone()],
-            cwd: project,
-            env: Vec::new(),
-        })
-    }
+pub fn parse_agent(value: &str) -> Result<AgentKind> {
+    let normalized = value
+        .to_ascii_lowercase()
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric())
+        .collect::<String>();
+    all_providers()
+        .into_iter()
+        .find(|provider| provider.matches_name(&normalized))
+        .map(|provider| provider.kind())
+        .ok_or_else(|| anyhow::anyhow!("unknown agent target {value}"))
 }
 
 fn absolute_project(session: &SessionRecord) -> Option<PathBuf> {
@@ -578,13 +389,7 @@ fn absolute_project(session: &SessionRecord) -> Option<PathBuf> {
 }
 
 fn agent_display_name(agent: AgentKind) -> &'static str {
-    match agent {
-        AgentKind::Codex => "Codex",
-        AgentKind::Cursor => "Cursor",
-        AgentKind::Claude => "Claude Code",
-        AgentKind::Shared => "Shared",
-        AgentKind::Unknown => "Unknown",
-    }
+    agent_provider(agent).display_name().unwrap_or("Unknown")
 }
 
 fn push_skill_root(roots: &mut Vec<SkillRoot>, path: PathBuf, scope: &str, agent: AgentKind) {
@@ -608,126 +413,6 @@ fn push_skill_root_with_plugin(
             plugin_enabled,
         });
     }
-}
-
-fn codex_home(ctx: &ProviderContext) -> PathBuf {
-    env::var_os("CODEX_HOME")
-        .map(PathBuf::from)
-        .or_else(|| ctx.home.as_ref().map(|home| home.join(".codex")))
-        .unwrap_or_else(|| PathBuf::from(".codex"))
-}
-
-fn codex_skill_roots(home: &Path, project_dirs: &[PathBuf], agent: AgentKind) -> Vec<SkillRoot> {
-    let mut roots = Vec::new();
-    push_skill_root(&mut roots, home.join("skills"), "global", agent);
-    let plugin_enabled = codex_plugin_enabled_by_id(home);
-    for root in codex_plugin_skill_roots(home) {
-        let plugin_id = codex_plugin_id_for_skill_root(home, &root);
-        let enabled = plugin_id
-            .as_ref()
-            .and_then(|id| plugin_enabled.get(id).copied());
-        push_skill_root_with_plugin(&mut roots, root, "plugin", agent, plugin_id, enabled);
-    }
-    for dir in project_dirs {
-        push_skill_root(&mut roots, dir.join(".codex/skills"), "project", agent);
-    }
-    roots
-}
-
-fn codex_plugin_enabled_by_id(codex_home: &Path) -> BTreeMap<String, bool> {
-    let Ok(text) = fs::read_to_string(codex_home.join("config.toml")) else {
-        return BTreeMap::new();
-    };
-    let Ok(value) = toml::from_str::<TomlValue>(&text) else {
-        return BTreeMap::new();
-    };
-    let Some(plugins) = value.get("plugins").and_then(TomlValue::as_table) else {
-        return BTreeMap::new();
-    };
-    plugins
-        .iter()
-        .filter_map(|(id, value)| {
-            value
-                .get("enabled")
-                .and_then(TomlValue::as_bool)
-                .map(|enabled| (id.to_string(), enabled))
-        })
-        .collect()
-}
-
-fn codex_plugin_id_for_skill_root(codex_home: &Path, skill_root: &Path) -> Option<String> {
-    let relative = skill_root
-        .strip_prefix(codex_home.join("plugins/cache"))
-        .ok()?;
-    let mut parts = relative
-        .components()
-        .filter_map(|part| part.as_os_str().to_str());
-    let marketplace = parts.next()?;
-    let plugin = parts.next()?;
-    Some(format!("{plugin}@{marketplace}"))
-}
-
-fn codex_plugin_skill_roots(codex_home: &Path) -> Vec<PathBuf> {
-    let cache = codex_home.join("plugins/cache");
-    if !cache.is_dir() {
-        return Vec::new();
-    }
-
-    let mut roots = WalkDir::new(cache)
-        .follow_links(false)
-        .max_depth(5)
-        .into_iter()
-        .filter_entry(|entry| !is_skipped_plugin_entry(entry.path()))
-        .filter_map(Result::ok)
-        .filter(|entry| entry.file_type().is_dir() && entry.file_name() == "skills")
-        .map(|entry| entry.into_path())
-        .collect::<Vec<_>>();
-    roots.sort();
-    roots
-}
-
-fn is_skipped_plugin_entry(path: &Path) -> bool {
-    path.components().any(|part| {
-        part.as_os_str().to_str().is_some_and(|value| {
-            matches!(
-                value,
-                ".git" | "node_modules" | "dist" | "build" | "__pycache__"
-            )
-        })
-    })
-}
-
-fn codex_project_doc_fallbacks(ctx: &ProviderContext) -> Vec<String> {
-    let mut values = Vec::new();
-    collect_codex_fallbacks_from_config(&codex_home(ctx).join("config.toml"), &mut values);
-    for dir in ctx.project_dirs() {
-        collect_codex_fallbacks_from_config(&dir.join(".codex/config.toml"), &mut values);
-    }
-    values
-}
-
-fn collect_codex_fallbacks_from_config(path: &Path, values: &mut Vec<String>) {
-    let Ok(text) = fs::read_to_string(path) else {
-        return;
-    };
-    let Ok(value) = toml::from_str::<TomlValue>(&text) else {
-        return;
-    };
-    let Some(items) = value
-        .get("project_doc_fallback_filenames")
-        .and_then(TomlValue::as_array)
-    else {
-        return;
-    };
-    values.clear();
-    values.extend(
-        items
-            .iter()
-            .filter_map(TomlValue::as_str)
-            .map(str::trim)
-            .filter(|value| !value.is_empty() && !value.contains('/'))
-            .map(str::to_string),
-    );
 }
 
 fn project_dirs(cwd: &Path) -> Vec<PathBuf> {
@@ -757,10 +442,7 @@ mod tests {
         time::{SystemTime, UNIX_EPOCH},
     };
 
-    use super::{
-        AgentKind, SessionRecord, codex_plugin_enabled_by_id, codex_plugin_id_for_skill_root,
-        codex_plugin_skill_roots, codex_skill_roots, plan_session_resume, project_dirs,
-    };
+    use super::{AgentKind, SessionRecord, codex, plan_session_resume, project_dirs};
 
     fn temp_dir(prefix: &str) -> PathBuf {
         std::env::temp_dir().join(format!(
@@ -793,7 +475,7 @@ mod tests {
         )
         .unwrap();
 
-        let roots = codex_skill_roots(&codex_home, &project_dirs(&root), AgentKind::Codex);
+        let roots = codex::codex_skill_roots(&codex_home, &project_dirs(&root), AgentKind::Codex);
 
         assert!(roots.iter().any(|root| {
             root.path == global_skills && root.scope == "global" && root.agent == AgentKind::Codex
@@ -822,11 +504,11 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            codex_plugin_id_for_skill_root(&codex_home, &plugin_skills).as_deref(),
+            codex::codex_plugin_id_for_skill_root(&codex_home, &plugin_skills).as_deref(),
             Some("browser@openai-bundled")
         );
         assert_eq!(
-            codex_plugin_enabled_by_id(&codex_home)
+            codex::codex_plugin_enabled_by_id(&codex_home)
                 .get("browser@openai-bundled")
                 .copied(),
             Some(false)
@@ -845,7 +527,7 @@ mod tests {
         fs::create_dir_all(&plugin_skills).unwrap();
         fs::create_dir_all(&dependency_skills).unwrap();
 
-        let roots = codex_plugin_skill_roots(&codex_home);
+        let roots = codex::codex_plugin_skill_roots(&codex_home);
 
         assert_eq!(roots, vec![plugin_skills]);
 

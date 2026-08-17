@@ -1,9 +1,10 @@
 .dialogActions {
+  flex: 0 0 auto;
+  margin-top: auto;
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  margin-top: 0;
   padding: 14px 24px;
   border-top: 1px solid var(--line);
   background: var(--surface-2);

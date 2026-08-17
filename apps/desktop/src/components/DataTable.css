@@ -151,7 +151,6 @@
   position: relative;
   left: auto;
   z-index: var(--z-content);
-  background: transparent;
 }
 
 .dataTableShell--frozen .dataHeaderSelection {
@@ -367,8 +366,8 @@
 }
 
 .sectionHeaderCount {
-  margin-left: auto;
-  padding-left: 12px;
+  margin-left: 6px;
+  padding-left: 0;
   color: var(--data-table-header-color, var(--muted));
   font-size: var(--data-table-header-font-size, var(--text-caption));
   font-weight: var(--data-table-header-font-weight, 750);
@@ -409,12 +408,22 @@
 }
 
 .dataTableEmpty {
+  position: absolute;
+  inset: 0;
+  z-index: var(--z-header-rule);
   display: flex;
   flex-direction: column;
   align-items: center;
+  justify-content: center;
   gap: 10px;
-  padding: 48px 0;
+  box-sizing: border-box;
+  padding: 48px;
   color: var(--faint);
+  pointer-events: none;
+}
+
+.dataTableEmpty--belowHeader {
+  top: var(--data-table-header-height, 34px);
 }
 
 /* Table layout (frozen first column) reuses the existing selectable-table
@@ -649,6 +658,10 @@
   :has([data-state="open"])
 )::after {
   background: var(--data-table-row-hover-bg, var(--row-frame-bg));
+}
+
+.rowFrame.rowSelected::after {
+  background: var(--selection-fill);
 }
 
 /* Hide the 1px separator above an active row and on the row directly below it. */

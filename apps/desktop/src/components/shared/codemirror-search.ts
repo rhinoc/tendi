@@ -7,21 +7,25 @@ import { findTextRanges, type TextRange } from "./text-ranges.ts";
 export { findTextRanges } from "./text-ranges.ts";
 export type { TextRange } from "./text-ranges.ts";
 
-export function buildCodeMirrorSearchDecorations(state: EditorState, query: string, activeIndex: number) {
-  const ranges = findTextRanges(state.doc.toString(), query);
-  if (ranges.length === 0) return Decoration.none;
-  return Decoration.set(ranges.map((range, index) => Decoration.mark({
+export function buildCodeMirrorSearchDecorations(
+  state: EditorState,
+  query: string,
+  activeIndex: number,
+  ranges?: TextRange[],
+) {
+  const searchRanges = ranges ?? findTextRanges(state.doc.toString(), query);
+  if (searchRanges.length === 0) return Decoration.none;
+  return Decoration.set(searchRanges.map((range, index) => Decoration.mark({
     class: `cmEditorSearchMatch ${index === activeIndex ? "active" : ""}`,
   }).range(range.from, range.to)), true);
 }
 
-export function codeMirrorSearchExtension(query: string, activeIndex: number) {
+export function codeMirrorSearchExtension(query: string, activeIndex: number, ranges?: TextRange[]) {
   return StateField.define({
     create(state) {
-      return buildCodeMirrorSearchDecorations(state, query, activeIndex);
+      return buildCodeMirrorSearchDecorations(state, query, activeIndex, ranges);
     },
     update(decorations, transaction) {
-      if (transaction.docChanged) return buildCodeMirrorSearchDecorations(transaction.state, query, activeIndex);
       return decorations.map(transaction.changes);
     },
     provide: (field) => EditorView.decorations.from(field),

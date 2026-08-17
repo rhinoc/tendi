@@ -18,11 +18,11 @@ export type NavItem = { id: string; label: string; icon: LucideIcon };
 export const navItems: NavItem[] = [
   { id: "overview", label: "Overview", icon: LayoutDashboard },
   { id: "skills", label: "Skills", icon: Sparkles },
-  { id: "prompts", label: "Prompts", icon: MessageSquareText },
   { id: "sessions", label: "Sessions", icon: MessagesSquare },
   { id: "rules", label: "Rules", icon: ScrollText },
-  { id: "hooks", label: "Hooks", icon: Webhook },
   { id: "mcp", label: "MCP", icon: Server },
+  { id: "hooks", label: "Hooks", icon: Webhook },
+  { id: "prompts", label: "Prompts", icon: MessageSquareText },
   { id: "config", label: "Config", icon: FileCode },
   { id: "settings", label: "Settings", icon: Settings },
 ];
@@ -88,42 +88,6 @@ export const fallbackSkillFiles = [
   { name: "SKILL.md", kind: "file" },
   { name: "references", kind: "folder" },
   { name: "references/example.md", kind: "file" },
-];
-
-export const fallbackSessions = [
-  {
-    id: "s1",
-    title: "Review skill routing",
-    project: "tendi",
-    agent: "Codex",
-    startedAt: "09:58",
-    updatedAt: "10:56",
-    time: "10:56",
-    messages: 3,
-  },
-  {
-    id: "s2",
-    title: "Update desktop UI",
-    project: "tendi",
-    agent: "Claude",
-    startedAt: "09:12",
-    updatedAt: "09:40",
-    time: "09:40",
-    messages: 5,
-  },
-];
-
-export const fallbackTranscript = [
-  { type: "user", body: "Refactor the auth middleware.", time: "09:11" },
-  { type: "assistant", body: "I'll read the current middleware first.", time: "09:11" },
-  {
-    type: "tool",
-    body: "cat src/middleware/auth.rs",
-    command: "cat src/middleware/auth.rs",
-    result: "pub fn auth_middleware() {\n    // ...\n}",
-    durationMs: 42,
-    tag: "read_file",
-  },
 ];
 
 export const SIDEBAR_SIZE = "200px";

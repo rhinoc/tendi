@@ -72,7 +72,6 @@
   --z-selection-bar: 8;
   --z-frozen-header: 9;
   --z-header-rule: 10;
-  --z-legacy-divider: 20;
   --z-resize-handle: 25;
   --z-marquee: 30;
   --z-menu: 40;
@@ -97,7 +96,7 @@
   --content-bg: oklch(0.956 0.055 96.155);
   --panel-bg: oklch(0.956 0.055 96.155);
   --editor-bg: oklch(0.956 0.055 96.155);
-  --file-tree-bg: oklch(0.922 0.055 92.526);
+  --file-tree-bg: var(--surface);
 
   --line: oklch(0.411 0.012 51.866 / 0.18);
   --line-strong: oklch(0.411 0.012 51.866 / 0.28);
@@ -297,7 +296,7 @@
   --content-bg: oklch(0.277 0 0);
   --panel-bg: oklch(0.344 0.007 48.523);
   --editor-bg: oklch(0.277 0 0);
-  --file-tree-bg: oklch(0.311 0.003 48.619);
+  --file-tree-bg: var(--surface);
 
   --line: oklch(0.894 0.057 89.24 / 0.12);
   --line-strong: oklch(0.894 0.057 89.24 / 0.2);

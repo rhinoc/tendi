@@ -33,25 +33,27 @@ export function SelectionActionBar({
   const countLabel = selectedCount === 1 && label.endsWith("s") ? label.slice(0, -1) : label;
   return (
     <div className={`actionBar bottomBar ${className}`}>
-      <div className="actionBarSelectionSummary">
-        <SelectionCheckbox
-          checked={allSelected}
-          mixed={mixed}
-          label={checkboxLabel}
-          onChange={onToggleAll}
-        />
-        <span>{selectedCount} {countLabel}</span>
-      </div>
-      {children || onClear ? (
-        <div className="actionBarActions">
-          {children}
-          {onClear ? (
-            <button className="actionBarClearButton" type="button" aria-label={clearLabel} onClick={onClear}>
-              <X size={14} strokeWidth={2.4} />
-            </button>
-          ) : null}
+      <div className="actionBarSurface">
+        <div className="actionBarSelectionSummary">
+          <SelectionCheckbox
+            checked={allSelected}
+            mixed={mixed}
+            label={checkboxLabel}
+            onChange={onToggleAll}
+          />
+          <span>{selectedCount} {countLabel}</span>
         </div>
-      ) : null}
+        {children || onClear ? (
+          <div className="actionBarActions">
+            {children}
+            {onClear ? (
+              <button className="actionBarClearButton" type="button" aria-label={clearLabel} onClick={onClear}>
+                <X size={14} strokeWidth={2.4} />
+              </button>
+            ) : null}
+          </div>
+        ) : null}
+      </div>
     </div>
   );
 }

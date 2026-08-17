@@ -157,6 +157,13 @@
   cursor: pointer;
 }
 
+.configProfileStateButton {
+  width: 80px;
+  flex: 0 0 80px;
+  justify-content: center;
+  white-space: nowrap;
+}
+
 .configProfileSwitchButton:hover:not(:disabled) {
   background: var(--accent-hover);
 }
@@ -188,9 +195,12 @@
 
 .configProfileDialog {
   width: min(420px, calc(100vw - 32px));
+  height: min(300px, calc(100vh - 48px));
 }
 
 .configProfileDialogBody {
+  flex: 1 1 auto;
+  min-height: 0;
   display: flex;
   flex-direction: column;
   gap: 8px;
@@ -201,8 +211,4 @@
   margin: 0;
   color: var(--faint);
   font-size: 12px;
-}
-
-.configProfileDialogBody .addSkillError {
-  margin: 0;
 }

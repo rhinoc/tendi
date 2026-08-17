@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" fill="none">
+  <defs><linearGradient id="promptscriptGradient" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#6D28D9"/><stop offset=".55" stop-color="#2563EB"/><stop offset="1" stop-color="#06B6D4"/></linearGradient></defs>
+  <rect x="8" y="8" width="240" height="240" rx="48" fill="#0B1220" stroke="url(#promptscriptGradient)" stroke-width="4"/>
+  <path d="M64 80c0-14 11-24 24-24h80c13 0 24 10 24 24v56c0 14-11 24-24 24h-44l-28 24v-24H88c-13 0-24-10-24-24V80Z" fill="#0F1B33" stroke="url(#promptscriptGradient)" stroke-width="4" stroke-linejoin="round"/>
+  <path d="m104 92-14 16 14 16m48-32 14 16-14 16m-24-34-10 36" stroke="#E8F0FF" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="m188 56 8 14 14 8-14 8-8 14-8-14-14-8 14-8 8-14Z" fill="url(#promptscriptGradient)"/><path d="M88 188h80m8-12v24" stroke="url(#promptscriptGradient)" stroke-width="8" stroke-linecap="round"/>
+</svg>

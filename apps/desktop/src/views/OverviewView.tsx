@@ -5,27 +5,32 @@ import {
   useRef,
   useState,
 } from "react";
-import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import { ArrowLeft, ArrowRight, ArrowUpRight, Check, ChevronDown, RefreshCw } from "lucide-react";
-import { DropdownMenu } from "radix-ui";
+import type { UnlistenFn } from "@tauri-apps/api/event";
+import { ArrowLeft, ArrowRight, ArrowUpRight, ChevronDown, RefreshCw } from "lucide-react";
 
 import { AgentBadge } from "../components/shared/AgentBadge.tsx";
 import { ContentTopDragStrip } from "../components/shared/ContentTopDragStrip.tsx";
+import { ChartFrame } from "../components/shared/chart/ChartFrame.tsx";
+import { ChartLegend } from "../components/shared/chart/ChartLegend.tsx";
+import { IconButton } from "../components/shared/IconButton.tsx";
+import { LoadingDots } from "../components/shared/LoadingDots.tsx";
 import { LoadingIcon } from "../components/shared/LoadingIcon.tsx";
 import { PageHeader } from "../components/shared/PageHeader.tsx";
+import { SelectControl } from "../components/shared/SelectControl.tsx";
 import { Tooltip } from "../components/shared/Tooltip.tsx";
-import { TranscriptLinkText } from "../components/shared/TranscriptLinkText.tsx";
+import { SessionTitleText, TranscriptLinkText } from "../components/shared/TranscriptLinkText.tsx";
 import { tokenToneClass } from "../lib/token-style.ts";
 import { formatTokenCount } from "../lib/token-format.ts";
 import { sessionProject, type SessionRecord } from "../lib/sessions.ts";
 import { summarizeSessionUsage } from "../lib/overview.ts";
-import { summarizeSessionPreviewRecord } from "../lib/session-preview.ts";
+import { formatSessionTitle, summarizeSessionPreviewRecord } from "../lib/session-preview.ts";
 import {
   type AnalyticsGranularity,
   type AnalyticsRefreshProgress,
   type OverviewAnalytics,
+  selectAnalyticsGranularity,
 } from "../lib/analytics.ts";
-import { TauriCommand, safeInvoke } from "../lib/tauri.ts";
+import { TauriCommand, safeInvoke, safeListen } from "../lib/tauri.ts";
 import { OverviewTrendChart, type OverviewUsageMetric } from "./OverviewTrendChart.tsx";
 import type { SkillRecord } from "./SkillsView.tsx";
 import "./OverviewView.css";
@@ -40,6 +45,8 @@ export type OverviewViewProps = {
   analyticsRevision: number;
   analyticsRevisionReady: boolean;
   agentFilter: string;
+  loadedDomains: ReadonlySet<string>;
+  sessionListLoaded: boolean;
   onNavigate: (id: OverviewNavId) => void;
   onOpenSession: (session: SessionRecord) => void;
 };
@@ -47,7 +54,6 @@ export type OverviewViewProps = {
 const ANALYTICS_LOAD_STEPS = [30, 90, 182, 365] as const;
 const MAX_ANALYTICS_DAYS = 365;
 let retainedAnalyticsRange = 30;
-let retainedAnalyticsGranularity: AnalyticsGranularity = "day";
 let retainedUsageMetric: OverviewUsageMetric = "tokens";
 const USAGE_METRICS = ["sessions", "turns", "tokens", "cache", "tools", "skills"] as const satisfies ReadonlyArray<OverviewUsageMetric>;
 const USAGE_METRIC_LABELS: Record<OverviewUsageMetric, string> = {
@@ -82,9 +88,8 @@ function AnalyticsLoadingState({
   const completed = progress?.completed ?? 0;
   const total = progress?.total ?? 0;
   return (
-    <section className="overviewTrendBlock" aria-label="Loading usage chart">
-      <div className="overviewTrendLegend overviewTrendLegendEmpty" aria-hidden="true" />
-      <div className="overviewAnalyticsLoadingDots" aria-hidden="true" />
+    <ChartFrame ariaLabel="Loading usage chart" legend={<ChartLegend items={[]} />}>
+      <LoadingDots variant="surface" className="overviewAnalyticsLoadingDots" />
       <div
         role="progressbar"
         aria-label={total ? `Analyzing ${completed} of ${total} sessions` : "Loading usage analytics"}
@@ -93,7 +98,7 @@ function AnalyticsLoadingState({
         aria-valuenow={total ? completed : undefined}
         className="overviewVisuallyHidden"
       />
-    </section>
+    </ChartFrame>
   );
 }
 
@@ -105,6 +110,8 @@ export function OverviewView({
   analyticsRevision,
   analyticsRevisionReady,
   agentFilter,
+  loadedDomains,
+  sessionListLoaded,
   onNavigate,
   onOpenSession,
 }: OverviewViewProps) {
@@ -117,7 +124,9 @@ export function OverviewView({
   const [analyticsProgress, setAnalyticsProgress] = useState<AnalyticsRefreshProgress | null>(null);
   const [analyticsError, setAnalyticsError] = useState("");
   const [analyticsRange, setAnalyticsRange] = useState<number>(retainedAnalyticsRange);
-  const [granularity, setGranularity] = useState<AnalyticsGranularity>(retainedAnalyticsGranularity);
+  const automaticGranularity = selectAnalyticsGranularity(analytics?.days.length ?? analyticsRange);
+  const [granularityOverride, setGranularityOverride] = useState<AnalyticsGranularity | null>(null);
+  const granularity = granularityOverride ?? automaticGranularity;
   const [usageMetric, setUsageMetric] = useState<OverviewUsageMetric>(retainedUsageMetric);
   const analyticsRequestRef = useRef(0);
   const analyticsRef = useRef(analytics);
@@ -202,6 +211,10 @@ export function OverviewView({
     setAnalyticsLoading(false);
   }, [agentFilter, analyticsRange, analyticsRevision]);
   useEffect(() => {
+    setGranularityOverride(null);
+  }, [automaticGranularity]);
+
+  useEffect(() => {
     if (!analyticsRevisionReady) return;
     const cacheKey = overviewAnalyticsCacheKey(agentFilter, analyticsRange, analyticsRevision);
     const cached = overviewAnalyticsCache.get(cacheKey);
@@ -216,7 +229,7 @@ export function OverviewView({
   useEffect(() => {
     let disposed = false;
     let unlisten: UnlistenFn | undefined;
-    void listen<AnalyticsRefreshProgress>("analytics://progress", ({ payload }) => {
+    void safeListen<AnalyticsRefreshProgress>("analytics://progress", ({ payload }) => {
       if (disposed) return;
       setAnalyticsProgress(payload);
       if (payload.error) setAnalyticsError(payload.error);
@@ -272,7 +285,9 @@ export function OverviewView({
                     </span>
                   ) : null}
                 </span>
-                <span className="overviewInventoryValue">{counts[item.id]}</span>
+                <span className="overviewInventoryValue">
+                  {loadedDomains.has(item.id) || (item.id === "sessions" && sessionListLoaded) ? counts[item.id] : "—"}
+                </span>
               </span>
               <ArrowUpRight size={14} aria-hidden="true" />
             </button>
@@ -285,56 +300,30 @@ export function OverviewView({
               <h2 id="overview-analytics-title">Usage</h2>
             </div>
             <div className="overviewAnalyticsControls">
-              <DropdownMenu.Root>
-                <DropdownMenu.Trigger asChild>
-                  <button type="button" className="overviewMetricSelect" aria-label={`Usage metric: ${USAGE_METRIC_LABELS[usageMetric]}`}>
-                    <span className="overviewMetricSelectInner">
-                      <span>{USAGE_METRIC_LABELS[usageMetric]}</span>
-                      <ChevronDown size={13} aria-hidden="true" />
-                    </span>
-                  </button>
-                </DropdownMenu.Trigger>
-                <DropdownMenu.Portal>
-                  <DropdownMenu.Content className="skillMenuContent overviewMetricMenu" align="end" sideOffset={6}>
-                    <DropdownMenu.RadioGroup
-                      value={usageMetric}
-                      onValueChange={(value) => {
-                        const metric = value as OverviewUsageMetric;
-                        retainedUsageMetric = metric;
-                        setUsageMetric(metric);
-                      }}
-                    >
-                      {USAGE_METRICS.map((value) => (
-                        <DropdownMenu.RadioItem className="skillMenuItem overviewMetricMenuItem" key={value} value={value}>
-                          <span className="overviewMetricMenuIndicator" aria-hidden="true">
-                            <DropdownMenu.ItemIndicator><Check size={12} strokeWidth={2.5} /></DropdownMenu.ItemIndicator>
-                          </span>
-                          <span>{USAGE_METRIC_LABELS[value]}</span>
-                        </DropdownMenu.RadioItem>
-                      ))}
-                    </DropdownMenu.RadioGroup>
-                  </DropdownMenu.Content>
-                </DropdownMenu.Portal>
-              </DropdownMenu.Root>
-              <div className="overviewGranularityControl" role="group" aria-label="Group chart by">
-                {(["day", "week", "month"] as const).map((value) => (
-                  <button
-                    key={value}
-                    type="button"
-                    aria-pressed={granularity === value}
-                    className={granularity === value ? "isActive" : undefined}
-                    onClick={() => {
-                      retainedAnalyticsGranularity = value;
-                      setGranularity(value);
-                    }}
-                  >
-                    {value === "day" ? "Day" : value === "week" ? "Week" : "Month"}
-                  </button>
-                ))}
-              </div>
-              <button type="button" className="iconButton" onClick={() => void loadAnalytics(true)} disabled={analyticsLoading} aria-label="Refresh analytics">
+              <SelectControl
+                className="overviewMetricSelect"
+                contentClassName="overviewMetricMenu"
+                itemClassName="overviewMetricMenuItem"
+                label={`Usage metric: ${USAGE_METRIC_LABELS[usageMetric]}`}
+                value={usageMetric}
+                onValueChange={(value) => {
+                  const metric = value as OverviewUsageMetric;
+                  retainedUsageMetric = metric;
+                  setUsageMetric(metric);
+                }}
+                options={USAGE_METRICS.map((value) => ({ value, label: USAGE_METRIC_LABELS[value] }))}
+                align="end"
+                showChevron={false}
+                renderValue={(option) => (
+                  <span className="overviewMetricSelectInner">
+                    <span>{option?.label ?? USAGE_METRIC_LABELS[usageMetric]}</span>
+                    <ChevronDown size={13} aria-hidden="true" />
+                  </span>
+                )}
+              />
+              <IconButton type="button" onClick={() => void loadAnalytics(true)} disabled={analyticsLoading} aria-label="Refresh analytics" aria-busy={analyticsLoading}>
                 {analyticsLoading ? <LoadingIcon size={15} /> : <RefreshCw size={15} />}
-              </button>
+              </IconButton>
             </div>
           </div>
 
@@ -352,6 +341,7 @@ export function OverviewView({
                 loadingOlder={loadingOlderAnalytics}
                 metric={usageMetric}
                 onLoadOlder={loadOlderAnalytics}
+                onGranularityChange={setGranularityOverride}
               />
               {analytics.warnings.length ? <p className="overviewAnalyticsWarning">{analytics.warnings.length} transcript files could not be fully analyzed.</p> : null}
               {analytics.coverage.indexingSessions > 0 ? (
@@ -402,8 +392,8 @@ export function OverviewView({
                       <span className="overviewSessionRowHeader">
                         <span className="overviewSessionTitleLine">
                           <AgentBadge agent={session.agent || "Unknown"} small />
-                          <Tooltip content={preview.title} onlyWhenTruncated>
-                            <span className="overviewSessionRowTitle"><TranscriptLinkText interactive={false} value={preview.title} /></span>
+                          <Tooltip content={formatSessionTitle(preview.title)} onlyWhenTruncated>
+                            <span className="overviewSessionRowTitle"><SessionTitleText interactive={false} value={preview.title} /></span>
                           </Tooltip>
                         </span>
                         <span className="overviewSessionProject">{sessionProject(session)}</span>

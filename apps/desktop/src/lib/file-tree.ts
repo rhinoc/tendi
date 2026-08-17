@@ -126,3 +126,7 @@ export function isYamlPath(value: unknown): boolean {
   const path = `${value ?? ""}`.toLowerCase();
   return path.endsWith(".yaml") || path.endsWith(".yml");
 }
+
+export function isJsonPath(value: unknown): boolean {
+  return `${value ?? ""}`.toLowerCase().endsWith(".json");
+}

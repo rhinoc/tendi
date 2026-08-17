@@ -11,7 +11,7 @@
   font-weight: 700;
   line-height: 1;
   overflow: hidden;
-  background: var(--panel-bg);
+  background: #fff;
 }
 
 .chip,
@@ -34,8 +34,16 @@
   transform: scale(0.82);
 }
 
-.agentIconSurface:is(.cline, .copilot, .cursor, .hermes, .hermesagent, .opencode) .agentIconImage {
+.agentIconSurface:is(.cline, .copilot, .hermes, .hermesagent, .opencode) .agentIconImage {
   filter: var(--monochrome-icon-filter);
+}
+
+.agentIconSurface:is(.grok, .zed) .agentIconImage {
+  filter: brightness(0);
+}
+
+.agentIconSurface.kimi {
+  background: #000;
 }
 
 .agentIconSvg {
@@ -43,12 +51,6 @@
   height: 70%;
   color: var(--faint);
   stroke-width: 2.4;
-}
-
-.agentIconFallback {
-  color: var(--faint);
-  font-size: inherit;
-  line-height: inherit;
 }
 
 .agentIconSurface.claude .agentIconImage,

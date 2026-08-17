@@ -41,8 +41,10 @@ export function PlainTextFileEditor({
     if (!textarea || !searchQuery.trim() || searchMatches.length === 0) return;
     const match = searchMatches[Math.min(searchIndex, searchMatches.length - 1)];
     if (!match) return;
-    const before = content.slice(0, match.from);
-    const line = before.split("\n").length - 1;
+    let line = 0;
+    for (let index = 0; index < match.from; index += 1) {
+      if (content[index] === "\n") line += 1;
+    }
     const lineHeight = Number.parseFloat(window.getComputedStyle(textarea).lineHeight) || 20;
     textarea.scrollTop = Math.max(0, line * lineHeight - textarea.clientHeight / 2);
   }, [content, searchIndex, searchMatches, searchQuery]);

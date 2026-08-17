@@ -4,15 +4,19 @@ import "./agent-surface.css";
 export type AgentOptionLabelProps = {
   agent: string;
   label?: string;
+  variant?: "target" | "filter";
+  collapsed?: boolean;
 };
 
-export function AgentOptionLabel({ agent, label }: AgentOptionLabelProps) {
+export function AgentOptionLabel({ agent, label, variant = "target", collapsed = false }: AgentOptionLabelProps) {
+  const isFilter = variant === "filter";
+  const isAll = isFilter && agent === "All";
   return (
     <span className="agentOptionLabel">
-      <span className={`agentIconSurface agentOptionIcon ${agentClassName(agent)}`} aria-hidden="true">
-        {agentIcon(agent)}
+      <span className={`agentIconSurface agentOptionIcon ${isAll ? "all" : agentClassName(agent)}`} aria-hidden="true">
+        {isAll ? "All" : agentIcon(agent)}
       </span>
-      <span>{label ?? targetAgentLabel(agent)}</span>
+      {!collapsed && <span>{label ?? (isFilter ? agent : targetAgentLabel(agent))}</span>}
     </span>
   );
 }

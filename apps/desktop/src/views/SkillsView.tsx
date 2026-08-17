@@ -1,38 +1,50 @@
-import { Tooltip } from "../components/shared/Tooltip.tsx";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ComponentType, ReactNode } from "react";
-import { invoke } from "@tauri-apps/api/core";
-import { ContextMenu, Dialog, DropdownMenu, Select, ToggleGroup } from "radix-ui";
+import { ContextMenu, Dialog, DropdownMenu, ToggleGroup } from "radix-ui";
 import {
-  Check,
   ChevronRight,
+  Copy,
+  Eye,
+  FolderOpen,
   Hammer,
+  List,
   PackagePlus,
   Plus,
   RefreshCw,
-  Search,
+  Sparkles,
   Trash2,
+  Waypoints,
+  X,
 } from "lucide-react";
 
 import { AgentChips } from "../components/shared/AgentChips.tsx";
 import { AgentOptionLabel } from "../components/shared/AgentOptionLabel.tsx";
+import { Button } from "../components/shared/Button.tsx";
 import { ContentTopDragStrip } from "../components/shared/ContentTopDragStrip.tsx";
 import { DialogActionBar } from "../components/shared/DialogActionBar.tsx";
 import { DialogAdvanceButton } from "../components/shared/DialogAdvanceButton.tsx";
+import { DialogShell } from "../components/shared/DialogShell.tsx";
 import { DialogTextField } from "../components/shared/DialogTextField.tsx";
+import { IconButton } from "../components/shared/IconButton.tsx";
 import { LoadingIcon } from "../components/shared/LoadingIcon.tsx";
 import { LoadingInline } from "../components/shared/LoadingInline.tsx";
-import { MoreActionsButton } from "../components/shared/MoreActionsButton.tsx";
+import { LoadingState } from "../components/shared/LoadingState.tsx";
 import { PageHeader } from "../components/shared/PageHeader.tsx";
+import { RowActionsMenu } from "../components/shared/RowActionsMenu.tsx";
 import { SelectionCheckbox } from "../components/shared/SelectionCheckbox.tsx";
+import { SegmentedControl, SegmentedControlItem } from "../components/shared/SegmentedControl.tsx";
 import { SearchField } from "../components/shared/SearchField.tsx";
-import { SelectTrigger } from "../components/shared/SelectTrigger.tsx";
-import { Visibility } from "../components/shared/Visibility.tsx";
+import { SelectControl } from "../components/shared/SelectControl.tsx";
+import { SkillRelationshipMap } from "../features/skills/SkillRelationshipMap.tsx";
+import { StatefulButton } from "../components/shared/StatefulButton.tsx";
+import { Visibility } from "../features/skills/Visibility.tsx";
 import { DataTable } from "../components/DataTable.tsx";
 import type { ColumnDef, SortState } from "../components/DataTable.types";
-import { TauriCommand, SkillVisibility, allSkillVisibilities, copyText, editableSkillVisibilities, isSkillRowSelectable, isSkillSelectable, isSkillVisibilityEditable, primarySkillPath, safeInvoke, skillSourceAction, skillSourceDetails, skillTargets, sourceRemoteDetails, suppressNextClick, targetAgentLabel } from "../lib/index.ts";
+import { TauriCommand, SkillVisibility, agentIdentityKey, allSkillVisibilities, compactDateTime, copyText, editableSkillVisibilities, invokeCommand, isSkillRowSelectable, isSkillSelectable, isSkillVisibilityEditable, primarySkillPath, safeInvoke, skillSourceAction, skillSourceDetails, skillTargets, sourceRemoteDetails, suppressNextClick } from "../lib/index.ts";
 
 export type SkillsTableSort = SortState;
+
+type SkillsViewMode = "list" | "network";
 
 type SkillSection = "Local" | "Remote" | "Plugin" | "System";
 
@@ -65,6 +77,8 @@ export type SkillRecord = {
   source_summary?: string;
   is_system?: boolean;
   isSystem?: boolean;
+  ctime?: string;
+  mtime?: string;
 };
 
 type SkillTableRow = SkillRecord;
@@ -105,6 +119,71 @@ type AvailableSkill = {
   dependencies?: string[];
 };
 
+type MarketplaceSource = {
+  id: string;
+  name: string;
+  description?: string;
+  source: string;
+  url: string;
+  version?: string;
+  metric?: number;
+  metricLabel?: string;
+  trustLabel?: string;
+  kind: string;
+};
+
+type MarketplaceSearchResponse = {
+  items?: MarketplaceSource[];
+  warnings?: string[];
+};
+
+const recommendedSkillSources: MarketplaceSource[] = [
+  {
+    id: "mattpocock-skills",
+    name: "Matt Pocock Skills",
+    source: "mattpocock/skills",
+    url: "https://github.com/mattpocock/skills",
+    trustLabel: "Community",
+    kind: "Collection",
+  },
+  {
+    id: "claude-code-plugin-dev",
+    name: "Claude Code Plugin Dev",
+    source: "anthropics/claude-code/plugins/plugin-dev",
+    url: "https://github.com/anthropics/claude-code/tree/main/plugins/plugin-dev",
+    trustLabel: "Anthropic official",
+    kind: "Collection",
+  },
+  {
+    id: "emil-skills",
+    name: "Emil's Design Skills",
+    source: "emilkowalski/skills",
+    url: "https://github.com/emilkowalski/skills",
+    trustLabel: "Community",
+    kind: "Collection",
+  },
+  {
+    id: "vercel-agent-skills",
+    name: "Vercel Agent Skills",
+    source: "vercel-labs/agent-skills",
+    url: "https://github.com/vercel-labs/agent-skills",
+    trustLabel: "Vercel official",
+    kind: "Collection",
+  },
+];
+
+type SkillMarkdownPreview = {
+  name: string;
+  relativePath: string;
+  content: string;
+};
+
+type SkillPreviewOverrides = {
+  target?: string;
+  copy?: boolean;
+  visibility?: SkillVisibility;
+};
+
 type SkillAddPlan = {
   available?: AvailableSkill[];
   selected?: AvailableSkill[];
@@ -121,6 +200,13 @@ export type SkillInstallResult = {
     results?: Array<{ target?: string }>;
   };
 };
+
+function installedSkillName(result: SkillInstallResult): string | null {
+  const installedNames = new Set((result.skills ?? []).map((skill) => skill.name));
+  return result.report?.plan?.selected
+    ?.map((skill) => skill.name)
+    .find((name) => installedNames.has(name)) ?? null;
+}
 
 export type WrapperArgs = {
   name: string;
@@ -196,14 +282,15 @@ export function SkillActionsMenuItems({ Menu, skill, onApplyUpdates, onDeleteSki
             suppressNextClick();
             onApplyUpdates([skill.name]);
           }}>
+            <RefreshCw size={14} />
             Apply update
           </Menu.Item>
-          <Menu.Separator className="skillMenuSeparator" />
         </>
       )}
       {hasMultipleTargets ? (
         <Menu.Sub>
           <Menu.SubTrigger className="skillMenuItem skillMenuSubTrigger">
+            <FolderOpen size={14} />
             <span>Reveal in Finder</span>
             <ChevronRight className="skillMenuSubIcon" size={14} />
           </Menu.SubTrigger>
@@ -229,13 +316,14 @@ export function SkillActionsMenuItems({ Menu, skill, onApplyUpdates, onDeleteSki
             if (primaryPath) safeInvoke(TauriCommand.RevealInFinder, { path: primaryPath });
           }}
         >
+          <FolderOpen size={14} />
           Reveal in Finder
         </Menu.Item>
       )}
-      <Menu.Separator className="skillMenuSeparator" />
       {hasMultipleTargets ? (
         <Menu.Sub>
           <Menu.SubTrigger className="skillMenuItem skillMenuSubTrigger">
+            <Copy size={14} />
             <span>Copy path</span>
             <ChevronRight className="skillMenuSubIcon" size={14} />
           </Menu.SubTrigger>
@@ -251,6 +339,7 @@ export function SkillActionsMenuItems({ Menu, skill, onApplyUpdates, onDeleteSki
         </Menu.Sub>
       ) : (
         <Menu.Item className="skillMenuItem" disabled={!primaryPath} onSelect={() => copyText(primaryPath ?? "")}>
+          <Copy size={14} />
           Copy path
         </Menu.Item>
       )}
@@ -294,6 +383,7 @@ export function BulkSkillActionsMenuItems({ Menu, selectedSkills, onApplyUpdates
           suppressNextClick();
           onApplyUpdates(updateNames);
         }}>
+          <RefreshCw size={14} />
           Update
         </Menu.Item>
       )}
@@ -335,6 +425,18 @@ export function SkillMainCell({ skill, openSkill, onApplyUpdates }: SkillMainCel
           <span className="skillNameText">{skill.name}</span>
           {skill.isWrapper && <em>wrapper</em>}
         </button>
+        {sourceAction && (
+          <button
+            className="skillSourceButton"
+            aria-label={sourceAction.ariaLabel}
+            onClick={(event) => {
+              event.stopPropagation();
+              sourceAction.onClick();
+            }}
+          >
+            {sourceAction.icon}
+          </button>
+        )}
         {skill.updateStatus === "update-available" && (
           <button
             type="button"
@@ -347,18 +449,6 @@ export function SkillMainCell({ skill, openSkill, onApplyUpdates }: SkillMainCel
           >
             Update
           </button>
-        )}
-        {sourceAction && (
-          <Tooltip content={sourceAction.title}><button
-            className="skillSourceButton"
-            aria-label={sourceAction.ariaLabel}
-            onClick={(event) => {
-              event.stopPropagation();
-              sourceAction.onClick();
-            }}
-          >
-            {sourceAction.icon}
-          </button></Tooltip>
         )}
       </div>
       <button
@@ -382,16 +472,12 @@ export type SkillActionsCellProps = {
 
 export function SkillActionsCell({ skill, onApplyUpdates, onDeleteSkills }: SkillActionsCellProps) {
   return (
-    <DropdownMenu.Root onOpenChange={(open) => { if (!open) suppressNextClick(); }}>
-      <DropdownMenu.Trigger asChild>
-        <MoreActionsButton aria-label={`Skill actions for ${skill.name}`} />
-      </DropdownMenu.Trigger>
-      <DropdownMenu.Portal>
-        <DropdownMenu.Content className="skillMenuContent" align="end" sideOffset={6}>
-          <SkillActionsMenuItems Menu={DropdownMenu} skill={skill} onApplyUpdates={onApplyUpdates} onDeleteSkills={onDeleteSkills} />
-        </DropdownMenu.Content>
-      </DropdownMenu.Portal>
-    </DropdownMenu.Root>
+    <RowActionsMenu
+      ariaLabel={`Skill actions for ${skill.name}`}
+      onOpenChange={(open) => { if (!open) suppressNextClick(); }}
+    >
+      <SkillActionsMenuItems Menu={DropdownMenu} skill={skill} onApplyUpdates={onApplyUpdates} onDeleteSkills={onDeleteSkills} />
+    </RowActionsMenu>
   );
 }
 
@@ -485,23 +571,28 @@ export function WrapperDialog({ open, selectedSkills, onOpenChange, onApplyWrapp
   };
 
   return (
-    <Dialog.Root open={open} onOpenChange={(nextOpen) => !busy && onOpenChange(nextOpen)}>
-      <Dialog.Portal>
-        <Dialog.Overlay className="dialogOverlay" />
-        <Dialog.Content className="wrapperDialogPanel" data-no-drag onMouseDown={(event) => event.stopPropagation()}>
+    <DialogShell
+      open={open}
+      onOpenChange={(nextOpen) => !busy && onOpenChange(nextOpen)}
+      className="wrapperDialogPanel"
+      descriptionId="wrapper-skill-dialog-description"
+    >
           <Dialog.Title className="confirmDialogTitle">Create wrapper skill</Dialog.Title>
+          <Dialog.Description id="wrapper-skill-dialog-description" className="dialogVisuallyHidden">
+            Create a wrapper skill from the selected child skills.
+          </Dialog.Description>
           <div className="wrapperDialogBody">
             <DialogTextField label="Name" value={name} onChange={updateName} placeholder="" />
             <label className="dialogField">
               <span>Description</span>
               <textarea
                 autoFocus
-                className="dialogTextArea wrapperDescriptionInput"
+                className="dialogTextArea"
                 value={description}
                 onChange={(event) => updateDescription(event.target.value)}
               />
             </label>
-            <label className={`addSkillReplaceField ${manualChildren ? "isChecked" : ""}`}>
+            <label className="checkboxLine">
               <SelectionCheckbox
                 checked={manualChildren}
                 label="Only trigger selected skills through this wrapper"
@@ -509,10 +600,11 @@ export function WrapperDialog({ open, selectedSkills, onOpenChange, onApplyWrapp
               />
               <span>
                 <strong>Make children manual</strong>
+                <br />
                 <small>Selected skills will stop triggering on their own.</small>
               </span>
             </label>
-            {error ? <div className="wrapperDialogError">{error}</div> : null}
+            {error ? <div className="dialogError">{error}</div> : null}
           </div>
           <DialogActionBar cancelDisabled={busy} onCancel={() => onOpenChange(false)}>
             <DialogAdvanceButton
@@ -523,9 +615,7 @@ export function WrapperDialog({ open, selectedSkills, onOpenChange, onApplyWrapp
               onClick={apply}
             />
           </DialogActionBar>
-        </Dialog.Content>
-      </Dialog.Portal>
-    </Dialog.Root>
+    </DialogShell>
   );
 }
 
@@ -630,10 +720,22 @@ function availableSkillSearchText(skill: AvailableSkill) {
     .toLowerCase();
 }
 
+function isDirectSkillSource(value: string) {
+  const source = value.trim();
+  return /^(?:https?:\/\/|ssh:\/\/|git@|github:|gitlab:|huggingface:|\/|\/?\.\.?\/)/i.test(source)
+    || /^[^/\s]+\/[^/\s]+(?:#\S+)?$/.test(source);
+}
+
+const TiptapMarkdownPreview = lazy(() => import("../components/shared/TiptapMarkdownPreview.tsx").then(({ TiptapMarkdownPreview: component }) => ({ default: component })));
+
 export type AddSkillDialogProps = {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  trigger: ReactNode;
   onClose: () => void;
   onInstalled: (result: SkillInstallResult) => void;
   onRequestWrapper: (skills: SkillRecord[]) => void;
+  installedAgentKeys: string[];
 };
 
 type InstallTargetOption = {
@@ -642,10 +744,15 @@ type InstallTargetOption = {
   supportsGlobal: boolean;
 };
 
-export function AddSkillDialog({ onClose, onInstalled, onRequestWrapper }: AddSkillDialogProps) {
+export function AddSkillDialog({ open, onOpenChange, trigger, onClose, onInstalled, onRequestWrapper, installedAgentKeys }: AddSkillDialogProps) {
   const [source, setSource] = useState("");
+  const [marketplaceResults, setMarketplaceResults] = useState<MarketplaceSource[]>([]);
+  const [marketplaceBusy, setMarketplaceBusy] = useState(false);
+  const [marketplaceError, setMarketplaceError] = useState("");
+  const [skillPreview, setSkillPreview] = useState<SkillMarkdownPreview | null>(null);
+  const [skillPreviewBusy, setSkillPreviewBusy] = useState("");
+  const [skillPreviewError, setSkillPreviewError] = useState("");
   const [target, setTarget] = useState("shared");
-  const [scope, setScope] = useState("global");
   const [installTargets, setInstallTargets] = useState<InstallTargetOption[]>([
     { id: "shared", displayName: "Shared", supportsGlobal: true },
   ]);
@@ -661,11 +768,30 @@ export function AddSkillDialog({ onClose, onInstalled, onRequestWrapper }: AddSk
   const skillItemRefs = useRef(new Map<string, HTMLDivElement>());
   const busy = busyAction !== "";
   const visibleInstallTargets = useMemo(
-    () => installTargets.filter((option) => scope === "project" || option.supportsGlobal),
-    [installTargets, scope],
+    () => {
+      const installed = new Set(installedAgentKeys);
+      return installTargets
+        .map((option, index) => ({
+          option,
+          index,
+          installed: installed.has(agentIdentityKey(option.id)),
+        }))
+        .filter(({ option }) => option.supportsGlobal && option.id !== "universal")
+        .sort((left, right) => {
+          if (left.option.id === "shared") return -1;
+          if (right.option.id === "shared") return 1;
+          if (left.installed !== right.installed) return left.installed ? -1 : 1;
+          return left.index - right.index;
+        })
+        .map(({ option }) => option);
+    },
+    [installTargets, installedAgentKeys],
   );
-  const targetDisplayName = installTargets.find((option) => option.id === target)?.displayName
-    ?? targetAgentLabel(target);
+  useEffect(() => {
+    if (!visibleInstallTargets.some((option) => option.id === target)) {
+      setTarget(visibleInstallTargets[0]?.id ?? "shared");
+    }
+  }, [target, visibleInstallTargets]);
   const available = plan?.available ?? [];
   const showSkillSearch = available.length > 10;
   const normalizedSkillSearch = skillSearch.trim().toLowerCase();
@@ -733,31 +859,75 @@ export function AddSkillDialog({ onClose, onInstalled, onRequestWrapper }: AddSk
   }, [available, normalizedSkillSearch]);
   const searchMatchSet = useMemo(() => new Set(searchMatches), [searchMatches]);
   const firstSearchMatch = searchMatches[0] ?? "";
-  const canPreview = source.trim().length > 0 && !busy;
-  const canInstall = canPreview && selected.length > 0 && plan;
-  const canAdvance = plan ? canInstall : canPreview;
-  const advanceLabel = busyAction === "preview"
-    ? "Previewing skills"
-    : busyAction === "install"
-      ? "Installing selected skills"
-      : plan ? "Install selected skills" : "Preview skills";
-  const advanceText = busyAction === "preview" ? "Loading" : busyAction === "install" ? "Installing" : plan ? "Install" : "Next";
+  const canInstall = Boolean(source.trim() && plan && previewId && selected.length > 0 && !busy);
+  const advanceLabel = busyAction === "install" ? "Installing selected skills" : "Install selected skills";
+  const advanceText = busyAction === "install" ? "Installing" : "Install";
+  const sourceCandidates = source.trim() ? marketplaceResults : recommendedSkillSources;
+  const sourceCandidatesLabel = source.trim() ? "Matches" : "Recommended";
 
-  const preview = async () => {
-    if (!source.trim()) return;
+  const handleSourceChange = (value: string) => {
+    setSource(value);
+    setMarketplaceResults([]);
+    setMarketplaceError("");
+    setPlan(null);
+    setPreviewId("");
+    setSelectedRoots([]);
+    setSkillPreview(null);
+    setSkillPreviewError("");
+    setError("");
+  };
+
+  const searchMarketplace = async (rawQuery = source) => {
+    const query = rawQuery.trim();
+    if (query.length < 2 || marketplaceBusy) return;
+    setMarketplaceBusy(true);
+    setMarketplaceError("");
+    setPlan(null);
+    setPreviewId("");
+    setSkillPreview(null);
+    setSkillPreviewError("");
+    try {
+      const response = await invokeCommand<MarketplaceSearchResponse>(TauriCommand.SkillsMarketplaceSearch, {
+        query,
+      });
+      setMarketplaceResults(response?.items ?? []);
+      setMarketplaceError(response?.warnings?.length
+        ? "Some marketplaces are unavailable."
+        : response?.items?.length ? "" : "No matching skills.");
+    } catch (searchError) {
+      setMarketplaceResults([]);
+      setMarketplaceError(String(searchError));
+    } finally {
+      setMarketplaceBusy(false);
+    }
+  };
+
+  const previewSource = async (nextSource = source, overrides: SkillPreviewOverrides = {}) => {
+    const normalizedSource = nextSource.trim();
+    if (!normalizedSource || busyAction || marketplaceBusy) return;
+    const nextTarget = overrides.target ?? target;
+    const nextCopy = overrides.copy ?? copy;
+    const nextVisibility = overrides.visibility ?? visibility;
+    setSource(normalizedSource);
+    setMarketplaceError("");
+    setSkillPreview(null);
+    setSkillPreviewError("");
     setBusyAction("preview");
     setError("");
     try {
-      const response = await invoke(TauriCommand.SkillsAdd, {
-        source: source.trim(),
-        target,
-        scope,
+      const response = await invokeCommand(TauriCommand.SkillsAdd, {
+        source: normalizedSource,
+        target: nextTarget,
+        scope: "global",
         skills: [],
-        copy,
+        copy: nextCopy,
         overwrite: false,
-        visibility: visibility.toLowerCase(),
+        visibility: nextVisibility.toLowerCase(),
         dryRun: true,
       }) as { plan?: SkillAddPlan; previewId?: string } | null;
+      if (!response?.plan || !response.previewId) {
+        throw new Error("Skill preview returned no data. Restart the development service and try again.");
+      }
       const nextPlan = normalizeSkillAddPlan(response?.plan);
       const nextOperations = new Map((nextPlan?.operations ?? []).map((operation) => [operation.name, operation]));
       setPlan(nextPlan);
@@ -780,15 +950,47 @@ export function AddSkillDialog({ onClose, onInstalled, onRequestWrapper }: AddSk
     }
   };
 
+  const resolveSourceInput = () => {
+    const value = source.trim();
+    if (!value || busy || marketplaceBusy) return;
+    if (isDirectSkillSource(value)) {
+      void previewSource(value);
+    } else {
+      void searchMarketplace(value);
+    }
+  };
+
+  const selectMarketplaceSource = (skill: MarketplaceSource) => {
+    void previewSource(skill.source);
+  };
+
+  const previewSkill = async (name: string) => {
+    if (!previewId || skillPreviewBusy) return;
+    setSkillPreviewBusy(name);
+    setSkillPreviewError("");
+    try {
+      const preview = await invokeCommand<SkillMarkdownPreview>(TauriCommand.SkillsAddPreviewRead, {
+        previewId,
+        skillName: name,
+      });
+      setSkillPreview(preview);
+    } catch (previewError) {
+      setSkillPreview(null);
+      setSkillPreviewError(`${previewError}`);
+    } finally {
+      setSkillPreviewBusy("");
+    }
+  };
+
   const install = async () => {
     if (!canInstall) return;
     setBusyAction("install");
     setError("");
     try {
-      const result = await invoke<SkillInstallResult>(TauriCommand.SkillsAdd, {
+      const result = await invokeCommand<SkillInstallResult>(TauriCommand.SkillsAdd, {
         source: source.trim(),
         target,
-        scope,
+        scope: "global",
         skills: selected,
         copy,
         overwrite: selectedHasExisting,
@@ -817,7 +1019,6 @@ export function AddSkillDialog({ onClose, onInstalled, onRequestWrapper }: AddSk
 
   const advance = () => {
     if (plan) install();
-    else preview();
   };
 
   useEffect(() => {
@@ -867,163 +1068,87 @@ export function AddSkillDialog({ onClose, onInstalled, onRequestWrapper }: AddSk
   };
 
   return (
-    <Dialog.Portal>
-      <Dialog.Overlay className="dialogOverlay" />
-      <Dialog.Content className="addSkillPanel" aria-describedby={undefined} data-no-drag onMouseDown={(event) => event.stopPropagation()}>
-      <Dialog.Title className="addSkillTitle">Add skill</Dialog.Title>
-      <div className="addSkillGrid">
-        <div className="sourceField">
-          <DialogTextField
-            label="Source"
-            value={source}
-            onChange={(nextSource: string) => {
-              setSource(nextSource);
-              setPlan(null);
-              setSelectedRoots([]);
-              setCreateWrapper(false);
-              setSkillSearch("");
-              setError("");
-            }}
-            placeholder="owner/repo, Git URL, or local path"
-          />
-        </div>
-        <div className="dialogField">
-          <span>Target</span>
-          <Select.Root
-            value={target}
-            onValueChange={(value) => {
-              setTarget(value);
-              setPlan(null);
-              setSelectedRoots([]);
-              setCreateWrapper(false);
-              setSkillSearch("");
+    <DialogShell
+      open={open}
+      onOpenChange={onOpenChange}
+      trigger={trigger}
+      className="addSkillPanel"
+      descriptionId="add-skill-dialog-description"
+    >
+      <Dialog.Title className="confirmDialogTitle">{plan ? "Review & install" : "Add skill"}</Dialog.Title>
+      <Dialog.Description id="add-skill-dialog-description" className="dialogVisuallyHidden">
+        {plan ? "Review the selected skills and install them with the chosen settings." : "Choose a skill source and review it before installation."}
+      </Dialog.Description>
+      <div className={`addSkillGrid ${plan ? "hasPlan" : "sourceStage"}`}>
+        <div className="skillSourceField">
+          <form
+            className="skillSourceForm"
+            aria-busy={marketplaceBusy || busyAction === "preview"}
+            onSubmit={(event) => {
+              event.preventDefault();
+              resolveSourceInput();
             }}
           >
-            <SelectTrigger className="addSkillSelectTrigger" label="Skill install target">
-              <Select.Value>
-                <AgentOptionLabel agent={target} label={targetDisplayName} />
-              </Select.Value>
-            </SelectTrigger>
-            <Select.Portal>
-              <Select.Content
-                className="skillMenuContent addSkillSelectContent"
-                position="popper"
-                side="bottom"
-                align="start"
-                sideOffset={6}
-              >
-                <Select.Viewport>
-                  {visibleInstallTargets.map((option) => (
-                    <Select.Item className="skillMenuItem" value={option.id} key={option.id}>
-                      <Select.ItemText>
-                        <AgentOptionLabel agent={option.id} label={option.displayName} />
-                      </Select.ItemText>
-                      <Select.ItemIndicator className="selectItemIndicator">
-                        <Check size={13} strokeWidth={2.6} />
-                      </Select.ItemIndicator>
-                    </Select.Item>
-                  ))}
-                </Select.Viewport>
-              </Select.Content>
-            </Select.Portal>
-          </Select.Root>
+            <SearchField
+              value={source}
+              onChange={(event) => handleSourceChange(event.target.value)}
+              onClear={() => handleSourceChange("")}
+              onKeyDown={(event) => {
+                if (event.key !== "Enter") return;
+                event.preventDefault();
+                resolveSourceInput();
+              }}
+              placeholder="Search skills or paste a source"
+              aria-label="Search skills or paste a source"
+            />
+          </form>
+          {(marketplaceBusy || busyAction === "preview") && (
+            <LoadingState
+              className={plan ? "loadingStateCompact" : ""}
+              label={marketplaceBusy ? "Searching marketplaces" : "Loading skill"}
+            />
+          )}
+          {sourceCandidates.length > 0 && !plan && !marketplaceBusy && (
+            <>
+              <div className="sourceCandidatesHeader">
+                <span>{sourceCandidatesLabel}</span>
+              </div>
+              <div className="sourceCandidates" data-no-drag>
+                {sourceCandidates.map((skill) => (
+                  <button
+                    type="button"
+                    className="sourceCandidate"
+                    key={skill.id + "-" + skill.source}
+                    onClick={() => selectMarketplaceSource(skill)}
+                  >
+                    <span className="sourceCandidateIcon" aria-hidden="true">
+                      <Sparkles size={15} />
+                    </span>
+                    <span className="sourceCandidateCopy">
+                      <strong>
+                        {skill.name}
+                        <em>{skill.kind}</em>
+                      </strong>
+                      <small>{skill.description || skill.source}</small>
+                    </span>
+                    <span className="sourceCandidateMeta">
+                      {skill.metric != null
+                        ? String(skill.metric.toLocaleString()) + (skill.metricLabel ? " " + skill.metricLabel : "")
+                        : skill.trustLabel}
+                      <ChevronRight size={14} aria-hidden="true" />
+                    </span>
+                  </button>
+                ))}
+              </div>
+            </>
+          )}
+          {marketplaceError && <div className="dialogError" data-selectable-text>{marketplaceError}</div>}
         </div>
-        <div className="dialogField">
-          <span>Scope</span>
-          <Select.Root
-            value={scope}
-            onValueChange={(value) => {
-              setScope(value);
-              const selected = installTargets.find((option) => option.id === target);
-              if (value === "global" && selected && !selected.supportsGlobal) setTarget("shared");
-              setPlan(null);
-              setSelectedRoots([]);
-              setCreateWrapper(false);
-              setSkillSearch("");
-            }}
-          >
-            <SelectTrigger className="addSkillSelectTrigger" label="Skill install scope">
-              <Select.Value>{scope}</Select.Value>
-            </SelectTrigger>
-            <Select.Portal>
-              <Select.Content className="skillMenuContent addSkillSelectContent" position="popper" side="bottom" align="start" sideOffset={6}>
-                <Select.Viewport>
-                  {["global", "project"].map((value) => (
-                    <Select.Item className="skillMenuItem" value={value} key={value}>
-                      <Select.ItemText>{value}</Select.ItemText>
-                      <Select.ItemIndicator className="selectItemIndicator"><Check size={13} strokeWidth={2.6} /></Select.ItemIndicator>
-                    </Select.Item>
-                  ))}
-                </Select.Viewport>
-              </Select.Content>
-            </Select.Portal>
-          </Select.Root>
-        </div>
-        <div className="dialogField">
-          <span>Visibility</span>
-          <Select.Root
-            value={visibility}
-            onValueChange={(value) => {
-              setVisibility(value as SkillVisibility);
-              setPlan(null);
-              setSelectedRoots([]);
-              setCreateWrapper(false);
-              setSkillSearch("");
-            }}
-          >
-            <SelectTrigger className="addSkillSelectTrigger" label="Skill visibility">
-              <Select.Value>{visibility}</Select.Value>
-            </SelectTrigger>
-            <Select.Portal>
-              <Select.Content
-                className="skillMenuContent addSkillSelectContent"
-                position="popper"
-                side="bottom"
-                align="start"
-                sideOffset={6}
-              >
-                <Select.Viewport>
-                  {editableSkillVisibilities.map((option) => (
-                    <Select.Item className="skillMenuItem" value={option} key={option}>
-                      <Select.ItemText>{option}</Select.ItemText>
-                      <Select.ItemIndicator className="selectItemIndicator">
-                        <Check size={13} strokeWidth={2.6} />
-                      </Select.ItemIndicator>
-                    </Select.Item>
-                  ))}
-                </Select.Viewport>
-              </Select.Content>
-            </Select.Portal>
-          </Select.Root>
-        </div>
-      <div className="addSkillModeField">
-        <span>Mode</span>
-        <ToggleGroup.Root
-          className="addSkillModeControl"
-          type="single"
-          value={copy ? "copy" : "symlink"}
-          onValueChange={(value) => {
-            if (!value) return;
-            setCopy(value === "copy");
-            setPlan(null);
-            setSelectedRoots([]);
-            setCreateWrapper(false);
-            setSkillSearch("");
-          }}
-          aria-label="Skill install mode"
-        >
-          <ToggleGroup.Item className="addSkillModeItem" value="symlink" aria-label="Install using symlink">
-            Symlink
-          </ToggleGroup.Item>
-          <ToggleGroup.Item className="addSkillModeItem" value="copy" aria-label="Install by copying files">
-            Copy
-          </ToggleGroup.Item>
-        </ToggleGroup.Root>
       </div>
-      </div>
-      {error && <div className="addSkillError" data-no-drag data-selectable-text>{error}</div>}
+      {error && <div className="dialogError" data-no-drag data-selectable-text>{error}</div>}
       {plan && (
-        <div className="addSkillResults">
+        <div className="addSkillReview">
+          <div className="addSkillResults">
           <div className="addSkillSummary">
             <span>{available.length === 1 ? "1 skill found" : `${available.length} skills found`}</span>
             {dependencySelectedCount > 0 && (
@@ -1051,39 +1176,37 @@ export function AddSkillDialog({ onClose, onInstalled, onRequestWrapper }: AddSk
               <span>Select all</span>
             </div>
             <div className="addSkillQuickSelect" aria-label="Skill selection toggles">
-              <button
-                type="button"
-                className={newSelected ? "isActive" : ""}
+              <Button
+                size="sm"
+                variant={newSelected ? "primary" : "ghost"}
                 aria-pressed={newSelected}
                 onClick={() => toggleSkillGroup(newSkills)}
                 disabled={newSkills.length === 0}
               >
                 New
-              </button>
-              <button
-                type="button"
-                className={existingSelected ? "isActive" : ""}
+              </Button>
+              <Button
+                size="sm"
+                variant={existingSelected ? "primary" : "ghost"}
                 aria-pressed={existingSelected}
                 onClick={() => toggleSkillGroup(existingSkills)}
                 disabled={existingSkills.length === 0}
               >
                 Existing
-              </button>
+              </Button>
             </div>
           </div>
           {showSkillSearch && (
-            <div className="addSkillSearch">
-              <Search size={14} />
-              <input
-                value={skillSearch}
-                onChange={(event) => setSkillSearch(event.target.value)}
-                placeholder="Search skills"
-                aria-label="Search available skills"
-              />
-              {normalizedSkillSearch && (
+            <SearchField
+              value={skillSearch}
+              onChange={(event) => setSkillSearch(event.target.value)}
+              onClear={() => setSkillSearch("")}
+              placeholder="Search skills"
+              aria-label="Search available skills"
+              endContent={normalizedSkillSearch ? (
                 <span>{searchMatches.length === 1 ? "1 match" : `${searchMatches.length} matches`}</span>
-              )}
-            </div>
+              ) : null}
+            />
           )}
           <div className="addSkillList">
             {available.map((skill) => {
@@ -1117,7 +1240,7 @@ export function AddSkillDialog({ onClose, onInstalled, onRequestWrapper }: AddSk
                   disabled={blocked || lockedDependency}
                   onChange={() => toggleSkill(skill.name)}
                 />
-                <span>
+                <span className="addSkillItemContent">
                   <strong>
                     {skill.name}
                     {statusLabel && <em>{statusLabel}</em>}
@@ -1125,16 +1248,49 @@ export function AddSkillDialog({ onClose, onInstalled, onRequestWrapper }: AddSk
                   </strong>
                   <small>{skill.description || skill.relative_path || skill.relativePath || "No description"}</small>
                   {(dependencyNames.length > 0 || requiredBy.length > 0) && (
-                    <small className="addSkillDependencies">
+                    <small>
                       {dependencyNames.length > 0 ? `Depends on ${dependencyNames.join(", ")}` : `Required by ${requiredBy.join(", ")}`}
                     </small>
                   )}
                 </span>
+                <IconButton
+                  aria-label={`Preview ${skill.name} SKILL.md`}
+                  aria-busy={skillPreviewBusy === skill.name}
+                  disabled={Boolean(skillPreviewBusy)}
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    void previewSkill(skill.name);
+                  }}
+                >
+                  {skillPreviewBusy === skill.name ? <LoadingIcon size={13} /> : <Eye size={14} />}
+                </IconButton>
               </div>
             );})}
           </div>
+          {skillPreviewError && <div className="skillPreviewError" data-selectable-text>{skillPreviewError}</div>}
+          {skillPreview && (
+            <section className="skillMarkdownPreview" data-no-drag>
+              <header className="skillMarkdownPreviewHeader">
+                <div>
+                  <strong>{skillPreview.name}</strong>
+                  <small>{skillPreview.relativePath}</small>
+                </div>
+                <IconButton
+                  aria-label="Close skill preview"
+                  onClick={() => setSkillPreview(null)}
+                >
+                  <X size={14} />
+                </IconButton>
+              </header>
+              <div className="skillMarkdownPreviewBody">
+                <Suspense fallback={<LoadingInline label="Loading preview" />}>
+                  <TiptapMarkdownPreview content={skillPreview.content} />
+                </Suspense>
+              </div>
+            </section>
+          )}
           {selectedRoots.length > 1 && (
-            <label className={`addSkillReplaceField ${createWrapper ? "isChecked" : ""}`}>
+            <label className="checkboxLine">
               <SelectionCheckbox
                 checked={createWrapper}
                 label="Create a wrapper skill after installation"
@@ -1142,23 +1298,89 @@ export function AddSkillDialog({ onClose, onInstalled, onRequestWrapper }: AddSk
               />
               <span>
                 <strong>Create wrapper skill after install</strong>
+                <br />
                 <small>Continue to name a wrapper for the selected skills.</small>
               </span>
             </label>
           )}
+          </div>
+          <aside className="addSkillSettings" aria-label="Install options">
+            <div className="dialogField">
+              <strong>Install options</strong>
+              <small>{selected.length} selected</small>
+            </div>
+            <div className="dialogField">
+              <span>Target</span>
+              <SelectControl
+                value={target}
+                onValueChange={(value) => {
+                  if (busy) return;
+                  setTarget(value);
+                  void previewSource(source, { target: value });
+                }}
+                label="Skill install target"
+                options={visibleInstallTargets.map((option) => ({ value: option.id, label: option.displayName }))}
+                className="dialogSelectTrigger"
+                side="bottom"
+                align="start"
+                renderValue={(option) => option ? <AgentOptionLabel agent={option.value} label={option.label} /> : null}
+                renderOption={(option) => <AgentOptionLabel agent={option.value} label={option.label} />}
+              />
+            </div>
+            <div className="dialogField">
+              <span>Visibility</span>
+              <SelectControl
+                value={visibility}
+                onValueChange={(value) => {
+                  if (busy) return;
+                  setVisibility(value as SkillVisibility);
+                  void previewSource(source, { visibility: value as SkillVisibility });
+                }}
+                label="Skill visibility"
+                options={editableSkillVisibilities.map((option) => ({ value: option, label: option }))}
+                className="dialogSelectTrigger"
+                side="bottom"
+                align="start"
+              />
+            </div>
+            <div className="dialogField">
+              <span>Mode</span>
+              <SegmentedControl
+                variant="accent"
+                fullWidth
+                value={copy ? "copy" : "symlink"}
+                onValueChange={(value) => {
+                  if (!value) return;
+                  if (busy) return;
+                  const nextCopy = value === "copy";
+                  setCopy(nextCopy);
+                  void previewSource(source, { copy: nextCopy });
+                }}
+                aria-label="Skill install mode"
+              >
+                <SegmentedControlItem value="symlink" aria-label="Install using symlink">
+                  Symlink
+                </SegmentedControlItem>
+                <SegmentedControlItem value="copy" aria-label="Install by copying files">
+                  Copy
+                </SegmentedControlItem>
+              </SegmentedControl>
+            </div>
+          </aside>
         </div>
       )}
       <DialogActionBar onCancel={onClose}>
-        <DialogAdvanceButton
-          label={advanceText}
-          ariaLabel={advanceLabel}
-          busy={busy}
-          disabled={!canAdvance}
-          onClick={advance}
-        />
+        {plan && (
+          <DialogAdvanceButton
+            label={advanceText}
+            ariaLabel={advanceLabel}
+            busy={busyAction === "install"}
+            disabled={!canInstall}
+            onClick={advance}
+          />
+        )}
       </DialogActionBar>
-      </Dialog.Content>
-    </Dialog.Portal>
+    </DialogShell>
   );
 }
 
@@ -1175,6 +1397,7 @@ export type SkillsViewProps = {
   onApplyUpdates: (names: string[], onApplied?: () => void) => void;
   onDeleteSkills: (names: string[], onApplied?: () => void) => void;
   onAddInstalled: (result: SkillInstallResult) => void;
+  installedAgentKeys: string[];
 };
 
 export function SkillsView({
@@ -1190,18 +1413,33 @@ export function SkillsView({
   onApplyUpdates,
   onDeleteSkills,
   onAddInstalled,
+  installedAgentKeys,
 }: SkillsViewProps) {
   const [selected, setSelected] = useState<string[]>([]);
   const [query, setQuery] = useState("");
+  const [viewMode, setViewMode] = useState<SkillsViewMode>("list");
   const [showWrapper, setShowWrapper] = useState(false);
   const [showAddSkill, setShowAddSkill] = useState(false);
   const [installedWrapperSkills, setInstalledWrapperSkills] = useState<SkillRecord[]>([]);
+  const [skillLocatorRequest, setSkillLocatorRequest] = useState("");
+  const skillListBodyRef = useRef<HTMLDivElement | null>(null);
   const normalizedQuery = query.trim().toLowerCase();
   const visibleSkills = useMemo(() => {
     if (!normalizedQuery) return skillItems;
     return skillItems.filter((skill) => [skill.name, skill.description].some((value) => `${value ?? ""}`.toLowerCase().includes(normalizedQuery)));
   }, [normalizedQuery, skillItems]);
   const tableRows = loadingSkills ? [] : visibleSkills;
+  const networkNodes = useMemo(
+    () => visibleSkills.map((skill) => ({
+      name: skill.name,
+      label: skill.name,
+      description: skill.description,
+      dependencies: skill.dependencies,
+      dependents: skill.dependents,
+      kind: skill.isWrapper ? "wrapper" : `${skill.section ?? "local"}`.toLowerCase(),
+    })),
+    [visibleSkills],
+  );
   const selectedSkills = useMemo(() => skillItems.filter((skill) => selected.includes(skill.id)), [selected, skillItems]);
 
   useEffect(() => {
@@ -1232,6 +1470,61 @@ export function SkillsView({
     onDeleteSkills(names, clearSelection);
   }, [clearSelection, onDeleteSkills]);
 
+  const handleInstalled = useCallback((result: SkillInstallResult) => {
+    onAddInstalled(result);
+    const name = installedSkillName(result);
+    if (!name) return;
+    setQuery("");
+    setViewMode("list");
+    setSkillLocatorRequest(name);
+  }, [onAddInstalled]);
+
+  useEffect(() => {
+    if (!skillLocatorRequest) return undefined;
+    let frame = 0;
+    let attempts = 0;
+    const locate = () => {
+      frame = 0;
+      const root = skillListBodyRef.current?.querySelector<HTMLElement>(".dataTableBodyScroll");
+      if (!root) {
+        if (attempts < 20) {
+          attempts += 1;
+          frame = window.requestAnimationFrame(locate);
+        } else {
+          setSkillLocatorRequest("");
+        }
+        return;
+      }
+      const row = [...root.querySelectorAll<HTMLElement>("[data-row-id]")]
+        .find((candidate) => candidate.dataset.rowId === skillLocatorRequest);
+      if (row) {
+        const rootBounds = root.getBoundingClientRect();
+        const rowBounds = row.getBoundingClientRect();
+        const desiredTop = root.scrollTop
+          + rowBounds.top
+          - rootBounds.top
+          - (root.clientHeight - rowBounds.height) / 2;
+        const maxScrollTop = Math.max(0, root.scrollHeight - root.clientHeight);
+        root.scrollTo({
+          top: Math.min(maxScrollTop, Math.max(0, desiredTop)),
+          behavior: "smooth",
+        });
+        setSkillLocatorRequest("");
+        return;
+      }
+      if (attempts < 20) {
+        attempts += 1;
+        frame = window.requestAnimationFrame(locate);
+      } else {
+        setSkillLocatorRequest("");
+      }
+    };
+    frame = window.requestAnimationFrame(locate);
+    return () => {
+      if (frame !== 0) window.cancelAnimationFrame(frame);
+    };
+  }, [skillLocatorRequest, tableRows]);
+
   const columns = useMemo((): ColumnDef<SkillTableRow>[] => [
     {
       key: "main",
@@ -1240,6 +1533,15 @@ export function SkillsView({
       sortValue: (skill) => skill.name?.toLowerCase() ?? "",
       width: "minmax(250px, 1fr)",
       render: (skill) => <SkillMainCell skill={skill} openSkill={openSkill} onApplyUpdates={applyUpdatesAndClear} />,
+    },
+    {
+      key: "agents",
+      header: "Agents",
+      type: "enum",
+      groupBy: (skill) => (skill.agents ?? []).join(", ") || "None",
+      sortValue: (skill) => (skill.agents ?? []).join(",").toLowerCase(),
+      width: "120px",
+      render: (skill) => <AgentChips agents={skill.agents} />,
     },
     {
       key: "origin",
@@ -1252,15 +1554,6 @@ export function SkillsView({
       value: skillOriginLabel,
     },
     {
-      key: "agents",
-      header: "Agents",
-      type: "enum",
-      groupBy: (skill) => (skill.agents ?? []).join(", ") || "None",
-      sortValue: (skill) => (skill.agents ?? []).join(",").toLowerCase(),
-      width: "120px",
-      render: (skill) => <AgentChips agents={skill.agents} />,
-    },
-    {
       key: "visibility",
       header: "Visibility",
       type: "enum",
@@ -1268,6 +1561,24 @@ export function SkillsView({
       sortValue: (skill) => skill.visibility?.toLowerCase() ?? "",
       width: "176px",
       render: (skill) => <Visibility value={skill.visibility ?? SkillVisibility.Auto} skill={skill} onSetVisibility={setVisibilityAndClear} />,
+    },
+    {
+      key: "ctime",
+      header: "Created",
+      type: "date",
+      sortValue: (skill) => skill.ctime ?? "",
+      width: "104px",
+      value: (skill) => compactDateTime(skill.ctime),
+      empty: "",
+    },
+    {
+      key: "mtime",
+      header: "Modified",
+      type: "date",
+      sortValue: (skill) => skill.mtime ?? "",
+      width: "104px",
+      value: (skill) => compactDateTime(skill.mtime),
+      empty: "",
     },
     {
       key: "actions",
@@ -1308,13 +1619,19 @@ export function SkillsView({
             </DropdownMenu.Content>
           </DropdownMenu.Portal>
         </DropdownMenu.Root>
-        <button
+        <StatefulButton
           className="skillApplyUpdatesButton"
-          disabled={applyingUpdates || updateNames.length === 0}
+          size="sm"
+          width={136}
+          minWidth={136}
+          state={applyingUpdates ? "loading" : "idle"}
+          aria-label={applyingUpdates ? "Preparing update preview" : `Update${updateNames.length ? ` (${updateNames.length})` : ""}`}
+          disabled={updateNames.length === 0}
           onClick={() => applyUpdatesAndClear(updateNames)}
+          loadingContent={<LoadingIcon size={15} />}
         >
-          {applyingUpdates ? "Preparing preview" : `Update${updateNames.length ? ` (${updateNames.length})` : ""}`}
-        </button>
+          Update{updateNames.length ? ` (${updateNames.length})` : ""}
+        </StatefulButton>
         <button aria-label="Create wrapper skill" onClick={() => setShowWrapper(true)}><PackagePlus size={15} />Create wrapper skill</button>
         <button
           className="danger"
@@ -1333,53 +1650,85 @@ export function SkillsView({
     <section className="content skillsPage">
       <ContentTopDragStrip />
       <PageHeader title="Skills">
-        <SearchField placeholder="Search skills" value={query} onChange={(event) => setQuery(event.target.value)} />
-        <button
-          className="iconButton"
+        <ToggleGroup.Root
+          className="skillsViewToggle"
+          type="single"
+          value={viewMode}
+          onValueChange={(value) => {
+            if (value === "list" || value === "network") setViewMode(value);
+          }}
+          aria-label="Skills view"
+        >
+          <ToggleGroup.Item className="skillsViewToggleItem" value="list" aria-label="Show skills as a list">
+            <List size={15} aria-hidden="true" />
+          </ToggleGroup.Item>
+          <ToggleGroup.Item className="skillsViewToggleItem" value="network" aria-label="Show skill relationships">
+            <Waypoints size={15} aria-hidden="true" />
+          </ToggleGroup.Item>
+        </ToggleGroup.Root>
+        <SearchField placeholder="Search skills" value={query} onChange={(event) => setQuery(event.target.value)} onClear={() => setQuery("")} />
+        <IconButton
           disabled={loadingSkills}
           onClick={onRefresh}
           aria-label="Refresh skills and check updates"
+          aria-busy={checkingUpdates}
         >
           {checkingUpdates ? <LoadingIcon size={16} /> : <RefreshCw size={16} />}
-        </button>
+        </IconButton>
         {updateError && <span className="skillUpdateError" role="alert">{updateError}</span>}
-        <Dialog.Root open={showAddSkill} onOpenChange={setShowAddSkill}>
-          <Dialog.Trigger asChild>
-            <button className="iconButton filled" aria-label="Add skill"><Plus size={16} /></button>
-          </Dialog.Trigger>
-          <AddSkillDialog
-            onClose={() => setShowAddSkill(false)}
-            onInstalled={onAddInstalled}
-            onRequestWrapper={(skills) => {
-              setInstalledWrapperSkills(skills);
-              setShowWrapper(true);
-            }}
-          />
-        </Dialog.Root>
+        <AddSkillDialog
+          open={showAddSkill}
+          onOpenChange={setShowAddSkill}
+          trigger={(
+            <Dialog.Trigger asChild>
+              <IconButton className="filled" aria-label="Add skill"><Plus size={16} /></IconButton>
+            </Dialog.Trigger>
+          )}
+          onClose={() => setShowAddSkill(false)}
+          onInstalled={handleInstalled}
+          installedAgentKeys={installedAgentKeys}
+          onRequestWrapper={(skills) => {
+            setInstalledWrapperSkills(skills);
+            setShowWrapper(true);
+          }}
+        />
       </PageHeader>
-      <DataTable
-        rows={tableRows}
-        columns={columns}
-        getRowId={(skill) => skill.id}
-        getRowLabel={(skill) => skill.name}
-        selectable={(skill) => isSkillRowSelectable(skill)}
-        selectedIds={selected}
-        onSelectionChange={setSelected}
-        enableMarquee
-        defaultGroupBy="origin"
-        onRowClick={openSkill}
-        rowContextMenu={rowContextMenu}
-        bottomBar={bottomBar}
-        bottomBarCheckboxLabel="Select visible skills from toolbar"
-        selectionLabel="skills"
-        loading={loadingSkills}
-        loadingLabel={<LoadingInline label="Loading skills" />}
-        emptyState={normalizedQuery ? (
-          <><Hammer size={20} /><span>No skills match this search</span><span>Try another search or clear filters.</span></>
-        ) : (
-          <><Hammer size={20} /><span>No skills yet</span><span>Add a skill to install and manage it here.</span></>
-        )}
-      />
+      {viewMode === "network" ? (
+        <SkillRelationshipMap
+          nodes={loadingSkills ? [] : networkNodes}
+          onOpenSkill={(name) => {
+            const skill = skillItems.find((item) => item.name === name);
+            if (skill) openSkill(skill);
+          }}
+        />
+      ) : (
+        <div className="skillsListBody" ref={skillListBodyRef}>
+          <DataTable
+            rows={tableRows}
+            columns={columns}
+            getRowId={(skill) => skill.id}
+            getRowLabel={(skill) => skill.name}
+            selectable={(skill) => isSkillRowSelectable(skill)}
+            selectedIds={selected}
+            onSelectionChange={setSelected}
+            enableMarquee
+            defaultGroupBy="origin"
+            defaultSort={{ key: "mtime", direction: "desc" }}
+            onRowClick={openSkill}
+            rowContextMenu={rowContextMenu}
+            bottomBar={bottomBar}
+            bottomBarCheckboxLabel="Select visible skills from toolbar"
+            selectionLabel="skills"
+            loading={loadingSkills}
+            loadingLabel="Loading skills"
+            emptyState={normalizedQuery ? (
+              <><Hammer size={20} /><span>No skills match this search</span><span>Try another search or clear filters.</span></>
+            ) : (
+              <><Hammer size={20} /><span>No skills yet</span><span>Add a skill to install and manage it here.</span></>
+            )}
+          />
+        </div>
+      )}
       <WrapperDialog
         open={showWrapper}
         selectedSkills={installedWrapperSkills.length > 0 ? installedWrapperSkills : selectedSkills}

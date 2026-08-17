@@ -4,16 +4,20 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "vite --host 127.0.0.1",
+    "dev": "node scripts/dev-web.mjs",
+    "dev:vite": "vite --host 127.0.0.1",
     "icon:generate": "node scripts/generate-app-icon.mjs",
+    "check:agent-icons": "node scripts/check-agent-icons.mjs",
     "check:no-title-tooltips": "node scripts/check-no-title-tooltips.mjs",
+    "check:ui-boundaries": "node scripts/check-ui-boundaries.mjs",
     "typecheck": "tsc --noEmit",
     "build": "vite build",
     "e2e:align": "node scripts/alignment-e2e.mjs",
     "preview": "vite preview --host 127.0.0.1",
     "tauri": "tauri",
-    "dev:tauri": "tauri dev",
+    "dev:tauri": "node scripts/dev-tauri.mjs",
     "build:tauri": "tauri build",
+    "e2e:real-data": "node scripts/real-data-performance.mjs",
     "build:dmg": "../../scripts/build-release.sh"
   },
   "dependencies": {

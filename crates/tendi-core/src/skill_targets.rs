@@ -80,14 +80,9 @@ impl<'de> Deserialize<'de> for SkillTarget {
 impl From<AgentKind> for SkillTarget {
     fn from(value: AgentKind) -> Self {
         Self(
-            match value {
-                AgentKind::Codex => "codex",
-                AgentKind::Cursor => "cursor",
-                AgentKind::Claude => "claude",
-                AgentKind::Shared => "shared",
-                AgentKind::Unknown => "unknown",
-            }
-            .to_string(),
+            crate::providers::agent_provider(value)
+                .storage_key()
+                .to_string(),
         )
     }
 }

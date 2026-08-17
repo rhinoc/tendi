@@ -20,18 +20,16 @@ export function DialogAdvanceButton({
   onClick,
   ariaLabel,
 }: DialogAdvanceButtonProps) {
-  const currentLabel = busy ? busyLabel : label;
   return (
     <DialogActionButton
       variant="primary"
       className={`dialogAdvanceButton ${busy ? "isBusy" : ""}`}
-      aria-label={ariaLabel ?? currentLabel}
+      aria-label={ariaLabel ?? (busy ? busyLabel : label)}
       aria-busy={busy}
       onClick={onClick}
       disabled={disabled || busy}
     >
-      <span>{currentLabel}</span>
-      {busy ? <LoadingIcon size={16} /> : <ChevronRight size={16} />}
+      {busy ? <LoadingIcon size={16} /> : <><span>{label}</span><ChevronRight size={16} /></>}
     </DialogActionButton>
   );
 }

@@ -4,7 +4,7 @@ import type { Extension } from "@codemirror/state";
 import { EditorView, type ViewUpdate } from "@codemirror/view";
 
 import { codeMirrorSearchExtension } from "./codemirror-search.ts";
-import { LoadingInline } from "./LoadingInline.tsx";
+import { EditorStatePlaceholder } from "./EditorStatePlaceholder.tsx";
 import { findTextRanges } from "./text-ranges.ts";
 
 const codeMirrorBasicSetup = {
@@ -12,6 +12,7 @@ const codeMirrorBasicSetup = {
   highlightActiveLine: true,
   highlightActiveLineGutter: true,
   searchKeymap: true,
+  syntaxHighlighting: false,
 };
 
 export type CodeMirrorLanguage = "json" | "markdown" | "toml" | "yaml";
@@ -28,7 +29,7 @@ async function loadCodeMirrorModules(activeLanguage: CodeMirrorLanguage | undefi
     languageExtension = markdown();
     promptXmlTagExtension = codeMirrorPromptXmlTagExtension();
   } else if (activeLanguage === "json") {
-    languageExtension = (await import("@codemirror/lang-json")).json();
+    languageExtension = (await import("../../lib/codemirror-json.ts")).codeMirrorJson();
   } else if (activeLanguage === "toml") {
     const [{ StreamLanguage }, { toml }] = await Promise.all([
       import("@codemirror/language"),
@@ -128,15 +129,21 @@ export function CodeMirrorFileEditor({
     if (!loadedModules || loadedModules.activeLanguage !== activeLanguage || loadedModules.showDiff !== showDiff) return shellExtensions;
     const next: Extension[] = [
       loadedModules.baseTheme,
-      loadedModules.syntaxHighlighting(loadedModules.highlightStyle),
       ...shellExtensions,
     ];
     if (loadedModules.languageExtension) next.push(loadedModules.languageExtension);
+    next.push(loadedModules.syntaxHighlighting(loadedModules.highlightStyle));
     if (loadedModules.promptXmlTagExtension) next.push(loadedModules.promptXmlTagExtension);
     if (loadedModules.diffExtensionFactory) next.push(loadedModules.diffExtensionFactory(originalContent ?? ""));
-    if (searchQuery.trim()) next.push(codeMirrorSearchExtension(searchQuery, Math.min(searchIndex, searchMatches.length - 1)));
+    if (searchQuery.trim()) {
+      next.push(codeMirrorSearchExtension(
+        searchQuery,
+        Math.min(searchIndex, searchMatches.length - 1),
+        searchMatches,
+      ));
+    }
     return next;
-  }, [activeLanguage, loadedModules, originalContent, searchIndex, searchMatches.length, searchQuery, shellExtensions, showDiff]);
+  }, [activeLanguage, loadedModules, originalContent, searchIndex, searchMatches, searchQuery, shellExtensions, showDiff]);
 
   useEffect(() => {
     onSearchMatchCount?.(searchMatches.length);
@@ -153,7 +160,7 @@ export function CodeMirrorFileEditor({
   }, [searchIndex, searchMatches, searchQuery]);
 
   if (!loadedModules || loadedModules.activeLanguage !== activeLanguage || loadedModules.showDiff !== showDiff) {
-    return <div className="emptyState editorLoadingState"><LoadingInline label="Loading file" /></div>;
+    return <EditorStatePlaceholder label="Loading file" />;
   }
 
   return (

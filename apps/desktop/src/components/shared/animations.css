@@ -60,12 +60,10 @@
   transform: scale(1);
 }
 
-.skillsEmpty,
 .dataTableEmpty {
   animation: none;
 }
 
-.skillsEmpty > *,
 .dataTableEmpty > * {
   opacity: 0;
   animation: uiEnter 180ms ease-out both;
@@ -76,7 +74,6 @@
     transition: none;
   }
 
-  .skillsEmpty > *,
   .dataTableEmpty > * {
     opacity: 1;
     animation: none;

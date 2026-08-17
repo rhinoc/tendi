@@ -1,0 +1,100 @@
+.appButton {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 0 14px;
+  border: 0;
+  border-radius: var(--radius-md);
+  color: var(--text);
+  background: var(--panel-bg);
+  box-shadow: var(--shadow-border);
+  cursor: pointer;
+  font-size: var(--text-ui);
+  font-weight: 600;
+  line-height: 1;
+  white-space: nowrap;
+  transition-property: box-shadow, background-color, color, transform;
+  transition-duration: 140ms;
+  transition-timing-function: ease-out;
+}
+
+.appButton-sm {
+  height: 28px;
+  min-width: 0;
+  padding: 0 9px;
+  border-radius: var(--radius-sm);
+  font-size: 12px;
+}
+
+.appButton-md {
+  height: 38px;
+  min-width: 104px;
+}
+
+.appButton-lg {
+  height: 42px;
+  min-width: 120px;
+  padding: 0 16px;
+}
+
+.appButton:hover {
+  box-shadow: var(--shadow-border-hover);
+}
+
+.appButton:active:not(:disabled) {
+  transform: scale(var(--press-scale));
+}
+
+.appButton:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: -2px;
+}
+
+.appButton-primary {
+  color: var(--accent-contrast);
+  background: var(--accent);
+  box-shadow: none;
+}
+
+.appButton-primary:hover {
+  background: var(--accent-hover);
+  box-shadow: none;
+}
+
+.appButton-primary:active:not(:disabled) {
+  background: var(--accent-active);
+}
+
+.appButton-ghost {
+  color: var(--muted);
+  background: transparent;
+  box-shadow: none;
+}
+
+.appButton-ghost:hover {
+  color: var(--text);
+  background: var(--hover-fill-strong);
+  box-shadow: none;
+}
+
+.appButton-danger {
+  color: var(--panel-bg);
+  background: var(--orange);
+  box-shadow: none;
+}
+
+.appButton-danger:hover {
+  background: var(--danger);
+  box-shadow: none;
+}
+
+.appButton:disabled,
+.appButton:disabled:hover {
+  color: var(--faint);
+  background: var(--control-fill);
+  box-shadow: none;
+  cursor: default;
+  opacity: 1;
+  transform: none;
+}

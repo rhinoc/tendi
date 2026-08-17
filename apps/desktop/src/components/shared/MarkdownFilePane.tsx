@@ -1,18 +1,20 @@
 import { Tooltip } from "./Tooltip.tsx";
-import { lazy, Suspense, useCallback, useEffect, useRef, useState, type MouseEvent, type ReactNode } from "react";
+import { lazy, Suspense, useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { Check, ChevronDown, ChevronUp, Code2, Eye, Save, Search, X } from "lucide-react";
 
-import { copyText, isMarkdownPath, isYamlPath } from "../../lib/index.ts";
+import { isJsonPath, isMarkdownPath, isYamlPath } from "../../lib/index.ts";
 import { loadCodeMirrorFileEditor } from "./code-mirror-loader.ts";
 import type { CodeMirrorLanguage } from "./CodeMirrorFileEditor.tsx";
+import { EditorStatePlaceholder } from "./EditorStatePlaceholder.tsx";
 import { LoadingIcon } from "./LoadingIcon.tsx";
-import { LoadingInline } from "./LoadingInline.tsx";
 import { PlainTextFileEditor } from "./PlainTextFileEditor.tsx";
-import { CopyFeedbackIcon, useCopyFeedback } from "./useCopyFeedback.tsx";
+import { CopyButton } from "./CopyButton.tsx";
+import { SearchClearButton } from "./SearchClearButton.tsx";
 
 const CodeMirrorFileEditor = lazy(() => loadCodeMirrorFileEditor().then(({ CodeMirrorFileEditor: component }) => ({ default: component })));
 const TokenStatusBar = lazy(() => import("../TokenStatusBar.tsx").then(({ TokenStatusBar: component }) => ({ default: component })));
 const TiptapMarkdownPreview = lazy(() => import("./TiptapMarkdownPreview.tsx").then(({ TiptapMarkdownPreview: component }) => ({ default: component })));
+const LARGE_PLAIN_TEXT_CHARS = 256 * 1024;
 
 type DeferredTokenStatusBarProps = {
   activePath: string;
@@ -79,8 +81,10 @@ export function MarkdownFilePane({
   saveError = "",
 }: MarkdownFilePaneProps) {
   const markdown = language === "markdown" || (!language && isMarkdownPath(activePath));
-  const activeLanguage = language ?? (isYamlPath(activePath) ? "yaml" : undefined);
-  const useCodeMirror = Boolean(activeLanguage) || markdown;
+  const activeLanguage = language ?? (
+    isYamlPath(activePath) ? "yaml" : isJsonPath(activePath) ? "json" : undefined
+  );
+  const useCodeMirror = Boolean(activeLanguage) || markdown || content.length >= LARGE_PLAIN_TEXT_CHARS;
   const paneRef = useRef<HTMLElement>(null);
   const searchInputRef = useRef<HTMLInputElement>(null);
   const [searchOpen, setSearchOpen] = useState(false);
@@ -91,7 +95,6 @@ export function MarkdownFilePane({
   const [showPreview, setShowPreview] = useState(false);
   const [showDiff, setShowDiff] = useState(false);
   const [selectionText, setSelectionText] = useState("");
-  const { copied: copiedPath, markCopied: markPathCopied } = useCopyFeedback();
   const showEditorDiff = !readOnly && !showPreview && showDiff;
   const hasDiff = diffStats.added > 0 || diffStats.removed > 0;
   const activeSearchIndex = searchCount > 0 ? Math.min(searchIndex, searchCount - 1) : 0;
@@ -122,13 +125,6 @@ export function MarkdownFilePane({
   const handleSearchMatchCount = useCallback((nextCount: number) => {
     setSearchCount(nextCount);
   }, []);
-
-  const copyActivePath = async (event: MouseEvent<HTMLButtonElement>) => {
-    event.preventDefault();
-    event.stopPropagation();
-    await copyText(activePath);
-    markPathCopied();
-  };
 
   useEffect(() => {
     setSearchIndex(0);
@@ -178,17 +174,17 @@ export function MarkdownFilePane({
       onMouseLeave={() => setSearchHovered(false)}
     >
       <div className="codeTabs">
-        <div className={`codeTabTitle ${copiedPath ? "isCopied" : ""}`}>
+        <div className="codeTabTitle">
           <Tooltip content={activePath} onlyWhenTruncated><span>{activePath}</span></Tooltip>
           {copyablePath && activePath ? (
-            <button
-              type="button"
+            <CopyButton
               className="codeTabCopyButton"
-              aria-label={copiedPath ? "Path copied" : "Copy path"}
-              onClick={copyActivePath}
-            >
-              <CopyFeedbackIcon copied={copiedPath} swap={false} />
-            </button>
+              value={activePath}
+              copyLabel="Copy path"
+              copiedLabel="Path copied"
+              iconSize={13}
+              stopPropagation
+            />
           ) : null}
           {!readOnly && showDirtyIndicator && dirty && <span className="dirty">modified</span>}
           {!readOnly && saveState === "saving" && <span className="editorSaveStatus">saving</span>}
@@ -251,6 +247,7 @@ export function MarkdownFilePane({
             }}
             placeholder="Find in file"
           />
+          <SearchClearButton value={searchQuery} onClear={() => setSearchQuery("")} ariaLabel="Clear find query" />
           <span className={`editorFindCount ${searchQuery.trim() && searchCount === 0 ? "empty" : ""}`}>{searchLabel}</span>
           <button className="editorIconButton" aria-label="Previous match" disabled={searchCount === 0} onClick={() => moveSearch(-1)}>
             <ChevronUp size={13} />
@@ -264,7 +261,7 @@ export function MarkdownFilePane({
         </div>
       )}
       {markdown && showPreview ? (
-        <Suspense fallback={<div className="emptyState editorLoadingState"><LoadingInline label="Loading preview" /></div>}>
+        <Suspense fallback={<EditorStatePlaceholder label="Loading preview" />}>
           <TiptapMarkdownPreview
             content={content}
             searchQuery={searchQuery}
@@ -284,7 +281,7 @@ export function MarkdownFilePane({
           onSelectionChange={setSelectionText}
         />
       ) : (
-        <Suspense fallback={<div className="emptyState editorLoadingState"><LoadingInline label="Loading file" /></div>}>
+        <Suspense fallback={<EditorStatePlaceholder label="Loading file" />}>
           <CodeMirrorFileEditor
             content={content}
             originalContent={originalContent}

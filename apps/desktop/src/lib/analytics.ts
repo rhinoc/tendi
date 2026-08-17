@@ -15,7 +15,7 @@ export type AnalyticsCapabilities = {
 };
 
 export type AnalyticsRefreshProgress = {
-  phase: "overview" | "recent" | "backfill" | "watch" | "session";
+  phase: "overview" | "recent" | "backfill" | "watch";
   total: number;
   completed: number;
   parsed: number;
@@ -25,11 +25,6 @@ export type AnalyticsRefreshProgress = {
   running: boolean;
   error?: string | null;
 };
-
-export function supportsResponseTokenUsage(agent: unknown): boolean {
-  const key = `${agent ?? ""}`.toLowerCase().replace(/[^a-z0-9]/g, "");
-  return key === "codex" || key === "claude" || key === "claudecode";
-}
 
 export type AnalyticsRunSummary = {
   started: number;
@@ -50,6 +45,7 @@ export type AnalyticsDay = {
   usage: AnalyticsTokenUsage;
   responses: number;
   sessions: number;
+  sessionsByAgent: Record<string, number>;
   runs: AnalyticsRunSummary;
   aborted: number;
   compacted: number;
@@ -96,29 +92,24 @@ export type OverviewAnalytics = {
   warnings: string[];
 };
 
-export type SessionAnalyticsDetail = {
-  sessionId: string;
-  agent: string;
-  sessionPath: string;
-  capabilities: AnalyticsCapabilities;
-  responses: Array<{
-    index: number;
-    timestamp: string;
-    model: string;
-    usage: AnalyticsTokenUsage;
-    cumulative: AnalyticsTokenUsage;
-  }>;
-  runs: Array<{ start: string; end: string; completed: boolean }>;
-  tools: Array<{ timestamp: string; name: string; server: string }>;
-  skills: Array<{ timestamp: string; name: string }>;
-  aborts: string[];
-  compactions: string[];
-  limitSamples: Array<{ timestamp: string; windowMinutes: number; usedPercent: number }>;
-  malformedLines: number;
-  indexedBytes: number;
-};
-
 export type AnalyticsGranularity = "day" | "week" | "month";
+
+export function selectAnalyticsGranularity(dayCount: number): AnalyticsGranularity {
+  const span = Math.max(1, Math.ceil(dayCount));
+  if (span <= 60) return "day";
+  if (span <= 365) return "week";
+  return "month";
+}
+
+export function stepAnalyticsGranularity(
+  granularity: AnalyticsGranularity,
+  direction: -1 | 1,
+): AnalyticsGranularity {
+  const granularities: AnalyticsGranularity[] = ["day", "week", "month"];
+  const currentIndex = granularities.indexOf(granularity);
+  const nextIndex = Math.max(0, Math.min(granularities.length - 1, currentIndex + direction));
+  return granularities[nextIndex];
+}
 
 export type AnalyticsPeriod = {
   key: string;
@@ -128,6 +119,8 @@ export type AnalyticsPeriod = {
   totalTokens: number;
   responses: number;
   sessions: number;
+  sessionsByAgent: Record<string, number>;
+  sessionPeakDate: string;
   runs: number;
   completedRuns: number;
   unclosedRuns: number;
@@ -202,6 +195,8 @@ export function groupAnalyticsDays(
       totalTokens: 0,
       responses: 0,
       sessions: 0,
+      sessionsByAgent: {},
+      sessionPeakDate: "",
       runs: 0,
       completedRuns: 0,
       unclosedRuns: 0,
@@ -220,8 +215,13 @@ export function groupAnalyticsDays(
     period.totalTokens += day.usage.totalTokens;
     period.responses += day.responses;
     // Daily buckets contain distinct sessions. For wider buckets, keep the
-    // peak daily count instead of double-counting sessions active on many days.
-    period.sessions = Math.max(period.sessions, day.sessions);
+    // the peak day and its agent breakdown instead of double-counting sessions
+    // active on many days.
+    if (day.sessions > period.sessions) {
+      period.sessions = day.sessions;
+      period.sessionsByAgent = { ...day.sessionsByAgent };
+      period.sessionPeakDate = day.date;
+    }
     period.runs += day.runs.started;
     period.completedRuns += day.runs.completed;
     period.unclosedRuns += day.runs.unclosed;

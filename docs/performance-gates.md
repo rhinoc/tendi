@@ -27,6 +27,18 @@ To include the desktop idle CPU check, leave Tendi idle and pass its process ID:
 node scripts/perf-check.mjs --full --app-pid "$(pgrep -n -f '/target/debug/tendi-desktop$')"
 ```
 
+Run the real-data WebView scenario from the desktop package:
+
+```sh
+pnpm --dir apps/desktop run e2e:real-data
+```
+
+This command uses the current `tendi` binary to load the local Skills, Sessions, Rules, Hooks,
+and MCP snapshot, selects the largest readable local transcript, and opens the actual Vite page in
+Playwright. It measures first view, chart scrolling, Sessions scrolling, transcript search, long
+tasks, and long animation frames. It reports counts and byte sizes, not transcript contents. Set
+`TENDI_BIN` when the binary is outside `target/debug/tendi`.
+
 Save a local comparison baseline:
 
 ```sh
@@ -116,6 +128,8 @@ including fixture setup.
 | Settings | N/A: no row detail | Settings save |
 
 The core gates do not measure WebView DOM/layout/paint. Session pagination bounds each backend page,
+while the desktop Git update checker reuses a successful result for 60 seconds and invalidates it when
+the skill scan changes. Git commands are still bounded by local/network timeouts and can be cancelled.
 but repeatedly loading pages can still grow the transcript DOM. Browser automation is intentionally
 not used by this gate.
 

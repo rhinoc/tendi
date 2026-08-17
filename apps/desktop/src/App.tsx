@@ -1,8 +1,8 @@
-import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { lazy, startTransition, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import type { UnlistenFn } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { Group as PanelGroup, Panel } from "react-resizable-panels";
+import { Group as PanelGroup, Panel, usePanelRef } from "react-resizable-panels";
 import { Accordion, Checkbox, ContextMenu, Dialog, DropdownMenu, Select, ToggleGroup } from "radix-ui";
 import {
   ArrowLeft,
@@ -80,12 +80,12 @@ import traeIcon from "@lobehub/icons-static-svg/icons/trae-color.svg";
 import type { ComponentProps } from "react";
 import type { RuntimeData } from "./lib/data.ts";
 import { applyAppearance, listenForSystemAppearanceChange, normalizeAppearance, normalizeThemePreferences, readCachedAppearance, readCachedThemePreferences, type Appearance, type ColorTheme, type ThemePreferences } from "./lib/appearance.ts";
-import { COLLAPSED_SIDEBAR_SIZE, SIDEBAR_SIZE, SkillChangeCommand, SkillVisibility, TauriCommand, applySessionDelta, applySessionProjectDelta, applySkillUpdateReports, applyVisibilityState, clearSkillUpdateAvailability, fallbackAgents, hookSourcePath, hookTrustHash, initialData, mergeSessionRows, mergeSkillListPreservingUpdates, navItems, normalizeDomainRows, normalizeReport, normalizeSession, normalizeTranscriptPage, safeInvoke, sameAgent, sessionIdentity, sessionLaunchPayload, sessionLogicalIdentity } from "./lib/index.ts";
-import type { BundledSkillStatus, CliInstallStatus, SessionAnalyticsDetail, SessionIdentityRecord, SessionProjectDelta, TranscriptPage } from "./lib/index.ts";
+import { COLLAPSED_SIDEBAR_SIZE, SIDEBAR_SIZE, SkillChangeCommand, SkillVisibility, TauriCommand, agentIdentityKey, applySessionDelta, applySessionProjectDelta, applySkillUpdateReports, applyVisibilityState, clearSkillUpdateAvailability, fallbackAgents, hookSourcePath, hookTrustHash, initialData, isConcreteAgent, mergeSessionRows, navItems, normalizeDomainRows, normalizeReport, normalizeSession, normalizeTranscriptPage, normalizeTranscriptSearchResult, replaceSkillReportPreservingUpdates, safeInvoke, safeListen, sameAgent, sessionIdentity, sessionLaunchPayload, sessionLogicalIdentity } from "./lib/index.ts";
+import type { BundledSkillStatus, CliInstallStatus, SessionIdentityRecord, SessionProjectDelta, TranscriptPage, TranscriptSearchResult, TranscriptSearchScopes } from "./lib/index.ts";
 import { mcpColumns } from "./lib/tableColumns.tsx";
 import { PlaceholderView } from "./components/shared/PlaceholderView.tsx";
+import { LoadingState } from "./components/shared/LoadingState.tsx";
 import { Sidebar } from "./components/shared/Sidebar.tsx";
-import { SkillEditorView } from "./components/shared/SkillEditorView.tsx";
 import type { SessionRecord } from "./views/SessionsView.tsx";
 import type { SkillInstallResult, SkillRecord } from "./views/SkillsView.tsx";
 import type { OverviewNavId } from "./views/OverviewView.tsx";
@@ -103,10 +103,11 @@ type ViewId =
   | "skillDetail"
   | "ruleDetail";
 
-const loadConfirmSkillChangesDialog = () => import("./components/shared/ConfirmSkillChangesDialog.tsx");
-const loadBundledSkillInstallDialog = () => import("./components/shared/BundledSkillInstallDialog.tsx");
-const loadRuleEditorView = () => import("./components/shared/RuleEditorView.tsx");
-const loadSettingsView = () => import("./components/shared/SettingsView.tsx");
+const loadConfirmSkillChangesDialog = () => import("./features/skills/ConfirmSkillChangesDialog.tsx");
+const loadBundledSkillInstallDialog = () => import("./features/skills/BundledSkillInstallDialog.tsx");
+const loadRuleEditorView = () => import("./features/rules/RuleEditorView.tsx");
+const loadSettingsView = () => import("./features/settings/SettingsView.tsx");
+const loadSkillEditorView = () => import("./features/skills/SkillEditorView.tsx");
 const loadDataListView = () => import("./views/McpView.tsx");
 const loadHooksView = () => import("./views/HooksView.tsx");
 const loadConfigView = () => import("./views/ConfigView.tsx");
@@ -120,6 +121,7 @@ const ConfirmSkillChangesDialog = lazy(() => loadConfirmSkillChangesDialog().the
 const BundledSkillInstallDialog = lazy(() => loadBundledSkillInstallDialog().then(({ BundledSkillInstallDialog: component }) => ({ default: component })));
 const RuleEditorView = lazy(() => loadRuleEditorView().then(({ RuleEditorView: component }) => ({ default: component })));
 const SettingsView = lazy(() => loadSettingsView().then(({ SettingsView: component }) => ({ default: component })));
+const SkillEditorView = lazy(() => loadSkillEditorView().then(({ SkillEditorView: component }) => ({ default: component })));
 const DataListView = lazy(() => loadDataListView().then(({ DataListView: component }) => ({ default: component })));
 const HooksView = lazy(() => loadHooksView().then(({ HooksView: component }) => ({ default: component })));
 const ConfigView = lazy(() => loadConfigView().then(({ ConfigView: component }) => ({ default: component })));
@@ -139,6 +141,7 @@ const viewPreloaders: Partial<Record<ViewId, () => Promise<unknown>>> = {
   mcp: loadDataListView,
   config: loadConfigView,
   settings: loadSettingsView,
+  skillDetail: loadSkillEditorView,
   ruleDetail: loadRuleEditorView,
 };
 
@@ -190,6 +193,55 @@ type DomainRow = Record<string, unknown>;
 
 type DomainKey = "skills" | "prompts" | "sessions" | "rules" | "hooks" | "mcp";
 
+type AgentTargetOption = {
+  id: string;
+  displayName: string;
+  supportsGlobal: boolean;
+};
+
+type SidebarSource = {
+  label: string;
+  count: number;
+};
+
+function sidebarSources(
+  targets: AgentTargetOption[],
+  discoveredSources: SidebarSource[],
+  agents: Record<string, unknown>[],
+): SidebarSource[] {
+  const installedKeys = new Set(
+    agents
+      .filter((agent) => agent.installed === true)
+      .map((agent) => agentIdentityKey(agent.name ?? agent.kind)),
+  );
+  const sourceByKey = new Map(discoveredSources.map((source) => [agentIdentityKey(source.label), source]));
+  const seen = new Set<string>();
+  const result: Array<SidebarSource & { installed: boolean; order: number }> = [];
+
+  const add = (label: string, count: number, order: number) => {
+    const key = agentIdentityKey(label);
+    if (!isConcreteAgent(label) || seen.has(key)) return;
+    seen.add(key);
+    const source = sourceByKey.get(key);
+    result.push({
+      label,
+      count: source?.count ?? count,
+      installed: installedKeys.has(key) || (source?.count ?? 0) > 0,
+      order,
+    });
+  };
+
+  targets.forEach((target, index) => add(target.displayName, 0, index));
+  discoveredSources.forEach((source, index) => add(source.label, source.count, targets.length + index));
+
+  return result
+    .sort((left, right) => {
+      if (left.installed !== right.installed) return left.installed ? -1 : 1;
+      return left.order - right.order || left.label.localeCompare(right.label);
+    })
+    .map(({ label, count }) => ({ label, count }));
+}
+
 function hookDeleteArgs(hook: DomainRow) {
   return {
     path: hookSourcePath(hook),
@@ -239,6 +291,7 @@ export function App() {
   const [data, setData] = useState<RuntimeData>(() => initialData());
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [agentFilter, setAgentFilter] = useState("All");
+  const [agentTargets, setAgentTargets] = useState<AgentTargetOption[]>([]);
   const [pendingSkillChange, setPendingSkillChange] = useState<PendingSkillChange | null>(null);
   const [bundledSkillPrompt, setBundledSkillPrompt] = useState<BundledSkillStatus | null>(null);
   const [bundledSkillBusy, setBundledSkillBusy] = useState(false);
@@ -252,12 +305,14 @@ export function App() {
   const [loadingDomains, setLoadingDomains] = useState(() => new Set<string>(["skills"]));
   const [appearance, setAppearance] = useState<Appearance>(() => readCachedAppearance());
   const [themePreferences, setThemePreferences] = useState<ThemePreferences>(() => readCachedThemePreferences());
+  const [developerMode, setDeveloperMode] = useState(false);
   const appearanceChangeRevision = useRef(0);
   const loadedDomains = useRef(new Set<string>());
   const domainLoadInFlight = useRef(new Map<DomainKey, Promise<void>>());
   const promptsRefreshInFlight = useRef<Promise<unknown[] | null> | null>(null);
   const sessionsRefreshInFlight = useRef<Promise<unknown> | null>(null);
   const sessionEventReady = useRef<Promise<void>>(Promise.resolve());
+  const sessionListLoaded = useRef(false);
   const sessionEventUnlisten = useRef<UnlistenFn | null>(null);
   const sessionEventFlushTimer = useRef<number | undefined>(undefined);
   const sessionScanGeneration = useRef(0);
@@ -266,12 +321,36 @@ export function App() {
   const pendingRecentSessions = useRef(new Map<string, SessionRecord>());
   const pendingWatchSessions = useRef(new Map<string, SessionRecord>());
   const pendingDeletedSessions = useRef(new Map<string, SessionIdentityRecord>());
+  const sidebarPanelRef = usePanelRef();
   const currentView = useRef<ViewId>(view);
   const skillListRevision = useRef(0);
   const skillUpdateCheckRevision = useRef(0);
   const prefetchedViews = useRef(new Set<ViewId>());
   const prefetchTimers = useRef(new Map<ViewId, number>());
   const activeNav = navItems.find((item) => item.id === view);
+  const availableSidebarSources = useMemo(
+    () => sidebarSources(
+      agentTargets,
+      data.sources.length || agentTargets.length ? data.sources : fallbackAgents,
+      data.agents,
+    ),
+    [agentTargets, data.agents, data.sources],
+  );
+  const installedAgentKeys = useMemo(() => {
+    const keys = new Set<string>();
+    for (const agent of data.agents) {
+      if (agent.installed === true) keys.add(agentIdentityKey(agent.name ?? agent.kind));
+    }
+    for (const source of data.sources) {
+      if (source.count > 0) keys.add(agentIdentityKey(source.label));
+    }
+    return [...keys];
+  }, [data.agents, data.sources]);
+  useEffect(() => {
+    if (agentFilter !== "All" && !availableSidebarSources.some((source) => source.label === agentFilter)) {
+      setAgentFilter("All");
+    }
+  }, [agentFilter, availableSidebarSources]);
   const filteredData = useMemo(() => {
     if (agentFilter === "All") return data;
     return {
@@ -302,27 +381,23 @@ export function App() {
   useEffect(() => {
     let cancelled = false;
     const revision = appearanceChangeRevision.current;
-    safeInvoke<{ appearance?: unknown; lightTheme?: unknown; darkTheme?: unknown }>(TauriCommand.SettingsGet).then((settings) => {
+    safeInvoke<{ appearance?: unknown; lightTheme?: unknown; darkTheme?: unknown; developerMode?: unknown }>(TauriCommand.SettingsGet).then((settings) => {
       if (!cancelled && settings && revision === appearanceChangeRevision.current) {
         setAppearance(normalizeAppearance(settings.appearance));
         setThemePreferences(normalizeThemePreferences({ light: settings.lightTheme as ColorTheme, dark: settings.darkTheme as ColorTheme }));
+        setDeveloperMode(settings.developerMode === true);
       }
     });
     return () => { cancelled = true; };
   }, []);
 
-  const refreshSkillList = async ({ preserveUpdates = true }: { preserveUpdates?: boolean } = {}) => {
+  const refreshSkillList = async () => {
     const revision = ++skillListRevision.current;
     const skills = await safeInvoke(TauriCommand.SkillsList);
     if (revision !== skillListRevision.current || !skills) return null;
     setData((current) => {
       const normalized = normalizeReport({ ...current, skills }, { fallback: false });
-      return preserveUpdates
-        ? {
-            ...normalized,
-            skills: mergeSkillListPreservingUpdates(current.skills, normalized.skills),
-          }
-        : normalized;
+      return replaceSkillReportPreservingUpdates(current, normalized);
     });
     loadedDomains.current.add("skills");
     return skills;
@@ -336,7 +411,10 @@ export function App() {
       if (revision === skillListRevision.current) setCheckingSkillUpdates(false);
       return null;
     }
-    setData((current) => normalizeReport({ ...current, skills: result.skills }, { fallback: false }));
+    setData((current) => {
+      const next = normalizeReport({ ...current, skills: result.skills }, { fallback: false });
+      return replaceSkillReportPreservingUpdates(current, next);
+    });
     loadedDomains.current.add("skills");
     if (result.updateCheck !== "started" && result.updateCheck !== "already-running") {
       setCheckingSkillUpdates(false);
@@ -346,7 +424,10 @@ export function App() {
 
   const applyInstalledSkills = (result: SkillInstallResult) => {
     if (!result.skills) return;
-    setData((current) => normalizeReport({ ...current, skills: result.skills }, { fallback: false }));
+    setData((current) => {
+      const next = normalizeReport({ ...current, skills: result.skills }, { fallback: false });
+      return replaceSkillReportPreservingUpdates(current, next);
+    });
   };
 
   const refreshSkillUpdates = async () => {
@@ -477,6 +558,7 @@ export function App() {
   }, []);
 
   const setSessionRows = useCallback((rows: unknown[], { markLoaded = true } = {}) => {
+    sessionListLoaded.current = true;
     setData((current) => {
       const nextSessions = mergeSessionRows(current.sessions, rows as Array<Record<string, unknown>>);
       if (nextSessions === current.sessions) return current;
@@ -588,7 +670,7 @@ export function App() {
     const applyRevision = (revision: number) => {
       if (!disposed) setAnalyticsRevision((current) => Math.max(current, revision));
     };
-    const ready = listen<{ revision: number }>("analytics://revision", ({ payload }) => {
+    const ready = safeListen<{ revision: number }>("analytics://revision", ({ payload }) => {
       applyRevision(payload.revision);
     }).then(async (cleanup) => {
       if (disposed) {
@@ -609,7 +691,7 @@ export function App() {
 
   useEffect(() => {
     let disposed = false;
-    const ready = listen<SessionScanEvent>("sessions://scan", ({ payload }) => {
+    const ready = safeListen<SessionScanEvent>("sessions://scan", ({ payload }) => {
       if (!disposed) handleSessionScanEvent(payload);
     }).then((unlisten) => {
       if (disposed) unlisten();
@@ -630,7 +712,7 @@ export function App() {
   useEffect(() => {
     let disposed = false;
     let unlisten: UnlistenFn | null = null;
-    const ready = listen<SkillUpdateCheckEvent>("skills://updates", ({ payload }) => {
+    const ready = safeListen<SkillUpdateCheckEvent>("skills://updates", ({ payload }) => {
       if (disposed) return;
       if (payload.status === "completed") {
         setData((current) => {
@@ -660,7 +742,12 @@ export function App() {
       sessionsRefreshInFlight.current = sessionEventReady.current
         .then(() => safeInvoke<number>(TauriCommand.SessionsScanStart))
         .then((generation) => {
-          if (generation === null) return null;
+          if (generation === null) {
+            return safeInvoke(TauriCommand.SessionsList).then((rows) => {
+              if (Array.isArray(rows)) setSessionRows(rows);
+              return null;
+            });
+          }
           sessionScanGeneration.current = Math.max(sessionScanGeneration.current, generation);
           if (completedSessionScans.current.has(generation)) return generation;
           return new Promise<number>((resolve) => {
@@ -674,7 +761,7 @@ export function App() {
         });
     }
     return sessionsRefreshInFlight.current;
-  }, []);
+  }, [setSessionRows]);
 
   const refreshSkillIndexStatus = useCallback(async () => {
     const status = await safeInvoke(TauriCommand.SessionSkillIndexStatus);
@@ -698,6 +785,16 @@ export function App() {
       if (!cancelled && Array.isArray(agents)) {
         setData((current) => normalizeReport({ ...current, agents }, { fallback: false }));
       }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    safeInvoke<AgentTargetOption[]>(TauriCommand.SkillsTargets).then((targets) => {
+      if (!cancelled && Array.isArray(targets)) setAgentTargets(targets);
     });
     return () => {
       cancelled = true;
@@ -739,7 +836,7 @@ export function App() {
       }
       await invoke(TauriCommand.BundledSkillInstall);
       setBundledSkillPrompt(null);
-      void refreshSkillList({ preserveUpdates: false });
+      void refreshSkillList();
     } catch (error) {
       setBundledSkillError(`${error}`);
     } finally {
@@ -753,6 +850,9 @@ export function App() {
       const existing = domainLoadInFlight.current.get(domain);
       if (existing) {
         await existing;
+        if (domain === "sessions" && view !== "overview" && !loadedDomains.current.has(domain)) {
+          await refreshSessionsFromScan();
+        }
         return;
       }
       const request = (async () => {
@@ -763,9 +863,11 @@ export function App() {
             return;
           }
           if (domain === "sessions") {
-            const cachedRows = await safeInvoke(TauriCommand.SessionsList) as unknown[] | null;
-            if (cachedRows) {
-              setSessionRows(cachedRows, { markLoaded: view !== "overview" });
+            if (!sessionListLoaded.current) {
+              const cachedRows = await safeInvoke(TauriCommand.SessionsList) as unknown[] | null;
+              if (cachedRows) {
+                setSessionRows(cachedRows, { markLoaded: view !== "overview" });
+              }
             }
             if (view === "overview") return;
             await refreshSessionsFromScan();
@@ -841,11 +943,15 @@ export function App() {
     };
   }, [refreshSkillIndexStatus, skillIndexStatus]);
 
+  const transitionTo = useCallback((next: ViewId) => {
+    startTransition(() => setView(next));
+  }, []);
+
   const navigate = useCallback((next: ViewId) => {
-    setView(next);
+    transitionTo(next);
     setActiveSkill(null);
     setActiveRule(null);
-  }, []);
+  }, [transitionTo]);
 
   const prefetchView = useCallback((next: ViewId) => {
     const loader = viewPreloaders[next];
@@ -886,13 +992,15 @@ export function App() {
       : { items: [], warnings: [], done: true, sourceVersion: "", restartRequired: false, unchanged: false };
   }, []);
 
-  const loadSessionAnalytics = useCallback(async (session: SessionRecord) => {
-    if (!session?.id || !session.path || !session.agent) return null;
-    return safeInvoke<SessionAnalyticsDetail>(TauriCommand.SessionAnalytics, {
-      sessionId: session.id,
-      agent: session.agent,
+  const searchTranscript = useCallback(async (session: SessionRecord, query: string, scopes: TranscriptSearchScopes): Promise<TranscriptSearchResult | null> => {
+    if (!session?.path) return null;
+    const result = await safeInvoke(TauriCommand.SessionTranscriptSearch, {
       path: session.path,
+      agent: session.agent,
+      query,
+      scopes,
     });
+    return result ? normalizeTranscriptSearchResult(result) : null;
   }, []);
 
   const searchSessions = useCallback(async (query: string) => {
@@ -911,13 +1019,13 @@ export function App() {
   const openSkillByName = useCallback((skillName: string) => {
     const skill = data.skills.find((item) => item.name === skillName) as SkillRecord | undefined;
     if (skill) setActiveSkill(skill);
-    setView(skill ? "skillDetail" : "skills");
-  }, [data.skills]);
+    transitionTo(skill ? "skillDetail" : "skills");
+  }, [data.skills, transitionTo]);
 
   const openSessionFromLink = useCallback((link: DomainRow) => {
     setActiveSessionKey(`${link.agent ?? ""}:${link.session_id ?? link.sessionId ?? ""}`);
-    setView("sessions");
-  }, []);
+    transitionTo("sessions");
+  }, [transitionTo]);
 
   const resumeSessionInTerminal = useCallback(async (session: SessionRecord) => {
     return safeInvoke(TauriCommand.SessionResumeInTerminal, { session: sessionLaunchPayload(session) }) as Promise<
@@ -966,7 +1074,10 @@ export function App() {
   const applySkillChange = async (command: SkillChangeCommand, args: Record<string, unknown>) => {
     const result = await invoke<SkillPreview>(command, { ...args, dryRun: false });
     if (result.skills) {
-      setData((current) => normalizeReport({ ...current, skills: result.skills }, { fallback: false }));
+      setData((current) => {
+        const next = normalizeReport({ ...current, skills: result.skills }, { fallback: false });
+        return replaceSkillReportPreservingUpdates(current, next, typeof args.name === "string" ? [args.name] : []);
+      });
     }
     return result;
   };
@@ -989,7 +1100,10 @@ export function App() {
     try {
       const result = await invoke<SkillPreview>(command, { ...args, previewId, dryRun: false });
       if (result.skills) {
-        setData((current) => normalizeReport({ ...current, skills: result.skills }, { fallback: false }));
+        setData((current) => {
+          const next = normalizeReport({ ...current, skills: result.skills }, { fallback: false });
+          return replaceSkillReportPreservingUpdates(current, next, (args.names as unknown[] | undefined)?.map((name) => `${name}`) ?? []);
+        });
       } else if (command === SkillChangeCommand.DeleteMany) {
         const names = new Set((args.names as unknown[] | undefined)?.map((name) => `${name}`) ?? []);
         setData((current) => normalizeReport({
@@ -1003,7 +1117,7 @@ export function App() {
       setPendingSkillChange(null);
       onApplied?.();
       if (!result.skills && (command !== SkillChangeCommand.DeleteMany || result?.refreshRequired)) {
-        void refreshSkillList({ preserveUpdates: false });
+        void refreshSkillList();
       }
     } catch (error) {
       const message = `${error}`;
@@ -1026,7 +1140,10 @@ export function App() {
     try {
       const result = await invoke<SkillPreview>(pendingSkillChange.command, { ...pendingSkillChange.args, names, dryRun: false });
       if (result.skills) {
-        setData((current) => normalizeReport({ ...current, skills: result.skills }, { fallback: false }));
+        setData((current) => {
+          const next = normalizeReport({ ...current, skills: result.skills }, { fallback: false });
+          return replaceSkillReportPreservingUpdates(current, next, names);
+        });
       } else {
         const deletedNames = new Set(names);
         setData((current) => normalizeReport({
@@ -1049,7 +1166,10 @@ export function App() {
     setData((current) => applyVisibilityState(current, names, visibility));
     const result = await safeInvoke<SkillPreview>(SkillChangeCommand.Set, { names, visibility, dryRun: false });
     if (result?.skills) {
-      setData((current) => normalizeReport({ ...current, skills: result.skills }, { fallback: false }));
+      setData((current) => {
+        const next = normalizeReport({ ...current, skills: result.skills }, { fallback: false });
+        return replaceSkillReportPreservingUpdates(current, next);
+      });
     }
     if (!result) await refreshSkillList();
   };
@@ -1058,6 +1178,10 @@ export function App() {
     typeof window !== "undefined" &&
     new URLSearchParams(window.location.search).get("forceSidebarResizeHover") === "1";
   const sidebarSize = sidebarCollapsed ? COLLAPSED_SIDEBAR_SIZE : SIDEBAR_SIZE;
+
+  useLayoutEffect(() => {
+    sidebarPanelRef.current?.resize(Number.parseFloat(sidebarSize));
+  }, [sidebarPanelRef, sidebarSize]);
 
   return (
     <main className="appShell">
@@ -1090,18 +1214,17 @@ export function App() {
       ) : null}
       <PanelGroup
         className={`window ${sidebarCollapsed ? "sidebarCollapsed" : ""} ${forceSidebarResizeHover ? "forceSidebarResizeHover" : ""}`}
-        key={sidebarCollapsed ? "window-collapsed" : "window-expanded"}
         orientation="horizontal"
         disabled
       >
         <Panel
-          key={sidebarCollapsed ? "sidebar-collapsed" : "sidebar-expanded"}
           className="sidebarPanel"
           collapsible={false}
-          defaultSize={sidebarSize}
+          defaultSize={SIDEBAR_SIZE}
           groupResizeBehavior="preserve-pixel-size"
-          minSize={sidebarSize}
-          maxSize={sidebarSize}
+          minSize={COLLAPSED_SIDEBAR_SIZE}
+          maxSize={SIDEBAR_SIZE}
+          panelRef={sidebarPanelRef}
           {...({ order: 1 } as Record<string, unknown>)}
         >
           <Sidebar
@@ -1109,7 +1232,7 @@ export function App() {
             setView={navigate}
             onPrefetchView={prefetchView}
             onCancelPrefetchView={cancelPrefetchView}
-            sources={data.sources.length ? data.sources : fallbackAgents}
+            sources={availableSidebarSources}
             collapsed={sidebarCollapsed}
             setCollapsed={setSidebarCollapsed}
             agentFilter={agentFilter}
@@ -1117,7 +1240,13 @@ export function App() {
           />
         </Panel>
         <Panel className="mainPanel" minSize="520px" {...({ order: 2 } as Record<string, unknown>)}>
-          <Suspense fallback={<div className="content viewLoadingFallback" aria-busy="true" />}>
+          <Suspense
+            fallback={(
+              <div className="content" aria-busy="true">
+                <LoadingState label="Loading" />
+              </div>
+            )}
+          >
           {view === "skillDetail" ? (
             <SkillEditorView
               skill={activeSkill}
@@ -1128,7 +1257,10 @@ export function App() {
               onOpenSkill={openSkillByName}
               onSaved={(skills) => {
                 if (skills) {
-                  setData((current) => normalizeReport({ ...current, skills }, { fallback: false }));
+                  setData((current) => {
+                    const next = normalizeReport({ ...current, skills }, { fallback: false });
+                    return replaceSkillReportPreservingUpdates(current, next);
+                  });
                 }
               }}
             />
@@ -1137,6 +1269,7 @@ export function App() {
           ) : view === "skills" ? (
             <SkillsView
               skills={filteredData.skills as SkillRecord[]}
+              installedAgentKeys={installedAgentKeys}
               loadingSkills={loadingDomains.has("skills")}
               checkingUpdates={checkingSkillUpdates}
               applyingUpdates={applyingSkillUpdates}
@@ -1149,14 +1282,15 @@ export function App() {
               onAddInstalled={applyInstalledSkills}
               openSkill={(skill) => {
                 setActiveSkill(skill);
-                setView("skillDetail");
+                transitionTo("skillDetail");
               }}
             />
           ) : view === "sessions" ? (
             <SessionsView
               sessions={filteredData.sessions as SessionRecord[]}
+              developerMode={developerMode}
               loadTranscript={loadTranscript}
-              loadSessionAnalytics={loadSessionAnalytics}
+              searchTranscript={searchTranscript}
               searchSessions={searchSessions}
               loadSessionSkillLinks={loadSessionSkillLinks}
               loadingSessions={loadingDomains.has("sessions")}
@@ -1187,7 +1321,9 @@ export function App() {
             <SettingsView
               appearance={appearance}
               themePreferences={themePreferences}
+              developerMode={developerMode}
               onAppearanceChange={changeAppearance}
+              onDeveloperModeChange={setDeveloperMode}
               onThemeChange={(mode, theme) => {
                 setThemePreferences((current) => ({ ...current, [mode]: theme }));
               }}
@@ -1208,10 +1344,12 @@ export function App() {
               analyticsRevision={analyticsRevision}
               analyticsRevisionReady={analyticsRevisionReady}
               agentFilter={agentFilter}
+              loadedDomains={loadedDomains.current}
+              sessionListLoaded={sessionListLoaded.current}
               onNavigate={(id: OverviewNavId) => navigate(id)}
               onOpenSession={(session) => {
                 setActiveSessionKey(`${session.agent ?? ""}:${session.id ?? ""}`);
-                setView("sessions");
+                navigate("sessions");
               }}
             />
           ) : (

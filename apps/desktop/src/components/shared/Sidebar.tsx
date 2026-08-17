@@ -1,10 +1,9 @@
 import { Tooltip } from "./Tooltip.tsx";
-import { Check, PanelLeftClose, PanelLeftOpen } from "lucide-react";
-import { Select } from "radix-ui";
+import { PanelLeftClose, PanelLeftOpen } from "lucide-react";
 
 import { navItems, startWindowDrag } from "../../lib/index.ts";
-import { AgentFilterOptionLabel } from "./AgentFilterOptionLabel.tsx";
-import { SelectTrigger } from "./SelectTrigger.tsx";
+import { AgentOptionLabel } from "./AgentOptionLabel.tsx";
+import { SelectControl } from "./SelectControl.tsx";
 
 export type SidebarSource = {
   label: string;
@@ -65,41 +64,27 @@ export function Sidebar<TView extends string = string>({
           })}
         </nav>
         <div className="agentSelectGroup">
-          <Select.Root value={agentFilter} onValueChange={setAgentFilter}>
-            <Tooltip content={collapsed ? selectedAgentLabel : undefined}>
-              <SelectTrigger
-                className="agentSelectTrigger"
-                label="Agent filter"
-                showChevron={!collapsed}
-              >
-                <Select.Value>
-                  <AgentFilterOptionLabel agent={agentFilter} label={selectedAgentLabel} collapsed={collapsed} />
-                </Select.Value>
-              </SelectTrigger>
-            </Tooltip>
-            <Select.Portal>
-              <Select.Content
-                className="skillMenuContent agentSelectContent"
-                position="popper"
-                side="top"
-                align="start"
-                sideOffset={6}
-              >
-                <Select.Viewport>
-                  {agentOptions.map((option) => (
-                    <Select.Item className="skillMenuItem" value={option.value} key={option.value}>
-                      <Select.ItemText>
-                        <AgentFilterOptionLabel agent={option.value} label={option.label} />
-                      </Select.ItemText>
-                      <Select.ItemIndicator className="selectItemIndicator">
-                        <Check size={13} strokeWidth={2.6} />
-                      </Select.ItemIndicator>
-                    </Select.Item>
-                  ))}
-                </Select.Viewport>
-              </Select.Content>
-            </Select.Portal>
-          </Select.Root>
+          <SelectControl
+            className="agentSelectTrigger"
+            contentClassName="agentSelectContent"
+            label="Agent filter"
+            value={agentFilter}
+            onValueChange={setAgentFilter}
+            options={agentOptions}
+            side="top"
+            align="start"
+            showChevron={!collapsed}
+            triggerTooltipContent={collapsed ? selectedAgentLabel : undefined}
+            renderValue={(option) => (
+              <AgentOptionLabel
+                agent={option?.value ?? agentFilter}
+                label={option?.label ?? selectedAgentLabel}
+                variant="filter"
+                collapsed={collapsed}
+              />
+            )}
+            renderOption={(option) => <AgentOptionLabel agent={option.value} label={option.label} variant="filter" />}
+          />
           <button
             className="paneButton sidebarToggle"
             aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"}

@@ -3,7 +3,9 @@ import test from "node:test";
 
 import { resolveInitialSession, resolveInitialSessionId } from "../src/lib/session-selection.ts";
 import { applySessionProjectDelta } from "../src/lib/session-project-delta.ts";
-import { createLatestRequestAuthority, mergeTranscriptItems, transcriptItemsSize } from "../src/lib/transcript.ts";
+import { createLatestRequestAuthority, mergeTranscriptItems, normalizeTranscriptSearchResult, transcriptItemsSize } from "../src/lib/transcript.ts";
+import { selectAnalyticsGranularity, stepAnalyticsGranularity } from "../src/lib/analytics.ts";
+import { trackpadZoomDirection, trackpadZoomFactor } from "../src/lib/zoom-gesture.ts";
 
 test("external session target wins on the first selection", () => {
   const sessions = [
@@ -86,4 +88,44 @@ test("cross-page tool result merges by stable call id", () => {
 
 test("transcript cache size includes large bodies and tool results", () => {
   assert.equal(transcriptItemsSize([{ body: "abc", result: "12345" }]), 8);
+});
+
+test("transcript search results normalize logical group and tool indices", () => {
+  assert.deepEqual(
+    normalizeTranscriptSearchResult({
+      hits: [
+        { groupIndex: 4 },
+        { groupIndex: 8, toolIndex: 2 },
+        { groupIndex: -1 },
+        { groupIndex: "invalid" },
+      ],
+      warnings: ["one warning"],
+      sourceVersion: "v1-test",
+    }),
+    {
+      hits: [{ groupIndex: 4 }, { groupIndex: 8, toolIndex: 2 }],
+      warnings: ["one warning"],
+      sourceVersion: "v1-test",
+    },
+  );
+});
+
+test("analytics chart density adapts to the loaded span", () => {
+  assert.equal(selectAnalyticsGranularity(30), "day");
+  assert.equal(selectAnalyticsGranularity(90), "week");
+  assert.equal(selectAnalyticsGranularity(365), "week");
+  assert.equal(selectAnalyticsGranularity(730), "month");
+});
+
+test("analytics chart zoom steps through adjacent granularities", () => {
+  assert.equal(stepAnalyticsGranularity("week", -1), "day");
+  assert.equal(stepAnalyticsGranularity("week", 1), "month");
+  assert.equal(stepAnalyticsGranularity("day", -1), "day");
+  assert.equal(stepAnalyticsGranularity("month", 1), "month");
+});
+
+test("charts share trackpad zoom sensitivity and thresholds", () => {
+  assert.equal(trackpadZoomDirection(trackpadZoomFactor(-40)), -1);
+  assert.equal(trackpadZoomDirection(trackpadZoomFactor(40)), 1);
+  assert.equal(trackpadZoomDirection(1), 0);
 });

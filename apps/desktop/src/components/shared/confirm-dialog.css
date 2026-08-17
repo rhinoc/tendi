@@ -16,6 +16,18 @@
   text-wrap: balance;
 }
 
+.dialogVisuallyHidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
 .confirmDialogPanel {
   position: fixed;
   top: 50%;
@@ -33,6 +45,24 @@
 
 .confirmDialogPanel[data-update-preview="true"] {
   width: min(1180px, calc(100vw - 48px));
+}
+
+.skillDeleteConfirmDialog {
+  box-sizing: border-box;
+  width: min(420px, calc(100vw - 48px));
+  height: min(260px, calc(100vh - 48px));
+  display: flex;
+  flex-direction: column;
+}
+
+.skillDeleteConfirmDialog .skillChangeDialogBody {
+  min-height: 0;
+  flex: 1 1 auto;
+  overflow: auto;
+}
+
+.skillDeleteConfirmDialog .confirmDialogActions {
+  flex: 0 0 auto;
 }
 
 .skillUpdateDiffFrame {
@@ -136,17 +166,32 @@
 }
 
 .skillUpdatePreviewLoading,
+.skillDeletePreviewLoading,
 .skillUpdatePreviewError {
   margin: 4px 22px 20px;
 }
 
 .skillUpdatePreviewLoading {
+  width: auto;
   height: min(62vh, 640px);
   margin: -4px 22px 20px;
   display: grid;
   place-items: center;
   border: 1px solid var(--line);
   border-radius: var(--radius-md);
+}
+
+.skillDeletePreviewLoading {
+  margin: -4px 22px 20px;
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+}
+
+.skillDeletePreviewLoading .loadingStateDots {
+  min-height: 72px;
+  background-size: 10px 10px;
 }
 
 .skillUpdatePreviewError {

@@ -19,7 +19,11 @@ export function ruleTitle(rule: RuleRecord | null | undefined): string {
 }
 
 export function ruleKey(rule: RuleRecord | null | undefined, index = 0): string {
-  return `${rule?.path ?? rule?.source ?? `${rule?.agent ?? "rule"}-${rule?.kind ?? ""}-${rule?.scope ?? ""}-${index}`}`;
+  const agent = `${rule?.agent ?? "rule"}`;
+  const path = `${rule?.path ?? rule?.source ?? ""}`;
+  return path
+    ? `${agent}:${path}`
+    : `${agent}:${rule?.kind ?? ""}:${rule?.scope ?? ""}:${index}`;
 }
 
 export function ruleSearchText(rule: RuleRecord | null | undefined): string {

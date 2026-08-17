@@ -4,12 +4,14 @@ pub mod bundled_skill;
 pub mod config;
 pub mod files;
 mod fsutil;
+mod git;
 pub mod hooks;
 pub mod mcp;
 mod providers;
 pub mod rules;
 pub mod session_skills;
 pub mod sessions;
+pub mod skill_marketplace;
 pub mod skill_restore;
 mod skill_source;
 pub mod skill_targets;
@@ -25,7 +27,10 @@ use serde::Serialize;
 pub use agents::{AgentRecord, AgentScan};
 pub use hooks::{HookRecord, HookScan};
 pub use mcp::{McpScan, McpServerRecord};
-pub use providers::{SessionCommand, SessionResumePlan, plan_session_resume};
+pub use providers::{
+    SessionCommand, SessionResumePlan, apply_session_config_profile, config_profile_key,
+    parse_agent, plan_session_resume,
+};
 pub use rules::{RuleRecord, RuleScan};
 pub use sessions::{SessionRecord, SessionScan};
 pub use skill_targets::{SkillInstallScope, SkillTarget};

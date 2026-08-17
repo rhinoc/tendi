@@ -53,26 +53,7 @@ pub struct AnalyticsCapabilities {
 
 impl AnalyticsCapabilities {
     pub fn for_agent(agent: AgentKind) -> Self {
-        match agent {
-            AgentKind::Codex => Self {
-                token_usage: true,
-                reasoning_tokens: true,
-                explicit_runs: true,
-                rate_limit_history: true,
-            },
-            AgentKind::Claude => Self {
-                token_usage: true,
-                reasoning_tokens: false,
-                explicit_runs: false,
-                rate_limit_history: false,
-            },
-            AgentKind::Cursor | AgentKind::Shared | AgentKind::Unknown => Self {
-                token_usage: false,
-                reasoning_tokens: false,
-                explicit_runs: false,
-                rate_limit_history: false,
-            },
-        }
+        crate::providers::agent_provider(agent).analytics_capabilities()
     }
 }
 
@@ -299,6 +280,7 @@ pub struct AnalyticsDay {
     pub usage: AnalyticsTokenUsage,
     pub responses: u64,
     pub sessions: usize,
+    pub sessions_by_agent: BTreeMap<AgentKind, usize>,
     pub runs: AnalyticsRunSummary,
     pub aborted: u64,
     pub compacted: u64,
@@ -365,44 +347,6 @@ pub struct OverviewAnalytics {
     pub warnings: Vec<String>,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SessionAnalyticsDetail {
-    pub session_id: String,
-    pub agent: AgentKind,
-    pub session_path: PathBuf,
-    pub capabilities: AnalyticsCapabilities,
-    pub responses: Vec<AnalyticsResponseUsage>,
-    pub runs: Vec<AnalyticsRun>,
-    pub tools: Vec<AnalyticsToolCall>,
-    pub skills: Vec<AnalyticsSkillCall>,
-    pub aborts: Vec<String>,
-    pub compactions: Vec<String>,
-    pub limit_samples: Vec<AnalyticsLimitSample>,
-    pub malformed_lines: usize,
-    pub indexed_bytes: i64,
-}
-
-impl SessionAnalyticsDetail {
-    pub(crate) fn from_record(record: &SessionAnalyticsRecord) -> Self {
-        Self {
-            session_id: record.analytics.session_id.clone(),
-            agent: record.analytics.agent,
-            session_path: record.analytics.session_path.clone(),
-            capabilities: record.analytics.capabilities(),
-            responses: record.analytics.responses.clone(),
-            runs: record.analytics.snapshot_runs(&record.state),
-            tools: record.analytics.tools.clone(),
-            skills: record.analytics.skills.clone(),
-            aborts: record.analytics.aborts.clone(),
-            compactions: record.analytics.compactions.clone(),
-            limit_samples: record.analytics.limit_samples.clone(),
-            malformed_lines: record.analytics.malformed_lines,
-            indexed_bytes: record.file_size,
-        }
-    }
-}
-
 #[derive(Default)]
 struct DayAccumulator {
     usage: AnalyticsTokenUsage,
@@ -415,6 +359,7 @@ struct DayAccumulator {
     skills: BTreeMap<String, u64>,
     rate_limits: BTreeMap<u32, f64>,
     sessions: BTreeSet<String>,
+    sessions_by_agent: BTreeMap<AgentKind, BTreeSet<String>>,
 }
 
 #[derive(Default)]
@@ -479,7 +424,7 @@ pub(crate) fn aggregate_overview(
             let slot = by_day.entry(date.to_string()).or_default();
             slot.usage.add_assign(response.usage);
             slot.responses += 1;
-            slot.sessions.insert(identity.clone());
+            record_session(slot, analytics.agent, &identity);
             *slot
                 .models
                 .entry(if response.model.is_empty() {
@@ -498,7 +443,7 @@ pub(crate) fn aggregate_overview(
                 continue;
             }
             let slot = by_day.entry(date.to_string()).or_default();
-            slot.sessions.insert(identity.clone());
+            record_session(slot, analytics.agent, &identity);
             add_run(&mut slot.runs, &run);
         }
         for timestamp in &analytics.aborts {
@@ -506,7 +451,7 @@ pub(crate) fn aggregate_overview(
             if let Some(date) = analytics_date(timestamp).filter(|date| *date >= since) {
                 let slot = by_day.entry(date.to_string()).or_default();
                 slot.aborted += 1;
-                slot.sessions.insert(identity.clone());
+                record_session(slot, analytics.agent, &identity);
             }
         }
         for timestamp in &analytics.compactions {
@@ -514,7 +459,7 @@ pub(crate) fn aggregate_overview(
             if let Some(date) = analytics_date(timestamp).filter(|date| *date >= since) {
                 let slot = by_day.entry(date.to_string()).or_default();
                 slot.compacted += 1;
-                slot.sessions.insert(identity.clone());
+                record_session(slot, analytics.agent, &identity);
                 compacted_sessions.insert(identity.clone());
             }
         }
@@ -549,7 +494,7 @@ pub(crate) fn aggregate_overview(
                     .tools
                     .entry((call.server.clone(), call.name.clone()))
                     .or_default() += 1;
-                slot.sessions.insert(identity.clone());
+                record_session(slot, analytics.agent, &identity);
             }
             if date < rank_since {
                 continue;
@@ -574,7 +519,7 @@ pub(crate) fn aggregate_overview(
             if date >= since {
                 let slot = by_day.entry(date.to_string()).or_default();
                 *slot.skills.entry(call.name.clone()).or_default() += 1;
-                slot.sessions.insert(identity.clone());
+                record_session(slot, analytics.agent, &identity);
             }
             if date < rank_since {
                 continue;
@@ -596,6 +541,11 @@ pub(crate) fn aggregate_overview(
             usage: slot.usage,
             responses: slot.responses,
             sessions: slot.sessions.len(),
+            sessions_by_agent: slot
+                .sessions_by_agent
+                .into_iter()
+                .map(|(agent, sessions)| (agent, sessions.len()))
+                .collect(),
             runs: slot.runs,
             aborted: slot.aborted,
             compacted: slot.compacted,
@@ -697,6 +647,14 @@ pub(crate) fn aggregate_overview(
     }
 }
 
+fn record_session(slot: &mut DayAccumulator, agent: AgentKind, identity: &str) {
+    slot.sessions.insert(identity.to_string());
+    slot.sessions_by_agent
+        .entry(agent)
+        .or_default()
+        .insert(identity.to_string());
+}
+
 fn add_run(summary: &mut AnalyticsRunSummary, run: &AnalyticsRun) {
     summary.started += 1;
     if !run.completed {
@@ -771,13 +729,7 @@ fn analytics_date(timestamp: &str) -> Option<NaiveDate> {
 }
 
 fn agent_key(agent: AgentKind) -> &'static str {
-    match agent {
-        AgentKind::Codex => "codex",
-        AgentKind::Cursor => "cursor",
-        AgentKind::Claude => "claude",
-        AgentKind::Shared => "shared",
-        AgentKind::Unknown => "unknown",
-    }
+    crate::providers::agent_provider(agent).storage_key()
 }
 
 pub(crate) fn diff_usage(
@@ -874,11 +826,7 @@ pub(crate) fn analyze_session(
             indexed_size = file_size.saturating_sub(bytes as i64);
             break;
         }
-        match session.agent {
-            AgentKind::Codex => parse_codex_line(&line, &mut record),
-            AgentKind::Claude | AgentKind::Cursor => parse_message_line(&line, &mut record),
-            AgentKind::Shared | AgentKind::Unknown => {}
-        }
+        crate::providers::agent_provider(session.agent).parse_analytics_line(&line, &mut record);
     }
 
     let mut file = reader.into_inner().into_inner();
@@ -990,7 +938,7 @@ fn is_line_boundary(path: &Path, offset: u64) -> bool {
     std::io::Read::read_exact(&mut file, &mut byte).is_ok() && byte[0] == b'\n'
 }
 
-fn parse_codex_line(line: &str, record: &mut SessionAnalyticsRecord) {
+pub(crate) fn parse_codex_line(line: &str, record: &mut SessionAnalyticsRecord) {
     let head = &line.as_bytes()[..line.len().min(1024)];
     const MARKERS: [&[u8]; 11] = [
         b"\"turn_context\"",
@@ -1118,7 +1066,7 @@ fn parse_codex_line(line: &str, record: &mut SessionAnalyticsRecord) {
     });
 }
 
-fn parse_message_line(line: &str, record: &mut SessionAnalyticsRecord) {
+pub(crate) fn parse_message_line(line: &str, record: &mut SessionAnalyticsRecord) {
     let Ok(value) = serde_json::from_str::<Value>(line) else {
         record.analytics.malformed_lines += 1;
         return;
@@ -1847,6 +1795,52 @@ mod tests {
         assert_eq!(overview.tools.len(), 2);
         assert_eq!(overview.tools[0].name, "search");
         assert_ne!(overview.tools[0].server, overview.tools[1].server);
+    }
+
+    #[test]
+    fn overview_tracks_daily_sessions_by_agent() {
+        let timestamp = Local::now().to_rfc3339();
+        let record = |id: &str, agent: AgentKind| SessionAnalyticsRecord {
+            analytics: SessionAnalytics {
+                session_id: id.to_string(),
+                agent,
+                session_path: PathBuf::from(format!("/tmp/{id}.jsonl")),
+                responses: vec![AnalyticsResponseUsage {
+                    index: 1,
+                    timestamp: timestamp.clone(),
+                    model: String::new(),
+                    usage: AnalyticsTokenUsage::default(),
+                    cumulative: AnalyticsTokenUsage::default(),
+                }],
+                ..SessionAnalytics::default()
+            },
+            state: AnalyticsParserState::default(),
+            file_mtime: 0,
+            file_size: 0,
+        };
+
+        let overview = aggregate_overview(
+            &[
+                record("codex-session", AgentKind::Codex),
+                record("claude-session", AgentKind::Claude),
+            ],
+            1,
+            1,
+            Vec::new(),
+        );
+
+        assert_eq!(overview.days[0].sessions, 2);
+        assert_eq!(
+            overview.days[0].sessions_by_agent.get(&AgentKind::Codex),
+            Some(&1)
+        );
+        assert_eq!(
+            overview.days[0].sessions_by_agent.get(&AgentKind::Claude),
+            Some(&1)
+        );
+        let serialized = serde_json::to_value(&overview.days[0]).unwrap();
+        assert_eq!(serialized["sessionsByAgent"]["codex"], 1);
+        assert_eq!(serialized["sessionsByAgent"]["claude"], 1);
     }
 
     #[test]

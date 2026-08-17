@@ -1,5 +1,5 @@
 import type { ComponentType, ReactNode } from "react";
-import { Copy, Trash2 } from "lucide-react";
+import { Copy, FolderOpen, Trash2 } from "lucide-react";
 
 import { TauriCommand, copyText, safeInvoke } from "../../lib/index.ts";
 
@@ -30,6 +30,7 @@ export function RevealInFinderMenuItem({
       disabled={!resolved}
       onSelect={() => resolved && safeInvoke(TauriCommand.RevealInFinder, { path: resolved })}
     >
+      <FolderOpen size={14} />
       {label}
     </Menu.Item>
   );
@@ -47,6 +48,7 @@ export function CopyPathMenuItem({
   const resolved = `${path ?? ""}`.trim();
   return (
     <Menu.Item className="skillMenuItem" disabled={!resolved} onSelect={() => resolved && copyText(resolved)}>
+      <Copy size={14} />
       {label}
     </Menu.Item>
   );
@@ -65,6 +67,7 @@ export function CopyTextMenuItem({
 }) {
   return (
     <Menu.Item className="skillMenuItem" disabled={disabled || !text} onSelect={() => copyText(text)}>
+      <Copy size={14} />
       {label}
     </Menu.Item>
   );

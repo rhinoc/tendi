@@ -26,8 +26,10 @@ import { ChevronDown, ListTree } from "lucide-react";
 import { Accordion, ContextMenu } from "radix-ui";
 
 import { FreezeColumnResizeHandle, useFreezeColumnResize } from "./shared/freeze-column.tsx";
+import { LoadingState } from "./shared/LoadingState.tsx";
 import { SelectionActionBar } from "./shared/SelectionActionBar.tsx";
 import { SelectionCheckbox } from "./shared/SelectionCheckbox.tsx";
+import { useElementSize } from "./shared/useElementSize.ts";
 import {
   MARQUEE_DRAG_THRESHOLD,
   clientPointFromContent,
@@ -63,10 +65,18 @@ type DataTableColumnMeta<TRow> = {
   source: ColumnDef<TRow>;
 };
 
+type DataTableGroupLayout = {
+  bodyTop: number;
+  bodyHeight: number;
+  expanded: boolean;
+};
+
 const EMPTY_GROUP_KEY = "__empty__";
 const DATA_TABLE_ROW_HEIGHT = 58;
 const DATA_TABLE_VIRTUAL_THRESHOLD = 40;
-const DATA_TABLE_VIRTUAL_OVERSCAN = 8;
+const DATA_TABLE_VIRTUAL_OVERSCAN = 4;
+const DATA_TABLE_GROUP_HEADER_HEIGHT = 34;
+const DATA_TABLE_GROUP_GAP = 18;
 const DATA_TABLE_INTERACTIVE_SELECTOR = "button, a, input, textarea, select, [role='button'], [role='menuitem'], [role='menuitemcheckbox'], [role='menuitemradio'], [data-no-row-click]";
 
 function columnDisplayValue<TRow>(column: ColumnDef<TRow>, row: TRow): ReactNode {
@@ -217,7 +227,14 @@ export function DataTable<TRow extends Record<string, unknown>>({
   emptyState = "No items",
 }: DataTableProps<TRow>) {
   const shellRef = useRef<HTMLDivElement>(null);
-  const scrollRef = useRef<HTMLDivElement>(null);
+  const { ref: scrollRef, size: scrollSize } = useElementSize<HTMLDivElement>(
+    { width: 0, height: 720 },
+    {
+      readSize: (element) => ({ width: element.clientWidth, height: element.clientHeight }),
+      isValidSize: ({ height }) => height > 0,
+      isEqual: (current, next) => current.height === next.height,
+    },
+  );
   const marqueeDragRef = useRef<MarqueeDrag | null>(null);
   const suppressClickRef = useRef(false);
   const [marquee, setMarquee] = useState<MarqueeRect | null>(null);
@@ -225,7 +242,6 @@ export function DataTable<TRow extends Record<string, unknown>>({
   const [menuRowId, setMenuRowId] = useState<string | null>(null);
   const [scrollLeft, setScrollLeft] = useState(0);
   const [scrollTop, setScrollTop] = useState(0);
-  const [virtualViewportHeight, setVirtualViewportHeight] = useState(720);
   const scrollUpdateFrameRef = useRef<number | null>(null);
   const [expandedGroups, setExpandedGroups] = useState<string[]>([]);
   const previousGroupStateRef = useRef<{ groupingKey: string; groupKeys: string[] } | null>(null);
@@ -377,14 +393,14 @@ export function DataTable<TRow extends Record<string, unknown>>({
     const start = Math.max(0, Math.floor(scrollTop / rowHeight) - DATA_TABLE_VIRTUAL_OVERSCAN);
     const end = Math.min(
       modelRows.length,
-      Math.ceil((scrollTop + virtualViewportHeight) / rowHeight) + DATA_TABLE_VIRTUAL_OVERSCAN,
+      Math.ceil((scrollTop + scrollSize.height) / rowHeight) + DATA_TABLE_VIRTUAL_OVERSCAN,
     );
     return {
       rows: modelRows.slice(start, end),
       top: start * rowHeight,
       bottom: Math.max(0, (modelRows.length - end) * rowHeight),
     };
-  }, [modelRows, rowHeight, scrollTop, virtualViewportHeight, virtualizedRows]);
+  }, [modelRows, rowHeight, scrollSize.height, scrollTop, virtualizedRows]);
   const selectableRows = useMemo(() => leafRows.filter((row) => row.getCanSelect()), [leafRows]);
   const selectableIds = useMemo(() => selectableRows.map((row) => row.id), [selectableRows]);
   const selectedRows = useMemo(
@@ -557,20 +573,6 @@ export function DataTable<TRow extends Record<string, unknown>>({
   }, []);
   useEffect(() => () => marqueeDragRef.current?.cleanup?.(), []);
 
-  useEffect(() => {
-    const scroll = scrollRef.current;
-    if (!scroll) return undefined;
-    const updateViewportHeight = () => {
-      const nextHeight = scroll.clientHeight;
-      if (nextHeight > 0) setVirtualViewportHeight((current) => current === nextHeight ? current : nextHeight);
-    };
-    updateViewportHeight();
-    if (typeof ResizeObserver === "undefined") return undefined;
-    const observer = new ResizeObserver(updateViewportHeight);
-    observer.observe(scroll);
-    return () => observer.disconnect();
-  }, []);
-
   useEffect(() => () => {
     if (scrollUpdateFrameRef.current !== null) window.cancelAnimationFrame(scrollUpdateFrameRef.current);
   }, []);
@@ -639,7 +641,7 @@ export function DataTable<TRow extends Record<string, unknown>>({
             <span className="dataHeaderLabel">{flexRender(header.column.columnDef.header, header.getContext())}</span>
           )}
           {groupable ? (
-            <Tooltip content={grouped ? `Ungroup by ${label}` : `Group by ${label}`}><button
+            <button
               type="button"
               className={`dataHeaderGroupButton ${grouped ? "activeGroup" : ""}`}
               aria-label={grouped ? `Ungroup by ${label}` : `Group by ${label}`}
@@ -647,7 +649,7 @@ export function DataTable<TRow extends Record<string, unknown>>({
               onClick={() => toggleGroup(column)}
             >
               <ListTree size={13} strokeWidth={1.75} aria-hidden="true" />
-            </button></Tooltip>
+            </button>
           ) : null}
         </div>
       </div>
@@ -801,6 +803,58 @@ export function DataTable<TRow extends Record<string, unknown>>({
     ));
   }, [effectiveGroupOrder, grouping, table, rows, sorting]);
 
+  const expandedGroupSet = useMemo(() => new Set(expandedGroups), [expandedGroups]);
+  const groupedLeafCount = useMemo(
+    () => groupRows.reduce((total, group) => total + group.subRows.length, 0),
+    [groupRows],
+  );
+  const virtualizedGroups = Boolean(grouping[0]) && groupedLeafCount > DATA_TABLE_VIRTUAL_THRESHOLD;
+  const groupLayouts = useMemo(() => {
+    let top = showColumnHeader && !freezeColumn ? DATA_TABLE_GROUP_HEADER_HEIGHT : 0;
+    return groupRows.map((group, index) => {
+      const key = `${group.groupingValue}`;
+      const expanded = expandedGroupSet.has(key);
+      const bodyHeight = expanded ? group.subRows.length * rowHeight : 0;
+      const layout = { bodyTop: top + DATA_TABLE_GROUP_HEADER_HEIGHT, bodyHeight, expanded };
+      top += DATA_TABLE_GROUP_HEADER_HEIGHT + bodyHeight;
+      if (index < groupRows.length - 1) top += DATA_TABLE_GROUP_GAP;
+      return layout;
+    });
+  }, [expandedGroupSet, freezeColumn, groupRows, rowHeight, showColumnHeader]);
+
+  const renderGroupedRows = (
+    group: Row<TRow>,
+    layout: DataTableGroupLayout,
+    renderRow: (row: Row<TRow>) => ReactNode,
+  ) => {
+    if (!layout.expanded) return null;
+    if (!virtualizedGroups) return group.subRows.map(renderRow);
+
+    const count = group.subRows.length;
+    const bodyBottom = layout.bodyTop + layout.bodyHeight;
+    const viewportBottom = scrollTop + scrollSize.height;
+    let start = 0;
+    let end = 0;
+    if (viewportBottom > layout.bodyTop && scrollTop < bodyBottom) {
+      start = Math.max(0, Math.floor((scrollTop - layout.bodyTop) / rowHeight) - DATA_TABLE_VIRTUAL_OVERSCAN);
+      end = Math.min(
+        count,
+        Math.ceil((viewportBottom - layout.bodyTop) / rowHeight) + DATA_TABLE_VIRTUAL_OVERSCAN,
+      );
+    } else if (scrollTop >= bodyBottom) {
+      start = count;
+      end = count;
+    }
+
+    return (
+      <>
+        {start > 0 ? <div className="dataTableVirtualSpacer" style={{ height: start * rowHeight }} aria-hidden="true" /> : null}
+        {group.subRows.slice(start, end).map(renderRow)}
+        {end < count ? <div className="dataTableVirtualSpacer" style={{ height: (count - end) * rowHeight }} aria-hidden="true" /> : null}
+      </>
+    );
+  };
+
   useEffect(() => {
     const groupingKey = grouping[0] ?? "";
     if (!grouping[0]) {
@@ -844,6 +898,13 @@ export function DataTable<TRow extends Record<string, unknown>>({
     </div>
   ) : null;
 
+  const isEmpty = rows.length === 0;
+  const renderEmptyState = (belowHeader = false) => isEmpty ? (
+    <div className={`dataTableEmpty${belowHeader ? " dataTableEmpty--belowHeader" : ""}`}>
+      {loading ? <LoadingState label={loadingLabel} /> : emptyState}
+    </div>
+  ) : null;
+
   const renderFrozenGroups = () => (
     <Accordion.Root
       key={grouping[0]}
@@ -852,7 +913,7 @@ export function DataTable<TRow extends Record<string, unknown>>({
       value={expandedGroups}
       onValueChange={setExpandedGroups}
     >
-      {groupRows.map((group) => {
+      {groupRows.map((group, index) => {
         const key = `${group.groupingValue}`;
         return (
           <Accordion.Item className="dataGroup" value={key} key={group.id}>
@@ -860,36 +921,31 @@ export function DataTable<TRow extends Record<string, unknown>>({
               <div className="sectionHeading">
                 <Accordion.Trigger className="sectionHeader">
                   <span className="sectionHeaderLabel">{effectiveGroupLabel(key)}</span>
-                  <ChevronDown className="accordionChevron" size={14} />
                   <span className="sectionHeaderCount">{group.subRows.length}</span>
+                  <ChevronDown className="accordionChevron" size={14} />
                 </Accordion.Trigger>
               </div>
             </Accordion.Header>
-            <Accordion.Content>{group.subRows.map((row) => renderSplitDataRow(row, "frozen"))}</Accordion.Content>
+            <Accordion.Content>{renderGroupedRows(group, groupLayouts[index], (row) => renderSplitDataRow(row, "frozen"))}</Accordion.Content>
           </Accordion.Item>
         );
       })}
     </Accordion.Root>
   );
 
-  const expandedGroupSet = useMemo(() => new Set(expandedGroups), [expandedGroups]);
-
   const renderScrollGroups = () => (
     <div className="dataTableGroups">
-      {groupRows.map((group) => {
-        const key = `${group.groupingValue}`;
-        const expanded = expandedGroupSet.has(key);
+      {groupRows.map((group, index) => {
         return (
           <div className="dataGroup" key={group.id}>
             <div className="sectionHeading dataSplitGroupSpacer" aria-hidden="true" />
-            {expanded ? group.subRows.map((row) => renderSplitDataRow(row, "scroll")) : null}
+            {renderGroupedRows(group, groupLayouts[index], (row) => renderSplitDataRow(row, "scroll"))}
           </div>
         );
       })}
     </div>
   );
 
-  const isEmpty = rows.length === 0;
   const handleBodyScroll = useCallback(() => {
     const scroll = scrollRef.current;
     if (!scroll) return;
@@ -936,15 +992,10 @@ export function DataTable<TRow extends Record<string, unknown>>({
               {grouping[0]
                 ? renderScrollGroups()
                 : renderVisibleRows((row) => renderSplitDataRow(row, "scroll"))}
-
-              {isEmpty && (
-                <div className="dataTableEmpty">
-                  {loading ? loadingLabel : emptyState}
-                </div>
-              )}
             </div>
           </div>
         </div>
+        {renderEmptyState()}
       </div>
     </>
   );
@@ -969,6 +1020,7 @@ export function DataTable<TRow extends Record<string, unknown>>({
               className="tableScroll dataTableScroll dataTableBodyScroll pageScrollArea pageScrollInsetRight"
               ref={scrollRef}
               style={{ "--data-table-sticky-header-offset": "0px" } as CSSProperties}
+              onScroll={handleBodyScroll}
               onMouseDownCapture={enableMarquee ? beginMarquee : undefined}
               onClickCapture={enableMarquee ? suppressClickAfterMarquee : undefined}
             >
@@ -990,7 +1042,7 @@ export function DataTable<TRow extends Record<string, unknown>>({
                       value={expandedGroups}
                       onValueChange={setExpandedGroups}
                     >
-                      {groupRows.map((group) => {
+                      {groupRows.map((group, index) => {
                         const key = `${group.groupingValue}`;
                         return (
                           <Accordion.Item className="dataGroup" value={key} key={group.id}>
@@ -998,12 +1050,12 @@ export function DataTable<TRow extends Record<string, unknown>>({
                               <div className="sectionHeading">
                                 <Accordion.Trigger className="sectionHeader">
                                   <span className="sectionHeaderLabel">{effectiveGroupLabel(key)}</span>
-                                  <ChevronDown className="accordionChevron" size={14} />
                                   <span className="sectionHeaderCount">{group.subRows.length}</span>
+                                  <ChevronDown className="accordionChevron" size={14} />
                                 </Accordion.Trigger>
                               </div>
                             </Accordion.Header>
-                            <Accordion.Content>{group.subRows.map(renderDataRow)}</Accordion.Content>
+                            <Accordion.Content>{renderGroupedRows(group, groupLayouts[index], renderDataRow)}</Accordion.Content>
                           </Accordion.Item>
                         );
                       })}
@@ -1012,13 +1064,9 @@ export function DataTable<TRow extends Record<string, unknown>>({
                     renderVisibleRows(renderDataRow)
                   )}
 
-                  {isEmpty && (
-                    <div className="dataTableEmpty">
-                      {loading ? loadingLabel : emptyState}
-                    </div>
-                  )}
                 </div>
               </div>
+              {renderEmptyState(showColumnHeader)}
             </div>
           </>
         )}

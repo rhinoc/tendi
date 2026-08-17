@@ -50,6 +50,8 @@ export type NormalizedSkill = {
   source: string;
   installTargets?: string[];
   updateStatus: string;
+  ctime?: string;
+  mtime?: string;
   paths: NonNullable<SkillLike["paths"]>;
   meta?: string;
   [key: string]: unknown;
@@ -164,6 +166,8 @@ export function normalizeSkill(skill: Record<string, unknown>, index: number): N
     source: `${skill.source_summary ?? skill.source ?? "local"}`,
     installTargets: (skill.install_targets as string[] | undefined) ?? (skill.installTargets as string[] | undefined) ?? [],
     updateStatus: `${skill.update_status ?? skill.updateStatus ?? "local"}`,
+    ctime: typeof skill.ctime === "string" ? skill.ctime : undefined,
+    mtime: typeof skill.mtime === "string" ? skill.mtime : undefined,
     paths: (skill.paths as SkillLike["paths"]) ?? [],
     meta: `${skill.update_status ?? skill.updateStatus ?? ""}`,
   };
@@ -285,6 +289,20 @@ export function mergeSkillListPreservingUpdates(
       statusTone: skill.statusTone === "muted" ? skill.statusTone : "warn",
     };
   });
+}
+
+export function replaceSkillReportPreservingUpdates<T extends { skills: NormalizedSkill[] }>(
+  previous: T,
+  next: T,
+  clearNames: string[] = [],
+): T {
+  return clearSkillUpdateAvailability(
+    {
+      ...next,
+      skills: mergeSkillListPreservingUpdates(previous.skills, next.skills),
+    },
+    clearNames,
+  );
 }
 
 export function clearSkillUpdateAvailability<T extends { skills: NormalizedSkill[] }>(

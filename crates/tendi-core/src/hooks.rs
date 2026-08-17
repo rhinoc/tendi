@@ -1,6 +1,6 @@
 use std::{
     collections::{HashMap, HashSet},
-    env, fs,
+    fs,
     path::{Path, PathBuf},
     sync::{LazyLock, Mutex, MutexGuard},
 };
@@ -10,7 +10,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::Digest;
 use toml::Value as TomlValue;
-use walkdir::WalkDir;
 
 use crate::{
     fsutil::{atomic_write, sha256_file, sha256_text},
@@ -25,7 +24,7 @@ fn lock_hook_mutation() -> Result<MutexGuard<'static, ()>> {
         .map_err(|_| anyhow::anyhow!("hook mutation authority is unavailable"))
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct HookRecord {
     pub agent: AgentKind,
     pub event: String,
@@ -41,9 +40,9 @@ pub struct HookRecord {
     pub trust_hash: String,
     pub needs_review: bool,
     #[serde(skip)]
-    codex_hook_key: Option<String>,
+    pub(crate) codex_hook_key: Option<String>,
     #[serde(skip)]
-    codex_current_hash: Option<String>,
+    pub(crate) codex_current_hash: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -202,7 +201,12 @@ fn codex_event_key_label(event: &str) -> String {
     label
 }
 
-fn codex_hook_key(path: &Path, event: &str, group_index: usize, handler_index: usize) -> String {
+pub(crate) fn codex_hook_key(
+    path: &Path,
+    event: &str,
+    group_index: usize,
+    handler_index: usize,
+) -> String {
     format!(
         "{}:{}:{group_index}:{handler_index}",
         path.display(),
@@ -210,7 +214,7 @@ fn codex_hook_key(path: &Path, event: &str, group_index: usize, handler_index: u
     )
 }
 
-fn codex_hook_timeout(event: &str, configured: Option<u64>) -> u64 {
+pub(crate) fn codex_hook_timeout(event: &str, configured: Option<u64>) -> u64 {
     if event == "SessionEnd" {
         configured.unwrap_or(1).clamp(1, 3)
     } else {
@@ -254,7 +258,7 @@ fn canonical_json(value: &Value) -> Value {
     }
 }
 
-fn codex_hook_hash(
+pub(crate) fn codex_hook_hash(
     event: &str,
     matcher: Option<&str>,
     command: &str,
@@ -333,24 +337,14 @@ fn hook_review_identity(hook: &HookRecord) -> String {
 }
 
 fn hook_source_is_managed(hook: &HookRecord) -> bool {
-    let path = hook.path.to_string_lossy();
-    match hook.agent {
-        AgentKind::Cursor => {
-            path.starts_with("/etc/cursor/")
-                || path.starts_with("/Library/Application Support/Cursor/")
-        }
-        AgentKind::Claude => {
-            path.starts_with("/etc/claude-code/")
-                || path.starts_with("/Library/Application Support/ClaudeCode/")
-                || path.contains("/.claude/plugins/")
-        }
-        _ => false,
-    }
+    crate::providers::agent_provider(hook.agent).managed_hook_path(&hook.path)
 }
 
 fn apply_tendi_hook_review_states(hooks: &mut [HookRecord], states: &HashMap<String, String>) {
     for hook in hooks {
-        if hook.agent == AgentKind::Codex || hook_source_is_managed(hook) {
+        if !crate::providers::agent_provider(hook.agent).uses_tendi_hook_review_state()
+            || hook_source_is_managed(hook)
+        {
             continue;
         }
         hook.needs_review = states
@@ -363,122 +357,16 @@ pub fn scan_hooks(cwd: &Path) -> Result<HookScan> {
     let mut hooks = Vec::new();
     let mut warnings = Vec::new();
     let mut scanned_files = HashSet::new();
-    let codex_root = dirs::home_dir().map(|home| codex_home(&home));
+    let context = crate::providers::ProviderContext::new(cwd);
+    let codex_root = crate::providers::agent_provider(AgentKind::Codex).config_dir(&context);
     let codex_hook_states = codex_root
         .as_ref()
         .map(|home| load_codex_hook_states(&home.join("config.toml")))
         .unwrap_or_default();
     let tendi_hook_review_states = load_tendi_hook_review_states();
 
-    if let Some(home) = dirs::home_dir() {
-        scan_hook_file_once(
-            &codex_home(&home).join("hooks.json"),
-            AgentKind::Codex,
-            &mut scanned_files,
-            &mut hooks,
-            &mut warnings,
-        );
-        scan_codex_config_hooks_once(
-            &codex_home(&home).join("config.toml"),
-            &mut scanned_files,
-            &mut hooks,
-            &mut warnings,
-        );
-        scan_hook_file_once(
-            &home.join(".cursor/hooks.json"),
-            AgentKind::Cursor,
-            &mut scanned_files,
-            &mut hooks,
-            &mut warnings,
-        );
-        scan_hook_file_once(
-            &home.join(".claude/settings.json"),
-            AgentKind::Claude,
-            &mut scanned_files,
-            &mut hooks,
-            &mut warnings,
-        );
-        scan_claude_plugin_hooks(&home.join(".claude/plugins"), &mut hooks, &mut warnings);
-        scan_claude_component_hooks(&home.join(".claude/skills"), &mut hooks, &mut warnings);
-        scan_claude_component_hooks(&home.join(".claude/agents"), &mut hooks, &mut warnings);
-    }
-
-    scan_hook_file_once(
-        &PathBuf::from("/etc/cursor/hooks.json"),
-        AgentKind::Cursor,
-        &mut scanned_files,
-        &mut hooks,
-        &mut warnings,
-    );
-    scan_hook_file_once(
-        &PathBuf::from("/Library/Application Support/Cursor/hooks.json"),
-        AgentKind::Cursor,
-        &mut scanned_files,
-        &mut hooks,
-        &mut warnings,
-    );
-    scan_hook_file_once(
-        &PathBuf::from("/Library/Application Support/ClaudeCode/managed-settings.json"),
-        AgentKind::Claude,
-        &mut scanned_files,
-        &mut hooks,
-        &mut warnings,
-    );
-    scan_claude_managed_dropins(
-        &PathBuf::from("/Library/Application Support/ClaudeCode/managed-settings.d"),
-        &mut hooks,
-        &mut warnings,
-    );
-    scan_hook_file_once(
-        &PathBuf::from("/etc/claude-code/managed-settings.json"),
-        AgentKind::Claude,
-        &mut scanned_files,
-        &mut hooks,
-        &mut warnings,
-    );
-    scan_claude_managed_dropins(
-        &PathBuf::from("/etc/claude-code/managed-settings.d"),
-        &mut hooks,
-        &mut warnings,
-    );
-
-    for ancestor in cwd.ancestors() {
-        scan_hook_file_once(
-            &ancestor.join(".codex/hooks.json"),
-            AgentKind::Codex,
-            &mut scanned_files,
-            &mut hooks,
-            &mut warnings,
-        );
-        scan_codex_config_hooks_once(
-            &ancestor.join(".codex/config.toml"),
-            &mut scanned_files,
-            &mut hooks,
-            &mut warnings,
-        );
-        scan_hook_file_once(
-            &ancestor.join(".cursor/hooks.json"),
-            AgentKind::Cursor,
-            &mut scanned_files,
-            &mut hooks,
-            &mut warnings,
-        );
-        scan_hook_file_once(
-            &ancestor.join(".claude/settings.json"),
-            AgentKind::Claude,
-            &mut scanned_files,
-            &mut hooks,
-            &mut warnings,
-        );
-        scan_hook_file_once(
-            &ancestor.join(".claude/settings.local.json"),
-            AgentKind::Claude,
-            &mut scanned_files,
-            &mut hooks,
-            &mut warnings,
-        );
-        scan_claude_component_hooks(&ancestor.join(".claude/skills"), &mut hooks, &mut warnings);
-        scan_claude_component_hooks(&ancestor.join(".claude/agents"), &mut hooks, &mut warnings);
+    for provider in crate::providers::agent_providers() {
+        provider.scan_hooks(&context, &mut scanned_files, &mut hooks, &mut warnings);
     }
 
     apply_codex_hook_review_states(&mut hooks, &codex_hook_states);
@@ -599,10 +487,8 @@ pub fn review_hook_and_scan(cwd: &Path, request: HookReviewRequest) -> Result<Ho
         .hooks
         .iter()
         .position(|hook| {
-            matches!(
-                hook.agent,
-                AgentKind::Codex | AgentKind::Cursor | AgentKind::Claude
-            ) && hook.path == request.path
+            crate::providers::agent_provider(hook.agent).discoverable()
+                && hook.path == request.path
                 && hook.trust_hash == request.expected_trust_hash
                 && hook.event == request.event
                 && hook.matcher == request.matcher
@@ -618,32 +504,22 @@ pub fn review_hook_and_scan(cwd: &Path, request: HookReviewRequest) -> Result<Ho
     if hook_source_is_managed(hook) {
         bail!("managed hook sources cannot be reviewed here");
     }
-    if hook.agent == AgentKind::Codex {
-        let key = hook
-            .codex_hook_key
-            .as_deref()
-            .context("this hook does not support review")?;
-        let current_hash = hook
-            .codex_current_hash
-            .as_deref()
-            .filter(|hash| *hash != "unsupported")
-            .context("this hook type does not support review")?;
-        let home = dirs::home_dir().context("home directory is unavailable")?;
-        write_codex_trusted_hash(&codex_home(&home).join("config.toml"), key, current_hash)?;
-    } else {
-        let path = tendi_hook_review_state_path().context("Tendi data directory is unavailable")?;
-        let mut states = load_tendi_hook_review_states();
-        states.insert(hook_review_identity(hook), hook.trust_hash.clone());
-        atomic_write(
-            &path,
-            &format!("{}\n", serde_json::to_string_pretty(&states)?),
-        )?;
-    }
+    crate::providers::agent_provider(hook.agent).review_hook(hook)?;
     scan.hooks[hook_index].needs_review = false;
     Ok(scan)
 }
 
-fn write_codex_trusted_hash(path: &Path, key: &str, trusted_hash: &str) -> Result<()> {
+pub(crate) fn review_hook_with_tendi_state(hook: &HookRecord) -> Result<()> {
+    let path = tendi_hook_review_state_path().context("Tendi data directory is unavailable")?;
+    let mut states = load_tendi_hook_review_states();
+    states.insert(hook_review_identity(hook), hook.trust_hash.clone());
+    atomic_write(
+        &path,
+        &format!("{}\n", serde_json::to_string_pretty(&states)?),
+    )
+}
+
+pub(crate) fn write_codex_trusted_hash(path: &Path, key: &str, trusted_hash: &str) -> Result<()> {
     let original = fs::read_to_string(path)
         .with_context(|| format!("failed to read Codex config {}", path.display()))?;
     let escaped_key = key.replace('\\', "\\\\").replace('"', "\\\"");
@@ -986,12 +862,9 @@ fn ensure_deletable_hook_path(path: &Path) -> Result<()> {
 }
 
 fn hook_management_disabled_reason(path: &Path) -> Option<&'static str> {
-    let text = path.to_string_lossy();
-    if text.starts_with("/etc/cursor/")
-        || text.starts_with("/Library/Application Support/Cursor/")
-        || text.starts_with("/etc/claude-code/")
-        || text.starts_with("/Library/Application Support/ClaudeCode/")
-        || text.contains("/.claude/plugins/")
+    if crate::providers::all_providers()
+        .into_iter()
+        .any(|provider| provider.managed_hook_path(path))
     {
         return Some("this hook source is read-only");
     }
@@ -1004,37 +877,38 @@ fn hook_management_disabled_reason(path: &Path) -> Option<&'static str> {
     None
 }
 
-fn codex_home(home: &Path) -> PathBuf {
-    env::var_os("CODEX_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| home.join(".codex"))
-}
-
 fn canonical_scan_key(path: &Path) -> PathBuf {
     fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
-fn scan_hook_file_once(
+fn yaml_frontmatter(text: &str) -> Option<&str> {
+    let rest = text.strip_prefix("---\n")?;
+    let end = rest.find("\n---")?;
+    Some(&rest[..end])
+}
+
+pub(crate) fn scan_hook_file_once(
     path: &Path,
     agent: AgentKind,
     scanned_files: &mut HashSet<PathBuf>,
     hooks: &mut Vec<HookRecord>,
     warnings: &mut Vec<String>,
 ) {
-    if !path.is_file() {
-        return;
-    }
-    if !scanned_files.insert(canonical_scan_key(path)) {
-        return;
-    }
-    scan_hook_file(path, agent, hooks, warnings);
+    scan_file_once(
+        path,
+        scanned_files,
+        hooks,
+        warnings,
+        |path, hooks, warnings| scan_hook_file(path, agent, hooks, warnings),
+    );
 }
 
-fn scan_codex_config_hooks_once(
+pub(crate) fn scan_file_once(
     path: &Path,
     scanned_files: &mut HashSet<PathBuf>,
     hooks: &mut Vec<HookRecord>,
     warnings: &mut Vec<String>,
+    scanner: impl FnOnce(&Path, &mut Vec<HookRecord>, &mut Vec<String>),
 ) {
     if !path.is_file() {
         return;
@@ -1042,88 +916,10 @@ fn scan_codex_config_hooks_once(
     if !scanned_files.insert(canonical_scan_key(path)) {
         return;
     }
-    scan_codex_config_hooks(path, hooks, warnings);
+    scanner(path, hooks, warnings);
 }
 
-/// Codex lifecycle hook events from the official `HookEventsToml` schema.
-/// `hooks.state` is runtime metadata and is intentionally excluded.
-#[derive(Debug, Default, Deserialize)]
-struct CodexHookEvents {
-    #[serde(rename = "PreToolUse", default)]
-    pre_tool_use: Vec<Value>,
-    #[serde(rename = "PermissionRequest", default)]
-    permission_request: Vec<Value>,
-    #[serde(rename = "PostToolUse", default)]
-    post_tool_use: Vec<Value>,
-    #[serde(rename = "PreCompact", default)]
-    pre_compact: Vec<Value>,
-    #[serde(rename = "PostCompact", default)]
-    post_compact: Vec<Value>,
-    #[serde(rename = "SessionStart", default)]
-    session_start: Vec<Value>,
-    #[serde(rename = "UserPromptSubmit", default)]
-    user_prompt_submit: Vec<Value>,
-    #[serde(rename = "SubagentStart", default)]
-    subagent_start: Vec<Value>,
-    #[serde(rename = "SubagentStop", default)]
-    subagent_stop: Vec<Value>,
-    #[serde(rename = "Stop", default)]
-    stop: Vec<Value>,
-}
-
-impl CodexHookEvents {
-    fn event_groups(&self) -> [(&str, &Vec<Value>); 10] {
-        [
-            ("PreToolUse", &self.pre_tool_use),
-            ("PermissionRequest", &self.permission_request),
-            ("PostToolUse", &self.post_tool_use),
-            ("PreCompact", &self.pre_compact),
-            ("PostCompact", &self.post_compact),
-            ("SessionStart", &self.session_start),
-            ("UserPromptSubmit", &self.user_prompt_submit),
-            ("SubagentStart", &self.subagent_start),
-            ("SubagentStop", &self.subagent_stop),
-            ("Stop", &self.stop),
-        ]
-    }
-
-    fn is_empty(&self) -> bool {
-        self.event_groups()
-            .into_iter()
-            .all(|(_, groups)| groups.is_empty())
-    }
-}
-
-#[derive(Debug, Deserialize)]
-struct CodexHooksFile {
-    hooks: CodexHookEvents,
-}
-
-fn collect_codex_hook_events(
-    path: &Path,
-    trust_hash: &str,
-    events: &CodexHookEvents,
-    hooks: &mut Vec<HookRecord>,
-) {
-    for (event, groups) in events.event_groups() {
-        if groups.is_empty() {
-            continue;
-        }
-        for (group_index, group) in groups.iter().enumerate() {
-            collect_event_hooks(
-                AgentKind::Codex,
-                path,
-                trust_hash,
-                event,
-                group_index,
-                group,
-                hooks,
-            );
-        }
-    }
-}
-
-fn scan_hook_file(
+pub(crate) fn scan_hook_file(
     path: &Path,
     agent: AgentKind,
     hooks: &mut Vec<HookRecord>,
@@ -1147,15 +943,7 @@ fn scan_hook_file(
             return;
         }
     };
-    if agent == AgentKind::Codex {
-        let parsed = match serde_json::from_str::<CodexHooksFile>(&text) {
-            Ok(parsed) => parsed,
-            Err(err) => {
-                warnings.push(format!("{}: {err}", path.display()));
-                return;
-            }
-        };
-        collect_codex_hook_events(path, &trust_hash, &parsed.hooks, hooks);
+    if crate::providers::agent_provider(agent).parse_hook_file(path, &trust_hash, hooks, warnings) {
         return;
     }
 
@@ -1168,155 +956,6 @@ fn scan_hook_file(
     };
 
     collect_hooks_from_value(agent, path, &trust_hash, &value, hooks);
-}
-
-fn scan_codex_config_hooks(path: &Path, hooks: &mut Vec<HookRecord>, warnings: &mut Vec<String>) {
-    if !path.is_file() {
-        return;
-    }
-
-    let text = match fs::read_to_string(path) {
-        Ok(text) => text,
-        Err(err) => {
-            warnings.push(format!("{}: {err}", path.display()));
-            return;
-        }
-    };
-    let trust_hash = match sha256_file(path) {
-        Ok(hash) => hash,
-        Err(err) => {
-            warnings.push(format!("{}: {err:#}", path.display()));
-            return;
-        }
-    };
-    let toml_value = match toml::from_str::<TomlValue>(&text) {
-        Ok(value) => value,
-        Err(err) => {
-            warnings.push(format!("{}: {err}", path.display()));
-            return;
-        }
-    };
-    let Some(hooks_table) = toml_value.get("hooks") else {
-        return;
-    };
-    let events: CodexHookEvents = match hooks_table.clone().try_into() {
-        Ok(events) => events,
-        Err(err) => {
-            warnings.push(format!("{}: {err}", path.display()));
-            return;
-        }
-    };
-    if events.is_empty() {
-        return;
-    }
-
-    collect_codex_hook_events(path, &trust_hash, &events, hooks);
-}
-
-fn scan_claude_plugin_hooks(root: &Path, hooks: &mut Vec<HookRecord>, warnings: &mut Vec<String>) {
-    if !root.is_dir() {
-        return;
-    }
-
-    for entry in WalkDir::new(root)
-        .follow_links(true)
-        .max_depth(7)
-        .into_iter()
-        .filter_map(Result::ok)
-        .filter(|entry| entry.file_type().is_file() && entry.file_name() == "hooks.json")
-    {
-        scan_hook_file(entry.path(), AgentKind::Claude, hooks, warnings);
-    }
-}
-
-fn scan_claude_managed_dropins(
-    root: &Path,
-    hooks: &mut Vec<HookRecord>,
-    warnings: &mut Vec<String>,
-) {
-    let Ok(entries) = fs::read_dir(root) else {
-        return;
-    };
-    let mut paths = entries
-        .filter_map(|entry| entry.ok())
-        .map(|entry| entry.path())
-        .filter(|path| path.extension().and_then(|value| value.to_str()) == Some("json"))
-        .collect::<Vec<_>>();
-    paths.sort();
-    for path in paths {
-        scan_hook_file(&path, AgentKind::Claude, hooks, warnings);
-    }
-}
-
-fn scan_claude_component_hooks(
-    root: &Path,
-    hooks: &mut Vec<HookRecord>,
-    warnings: &mut Vec<String>,
-) {
-    if !root.is_dir() {
-        return;
-    }
-
-    for entry in WalkDir::new(root)
-        .follow_links(true)
-        .max_depth(7)
-        .into_iter()
-        .filter_map(|entry| entry.ok())
-        .filter(|entry| {
-            entry.file_type().is_file()
-                && entry.path().extension().and_then(|value| value.to_str()) == Some("md")
-        })
-    {
-        scan_claude_component_file(entry.path(), hooks, warnings);
-    }
-}
-
-fn scan_claude_component_file(
-    path: &Path,
-    hooks: &mut Vec<HookRecord>,
-    warnings: &mut Vec<String>,
-) {
-    let text = match fs::read_to_string(path) {
-        Ok(text) => text,
-        Err(err) => {
-            warnings.push(format!("{}: {err}", path.display()));
-            return;
-        }
-    };
-    let Some(frontmatter) = yaml_frontmatter(&text) else {
-        return;
-    };
-    let value = match serde_yaml::from_str::<serde_yaml::Value>(frontmatter) {
-        Ok(value) => value,
-        Err(err) => {
-            warnings.push(format!("{}: {err}", path.display()));
-            return;
-        }
-    };
-    let value = match serde_json::to_value(value) {
-        Ok(value) => value,
-        Err(err) => {
-            warnings.push(format!("{}: {err}", path.display()));
-            return;
-        }
-    };
-    if value.get("hooks").is_none() {
-        return;
-    }
-    let trust_hash = match sha256_file(path) {
-        Ok(hash) => hash,
-        Err(err) => {
-            warnings.push(format!("{}: {err:#}", path.display()));
-            return;
-        }
-    };
-    collect_hooks_from_value(AgentKind::Claude, path, &trust_hash, &value, hooks);
-}
-
-fn yaml_frontmatter(text: &str) -> Option<&str> {
-    let rest = text.strip_prefix("---\n")?;
-    let end = rest.find("\n---")?;
-    Some(&rest[..end])
 }
 
 fn remove_json_hook_from_value(value: &mut Value, request: &HookDeleteRequest) -> bool {
@@ -1730,7 +1369,7 @@ fn hook_table_matches_enabled_request(
         && request.status_message.as_deref() == status_message
 }
 
-fn collect_hooks_from_value(
+pub(crate) fn collect_hooks_from_value(
     agent: AgentKind,
     path: &Path,
     trust_hash: &str,
@@ -1745,19 +1384,14 @@ fn collect_hooks_from_value(
     for (event, specs) in hook_map {
         collect_event_hooks(agent, path, trust_hash, event, 0, specs, hooks);
     }
-    if agent == AgentKind::Claude
-        && value
-            .get("disableAllHooks")
-            .and_then(Value::as_bool)
-            .unwrap_or(false)
-    {
+    if crate::providers::agent_provider(agent).disables_hooks_from_config(value) {
         for hook in &mut hooks[start..] {
             hook.enabled = false;
         }
     }
 }
 
-fn collect_event_hooks(
+pub(crate) fn collect_event_hooks(
     agent: AgentKind,
     path: &Path,
     trust_hash: &str,
@@ -1814,6 +1448,24 @@ fn collect_event_hooks(
         object,
         hooks,
     );
+}
+
+#[cfg(test)]
+pub(crate) fn scan_codex_config_hooks(
+    path: &Path,
+    hooks: &mut Vec<HookRecord>,
+    warnings: &mut Vec<String>,
+) {
+    crate::providers::codex::scan_codex_config_hooks(path, hooks, warnings);
+}
+
+#[cfg(test)]
+pub(crate) fn scan_claude_component_file(
+    path: &Path,
+    hooks: &mut Vec<HookRecord>,
+    warnings: &mut Vec<String>,
+) {
+    crate::providers::claude::scan_claude_component_file(path, hooks, warnings);
 }
 
 fn collect_group_hooks(
@@ -1941,35 +1593,26 @@ fn push_hook_record(
         .or_else(|| object.get("status_message"))
         .and_then(Value::as_str)
         .map(str::to_string);
-    let codex_hook_key = (agent == AgentKind::Codex)
-        .then(|| codex_hook_key(path, event, group_index, handler_index));
-    let codex_current_hash = if agent == AgentKind::Codex {
-        if let Some(command) = command.as_deref() {
-            let configured_timeout = object.get("timeout").and_then(Value::as_u64);
-            let is_async = object
+    let (codex_hook_key, codex_current_hash) = crate::providers::agent_provider(agent)
+        .codex_hook_metadata(
+            path,
+            event,
+            group_index,
+            handler_index,
+            matcher,
+            command.as_deref(),
+            object.get("timeout").and_then(Value::as_u64),
+            object
                 .get("async")
                 .and_then(Value::as_bool)
-                .unwrap_or(false);
-            let additional_context_limit = object
+                .unwrap_or(false),
+            status_message.as_deref(),
+            object
                 .get("additionalContextLimit")
                 .or_else(|| object.get("additional_context_limit"))
                 .and_then(Value::as_u64)
-                .and_then(|value| usize::try_from(value).ok());
-            codex_hook_hash(
-                event,
-                matcher,
-                command,
-                codex_hook_timeout(event, configured_timeout),
-                is_async,
-                status_message.as_deref(),
-                additional_context_limit,
-            )
-        } else {
-            Some("unsupported".to_string())
-        }
-    } else {
-        None
-    };
+                .and_then(|value| usize::try_from(value).ok()),
+        );
 
     hooks.push(HookRecord {
         agent,

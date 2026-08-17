@@ -1,0 +1,101 @@
+import { spawn } from "node:child_process";
+import {
+  mkdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+
+const scriptDir = dirname(fileURLToPath(import.meta.url));
+const desktopDir = resolve(scriptDir, "..");
+const repoDir = resolve(desktopDir, "../..");
+const requestedTargetDir = process.env.CARGO_TARGET_DIR;
+const targetDir = requestedTargetDir
+  ? resolve(process.cwd(), requestedTargetDir)
+  : resolve(repoDir, "target", "tauri-dev");
+const lockDir = resolve(targetDir, ".tendi-tauri-dev.lock");
+const lockPidFile = resolve(lockDir, "pid");
+
+function processIsRunning(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return error?.code === "EPERM";
+  }
+}
+
+function readLockPid() {
+  try {
+    const pid = Number.parseInt(readFileSync(lockPidFile, "utf8").trim(), 10);
+    return Number.isInteger(pid) && pid > 0 ? pid : null;
+  } catch {
+    return null;
+  }
+}
+
+function removeStaleLock() {
+  rmSync(lockDir, { recursive: true, force: true });
+}
+
+function acquireLock() {
+  mkdirSync(targetDir, { recursive: true });
+
+  try {
+    mkdirSync(lockDir);
+  } catch (error) {
+    if (error?.code !== "EEXIST") throw error;
+
+    const pid = readLockPid();
+    if (pid && processIsRunning(pid)) {
+      throw new Error(`Tauri dev target is already in use by process ${pid}: ${targetDir}`);
+    }
+
+    removeStaleLock();
+    mkdirSync(lockDir);
+  }
+
+  writeFileSync(lockPidFile, `${process.pid}\n`);
+}
+
+function releaseLock() {
+  const pid = readLockPid();
+  if (pid === process.pid) removeStaleLock();
+}
+
+try {
+  acquireLock();
+} catch (error) {
+  console.error(`[tendi] ${error.message}`);
+  process.exit(1);
+}
+
+console.log(`[tendi] CARGO_TARGET_DIR=${targetDir}`);
+
+const tauriCommand = process.platform === "win32" ? "tauri.cmd" : "tauri";
+const child = spawn(tauriCommand, ["dev", ...process.argv.slice(2)], {
+  cwd: desktopDir,
+  env: { ...process.env, CARGO_TARGET_DIR: targetDir },
+  stdio: "inherit",
+});
+
+function forwardSignal(signal) {
+  child.kill(signal);
+}
+
+process.once("SIGINT", () => forwardSignal("SIGINT"));
+process.once("SIGTERM", () => forwardSignal("SIGTERM"));
+process.once("exit", releaseLock);
+
+child.once("error", (error) => {
+  releaseLock();
+  console.error(`[tendi] failed to start Tauri: ${error.message}`);
+  process.exit(1);
+});
+
+child.once("exit", (code, signal) => {
+  releaseLock();
+  process.exit(code ?? (signal ? 1 : 0));
+});

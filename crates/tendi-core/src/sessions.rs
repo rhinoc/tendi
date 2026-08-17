@@ -1,9 +1,9 @@
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, VecDeque},
     fs,
     io::{BufRead, BufReader, Read, Seek, SeekFrom},
     path::{Path, PathBuf},
-    process::Command,
+    sync::{LazyLock, Mutex},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use walkdir::WalkDir;
 
-use crate::skills::AgentKind;
+use crate::{git, skills::AgentKind};
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct SessionTokenUsage {
@@ -125,8 +125,11 @@ impl SessionScanCache {
     fn session_if_current(&self, agent: AgentKind, path: &Path) -> Option<SessionRecord> {
         let entry = self.entry_for_path(agent, path)?;
         let (file_mtime, file_size) = file_state(path)?;
-        (entry.file_mtime == file_mtime && entry.file_size == file_size)
-            .then(|| entry.session.clone())
+        (entry.file_mtime == file_mtime
+            && entry.file_size == file_size
+            && !session_preview_requires_rescan(&entry.session)
+            && !session_title_requires_rescan(&entry.session))
+        .then(|| entry.session.clone())
     }
 
     fn session_if_current_id(&self, agent: AgentKind, id: &str) -> Option<SessionRecord> {
@@ -135,8 +138,11 @@ impl SessionScanCache {
                 return None;
             }
             let (file_mtime, file_size) = file_state(&entry.session.path)?;
-            (entry.file_mtime == file_mtime && entry.file_size == file_size)
-                .then(|| entry.session.clone())
+            (entry.file_mtime == file_mtime
+                && entry.file_size == file_size
+                && !session_preview_requires_rescan(&entry.session)
+                && !session_title_requires_rescan(&entry.session))
+            .then(|| entry.session.clone())
         })
     }
 
@@ -148,6 +154,8 @@ impl SessionScanCache {
         if current_size <= cached_size
             || file_mtime < entry.file_mtime
             || !is_line_boundary(path, cached_size)
+            || session_preview_requires_rescan(&entry.session)
+            || session_title_requires_rescan(&entry.session)
         {
             return None;
         }
@@ -398,20 +406,15 @@ pub fn scan_session_paths(paths: &[PathBuf], cache: &SessionScanCache) -> Sessio
     let mut sessions = Vec::new();
     let warnings = Vec::new();
     for path in paths.iter().filter(|path| path.is_file()) {
-        match path.file_name().and_then(|name| name.to_str()) {
-            Some("meta.json") if is_cursor_meta_file(path) => {
-                scan_cursor_meta_file(path, &mut sessions, AgentKind::Cursor, Some(cache));
-            }
-            Some("store.db") => {
-                scan_cursor_store_file(path, &mut sessions, AgentKind::Cursor, Some(cache));
-            }
-            _ if path
+        let handled = crate::providers::all_providers()
+            .into_iter()
+            .any(|provider| provider.scan_explicit_session_path(path, &mut sessions, Some(cache)));
+        if !handled
+            && path
                 .extension()
-                .is_some_and(|extension| extension == "jsonl") =>
-            {
-                scan_detected_jsonl_session(path, &mut sessions, Some(cache));
-            }
-            _ => {}
+                .is_some_and(|extension| extension == "jsonl")
+        {
+            scan_detected_jsonl_session(path, &mut sessions, Some(cache));
         }
     }
     let mut sessions = merge_sessions(sessions);
@@ -456,7 +459,7 @@ pub fn normalize_session_projects(sessions: &mut [SessionRecord]) {
     }
 }
 
-fn ephemeral_chat_root(path: &Path) -> Option<PathBuf> {
+pub(crate) fn ephemeral_chat_root(path: &Path) -> Option<PathBuf> {
     let parent = path.parent()?;
     let parent_name = parent.file_name()?.to_str()?;
     let root = parent.parent()?;
@@ -530,10 +533,9 @@ impl SessionRepositoryResolver {
         self.repositories
             .entry(boundary.clone())
             .or_insert_with(|| {
-                (
-                    git_repository_root(&boundary),
-                    git_repository_url(&boundary),
-                )
+                git::local_repository_snapshot(&boundary, git::never_cancelled())
+                    .map(repository_from_git_snapshot)
+                    .unwrap_or((None, None))
             })
             .clone()
     }
@@ -561,61 +563,19 @@ impl SessionRepositoryResolver {
     }
 }
 
-fn git_repository_url(workspace: &Path) -> Option<String> {
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(workspace)
-        .args(["config", "--get", "remote.origin.url"])
-        .env("GIT_OPTIONAL_LOCKS", "0")
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    String::from_utf8(output.stdout)
-        .ok()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-}
-
-fn git_repository_root(workspace: &Path) -> Option<PathBuf> {
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(workspace)
-        .args([
-            "rev-parse",
-            "--path-format=absolute",
-            "--show-toplevel",
-            "--git-dir",
-            "--git-common-dir",
-        ])
-        .env("GIT_OPTIONAL_LOCKS", "0")
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let stdout = String::from_utf8(output.stdout).ok()?;
-    let mut lines = stdout
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty());
-    let top_level = PathBuf::from(lines.next()?);
-    let git_dir = PathBuf::from(lines.next()?);
-    let common_dir = PathBuf::from(lines.next()?);
-    let canonical_git_dir = fs::canonicalize(&git_dir).unwrap_or(git_dir);
-    let canonical_common_dir = fs::canonicalize(&common_dir).unwrap_or(common_dir.clone());
-
-    if canonical_git_dir != canonical_common_dir
-        && canonical_common_dir
-            .file_name()
-            .and_then(|name| name.to_str())
-            == Some(".git")
-    {
-        return canonical_common_dir.parent().map(Path::to_path_buf);
-    }
-
-    Some(fs::canonicalize(&top_level).unwrap_or(top_level))
+fn repository_from_git_snapshot(
+    snapshot: git::GitRepositorySnapshot,
+) -> (Option<PathBuf>, Option<String>) {
+    let repository = match (snapshot.repo_root, snapshot.git_dir, snapshot.common_dir) {
+        (Some(_), Some(git_dir), Some(common_dir))
+            if git_dir != common_dir
+                && common_dir.file_name().and_then(|name| name.to_str()) == Some(".git") =>
+        {
+            common_dir.parent().map(Path::to_path_buf)
+        }
+        (repo_root, _, _) => repo_root,
+    };
+    (repository, snapshot.remote_url)
 }
 
 fn collect_recent_codex_paths(
@@ -741,25 +701,19 @@ fn is_line_boundary(path: &Path, offset: u64) -> bool {
 pub fn infer_session_project(path: &Path, agent: AgentKind) -> Option<PathBuf> {
     let project = if path.extension().is_some_and(|ext| ext == "jsonl") {
         let meta = scan_jsonl_meta(path);
-        meta.project.or_else(|| match agent {
-            AgentKind::Cursor => cursor_project_from_transcript_path(path),
-            _ => None,
-        })
+        meta.project
     } else if path.file_name().and_then(|name| name.to_str()) == Some("meta.json") {
         fs::read_to_string(path)
             .ok()
             .and_then(|text| serde_json::from_str::<Value>(&text).ok())
-            .and_then(|value| cursor_project_from_meta(Some(&value)))
+            .and_then(|value| crate::providers::agent_provider(agent).infer_meta_project(&value))
     } else {
         None
     };
 
-    let project = project.filter(|path| path.is_absolute());
-    if agent == AgentKind::Codex {
-        project.map(|path| ephemeral_chat_root(&path).unwrap_or(path))
-    } else {
-        project
-    }
+    crate::providers::agent_provider(agent)
+        .infer_session_project(path, project)
+        .filter(|path| path.is_absolute())
 }
 
 pub(crate) fn scan_codex_index(
@@ -786,7 +740,7 @@ pub(crate) fn scan_codex_index(
                         title: value
                             .get("thread_name")
                             .and_then(Value::as_str)
-                            .map(str::to_string),
+                            .and_then(clean_title),
                         project: None,
                         repository: None,
                         repository_url: None,
@@ -937,8 +891,12 @@ pub(crate) fn scan_additional_session_roots(
             .is_some_and(|extension| extension == "jsonl")
         {
             scan_detected_jsonl_session(&path, sessions, cache);
-        } else if is_cursor_meta_file(&path) {
-            scan_cursor_meta_file(&path, sessions, AgentKind::Cursor, cache);
+        } else {
+            for provider in crate::providers::all_providers() {
+                if provider.scan_explicit_session_path(&path, sessions, cache) {
+                    break;
+                }
+            }
         }
     }
 }
@@ -1004,7 +962,7 @@ fn scan_detected_jsonl_session(
         sessions.push(session);
         return;
     }
-    if matches!(agent, AgentKind::Codex | AgentKind::Cursor) {
+    if crate::providers::agent_provider(agent).session_supports_append_cache() {
         if let Some((session, offset)) =
             cache.and_then(|cache| cache.session_if_appended(agent, path))
         {
@@ -1019,23 +977,9 @@ fn scan_detected_jsonl_session(
         return;
     }
     let file_updated_at = file_modified_iso(path);
-    let project = match agent {
-        AgentKind::Claude => meta
-            .project
-            .or_else(|| path.parent().map(Path::to_path_buf)),
-        AgentKind::Cursor => meta
-            .project
-            .or_else(|| cursor_project_from_transcript_path(path)),
-        _ => meta.project,
-    };
-    let id = match agent {
-        AgentKind::Codex => codex_session_id_from_path(path),
-        _ => path
-            .file_stem()
-            .and_then(|name| name.to_str())
-            .unwrap_or("session")
-            .to_string(),
-    };
+    let provider = crate::providers::agent_provider(agent);
+    let project = provider.infer_session_project(path, meta.project);
+    let id = provider.session_id_from_path(path);
     sessions.push(SessionRecord {
         id,
         agent,
@@ -1073,24 +1017,17 @@ fn detect_jsonl_agent(path: &Path) -> Option<AgentKind> {
         let Ok(value) = serde_json::from_str::<Value>(&line) else {
             continue;
         };
-        let record_type = value.get("type").and_then(Value::as_str);
-        if matches!(
-            record_type,
-            Some("session_meta" | "response_item" | "event_msg" | "turn_context" | "compacted")
-        ) {
-            return Some(AgentKind::Codex);
-        }
-        if value.get("sessionId").is_some() && record_type.is_some() {
-            return Some(AgentKind::Claude);
-        }
-        if value.get("role").and_then(Value::as_str).is_some() && value.get("message").is_some() {
-            return Some(AgentKind::Cursor);
+        if let Some(provider) = crate::providers::all_providers()
+            .into_iter()
+            .find(|provider| provider.recognizes_transcript(&value))
+        {
+            return Some(provider.kind());
         }
     }
     None
 }
 
-fn codex_session_id_from_path(path: &Path) -> String {
+pub(crate) fn codex_session_id_from_path(path: &Path) -> String {
     let raw_id = path
         .file_stem()
         .and_then(|name| name.to_str())
@@ -1274,6 +1211,7 @@ struct JsonlMeta {
     project: Option<PathBuf>,
     repository_url: Option<String>,
     title: Option<String>,
+    title_candidates: Vec<String>,
     model: Option<String>,
     parent_session_id: Option<String>,
     token_usage: Option<SessionTokenUsage>,
@@ -1296,6 +1234,7 @@ fn scan_jsonl_meta(path: &Path) -> JsonlMeta {
         &mut meta,
         &mut claude_message_usage,
     );
+    finalize_jsonl_title(&mut meta);
 
     if meta.token_usage.is_none() && !claude_message_usage.is_empty() {
         meta.token_usage = sum_token_usage(claude_message_usage.values());
@@ -1324,6 +1263,7 @@ fn scan_jsonl_meta_from_offset(
         project: session.project,
         repository_url: session.repository_url,
         title: session.title,
+        title_candidates: Vec::new(),
         model: session.model,
         parent_session_id: session.parent_session_id,
         token_usage: session.token_usage,
@@ -1334,6 +1274,7 @@ fn scan_jsonl_meta_from_offset(
         &mut meta,
         &mut claude_message_usage,
     );
+    finalize_jsonl_title(&mut meta);
 
     if !meta.has_content {
         return None;
@@ -1382,8 +1323,9 @@ fn scan_jsonl_meta_lines<I, S>(
         let Ok(value) = serde_json::from_str::<Value>(line) else {
             continue;
         };
-        if extract_session_title(&value).is_some() {
+        if let Some(title) = extract_session_title(&value) {
             meta.turn_count = meta.turn_count.map(|count| count + 1);
+            meta.title_candidates.push(title);
         }
         if let Some((role, body)) = extract_session_message(&value) {
             if let Some(body) = clean_preview_text(&body) {
@@ -1420,9 +1362,6 @@ fn scan_jsonl_meta_lines<I, S>(
                 .filter(|url| !url.is_empty())
                 .map(str::to_string);
         }
-        if meta.title.is_none() {
-            meta.title = extract_session_title(&value);
-        }
         if let Some(model) = extract_session_model(&value) {
             meta.model = Some(model);
         }
@@ -1436,6 +1375,17 @@ fn scan_jsonl_meta_lines<I, S>(
             claude_message_usage.insert(message_id, token_usage);
         }
     }
+}
+
+fn finalize_jsonl_title(meta: &mut JsonlMeta) {
+    if meta.title.is_some() {
+        return;
+    }
+    meta.title = if meta.parent_session_id.is_some() {
+        meta.title_candidates.last().cloned()
+    } else {
+        meta.title_candidates.first().cloned()
+    };
 }
 
 const METADATA_HINT_PREFIX_BYTES: usize = 16 * 1024;
@@ -1732,7 +1682,7 @@ pub(crate) fn scan_cursor_meta(
     }
 }
 
-fn is_cursor_meta_file(path: &Path) -> bool {
+pub(crate) fn is_cursor_meta_file(path: &Path) -> bool {
     fs::read_to_string(path)
         .ok()
         .and_then(|text| serde_json::from_str::<Value>(&text).ok())
@@ -1740,7 +1690,7 @@ fn is_cursor_meta_file(path: &Path) -> bool {
         .is_some()
 }
 
-fn scan_cursor_meta_file(
+pub(crate) fn scan_cursor_meta_file(
     path: &Path,
     sessions: &mut Vec<SessionRecord>,
     agent: AgentKind,
@@ -1764,11 +1714,11 @@ fn scan_cursor_meta_file(
     let file_updated_at = file_modified_iso(path);
     let store_path = path.parent().map(|parent| parent.join("store.db"));
     let store_meta = scan_cursor_store_db(store_path);
-    let explicit_title = string_field(
+    let explicit_title = clean_session_title(string_field(
         value
             .as_ref()
             .and_then(|value| value.get("name").or_else(|| value.get("title"))),
-    )
+    ))
     .or_else(|| store_meta.title.clone())
     .filter(|title| {
         store_meta.parent_session_id.is_none() || !title.eq_ignore_ascii_case("New Agent")
@@ -1821,7 +1771,7 @@ fn scan_cursor_meta_file(
     });
 }
 
-fn scan_cursor_store_file(
+pub(crate) fn scan_cursor_store_file(
     path: &Path,
     sessions: &mut Vec<SessionRecord>,
     agent: AgentKind,
@@ -1968,7 +1918,9 @@ pub(crate) fn scan_cursor_agent_transcripts(
     }
 }
 
-#[derive(Default)]
+const CURSOR_STORE_CACHE_MAX_ENTRIES: usize = 128;
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct CursorStoreMeta {
     message_count: Option<usize>,
     first_user_message: Option<String>,
@@ -1985,6 +1937,137 @@ struct CursorStoreMeta {
     parent_session_id: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CursorStoreFileMetadata {
+    size: u64,
+    modified_ns: u128,
+    device: u64,
+    inode: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CursorStoreVersion {
+    database: CursorStoreFileMetadata,
+    wal: Option<CursorStoreFileMetadata>,
+    shm: Option<CursorStoreFileMetadata>,
+    journal: Option<CursorStoreFileMetadata>,
+}
+
+#[derive(Debug, Clone)]
+struct CursorStoreCacheEntry {
+    path: PathBuf,
+    version: CursorStoreVersion,
+    meta: CursorStoreMeta,
+    #[cfg(test)]
+    full_scans: usize,
+}
+
+#[derive(Debug, Default)]
+struct CursorStoreCache {
+    entries: VecDeque<CursorStoreCacheEntry>,
+}
+
+static CURSOR_STORE_CACHE: LazyLock<Mutex<CursorStoreCache>> =
+    LazyLock::new(|| Mutex::new(CursorStoreCache::default()));
+
+fn cursor_store_file_metadata(path: &Path) -> Option<CursorStoreFileMetadata> {
+    let metadata = fs::metadata(path).ok()?;
+    let modified_ns = metadata
+        .modified()
+        .ok()
+        .and_then(|modified| modified.duration_since(UNIX_EPOCH).ok())
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default();
+    let (device, inode) = cursor_store_file_identity(&metadata);
+    Some(CursorStoreFileMetadata {
+        size: metadata.len(),
+        modified_ns,
+        device,
+        inode,
+    })
+}
+
+fn cursor_store_sidecar(path: &Path, suffix: &str) -> PathBuf {
+    let mut file_name = path
+        .file_name()
+        .unwrap_or_else(|| std::ffi::OsStr::new("store.db"))
+        .to_os_string();
+    file_name.push(suffix);
+    path.with_file_name(file_name)
+}
+
+fn cursor_store_version(path: &Path) -> Option<CursorStoreVersion> {
+    Some(CursorStoreVersion {
+        database: cursor_store_file_metadata(path)?,
+        wal: cursor_store_file_metadata(&cursor_store_sidecar(path, "-wal")),
+        shm: cursor_store_file_metadata(&cursor_store_sidecar(path, "-shm")),
+        journal: cursor_store_file_metadata(&cursor_store_sidecar(path, "-journal")),
+    })
+}
+
+#[cfg(unix)]
+fn cursor_store_file_identity(metadata: &fs::Metadata) -> (u64, u64) {
+    use std::os::unix::fs::MetadataExt;
+
+    (metadata.dev(), metadata.ino())
+}
+
+#[cfg(not(unix))]
+fn cursor_store_file_identity(_metadata: &fs::Metadata) -> (u64, u64) {
+    (0, 0)
+}
+
+fn cursor_store_cache_get(path: &Path, version: &CursorStoreVersion) -> Option<CursorStoreMeta> {
+    let mut cache = CURSOR_STORE_CACHE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let index = cache
+        .entries
+        .iter()
+        .position(|entry| entry.path == path && entry.version == *version)?;
+    let entry = cache.entries.remove(index)?;
+    let meta = entry.meta.clone();
+    cache.entries.push_front(entry);
+    Some(meta)
+}
+
+fn cursor_store_cache_put(path: &Path, version: CursorStoreVersion, meta: CursorStoreMeta) {
+    let mut cache = CURSOR_STORE_CACHE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    #[cfg(test)]
+    let full_scans = cache
+        .entries
+        .iter()
+        .find(|entry| entry.path == path)
+        .map_or(0, |entry| entry.full_scans)
+        .saturating_add(1);
+
+    cache.entries.retain(|entry| entry.path != path);
+    while cache.entries.len() >= CURSOR_STORE_CACHE_MAX_ENTRIES {
+        cache.entries.pop_back();
+    }
+    cache.entries.push_front(CursorStoreCacheEntry {
+        path: path.to_path_buf(),
+        version,
+        meta,
+        #[cfg(test)]
+        full_scans,
+    });
+}
+
+#[cfg(test)]
+fn cursor_store_cache_full_scans(path: &Path) -> Option<usize> {
+    let cache = CURSOR_STORE_CACHE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    cache
+        .entries
+        .iter()
+        .find(|entry| entry.path == path)
+        .map(|entry| entry.full_scans)
+}
+
 fn scan_cursor_store_db(path: Option<PathBuf>) -> CursorStoreMeta {
     let Some(path) = path else {
         return CursorStoreMeta::default();
@@ -1993,8 +2076,15 @@ fn scan_cursor_store_db(path: Option<PathBuf>) -> CursorStoreMeta {
         return CursorStoreMeta::default();
     }
 
+    let Some(version) = cursor_store_version(&path) else {
+        return CursorStoreMeta::default();
+    };
+    if let Some(meta) = cursor_store_cache_get(&path, &version) {
+        return meta;
+    }
+
     let Ok(connection) = Connection::open_with_flags(
-        path,
+        &path,
         OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
     ) else {
         return CursorStoreMeta::default();
@@ -2006,9 +2096,11 @@ fn scan_cursor_store_db(path: Option<PathBuf>) -> CursorStoreMeta {
         })
         .ok()
         .and_then(|text| parse_cursor_store_value(&text));
-    let mut title = stored_meta
-        .as_ref()
-        .and_then(|value| string_field(value.get("name").or_else(|| value.get("title"))));
+    let mut title = stored_meta.as_ref().and_then(|value| {
+        clean_session_title(string_field(
+            value.get("name").or_else(|| value.get("title")),
+        ))
+    });
     let mut model = stored_meta
         .as_ref()
         .and_then(|value| cursor_store_model(value));
@@ -2083,7 +2175,7 @@ fn scan_cursor_store_db(path: Option<PathBuf>) -> CursorStoreMeta {
         }
     }
 
-    CursorStoreMeta {
+    let meta = CursorStoreMeta {
         message_count: (message_count > 0).then_some(message_count),
         first_user_message,
         last_user_message,
@@ -2097,7 +2189,9 @@ fn scan_cursor_store_db(path: Option<PathBuf>) -> CursorStoreMeta {
         approval_mode,
         is_run_everything,
         parent_session_id,
-    }
+    };
+    cursor_store_cache_put(&path, version, meta.clone());
+    meta
 }
 
 fn cursor_store_model(value: &Value) -> Option<String> {
@@ -2138,7 +2232,7 @@ fn parse_cursor_store_value(text: &str) -> Option<Value> {
     })
 }
 
-fn cursor_project_from_meta(value: Option<&Value>) -> Option<PathBuf> {
+pub(crate) fn cursor_project_from_meta(value: Option<&Value>) -> Option<PathBuf> {
     value
         .and_then(|value| {
             value
@@ -2176,7 +2270,7 @@ fn cursor_time_field(value: Option<&Value>, keys: &[&str]) -> Option<String> {
         })
 }
 
-fn cursor_project_from_transcript_path(path: &Path) -> Option<PathBuf> {
+pub(crate) fn cursor_project_from_transcript_path(path: &Path) -> Option<PathBuf> {
     let mut components = path.components();
     while let Some(component) = components.next() {
         if component.as_os_str() == "projects" {
@@ -2260,7 +2354,13 @@ fn extract_session_message(value: &Value) -> Option<(&'static str, String)> {
 pub(crate) const SESSION_PREVIEW_MAX_CHARS: usize = 256;
 
 pub(crate) fn bound_session_preview(value: Option<String>) -> Option<String> {
-    value.and_then(|value| bound_session_preview_text(&value))
+    value.and_then(|value| {
+        if contains_internal_context(&value) || contains_image_marker(&value) {
+            clean_preview_text(&value)
+        } else {
+            bound_session_preview_text(&value)
+        }
+    })
 }
 
 fn bound_session_preview_text(text: &str) -> Option<String> {
@@ -2276,33 +2376,123 @@ fn bound_session_preview_text(text: &str) -> Option<String> {
     Some(value)
 }
 
-fn clean_preview_text(text: &str) -> Option<String> {
-    let mut text = text.trim();
-    if let Some(inner) = extract_tag_body(text, "user_query") {
-        text = inner.trim();
-    }
-    if text.is_empty()
-        || [
-            "# AGENTS.md instructions",
-            "<codex_internal_context",
-            "<local-command-caveat>",
-            "<command-name>",
-            "<local-command-stdout>",
-            "<task-notification>",
-            "<environment_context>",
-            "<permissions instructions>",
-            "<app-context>",
-            "<collaboration_mode>",
-            "<skills_instructions>",
-            "<plugins_instructions>",
-            "<system-reminder>",
-        ]
+const INTERNAL_CONTEXT_MARKERS: [(&str, Option<&str>); 19] = [
+    ("# AGENTS.md instructions", Some("</INSTRUCTIONS>")),
+    ("<codex_internal_context", Some("</codex_internal_context>")),
+    ("<local-command-caveat>", Some("</local-command-caveat>")),
+    ("<command-name>", Some("</command-name>")),
+    ("<local-command-stdout>", Some("</local-command-stdout>")),
+    ("<task-notification>", Some("</task-notification>")),
+    ("<recommended_plugins>", Some("</recommended_plugins>")),
+    ("<environment_context>", Some("</environment_context>")),
+    (
+        "<permissions instructions>",
+        Some("</permissions instructions>"),
+    ),
+    ("<app-context>", Some("</app-context>")),
+    ("<collaboration_mode>", Some("</collaboration_mode>")),
+    ("<skills_instructions>", Some("</skills_instructions>")),
+    ("<plugins_instructions>", Some("</plugins_instructions>")),
+    ("<system-reminder>", Some("</system-reminder>")),
+    (
+        "<available_subagent_types>",
+        Some("</available_subagent_types>"),
+    ),
+    ("<user_instructions>", Some("</user_instructions>")),
+    ("<subagent_notification>", Some("</subagent_notification>")),
+    ("<turn_aborted>", Some("</turn_aborted>")),
+    ("<in-app-browser-context", Some("</in-app-browser-context>")),
+];
+
+fn find_internal_context_marker(
+    text: &str,
+    offset: usize,
+) -> Option<(usize, &'static str, Option<&'static str>)> {
+    INTERNAL_CONTEXT_MARKERS
         .iter()
-        .any(|prefix| text.starts_with(prefix))
-    {
+        .filter_map(|(prefix, closing)| {
+            let mut search_from = offset;
+            while let Some(relative_start) = text[search_from..].find(prefix) {
+                let start = search_from + relative_start;
+                if start == 0 || text.as_bytes().get(start.wrapping_sub(1)) == Some(&b'\n') {
+                    return Some((start, *prefix, *closing));
+                }
+                search_from = start + prefix.len();
+            }
+            None
+        })
+        .min_by_key(|(start, _, _)| *start)
+}
+
+fn split_internal_context_segments(text: &str) -> Vec<(bool, String)> {
+    let mut segments = Vec::new();
+    let mut cursor = 0;
+    while let Some((start, prefix, closing)) = find_internal_context_marker(text, cursor) {
+        if start > cursor {
+            segments.push((false, text[cursor..start].to_string()));
+        }
+        let block_end = closing
+            .and_then(|closing| {
+                text[start..]
+                    .find(closing)
+                    .map(|offset| start + offset + closing.len())
+            })
+            .or_else(|| {
+                find_internal_context_marker(text, start + prefix.len())
+                    .map(|(next_start, _, _)| next_start)
+            })
+            .unwrap_or(text.len());
+        if block_end <= start {
+            break;
+        }
+        segments.push((true, text[start..block_end].trim().to_string()));
+        cursor = block_end;
+    }
+    if cursor < text.len() {
+        segments.push((false, text[cursor..].to_string()));
+    }
+    if segments.is_empty() && !text.trim().is_empty() {
+        segments.push((false, text.trim().to_string()));
+    }
+    segments
+}
+
+fn contains_internal_context(text: &str) -> bool {
+    split_internal_context_segments(text)
+        .into_iter()
+        .any(|(is_context, _)| is_context)
+}
+
+fn contains_image_marker(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    lower.contains("<image") || text.contains("![")
+}
+
+fn clean_user_content_part(text: &str) -> Option<String> {
+    let mut text = split_internal_context_segments(text)
+        .into_iter()
+        .filter_map(|(is_context, segment)| (!is_context).then_some(segment))
+        .collect::<Vec<_>>()
+        .join("\n");
+    text = text.trim().to_string();
+    if let Some(inner) = extract_tag_body(&text, "user_query") {
+        text = inner.trim().to_string();
+    }
+    if text.is_empty() {
         return None;
     }
-    bound_session_preview_text(text)
+    Some(text.to_string())
+}
+
+fn clean_preview_text(text: &str) -> Option<String> {
+    let text = clean_user_content_part(text)?;
+    let had_image = contains_image_marker(&text);
+    let text = strip_image_markers(&text);
+    let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if text.is_empty() {
+        return had_image.then(|| "Image".to_string());
+    }
+    bound_session_preview_text(&text)
 }
 
 fn extract_user_text(value: Option<&Value>) -> Option<String> {
@@ -2321,11 +2511,12 @@ fn extract_user_text(value: Option<&Value>) -> Option<String> {
                         .or_else(|| item.get("content"))
                         .and_then(Value::as_str)
                 })
+                .filter_map(clean_user_content_part)
                 .collect::<Vec<_>>()
                 .join("\n");
             (!text.trim().is_empty()).then_some(text)
         }
-        value => extract_text(Some(value)),
+        value => extract_text(Some(value)).and_then(|text| clean_user_content_part(&text)),
     }
 }
 
@@ -2350,31 +2541,111 @@ fn extract_text(value: Option<&Value>) -> Option<String> {
 }
 
 fn clean_title(text: &str) -> Option<String> {
-    let mut text = text.trim();
-    if text.starts_with("# AGENTS.md instructions")
-        || text.starts_with("<codex_internal_context")
-        || text.starts_with("<local-command-caveat>")
-        || text.starts_with("<command-name>")
-        || text.starts_with("<local-command-stdout>")
-        || text.starts_with("<task-notification>")
-        || text.starts_with("<environment_context>")
-        || text.starts_with("<permissions instructions>")
-        || text.starts_with("<app-context>")
-        || text.starts_with("<collaboration_mode>")
-        || text.starts_with("<skills_instructions>")
-        || text.starts_with("<plugins_instructions>")
-        || text.starts_with("<system-reminder>")
-    {
-        return None;
-    }
-    if let Some(inner) = extract_tag_body(text, "user_query") {
-        text = inner.trim();
-    }
+    let text = clean_user_content_part(text)?;
+    let had_image = contains_image_marker(&text);
+    let text = strip_image_markers(&text);
     let title = text
         .lines()
         .map(str::trim)
-        .find(|line| !line.is_empty() && !line.starts_with("---"))?;
-    Some(title.chars().take(96).collect())
+        .find(|line| !line.is_empty() && !line.starts_with("---"));
+    match title {
+        Some(title) => Some(title.chars().take(96).collect()),
+        None if had_image => Some("Image".to_string()),
+        None => None,
+    }
+}
+
+pub(crate) fn clean_session_title(value: Option<String>) -> Option<String> {
+    value.and_then(|value| clean_title(&value))
+}
+
+fn strip_image_markers(text: &str) -> String {
+    let lower = text.to_ascii_lowercase();
+    let mut cursor = 0;
+    let mut scan_from = 0;
+    let mut stripped = String::with_capacity(text.len());
+    while let Some((start, is_tag)) = next_image_marker(&lower, scan_from) {
+        let Some(end) = image_marker_end(text, start, is_tag) else {
+            scan_from = start + 2;
+            continue;
+        };
+        stripped.push_str(&text[cursor..start]);
+        cursor = end;
+        scan_from = end;
+    }
+
+    stripped.push_str(&text[cursor..]);
+    stripped
+}
+
+fn next_image_marker(text: &str, offset: usize) -> Option<(usize, bool)> {
+    let open_tag = text[offset..]
+        .find("<image")
+        .map(|relative| offset + relative);
+    let open_tag = open_tag.filter(|start| {
+        text.as_bytes()
+            .get(start + "<image".len())
+            .is_none_or(|byte| !byte.is_ascii_alphanumeric() && *byte != b'_')
+    });
+    let close_tag = text[offset..]
+        .find("</image")
+        .map(|relative| offset + relative);
+    let close_tag = close_tag.filter(|start| {
+        text.as_bytes()
+            .get(start + "</image".len())
+            .is_none_or(|byte| !byte.is_ascii_alphanumeric() && *byte != b'_')
+    });
+    let markdown = text[offset..].find("![").map(|relative| offset + relative);
+
+    let tag = [open_tag, close_tag].into_iter().flatten().min();
+    match (tag, markdown) {
+        (Some(tag), Some(markdown)) if tag < markdown => Some((tag, true)),
+        (Some(tag), Some(_)) => Some((tag, true)),
+        (Some(tag), None) => Some((tag, true)),
+        (None, Some(markdown)) => Some((markdown, false)),
+        (None, None) => None,
+    }
+}
+
+fn image_marker_end(text: &str, start: usize, is_tag: bool) -> Option<usize> {
+    if is_tag {
+        return Some(
+            text[start..]
+                .find('>')
+                .map(|relative| start + relative + 1)
+                .unwrap_or(text.len()),
+        );
+    }
+    let url_start = start + text[start..].find("](")? + 2;
+    text[url_start..]
+        .find(')')
+        .map(|relative| url_start + relative + 1)
+}
+
+fn session_preview_requires_rescan(session: &SessionRecord) -> bool {
+    [
+        session.title.as_deref(),
+        session.first_user_message.as_deref(),
+        session.last_user_message.as_deref(),
+        session.last_assistant_message.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    .any(|text| contains_internal_context(text) || contains_image_marker(text))
+}
+
+fn session_title_requires_rescan(session: &SessionRecord) -> bool {
+    if session.parent_session_id.is_none() {
+        return false;
+    }
+    let Some(title) = session.title.as_deref() else {
+        return true;
+    };
+    session
+        .last_user_message
+        .as_deref()
+        .and_then(|message| clean_title(message))
+        .is_some_and(|last_title| last_title != title)
 }
 
 fn extract_tag_body<'a>(text: &'a str, tag: &str) -> Option<&'a str> {
@@ -2440,22 +2711,23 @@ mod tests {
         fs,
         path::{Path, PathBuf},
         process::Command,
-        time::{SystemTime, UNIX_EPOCH},
+        time::{Duration, SystemTime, UNIX_EPOCH},
     };
 
     use rusqlite::Connection;
     use serde_json::json;
 
-    use crate::skills::AgentKind;
+    use crate::{git, skills::AgentKind};
 
     use super::{
         SESSION_PREVIEW_MAX_CHARS, SessionRecord, SessionRepositoryResolver, SessionScanCache,
         SessionScanCacheEntry, clean_preview_text, clean_title, collect_recent_codex_paths,
-        collect_tutti_run_session_paths, cursor_store_model, cursor_time_field,
-        decode_cursor_project_dir, extract_cursor_blob_model, extract_parent_session_id,
-        extract_session_title, file_state, git_repository_root, infer_session_project,
-        merge_sessions, normalize_session_projects, scan_additional_session_roots,
-        scan_codex_jsonl, scan_cursor_agent_transcripts, scan_cursor_meta, scan_jsonl_meta,
+        collect_tutti_run_session_paths, cursor_store_cache_full_scans, cursor_store_model,
+        cursor_time_field, decode_cursor_project_dir, extract_cursor_blob_model,
+        extract_parent_session_id, extract_session_title, file_state, infer_session_project,
+        merge_sessions, normalize_session_projects, repository_from_git_snapshot,
+        scan_additional_session_roots, scan_codex_index, scan_codex_jsonl,
+        scan_cursor_agent_transcripts, scan_cursor_meta, scan_cursor_store_db, scan_jsonl_meta,
         session_watch_plan, should_replace_session_path, title_from_project_path, unix_ms_to_iso,
     };
 
@@ -2509,11 +2781,19 @@ mod tests {
 
         let expected = fs::canonicalize(&repo).unwrap();
         assert_eq!(
-            git_repository_root(&repo).as_deref(),
+            repository_from_git_snapshot(
+                git::local_repository_snapshot(&repo, git::never_cancelled()).unwrap(),
+            )
+            .0
+            .as_deref(),
             Some(expected.as_path())
         );
         assert_eq!(
-            git_repository_root(&linked).as_deref(),
+            repository_from_git_snapshot(
+                git::local_repository_snapshot(&linked, git::never_cancelled()).unwrap(),
+            )
+            .0
+            .as_deref(),
             Some(expected.as_path())
         );
         let mut resolver = SessionRepositoryResolver::default();
@@ -2525,6 +2805,44 @@ mod tests {
             resolver.resolve(&linked).0.as_deref(),
             Some(expected.as_path())
         );
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn session_repository_resolver_reuses_local_snapshot_cache_across_scans() {
+        let root = temp_dir("tendi-session-repository-snapshot-cache-test");
+        fs::create_dir_all(&root).unwrap();
+        git(&root, &["init", "--quiet"]);
+        git(
+            &root,
+            &[
+                "remote",
+                "add",
+                "origin",
+                "https://github.com/example/tendi-before.git",
+            ],
+        );
+
+        let mut first_resolver = SessionRepositoryResolver::default();
+        let first = first_resolver.resolve(&root);
+        assert_eq!(
+            first.1.as_deref(),
+            Some("https://github.com/example/tendi-before.git")
+        );
+
+        git(
+            &root,
+            &[
+                "remote",
+                "set-url",
+                "origin",
+                "https://github.com/example/tendi-after.git",
+            ],
+        );
+
+        let mut second_resolver = SessionRepositoryResolver::default();
+        assert_eq!(second_resolver.resolve(&root), first);
 
         fs::remove_dir_all(root).unwrap();
     }
@@ -2620,6 +2938,61 @@ mod tests {
         let value = json!({ "lastUsedModel": "composer-2.5" });
 
         assert_eq!(cursor_store_model(&value).as_deref(), Some("composer-2.5"));
+    }
+
+    #[test]
+    fn cursor_store_db_reuses_unchanged_cache_and_rechecks_file_changes() {
+        let root = temp_dir("tendi-cursor-store-cache-test");
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("store.db");
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE blobs (id TEXT PRIMARY KEY, data BLOB);
+                 CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT);",
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO blobs (id, data) VALUES ('first', ?1)",
+                [json!({
+                    "role": "user",
+                    "content": "first cached message"
+                })
+                .to_string()
+                .as_bytes()],
+            )
+            .unwrap();
+        drop(connection);
+
+        let first = scan_cursor_store_db(Some(path.clone()));
+        assert_eq!(first.message_count, Some(1));
+        assert_eq!(cursor_store_cache_full_scans(&path), Some(1));
+
+        let cached = scan_cursor_store_db(Some(path.clone()));
+        assert_eq!(cached, first);
+        assert_eq!(cursor_store_cache_full_scans(&path), Some(1));
+
+        std::thread::sleep(Duration::from_millis(2));
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .execute(
+                "INSERT INTO blobs (id, data) VALUES ('second', ?1)",
+                [json!({
+                    "role": "assistant",
+                    "content": "second changed message"
+                })
+                .to_string()
+                .as_bytes()],
+            )
+            .unwrap();
+        drop(connection);
+
+        let changed = scan_cursor_store_db(Some(path.clone()));
+        assert_eq!(changed.message_count, Some(2));
+        assert_eq!(cursor_store_cache_full_scans(&path), Some(2));
+
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -2882,6 +3255,61 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
+    #[test]
+    fn stale_session_scan_cache_rechecks_injected_preview_values() {
+        let root = temp_dir("tendi-session-scan-cache-injected-preview-test");
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("rollout-12345678-1234-1234-1234-123456789012.jsonl");
+        fs::write(
+            &path,
+            r#"{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"<recommended_plugins>hidden</recommended_plugins>"},{"type":"input_text","text":"Real request"}]}}"#,
+        )
+        .unwrap();
+
+        let (file_mtime, file_size) = file_state(&path).unwrap();
+        let cached_session = SessionRecord {
+            id: "12345678-1234-1234-1234-123456789012".to_string(),
+            agent: AgentKind::Codex,
+            title: Some("<recommended_plugins>".to_string()),
+            project: None,
+            repository: None,
+            repository_url: None,
+            logical_project_id: None,
+            logical_project_name: None,
+            path: path.clone(),
+            started_at: None,
+            updated_at: None,
+            message_count: Some(1),
+            first_user_message: Some("<recommended_plugins>hidden".to_string()),
+            last_user_message: Some("<recommended_plugins>hidden".to_string()),
+            last_assistant_message: None,
+            turn_count: Some(1),
+            model: None,
+            mode: None,
+            approval_mode: None,
+            is_run_everything: None,
+            parent_session_id: None,
+            token_usage: None,
+        };
+        let cache = SessionScanCache::from_entries([SessionScanCacheEntry {
+            session: cached_session,
+            file_mtime,
+            file_size,
+        }]);
+
+        let mut sessions = Vec::new();
+        scan_codex_jsonl(&root, &mut sessions, Some(&cache));
+
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(
+            sessions[0].first_user_message.as_deref(),
+            Some("Real request")
+        );
+        assert_eq!(sessions[0].title.as_deref(), Some("Real request"));
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
     #[cfg(unix)]
     #[test]
     fn session_scan_cache_reuses_hard_linked_transcript_across_roots() {
@@ -2990,6 +3418,34 @@ mod tests {
             extract_session_title(&codex),
             Some("sessions 页面修一下标题".to_string())
         );
+        let codex_with_injected_context = json!({
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "user",
+                "content": [
+                    { "type": "input_text", "text": "<recommended_plugins>\nhidden\n</recommended_plugins>" },
+                    { "type": "input_text", "text": "<environment_context>hidden</environment_context>" },
+                    { "type": "input_text", "text": "The real user request" }
+                ]
+            }
+        });
+        assert_eq!(
+            extract_session_title(&codex_with_injected_context),
+            Some("The real user request".to_string())
+        );
+        let codex_with_embedded_context = json!({
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "user",
+                "content": "Real request\n<turn_aborted>\nThe previous turn was interrupted.\n</turn_aborted>\nNext request"
+            }
+        });
+        assert_eq!(
+            extract_session_title(&codex_with_embedded_context),
+            Some("Real request".to_string())
+        );
         assert_eq!(
             clean_title(
                 "<user_info>Ryan</user_info>\n<timestamp>today</timestamp>\n<user_query>\nUse the Cursor transcript title\n</user_query>"
@@ -3002,6 +3458,44 @@ mod tests {
             ),
             Some("Show the session preview".to_string())
         );
+        assert_eq!(
+            clean_preview_text(
+                "<image name=[Image #1] path=\"/tmp/image.png\">\nShow the session preview"
+            ),
+            Some("Show the session preview".to_string())
+        );
+        assert_eq!(
+            clean_preview_text("<image name=[Image #1] path=\"/tmp/image.png\">"),
+            Some("Image".to_string())
+        );
+        assert_eq!(clean_preview_text("<recommended_plugins>hidden"), None);
+        assert_eq!(
+            clean_title("<image name=[Image #1] path=\"/tmp/image.png\">"),
+            Some("Image".to_string())
+        );
+        assert_eq!(
+            clean_title("<image name=[Image #1] path=\"/tmp/image.png\""),
+            Some("Image".to_string())
+        );
+        assert_eq!(
+            clean_title("<image name=[Image #1] path=\"/tmp/image.png\">\nFollow-up request"),
+            Some("Follow-up request".to_string())
+        );
+        assert_eq!(
+            clean_title("<image name=[Image #1] path=\"/tmp/image.png\"> Follow-up request"),
+            Some("Follow-up request".to_string())
+        );
+        assert_eq!(
+            clean_title("![Image #1](/tmp/image.png) Follow-up request"),
+            Some("Follow-up request".to_string())
+        );
+        let long_title = format!(
+            "<image name=[Image #1] path=\"/tmp/image.png\">\n{}",
+            "x".repeat(120)
+        );
+        let parsed_long_title = clean_title(&long_title).unwrap();
+        assert_eq!(parsed_long_title.chars().count(), 96);
+        assert!(parsed_long_title.chars().all(|character| character == 'x'));
         let oversized_preview = "界".repeat(SESSION_PREVIEW_MAX_CHARS + 1);
         let bounded_preview = clean_preview_text(&oversized_preview).unwrap();
         assert_eq!(
@@ -3013,6 +3507,69 @@ mod tests {
     }
 
     #[test]
+    fn child_jsonl_title_prefers_task_after_inherited_parent_prompt() {
+        let root = temp_dir("tendi-child-title-test");
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("rollout-12345678-1234-1234-1234-123456789012.jsonl");
+        fs::write(
+            &path,
+            [
+                r#"{"type":"session_meta","payload":{"parent_thread_id":"parent-id"}}"#,
+                r#"{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Parent orchestration"}]}}"#,
+                r#"{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Inherited label"}]}}"#,
+                r#"{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Child-specific task"}]}}"#,
+            ]
+            .join("\n"),
+        )
+        .unwrap();
+
+        assert_eq!(
+            scan_jsonl_meta(&path).title.as_deref(),
+            Some("Child-specific task")
+        );
+
+        let mut first_scan = Vec::new();
+        scan_codex_jsonl(&root, &mut first_scan, None);
+        let (file_mtime, file_size) = file_state(&path).unwrap();
+        let mut cached_session = first_scan[0].clone();
+        cached_session.title = Some("Inherited label".to_string());
+        cached_session.first_user_message = Some("Parent orchestration".to_string());
+        let cache = SessionScanCache::from_entries([SessionScanCacheEntry {
+            session: cached_session,
+            file_mtime,
+            file_size,
+        }]);
+
+        let mut rescanned = Vec::new();
+        scan_codex_jsonl(&root, &mut rescanned, Some(&cache));
+
+        assert_eq!(rescanned[0].title.as_deref(), Some("Child-specific task"));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn codex_index_ignores_injected_thread_names() {
+        let root = temp_dir("tendi-codex-index-injected-title-test");
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("session_index.jsonl");
+        fs::write(
+            &path,
+            r#"{"id":"session-id","thread_name":"<recommended_plugins>"}"#,
+        )
+        .unwrap();
+
+        let mut sessions = Vec::new();
+        let mut warnings = Vec::new();
+        scan_codex_index(&path, &mut sessions, &mut warnings).unwrap();
+
+        assert_eq!(warnings, Vec::<String>::new());
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].title, None);
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn counts_only_real_user_turns() {
         let root = temp_dir("tendi-session-turn-count-test");
         fs::create_dir_all(&root).unwrap();
@@ -3020,6 +3577,7 @@ mod tests {
         fs::write(
             &path,
             [
+                r##"{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"<recommended_plugins>\nhidden\n</recommended_plugins>"},{"type":"input_text","text":"# AGENTS.md instructions\nhidden"},{"type":"input_text","text":"<environment_context>hidden</environment_context>"}]}}"##,
                 r##"{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"# AGENTS.md instructions\nhidden"}]}}"##,
                 r#"{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"First question"}]}}"#,
                 r#"{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"First answer"}]}}"#,
@@ -3032,7 +3590,7 @@ mod tests {
 
         let meta = scan_jsonl_meta(&path);
 
-        assert_eq!(meta.message_count, Some(5));
+        assert_eq!(meta.message_count, Some(6));
         assert_eq!(meta.turn_count, Some(2));
         assert_eq!(meta.first_user_message.as_deref(), Some("First question"));
         assert_eq!(meta.last_user_message.as_deref(), Some("Second question"));
@@ -3153,7 +3711,7 @@ mod tests {
         fs::create_dir_all(&session_dir).unwrap();
         fs::write(
             session_dir.join("meta.json"),
-            r#"{"schemaVersion":1,"name":"Pinned Cursor session","cwd":"/Users/test/dev/tendi"}"#,
+            r#"{"schemaVersion":1,"name":"<image name=[Image #1] path=\"/tmp/image.png\"> Pinned Cursor session","cwd":"/Users/test/dev/tendi"}"#,
         )
         .unwrap();
 
@@ -3163,6 +3721,43 @@ mod tests {
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].title.as_deref(), Some("Pinned Cursor session"));
         assert_eq!(sessions[0].message_count, Some(0));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn cursor_store_keeps_clean_explicit_title_without_messages() {
+        let root = temp_dir("tendi-cursor-store-titled-test");
+        let store_dir = root.join("session-id");
+        fs::create_dir_all(&store_dir).unwrap();
+        let connection = Connection::open(store_dir.join("store.db")).unwrap();
+        connection
+            .execute_batch("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT);")
+            .unwrap();
+        let metadata = json!({
+            "name": "<image name=[Image #1] path=\"/tmp/image.png\"> Pinned Cursor store session",
+            "cwd": "/Users/test/dev/tendi"
+        })
+        .to_string();
+        let encoded = metadata
+            .as_bytes()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        connection
+            .execute("INSERT INTO meta (key, value) VALUES ('0', ?1)", [&encoded])
+            .unwrap();
+        drop(connection);
+
+        let mut sessions = Vec::new();
+        scan_cursor_meta(&root, &mut sessions, AgentKind::Cursor, None);
+
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(
+            sessions[0].title.as_deref(),
+            Some("Pinned Cursor store session")
+        );
+        assert_eq!(sessions[0].message_count, None);
 
         let _ = fs::remove_dir_all(root);
     }

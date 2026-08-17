@@ -1,6 +1,8 @@
 use std::{
     env,
     io::{IsTerminal, Write},
+    thread,
+    time::Duration,
 };
 
 use anyhow::Result;
@@ -83,6 +85,8 @@ enum SkillCommand {
         dry_run: bool,
         #[arg(long)]
         yes: bool,
+        #[arg(long)]
+        json: bool,
     },
     Restore {
         #[arg(long)]
@@ -220,6 +224,27 @@ impl From<VisibilityArg> for tendi_core::SkillVisibility {
     }
 }
 
+fn ensure_projection<T, Ready, Refresh>(
+    store: &tendi_core::storage::Store,
+    ready: Ready,
+    mut refresh: Refresh,
+) -> Result<T>
+where
+    Ready: Fn() -> Result<Option<T>>,
+    Refresh: FnMut() -> Result<T>,
+{
+    for _ in 0..100 {
+        if let Some(value) = ready()? {
+            return Ok(value);
+        }
+        if let Some(result) = store.with_projection_refresh_lock(|| refresh())? {
+            return Ok(result);
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+    anyhow::bail!("timed out waiting for another projection refresh")
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
     let cwd = env::current_dir()?;
@@ -227,7 +252,16 @@ fn main() -> Result<()> {
 
     match cli.command {
         Command::Scan { json } => {
-            let report = tendi_core::scan_and_persist(cwd)?;
+            let store = tendi_core::storage::Store::open_default()?;
+            let report = ensure_projection(
+                &store,
+                || Ok(None),
+                || {
+                    let report = tendi_core::scan(&cwd)?;
+                    store.save_scan_for_workspace(&cwd, &report)?;
+                    Ok(report)
+                },
+            )?;
             if json {
                 println!("{}", serde_json::to_string_pretty(&report)?);
             } else {
@@ -236,7 +270,16 @@ fn main() -> Result<()> {
         }
         Command::Agents { command } => match command {
             ListCommand::List { json } => {
-                let report = tendi_core::agents::scan_agents(&cwd)?;
+                let store = tendi_core::storage::Store::open_default()?;
+                let report = ensure_projection(
+                    &store,
+                    || store.list_agents_for_workspace(&cwd),
+                    || {
+                        let report = tendi_core::agents::scan_agents(&cwd)?;
+                        store.save_agents_for_workspace(&cwd, &report)?;
+                        Ok(report)
+                    },
+                )?;
                 if json {
                     println!("{}", serde_json::to_string_pretty(&report.agents)?);
                 } else {
@@ -261,7 +304,16 @@ fn main() -> Result<()> {
                 }
             }
             SkillCommand::List { json } => {
-                let report = tendi_core::skills::scan_skills_synced(&cwd)?;
+                let store = tendi_core::storage::Store::open_default()?;
+                let report = ensure_projection(
+                    &store,
+                    || store.list_skills_for_workspace(&cwd),
+                    || {
+                        let report = tendi_core::skills::scan_skills_synced(&cwd)?;
+                        store.save_skills_for_workspace(&cwd, &report)?;
+                        Ok(report)
+                    },
+                )?;
                 if json {
                     println!("{}", serde_json::to_string_pretty(&report.skills)?);
                 } else {
@@ -299,10 +351,15 @@ fn main() -> Result<()> {
                 visibility,
                 dry_run,
                 yes,
+                json,
             } => {
                 if list {
                     let plan = tendi_core::skills::list_installable_skills(&cwd, &source)?;
-                    print_installable_skills(&plan)?;
+                    if json {
+                        println!("{}", serde_json::to_string_pretty(&plan)?);
+                    } else {
+                        print_installable_skills(&plan)?;
+                    }
                     return Ok(());
                 }
 
@@ -316,9 +373,16 @@ fn main() -> Result<()> {
                     visibility: visibility.into(),
                 };
                 let plan = tendi_core::skills::plan_skill_add(&cwd, &options)?;
-                print_skill_add_plan(&plan)?;
                 if dry_run {
+                    if json {
+                        println!("{}", serde_json::to_string_pretty(&plan)?);
+                    } else {
+                        print_skill_add_plan(&plan)?;
+                    }
                     return Ok(());
+                }
+                if json && !yes {
+                    anyhow::bail!("--json requires --yes for a real installation");
                 }
                 if !yes && !confirm("Install these skills? [y/N] ")? {
                     println!("aborted");
@@ -328,7 +392,19 @@ fn main() -> Result<()> {
                 let source_records = tendi_core::skills::skill_source_records_for_add(&report);
                 tendi_core::storage::Store::open_default()?
                     .upsert_skill_source_records(&source_records)?;
-                print_skill_add_results(&report.results)?;
+                if json {
+                    let scan = tendi_core::skills::scan_skills_synced(&cwd)?;
+                    println!(
+                        "{}",
+                        serde_json::json!({
+                            "applied": true,
+                            "report": report,
+                            "skills": scan.skills,
+                        })
+                    );
+                } else {
+                    print_skill_add_results(&report.results)?;
+                }
             }
             SkillCommand::Restore { dry_run, yes } => {
                 let store = tendi_core::storage::Store::open_default()?;
@@ -517,12 +593,13 @@ fn main() -> Result<()> {
         Command::Sessions { command } => match command {
             SessionCommand::List { json } => {
                 let store = tendi_core::storage::Store::open_default()?;
-                let cache = store.session_scan_cache()?;
-                let report = tendi_core::sessions::scan_sessions_with_additional_roots_cached(
-                    &cwd,
-                    &[],
-                    &cache,
-                )?;
+                let mut report = store.list_sessions()?;
+                if report.sessions.is_empty() && store.last_scan_at()?.is_none() {
+                    let scan = tendi_core::scan(&cwd)?;
+                    store.save_scan_for_workspace(&cwd, &scan)?;
+                    report = scan.sessions;
+                }
+                store.resolve_session_projects(&mut report.sessions)?;
                 if json {
                     let stdout = std::io::stdout();
                     let mut output = stdout.lock();
@@ -562,7 +639,16 @@ fn main() -> Result<()> {
         },
         Command::Rules { command } => match command {
             ListCommand::List { json } => {
-                let report = tendi_core::rules::scan_rules(&cwd)?;
+                let store = tendi_core::storage::Store::open_default()?;
+                let report = ensure_projection(
+                    &store,
+                    || store.list_rules_for_workspace(&cwd),
+                    || {
+                        let report = tendi_core::rules::scan_rules(&cwd)?;
+                        store.save_rules_for_workspace(&cwd, &report)?;
+                        Ok(report)
+                    },
+                )?;
                 if json {
                     println!("{}", serde_json::to_string_pretty(&report.rules)?);
                 } else {
@@ -572,7 +658,16 @@ fn main() -> Result<()> {
         },
         Command::Hooks { command } => match command {
             ListCommand::List { json } => {
-                let report = tendi_core::hooks::scan_hooks(&cwd)?;
+                let store = tendi_core::storage::Store::open_default()?;
+                let report = ensure_projection(
+                    &store,
+                    || store.list_hooks_for_workspace(&cwd),
+                    || {
+                        let report = tendi_core::hooks::scan_hooks(&cwd)?;
+                        store.save_hooks_for_workspace(&cwd, &report)?;
+                        Ok(report)
+                    },
+                )?;
                 if json {
                     println!("{}", serde_json::to_string_pretty(&report.hooks)?);
                 } else {
@@ -582,7 +677,16 @@ fn main() -> Result<()> {
         },
         Command::Mcp { command } => match command {
             ListCommand::List { json } => {
-                let report = tendi_core::mcp::scan_mcp(&cwd)?;
+                let store = tendi_core::storage::Store::open_default()?;
+                let report = ensure_projection(
+                    &store,
+                    || store.list_mcp_for_workspace(&cwd),
+                    || {
+                        let report = tendi_core::mcp::scan_mcp(&cwd)?;
+                        store.save_mcp_for_workspace(&cwd, &report)?;
+                        Ok(report)
+                    },
+                )?;
                 if json {
                     println!("{}", serde_json::to_string_pretty(&report.servers)?);
                 } else {

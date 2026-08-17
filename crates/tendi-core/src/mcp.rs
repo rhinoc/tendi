@@ -4,14 +4,14 @@ use std::{
 };
 
 use anyhow::Result;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use toml::Value as TomlValue;
 use walkdir::WalkDir;
 
 use crate::skills::AgentKind;
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct McpServerRecord {
     pub agent: AgentKind,
     pub name: String,
@@ -31,66 +31,9 @@ pub fn scan_mcp(cwd: &Path) -> Result<McpScan> {
     let mut servers = Vec::new();
     let mut warnings = Vec::new();
 
-    if let Some(home) = dirs::home_dir() {
-        scan_toml_mcp(
-            &home.join(".codex/config.toml"),
-            AgentKind::Codex,
-            "global",
-            &mut servers,
-            &mut warnings,
-        );
-        scan_json_mcp(
-            &home.join(".claude/settings.json"),
-            AgentKind::Claude,
-            "global",
-            &mut servers,
-            &mut warnings,
-        );
-        scan_json_mcp(
-            &home.join(".cursor/cli-config.json"),
-            AgentKind::Cursor,
-            "global",
-            &mut servers,
-            &mut warnings,
-        );
-        scan_project_mcp(
-            &home.join(".cursor/projects"),
-            AgentKind::Cursor,
-            &mut servers,
-            &mut warnings,
-        );
-    }
-
-    for ancestor in cwd.ancestors() {
-        let scope = ancestor.display().to_string();
-        scan_json_mcp(
-            &ancestor.join(".mcp.json"),
-            AgentKind::Claude,
-            &scope,
-            &mut servers,
-            &mut warnings,
-        );
-        scan_json_mcp(
-            &ancestor.join(".cursor/mcp.json"),
-            AgentKind::Cursor,
-            &scope,
-            &mut servers,
-            &mut warnings,
-        );
-        scan_json_mcp(
-            &ancestor.join(".codex/mcp.json"),
-            AgentKind::Codex,
-            &scope,
-            &mut servers,
-            &mut warnings,
-        );
-        scan_toml_mcp(
-            &ancestor.join(".codex/config.toml"),
-            AgentKind::Codex,
-            &scope,
-            &mut servers,
-            &mut warnings,
-        );
+    let context = crate::providers::ProviderContext::new(cwd);
+    for provider in crate::providers::agent_providers() {
+        provider.scan_mcp(&context, &mut servers, &mut warnings)?;
     }
 
     servers.sort_by(|a, b| {
@@ -103,7 +46,7 @@ pub fn scan_mcp(cwd: &Path) -> Result<McpScan> {
     Ok(McpScan { servers, warnings })
 }
 
-fn scan_project_mcp(
+pub(crate) fn scan_project_mcp(
     root: &Path,
     agent: AgentKind,
     servers: &mut Vec<McpServerRecord>,
@@ -132,15 +75,13 @@ fn scan_project_mcp(
         else {
             continue;
         };
-        if entry.file_name() == "SERVER_METADATA.json" {
-            scan_cursor_metadata_mcp(entry.path(), agent, scope, servers, warnings);
-        } else if entry.file_name() == "mcp.json" || entry.file_name() == ".mcp.json" {
+        if entry.file_name() == "mcp.json" || entry.file_name() == ".mcp.json" {
             scan_json_mcp(entry.path(), agent, scope, servers, warnings);
         }
     }
 }
 
-fn scan_toml_mcp(
+pub(crate) fn scan_toml_mcp(
     path: &Path,
     agent: AgentKind,
     scope: &str,
@@ -181,7 +122,7 @@ fn scan_toml_mcp(
     }
 }
 
-fn scan_json_mcp(
+pub(crate) fn scan_json_mcp(
     path: &Path,
     agent: AgentKind,
     scope: &str,
@@ -221,57 +162,6 @@ fn scan_json_mcp(
             });
         }
     }
-}
-
-fn scan_cursor_metadata_mcp(
-    path: &Path,
-    agent: AgentKind,
-    scope: &str,
-    servers: &mut Vec<McpServerRecord>,
-    warnings: &mut Vec<String>,
-) {
-    let text = match fs::read_to_string(path) {
-        Ok(text) => text,
-        Err(err) => {
-            warnings.push(format!("{}: {err}", path.display()));
-            return;
-        }
-    };
-    let value = match serde_json::from_str::<Value>(&text) {
-        Ok(value) => value,
-        Err(err) => {
-            warnings.push(format!("{}: {err}", path.display()));
-            return;
-        }
-    };
-    let Some(identifier) = value.get("serverIdentifier").and_then(Value::as_str) else {
-        return;
-    };
-    let name = value
-        .get("serverName")
-        .and_then(Value::as_str)
-        .unwrap_or(identifier);
-    let status_path = path.parent().map(|parent| parent.join("STATUS.md"));
-    let status = status_path
-        .as_ref()
-        .and_then(|path| fs::read_to_string(path).ok())
-        .map(|text| {
-            if text.to_ascii_lowercase().contains("needs authentication") {
-                "needs-auth"
-            } else {
-                "configured"
-            }
-        })
-        .unwrap_or("configured");
-
-    servers.push(McpServerRecord {
-        agent,
-        name: name.to_string(),
-        scope: scope.to_string(),
-        transport: "cursor-plugin".to_string(),
-        status: status.to_string(),
-        path: path.to_path_buf(),
-    });
 }
 
 fn infer_transport(spec: &Value) -> String {
@@ -348,7 +238,7 @@ mod tests {
         time::{SystemTime, UNIX_EPOCH},
     };
 
-    use super::{scan_cursor_metadata_mcp, scan_project_mcp, scan_toml_mcp};
+    use super::scan_toml_mcp;
     use crate::skills::AgentKind;
 
     fn temp_root(name: &str) -> std::path::PathBuf {
@@ -405,7 +295,7 @@ enabled = false
     #[test]
     fn scans_cursor_plugin_metadata_status() {
         let root = temp_root("cursor");
-        let server_dir = root.join("mcps/plugin-figma-figma");
+        let server_dir = root.join("project-alpha/mcps/plugin-figma-figma");
         fs::create_dir_all(&server_dir).expect("create server dir");
         let metadata = server_dir.join("SERVER_METADATA.json");
         fs::write(
@@ -421,13 +311,7 @@ enabled = false
         let mut servers = Vec::new();
         let mut warnings = Vec::new();
 
-        scan_cursor_metadata_mcp(
-            &metadata,
-            AgentKind::Cursor,
-            "project-alpha",
-            &mut servers,
-            &mut warnings,
-        );
+        crate::providers::cursor::scan_project_mcp(&root, &mut servers, &mut warnings);
 
         assert!(warnings.is_empty());
         assert_eq!(servers.len(), 1);
@@ -451,7 +335,7 @@ enabled = false
         let mut servers = Vec::new();
         let mut warnings = Vec::new();
 
-        scan_project_mcp(&root, AgentKind::Cursor, &mut servers, &mut warnings);
+        crate::providers::cursor::scan_project_mcp(&root, &mut servers, &mut warnings);
 
         assert!(warnings.is_empty());
         assert_eq!(servers.len(), 1);

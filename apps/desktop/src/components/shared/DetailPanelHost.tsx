@@ -42,13 +42,10 @@ export function DetailPanelHost({
         minSize={collapsed ? COLLAPSED_WIDTH : MIN_EXPANDED_WIDTH}
         maxSize={collapsed ? COLLAPSED_WIDTH : undefined}
       >
-        {collapsed ? (
-          <DetailCollapsedRail label={railLabel} expandLabel={expandLabel} onExpand={onExpand} />
-        ) : hasSelection ? (
-          children
-        ) : (
-          <aside className={`${panelClassName} emptyTranscript`}>{emptyState}</aside>
-        )}
+        <div className="detailPanelContent" hidden={collapsed} aria-hidden={collapsed}>
+          {hasSelection ? children : <aside className={`${panelClassName} emptyTranscript`}>{emptyState}</aside>}
+        </div>
+        {collapsed ? <DetailCollapsedRail label={railLabel} expandLabel={expandLabel} onExpand={onExpand} /> : null}
       </Panel>
     </>
   );

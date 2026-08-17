@@ -1,0 +1,69 @@
+.chartTooltipContent {
+  display: grid;
+  min-width: 220px;
+  max-height: min(360px, calc(var(--radix-tooltip-content-available-height) - 12px));
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+  gap: 7px;
+}
+
+.chartTooltipHeader {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.chartTooltipHeader > strong {
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.chartTooltipHeader > span {
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.chartTooltipDetails {
+  display: grid;
+  gap: 4px;
+}
+
+.chartTooltipDetail {
+  display: grid;
+  grid-template-columns: 12px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 7px;
+}
+
+.chartTooltipDetailLabel {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chartTooltipDetailValue {
+  color: var(--text);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.chartTooltipDetailSwatch {
+  width: 12px;
+  height: 2px;
+  flex: 0 0 auto;
+  border-radius: 999px;
+}
+
+.chartTooltipMeta {
+  margin: 0;
+  padding-block-start: 6px;
+  border-block-start: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+}
