@@ -610,6 +610,8 @@ fn fixture_skill(root: &Path, index: usize) -> SkillRecord {
         install_targets: vec!["shared".to_string()],
         update_status: "not-tracked".to_string(),
         is_system: false,
+        ctime: None,
+        mtime: None,
     }
 }
 
