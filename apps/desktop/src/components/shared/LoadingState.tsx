@@ -10,7 +10,7 @@ export type LoadingStateProps = {
 export function LoadingState({ label, className = "" }: LoadingStateProps) {
   return (
     <div className={["loadingState", className].filter(Boolean).join(" ")} role="status" aria-label={label}>
-      <LoadingDots variant="surface" className="loadingStateDots" />
+      <LoadingDots className="loadingStateDots" />
     </div>
   );
 }

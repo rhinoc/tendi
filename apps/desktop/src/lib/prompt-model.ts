@@ -38,3 +38,9 @@ export function promptPreview(prompt: Pick<PromptRecord, "body">): string {
   const body = `${prompt.body ?? ""}`.replace(/\s+/g, " ").trim();
   return body || "Empty prompt";
 }
+
+export function promptTitleFromBody(body: string): string {
+  const firstLine = body.split(/\r?\n/).find((line) => line.trim())?.trim().replace(/\s+/g, " ") ?? "";
+  if (!firstLine) return "Saved prompt";
+  return firstLine.length > 80 ? `${firstLine.slice(0, 79).trimEnd()}…` : firstLine;
+}

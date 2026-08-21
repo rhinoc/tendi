@@ -1,4 +1,5 @@
 import { SkillVisibility, editableSkillVisibilities, isSkillVisibilityEditable } from "../../lib/index.ts";
+import { SelectControl } from "../../components/shared/SelectControl.tsx";
 import "./Visibility.css";
 
 export type VisibilitySkill = {
@@ -14,32 +15,19 @@ export type VisibilityProps = {
 };
 
 export function Visibility({ value, skill, onSetVisibility, readOnly = false }: VisibilityProps) {
-  // Use aria-disabled (not native disabled) so clicks still hit these controls and do not fall through to row onClick.
-  const disabled = readOnly || !isSkillVisibilityEditable(skill);
-  const options = value === SkillVisibility.Mixed ? [SkillVisibility.Mixed] : editableSkillVisibilities;
-  return (
-    <div className="visibility" aria-label="Visibility" data-no-row-click>
-      {options.map((option) => (
-        <button
-          className={value === option ? "selected" : ""}
-          aria-disabled={disabled || undefined}
-          key={option}
-          onClick={(event) => {
-            event.stopPropagation();
-            if (disabled) return;
-            onSetVisibility?.([skill.name], option);
-          }}
-          onKeyDown={(event) => {
-            if (!disabled) return;
-            if (event.key === "Enter" || event.key === " ") {
-              event.preventDefault();
-              event.stopPropagation();
-            }
-          }}
-        >
-          {option}
-        </button>
-      ))}
-    </div>
-  );
+  const disabled = readOnly || !isSkillVisibilityEditable(skill) || value === SkillVisibility.Mixed;
+  const options = value === SkillVisibility.Mixed
+    ? [{ value: SkillVisibility.Mixed, label: SkillVisibility.Mixed }]
+    : editableSkillVisibilities.map((option) => ({ value: option, label: option }));
+
+  return <SelectControl
+    value={value}
+    onValueChange={(nextValue) => {
+      if (!disabled) onSetVisibility?.([skill.name], nextValue as SkillVisibility);
+    }}
+    label="Visibility"
+    options={options}
+    className="visibility"
+    disabled={disabled}
+  />;
 }

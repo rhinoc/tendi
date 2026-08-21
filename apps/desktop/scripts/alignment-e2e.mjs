@@ -1,5 +1,5 @@
 // Alignment E2E — verifies the three unified-table requirements across every
-// tab (Skills, Prompts, Sessions, Rules, Hooks, MCP) without screenshots.
+// data tab, plus navigation and header contracts for all nine pages.
 //
 // Requirements under test (per tab):
 //   req1  Row selection checkbox is hidden by default and revealed on row hover.
@@ -36,6 +36,7 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createServer } from "vite";
+import { writeStderr, writeStdout } from "./stdio.mjs";
 
 const require = createRequire(import.meta.url);
 const appDir = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -135,19 +136,73 @@ function buildReport() {
 }
 
 const tabs = [
-  { id: "skills", nav: "Skills", heading: "Skills", selectable: true, listHeader: "section", tableHeader: false, frozen: false },
-  { id: "prompts", nav: "Prompts", heading: "Prompts", selectable: true, listHeader: "table", tableHeader: true, frozen: false },
-  { id: "sessions", nav: "Sessions", heading: "Sessions", selectable: false, listHeader: "table", tableHeader: true, frozen: true },
-  { id: "rules", nav: "Rules", heading: "Rules", selectable: true, listHeader: "table", tableHeader: true, frozen: true },
-  { id: "hooks", nav: "Hooks", heading: "Hooks", selectable: true, listHeader: "table", tableHeader: true, frozen: true },
-  { id: "mcp", nav: "MCP", heading: "MCP", selectable: true, listHeader: "table", tableHeader: true, frozen: true },
+  { id: "skills", nav: "Skills", heading: "Skills", compact: false, selectable: true, listHeader: "section", tableHeader: false, frozen: false },
+  { id: "prompts", nav: "Prompts", heading: "Prompts", compact: false, selectable: true, listHeader: "table", tableHeader: true, frozen: false },
+  { id: "sessions", nav: "Sessions", heading: "Sessions", compact: true, selectable: true, listHeader: "table", tableHeader: true, frozen: true },
+  { id: "rules", nav: "Rules", heading: "Rules", compact: true, selectable: true, listHeader: "table", tableHeader: true, frozen: true },
+  { id: "hooks", nav: "Hooks", heading: "Hooks", compact: true, selectable: true, listHeader: "table", tableHeader: true, frozen: true },
+  { id: "mcp", nav: "MCP", heading: "MCP", compact: false, selectable: true, listHeader: "table", tableHeader: true, frozen: true },
 ];
 
 const failures = [];
+const runtimePageErrors = [];
 function check(tab, requirement, condition, detail) {
   const status = condition ? "ok " : "FAIL";
-  console.log(`  [${status}] ${tab} ${requirement}: ${detail}`);
+  writeStdout(`  [${status}] ${tab} ${requirement}: ${detail}`);
   if (!condition) failures.push(`${tab} ${requirement}: ${detail}`);
+}
+
+async function runPageHeaderChecks(page, tab, heading, expectedCompact) {
+  const metrics = await page.locator(".pageHeader").first().evaluate((node) => {
+    const style = getComputedStyle(node);
+    const rootStyle = getComputedStyle(document.documentElement);
+    const toPx = (value) => Number.parseFloat(value) || 0;
+    return {
+      title: node.querySelector("h1")?.textContent?.trim() ?? "",
+      titleTop: node.querySelector("h1")?.getBoundingClientRect().top ?? 0,
+      compact: node.classList.contains("compact"),
+      height: node.getBoundingClientRect().height,
+      paddingTop: toPx(style.paddingTop),
+      paddingBottom: toPx(style.paddingBottom),
+      marginBottom: toPx(style.marginBottom),
+      pageTopInset: toPx(rootStyle.getPropertyValue("--page-top-inset")),
+      pageHeaderBottomInset: toPx(rootStyle.getPropertyValue("--page-header-bottom-inset")),
+      parentPaddingTop: toPx(getComputedStyle(node.parentElement ?? node).paddingTop),
+    };
+  });
+  check(tab, "header-title", metrics.title === heading, `title ${JSON.stringify(metrics.title)}`);
+  check(tab, "header-mode", metrics.compact === expectedCompact, `compact ${metrics.compact}, expected ${expectedCompact}`);
+  check(tab, "header-visible", metrics.height > 0, `height ${metrics.height}px`);
+  check(
+    tab,
+    "header-title-top",
+    metrics.pageTopInset > 0 && Math.abs(metrics.titleTop - metrics.pageTopInset) <= TOLERANCE,
+    `title top ${metrics.titleTop}px vs ${metrics.pageTopInset}px`,
+  );
+  const bottomSpaceMatches = expectedCompact
+    ? Math.abs(metrics.paddingBottom - metrics.pageHeaderBottomInset) <= TOLERANCE && metrics.marginBottom <= TOLERANCE
+    : metrics.paddingBottom <= TOLERANCE && Math.abs(metrics.marginBottom - metrics.pageHeaderBottomInset) <= TOLERANCE;
+  check(
+    tab,
+    "header-bottom-space",
+    metrics.pageHeaderBottomInset > 0 && bottomSpaceMatches,
+    `${expectedCompact ? "padding-bottom" : "margin-bottom"} ${expectedCompact ? metrics.paddingBottom : metrics.marginBottom}px vs ${metrics.pageHeaderBottomInset}px`,
+  );
+  if (expectedCompact) {
+    check(
+      tab,
+      "header-top-space",
+      metrics.pageTopInset > 0 && Math.abs(metrics.paddingTop - metrics.pageTopInset) <= TOLERANCE,
+      `padding-top ${metrics.paddingTop}px vs ${metrics.pageTopInset}px`,
+    );
+  } else {
+    check(
+      tab,
+      "header-parent-top-space",
+      metrics.pageTopInset > 0 && Math.abs(metrics.parentPaddingTop - metrics.pageTopInset) <= TOLERANCE,
+      `parent padding-top ${metrics.parentPaddingTop}px vs ${metrics.pageTopInset}px`,
+    );
+  }
 }
 
 async function runReq8NonFrozenFixture(page) {
@@ -254,12 +309,16 @@ async function runReq8TabChecks(page, tab) {
   if (!tab.selectable) {
     await page.evaluate(() => {
       document.querySelectorAll(".dataRow.rowSelected").forEach((row) => row.classList.remove("rowSelected"));
-      document.querySelector(".dataRow.rowFrame")?.classList.add("rowSelected");
+      const row = document.querySelector(".dataRow.rowFrame");
+      if (!row?.dataset.rowId) return;
+      document.querySelectorAll(`[data-row-id="${CSS.escape(row.dataset.rowId)}"]`).forEach((peer) => peer.classList.add("rowSelected"));
     });
   } else {
     await page.evaluate(() => {
       if (document.querySelector(".dataRow.rowSelected")) return;
-      document.querySelector('.dataRow[data-row-selectable="true"]')?.classList.add("rowSelected");
+      const row = document.querySelector('.dataRow[data-row-selectable="true"]');
+      if (!row?.dataset.rowId) return;
+      document.querySelectorAll(`[data-row-id="${CSS.escape(row.dataset.rowId)}"]`).forEach((peer) => peer.classList.add("rowSelected"));
     });
   }
 
@@ -436,6 +495,21 @@ async function runSessionLocatorChecks(page) {
 async function runFrozenBugSmokeChecks(page, tab) {
   if (!tab.frozen) return;
 
+  const overflowFixture = await page.evaluate(() => {
+    const shell = document.querySelector(".dataTableShell--frozen");
+    const scrollColumns = shell?.querySelectorAll(".dataTableHeader--scroll .dataHeaderCell").length ?? 0;
+    if (!shell || scrollColumns === 0) return { applied: false, original: "" };
+    const original = shell.style.getPropertyValue("--data-scroll-grid-columns");
+    shell.style.setProperty("--data-scroll-grid-columns", `repeat(${scrollColumns}, minmax(500px, 500px))`);
+    return { applied: true, original };
+  });
+  check(
+    tab.id,
+    "bug2-horizontal-overflow-fixture",
+    overflowFixture.applied === true,
+    overflowFixture.applied ? "wide scroll columns applied" : "missing frozen table scroll columns",
+  );
+
   const b2Metrics = await page.evaluate(() => {
     const round = (value) => Math.round(value * 100) / 100;
     const scroller = document.querySelector(".dataTableBodyScroll");
@@ -468,13 +542,9 @@ async function runFrozenBugSmokeChecks(page, tab) {
     tab.id,
     "bug2-no-scroll-cell-over-frozen",
     b2Metrics.missing !== true
-      && (
-        b2Metrics.maxScroll <= TOLERANCE
-        || (
-          b2Metrics.scrollLeft > 0
-          && (!b2Metrics.overlapsFrozen || b2Metrics.hitInScrollCell === false)
-        )
-      ),
+      && b2Metrics.maxScroll > TOLERANCE
+      && b2Metrics.scrollLeft > 0
+      && (!b2Metrics.overlapsFrozen || b2Metrics.hitInScrollCell === false),
     `maxScroll ${b2Metrics.maxScroll}, scrollLeft ${b2Metrics.scrollLeft}, scroll cell left ${b2Metrics.scrollCellLeft}, frozen right ${b2Metrics.frozenRight}, hit scroll cell ${b2Metrics.hitInScrollCell}`,
   );
 
@@ -604,7 +674,9 @@ async function runFrozenBugSmokeChecks(page, tab) {
 
   if (tab.id === "sessions") {
     const separatorGeometry = await page.evaluate(() => {
-      const frozenRow = document.querySelectorAll(".dataRow--frozenPane")[1];
+      // Skip the row immediately below the synthetic selected row: its leading
+      // separator is intentionally hidden to avoid a doubled active-row edge.
+      const frozenRow = document.querySelectorAll(".dataRow--frozenPane")[2];
       const scrollRow = frozenRow?.dataset.rowId
         ? document.querySelector(`.dataRow--scrollPane[data-row-id="${CSS.escape(frozenRow.dataset.rowId)}"]`)
         : null;
@@ -717,15 +789,14 @@ async function runFrozenBugSmokeChecks(page, tab) {
   const b8Metrics = await page.evaluate(() => {
     const row = document.querySelector(".dataRow--frozenPane");
     const cell = row?.querySelector(".dataCell[data-frozen]");
-    const selection = row?.querySelector(".rowSelection, .rowSelectionPlaceholder");
-    if (!row || !cell || !selection) return { missing: true };
+    if (!row || !cell) return { missing: true };
     row.classList.add("rowHover");
     const afterTop = parseFloat(getComputedStyle(row, "::after").top);
     const result = {
       missing: false,
       afterTop,
       cellBg: getComputedStyle(cell).backgroundColor,
-      selectionBg: getComputedStyle(selection).backgroundColor,
+      overlayBg: getComputedStyle(row, "::after").backgroundColor,
     };
     row.classList.remove("rowHover");
     return result;
@@ -735,9 +806,8 @@ async function runFrozenBugSmokeChecks(page, tab) {
     "bug8-frozen-active-bg-inset",
     b8Metrics.missing !== true
       && Math.abs(b8Metrics.afterTop - 1) <= TOLERANCE
-      && (b8Metrics.cellBg === "transparent" || b8Metrics.cellBg === "rgba(0, 0, 0, 0)")
-      && (b8Metrics.selectionBg === "transparent" || b8Metrics.selectionBg === "rgba(0, 0, 0, 0)"),
-    `after top ${b8Metrics.afterTop}, cell bg ${b8Metrics.cellBg}, selection bg ${b8Metrics.selectionBg}`,
+      && (b8Metrics.cellBg === "transparent" || b8Metrics.cellBg === "rgba(0, 0, 0, 0)"),
+    `after top ${b8Metrics.afterTop}, cell bg ${b8Metrics.cellBg}, overlay bg ${b8Metrics.overlayBg}`,
   );
 
   const b10Metrics = await page.evaluate(() => {
@@ -764,14 +834,10 @@ async function runFrozenBugSmokeChecks(page, tab) {
     tab.id,
     "bug10-scroll-header-not-over-frozen",
     b10Metrics.missing !== true
-      && (
-        b10Metrics.maxScroll <= TOLERANCE
-        || (
-          b10Metrics.scrollLeft > 0
-          && b10Metrics.hitScrollHeader === false
-          && b10Metrics.hitFrozenHeader === true
-        )
-      ),
+      && b10Metrics.maxScroll > TOLERANCE
+      && b10Metrics.scrollLeft > 0
+      && b10Metrics.hitScrollHeader === false
+      && b10Metrics.hitFrozenHeader === true,
     `maxScroll ${b10Metrics.maxScroll}, scrollLeft ${b10Metrics.scrollLeft}, hit frozen ${b10Metrics.hitFrozenHeader}, hit scroll ${b10Metrics.hitScrollHeader}, hit ${b10Metrics.hitClass}`,
   );
 
@@ -903,6 +969,8 @@ async function runFrozenBugSmokeChecks(page, tab) {
 
   const groupButton = page.locator(".dataTableHeader .dataHeaderGroupButton").first();
   if (await groupButton.count()) {
+    const clearSelectionButton = page.getByRole("button", { name: "Clear selection", exact: true });
+    if (await clearSelectionButton.count()) await clearSelectionButton.click();
     await groupButton.click();
     await page.waitForTimeout(80);
     const groupedMetrics = await page.evaluate(() => {
@@ -922,6 +990,7 @@ async function runFrozenBugSmokeChecks(page, tab) {
       const scrollSpacerRect = scrollSpacer.getBoundingClientRect();
       const frozenRowRect = frozenRow.getBoundingClientRect();
       const scrollRowRect = scrollRow.getBoundingClientRect();
+      const isVisible = (backgroundColor) => backgroundColor !== "transparent" && backgroundColor !== "rgba(0, 0, 0, 0)";
       return {
         missing: false,
         rowId: frozenRow.dataset.rowId,
@@ -931,6 +1000,8 @@ async function runFrozenBugSmokeChecks(page, tab) {
         rowHeightDelta: round(Math.abs(frozenRowRect.height - scrollRowRect.height)),
         frozenRowTop: round(frozenRowRect.top),
         scrollRowTop: round(scrollRowRect.top),
+        frozenSeparatorVisible: isVisible(getComputedStyle(frozenRow, "::before").backgroundColor),
+        scrollSeparatorVisible: isVisible(getComputedStyle(scrollRow, "::before").backgroundColor),
       };
     });
     check(
@@ -945,11 +1016,27 @@ async function runFrozenBugSmokeChecks(page, tab) {
         ? "missing grouped frozen/scroll rows"
         : `heading ${groupedMetrics.headingHeight}, spacer ${groupedMetrics.spacerHeight}, row ${groupedMetrics.rowId} top ${groupedMetrics.frozenRowTop}/${groupedMetrics.scrollRowTop} delta ${groupedMetrics.rowTopDelta}, height delta ${groupedMetrics.rowHeightDelta}`,
     );
+    check(
+      tab.id,
+      "bug18-grouped-row-separators-visible",
+      groupedMetrics.missing !== true
+        && groupedMetrics.frozenSeparatorVisible === true
+        && groupedMetrics.scrollSeparatorVisible === true,
+      groupedMetrics.missing === true
+        ? "missing grouped frozen/scroll rows"
+        : `frozen separator ${groupedMetrics.frozenSeparatorVisible}, scroll separator ${groupedMetrics.scrollSeparatorVisible}`,
+    );
     await groupButton.click();
     await page.waitForTimeout(40);
   } else {
     check(tab.id, "bug13-grouped-frozen-scroll-row-sync", true, "no groupable header");
   }
+  await page.evaluate(({ original }) => {
+    const shell = document.querySelector(".dataTableShell--frozen");
+    if (!shell) return;
+    if (original) shell.style.setProperty("--data-scroll-grid-columns", original);
+    else shell.style.removeProperty("--data-scroll-grid-columns");
+  }, overflowFixture);
 }
 
 const { chromium } = loadPlaywrightCore();
@@ -983,94 +1070,275 @@ try {
   });
 
   const page = await browser.newPage({ viewport: { width: 1440, height: 1024 } });
-  page.on("pageerror", (error) => console.error("browser page error:", error));
+  page.on("pageerror", (error) => {
+    const detail = error instanceof Error ? error.stack ?? error.message : String(error);
+    runtimePageErrors.push(detail);
+    writeStderr("browser page error:", detail);
+  });
   page.on("console", (message) => {
-    if (message.type() === "error") console.error("browser console error:", message.text());
+    if (message.type() === "error") writeStderr("browser console error:", message.text());
   });
 
   await page.addInitScript((report) => {
     const callbacks = new Map();
+    const daemonEventQueue = [];
+    const daemonEventWaiters = [];
     let nextCallbackId = 1;
     let sessionScanHandler = null;
     let sessionsListReleased = false;
     let skillUpdateAttempts = 0;
+    const unhandledCommands = [];
+    const emitDaemonEvent = (event) => {
+      const resolve = daemonEventWaiters.shift();
+      if (resolve) resolve(event);
+      else daemonEventQueue.push(event);
+    };
+    const invokeDomainCommand = async (command, args) => {
+      if (command === "log_event") return null;
+      if (command === "plugin:event|listen") {
+        sessionScanHandler = callbacks.get(args.handler);
+        return 1;
+      }
+      if (command === "plugin:event|unlisten") return null;
+      if (command === "scan") return report;
+      if (command === "settings_get") {
+        return {
+          appearance: "dark",
+          lightTheme: "gruvbox",
+          darkTheme: "gruvbox",
+          terminal: "auto",
+          editor: "vscode",
+          developerMode: false,
+          additionalSessionRoots: [],
+          configProfiles: {},
+        };
+      }
+      if (command === "analytics_revision") return 1;
+      if (command === "bundled_skill_status") {
+        return {
+          name: "tendi",
+          target: "codex",
+          installed: true,
+          current: true,
+          promptHandled: true,
+          shouldPrompt: false,
+        };
+      }
+      if (command === "session_skill_index_status") {
+        return { state: "idle", indexed: 0, total: 0, failed: 0 };
+      }
+      if (command === "session_skill_index_run") return { started: true };
+      if (command === "session_skill_links") return [];
+      if (command === "overview_count") {
+        const counts = {
+          skills: report.skills.skills.length,
+          prompts: report.prompts.prompts.length,
+          sessions: report.sessions.sessions.length,
+          rules: report.rules.rules.length,
+          hooks: report.hooks.hooks.length,
+          mcp: report.mcp.servers.length,
+        };
+        return {
+          count: counts[args?.domain] ?? 0,
+          secondaryCount: args?.domain === "skills" || args?.domain === "hooks" ? 1 : 0,
+        };
+      }
+      if (command === "analytics_overview") {
+        const usage = {
+          inputTokens: 10,
+          cachedInputTokens: 2,
+          cacheWriteInputTokens: 1,
+          outputTokens: 8,
+          reasoningOutputTokens: 0,
+          totalTokens: 19,
+        };
+        const runs = { started: 1, completed: 1, unclosed: 0, totalMs: 100, maxMs: 100 };
+        return {
+          revision: 1,
+          generatedAt: "2026-06-29T19:00:00Z",
+          daysRequested: args?.days ?? 30,
+          rankDays: args?.rankDays ?? 30,
+          coverage: {
+            first: "2026-06-29",
+            last: "2026-06-29",
+            totalSessions: 1,
+            analyzedSessions: 1,
+            indexingSessions: 0,
+          },
+          capabilities: [{
+            agent: "codex",
+            tokenUsage: true,
+            reasoningTokens: false,
+            explicitRuns: true,
+            rateLimitHistory: false,
+          }],
+          summary: {
+            usage,
+            responses: 1,
+            sessions: 1,
+            runs,
+            aborted: 0,
+            abortedRate: 0,
+            compacted: 0,
+            compactedSessions: 0,
+          },
+          days: [{
+            date: "2026-06-29",
+            usage,
+            responses: 1,
+            sessions: 1,
+            sessionsByAgent: { codex: 1 },
+            runs,
+            aborted: 0,
+            compacted: 0,
+            models: [{ model: "mock-model", totalTokens: 19 }],
+            tools: [],
+            skills: [],
+            rateLimits: {},
+          }],
+          tools: [],
+          skills: [],
+          warnings: [],
+        };
+      }
+      if (command === "agent_configs_list") {
+        return [{
+          agent: "codex",
+          label: "Codex",
+          path: "/tmp/tendi-codex.json",
+          format: "json",
+          exists: true,
+        }];
+      }
+      if (command === "agent_config_watch") {
+        return { path: args?.path ?? "/tmp/tendi-codex.json" };
+      }
+      if (command === "agent_config_read") {
+        return {
+          path: args?.path ?? "/tmp/tendi-codex.json",
+          content: "{}",
+          sha256: "config-sha",
+          exists: true,
+        };
+      }
+      if (command === "rule_file_read") {
+        return { content: "# Mock rule\n", sha256: args?.path ? `rule-${args.path}` : "rule-sha" };
+      }
+      if (command === "hook_source_read") {
+        return { content: "echo mock-hook\n", source_line: 1, path: args?.path ?? "" };
+      }
+      if (command === "terminal_apps_list") return [{ id: "auto", label: "Auto", available: true }];
+      if (command === "cli_status") {
+        return {
+          state: "installed",
+          supported: true,
+          commandPath: "/usr/local/bin/tendi",
+          bundledPath: null,
+          pathConfigured: true,
+          currentTarget: null,
+          detail: "",
+        };
+      }
+      if (command === "skills_refresh") return { skills: report.skills.skills, updateCheck: "completed" };
+      if (command === "skills_list") return report.skills.skills;
+      if (command === "skills_targets") {
+        return [
+          { id: "claude", displayName: "Claude", supportsGlobal: true },
+          { id: "codex", displayName: "Codex", supportsGlobal: true },
+          { id: "cursor", displayName: "Cursor", supportsGlobal: true },
+        ];
+      }
+      if (command === "prompts_list") return report.prompts.prompts;
+      if (command === "sessions_list") {
+        if (sessionsListReleased) return report.sessions.sessions;
+        return new Promise((resolve) => {
+          window.__releaseSessionsList = () => {
+            sessionsListReleased = true;
+            resolve(report.sessions.sessions);
+          };
+        });
+      }
+      if (command === "sessions_scan_start") {
+        queueMicrotask(() => {
+          const recent = { id: 1, event: "sessions://scan", payload: { generation: 1, phase: "recent", upserts: [], deleted: [], scanned: 0, complete: true } };
+          const backfill = { id: 1, event: "sessions://scan", payload: { generation: 1, phase: "backfill", upserts: [], deleted: [], scanned: report.sessions.sessions.length, complete: true } };
+          emitDaemonEvent(recent);
+          emitDaemonEvent(backfill);
+          sessionScanHandler?.(recent);
+          sessionScanHandler?.(backfill);
+        });
+        return 1;
+      }
+      if (command === "session_transcript") {
+        return {
+          items: Array.from({ length: 5 }, (_, index) => ([
+            {
+              type: "user",
+              body: `Locator prompt ${index + 1}`,
+              time: `10:0${index}`,
+            },
+            {
+              type: "assistant",
+              body: `Locator response ${index + 1}`,
+              time: `10:0${index}`,
+            },
+          ])).flat(),
+          locatorItems: Array.from({ length: 5 }, (_, index) => ({
+            index: index * 2,
+            label: `Locator prompt ${index + 1}`,
+            response: `Locator response ${index + 1}`,
+          })),
+          warnings: [],
+          nextCursor: null,
+          done: true,
+        };
+      }
+      if (command === "sessions_search") {
+        return report.sessions.sessions.map((session, index) => ({
+          ...session,
+          search_score: report.sessions.sessions.length - index,
+          search_snippet: "Matched ⟦session⟧ text",
+        }));
+      }
+      if (command === "rules_list") return report.rules.rules;
+      if (command === "hooks_list") return report.hooks.hooks;
+      if (command === "mcp_list") return report.mcp.servers;
+      if (command === "agents_list") return report.agents.agents;
+      if (command === "skills_updates") return [];
+      if (command === "skills_update_many") {
+        if (args?.dryRun) {
+          return {
+            plan: {
+              git_updates: [{
+                files: [{ path: "skills/alpha-skill/SKILL.md", before: "old", after: "new" }],
+              }],
+            },
+          };
+        }
+        skillUpdateAttempts += 1;
+        if (skillUpdateAttempts === 1) throw new Error("mock update failed");
+        report.skills.skills = report.skills.skills.map((skill) => (
+          skill.name === "alpha-skill" ? { ...skill, update_status: "checkable" } : skill
+        ));
+        return { applied: true };
+      }
+      unhandledCommands.push(command);
+      throw new Error(`Unhandled alignment e2e mock command: ${command}`);
+    };
     window.__TAURI_EVENT_PLUGIN_INTERNALS__ = { unregisterListener: () => {} };
     window.__TAURI_INTERNALS__ = {
       invoke: async (command, args) => {
-        if (command === "plugin:event|listen") {
-          sessionScanHandler = callbacks.get(args.handler);
-          return 1;
+        if (command === "daemon_invoke") {
+          const request = args?.request ?? {};
+          return { ok: true, result: await invokeDomainCommand(request.command, request.args) };
         }
-        if (command === "plugin:event|unlisten") return null;
-        if (command === "scan") return report;
-        if (command === "skills_refresh") return { skills: report.skills.skills, updateCheck: "completed" };
-        if (command === "skills_list") return report.skills.skills;
-        if (command === "prompts_list") return report.prompts.prompts;
-        if (command === "sessions_list") {
-          if (sessionsListReleased) return report.sessions.sessions;
-          return new Promise((resolve) => {
-            window.__releaseSessionsList = () => {
-              sessionsListReleased = true;
-              resolve(report.sessions.sessions);
-            };
-          });
+        if (command === "daemon_subscribe_events") return 1;
+        if (command === "daemon_next_event") {
+          if (daemonEventQueue.length > 0) return daemonEventQueue.shift();
+          return new Promise((resolve) => daemonEventWaiters.push(resolve));
         }
-        if (command === "sessions_scan_start") {
-          queueMicrotask(() => {
-            sessionScanHandler?.({ id: 1, event: "sessions://scan", payload: { generation: 1, phase: "recent", upserts: [], deleted: [], scanned: 0, complete: true } });
-            sessionScanHandler?.({ id: 1, event: "sessions://scan", payload: { generation: 1, phase: "backfill", upserts: [], deleted: [], scanned: report.sessions.sessions.length, complete: true } });
-          });
-          return 1;
-        }
-        if (command === "session_transcript") {
-          return {
-            items: Array.from({ length: 5 }, (_, index) => ([
-              {
-                type: "user",
-                body: `Locator prompt ${index + 1}`,
-                time: `10:0${index}`,
-              },
-              {
-                type: "assistant",
-                body: `Locator response ${index + 1}`,
-                time: `10:0${index}`,
-              },
-            ])).flat(),
-            warnings: [],
-            nextCursor: null,
-            done: true,
-          };
-        }
-        if (command === "sessions_search") {
-          return report.sessions.sessions.map((session, index) => ({
-            ...session,
-            search_score: report.sessions.sessions.length - index,
-            search_snippet: "Matched ⟦session⟧ text",
-          }));
-        }
-        if (command === "rules_list") return report.rules.rules;
-        if (command === "hooks_list") return report.hooks.hooks;
-        if (command === "mcp_list") return report.mcp.servers;
-        if (command === "agents_list") return report.agents.agents;
-        if (command === "skills_updates") return [];
-        if (command === "skills_update_many") {
-          if (args?.dryRun) {
-            return {
-              plan: {
-                git_updates: [{
-                  files: [{ path: "skills/alpha-skill/SKILL.md", before: "old", after: "new" }],
-                }],
-              },
-            };
-          }
-          skillUpdateAttempts += 1;
-          if (skillUpdateAttempts === 1) throw new Error("mock update failed");
-          report.skills.skills = report.skills.skills.map((skill) => (
-            skill.name === "alpha-skill" ? { ...skill, update_status: "checkable" } : skill
-          ));
-          return { applied: true };
-        }
-        return null;
+        if (command === "daemon_unsubscribe_events") return null;
+        return invokeDomainCommand(command, args);
       },
       transformCallback: (callback) => {
         const id = nextCallbackId++;
@@ -1080,13 +1348,41 @@ try {
       unregisterCallback: (id) => callbacks.delete(id),
       metadata: { currentWindow: { label: "main" }, currentWebview: { label: "main" } },
     };
+    window.__alignmentMockDiagnostics = () => ({ unhandledCommands: [...unhandledCommands] });
   }, buildReport());
 
-  await page.goto(`http://127.0.0.1:${PORT}/`);
+  await page.goto(`http://127.0.0.1:${PORT}/`, { waitUntil: "domcontentloaded", timeout: 10000 });
+  await page.getByRole("button", { name: "Skills", exact: true }).waitFor({ state: "visible", timeout: 5000 });
+  await page.getByRole("heading", { name: "Overview", exact: true }).waitFor();
+  await page.locator(".overviewPage").waitFor();
+  await runPageHeaderChecks(page, "overview", "Overview", false);
+  const navLabels = await page.locator(".navItem").evaluateAll((buttons) => buttons.map((button) => button.textContent?.trim() ?? ""));
+  check(
+    "navigation",
+    "all-pages-listed",
+    JSON.stringify(navLabels) === JSON.stringify(["Overview", "Skills", "Sessions", "Rules", "MCP", "Hooks", "Prompts", "Config", "Settings"]),
+    navLabels.join(", "),
+  );
   await page.getByRole("button", { name: "Skills", exact: true }).click();
   await page.getByRole("heading", { name: "Skills" }).waitFor();
+  await page.waitForFunction(
+    () => getComputedStyle(document.querySelector('.navItem[aria-label="Skills"]')).fontWeight === "550",
+    { timeout: 500 },
+  );
+  const navState = await page.evaluate(() => {
+    const buttons = [...document.querySelectorAll(".navItem")];
+    const active = document.querySelector('.navItem[aria-label="Skills"]');
+    return {
+      active: active?.classList.contains("active") === true && active?.getAttribute("aria-current") === "page",
+      fontWeights: [...new Set(buttons.map((button) => getComputedStyle(button).fontWeight))],
+      activeFontWeight: active ? getComputedStyle(active).fontWeight : "",
+    };
+  });
+  check("navigation", "active-state-after-click", navState.active, "Skills should be the active navigation item");
+  check("navigation", "active-tab-weight", navState.activeFontWeight === "550", `active weight: ${navState.activeFontWeight}`);
+  check("navigation", "inactive-tab-weight", navState.fontWeights.includes("400"), `weights: ${navState.fontWeights.join(", ")}`);
 
-  console.log("\n== installed agent filter ==");
+  writeStdout("\n== installed agent filter ==");
   await page.getByRole("combobox", { name: "Agent filter" }).click();
   await page.waitForFunction(
     () => [...document.querySelectorAll('[role="option"]')].some((option) => option.textContent?.includes("Claude")),
@@ -1097,11 +1393,11 @@ try {
   check("sidebar", "uninstalled-agent-filter", !agentOptions.some((label) => label.includes("Ghost Agent")), `options: ${agentOptions.join(", ")}`);
   await page.keyboard.press("Escape");
 
-  console.log("\n== req8 non-frozen fixture ==");
+  writeStdout("\n== req8 non-frozen fixture ==");
   await runReq8NonFrozenFixture(page);
 
   for (const tab of tabs) {
-    console.log(`\n== ${tab.heading} ==`);
+    writeStdout(`\n== ${tab.heading} ==`);
     if (tab.id !== "skills") {
       // Dismiss any overlay (e.g. a row click that opened an editor dialog)
       // left over from the previous tab before navigating.
@@ -1109,6 +1405,7 @@ try {
       await page.getByRole("button", { name: tab.nav, exact: true }).click();
     }
     await page.getByRole("heading", { name: tab.heading, exact: true }).waitFor();
+    await runPageHeaderChecks(page, tab.id, tab.heading, tab.compact);
     if (tab.id === "sessions") {
       const initialDetailPanels = await page.locator(".transcriptPanelHost").count();
       check(
@@ -1484,7 +1781,6 @@ try {
     if (!tab.selectable) {
       await runReq8TabChecks(page, tab);
       await runFrozenBugSmokeChecks(page, tab);
-      if (tab.id === "sessions") await runSessionLocatorChecks(page);
       continue;
     }
 
@@ -1561,7 +1857,8 @@ try {
     );
 
     // --- req4: action bar padding + height ------------------------------------
-    const barMetrics = await page.locator(".actionBar.bottomBar").first().evaluate((node) => {
+    // The outer bar owns the page inset; the visible surface owns the bar padding.
+    const barMetrics = await page.locator(".actionBar.bottomBar .actionBarSurface").first().evaluate((node) => {
       const style = getComputedStyle(node);
       const checkbox = node.querySelector(".selectionCheckbox");
       const box = node.getBoundingClientRect();
@@ -1573,6 +1870,8 @@ try {
         padLeft: parseFloat(style.paddingLeft),
         borderTop: parseFloat(style.borderTopWidth),
         borderBottom: parseFloat(style.borderBottomWidth),
+        surfaceRadius: parseFloat(style.borderTopLeftRadius),
+        checkboxRadius: checkbox ? parseFloat(getComputedStyle(checkbox).borderTopLeftRadius) : 0,
         height: box.height,
         checkboxHeight: checkboxBox?.height ?? 0,
       };
@@ -1593,6 +1892,21 @@ try {
       "req4-height",
       Math.abs(barMetrics.height - expectedHeight) <= TOLERANCE,
       `bar height ${barMetrics.height}px vs pad+checkbox ${expectedHeight}px (checkbox ${barMetrics.checkboxHeight}px)`,
+    );
+    check(
+      tab.id,
+      "req4-corner-center",
+      Math.abs(barMetrics.surfaceRadius - (barMetrics.checkboxRadius + barMetrics.padTop)) <= TOLERANCE,
+      `surface radius ${barMetrics.surfaceRadius}px vs checkbox radius + pad ${barMetrics.checkboxRadius + barMetrics.padTop}px`,
+    );
+    const actionButtonShadows = await page.locator(".actionBar.bottomBar .actionBarActions > button").evaluateAll((buttons) => (
+      buttons.map((button) => getComputedStyle(button).boxShadow)
+    ));
+    check(
+      tab.id,
+      "req4-action-button-shadow",
+      actionButtonShadows.every((shadow) => shadow === "none"),
+      `idle action button shadows ${actionButtonShadows.join(", ") || "none"}`,
     );
 
     const insetMetrics = await page.evaluate(() => {
@@ -1645,7 +1959,7 @@ try {
 
     const checkboxMetrics = await page.evaluate(() => {
       const round = (value) => Math.round(value * 100) / 100;
-      const bar = document.querySelector(".actionBar.bottomBar");
+      const bar = document.querySelector(".actionBar.bottomBar .actionBarSurface");
       const checkbox = bar?.querySelector(".selectionCheckbox");
       const label = bar?.querySelector(".actionBarSelectionSummary > span");
       if (!bar || !checkbox || !label) return { missing: true };
@@ -1684,18 +1998,39 @@ try {
 
     await runReq8TabChecks(page, tab);
     await runFrozenBugSmokeChecks(page, tab);
+    if (tab.id === "sessions") await runSessionLocatorChecks(page);
 
     // The next tab mounts a fresh view component, so selection does not carry
     // over; no explicit reset needed (overlays are dismissed via Escape above).
   }
 
-  console.log("\n----------------------------------------");
+  for (const pageSpec of [
+    { id: "config", nav: "Config", heading: "Config", compact: true, ready: ".configListPane" },
+    { id: "settings", nav: "Settings", heading: "Settings", compact: false, ready: ".settingsShell" },
+  ]) {
+    writeStdout(`\n== ${pageSpec.heading} navigation smoke ==`);
+    await page.keyboard.press("Escape").catch(() => {});
+    await page.getByRole("button", { name: pageSpec.nav, exact: true }).click();
+    await page.getByRole("heading", { name: pageSpec.heading, exact: true }).waitFor();
+    await page.locator(pageSpec.ready).waitFor();
+    await runPageHeaderChecks(page, pageSpec.id, pageSpec.heading, pageSpec.compact);
+  }
+
+  const mockDiagnostics = await page.evaluate(() => window.__alignmentMockDiagnostics?.() ?? { unhandledCommands: [] });
+  for (const command of new Set(mockDiagnostics.unhandledCommands)) {
+    check("runtime", "mock-command-covered", false, `unhandled Tauri command ${command}`);
+  }
+  for (const error of runtimePageErrors) {
+    check("runtime", "pageerror", false, error);
+  }
+
+  writeStdout("\n----------------------------------------");
   if (failures.length) {
-    console.log(`alignment e2e: ${failures.length} failure(s)`);
-    for (const failure of failures) console.log(`  - ${failure}`);
+    writeStdout(`alignment e2e: ${failures.length} failure(s)`);
+    for (const failure of failures) writeStdout(`  - ${failure}`);
     process.exitCode = 1;
   } else {
-    console.log("alignment e2e ok — all tabs pass req1/req2/req3/req4/req5/req6/req7/req8");
+    writeStdout("alignment e2e ok — all tabs pass req1/req2/req3/req4/req5/req6/req7/req8");
   }
 } finally {
   await cleanup();

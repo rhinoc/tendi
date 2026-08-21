@@ -2,6 +2,7 @@ import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { writeStderr, writeStdout } from "./stdio.mjs";
 
 const desktopDir = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const node = process.execPath;
@@ -23,7 +24,7 @@ function start(label, script, args = []) {
   });
   child.on("exit", (code, signal) => {
     if (!shuttingDown) {
-      console.error(`[tendi] ${label} exited (${code ?? signal})`);
+      writeStderr(`[tendi] ${label} exited (${code ?? signal})`);
       shutdown(code || 1);
     }
   });
@@ -57,5 +58,5 @@ process.once("SIGTERM", () => shutdown());
 
 start("web data bridge", bridgeScript);
 await waitForBridge();
-console.log("[tendi] web mode ready: Vite + local data bridge");
+writeStdout("[tendi] web mode ready: Vite + local data bridge");
 start("Vite", viteScript, ["--host", "127.0.0.1", ...process.argv.slice(2)]);

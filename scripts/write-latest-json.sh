@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
-VERSION="${VERSION:-$(node -e 'const fs=require("node:fs"); console.log(JSON.parse(fs.readFileSync("apps/desktop/src-tauri/tauri.conf.json", "utf8")).version)')}"
+VERSION="${VERSION:-$(node -e 'const fs=require("node:fs"); process.stdout.write(JSON.parse(fs.readFileSync("apps/desktop/src-tauri/tauri.conf.json", "utf8")).version)')}"
 TAG="${TENDI_RELEASE_TAG:-v${VERSION}}"
 REPO="${GITHUB_REPOSITORY:-rhinoc/tendi}"
 SERVER_URL="${GITHUB_SERVER_URL:-https://github.com}"

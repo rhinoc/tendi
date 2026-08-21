@@ -6,9 +6,6 @@ impl TerminalProvider for Custom {
     fn id(&self) -> &str {
         &self.0
     }
-    fn label(&self) -> String {
-        self.0.clone()
-    }
     fn available(&self) -> bool {
         true
     }

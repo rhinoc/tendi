@@ -201,7 +201,7 @@ function sequenceDiff<T>(
 
 function markChangedLines(lines: DiffLine[]) {
   for (const line of lines) {
-    if (line.kind) line.segments = [{ text: line.text || " ", changed: true }];
+    if (line.kind) line.segments = [{ text: line.text, changed: true }];
   }
   return lines;
 }
@@ -291,12 +291,12 @@ export function addInlineDiffSegments(lines: DiffLine[]): DiffLine[] {
       }
     }
     for (const line of hunk) {
-      if (!line.segments) line.segments = [{ text: line.text || " ", changed: true }];
+      if (!line.segments) line.segments = [{ text: line.text, changed: true }];
     }
     index = cursor - 1;
   }
   for (const line of result) {
-    if (line.kind && !line.segments) line.segments = [{ text: line.text || " ", changed: true }];
+    if (line.kind && !line.segments) line.segments = [{ text: line.text, changed: true }];
   }
   return result;
 }
@@ -343,4 +343,131 @@ export function currentLineDiffMap(before: string, after: string) {
   }
 
   return { lineStates, removedBefore };
+}
+
+type MergeHunk = {
+  start: number;
+  end: number;
+  replacement: string[];
+};
+
+export type ThreeWayMergeResult = {
+  content: string;
+  hasConflicts: boolean;
+};
+
+function changedHunks(base: string[], variant: string): MergeHunk[] {
+  const hunks: MergeHunk[] = [];
+  let baseIndex = 0;
+  let start = -1;
+  let replacement: string[] = [];
+  const finish = () => {
+    if (start < 0) return;
+    hunks.push({ start, end: baseIndex, replacement });
+    start = -1;
+    replacement = [];
+  };
+  for (const line of diffPreview(base.join("\n"), variant)) {
+    if (line.kind === "") {
+      finish();
+      baseIndex += 1;
+    } else if (line.kind === "removed") {
+      if (start < 0) start = baseIndex;
+      baseIndex += 1;
+    } else {
+      if (start < 0) start = baseIndex;
+      replacement.push(line.text);
+    }
+  }
+  finish();
+  return hunks;
+}
+
+function hunksOverlap(left: MergeHunk, right: MergeHunk) {
+  if (left.start === left.end && right.start === right.end) return left.start === right.start;
+  if (left.start === left.end) return left.start >= right.start && left.start <= right.end;
+  if (right.start === right.end) return right.start >= left.start && right.start <= left.end;
+  return left.start < right.end && right.start < left.end;
+}
+
+function mergeHunkGroups(local: MergeHunk[], incoming: MergeHunk[]) {
+  const all = [
+    ...local.map((hunk) => ({ ...hunk, source: "local" as const })),
+    ...incoming.map((hunk) => ({ ...hunk, source: "incoming" as const })),
+  ].sort((left, right) => left.start - right.start || left.end - right.end);
+  const groups: typeof all[number][][] = [];
+  for (const hunk of all) {
+    const group = groups[groups.length - 1];
+    if (!group || !group.some((member) => hunksOverlap(member, hunk))) {
+      groups.push([hunk]);
+    } else {
+      group.push(hunk);
+    }
+  }
+  return groups;
+}
+
+function renderHunks(base: string[], start: number, end: number, hunks: MergeHunk[]) {
+  const relevant = hunks
+    .filter((hunk) => hunk.start >= start && hunk.end <= end)
+    .sort((left, right) => left.start - right.start || left.end - right.end);
+  const result: string[] = [];
+  let cursor = start;
+  for (const hunk of relevant) {
+    result.push(...base.slice(cursor, hunk.start));
+    result.push(...hunk.replacement);
+    cursor = hunk.end;
+  }
+  result.push(...base.slice(cursor, end));
+  return result;
+}
+
+export function mergeThreeWay(baseContent: string, localContent: string, incomingContent: string): ThreeWayMergeResult {
+  if (localContent === incomingContent) return { content: localContent, hasConflicts: false };
+  if (localContent === baseContent) return { content: incomingContent, hasConflicts: false };
+  if (incomingContent === baseContent) return { content: localContent, hasConflicts: false };
+
+  const base = baseContent.split("\n");
+  const localHunks = changedHunks(base, localContent);
+  const incomingHunks = changedHunks(base, incomingContent);
+  const groups = mergeHunkGroups(localHunks, incomingHunks);
+  const merged: string[] = [];
+  let cursor = 0;
+  let hasConflicts = false;
+
+  for (const group of groups) {
+    const start = Math.min(...group.map((hunk) => hunk.start));
+    const end = Math.max(...group.map((hunk) => hunk.end));
+    merged.push(...base.slice(cursor, start));
+    const belongsToGroup = (hunk: MergeHunk, source: "local" | "incoming") => group.some(
+      (member) => member.source === source
+        && member.start === hunk.start
+        && member.end === hunk.end
+        && member.replacement.join("\n") === hunk.replacement.join("\n"),
+    );
+    const local = renderHunks(base, start, end, localHunks.filter((hunk) => belongsToGroup(hunk, "local")));
+    const incoming = renderHunks(base, start, end, incomingHunks.filter((hunk) => belongsToGroup(hunk, "incoming")));
+    const original = base.slice(start, end);
+    if (local.join("\n") === incoming.join("\n")) {
+      merged.push(...local);
+    } else if (local.join("\n") === original.join("\n")) {
+      merged.push(...incoming);
+    } else if (incoming.join("\n") === original.join("\n")) {
+      merged.push(...local);
+    } else {
+      hasConflicts = true;
+      merged.push(
+        "<<<<<<< local",
+        ...local,
+        "||||||| base",
+        ...original,
+        "=======",
+        ...incoming,
+        ">>>>>>> incoming",
+      );
+    }
+    cursor = end;
+  }
+  merged.push(...base.slice(cursor));
+  return { content: merged.join("\n"), hasConflicts };
 }

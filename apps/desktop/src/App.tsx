@@ -1,9 +1,7 @@
-import { lazy, startTransition, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
-import type { UnlistenFn } from "@tauri-apps/api/event";
+import { lazy, Suspense, useCallback, useDeferredValue, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { Group as PanelGroup, Panel, usePanelRef } from "react-resizable-panels";
-import { Accordion, Checkbox, ContextMenu, Dialog, DropdownMenu, Select, ToggleGroup } from "radix-ui";
+import { Accordion, Checkbox, ContextMenu, Dialog, DropdownMenu, Select } from "radix-ui";
 import {
   ArrowLeft,
   Bot,
@@ -78,17 +76,33 @@ import stepfunIcon from "@lobehub/icons-static-svg/icons/stepfun-color.svg";
 import traeIcon from "@lobehub/icons-static-svg/icons/trae-color.svg";
 
 import type { ComponentProps } from "react";
-import type { RuntimeData } from "./lib/data.ts";
-import { applyAppearance, listenForSystemAppearanceChange, normalizeAppearance, normalizeThemePreferences, readCachedAppearance, readCachedThemePreferences, type Appearance, type ColorTheme, type ThemePreferences } from "./lib/appearance.ts";
-import { COLLAPSED_SIDEBAR_SIZE, SIDEBAR_SIZE, SkillChangeCommand, SkillVisibility, TauriCommand, agentIdentityKey, applySessionDelta, applySessionProjectDelta, applySkillUpdateReports, applyVisibilityState, clearSkillUpdateAvailability, fallbackAgents, hookSourcePath, hookTrustHash, initialData, isConcreteAgent, mergeSessionRows, navItems, normalizeDomainRows, normalizeReport, normalizeSession, normalizeTranscriptPage, normalizeTranscriptSearchResult, replaceSkillReportPreservingUpdates, safeInvoke, safeListen, sameAgent, sessionIdentity, sessionLaunchPayload, sessionLogicalIdentity } from "./lib/index.ts";
-import type { BundledSkillStatus, CliInstallStatus, SessionIdentityRecord, SessionProjectDelta, TranscriptPage, TranscriptSearchResult, TranscriptSearchScopes } from "./lib/index.ts";
+import { applyAppearance, applyFontFamily, listenForSystemAppearanceChange, normalizeAppearance, normalizeFontFamily, normalizeThemePreferences, readCachedAppearance, readCachedFontFamily, readCachedThemePreferences, type Appearance, type ColorTheme, type FontFamily, type ThemePreferences } from "./lib/appearance.ts";
+import { applyAppIcon, normalizeAppIcon, readCachedAppIcon, type AppIcon } from "./lib/app-icon.ts";
+import { COLLAPSED_SIDEBAR_SIZE, SIDEBAR_SIZE, SkillChangeCommand, SkillVisibility, TauriCommand, agentIdentityKey, applySessionDelta, applyVisibilityState, clearSkillUpdateAvailability, fallbackAgents, hookSourcePath, hookTrustHash, invokeCommand, isConcreteAgent, logger, mergeSessionRows, navItems, normalizeDomainRows, normalizeReport, normalizeSession, normalizeSessionResumeTarget, normalizeTranscriptLocatorPage, normalizeTranscriptPage, normalizeTranscriptSearchResult, promptTitleFromBody, replaceSkillReportPreservingUpdates, ruleAgents, safeInvoke, sameAgent, sessionAppDeepLink, sessionIdentity, sessionLaunchPayload, sessionLogicalIdentity, sessionResumeTargetForAgent, subscribeDaemonEvents } from "./lib/index.ts";
+import type { BundledSkillStatus, CliInstallStatus, DaemonEvent, SessionIdentityRecord, SessionResumeTarget, TranscriptLocatorPage, TranscriptPage, TranscriptSearchResult, TranscriptSearchScopes } from "./lib/index.ts";
+import { sortSidebarSources, type OrderedSidebarSource } from "./lib/sidebar-sources.ts";
 import { mcpColumns } from "./lib/tableColumns.tsx";
 import { PlaceholderView } from "./components/shared/PlaceholderView.tsx";
+import { DialogLoadingFallback } from "./components/shared/DialogLoadingFallback.tsx";
+import { DialogActionButton } from "./components/shared/DialogActionButton.tsx";
+import { DialogShell } from "./components/shared/DialogShell.tsx";
+import { DialogStatefulButton } from "./components/shared/DialogStatefulButton.tsx";
 import { LoadingState } from "./components/shared/LoadingState.tsx";
 import { Sidebar } from "./components/shared/Sidebar.tsx";
-import type { SessionRecord } from "./views/SessionsView.tsx";
+import type { SessionRecord, SkillLinkRecord } from "./views/SessionsView.tsx";
 import type { SkillInstallResult, SkillRecord } from "./views/SkillsView.tsx";
-import type { OverviewNavId } from "./views/OverviewView.tsx";
+import { ConfigView } from "./views/ConfigView.tsx";
+import { DataListView } from "./views/McpView.tsx";
+import { HooksView } from "./views/HooksView.tsx";
+import { PromptsView } from "./views/PromptsView.tsx";
+import { RulesView } from "./views/RulesView.tsx";
+import { SessionsView } from "./views/SessionsView.tsx";
+import { SkillsView } from "./views/SkillsView.tsx";
+import { RuleEditorView } from "./features/rules/RuleEditorView.tsx";
+import { SettingsView } from "./features/settings/SettingsView.tsx";
+import { SkillEditorView } from "./features/skills/SkillEditorView.tsx";
+import { OverviewView, type OverviewNavId } from "./views/OverviewView.tsx";
+import { desktopStore, useDesktopStore, type AgentTargetOption, type SkillIndexStatus, type SkillUpdateReport } from "./store/desktop-store.ts";
 
 type ViewId =
   | "overview"
@@ -105,48 +119,63 @@ type ViewId =
 
 const loadConfirmSkillChangesDialog = () => import("./features/skills/ConfirmSkillChangesDialog.tsx");
 const loadBundledSkillInstallDialog = () => import("./features/skills/BundledSkillInstallDialog.tsx");
-const loadRuleEditorView = () => import("./features/rules/RuleEditorView.tsx");
-const loadSettingsView = () => import("./features/settings/SettingsView.tsx");
-const loadSkillEditorView = () => import("./features/skills/SkillEditorView.tsx");
-const loadDataListView = () => import("./views/McpView.tsx");
-const loadHooksView = () => import("./views/HooksView.tsx");
-const loadConfigView = () => import("./views/ConfigView.tsx");
-const loadPromptsView = () => import("./views/PromptsView.tsx");
-const loadRulesView = () => import("./views/RulesView.tsx");
-const loadSessionsView = () => import("./views/SessionsView.tsx");
-const loadSkillsView = () => import("./views/SkillsView.tsx");
-const loadOverviewView = () => import("./views/OverviewView.tsx");
 
 const ConfirmSkillChangesDialog = lazy(() => loadConfirmSkillChangesDialog().then(({ ConfirmSkillChangesDialog: component }) => ({ default: component })));
 const BundledSkillInstallDialog = lazy(() => loadBundledSkillInstallDialog().then(({ BundledSkillInstallDialog: component }) => ({ default: component })));
-const RuleEditorView = lazy(() => loadRuleEditorView().then(({ RuleEditorView: component }) => ({ default: component })));
-const SettingsView = lazy(() => loadSettingsView().then(({ SettingsView: component }) => ({ default: component })));
-const SkillEditorView = lazy(() => loadSkillEditorView().then(({ SkillEditorView: component }) => ({ default: component })));
-const DataListView = lazy(() => loadDataListView().then(({ DataListView: component }) => ({ default: component })));
-const HooksView = lazy(() => loadHooksView().then(({ HooksView: component }) => ({ default: component })));
-const ConfigView = lazy(() => loadConfigView().then(({ ConfigView: component }) => ({ default: component })));
-const PromptsView = lazy(() => loadPromptsView().then(({ PromptsView: component }) => ({ default: component })));
-const RulesView = lazy(() => loadRulesView().then(({ RulesView: component }) => ({ default: component })));
-const SessionsView = lazy(() => loadSessionsView().then(({ SessionsView: component }) => ({ default: component })));
-const SkillsView = lazy(() => loadSkillsView().then(({ SkillsView: component }) => ({ default: component })));
-const OverviewView = lazy(() => loadOverviewView().then(({ OverviewView: component }) => ({ default: component })));
 
-const viewPreloaders: Partial<Record<ViewId, () => Promise<unknown>>> = {
-  overview: loadOverviewView,
-  skills: loadSkillsView,
-  prompts: loadPromptsView,
-  sessions: loadSessionsView,
-  rules: loadRulesView,
-  hooks: loadHooksView,
-  mcp: loadDataListView,
-  config: loadConfigView,
-  settings: loadSettingsView,
-  skillDetail: loadSkillEditorView,
-  ruleDetail: loadRuleEditorView,
-};
+function SkillChangeDialogFallback({
+  command,
+  names,
+  onOpenChange,
+  onConfirm,
+}: {
+  command: SkillChangeCommand | null;
+  names: string[];
+  onOpenChange: (open: boolean) => void;
+  onConfirm: () => void;
+}) {
+  const isUpdate = command === SkillChangeCommand.UpdateMany;
+  const isDelete = command === SkillChangeCommand.DeleteMany;
+  return (
+    <DialogShell
+      open
+      onOpenChange={onOpenChange}
+      descriptionId="skill-changes-loading-description"
+      contentProps={{ "data-update-preview": isUpdate }}
+    >
+      <div className="skillChangeDialogBody">
+        <Dialog.Title className="confirmDialogTitle">{isDelete ? "Delete selected skills?" : "Confirm skill changes"}</Dialog.Title>
+        {isDelete ? (
+          <>
+            <p id="skill-changes-loading-description" className="confirmDialogDescription">
+              Delete the selected skills from their installed locations.
+            </p>
+            <div className="skillDeleteNames" data-selectable-text>
+              {names.map((name) => <span key={name}>{name}</span>)}
+            </div>
+          </>
+        ) : (
+          <>
+            <p id="skill-changes-loading-description" className="dialogVisuallyHidden">
+              Preparing skill change preview.
+            </p>
+            <LoadingState className="skillUpdatePreviewLoading" label="Preparing update preview" />
+          </>
+        )}
+      </div>
+      {isDelete ? (
+        <div className="confirmDialogActions">
+          <DialogActionButton variant="secondary" onClick={() => onOpenChange(false)}>Cancel</DialogActionButton>
+          <DialogStatefulButton state="idle" variant="danger" aria-label="Delete skills" onClick={onConfirm}>
+            Delete skills
+          </DialogStatefulButton>
+        </div>
+      ) : null}
+    </DialogShell>
+  );
+}
 
 const SESSION_EVENT_FLUSH_MS = 200;
-
 
 type SkillPreview = {
   summary?: string;
@@ -155,19 +184,13 @@ type SkillPreview = {
   refreshRequired?: boolean;
   skills?: SkillRecord[];
 };
-type SkillUpdateReport = { name: string; status: string };
-type SkillRefreshResult = { skills: SkillRecord[]; updateCheck?: string };
+type SkillRefreshResult = { skills: SkillRecord[]; updateCheck?: string; updates?: SkillUpdateReport[] };
+
 type SkillUpdateCheckEvent = {
   status: "completed" | "failed";
-  skills?: SkillRecord[];
+  skills?: SkillRecord[] | null;
   updates?: SkillUpdateReport[];
   error?: string | null;
-};
-
-type SkillIndexStatus = {
-  indexed?: number;
-  failed?: number;
-  running?: boolean;
 };
 
 type SessionScanEvent = {
@@ -193,11 +216,20 @@ type DomainRow = Record<string, unknown>;
 
 type DomainKey = "skills" | "prompts" | "sessions" | "rules" | "hooks" | "mcp";
 
-type AgentTargetOption = {
-  id: string;
-  displayName: string;
-  supportsGlobal: boolean;
+const DOMAIN_KEYS: DomainKey[] = ["skills", "prompts", "sessions", "rules", "hooks", "mcp"];
+const SESSION_LOAD_ERROR = "Could not load sessions. Try again.";
+const SESSION_REFRESH_ERROR = "Could not refresh sessions. Try again.";
+
+type OverviewDomainCount = {
+  count: number;
+  secondaryCount: number;
 };
+
+function errorMessage(error: unknown): string {
+  if (typeof error === "string") return error;
+  if (error instanceof Error) return error.message;
+  return `${error}`;
+}
 
 type SidebarSource = {
   label: string;
@@ -216,7 +248,7 @@ function sidebarSources(
   );
   const sourceByKey = new Map(discoveredSources.map((source) => [agentIdentityKey(source.label), source]));
   const seen = new Set<string>();
-  const result: Array<SidebarSource & { installed: boolean; order: number }> = [];
+  const result: OrderedSidebarSource[] = [];
 
   const add = (label: string, count: number, order: number) => {
     const key = agentIdentityKey(label);
@@ -234,12 +266,7 @@ function sidebarSources(
   targets.forEach((target, index) => add(target.displayName, 0, index));
   discoveredSources.forEach((source, index) => add(source.label, source.count, targets.length + index));
 
-  return result
-    .sort((left, right) => {
-      if (left.installed !== right.installed) return left.installed ? -1 : 1;
-      return left.order - right.order || left.label.localeCompare(right.label);
-    })
-    .map(({ label, count }) => ({ label, count }));
+  return sortSidebarSources(result);
 }
 
 function hookDeleteArgs(hook: DomainRow) {
@@ -270,50 +297,59 @@ function isDomainKey(value: string): value is DomainKey {
   return value in domainListCommands;
 }
 
-function deletePreviewRelatedNames(preview: SkillPreview | null | undefined) {
-  const plan = (preview as Record<string, unknown> | null | undefined)?.plan as Record<string, unknown> | undefined;
-  return ["dependencies", "dependents"].flatMap((key) => {
-    const relations = plan?.[key];
-    if (!Array.isArray(relations)) return [];
-    return relations.flatMap((relation) => {
-      const related = (relation as { related?: unknown }).related;
-      return Array.isArray(related) ? related.map((name) => `${name}`) : [];
-    });
-  });
-}
-
 export function App() {
+  const storeState = useDesktopStore((state) => state);
+  const { catalogs, inventory, skillUpdates, sessions, analytics } = storeState;
+  const data = catalogs.data;
+  const agentTargets = catalogs.agentTargets;
+  const loadingDomains = catalogs.loadingDomains;
+  const domainErrors = catalogs.errors;
+  const domainRetryRevision = catalogs.retryRevision;
+  const overviewCounts = inventory.counts;
+  const overviewCountsLoaded = inventory.loaded;
+  const overviewCountErrors = inventory.errors;
+  const overviewHookReviewCount = inventory.hookReviewCount;
+  const overviewSkillUpdateCount = inventory.skillUpdateCount;
+  const checkingSkillUpdates = skillUpdates.checking;
+  const skillUpdateError = skillUpdates.error;
+  const skillIndexStatus = skillUpdates.indexStatus;
+  const analyticsRevision = analytics.revision;
+  const analyticsRevisionReady = analytics.ready;
+  const analyticsRevisionError = analytics.error;
+  const sessionListStatus = sessions.listStatus;
+  const sessionListError = sessions.listError;
+  const sessionRefreshError = sessions.refreshError;
   const [view, setView] = useState<ViewId>("overview");
+  const deferredView = useDeferredValue(view);
+  const contentView = (
+    (deferredView === "skillDetail" && view !== "skillDetail")
+    || (deferredView === "ruleDetail" && view !== "ruleDetail")
+  ) ? view : deferredView;
   const [activeSkill, setActiveSkill] = useState<SkillRecord | null>(null);
   const [activeRule, setActiveRule] = useState<DomainRow | null>(null);
   const [activeSessionKey, setActiveSessionKey] = useState("");
-  const [skillIndexStatus, setSkillIndexStatus] = useState<SkillIndexStatus | null>(null);
-  const [data, setData] = useState<RuntimeData>(() => initialData());
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [agentFilter, setAgentFilter] = useState("All");
-  const [agentTargets, setAgentTargets] = useState<AgentTargetOption[]>([]);
   const [pendingSkillChange, setPendingSkillChange] = useState<PendingSkillChange | null>(null);
   const [bundledSkillPrompt, setBundledSkillPrompt] = useState<BundledSkillStatus | null>(null);
   const [bundledSkillBusy, setBundledSkillBusy] = useState(false);
   const [bundledSkillError, setBundledSkillError] = useState("");
   const [applyingSkillChange, setApplyingSkillChange] = useState(false);
-  const [applyingSkillUpdates, setApplyingSkillUpdates] = useState(false);
-  const [skillUpdateError, setSkillUpdateError] = useState("");
-  const [checkingSkillUpdates, setCheckingSkillUpdates] = useState(false);
-  const [analyticsRevision, setAnalyticsRevision] = useState(0);
-  const [analyticsRevisionReady, setAnalyticsRevisionReady] = useState(false);
-  const [loadingDomains, setLoadingDomains] = useState(() => new Set<string>(["skills"]));
   const [appearance, setAppearance] = useState<Appearance>(() => readCachedAppearance());
   const [themePreferences, setThemePreferences] = useState<ThemePreferences>(() => readCachedThemePreferences());
+  const [fontFamily, setFontFamily] = useState<FontFamily>(() => readCachedFontFamily());
+  const [appIcon, setAppIcon] = useState<AppIcon>(() => readCachedAppIcon());
   const [developerMode, setDeveloperMode] = useState(false);
+  const [sessionResumeTarget, setSessionResumeTarget] = useState<SessionResumeTarget>("terminal");
+  const changeAppIcon = useCallback((nextAppIcon: AppIcon) => {
+    setAppIcon(nextAppIcon);
+    void applyAppIcon(nextAppIcon);
+  }, []);
   const appearanceChangeRevision = useRef(0);
-  const loadedDomains = useRef(new Set<string>());
   const domainLoadInFlight = useRef(new Map<DomainKey, Promise<void>>());
-  const promptsRefreshInFlight = useRef<Promise<unknown[] | null> | null>(null);
+  const promptsRefreshInFlight = useRef<Promise<unknown[]> | null>(null);
   const sessionsRefreshInFlight = useRef<Promise<unknown> | null>(null);
   const sessionEventReady = useRef<Promise<void>>(Promise.resolve());
-  const sessionListLoaded = useRef(false);
-  const sessionEventUnlisten = useRef<UnlistenFn | null>(null);
   const sessionEventFlushTimer = useRef<number | undefined>(undefined);
   const sessionScanGeneration = useRef(0);
   const completedSessionScans = useRef(new Set<number>());
@@ -322,11 +358,8 @@ export function App() {
   const pendingWatchSessions = useRef(new Map<string, SessionRecord>());
   const pendingDeletedSessions = useRef(new Map<string, SessionIdentityRecord>());
   const sidebarPanelRef = usePanelRef();
-  const currentView = useRef<ViewId>(view);
   const skillListRevision = useRef(0);
   const skillUpdateCheckRevision = useRef(0);
-  const prefetchedViews = useRef(new Set<ViewId>());
-  const prefetchTimers = useRef(new Map<ViewId, number>());
   const activeNav = navItems.find((item) => item.id === view);
   const availableSidebarSources = useMemo(
     () => sidebarSources(
@@ -361,17 +394,67 @@ export function App() {
       }),
       prompts: data.prompts,
       sessions: data.sessions.filter((session) => sameAgent(session.agent, agentFilter)),
-      rules: data.rules.filter((rule) => sameAgent(rule.agent, agentFilter)),
+      rules: data.rules.filter((rule) => ruleAgents(rule).some((agent) => sameAgent(agent, agentFilter))),
       hooks: data.hooks.filter((hook) => sameAgent(hook.agent, agentFilter)),
       mcp: data.mcp.filter((server) => sameAgent(server.agent, agentFilter)),
     };
   }, [agentFilter, data]);
+
+  const setData = desktopStore.actions.updateData;
+  const setSkillUpdateError = desktopStore.actions.setSkillUpdateError;
+  const setCheckingSkillUpdates = desktopStore.actions.setSkillUpdatesChecking;
+  const setSkillIndexStatus = desktopStore.actions.setSkillIndexStatus;
+  const setAgentTargets = desktopStore.actions.setAgentTargets;
+  const setAnalyticsRevision = desktopStore.actions.setAnalyticsRevision;
+  const setAnalyticsRevisionReady = desktopStore.actions.setAnalyticsReady;
+  const setAnalyticsRevisionError = desktopStore.actions.setAnalyticsError;
+  const setSessionListStatus = useCallback((status: typeof sessions.listStatus) => {
+    desktopStore.actions.setSessionListState({ listStatus: status });
+  }, []);
+  const setSessionListError = useCallback((message: string) => {
+    desktopStore.actions.setSessionListState({ listError: message });
+  }, []);
+  const setSessionRefreshError = useCallback((message: string) => {
+    desktopStore.actions.setSessionListState({ refreshError: message });
+  }, []);
+
+  const setDomainError = useCallback((domain: DomainKey, message: string) => {
+    desktopStore.actions.setDomainError(domain, message);
+  }, []);
 
   useEffect(() => {
     applyAppearance(appearance, themePreferences);
     if (appearance !== "system") return;
     return listenForSystemAppearanceChange(() => applyAppearance("system", themePreferences));
   }, [appearance, themePreferences]);
+
+  useEffect(() => {
+    applyFontFamily(fontFamily);
+  }, [fontFamily]);
+
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (!(event.metaKey || event.ctrlKey) || event.key.toLowerCase() !== "f") return;
+      if (view === "sessions") return;
+      const target = event.target instanceof Element ? event.target : null;
+      const activeElement = document.activeElement;
+      const isInLocalFindPane = (element: Element | null) => Boolean(element?.closest(".codePane, .transcriptPanel, [role=\"dialog\"]"));
+      if (isInLocalFindPane(target) || isInLocalFindPane(activeElement)) return;
+
+      const searchInput = document.querySelector<HTMLInputElement>("[data-page-search] input");
+      if (!searchInput) return;
+      event.preventDefault();
+      event.stopPropagation();
+      searchInput.focus();
+      searchInput.select();
+    };
+    window.addEventListener("keydown", handleKeyDown, true);
+    return () => window.removeEventListener("keydown", handleKeyDown, true);
+  }, [view]);
+
+  useEffect(() => {
+    if (view === "skills") void loadConfirmSkillChangesDialog();
+  }, [view]);
 
   const changeAppearance = useCallback((nextAppearance: Appearance) => {
     appearanceChangeRevision.current += 1;
@@ -381,11 +464,16 @@ export function App() {
   useEffect(() => {
     let cancelled = false;
     const revision = appearanceChangeRevision.current;
-    safeInvoke<{ appearance?: unknown; lightTheme?: unknown; darkTheme?: unknown; developerMode?: unknown }>(TauriCommand.SettingsGet).then((settings) => {
+    safeInvoke<{ appearance?: unknown; lightTheme?: unknown; darkTheme?: unknown; appIcon?: unknown; fontFamily?: unknown; developerMode?: unknown; sessionResumeTarget?: unknown }>(TauriCommand.SettingsGet).then((settings) => {
       if (!cancelled && settings && revision === appearanceChangeRevision.current) {
         setAppearance(normalizeAppearance(settings.appearance));
         setThemePreferences(normalizeThemePreferences({ light: settings.lightTheme as ColorTheme, dark: settings.darkTheme as ColorTheme }));
+        const normalizedAppIcon = normalizeAppIcon(settings.appIcon);
+        setAppIcon(normalizedAppIcon);
+        void applyAppIcon(normalizedAppIcon);
+        setFontFamily(normalizeFontFamily(settings.fontFamily));
         setDeveloperMode(settings.developerMode === true);
+        setSessionResumeTarget(normalizeSessionResumeTarget(settings.sessionResumeTarget));
       }
     });
     return () => { cancelled = true; };
@@ -393,58 +481,80 @@ export function App() {
 
   const refreshSkillList = async () => {
     const revision = ++skillListRevision.current;
-    const skills = await safeInvoke(TauriCommand.SkillsList);
-    if (revision !== skillListRevision.current || !skills) return null;
-    setData((current) => {
-      const normalized = normalizeReport({ ...current, skills }, { fallback: false });
-      return replaceSkillReportPreservingUpdates(current, normalized);
-    });
-    loadedDomains.current.add("skills");
-    return skills;
+    try {
+      const skills = await invokeCommand<SkillRecord[]>(TauriCommand.SkillsList);
+      if (revision !== skillListRevision.current) return null;
+      setData((current) => {
+        const normalized = normalizeReport({ ...current, skills });
+        return replaceSkillReportPreservingUpdates(current, normalized);
+      });
+      desktopStore.actions.markDomainLoaded("skills");
+      setDomainError("skills", "");
+      return skills;
+    } catch (error) {
+      logger.error("skills list refresh failed", { revision, error });
+      if (revision === skillListRevision.current) setDomainError("skills", errorMessage(error));
+      return null;
+    }
   };
 
   const refreshSkillListAndUpdates = async () => {
     const revision = ++skillListRevision.current;
     setCheckingSkillUpdates(true);
-    const result = await safeInvoke<SkillRefreshResult>(TauriCommand.SkillsRefresh);
-    if (revision !== skillListRevision.current || !result) {
-      if (revision === skillListRevision.current) setCheckingSkillUpdates(false);
+    try {
+      const result = await invokeCommand<SkillRefreshResult>(TauriCommand.SkillsRefresh);
+      if (revision !== skillListRevision.current) return null;
+      setData((current) => {
+        const next = normalizeReport({ ...current, skills: result.skills });
+        return replaceSkillReportPreservingUpdates(current, next);
+      });
+      if (result.updates) desktopStore.actions.setSkillUpdateReports(result.updates, agentFilter);
+      desktopStore.actions.markDomainLoaded("skills");
+      setDomainError("skills", "");
+      setCheckingSkillUpdates(result.updateCheck === "started" || result.updateCheck === "already-running");
+      return result;
+    } catch (error) {
+      logger.error("skills refresh failed", { revision, error });
+      if (revision === skillListRevision.current) {
+        setDomainError("skills", errorMessage(error));
+        setCheckingSkillUpdates(false);
+      }
       return null;
     }
-    setData((current) => {
-      const next = normalizeReport({ ...current, skills: result.skills }, { fallback: false });
-      return replaceSkillReportPreservingUpdates(current, next);
-    });
-    loadedDomains.current.add("skills");
-    if (result.updateCheck !== "started" && result.updateCheck !== "already-running") {
-      setCheckingSkillUpdates(false);
-    }
-    return result;
   };
 
   const applyInstalledSkills = (result: SkillInstallResult) => {
     if (!result.skills) return;
     setData((current) => {
-      const next = normalizeReport({ ...current, skills: result.skills }, { fallback: false });
+      const next = normalizeReport({ ...current, skills: result.skills });
       return replaceSkillReportPreservingUpdates(current, next);
     });
   };
 
-  const refreshSkillUpdates = async () => {
+  const refreshSkillUpdates = useCallback(async () => {
     const revision = ++skillUpdateCheckRevision.current;
     setCheckingSkillUpdates(true);
-    const result = await safeInvoke<{ updateCheck?: string }>(TauriCommand.SkillsUpdates, { check: true });
-    if (revision !== skillUpdateCheckRevision.current || !result) {
-      if (revision === skillUpdateCheckRevision.current) setCheckingSkillUpdates(false);
-      return;
+    setSkillUpdateError("");
+    try {
+      await sessionEventReady.current;
+      const result = await invokeCommand<{ updateCheck?: string; updates?: SkillUpdateReport[] }>(TauriCommand.SkillsUpdates, { check: true });
+      if (revision !== skillUpdateCheckRevision.current) return;
+      if (result.updateCheck !== "started" && result.updateCheck !== "already-running") {
+        desktopStore.actions.setSkillUpdateReports(result.updates ?? [], agentFilter);
+        setCheckingSkillUpdates(false);
+      }
+    } catch (error) {
+      logger.error("skill updates check failed", { revision, error });
+      if (revision === skillUpdateCheckRevision.current) {
+        setCheckingSkillUpdates(false);
+        setSkillUpdateError(errorMessage(error));
+      }
     }
-    if (result.updateCheck !== "started" && result.updateCheck !== "already-running") {
-      setCheckingSkillUpdates(false);
-    }
-  };
+  }, [agentFilter]);
 
   const refreshSkills = async () => {
     setDomainLoading("skills", true);
+    setDomainError("skills", "");
     try {
       await refreshSkillListAndUpdates();
     } finally {
@@ -454,20 +564,32 @@ export function App() {
 
   const setDomainRows = (domain: DomainKey, rows: unknown[]) => {
     setData((current) => normalizeDomainRows(current, domain, rows));
-    loadedDomains.current.add(domain);
+    desktopStore.actions.markDomainLoaded(domain);
+    setDomainError(domain, "");
   };
 
   const refreshPrompts = useCallback(async () => {
-    if (!promptsRefreshInFlight.current) {
-      promptsRefreshInFlight.current = (async () => {
-        const rows = await safeInvoke(TauriCommand.PromptsList) as unknown[] | null;
-        if (rows) setDomainRows("prompts", rows);
-        return rows;
-      })().finally(() => {
-        promptsRefreshInFlight.current = null;
-      });
+    setDomainLoading("prompts", true);
+    setDomainError("prompts", "");
+    try {
+      if (!promptsRefreshInFlight.current) {
+        promptsRefreshInFlight.current = (async () => {
+          const rows = await invokeCommand<unknown[]>(TauriCommand.PromptsList);
+          if (!Array.isArray(rows)) throw new Error("Invalid prompts response");
+          setDomainRows("prompts", rows);
+          return rows;
+        })().finally(() => {
+          promptsRefreshInFlight.current = null;
+        });
+      }
+      return await promptsRefreshInFlight.current;
+    } catch (error) {
+      logger.error("prompts refresh failed", { error });
+      setDomainError("prompts", errorMessage(error));
+      return null;
+    } finally {
+      setDomainLoading("prompts", false);
     }
-    return promptsRefreshInFlight.current;
   }, []);
 
   const applyPromptSaved = useCallback((prompt: unknown) => {
@@ -476,9 +598,22 @@ export function App() {
     setData((current) => normalizeReport({
       ...current,
       prompts: [prompt, ...current.prompts.filter((item) => item.id !== id)],
-    }, { fallback: false }));
-    loadedDomains.current.add("prompts");
+    }));
+    desktopStore.actions.markDomainLoaded("prompts");
   }, []);
+
+  const savePromptFromSession = useCallback(async (body: string) => {
+    if (!body.trim()) return false;
+    const prompt = await safeInvoke(TauriCommand.PromptSave, {
+      id: null,
+      title: promptTitleFromBody(body),
+      tags: [],
+      body,
+    });
+    if (!prompt) return false;
+    applyPromptSaved(prompt);
+    return true;
+  }, [applyPromptSaved]);
 
   const removePrompts = useCallback((ids: string[]) => {
     const deleted = new Set(ids);
@@ -490,31 +625,31 @@ export function App() {
 
   const deleteHook = useCallback(async (hook: DomainRow) => {
     try {
-      const rows = await invoke(TauriCommand.HookDelete, hookDeleteArgs(hook));
+      const rows = await invokeCommand(TauriCommand.HookDelete, hookDeleteArgs(hook));
       if (Array.isArray(rows)) setDomainRows("hooks", rows);
       return rows;
     } catch (error) {
-      console.warn(`tendi command failed: ${TauriCommand.HookDelete}`, error);
+      logger.warn("tendi command failed", { command: TauriCommand.HookDelete, error });
       return { error: `${error}` };
     }
   }, []);
 
   const deleteHooks = useCallback(async (hooks: DomainRow[]) => {
     try {
-      const rows = await invoke(TauriCommand.HookDeleteMany, {
+      const rows = await invokeCommand(TauriCommand.HookDeleteMany, {
         requests: hooks.map(hookDeleteArgs),
       });
       if (Array.isArray(rows)) setDomainRows("hooks", rows);
       return rows;
     } catch (error) {
-      console.warn(`tendi command failed: ${TauriCommand.HookDeleteMany}`, error);
+      logger.warn("tendi command failed", { command: TauriCommand.HookDeleteMany, error });
       return { error: `${error}` };
     }
   }, []);
 
   const setHookEnabled = useCallback(async (hook: DomainRow, enabled: boolean) => {
     try {
-      const rows = await invoke(TauriCommand.HookSetEnabled, {
+      const rows = await invokeCommand(TauriCommand.HookSetEnabled, {
         path: hookSourcePath(hook),
         expectedTrustHash: hookTrustHash(hook),
         event: hook.event ?? "",
@@ -530,14 +665,14 @@ export function App() {
       if (Array.isArray(rows)) setDomainRows("hooks", rows);
       return rows;
     } catch (error) {
-      console.warn(`tendi command failed: ${TauriCommand.HookSetEnabled}`, error);
+      logger.warn("tendi command failed", { command: TauriCommand.HookSetEnabled, error });
       return { error: `${error}` };
     }
   }, []);
 
   const reviewHook = useCallback(async (hook: DomainRow) => {
     try {
-      const rows = await invoke(TauriCommand.HookReview, {
+      const rows = await invokeCommand(TauriCommand.HookReview, {
         path: hookSourcePath(hook),
         expectedTrustHash: hookTrustHash(hook),
         event: hook.event ?? "",
@@ -552,26 +687,34 @@ export function App() {
       if (Array.isArray(rows)) setDomainRows("hooks", rows);
       return rows;
     } catch (error) {
-      console.warn(`tendi command failed: ${TauriCommand.HookReview}`, error);
+      logger.warn("tendi command failed", { command: TauriCommand.HookReview, error });
       return { error: `${error}` };
     }
   }, []);
 
-  const setSessionRows = useCallback((rows: unknown[], { markLoaded = true } = {}) => {
-    sessionListLoaded.current = true;
+  const setSessionRows = useCallback((rows: unknown[], { markLoaded = true, markReady = true } = {}) => {
+    if (markReady) {
+      setSessionListStatus("loaded");
+      setSessionListError("");
+    }
     setData((current) => {
       const nextSessions = mergeSessionRows(current.sessions, rows as Array<Record<string, unknown>>);
       if (nextSessions === current.sessions) return current;
       return { ...current, sessions: nextSessions };
     });
-    if (markLoaded) loadedDomains.current.add("sessions");
+    if (markLoaded) desktopStore.actions.markDomainLoaded("sessions");
+    if (rows.length > 0) desktopStore.actions.setSessionListState({ rowsAvailable: true });
+    if (markReady) desktopStore.actions.setSessionListState({ listLoaded: true });
   }, []);
 
-  const applySessionProjectsChanged = useCallback((delta: SessionProjectDelta) => {
-    setData((current) => {
-      const sessions = applySessionProjectDelta(current.sessions, delta);
-      return sessions === current.sessions ? current : { ...current, sessions };
-    });
+  const setSessionLoadError = useCallback(() => {
+    if (desktopStore.getSnapshot().sessions.rowsAvailable) {
+      setSessionListStatus("loaded");
+      setSessionListError("");
+      return;
+    }
+    setSessionListStatus("error");
+    setSessionListError(SESSION_LOAD_ERROR);
   }, []);
 
   const flushSessionEventBuffer = useCallback(() => {
@@ -582,27 +725,23 @@ export function App() {
     pendingWatchSessions.current.clear();
     pendingDeletedSessions.current.clear();
     sessionEventFlushTimer.current = undefined;
-    if (recent.length > 0 || watch.length > 0 || deleted.length > 0) {
-      const upserts = new Map<string, SessionRecord>();
-      for (const session of recent) upserts.set(sessionLogicalIdentity(session), session);
-      for (const session of watch) upserts.set(sessionLogicalIdentity(session), session);
-      setData((current) => {
-        const sessions = applySessionDelta(
-          current.sessions,
-          [...upserts.values()] as unknown as Array<Record<string, unknown>>,
-          deleted,
-        );
-        return sessions === current.sessions ? current : { ...current, sessions };
-      });
-    }
+    if (recent.length === 0 && watch.length === 0 && deleted.length === 0) return;
+    const upserts = new Map<string, SessionRecord>();
+    for (const session of recent) upserts.set(sessionLogicalIdentity(session), session);
+    for (const session of watch) upserts.set(sessionLogicalIdentity(session), session);
+    setData((current) => {
+      const sessions = applySessionDelta(
+        current.sessions,
+        [...upserts.values()] as unknown as Array<Record<string, unknown>>,
+        deleted,
+      );
+      return sessions === current.sessions ? current : { ...current, sessions };
+    });
   }, []);
 
   const scheduleSessionEventFlush = useCallback(() => {
     if (sessionEventFlushTimer.current !== undefined) return;
-    sessionEventFlushTimer.current = window.setTimeout(
-      flushSessionEventBuffer,
-      SESSION_EVENT_FLUSH_MS,
-    );
+    sessionEventFlushTimer.current = window.setTimeout(flushSessionEventBuffer, SESSION_EVENT_FLUSH_MS);
   }, [flushSessionEventBuffer]);
 
   const finishSessionScanWaiters = useCallback((generation: number) => {
@@ -616,138 +755,141 @@ export function App() {
     if (event.generation < sessionScanGeneration.current) return;
     sessionScanGeneration.current = event.generation;
     const upserts = (event.upserts ?? []).map((row, index) => normalizeSession(row, index) as SessionRecord);
-    const deleted = event.deleted ?? [];
     if (event.phase === "recent") {
-      for (const session of upserts) {
-        const key = sessionLogicalIdentity(session);
-        pendingRecentSessions.current.set(key, session);
-      }
+      for (const session of upserts) pendingRecentSessions.current.set(sessionLogicalIdentity(session), session);
     } else if (event.phase === "watch") {
-      for (const session of upserts) {
-        const key = sessionLogicalIdentity(session);
-        pendingWatchSessions.current.set(key, session);
-      }
+      for (const session of upserts) pendingWatchSessions.current.set(sessionLogicalIdentity(session), session);
     }
-    for (const identity of deleted) {
-      const key = sessionIdentity({
-        id: `${identity.id ?? ""}`,
-        agent: `${identity.agent ?? ""}`,
-        path: `${identity.path ?? ""}`,
-      });
-      pendingDeletedSessions.current.set(key, identity);
+    for (const identity of event.deleted ?? []) {
+      pendingDeletedSessions.current.set(
+        sessionIdentity({ id: `${identity.id ?? ""}`, agent: `${identity.agent ?? ""}`, path: `${identity.path ?? ""}` }),
+        identity,
+      );
     }
     scheduleSessionEventFlush();
-
     if (event.phase === "recent" && event.complete) {
-      if (sessionEventFlushTimer.current !== undefined) {
-        window.clearTimeout(sessionEventFlushTimer.current);
-      }
+      setSessionRefreshError("");
+      if (sessionEventFlushTimer.current !== undefined) window.clearTimeout(sessionEventFlushTimer.current);
       flushSessionEventBuffer();
     }
-
     if (event.phase === "backfill" && event.complete) {
       void (async () => {
-        if (currentView.current === "sessions") {
-          const rows = await safeInvoke(TauriCommand.SessionsList) as unknown[] | null;
-          if (Array.isArray(rows)) setSessionRows(rows);
+        try {
+          const rows = await invokeCommand<unknown[]>(TauriCommand.SessionsList);
+          if (!Array.isArray(rows)) throw new Error("Invalid sessions response");
+          setSessionRows(rows);
+          const status = await invokeCommand<SkillIndexStatus>(TauriCommand.SessionSkillIndexRun, { force: false });
+          setSkillIndexStatus(status);
+          setSessionRefreshError("");
+        } catch (error) {
+          logger.error("sessions backfill finalization failed", {
+            generation: event.generation,
+            phase: event.phase,
+            error,
+          });
+          setSessionRefreshError(SESSION_REFRESH_ERROR);
+          setSessionLoadError();
+        } finally {
+          finishSessionScanWaiters(event.generation);
         }
-        const status = await safeInvoke(TauriCommand.SessionSkillIndexRun, { force: false });
-        if (status) setSkillIndexStatus(status as SkillIndexStatus);
-        finishSessionScanWaiters(event.generation);
       })();
-    } else if (event.phase === "error" && event.complete) {
+    } else if (event.phase === "error") {
+      logger.error("sessions scan failed", {
+        generation: event.generation,
+        phase: event.phase,
+        scanned: event.scanned ?? 0,
+        complete: event.complete ?? false,
+        error: event.error ?? "unknown session scan error",
+      });
+      if (!event.complete) return;
+      setSessionRefreshError(SESSION_REFRESH_ERROR);
+      setSessionLoadError();
       finishSessionScanWaiters(event.generation);
+    } else if (event.phase === "watch" && event.complete) {
+      setSessionRefreshError("");
     }
-  }, [finishSessionScanWaiters, flushSessionEventBuffer, scheduleSessionEventFlush, setSessionRows]);
-
-  useEffect(() => {
-    currentView.current = view;
-  }, [view]);
+  }, [finishSessionScanWaiters, flushSessionEventBuffer, scheduleSessionEventFlush, setSessionLoadError, setSessionRows]);
 
   useEffect(() => {
     let disposed = false;
-    let unlisten: UnlistenFn | null = null;
-    const applyRevision = (revision: number) => {
-      if (!disposed) setAnalyticsRevision((current) => Math.max(current, revision));
-    };
-    const ready = safeListen<{ revision: number }>("analytics://revision", ({ payload }) => {
-      applyRevision(payload.revision);
-    }).then(async (cleanup) => {
-      if (disposed) {
-        cleanup();
-        return;
+    let unsubscribe: (() => void) | null = null;
+    const setup = subscribeDaemonEvents((event: DaemonEvent) => {
+      if (disposed) return;
+      if (event.event === "sessions://scan") {
+        handleSessionScanEvent(event.payload as SessionScanEvent);
+      } else if (event.event === "analytics://revision") {
+        const revision = Number((event.payload as { revision?: unknown }).revision);
+        if (Number.isFinite(revision)) {
+          setAnalyticsRevision(revision);
+          setAnalyticsRevisionReady(true);
+          setAnalyticsRevisionError("");
+        }
+      } else if (event.event === "skills://updates") {
+        const payload = event.payload as SkillUpdateCheckEvent;
+        if (payload.status === "completed") {
+          if (Array.isArray(payload.skills)) {
+            setData((current) => {
+              const next = normalizeReport({ ...current, skills: payload.skills });
+              return replaceSkillReportPreservingUpdates(current, next);
+            });
+            desktopStore.actions.markDomainLoaded("skills");
+            desktopStore.actions.setDomainError("skills", "");
+          }
+          desktopStore.actions.setSkillUpdateReports(payload.updates ?? [], agentFilter);
+          setSkillUpdateError("");
+        } else {
+          setSkillUpdateError(payload.error || "Update check failed");
+        }
+        setCheckingSkillUpdates(false);
       }
-      unlisten = cleanup;
-      const revision = await safeInvoke<number>(TauriCommand.AnalyticsRevision);
-      if (revision !== null) applyRevision(revision);
-      if (!disposed) setAnalyticsRevisionReady(true);
+    });
+    sessionEventReady.current = setup.then((cleanup) => {
+      if (disposed) cleanup();
+      else unsubscribe = cleanup;
+    }).catch((error) => {
+      if (!disposed) logger.warn("daemon event subscription failed", { error });
     });
     return () => {
       disposed = true;
-      unlisten?.();
-      void ready;
-    };
-  }, []);
-
-  useEffect(() => {
-    let disposed = false;
-    const ready = safeListen<SessionScanEvent>("sessions://scan", ({ payload }) => {
-      if (!disposed) handleSessionScanEvent(payload);
-    }).then((unlisten) => {
-      if (disposed) unlisten();
-      else sessionEventUnlisten.current = unlisten;
-    });
-    sessionEventReady.current = ready;
-    return () => {
-      disposed = true;
-      sessionEventUnlisten.current?.();
-      sessionEventUnlisten.current = null;
+      unsubscribe?.();
       if (sessionEventFlushTimer.current !== undefined) {
         window.clearTimeout(sessionEventFlushTimer.current);
         sessionEventFlushTimer.current = undefined;
       }
     };
-  }, [handleSessionScanEvent]);
+  }, [agentFilter, handleSessionScanEvent]);
 
   useEffect(() => {
-    let disposed = false;
-    let unlisten: UnlistenFn | null = null;
-    const ready = safeListen<SkillUpdateCheckEvent>("skills://updates", ({ payload }) => {
-      if (disposed) return;
-      if (payload.status === "completed") {
-        setData((current) => {
-          return applySkillUpdateReports(current, payload.updates ?? []);
-        });
-        setSkillUpdateError("");
-      } else {
-        setSkillUpdateError(payload.error || "Update check failed");
-      }
-      setCheckingSkillUpdates(false);
-    }).then((cleanup) => {
-      if (disposed) cleanup();
-      else unlisten = cleanup;
-    });
-    return () => {
-      disposed = true;
-      unlisten?.();
-      void ready;
-    };
+    void refreshSkillUpdates();
+  }, [refreshSkillUpdates]);
+
+  const refreshAnalyticsRevision = useCallback(async () => {
+    setAnalyticsRevisionError("");
+    setAnalyticsRevisionReady(false);
+    try {
+      const revision = await invokeCommand<number>(TauriCommand.AnalyticsRevision);
+      setAnalyticsRevision(revision);
+      setAnalyticsRevisionReady(true);
+    } catch (error) {
+      logger.error("analytics revision load failed", { error });
+      setAnalyticsRevisionError(errorMessage(error));
+    }
   }, []);
 
-  const refreshSessionsFromScan = useCallback(() => {
+  useEffect(() => {
+    void refreshAnalyticsRevision();
+  }, [refreshAnalyticsRevision]);
+
+  const refreshSessionsFromScan = useCallback((showLoading = true) => {
+    setSessionRefreshError("");
+    if (showLoading) {
+      setSessionListStatus("loading");
+      setSessionListError("");
+    }
     if (!sessionsRefreshInFlight.current) {
-      pendingRecentSessions.current.clear();
-      pendingWatchSessions.current.clear();
-      pendingDeletedSessions.current.clear();
       sessionsRefreshInFlight.current = sessionEventReady.current
-        .then(() => safeInvoke<number>(TauriCommand.SessionsScanStart))
+        .then(() => invokeCommand<number>(TauriCommand.SessionsScanStart))
         .then((generation) => {
-          if (generation === null) {
-            return safeInvoke(TauriCommand.SessionsList).then((rows) => {
-              if (Array.isArray(rows)) setSessionRows(rows);
-              return null;
-            });
-          }
           sessionScanGeneration.current = Math.max(sessionScanGeneration.current, generation);
           if (completedSessionScans.current.has(generation)) return generation;
           return new Promise<number>((resolve) => {
@@ -756,12 +898,18 @@ export function App() {
             sessionScanWaiters.current.set(generation, waiters);
           });
         })
+        .catch((error) => {
+          logger.error("sessions scan start failed", { error });
+          setSessionRefreshError(SESSION_REFRESH_ERROR);
+          setSessionLoadError();
+          return null;
+        })
         .finally(() => {
           sessionsRefreshInFlight.current = null;
         });
     }
     return sessionsRefreshInFlight.current;
-  }, [setSessionRows]);
+  }, []);
 
   const refreshSkillIndexStatus = useCallback(async () => {
     const status = await safeInvoke(TauriCommand.SessionSkillIndexStatus);
@@ -770,20 +918,44 @@ export function App() {
   }, []);
 
   const setDomainLoading = (domain: string, loading: boolean) => {
-    setLoadingDomains((current) => {
-      if (current.has(domain) === loading) return current;
-      const next = new Set(current);
-      if (loading) next.add(domain);
-      else next.delete(domain);
-      return next;
-    });
+    if (!isDomainKey(domain)) return;
+    desktopStore.actions.setDomainLoading(domain, loading);
   };
+
+  const loadDomainForRetry = useCallback((domain: DomainKey) => {
+    desktopStore.actions.markDomainLoaded(domain, false);
+    if (domain === "sessions") {
+      desktopStore.actions.setSessionListState({ listLoaded: false });
+      setSessionListStatus("loading");
+      setSessionListError("");
+      setSessionRefreshError("");
+    }
+    setDomainLoading(domain, true);
+    desktopStore.actions.bumpDomainRetryRevision();
+  }, [setSessionListError, setSessionListStatus, setSessionRefreshError]);
+
+  const loadOverviewCount = useCallback(async (domain: DomainKey) => {
+    desktopStore.actions.setInventoryError(domain, false);
+    try {
+      const result = await invokeCommand<OverviewDomainCount>(TauriCommand.OverviewCount, {
+        domain,
+        agent: agentFilter === "All" ? null : agentFilter,
+      });
+      if (!Number.isFinite(result.count) || !Number.isFinite(result.secondaryCount)) {
+        throw new Error(`Invalid ${domain} count response`);
+      }
+      desktopStore.actions.setInventoryCount(domain, result.count, result.secondaryCount);
+    } catch (error) {
+      logger.warn("tendi overview count failed", { domain, error });
+      desktopStore.actions.setInventoryError(domain, true);
+    }
+  }, [agentFilter]);
 
   useEffect(() => {
     let cancelled = false;
     safeInvoke(TauriCommand.AgentsList).then((agents) => {
       if (!cancelled && Array.isArray(agents)) {
-        setData((current) => normalizeReport({ ...current, agents }, { fallback: false }));
+        setData((current) => normalizeReport({ ...current, agents }));
       }
     });
     return () => {
@@ -816,9 +988,10 @@ export function App() {
     setBundledSkillBusy(true);
     setBundledSkillError("");
     try {
-      await invoke(TauriCommand.BundledSkillPromptDismiss);
+      await invokeCommand(TauriCommand.BundledSkillPromptDismiss);
       setBundledSkillPrompt(null);
     } catch (error) {
+      logger.error("bundled skill prompt dismiss failed", { error });
       setBundledSkillError(`${error}`);
     } finally {
       setBundledSkillBusy(false);
@@ -830,14 +1003,15 @@ export function App() {
     setBundledSkillBusy(true);
     setBundledSkillError("");
     try {
-      const cliStatus = await invoke<CliInstallStatus>(TauriCommand.CliInstall);
+      const cliStatus = await invokeCommand<CliInstallStatus>(TauriCommand.CliInstall);
       if (cliStatus.state !== "installed" || !cliStatus.pathConfigured) {
         throw new Error(cliStatus.detail || "The Tendi CLI is not available on PATH.");
       }
-      await invoke(TauriCommand.BundledSkillInstall);
+      await invokeCommand(TauriCommand.BundledSkillInstall);
       setBundledSkillPrompt(null);
       void refreshSkillList();
     } catch (error) {
+      logger.error("bundled skill install failed", { error });
       setBundledSkillError(`${error}`);
     } finally {
       setBundledSkillBusy(false);
@@ -846,30 +1020,43 @@ export function App() {
 
   useEffect(() => {
     const loadOneDomain = async (domain: DomainKey) => {
-      if (loadedDomains.current.has(domain)) return;
+      if (desktopStore.getSnapshot().catalogs.loadedDomains.has(domain)) return;
       const existing = domainLoadInFlight.current.get(domain);
       if (existing) {
         await existing;
-        if (domain === "sessions" && view !== "overview" && !loadedDomains.current.has(domain)) {
+        if (domain === "sessions" && view !== "overview" && !desktopStore.getSnapshot().catalogs.loadedDomains.has(domain)) {
           await refreshSessionsFromScan();
         }
         return;
       }
       const request = (async () => {
         setDomainLoading(domain, true);
+        setDomainError(domain, "");
         try {
           if (domain === "skills") {
             await refreshSkillListAndUpdates();
             return;
           }
           if (domain === "sessions") {
-            if (!sessionListLoaded.current) {
-              const cachedRows = await safeInvoke(TauriCommand.SessionsList) as unknown[] | null;
-              if (cachedRows) {
-                setSessionRows(cachedRows, { markLoaded: view !== "overview" });
+            if (!desktopStore.getSnapshot().sessions.listLoaded) {
+              setSessionListStatus("loading");
+              setSessionListError("");
+              try {
+                const cachedRows = await invokeCommand<unknown[]>(TauriCommand.SessionsList);
+                setSessionRows(cachedRows, {
+                  markLoaded: view !== "overview",
+                  markReady: view !== "overview" || cachedRows.length > 0,
+                });
+              } catch (error) {
+                logger.error("sessions cached list load failed", { view, error });
+                setSessionRefreshError(SESSION_REFRESH_ERROR);
+                setSessionLoadError();
               }
             }
-            if (view === "overview") return;
+            if (view === "overview") {
+              void refreshSessionsFromScan(false);
+              return;
+            }
             await refreshSessionsFromScan();
             return;
           }
@@ -877,8 +1064,16 @@ export function App() {
             await refreshPrompts();
             return;
           }
-          const rows = await safeInvoke(domainListCommands[domain]) as unknown[] | null;
-          if (rows) setDomainRows(domain, rows);
+          const rows = await invokeCommand<unknown[]>(domainListCommands[domain]);
+          if (!Array.isArray(rows)) throw new Error(`Invalid ${domain} response`);
+          setDomainRows(domain, rows);
+    } catch (error) {
+      logger.error("domain load failed", { domain, error });
+      setDomainError(domain, errorMessage(error));
+          if (domain === "sessions") {
+            setSessionRefreshError(SESSION_REFRESH_ERROR);
+            setSessionLoadError();
+          }
         } finally {
           setDomainLoading(domain, false);
         }
@@ -894,19 +1089,14 @@ export function App() {
     };
 
     if (view === "overview") {
-      const domains: DomainKey[] = ["skills", "sessions", "prompts", "rules", "hooks", "mcp"];
-      let timer = 0;
-      let frame = 0;
-      frame = window.requestAnimationFrame(() => {
-        timer = window.setTimeout(() => {
-          void Promise.all(domains.map((domain) => loadOneDomain(domain)));
-        }, 0);
-      });
-      return () => {
-        window.cancelAnimationFrame(frame);
-        window.clearTimeout(timer);
-        for (const domain of domains) setDomainLoading(domain, false);
-      };
+      desktopStore.actions.resetInventory(agentFilter);
+      void (async () => {
+        await loadOneDomain("sessions");
+        for (const domain of DOMAIN_KEYS) {
+          await loadOverviewCount(domain);
+        }
+      })();
+      return () => undefined;
     }
 
     const domain = view === "skillDetail" ? "skills" : view === "ruleDetail" ? "rules" : view;
@@ -921,9 +1111,20 @@ export function App() {
     return () => {
       window.cancelAnimationFrame(frame);
       window.clearTimeout(timer);
-      setDomainLoading(domain, false);
     };
-  }, [refreshPrompts, refreshSessionsFromScan, setSessionRows, view]);
+  }, [agentFilter, domainRetryRevision, loadOverviewCount, refreshPrompts, refreshSessionsFromScan, setDomainError, setSessionLoadError, setSessionRows, view]);
+
+  useEffect(() => {
+    if (view !== "overview" || sessionListStatus === "loading") return;
+    const count = data.sessions.filter((session) => (
+      agentFilter === "All" || sameAgent(session.agent, agentFilter)
+    )).length;
+    desktopStore.actions.setInventoryCount("sessions", count);
+  }, [agentFilter, data.sessions, sessionListStatus, view]);
+
+  useEffect(() => {
+    desktopStore.actions.refreshSkillUpdateCount(agentFilter);
+  }, [agentFilter, data.skills]);
 
   useEffect(() => {
     if (typeof window === "undefined") return undefined;
@@ -943,95 +1144,91 @@ export function App() {
     };
   }, [refreshSkillIndexStatus, skillIndexStatus]);
 
-  const transitionTo = useCallback((next: ViewId) => {
-    startTransition(() => setView(next));
+  const navigateTo = useCallback((next: ViewId) => {
+    setView(next);
   }, []);
 
   const navigate = useCallback((next: ViewId) => {
-    transitionTo(next);
+    navigateTo(next);
     setActiveSkill(null);
     setActiveRule(null);
-  }, [transitionTo]);
-
-  const prefetchView = useCallback((next: ViewId) => {
-    const loader = viewPreloaders[next];
-    if (!loader || prefetchedViews.current.has(next) || prefetchTimers.current.has(next)) return;
-    const timer = window.setTimeout(() => {
-      prefetchTimers.current.delete(next);
-      prefetchedViews.current.add(next);
-      void loader().catch(() => {
-        prefetchedViews.current.delete(next);
-      });
-    }, 120);
-    prefetchTimers.current.set(next, timer);
-  }, []);
-
-  const cancelPrefetchView = useCallback((next: ViewId) => {
-    const timer = prefetchTimers.current.get(next);
-    if (timer === undefined) return;
-    window.clearTimeout(timer);
-    prefetchTimers.current.delete(next);
-  }, []);
-
-  useEffect(() => () => {
-    for (const timer of prefetchTimers.current.values()) window.clearTimeout(timer);
-    prefetchTimers.current.clear();
-  }, []);
+  }, [navigateTo]);
 
   const loadTranscript = useCallback(async (session: SessionRecord, cursor?: string, knownSourceVersion?: string): Promise<TranscriptPage> => {
-    if (!session?.path) return { items: [], warnings: [], done: true, sourceVersion: "", restartRequired: false, unchanged: false };
-    const page = await safeInvoke(TauriCommand.SessionTranscript, {
+    if (!session?.path) return { items: [], locatorItems: [], warnings: [], done: true, sourceVersion: "", restartRequired: false, unchanged: false };
+    const page = await invokeCommand(TauriCommand.SessionTranscript, {
       path: session.path,
       agent: session.agent,
       cursor,
       limit: 160,
       knownSourceVersion,
     });
-    return page
-      ? normalizeTranscriptPage(page)
-      : { items: [], warnings: [], done: true, sourceVersion: "", restartRequired: false, unchanged: false };
+    return normalizeTranscriptPage(page);
+  }, []);
+
+  const loadTranscriptLocator = useCallback(async (session: SessionRecord): Promise<TranscriptLocatorPage> => {
+    if (!session?.path) return { locatorItems: [], warnings: [], sourceVersion: "" };
+    const page = await invokeCommand(TauriCommand.SessionTranscriptLocator, {
+      path: session.path,
+      agent: session.agent,
+    });
+    return normalizeTranscriptLocatorPage(page);
   }, []);
 
   const searchTranscript = useCallback(async (session: SessionRecord, query: string, scopes: TranscriptSearchScopes): Promise<TranscriptSearchResult | null> => {
     if (!session?.path) return null;
-    const result = await safeInvoke(TauriCommand.SessionTranscriptSearch, {
+    const result = await invokeCommand(TauriCommand.SessionTranscriptSearch, {
       path: session.path,
       agent: session.agent,
       query,
       scopes,
     });
-    return result ? normalizeTranscriptSearchResult(result) : null;
+    return normalizeTranscriptSearchResult(result);
   }, []);
 
   const searchSessions = useCallback(async (query: string) => {
-    const rows = await safeInvoke(TauriCommand.SessionsSearch, { query }) as unknown[] | null;
-    return Array.isArray(rows)
-      ? rows.map((row, index) => normalizeSession(row as Record<string, unknown>, index)) as SessionRecord[]
-      : [];
+    try {
+      const rows = await invokeCommand<unknown[]>(TauriCommand.SessionsSearch, { query });
+      if (!Array.isArray(rows)) throw new Error("Invalid session search response");
+      return rows.map((row, index) => normalizeSession(row as Record<string, unknown>, index)) as SessionRecord[];
+    } catch (error) {
+      logger.error("session search failed", { query, error });
+      throw error;
+    }
   }, []);
 
   const loadSessionSkillLinks = useCallback(async (session: SessionRecord) => {
     if (!session?.id) return [];
-    const links = await safeInvoke(TauriCommand.SessionSkillLinks, { sessionId: session.id, agent: session.agent });
-    return Array.isArray(links) ? links : [];
+    const links = await invokeCommand<unknown[]>(TauriCommand.SessionSkillLinks, { sessionId: session.id, agent: session.agent });
+    if (!Array.isArray(links)) throw new Error("Invalid session skill links response");
+    return links as SkillLinkRecord[];
   }, []);
 
   const openSkillByName = useCallback((skillName: string) => {
     const skill = data.skills.find((item) => item.name === skillName) as SkillRecord | undefined;
     if (skill) setActiveSkill(skill);
-    transitionTo(skill ? "skillDetail" : "skills");
-  }, [data.skills, transitionTo]);
+    navigateTo(skill ? "skillDetail" : "skills");
+  }, [data.skills, navigateTo]);
 
   const openSessionFromLink = useCallback((link: DomainRow) => {
     setActiveSessionKey(`${link.agent ?? ""}:${link.session_id ?? link.sessionId ?? ""}`);
-    transitionTo("sessions");
-  }, [transitionTo]);
+    navigateTo("sessions");
+  }, [navigateTo]);
 
-  const resumeSessionInTerminal = useCallback(async (session: SessionRecord) => {
-    return safeInvoke(TauriCommand.SessionResumeInTerminal, { session: sessionLaunchPayload(session) }) as Promise<
-      { terminal?: string } | null | undefined
-    >;
-  }, []);
+  const resumeSession = useCallback(async (session: SessionRecord) => {
+    if (sessionResumeTargetForAgent(sessionResumeTarget, session.agent) === "app") {
+      const appUrl = sessionAppDeepLink(session);
+      if (appUrl) {
+        try {
+          await invokeCommand(TauriCommand.OpenUrl, { url: appUrl });
+          return { target: "app" as const };
+        } catch (error) {
+          logger.warn("session app resume unavailable; using terminal", { agent: session.agent, error });
+        }
+      }
+    }
+    return invokeCommand<{ terminal?: string }>(TauriCommand.SessionResumeInTerminal, { session: sessionLaunchPayload(session) });
+  }, [sessionResumeTarget]);
 
   const previewAndApply = async (
     command: SkillChangeCommand,
@@ -1040,42 +1237,38 @@ export function App() {
   ) => {
     const isUpdate = command === SkillChangeCommand.UpdateMany;
     const isDelete = command === SkillChangeCommand.DeleteMany;
-    if (isUpdate || isDelete) {
-      if (isDelete) {
-        setPendingSkillChange({ command, args, preview: null, onApplied });
-      } else {
-        setApplyingSkillUpdates(true);
-        setSkillUpdateError("");
-        setPendingSkillChange({ command, args, preview: null, onApplied });
-      }
+    if (isDelete) {
+      setPendingSkillChange({ command, args, preview: null, onApplied });
+      return;
+    }
+    if (isUpdate) {
+      setSkillUpdateError("");
+      setPendingSkillChange({ command, args, preview: null, onApplied });
     }
     try {
-      const preview = isUpdate || isDelete
-        ? await invoke<SkillPreview>(command, { ...args, dryRun: true })
+      const preview = isUpdate
+        ? await invokeCommand<SkillPreview>(command, { ...args, dryRun: true })
         : await safeInvoke(command, { ...args, dryRun: true }) as SkillPreview | null;
       if (!preview) return;
       if (isUpdate) {
         setPendingSkillChange((current) => current?.command === command ? { ...current, preview } : current);
-      } else if (isDelete) {
-        setPendingSkillChange((current) => current?.command === command && current.args === args ? { ...current, preview } : current);
       } else {
         setPendingSkillChange({ command, args, preview, onApplied });
       }
     } catch (error) {
+      logger.error("skill change preview failed", { command, error });
       const message = `${error}`;
       setSkillUpdateError(message);
       if (isUpdate) setPendingSkillChange((current) => current?.command === command ? { ...current, previewError: message } : current);
       if (isDelete) setPendingSkillChange((current) => current?.command === command && current.args === args ? { ...current, previewError: message } : current);
-    } finally {
-      if (isUpdate) setApplyingSkillUpdates(false);
     }
   };
 
   const applySkillChange = async (command: SkillChangeCommand, args: Record<string, unknown>) => {
-    const result = await invoke<SkillPreview>(command, { ...args, dryRun: false });
+    const result = await invokeCommand<SkillPreview>(command, { ...args, dryRun: false });
     if (result.skills) {
       setData((current) => {
-        const next = normalizeReport({ ...current, skills: result.skills }, { fallback: false });
+        const next = normalizeReport({ ...current, skills: result.skills });
         return replaceSkillReportPreservingUpdates(current, next, typeof args.name === "string" ? [args.name] : []);
       });
     }
@@ -1086,22 +1279,24 @@ export function App() {
     if (!open && !applyingSkillChange) setPendingSkillChange(null);
   };
 
-  const confirmSkillChange = async () => {
+  const confirmSkillChange = async (resolutions: Record<string, string> = {}) => {
     if (!pendingSkillChange || applyingSkillChange) return;
     setApplyingSkillChange(true);
     const { command, args, onApplied } = pendingSkillChange;
     setPendingSkillChange((current) => current ? { ...current, applyError: undefined } : current);
     if (command === SkillChangeCommand.UpdateMany) setSkillUpdateError("");
-    const previewId = command === SkillChangeCommand.DeleteMany
+    const previewId = command === SkillChangeCommand.UpdateMany
       ? pendingSkillChange.preview?.previewId
-      : command === SkillChangeCommand.UpdateMany
-        ? pendingSkillChange.preview?.previewId
-        : undefined;
+      : undefined;
     try {
-      const result = await invoke<SkillPreview>(command, { ...args, previewId, dryRun: false });
+      const result = await invokeCommand<SkillPreview>(command, {
+        ...args,
+        dryRun: false,
+        ...(command === SkillChangeCommand.UpdateMany ? { previewId, resolutions } : {}),
+      });
       if (result.skills) {
         setData((current) => {
-          const next = normalizeReport({ ...current, skills: result.skills }, { fallback: false });
+          const next = normalizeReport({ ...current, skills: result.skills });
           return replaceSkillReportPreservingUpdates(current, next, (args.names as unknown[] | undefined)?.map((name) => `${name}`) ?? []);
         });
       } else if (command === SkillChangeCommand.DeleteMany) {
@@ -1109,10 +1304,14 @@ export function App() {
         setData((current) => normalizeReport({
           ...current,
           skills: current.skills.filter((skill) => !names.has(skill.name)),
-        }, { fallback: false }));
+        }));
       } else if (command === SkillChangeCommand.UpdateMany) {
         const names = (args.names as unknown[] | undefined)?.map((name) => `${name}`) ?? [];
         setData((current) => clearSkillUpdateAvailability(current, names));
+      }
+      if (command === SkillChangeCommand.UpdateMany) {
+        const names = (args.names as unknown[] | undefined)?.map((name) => `${name}`) ?? [];
+        desktopStore.actions.clearSkillUpdateReports(names, agentFilter);
       }
       setPendingSkillChange(null);
       onApplied?.();
@@ -1120,43 +1319,10 @@ export function App() {
         void refreshSkillList();
       }
     } catch (error) {
+      logger.error("skill change apply failed", { command, error });
       const message = `${error}`;
       setPendingSkillChange((current) => current?.command === command ? { ...current, applyError: message } : current);
       if (command === SkillChangeCommand.UpdateMany) setSkillUpdateError(message);
-    } finally {
-      setApplyingSkillChange(false);
-    }
-  };
-
-  const confirmSkillChangeWithRelated = async () => {
-    if (!pendingSkillChange || applyingSkillChange || pendingSkillChange.command !== SkillChangeCommand.DeleteMany) return;
-    const currentNames = Array.isArray(pendingSkillChange.args.names)
-      ? pendingSkillChange.args.names.map((name) => `${name}`)
-      : [];
-    const names = [...new Set([...currentNames, ...deletePreviewRelatedNames(pendingSkillChange.preview)])];
-    if (names.length === currentNames.length) return confirmSkillChange();
-    setPendingSkillChange((current) => current ? { ...current, args: { ...current.args, names }, applyError: undefined } : current);
-    setApplyingSkillChange(true);
-    try {
-      const result = await invoke<SkillPreview>(pendingSkillChange.command, { ...pendingSkillChange.args, names, dryRun: false });
-      if (result.skills) {
-        setData((current) => {
-          const next = normalizeReport({ ...current, skills: result.skills }, { fallback: false });
-          return replaceSkillReportPreservingUpdates(current, next, names);
-        });
-      } else {
-        const deletedNames = new Set(names);
-        setData((current) => normalizeReport({
-          ...current,
-          skills: current.skills.filter((skill) => !deletedNames.has(skill.name)),
-        }, { fallback: false }));
-      }
-      setPendingSkillChange(null);
-      pendingSkillChange.onApplied?.();
-      if (result?.refreshRequired) void refreshSkillList();
-    } catch (error) {
-      const message = `${error}`;
-      setPendingSkillChange((current) => current ? { ...current, applyError: message } : current);
     } finally {
       setApplyingSkillChange(false);
     }
@@ -1167,7 +1333,7 @@ export function App() {
     const result = await safeInvoke<SkillPreview>(SkillChangeCommand.Set, { names, visibility, dryRun: false });
     if (result?.skills) {
       setData((current) => {
-        const next = normalizeReport({ ...current, skills: result.skills }, { fallback: false });
+        const next = normalizeReport({ ...current, skills: result.skills });
         return replaceSkillReportPreservingUpdates(current, next);
       });
     }
@@ -1186,7 +1352,14 @@ export function App() {
   return (
     <main className="appShell">
       {bundledSkillPrompt ? (
-        <Suspense fallback={null}>
+        <Suspense fallback={(
+          <DialogLoadingFallback
+            title="Set up Tendi for coding agents?"
+            label="Loading setup dialog"
+            descriptionId="bundled-skill-loading-description"
+            onOpenChange={(open) => { if (!open && !bundledSkillBusy) void dismissBundledSkillPrompt(); }}
+          />
+        )}>
           <BundledSkillInstallDialog
             open
             target={bundledSkillPrompt.target}
@@ -1198,17 +1371,24 @@ export function App() {
         </Suspense>
       ) : null}
       {pendingSkillChange ? (
-        <Suspense fallback={null}>
+        <Suspense fallback={(
+          <SkillChangeDialogFallback
+            command={pendingSkillChange.command}
+            names={Array.isArray(pendingSkillChange.args.names) ? pendingSkillChange.args.names.map((name) => `${name}`) : []}
+            onOpenChange={closeSkillChangeDialog}
+            onConfirm={() => { void confirmSkillChange(); }}
+          />
+        )}>
           <ConfirmSkillChangesDialog
             open
             command={pendingSkillChange.command}
+            names={Array.isArray(pendingSkillChange.args.names) ? pendingSkillChange.args.names.map((name) => `${name}`) : []}
             preview={pendingSkillChange.preview ?? null}
             previewError={pendingSkillChange.previewError}
             applyError={pendingSkillChange.applyError}
             busy={applyingSkillChange}
             onOpenChange={closeSkillChangeDialog}
-            onConfirm={confirmSkillChange}
-            onConfirmRelated={confirmSkillChangeWithRelated}
+            onConfirm={(resolutions) => { void confirmSkillChange(resolutions); }}
           />
         </Suspense>
       ) : null}
@@ -1230,8 +1410,6 @@ export function App() {
           <Sidebar
             view={view === "skillDetail" ? "skills" : view === "ruleDetail" ? "rules" : view}
             setView={navigate}
-            onPrefetchView={prefetchView}
-            onCancelPrefetchView={cancelPrefetchView}
             sources={availableSidebarSources}
             collapsed={sidebarCollapsed}
             setCollapsed={setSidebarCollapsed}
@@ -1240,14 +1418,7 @@ export function App() {
           />
         </Panel>
         <Panel className="mainPanel" minSize="520px" {...({ order: 2 } as Record<string, unknown>)}>
-          <Suspense
-            fallback={(
-              <div className="content" aria-busy="true">
-                <LoadingState label="Loading" />
-              </div>
-            )}
-          >
-          {view === "skillDetail" ? (
+          {contentView === "skillDetail" ? (activeSkill ? (
             <SkillEditorView
               skill={activeSkill}
               skills={data.skills}
@@ -1258,21 +1429,24 @@ export function App() {
               onSaved={(skills) => {
                 if (skills) {
                   setData((current) => {
-                    const next = normalizeReport({ ...current, skills }, { fallback: false });
+                    const next = normalizeReport({ ...current, skills });
                     return replaceSkillReportPreservingUpdates(current, next);
                   });
                 }
               }}
             />
-          ) : view === "ruleDetail" ? (
+          ) : (
+            <PlaceholderView title="Skill unavailable" />
+          )) : contentView === "ruleDetail" ? (
             <RuleEditorView rule={activeRule} back={() => navigate("rules")} />
-          ) : view === "skills" ? (
+          ) : contentView === "skills" ? (
             <SkillsView
               skills={filteredData.skills as SkillRecord[]}
               installedAgentKeys={installedAgentKeys}
               loadingSkills={loadingDomains.has("skills")}
+              loadError={domainErrors.skills ?? ""}
+              hasRows={data.skills.length > 0}
               checkingUpdates={checkingSkillUpdates}
-              applyingUpdates={applyingSkillUpdates}
               updateError={skillUpdateError}
               onRefresh={refreshSkills}
               onSetVisibility={applyVisibility}
@@ -1282,70 +1456,82 @@ export function App() {
               onAddInstalled={applyInstalledSkills}
               openSkill={(skill) => {
                 setActiveSkill(skill);
-                transitionTo("skillDetail");
+                navigateTo("skillDetail");
               }}
             />
-          ) : view === "sessions" ? (
+          ) : contentView === "sessions" ? (
             <SessionsView
               sessions={filteredData.sessions as SessionRecord[]}
               developerMode={developerMode}
               loadTranscript={loadTranscript}
+              loadTranscriptLocator={loadTranscriptLocator}
               searchTranscript={searchTranscript}
               searchSessions={searchSessions}
               loadSessionSkillLinks={loadSessionSkillLinks}
               loadingSessions={loadingDomains.has("sessions")}
+              sessionListError={sessionListError}
+              sessionRefreshError={sessionRefreshError}
               onRefreshSessions={refreshSessionsFromScan}
-              onResumeSession={resumeSessionInTerminal}
+              onResumeSession={resumeSession}
+              sessionResumeTarget={sessionResumeTarget}
               onOpenSkill={openSkillByName}
               activeSessionKey={activeSessionKey}
               skillIndexStatus={skillIndexStatus}
-              onSessionProjectsChanged={applySessionProjectsChanged}
+              onSavePrompt={savePromptFromSession}
             />
-          ) : view === "prompts" ? (
+          ) : contentView === "prompts" ? (
             <PromptsView
               prompts={filteredData.prompts as ComponentProps<typeof PromptsView>["prompts"]}
               loadingPrompts={loadingDomains.has("prompts")}
-              onRefreshPrompts={async () => { await refreshPrompts(); }}
+              loadError={domainErrors.prompts ?? ""}
+              hasRows={data.prompts.length > 0}
+              onRefreshPrompts={() => loadDomainForRetry("prompts")}
               onPromptSaved={applyPromptSaved}
               onPromptsDeleted={removePrompts}
             />
-            ) : view === "rules" ? (
-              <RulesView rows={filteredData.rules} skills={data.skills} loadingRows={loadingDomains.has("rules")} onOpenSkill={openSkillByName} />
-            ) : view === "hooks" ? (
-              <HooksView rows={filteredData.hooks} loadingRows={loadingDomains.has("hooks")} onDeleteHook={deleteHook} onDeleteHooks={deleteHooks} onSetHookEnabled={setHookEnabled} onReviewHook={reviewHook} />
-          ) : view === "mcp" ? (
-            <DataListView title="MCP" rows={filteredData.mcp} columns={mcpColumns} loading={loadingDomains.has("mcp")} />
-          ) : view === "config" ? (
+          ) : contentView === "rules" ? (
+              <RulesView rows={filteredData.rules} skills={data.skills} loadingRows={loadingDomains.has("rules")} loadError={domainErrors.rules ?? ""} hasRows={data.rules.length > 0} onRetry={() => { void loadDomainForRetry("rules"); }} onOpenSkill={openSkillByName} />
+          ) : contentView === "hooks" ? (
+              <HooksView rows={filteredData.hooks} loadingRows={loadingDomains.has("hooks")} loadError={domainErrors.hooks ?? ""} hasRows={data.hooks.length > 0} onRetry={() => { void loadDomainForRetry("hooks"); }} onDeleteHook={deleteHook} onDeleteHooks={deleteHooks} onSetHookEnabled={setHookEnabled} onReviewHook={reviewHook} />
+          ) : contentView === "mcp" ? (
+            <DataListView title="MCP" rows={filteredData.mcp} columns={mcpColumns} loading={loadingDomains.has("mcp")} loadError={domainErrors.mcp ?? ""} hasRows={data.mcp.length > 0} onRetry={() => { void loadDomainForRetry("mcp"); }} />
+          ) : contentView === "config" ? (
             <ConfigView />
-          ) : view === "settings" ? (
+          ) : contentView === "settings" ? (
             <SettingsView
               appearance={appearance}
               themePreferences={themePreferences}
+              fontFamily={fontFamily}
+              appIcon={appIcon}
               developerMode={developerMode}
+              sessionResumeTarget={sessionResumeTarget}
               onAppearanceChange={changeAppearance}
+              onFontFamilyChange={setFontFamily}
               onDeveloperModeChange={setDeveloperMode}
+              onSessionResumeTargetChange={setSessionResumeTarget}
+              onAppIconChange={changeAppIcon}
               onThemeChange={(mode, theme) => {
                 setThemePreferences((current) => ({ ...current, [mode]: theme }));
               }}
             />
-          ) : view === "overview" ? (
+          ) : contentView === "overview" ? (
             <OverviewView
               counts={{
-                skills: filteredData.skills.length,
-                sessions: filteredData.sessions.length,
-                prompts: filteredData.prompts.length,
-                rules: filteredData.rules.length,
-                hooks: filteredData.hooks.length,
-                mcp: filteredData.mcp.length,
+                ...overviewCounts,
               }}
-              hookReviewCount={filteredData.hooks.filter((hook) => hook.needs_review === true).length}
+              hookReviewCount={overviewHookReviewCount}
               skills={filteredData.skills as SkillRecord[]}
               sessions={filteredData.sessions as SessionRecord[]}
+              skillUpdateCount={overviewSkillUpdateCount}
               analyticsRevision={analyticsRevision}
               analyticsRevisionReady={analyticsRevisionReady}
+              analyticsRevisionError={analyticsRevisionError}
+              onRetryAnalyticsRevision={refreshAnalyticsRevision}
               agentFilter={agentFilter}
-              loadedDomains={loadedDomains.current}
-              sessionListLoaded={sessionListLoaded.current}
+              overviewCountsLoaded={overviewCountsLoaded}
+              overviewCountErrors={overviewCountErrors}
+              sessionListStatus={sessionListStatus}
+              sessionListError={sessionListError}
               onNavigate={(id: OverviewNavId) => navigate(id)}
               onOpenSession={(session) => {
                 setActiveSessionKey(`${session.agent ?? ""}:${session.id ?? ""}`);
@@ -1355,7 +1541,6 @@ export function App() {
           ) : (
             <PlaceholderView title={activeNav?.label ?? "Overview"} />
           )}
-          </Suspense>
         </Panel>
       </PanelGroup>
     </main>

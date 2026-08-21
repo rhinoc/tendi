@@ -13,6 +13,7 @@ export type DialogShellProps = {
   trigger?: ReactNode;
   className?: string;
   descriptionId?: string;
+  dismissOnOutsideClick?: boolean;
   contentProps?: DialogShellContentProps;
 };
 
@@ -23,6 +24,7 @@ export function DialogShell({
   trigger,
   className = "confirmDialogPanel",
   descriptionId,
+  dismissOnOutsideClick = false,
   contentProps,
 }: DialogShellProps) {
   return (
@@ -35,6 +37,14 @@ export function DialogShell({
           className={["dialogShell", className].filter(Boolean).join(" ")}
           aria-describedby={descriptionId}
           data-no-drag
+          onPointerDownOutside={(event) => {
+            contentProps?.onPointerDownOutside?.(event);
+            if (!dismissOnOutsideClick) event.preventDefault();
+          }}
+          onInteractOutside={(event) => {
+            contentProps?.onInteractOutside?.(event);
+            if (!dismissOnOutsideClick) event.preventDefault();
+          }}
           onMouseDown={(event) => event.stopPropagation()}
         >
           {children}

@@ -95,6 +95,7 @@ mod platform {
         command_path: PathBuf,
         shell_path: String,
         allow_privileged_install: bool,
+        development: bool,
     }
 
     impl Installer {
@@ -104,6 +105,7 @@ mod platform {
                 .parent()
                 .context("the Tendi app executable has no parent directory")?;
             let bundled_path = executable_dir.join(COMMAND_NAME);
+            let development = is_dev_app(&executable);
             let home = dirs::home_dir().context("resolve the user home directory")?;
             let shell_path = login_shell_path().unwrap_or_else(process_path);
             let command_path = choose_command_path(&home, &shell_path);
@@ -112,23 +114,35 @@ mod platform {
                 command_path,
                 shell_path,
                 allow_privileged_install: true,
+                development,
             })
         }
 
         #[cfg(test)]
         fn for_test(bundled_path: PathBuf, command_path: PathBuf, shell_path: String) -> Self {
+            Self::for_test_with_development(bundled_path, command_path, shell_path, false)
+        }
+
+        #[cfg(test)]
+        fn for_test_with_development(
+            bundled_path: PathBuf,
+            command_path: PathBuf,
+            shell_path: String,
+            development: bool,
+        ) -> Self {
             Self {
                 bundled_path,
                 command_path,
                 shell_path,
                 allow_privileged_install: false,
+                development,
             }
         }
 
         pub fn status(&self) -> Result<CliInstallStatus> {
             let unsupported_detail = if is_unstable_app_location(&self.bundled_path) {
                 Some("Move Tendi to Applications before registering its CLI.".to_string())
-            } else if !is_managed_tendi_target(&self.bundled_path)
+            } else if (!is_managed_tendi_target(&self.bundled_path) && !self.development)
                 || !is_executable_file(&self.bundled_path)
             {
                 Some("This Tendi app build does not contain the bundled CLI.".to_string())
@@ -471,6 +485,17 @@ mod platform {
         })
     }
 
+    fn is_dev_app(path: &Path) -> bool {
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name == "tendi-desktop")
+            && path
+                .parent()
+                .and_then(Path::file_name)
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name == "debug")
+    }
+
     fn is_executable_file(path: &Path) -> bool {
         fs::metadata(path)
             .map(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
@@ -641,6 +666,46 @@ mod platform {
                 CliInstallState::NotInstalled
             );
             assert!(!command.exists());
+
+            fs::remove_dir_all(root).unwrap();
+        }
+
+        #[test]
+        fn installs_and_removes_the_dev_cli() {
+            let unique = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            let root = env::temp_dir().join(format!(
+                "tendi-cli-install-dev-{}-{unique}",
+                std::process::id()
+            ));
+            let bundled = root.join("target/tauri-dev/debug/tendi");
+            let command = root.join("bin/tendi");
+            fs::create_dir_all(bundled.parent().unwrap()).unwrap();
+            fs::write(&bundled, "dev binary").unwrap();
+            let mut permissions = fs::metadata(&bundled).unwrap().permissions();
+            permissions.set_mode(0o755);
+            fs::set_permissions(&bundled, permissions).unwrap();
+            let installer = Installer::for_test_with_development(
+                bundled.clone(),
+                command.clone(),
+                command.parent().unwrap().display().to_string(),
+                true,
+            );
+
+            let before = installer.status().unwrap();
+            assert_eq!(before.state, CliInstallState::NotInstalled);
+            assert!(before.supported);
+            assert_eq!(
+                installer.install().unwrap().state,
+                CliInstallState::Installed
+            );
+            assert_eq!(fs::read_link(&command).unwrap(), bundled);
+            assert_eq!(
+                installer.remove().unwrap().state,
+                CliInstallState::NotInstalled
+            );
 
             fs::remove_dir_all(root).unwrap();
         }

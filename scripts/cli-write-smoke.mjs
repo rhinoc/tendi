@@ -4,6 +4,7 @@ import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, wr
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { writeStdout } from "../apps/desktop/scripts/stdio.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const temp = mkdtempSync(join(tmpdir(), "tendi-cli-write-"));
@@ -170,7 +171,7 @@ try {
   assert.match(addApply, /copy-ok/);
   assert.equal(lstatSync(addTargetDir).isDirectory(), true, "add copy did not create target directory");
 
-  console.log("cli write smoke ok");
+  writeStdout("cli write smoke ok");
 } finally {
   rmSync(temp, { recursive: true, force: true });
 }

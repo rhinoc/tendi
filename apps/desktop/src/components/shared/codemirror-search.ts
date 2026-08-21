@@ -2,7 +2,8 @@ import { StateField, type EditorState } from "@codemirror/state";
 import { Decoration, EditorView } from "@codemirror/view";
 import type { Node as ProseMirrorNode } from "@tiptap/pm/model";
 
-import { findTextRanges, type TextRange } from "./text-ranges.ts";
+import { findTextRanges } from "./text-ranges.ts";
+import type { TextRange } from "./text-ranges.ts";
 
 export { findTextRanges } from "./text-ranges.ts";
 export type { TextRange } from "./text-ranges.ts";
@@ -11,38 +12,37 @@ export function buildCodeMirrorSearchDecorations(
   state: EditorState,
   query: string,
   activeIndex: number,
-  ranges?: TextRange[],
 ) {
-  const searchRanges = ranges ?? findTextRanges(state.doc.toString(), query);
+  const searchRanges = findTextRanges(state.doc.toString(), query);
   if (searchRanges.length === 0) return Decoration.none;
+  const activeMatchIndex = Math.min(Math.max(activeIndex, 0), searchRanges.length - 1);
   return Decoration.set(searchRanges.map((range, index) => Decoration.mark({
-    class: `cmEditorSearchMatch ${index === activeIndex ? "active" : ""}`,
+    class: `cmEditorSearchMatch ${index === activeMatchIndex ? "active" : ""}`,
   }).range(range.from, range.to)), true);
 }
 
-export function codeMirrorSearchExtension(query: string, activeIndex: number, ranges?: TextRange[]) {
+export function codeMirrorSearchExtension(query: string, activeIndex: number) {
   return StateField.define({
     create(state) {
-      return buildCodeMirrorSearchDecorations(state, query, activeIndex, ranges);
+      return buildCodeMirrorSearchDecorations(state, query, activeIndex);
     },
     update(decorations, transaction) {
-      return decorations.map(transaction.changes);
+      return transaction.docChanged
+        ? buildCodeMirrorSearchDecorations(transaction.state, query, activeIndex)
+        : decorations.map(transaction.changes);
     },
     provide: (field) => EditorView.decorations.from(field),
   });
 }
 
 export function prosemirrorTextRanges(doc: ProseMirrorNode, query: string): TextRange[] {
-  const needle = query.trim().toLowerCase();
-  if (!needle) return [];
+  if (!query.trim()) return [];
+
   const ranges: TextRange[] = [];
   doc.descendants((node, pos) => {
     if (!node.isText || !node.text) return;
-    const text = node.text.toLowerCase();
-    let index = text.indexOf(needle);
-    while (index >= 0) {
-      ranges.push({ from: pos + index, to: pos + index + needle.length });
-      index = text.indexOf(needle, index + needle.length);
+    for (const range of findTextRanges(node.text, query)) {
+      ranges.push({ from: pos + range.from, to: pos + range.to });
     }
   });
   return ranges;

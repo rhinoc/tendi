@@ -2,6 +2,7 @@ import { readdir, readFile } from "node:fs/promises";
 import { join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import ts from "typescript";
+import { writeStderr, writeStdout } from "./stdio.mjs";
 
 const SOURCE_ROOT = fileURLToPath(new URL("../src/", import.meta.url));
 const JSX_EXTENSIONS = new Set([".jsx", ".tsx"]);
@@ -73,9 +74,9 @@ for (const fileName of await sourceFiles(SOURCE_ROOT)) {
 }
 
 if (violations.length > 0) {
-  console.error("Native title tooltips are not allowed in desktop JSX:");
-  for (const violation of violations) console.error(`- ${violation}`);
+  writeStderr("Native title tooltips are not allowed in desktop JSX:");
+  for (const violation of violations) writeStderr(`- ${violation}`);
   process.exitCode = 1;
 } else {
-  console.log("No native title tooltips found in desktop JSX.");
+  writeStdout("No native title tooltips found in desktop JSX.");
 }

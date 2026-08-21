@@ -335,23 +335,55 @@ impl super::AgentProvider for ClaudeProvider {
         Some("json")
     }
 
-    fn config_files(&self, home: &Path, _codex_home: &Path) -> Vec<crate::config::AgentConfigFile> {
-        let mut configs = vec![crate::config::AgentConfigFile {
-            agent: self.kind(),
-            label: "Claude".to_string(),
-            path: home.join(".claude/settings.json"),
-            format: "json".to_string(),
-            exists: home.join(".claude/settings.json").is_file(),
-            profile: None,
-        }];
-        configs.extend(crate::config::profile_configs_for_root(
-            self.kind(),
-            &home.join(".claude/tendi-profiles"),
-            ".settings.json",
-            "json",
-            "Claude Code",
-        ));
+    fn config_files(&self, home: &Path, codex_home: &Path) -> Vec<crate::config::AgentConfigFile> {
+        let base_path = home.join(".claude/settings.json");
+        let mut configs = vec![self
+            .config_file_for_path(home, codex_home, &base_path)
+            .expect("Claude provider must resolve its base config path")];
+        configs.extend(
+            crate::config::profile_paths_for_root(
+                &home.join(".claude/tendi-profiles"),
+                ".settings.json",
+            )
+            .into_iter()
+            .filter_map(|path| self.config_file_for_path(home, codex_home, &path)),
+        );
         configs
+    }
+
+    fn config_file_for_path(
+        &self,
+        home: &Path,
+        _codex_home: &Path,
+        path: &Path,
+    ) -> Option<crate::config::AgentConfigFile> {
+        let base_path = home.join(".claude/settings.json");
+        if path == base_path {
+            return Some(crate::config::AgentConfigFile {
+                agent: self.kind(),
+                label: "Claude".to_string(),
+                path: base_path.clone(),
+                format: "json".to_string(),
+                exists: base_path.is_file(),
+                updated_at: None,
+                profile: None,
+            });
+        }
+
+        let profile = path.file_name()?.to_str()?.strip_suffix(".settings.json")?;
+        crate::config::validate_profile_name(profile).ok()?;
+        let expected_path = home
+            .join(".claude/tendi-profiles")
+            .join(format!("{profile}.settings.json"));
+        (path == expected_path).then_some(crate::config::AgentConfigFile {
+            agent: self.kind(),
+            label: format!("Claude Code / {profile}"),
+            path: expected_path.clone(),
+            format: "json".to_string(),
+            exists: expected_path.is_file(),
+            updated_at: None,
+            profile: Some(profile.to_string()),
+        })
     }
 
     fn config_order(&self) -> usize {

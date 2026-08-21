@@ -28,10 +28,15 @@ export interface TooltipProps {
 
 function isTruncated(element: HTMLElement | null) {
   if (!element) return false;
-  return [element, ...element.querySelectorAll<HTMLElement>("*")].some((candidate) => (
-    candidate.scrollWidth > candidate.clientWidth + 1
-    || candidate.scrollHeight > candidate.clientHeight + 1
-  ));
+  return [element, ...element.querySelectorAll<HTMLElement>("*")].some((candidate) => {
+    const style = window.getComputedStyle(candidate);
+    const clipsHorizontally = style.overflowX === "hidden" || style.overflowX === "clip";
+    const clipsVertically = style.overflowY === "hidden" || style.overflowY === "clip";
+    return (
+      (clipsHorizontally && candidate.scrollWidth > candidate.clientWidth + 1)
+      || (clipsVertically && candidate.scrollHeight > candidate.clientHeight + 1)
+    );
+  });
 }
 
 type TooltipPopupProps = Omit<TooltipProps, "children" | "onlyWhenTruncated" | "open" | "onOpenChange">;

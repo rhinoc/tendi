@@ -1,15 +1,17 @@
 import { Tooltip } from "./Tooltip.tsx";
+import { Badge } from "./Badge.tsx";
 import { lazy, Suspense, useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { Check, ChevronDown, ChevronUp, Code2, Eye, Save, Search, X } from "lucide-react";
 
-import { isJsonPath, isMarkdownPath, isYamlPath } from "../../lib/index.ts";
+import { formatUserPath, isJsonPath, isMarkdownPath, isYamlPath } from "../../lib/index.ts";
 import { loadCodeMirrorFileEditor } from "./code-mirror-loader.ts";
 import type { CodeMirrorLanguage } from "./CodeMirrorFileEditor.tsx";
 import { EditorStatePlaceholder } from "./EditorStatePlaceholder.tsx";
 import { LoadingIcon } from "./LoadingIcon.tsx";
 import { PlainTextFileEditor } from "./PlainTextFileEditor.tsx";
 import { CopyButton } from "./CopyButton.tsx";
-import { SearchClearButton } from "./SearchClearButton.tsx";
+import { Button } from "./Button.tsx";
+import { IconButton } from "./IconButton.tsx";
 
 const CodeMirrorFileEditor = lazy(() => loadCodeMirrorFileEditor().then(({ CodeMirrorFileEditor: component }) => ({ default: component })));
 const TokenStatusBar = lazy(() => import("../TokenStatusBar.tsx").then(({ TokenStatusBar: component }) => ({ default: component })));
@@ -46,10 +48,12 @@ export type DiffStats = {
   removed: number;
 };
 
+const EMPTY_DIFF_STATS: DiffStats = { added: 0, removed: 0 };
+
 export type MarkdownFilePaneProps = {
   activePath: string;
   dirty: boolean;
-  diffStats: DiffStats;
+  diffStats?: DiffStats;
   content: string;
   originalContent: string;
   onChange: (value: string) => void;
@@ -57,6 +61,9 @@ export type MarkdownFilePaneProps = {
   language?: CodeMirrorLanguage;
   readOnly?: boolean;
   onNormalize?: (value: string) => void;
+  showConflictMarkers?: boolean;
+  onConflictResolve?: (value: string) => void;
+  saveDisabled?: boolean;
   copyablePath?: boolean;
   showDirtyIndicator?: boolean;
   showTokenStatusBar?: boolean;
@@ -67,19 +74,23 @@ export type MarkdownFilePaneProps = {
 export function MarkdownFilePane({
   activePath,
   dirty,
-  diffStats,
+  diffStats = EMPTY_DIFF_STATS,
   content,
   originalContent,
   onChange,
   onSave,
   language,
   readOnly = false,
+  showConflictMarkers = false,
+  onConflictResolve,
+  saveDisabled = false,
   copyablePath = false,
   showDirtyIndicator = true,
   showTokenStatusBar = true,
   saveState = "idle",
   saveError = "",
 }: MarkdownFilePaneProps) {
+  const displayPath = formatUserPath(activePath);
   const markdown = language === "markdown" || (!language && isMarkdownPath(activePath));
   const activeLanguage = language ?? (
     isYamlPath(activePath) ? "yaml" : isJsonPath(activePath) ? "json" : undefined
@@ -175,7 +186,7 @@ export function MarkdownFilePane({
     >
       <div className="codeTabs">
         <div className="codeTabTitle">
-          <Tooltip content={activePath} onlyWhenTruncated><span>{activePath}</span></Tooltip>
+          <Tooltip content={displayPath} onlyWhenTruncated><span>{displayPath}</span></Tooltip>
           {copyablePath && activePath ? (
             <CopyButton
               className="codeTabCopyButton"
@@ -186,44 +197,42 @@ export function MarkdownFilePane({
               stopPropagation
             />
           ) : null}
-          {!readOnly && showDirtyIndicator && dirty && <span className="dirty">modified</span>}
-          {!readOnly && saveState === "saving" && <span className="editorSaveStatus">saving</span>}
-          {!readOnly && saveState === "saved" && <span className="editorSaveStatus saved">saved</span>}
-          {!readOnly && saveState === "error" && <span className="editorSaveStatus error" role="alert">{saveError || "save failed"}</span>}
+          {!readOnly && showDirtyIndicator && dirty && <Badge tone="warning">modified</Badge>}
+          {!readOnly && saveState === "saving" && <Badge tone="info">saving</Badge>}
+          {!readOnly && saveState === "saved" && <Badge tone="success">saved</Badge>}
+          {!readOnly && saveState === "error" && <Badge tone="danger" role="alert">{saveError || "save failed"}</Badge>}
         </div>
         <div className="codeTabActions">
-          <button
-            className={`editorIconButton ${searchOpen ? "active" : ""}`}
+          <IconButton
+            className={searchOpen ? "filled" : ""}
             aria-label="Find in file"
             aria-pressed={searchOpen}
             onClick={focusSearchInput}
           >
             <Search size={13} />
-          </button>
+          </IconButton>
           {markdown && (
-            <button
-              className="editorIconButton"
+            <IconButton
               aria-label={showPreview ? "Switch to edit" : "Switch to preview"}
               onClick={() => setShowPreview((value: boolean) => !value)}
             >
               {showPreview ? <Code2 size={13} /> : <Eye size={13} />}
-            </button>
+            </IconButton>
           )}
           {!readOnly && (
             <>
-              <button
-                className="editorIconButton"
+              <IconButton
                 aria-label={saveState === "saving" ? "Saving file" : saveState === "saved" ? "File saved" : "Save file"}
                 aria-busy={saveState === "saving"}
                 onClick={onSave}
-                disabled={!dirty || saveState === "saving"}
+                disabled={!dirty || saveState === "saving" || saveDisabled}
               >
                 {saveState === "saving"
                   ? <LoadingIcon size={13} />
                   : saveState === "saved"
                     ? <Check size={13} strokeWidth={2.6} />
                     : <Save size={13} />}
-              </button>
+              </IconButton>
             </>
           )}
         </div>
@@ -247,17 +256,30 @@ export function MarkdownFilePane({
             }}
             placeholder="Find in file"
           />
-          <SearchClearButton value={searchQuery} onClear={() => setSearchQuery("")} ariaLabel="Clear find query" />
           <span className={`editorFindCount ${searchQuery.trim() && searchCount === 0 ? "empty" : ""}`}>{searchLabel}</span>
-          <button className="editorIconButton" aria-label="Previous match" disabled={searchCount === 0} onClick={() => moveSearch(-1)}>
+          <Button
+            variant="ghost"
+            size="sm"
+            className="editorFindNavButton"
+            aria-label="Previous match"
+            disabled={searchCount === 0}
+            onClick={() => moveSearch(-1)}
+          >
             <ChevronUp size={13} />
-          </button>
-          <button className="editorIconButton" aria-label="Next match" disabled={searchCount === 0} onClick={() => moveSearch(1)}>
+          </Button>
+          <Button
+            variant="ghost"
+            size="sm"
+            className="editorFindNavButton"
+            aria-label="Next match"
+            disabled={searchCount === 0}
+            onClick={() => moveSearch(1)}
+          >
             <ChevronDown size={13} />
-          </button>
-          <button className="editorIconButton" aria-label="Close find" onClick={closeSearch}>
+          </Button>
+          <IconButton aria-label="Close find" onClick={closeSearch}>
             <X size={13} />
-          </button>
+          </IconButton>
         </div>
       )}
       {markdown && showPreview ? (
@@ -288,6 +310,8 @@ export function MarkdownFilePane({
             markdown={markdown}
             language={activeLanguage}
             showDiff={showEditorDiff}
+            showConflictMarkers={showConflictMarkers}
+            onConflictResolve={onConflictResolve}
             onChange={onChange}
             readOnly={readOnly}
             searchQuery={searchQuery}

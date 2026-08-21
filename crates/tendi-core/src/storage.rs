@@ -22,13 +22,16 @@ use crate::{
         SessionAnalyticsRecord,
     },
     fsutil::sha256_text,
+    rules::merge_rules_by_path,
     session_skills::{SessionFileState, SessionSkillIndexStatus, SessionSkillLink},
     sessions::{
-        SESSION_PREVIEW_MAX_CHARS, SessionIdentity, SessionRecord, SessionScan, SessionScanCache,
+        SESSION_PREVIEW_MAX_CHARS, SessionRecord, SessionScan, SessionScanCache,
         SessionScanCacheEntry, bound_session_preview, clean_session_title,
         normalize_session_projects,
     },
-    skills::{AgentKind, SkillRecord, SkillScan, SkillSourceRecord},
+    skills::{
+        AgentKind, SkillRecord, SkillScan, SkillSnapshot, SkillSnapshotFile, SkillSourceRecord,
+    },
     transcript,
 };
 
@@ -41,7 +44,7 @@ struct ProjectState {
 
 const SESSION_SEARCH_RECORD_TEXT_LIMIT: usize = 64 * 1024;
 const SESSION_ANALYTICS_BATCH_SIZE: usize = 64;
-const PROJECTION_PARSER_VERSION: &str = "scan-v3";
+const PROJECTION_PARSER_VERSION: &str = "scan-v4";
 const PROJECTION_REFRESH_LOCK_TTL_SECS: i64 = 300;
 static PROJECTION_REFRESH_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
@@ -53,6 +56,12 @@ pub enum ProjectionStatus {
     Missing,
     Stale,
     Refreshing,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ProjectionCount {
+    pub rows: usize,
+    pub secondary: usize,
 }
 
 fn analytics_refresh_progress(
@@ -87,11 +96,17 @@ pub struct AnalyticsOverviewBackfillReport {
 pub struct AppSettings {
     #[serde(default = "default_appearance")]
     pub appearance: String,
+    #[serde(default = "default_font_family")]
+    pub font_family: String,
     #[serde(default = "default_color_theme")]
     pub light_theme: String,
     #[serde(default = "default_color_theme")]
     pub dark_theme: String,
+    #[serde(default = "default_app_icon")]
+    pub app_icon: String,
     pub terminal: String,
+    #[serde(default = "default_session_resume_target")]
+    pub session_resume_target: String,
     #[serde(default = "default_editor")]
     pub editor: String,
     #[serde(default)]
@@ -106,12 +121,24 @@ fn default_appearance() -> String {
     "system".to_string()
 }
 
+fn default_font_family() -> String {
+    "manrope".to_string()
+}
+
 fn default_color_theme() -> String {
-    "gruvbox".to_string()
+    "sakura-pop".to_string()
+}
+
+fn default_app_icon() -> String {
+    "sakura-pop".to_string()
 }
 
 fn default_editor() -> String {
     "vscode".to_string()
+}
+
+fn default_session_resume_target() -> String {
+    "terminal".to_string()
 }
 
 fn normalize_appearance(value: &str) -> Result<String> {
@@ -123,15 +150,48 @@ fn normalize_appearance(value: &str) -> Result<String> {
     }
 }
 
+fn normalize_font_family(value: &str) -> Result<String> {
+    let font_family = value.trim().to_ascii_lowercase();
+    if matches!(
+        font_family.as_str(),
+        "geist"
+            | "manrope"
+            | "inter"
+            | "ibm-plex-sans"
+            | "instrument-sans"
+            | "plus-jakarta-sans"
+            | "bricolage-grotesque"
+    ) {
+        Ok(font_family)
+    } else {
+        anyhow::bail!("invalid font family setting: {value}")
+    }
+}
+
 fn normalize_color_theme(value: &str) -> Result<String> {
     let theme = value.trim().to_ascii_lowercase();
     if matches!(
         theme.as_str(),
-        "gruvbox" | "dracula" | "nord" | "catppuccin" | "tokyo-night"
+        "sakura-pop"
+            | "gruvbox"
+            | "dracula"
+            | "nord"
+            | "catppuccin"
+            | "tokyo-night"
+            | "vercel"
     ) {
         Ok(theme)
     } else {
         anyhow::bail!("invalid color theme setting: {value}")
+    }
+}
+
+fn normalize_session_resume_target(value: &str) -> Result<String> {
+    let target = value.trim().to_ascii_lowercase();
+    match target.as_str() {
+        "terminal" => Ok(target),
+        "app" | "codex" => Ok("app".to_string()),
+        _ => anyhow::bail!("invalid session resume target: {value}"),
     }
 }
 
@@ -183,7 +243,7 @@ impl Store {
         }
         let conn = Connection::open(&path)
             .with_context(|| format!("failed to open sqlite database {}", path.display()))?;
-        conn.busy_timeout(Duration::from_secs(5))?;
+        conn.busy_timeout(Duration::from_secs(30))?;
         let store = Self { conn, path };
         for attempt in 0..5 {
             match store.init() {
@@ -224,6 +284,16 @@ impl Store {
             .optional()?
             .unwrap_or_else(default_appearance);
         let appearance = normalize_appearance(&appearance)?;
+        let font_family = self
+            .conn
+            .query_row(
+                "SELECT value FROM app_settings WHERE key = 'font_family'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+            .unwrap_or_else(default_font_family);
+        let font_family = normalize_font_family(&font_family)?;
         let light_theme = self
             .conn
             .query_row(
@@ -244,6 +314,16 @@ impl Store {
             .optional()?
             .unwrap_or_else(default_color_theme);
         let dark_theme = normalize_color_theme(&dark_theme)?;
+        let app_icon = self
+            .conn
+            .query_row(
+                "SELECT value FROM app_settings WHERE key = 'app_icon'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+            .unwrap_or_else(default_app_icon);
+        let app_icon = normalize_color_theme(&app_icon)?;
         let terminal = self
             .conn
             .query_row(
@@ -253,6 +333,17 @@ impl Store {
             )
             .optional()?
             .unwrap_or_else(|| "auto".to_string());
+        let session_resume_target = self
+            .conn
+            .query_row(
+                "SELECT value FROM app_settings WHERE key = 'session_resume_target'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+            .map(|value| normalize_session_resume_target(&value))
+            .transpose()?
+            .unwrap_or_else(default_session_resume_target);
         let editor = self
             .conn
             .query_row(
@@ -313,9 +404,12 @@ impl Store {
         }
         Ok(AppSettings {
             appearance,
+            font_family,
             light_theme,
             dark_theme,
+            app_icon,
             terminal,
+            session_resume_target,
             editor,
             developer_mode,
             additional_session_roots,
@@ -325,9 +419,13 @@ impl Store {
 
     pub fn save_app_settings(&self, settings: AppSettings) -> Result<AppSettings> {
         let appearance = normalize_appearance(&settings.appearance)?;
+        let font_family = normalize_font_family(&settings.font_family)?;
         let light_theme = normalize_color_theme(&settings.light_theme)?;
         let dark_theme = normalize_color_theme(&settings.dark_theme)?;
+        let app_icon = normalize_color_theme(&settings.app_icon)?;
         let terminal = normalize_setting_value(&settings.terminal, "auto");
+        let session_resume_target =
+            normalize_session_resume_target(&settings.session_resume_target)?;
         let editor = normalize_setting_value(&settings.editor, "vscode");
         let developer_mode = settings.developer_mode;
         let additional_session_roots =
@@ -348,6 +446,11 @@ impl Store {
             params![appearance],
         )?;
         self.conn.execute(
+            "INSERT INTO app_settings (key, value) VALUES ('font_family', ?1)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![font_family],
+        )?;
+        self.conn.execute(
             "INSERT INTO app_settings (key, value) VALUES ('light_theme', ?1)
              ON CONFLICT(key) DO UPDATE SET value = excluded.value",
             params![light_theme],
@@ -358,9 +461,19 @@ impl Store {
             params![dark_theme],
         )?;
         self.conn.execute(
+            "INSERT INTO app_settings (key, value) VALUES ('app_icon', ?1)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![app_icon],
+        )?;
+        self.conn.execute(
             "INSERT INTO app_settings (key, value) VALUES ('terminal', ?1)
              ON CONFLICT(key) DO UPDATE SET value = excluded.value",
             params![terminal],
+        )?;
+        self.conn.execute(
+            "INSERT INTO app_settings (key, value) VALUES ('session_resume_target', ?1)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![session_resume_target],
         )?;
         self.conn.execute(
             "INSERT INTO app_settings (key, value) VALUES ('editor', ?1)
@@ -384,9 +497,12 @@ impl Store {
         )?;
         Ok(AppSettings {
             appearance,
+            font_family,
             light_theme,
             dark_theme,
+            app_icon,
             terminal,
+            session_resume_target,
             editor,
             developer_mode,
             additional_session_roots,
@@ -554,7 +670,7 @@ impl Store {
                 "INSERT INTO rules (agent, kind, scope, path, effective_order, sha256, data_json)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
                 params![
-                    agent_label(rule.agent),
+                    agent_label(primary_rule_agent(rule)),
                     rule.kind,
                     rule.scope,
                     rule.path.display().to_string(),
@@ -883,7 +999,7 @@ impl Store {
         Ok(())
     }
 
-    fn try_acquire_projection_refresh_lock(&self, owner: &str) -> Result<bool> {
+    fn try_acquire_database_write_lock(&self, owner: &str) -> Result<bool> {
         let now = unix_now() as i64;
         let tx = self.conn.unchecked_transaction()?;
         tx.execute(
@@ -913,7 +1029,7 @@ impl Store {
         Ok(acquired)
     }
 
-    fn release_projection_refresh_lock(&self, owner: &str) -> Result<()> {
+    fn release_database_write_lock(&self, owner: &str) -> Result<()> {
         self.conn.execute(
             "DELETE FROM projection_refresh_lock WHERE id = 1 AND owner = ?1",
             params![owner],
@@ -1038,13 +1154,21 @@ impl Store {
         for row in rows {
             let (agent, kind, scope, path, order, data_json) = row?;
             match serde_json::from_str::<RuleRecord>(&data_json) {
-                Ok(rule) => rules.push(rule),
+                Ok(mut rule) => {
+                    if rule.agents.is_empty() {
+                        rule.agents.push(parse_agent_label(&agent));
+                    }
+                    rules.push(rule);
+                }
                 Err(err) => warnings.push(format!(
                     "invalid cached rule row ({agent}/{kind}/{scope}/{path}/{order}): {err}"
                 )),
             }
         }
-        Ok(RuleScan { rules, warnings })
+        Ok(RuleScan {
+            rules: merge_rules_by_path(rules),
+            warnings,
+        })
     }
 
     pub fn list_hooks(&self) -> anyhow::Result<HookScan> {
@@ -1160,6 +1284,88 @@ impl Store {
         self.list_skills().map(Some)
     }
 
+    /// Return the cached skill projection when the explicitly selected skills
+    /// are still fresh. Unselected skill files are intentionally ignored here:
+    /// callers using this path only need a stable update plan for `names`.
+    pub fn list_skills_for_names_if_current(
+        &self,
+        workspace_root: &Path,
+        names: &[String],
+    ) -> Result<Option<SkillScan>> {
+        let selected_names = names.iter().cloned().collect::<BTreeSet<_>>();
+        if selected_names.is_empty() {
+            return Ok(None);
+        }
+
+        let workspace_root = canonical_workspace_root(workspace_root);
+        let context = self
+            .conn
+            .query_row(
+                "SELECT workspace_root, state, parser_version
+                 FROM projection_contexts
+                 WHERE domain = 'skills'",
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let Some((stored_root, state, parser_version)) = context else {
+            return Ok(None);
+        };
+        if stored_root != workspace_root.display().to_string()
+            || state != "ready"
+            || parser_version != PROJECTION_PARSER_VERSION
+        {
+            return Ok(None);
+        }
+
+        let entries = self.list_fs_manifest_for_domain("skills")?;
+        if entries.is_empty() {
+            return Ok(None);
+        }
+        if entries.iter().any(|entry| {
+            entry.source_kind != "skill"
+                && (entry.parser_version != PROJECTION_PARSER_VERSION
+                    || !manifest_entry_is_current(entry))
+        }) {
+            return Ok(None);
+        }
+
+        let scan = self.list_skills()?;
+        let selected = scan
+            .skills
+            .iter()
+            .filter(|skill| selected_names.contains(&skill.name))
+            .collect::<Vec<_>>();
+        if selected.len() != selected_names.len() {
+            return Ok(None);
+        }
+
+        for skill in selected {
+            for path in &skill.paths {
+                let skill_file = path.path.join("SKILL.md");
+                let Some(entry) = entries
+                    .iter()
+                    .find(|entry| entry.source_kind == "skill" && entry.path == skill_file)
+                else {
+                    return Ok(None);
+                };
+                if entry.parser_version != PROJECTION_PARSER_VERSION
+                    || !manifest_entry_is_current(entry)
+                {
+                    return Ok(None);
+                }
+            }
+        }
+
+        Ok(Some(scan))
+    }
+
     pub fn list_rules_for_workspace(&self, workspace_root: &Path) -> Result<Option<RuleScan>> {
         if self.projection_status("rules", workspace_root)? != ProjectionStatus::Fresh {
             return Ok(None);
@@ -1181,6 +1387,93 @@ impl Store {
         self.list_mcp().map(Some)
     }
 
+    pub fn count_projection_for_workspace(
+        &self,
+        domain: &str,
+        workspace_root: &Path,
+        agent: Option<AgentKind>,
+    ) -> Result<Option<ProjectionCount>> {
+        if self.projection_status(domain, workspace_root)? != ProjectionStatus::Fresh {
+            return Ok(None);
+        }
+        let agent_label = agent.map(agent_label);
+        let count = match domain {
+            "agents" => ProjectionCount {
+                rows: self.count_rows("agents", "kind", agent_label.as_deref())?,
+                secondary: 0,
+            },
+            "skills" => {
+                let scan = self.list_skills()?;
+                let skills = scan
+                    .skills
+                    .into_iter()
+                    .filter(|skill| agent.is_none_or(|expected| skill.agents.contains(&expected)));
+                let mut count = ProjectionCount::default();
+                for skill in skills {
+                    count.rows += 1;
+                    if skill.update_status == "update-available" {
+                        count.secondary += 1;
+                    }
+                }
+                count
+            }
+            "rules" => ProjectionCount {
+                rows: self.count_rows("rules", "agent", agent_label.as_deref())?,
+                secondary: 0,
+            },
+            "hooks" => {
+                let scan = self.list_hooks()?;
+                let hooks = scan
+                    .hooks
+                    .into_iter()
+                    .filter(|hook| agent.is_none_or(|expected| hook.agent == expected));
+                let mut count = ProjectionCount::default();
+                for hook in hooks {
+                    count.rows += 1;
+                    if hook.needs_review {
+                        count.secondary += 1;
+                    }
+                }
+                count
+            }
+            "mcp" => ProjectionCount {
+                rows: self.count_rows("mcp_servers", "agent", agent_label.as_deref())?,
+                secondary: 0,
+            },
+            _ => anyhow::bail!("unknown projection domain: {domain}"),
+        };
+        Ok(Some(count))
+    }
+
+    pub fn count_sessions(&self, agent: Option<AgentKind>) -> Result<usize> {
+        let agent_label = agent.map(agent_label);
+        self.conn
+            .query_row(
+                "SELECT COUNT(*) FROM sessions WHERE (?1 IS NULL OR agent = ?1)",
+                params![agent_label],
+                |row| row.get::<_, i64>(0),
+            )
+            .map(|count| count as usize)
+            .map_err(Into::into)
+    }
+
+    pub fn count_prompts(&self) -> Result<usize> {
+        self.conn
+            .query_row("SELECT COUNT(*) FROM prompts", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .map(|count| count as usize)
+            .map_err(Into::into)
+    }
+
+    fn count_rows(&self, table: &str, column: &str, agent: Option<&str>) -> Result<usize> {
+        let sql = format!("SELECT COUNT(*) FROM {table} WHERE (?1 IS NULL OR {column} = ?1)");
+        self.conn
+            .query_row(&sql, params![agent], |row| row.get::<_, i64>(0))
+            .map(|count| count as usize)
+            .map_err(Into::into)
+    }
+
     /// Mark one domain stale after an external writer changed its source.
     /// The next list call will run only that domain's scanner.
     pub fn invalidate_projection(&self, domain: &str, workspace_root: &Path) -> Result<()> {
@@ -1193,9 +1486,9 @@ impl Store {
         )
     }
 
-    /// Coordinate cold-start and targeted scans across Tauri and CLI
-    /// processes. `None` means another process owns the database scan lock.
-    pub fn with_projection_refresh_lock<T, F>(&self, refresh: F) -> Result<Option<T>>
+    /// Coordinate all database writers across Tauri and CLI processes.
+    /// `None` means another process owns the database write lock.
+    pub fn with_database_write_lock<T, F>(&self, write: F) -> Result<Option<T>>
     where
         F: FnOnce() -> Result<T>,
     {
@@ -1204,14 +1497,24 @@ impl Store {
             std::process::id(),
             PROJECTION_REFRESH_SEQUENCE.fetch_add(1, Ordering::Relaxed)
         );
-        if !self.try_acquire_projection_refresh_lock(&owner)? {
+        if !self.try_acquire_database_write_lock(&owner)? {
             return Ok(None);
         }
 
-        let result = refresh();
-        let release_result = self.release_projection_refresh_lock(&owner);
+        let result = write();
+        let release_result = self.release_database_write_lock(&owner);
         release_result?;
         result.map(Some)
+    }
+
+    /// Coordinate cold-start and targeted scans across Tauri and CLI
+    /// processes. All projection domains share the database write lock.
+    pub fn with_projection_refresh_lock<T, F>(&self, domain: &str, refresh: F) -> Result<Option<T>>
+    where
+        F: FnOnce() -> Result<T>,
+    {
+        ensure_projection_domain(domain)?;
+        self.with_database_write_lock(refresh)
     }
 
     pub fn save_agents_for_workspace(
@@ -1284,7 +1587,7 @@ impl Store {
                 "INSERT INTO rules (agent, kind, scope, path, effective_order, sha256, data_json)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
                 params![
-                    agent_label(rule.agent),
+                    agent_label(primary_rule_agent(rule)),
                     rule.kind,
                     rule.scope,
                     rule.path.display().to_string(),
@@ -1410,18 +1713,8 @@ impl Store {
         let tx = self.conn.unchecked_transaction()?;
         let mut projects = load_session_projects(&tx)?;
         let mut aliases = load_session_project_aliases(&tx)?;
-        let overrides = load_session_project_overrides(&tx)?;
 
         for session in sessions {
-            let identity = session_project_identity(session);
-            if let Some(project_id) = overrides.get(&identity) {
-                if let Some(project) = projects.get(project_id) {
-                    session.logical_project_id = Some(project_id.clone());
-                    session.logical_project_name = Some(project.name.clone());
-                }
-                continue;
-            }
-
             let evidence = session_project_aliases(session);
             if evidence.is_empty() {
                 session.logical_project_id = None;
@@ -1515,81 +1808,6 @@ impl Store {
         Ok(())
     }
 
-    pub fn merge_session_projects(
-        &self,
-        target_project_id: &str,
-        source_project_ids: &[String],
-    ) -> Result<String> {
-        let tx = self.conn.unchecked_transaction()?;
-        let target_name = tx
-            .query_row(
-                "SELECT name FROM session_projects WHERE id = ?1",
-                [target_project_id],
-                |row| row.get::<_, String>(0),
-            )
-            .with_context(|| format!("target session project not found: {target_project_id}"))?;
-        for source in source_project_ids {
-            if source != target_project_id {
-                merge_session_project_rows(&tx, target_project_id, source)?;
-            }
-        }
-        tx.commit()?;
-        Ok(target_name)
-    }
-
-    pub fn split_sessions_into_project(
-        &self,
-        name: &str,
-        sessions: &[SessionIdentity],
-    ) -> Result<String> {
-        let name = name.trim();
-        if name.is_empty() {
-            anyhow::bail!("project name cannot be empty");
-        }
-        if sessions.is_empty() {
-            anyhow::bail!("at least one session is required");
-        }
-        let seed = sessions
-            .iter()
-            .map(|session| {
-                format!(
-                    "{}:{}:{}",
-                    session.id,
-                    agent_label(session.agent),
-                    session.path.display()
-                )
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
-        let project_id = format!(
-            "project-manual-{}-{}",
-            unix_now(),
-            &sha256_text(&format!("{name}\n{seed}"))[..12]
-        );
-        let tx = self.conn.unchecked_transaction()?;
-        tx.execute(
-            "INSERT INTO session_projects (id, name, name_custom, last_seen_at)
-             VALUES (?1, ?2, 1, '')",
-            params![project_id, name],
-        )?;
-        for session in sessions {
-            tx.execute(
-                "INSERT INTO session_project_overrides (session_id, agent, session_path, project_id)
-                 VALUES (?1, ?2, ?3, ?4)
-                 ON CONFLICT(session_id, agent, session_path)
-                 DO UPDATE SET project_id = excluded.project_id",
-                params![
-                    session.id,
-                    agent_label(session.agent),
-                    session.path.display().to_string(),
-                    project_id,
-                ],
-            )?;
-        }
-        tx.commit()?;
-        Ok(project_id)
-    }
-
     pub fn refresh_session_analytics(
         &self,
         sessions: &[SessionRecord],
@@ -1620,7 +1838,7 @@ impl Store {
             let mut updates = Vec::new();
             {
                 let mut state_stmt = self.conn.prepare(
-                    "SELECT file_mtime, file_size
+                    "SELECT file_mtime, file_size, parser_state_json
                      FROM session_analytics
                      WHERE session_id = ?1 AND agent = ?2 AND session_path = ?3",
                 )?;
@@ -1638,7 +1856,13 @@ impl Store {
                                 agent_label(session.agent),
                                 session.path.display().to_string(),
                             ],
-                            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+                            |row| {
+                                Ok((
+                                    row.get::<_, i64>(0)?,
+                                    row.get::<_, i64>(1)?,
+                                    row.get::<_, String>(2)?,
+                                ))
+                            },
                         )
                         .optional()?;
                     let file_state = match crate::session_skills::session_file_state(&session.path)
@@ -1654,8 +1878,10 @@ impl Store {
                             continue;
                         }
                     };
-                    if cached_state.is_some_and(|(file_mtime, file_size)| {
-                        file_mtime == file_state.file_mtime && file_size == file_state.file_size
+                    if cached_state.is_some_and(|(file_mtime, file_size, parser_state_json)| {
+                        file_mtime == file_state.file_mtime
+                            && file_size == file_state.file_size
+                            && analytics::parser_state_is_current(&parser_state_json)
                     }) {
                         report.skipped += 1;
                         continue;
@@ -2967,6 +3193,10 @@ impl Store {
                 "DELETE FROM skill_sources WHERE skill_path = ?1",
                 params![skill_path.display().to_string()],
             )?;
+            tx.execute(
+                "DELETE FROM skill_snapshots WHERE skill_path = ?1",
+                params![skill_path.display().to_string()],
+            )?;
         }
         tx.commit()?;
         Ok(deleted)
@@ -2979,6 +3209,13 @@ impl Store {
         let tx = self.conn.unchecked_transaction()?;
         let mut deleted = 0;
         for name in names {
+            tx.execute(
+                "DELETE FROM skill_snapshots
+                 WHERE skill_path IN (
+                    SELECT skill_path FROM skill_sources WHERE skill_name = ?1
+                 )",
+                params![name],
+            )?;
             deleted += tx.execute(
                 "DELETE FROM skill_sources WHERE skill_name = ?1",
                 params![name],
@@ -2986,6 +3223,78 @@ impl Store {
         }
         tx.commit()?;
         Ok(deleted)
+    }
+
+    pub fn skill_snapshot(&self, skill_path: &Path) -> Result<Option<SkillSnapshot>> {
+        let mut statement = self.conn.prepare(
+            "SELECT source_version, relative_path, content
+             FROM skill_snapshots
+             WHERE skill_path = ?1
+             ORDER BY relative_path",
+        )?;
+        let mut rows = statement.query(params![skill_path.display().to_string()])?;
+        let Some(first) = rows.next()? else {
+            return Ok(None);
+        };
+        let source_version = first.get::<_, String>(0)?;
+        let mut files = vec![SkillSnapshotFile {
+            relative_path: first.get(1)?,
+            content: first.get(2)?,
+        }];
+        while let Some(row) = rows.next()? {
+            files.push(SkillSnapshotFile {
+                relative_path: row.get(1)?,
+                content: row.get(2)?,
+            });
+        }
+        Ok(Some(SkillSnapshot {
+            skill_path: skill_path.to_path_buf(),
+            source_version,
+            files,
+        }))
+    }
+
+    pub fn replace_skill_snapshots(&self, snapshots: &[SkillSnapshot]) -> Result<()> {
+        if snapshots.is_empty() {
+            return Ok(());
+        }
+        let tx = self.conn.unchecked_transaction()?;
+        for snapshot in snapshots {
+            tx.execute(
+                "DELETE FROM skill_snapshots WHERE skill_path = ?1",
+                params![snapshot.skill_path.display().to_string()],
+            )?;
+            for file in &snapshot.files {
+                tx.execute(
+                    "INSERT INTO skill_snapshots (
+                        skill_path, source_version, relative_path, content
+                     ) VALUES (?1, ?2, ?3, ?4)",
+                    params![
+                        snapshot.skill_path.display().to_string(),
+                        snapshot.source_version,
+                        file.relative_path,
+                        file.content,
+                    ],
+                )?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn delete_skill_snapshots(&self, skill_paths: &[PathBuf]) -> Result<()> {
+        if skill_paths.is_empty() {
+            return Ok(());
+        }
+        let tx = self.conn.unchecked_transaction()?;
+        for skill_path in skill_paths {
+            tx.execute(
+                "DELETE FROM skill_snapshots WHERE skill_path = ?1",
+                params![skill_path.display().to_string()],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
     }
 
     pub fn save_skills(&self, skills: &SkillScan) -> Result<()> {
@@ -3258,6 +3567,13 @@ impl Store {
                 origin TEXT NOT NULL,
                 data_json TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS skill_snapshots (
+                skill_path TEXT NOT NULL,
+                source_version TEXT NOT NULL,
+                relative_path TEXT NOT NULL,
+                content BLOB NOT NULL,
+                PRIMARY KEY (skill_path, relative_path)
+            );
             CREATE INDEX IF NOT EXISTS idx_skill_sources_name
                 ON skill_sources(skill_name);
             CREATE TABLE IF NOT EXISTS fs_manifest (
@@ -3293,6 +3609,11 @@ impl Store {
                 owner TEXT NOT NULL,
                 started_at INTEGER NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS projection_refresh_locks (
+                domain TEXT PRIMARY KEY,
+                owner TEXT NOT NULL,
+                started_at INTEGER NOT NULL
+            );
             CREATE TABLE IF NOT EXISTS sessions (
                 id TEXT NOT NULL,
                 agent TEXT NOT NULL,
@@ -3322,15 +3643,6 @@ impl Store {
             );
             CREATE INDEX IF NOT EXISTS idx_session_project_aliases_project
                 ON session_project_aliases(project_id);
-            CREATE TABLE IF NOT EXISTS session_project_overrides (
-                session_id TEXT NOT NULL,
-                agent TEXT NOT NULL,
-                session_path TEXT NOT NULL,
-                project_id TEXT NOT NULL,
-                PRIMARY KEY (session_id, agent, session_path)
-            );
-            CREATE INDEX IF NOT EXISTS idx_session_project_overrides_project
-                ON session_project_overrides(project_id);
             CREATE TABLE IF NOT EXISTS session_skill_index (
                 session_id TEXT NOT NULL,
                 agent TEXT NOT NULL,
@@ -3732,7 +4044,6 @@ fn normalize_setting_value(value: &str, fallback: &str) -> String {
 }
 
 type SessionProjectAlias = (String, String);
-type SessionProjectIdentity = (String, String, String);
 
 fn load_session_projects(tx: &Transaction<'_>) -> Result<HashMap<String, ProjectState>> {
     let mut stmt =
@@ -3760,19 +4071,6 @@ fn load_session_project_aliases(
         .map_err(Into::into)
 }
 
-fn load_session_project_overrides(
-    tx: &Transaction<'_>,
-) -> Result<HashMap<SessionProjectIdentity, String>> {
-    let mut stmt = tx.prepare(
-        "SELECT session_id, agent, session_path, project_id FROM session_project_overrides",
-    )?;
-    let rows = stmt.query_map([], |row| {
-        Ok(((row.get(0)?, row.get(1)?, row.get(2)?), row.get(3)?))
-    })?;
-    rows.collect::<std::result::Result<HashMap<_, _>, _>>()
-        .map_err(Into::into)
-}
-
 fn merge_session_project_rows(
     tx: &Transaction<'_>,
     target_project_id: &str,
@@ -3786,22 +4084,10 @@ fn merge_session_project_rows(
         params![target_project_id, source_project_id],
     )?;
     tx.execute(
-        "UPDATE session_project_overrides SET project_id = ?1 WHERE project_id = ?2",
-        params![target_project_id, source_project_id],
-    )?;
-    tx.execute(
         "DELETE FROM session_projects WHERE id = ?1",
         [source_project_id],
     )?;
     Ok(())
-}
-
-fn session_project_identity(session: &SessionRecord) -> SessionProjectIdentity {
-    (
-        session.id.clone(),
-        agent_label(session.agent).to_string(),
-        session.path.display().to_string(),
-    )
 }
 
 fn session_project_aliases(session: &SessionRecord) -> Vec<SessionProjectAlias> {
@@ -3935,6 +4221,10 @@ fn agent_label(agent: AgentKind) -> &'static str {
     crate::providers::agent_provider(agent).storage_key()
 }
 
+fn primary_rule_agent(rule: &RuleRecord) -> AgentKind {
+    rule.agents.first().copied().unwrap_or(AgentKind::Unknown)
+}
+
 fn parse_agent_label(value: &str) -> AgentKind {
     crate::providers::parse_agent(value).unwrap_or(AgentKind::Unknown)
 }
@@ -4008,7 +4298,7 @@ fn fs_manifest_entries_from_scan(report: &ScanReport) -> Vec<FsManifestEntry> {
         for path in &skill.paths {
             add(
                 "skill",
-                &path.path,
+                &path.path.join("SKILL.md"),
                 &path.root,
                 Some(agent_label(path.agent).to_string()),
                 Some(path.scope.clone()),
@@ -4021,7 +4311,7 @@ fn fs_manifest_entries_from_scan(report: &ScanReport) -> Vec<FsManifestEntry> {
             "rule",
             &rule.path,
             rule.path.parent().unwrap_or(Path::new(".")),
-            Some(agent_label(rule.agent).to_string()),
+            Some(agent_label(primary_rule_agent(rule)).to_string()),
             Some(rule.scope.clone()),
             (!rule.sha256.is_empty()).then(|| rule.sha256.clone()),
         );
@@ -4289,7 +4579,7 @@ fn manifest_entries_for_skills(scan: &SkillScan, workspace_root: &Path) -> Vec<F
         for path in &skill.paths {
             entries.push(manifest_entry_for_path(
                 "skill",
-                &path.path,
+                &path.path.join("SKILL.md"),
                 &path.root,
                 Some(agent_label(path.agent).to_string()),
                 Some(path.scope.clone()),
@@ -4309,7 +4599,7 @@ fn manifest_entries_for_rules(scan: &RuleScan, workspace_root: &Path) -> Vec<FsM
             "rule",
             &rule.path,
             rule.path.parent().unwrap_or(workspace_root),
-            Some(agent_label(rule.agent).to_string()),
+            Some(agent_label(primary_rule_agent(rule)).to_string()),
             Some(rule.scope.clone()),
             (!rule.sha256.is_empty()).then(|| rule.sha256.clone()),
             PROJECTION_PARSER_VERSION,
@@ -4617,10 +4907,13 @@ fn insert_session_search_record(
 
 fn index_session_search_document_best_effort(tx: &Transaction<'_>, session: &SessionRecord) {
     if let Err(err) = index_session_search_document(tx, session) {
-        eprintln!(
-            "failed to index session search text for {} {}: {err:#}",
-            agent_label(session.agent),
-            session.id,
+        crate::logging::global().warn(
+            "failed to index session search text",
+            serde_json::json!({
+                "agent": agent_label(session.agent),
+                "session_id": session.id,
+                "error": format!("{err:#}"),
+            }),
         );
     }
 }
@@ -4830,15 +5123,17 @@ mod tests {
             SessionAnalyticsRecord,
         },
         session_skills::{SessionFileState, SessionSkillLink},
-        sessions::{SESSION_PREVIEW_MAX_CHARS, SessionIdentity},
-        skills::{AgentKind, SkillPath, SkillRoot, SkillSourceRecord},
+        sessions::SESSION_PREVIEW_MAX_CHARS,
+        skills::{
+            AgentKind, SkillPath, SkillRoot, SkillSnapshot, SkillSnapshotFile, SkillSourceRecord,
+        },
     };
     use chrono::{Local, TimeZone};
     use rusqlite::{Connection, params};
 
     use super::{
         AppSettings, FsManifestEntry, PromptWrite, SESSION_SEARCH_RECORD_TEXT_LIMIT, Store,
-        normalize_repository_url, truncate_to_char_boundary,
+        normalize_color_theme, normalize_repository_url, truncate_to_char_boundary,
     };
 
     #[test]
@@ -4924,70 +5219,32 @@ mod tests {
     }
 
     #[test]
-    fn manual_session_project_split_overrides_automatic_aliases() {
-        let temp = temp_dir("tendi-storage-session-project-split");
-        fs::create_dir_all(&temp).unwrap();
-        let store = Store::open(temp.join("tendi.sqlite3")).unwrap();
-        let mut first = session("first", "First");
-        first.repository_url = Some("https://github.com/tutti-os/tutti.git".to_string());
-        let mut second = session("second", "Second");
-        second.repository_url = first.repository_url.clone();
-        let mut sessions = vec![first, second];
-        store.resolve_session_projects(&mut sessions).unwrap();
-        assert_eq!(
-            sessions[0].logical_project_id,
-            sessions[1].logical_project_id
-        );
-
-        store
-            .split_sessions_into_project("Focused work", &[SessionIdentity::from(&sessions[1])])
-            .unwrap();
-        store.resolve_session_projects(&mut sessions).unwrap();
-
-        assert_ne!(
-            sessions[0].logical_project_id,
-            sessions[1].logical_project_id
-        );
-        assert_eq!(
-            sessions[1].logical_project_name.as_deref(),
-            Some("Focused work")
-        );
-
-        let target = sessions[0].logical_project_id.clone().unwrap();
-        let source = sessions[1].logical_project_id.clone().unwrap();
-        let target_name = store.merge_session_projects(&target, &[source]).unwrap();
-        assert_eq!(
-            target_name,
-            sessions[0].logical_project_name.clone().unwrap()
-        );
-        store.resolve_session_projects(&mut sessions).unwrap();
-        assert_eq!(
-            sessions[0].logical_project_id,
-            sessions[1].logical_project_id
-        );
-
-        drop(store);
-        fs::remove_dir_all(temp).unwrap();
-    }
-
-    #[test]
     fn app_settings_store_normalized_additional_session_roots() {
         let temp = temp_dir("tendi-storage-additional-session-settings");
         fs::create_dir_all(&temp).unwrap();
         let db = temp.join("tendi.sqlite3");
         let store = Store::open(&db).unwrap();
         assert_eq!(store.app_settings().unwrap().appearance, "system");
-        assert_eq!(store.app_settings().unwrap().light_theme, "gruvbox");
-        assert_eq!(store.app_settings().unwrap().dark_theme, "gruvbox");
+        assert_eq!(store.app_settings().unwrap().font_family, "manrope");
+        assert_eq!(store.app_settings().unwrap().light_theme, "sakura-pop");
+        assert_eq!(store.app_settings().unwrap().dark_theme, "sakura-pop");
+        assert_eq!(store.app_settings().unwrap().app_icon, "sakura-pop");
+        assert_eq!(
+            store.app_settings().unwrap().session_resume_target,
+            "terminal"
+        );
         assert_eq!(store.app_settings().unwrap().editor, "vscode");
         assert!(!store.app_settings().unwrap().developer_mode);
 
         let saved = store
             .save_app_settings(AppSettings {
                 appearance: "dark".to_string(),
+                font_family: "geist".to_string(),
                 light_theme: "nord".to_string(),
                 dark_theme: "tokyo-night".to_string(),
+                app_icon: "dracula".to_string(),
                 terminal: "Warp".to_string(),
+                session_resume_target: "app".to_string(),
                 editor: "zed".to_string(),
                 developer_mode: true,
                 additional_session_roots: vec![
@@ -5003,9 +5260,12 @@ mod tests {
             .unwrap();
 
         assert_eq!(saved.appearance, "dark");
+        assert_eq!(saved.font_family, "geist");
         assert_eq!(saved.light_theme, "nord");
         assert_eq!(saved.dark_theme, "tokyo-night");
+        assert_eq!(saved.app_icon, "dracula");
         assert_eq!(saved.terminal, "Warp");
+        assert_eq!(saved.session_resume_target, "app");
         assert_eq!(saved.editor, "zed");
         assert!(saved.developer_mode);
         assert_eq!(saved.config_profiles["codex"], "deep-review");
@@ -5037,17 +5297,20 @@ mod tests {
         let report = report_with_skill("manifest-skill", SkillVisibility::Auto);
         let skill_path = &report.skills.skills[0].paths[0].path;
         fs::create_dir_all(skill_path).unwrap();
+        fs::write(
+            skill_path.join("SKILL.md"),
+            "---\nname: manifest-skill\n---\n",
+        )
+        .unwrap();
 
         store.save_scan(&report).unwrap();
 
         let entries = store
             .list_fs_manifest_for_root(skill_path.parent().unwrap())
             .unwrap();
-        assert!(
-            entries
-                .iter()
-                .any(|entry| { entry.source_kind == "skill" && entry.path == *skill_path })
-        );
+        assert!(entries.iter().any(|entry| {
+            entry.source_kind == "skill" && entry.path == skill_path.join("SKILL.md")
+        }));
 
         drop(store);
         fs::remove_dir_all(temp).unwrap();
@@ -5149,6 +5412,35 @@ mod tests {
             1
         );
         assert!(store.skill_source_record(&skill_path).unwrap().is_none());
+
+        drop(store);
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn skill_snapshots_round_trip_and_are_removed_with_source_records() {
+        let temp = temp_dir("tendi-storage-skill-snapshot");
+        fs::create_dir_all(&temp).unwrap();
+        let store = Store::open(temp.join("tendi.sqlite3")).unwrap();
+        let skill_path = temp.join("skills/demo");
+        store
+            .replace_skill_snapshots(&[SkillSnapshot {
+                skill_path: skill_path.clone(),
+                source_version: "base".to_string(),
+                files: vec![SkillSnapshotFile {
+                    relative_path: "SKILL.md".to_string(),
+                    content: b"base".to_vec(),
+                }],
+            }])
+            .unwrap();
+
+        let snapshot = store.skill_snapshot(&skill_path).unwrap().unwrap();
+        assert_eq!(snapshot.source_version, "base");
+        assert_eq!(snapshot.files[0].content, b"base");
+        store
+            .delete_skill_source_records(std::slice::from_ref(&skill_path))
+            .unwrap();
+        assert!(store.skill_snapshot(&skill_path).unwrap().is_none());
 
         drop(store);
         fs::remove_dir_all(temp).unwrap();
@@ -5445,7 +5737,7 @@ mod tests {
                 &workspace,
                 &RuleScan {
                     rules: vec![RuleRecord {
-                        agent: AgentKind::Shared,
+                        agents: vec![AgentKind::Shared],
                         kind: "agents".to_string(),
                         scope: "project".to_string(),
                         path: rule_path.clone(),
@@ -5507,6 +5799,56 @@ mod tests {
     }
 
     #[test]
+    fn skill_projection_invalidates_when_skill_file_changes() {
+        let temp = temp_dir("tendi-skill-projection-freshness");
+        let workspace = temp.join("workspace");
+        let skill_dir = workspace.join(".agents/skills/demo");
+        let skill_file = skill_dir.join("SKILL.md");
+        fs::create_dir_all(&skill_dir).unwrap();
+        fs::write(&skill_file, "old").unwrap();
+
+        let mut scan = report_with_skill("demo", SkillVisibility::Auto).skills;
+        scan.roots[0].path = workspace.join(".agents/skills");
+        scan.skills[0].paths[0].path = skill_dir;
+        scan.skills[0].paths[0].root = workspace.join(".agents/skills");
+        let store = Store::open(temp.join("tendi.sqlite3")).unwrap();
+
+        store.save_skills_for_workspace(&workspace, &scan).unwrap();
+        assert!(
+            store
+                .list_skills_for_workspace(&workspace)
+                .unwrap()
+                .is_some()
+        );
+
+        store
+            .conn
+            .execute(
+                "UPDATE fs_manifest SET parser_version = 'scan-v3' WHERE source_kind = 'skill'",
+                [],
+            )
+            .unwrap();
+        assert!(
+            store
+                .list_skills_for_workspace(&workspace)
+                .unwrap()
+                .is_none()
+        );
+        store.save_skills_for_workspace(&workspace, &scan).unwrap();
+
+        fs::write(&skill_file, "edited skill content").unwrap();
+        assert!(
+            store
+                .list_skills_for_workspace(&workspace)
+                .unwrap()
+                .is_none()
+        );
+
+        drop(store);
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
     fn projection_context_does_not_mix_workspaces_and_retries_empty_domain() {
         let temp = temp_dir("tendi-projection-context");
         let first = temp.join("first");
@@ -5521,7 +5863,7 @@ mod tests {
 
         let scan = |path: PathBuf, sha256: &str| RuleScan {
             rules: vec![RuleRecord {
-                agent: AgentKind::Shared,
+                agents: vec![AgentKind::Shared],
                 kind: "agents".to_string(),
                 scope: "project".to_string(),
                 path,
@@ -5597,10 +5939,10 @@ mod tests {
         fs::create_dir_all(&temp).unwrap();
         let store = Store::open(temp.join("tendi.sqlite3")).unwrap();
         let nested = store
-            .with_projection_refresh_lock(|| {
+            .with_projection_refresh_lock("rules", || {
                 assert!(
                     store
-                        .with_projection_refresh_lock(|| Ok::<_, anyhow::Error>(()))
+                        .with_projection_refresh_lock("rules", || Ok::<_, anyhow::Error>(()))
                         .unwrap()
                         .is_none()
                 );
@@ -5608,6 +5950,21 @@ mod tests {
             })
             .unwrap();
         assert_eq!(nested, Some(42));
+        drop(store);
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn projection_refresh_lock_serializes_different_domains() {
+        let temp = temp_dir("tendi-projection-lock-domains");
+        fs::create_dir_all(&temp).unwrap();
+        let store = Store::open(temp.join("tendi.sqlite3")).unwrap();
+        let result = store
+            .with_projection_refresh_lock("rules", || {
+                store.with_projection_refresh_lock("hooks", || Ok::<_, anyhow::Error>(42))
+            })
+            .unwrap();
+        assert_eq!(result, Some(None));
         drop(store);
         fs::remove_dir_all(temp).unwrap();
     }
@@ -6015,6 +6372,20 @@ mod tests {
         assert_eq!((unchanged.parsed, unchanged.skipped), (0, 1));
         assert_eq!(store.analytics_revision().unwrap(), first_revision);
 
+        store
+            .conn
+            .execute("UPDATE session_analytics SET parser_state_json = '{}'", [])
+            .unwrap();
+        let reparsed = store
+            .refresh_session_analytics(std::slice::from_ref(&record))
+            .unwrap();
+        assert_eq!(
+            (reparsed.parsed, reparsed.skipped, reparsed.failed),
+            (1, 0, 0)
+        );
+        let reparsed_revision = store.analytics_revision().unwrap();
+        assert!(reparsed_revision > first_revision);
+
         let mut file = OpenOptions::new().append(true).open(&path).unwrap();
         writeln!(
             file,
@@ -6025,7 +6396,7 @@ mod tests {
             .refresh_session_analytics(std::slice::from_ref(&record))
             .unwrap();
         assert_eq!((appended.parsed, appended.appended), (1, 1));
-        assert!(store.analytics_revision().unwrap() > first_revision);
+        assert!(store.analytics_revision().unwrap() > reparsed_revision);
         let overview = store.overview_analytics(None, 1, 1).unwrap();
         assert_eq!(overview.summary.usage.total_tokens, 25);
 
@@ -6888,6 +7259,19 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap()
+    }
+
+    #[test]
+    fn accepts_vercel_color_theme() {
+        assert_eq!(normalize_color_theme(" VERCEL ").unwrap(), "vercel");
+    }
+
+    #[test]
+    fn accepts_sakura_pop_color_theme() {
+        assert_eq!(
+            normalize_color_theme(" SAKURA-POP ").unwrap(),
+            "sakura-pop"
+        );
     }
 
     fn temp_dir(prefix: &str) -> PathBuf {

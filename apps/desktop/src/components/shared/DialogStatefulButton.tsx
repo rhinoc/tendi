@@ -6,7 +6,7 @@ import {
   type DialogActionButtonProps,
 } from "./DialogActionButton.tsx";
 import { LoadingIcon } from "./LoadingIcon.tsx";
-import "./dialog-stateful-button.css";
+import "./StatefulButton.css";
 
 export type DialogStatefulButtonState = "idle" | "loading" | "success" | "error";
 
@@ -57,7 +57,7 @@ export function DialogStatefulButton({
   return (
     <DialogActionButton
       {...buttonProps}
-      className={["dialogStatefulButton", state === "loading" ? "isBusy" : "", className].filter(Boolean).join(" ")}
+      className={["statefulButton", "dialogStatefulButton", state === "loading" ? "isBusy" : "", className].filter(Boolean).join(" ")}
       disabled={disabled || state === "loading"}
       aria-label={stateLabel}
       aria-busy={state === "loading"}

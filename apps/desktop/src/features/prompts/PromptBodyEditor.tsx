@@ -1,9 +1,9 @@
 import { useMemo } from "react";
 import CodeMirror from "@uiw/react-codemirror";
 import { syntaxHighlighting } from "@codemirror/language";
-import { markdown as codeMirrorMarkdown } from "@codemirror/lang-markdown";
 import { EditorView } from "@codemirror/view";
 
+import { codeMirrorMarkdown } from "../../lib/codemirror-markdown.ts";
 import { codeMirrorBaseTheme, codeMirrorHighlightStyle } from "../../lib/codemirror-theme.ts";
 import { codeMirrorPromptXmlTagExtension } from "../../lib/prompt-codemirror.ts";
 

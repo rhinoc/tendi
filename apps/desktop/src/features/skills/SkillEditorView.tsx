@@ -1,4 +1,5 @@
 import { Tooltip } from "../../components/shared/Tooltip.tsx";
+import { Badge } from "../../components/shared/Badge.tsx";
 import { lazy, Suspense, useCallback, useDeferredValue, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   ChevronDown,
@@ -11,35 +12,34 @@ import {
 } from "lucide-react";
 import { Group as PanelGroup, Panel, usePanelRef } from "react-resizable-panels";
 import { ContextMenu } from "radix-ui";
-import { invoke } from "@tauri-apps/api/core";
-
 import {
   buildFileTreeRows,
   diffPreview,
   displayFileName,
-  fallbackSkillContent,
-  fallbackSkills,
   isMarkdownPath,
   isReadOnlySkillSource,
   joinRelativePath,
   normalizeSkillFileEntries,
   parentPath,
   preferredSkillFileName,
+  invokeCommand,
   safeInvoke,
-  SkillVisibility,
   TauriCommand,
   uniqueChildPath,
   type SkillFileEntry,
   type SkillLike,
 } from "../../lib/index.ts";
 import { EditorHeader } from "../../components/shared/EditorHeader.tsx";
+import { DialogLoadingFallback } from "../../components/shared/DialogLoadingFallback.tsx";
 import { EditorStatePlaceholder } from "../../components/shared/EditorStatePlaceholder.tsx";
 import { FileTreeContextMenuItems } from "./FileTreeContextMenuItems.tsx";
+import { IconButton } from "../../components/shared/IconButton.tsx";
 import { LoadingState } from "../../components/shared/LoadingState.tsx";
 import { MarkdownFilePane, type DiffStats } from "../../components/shared/MarkdownFilePane.tsx";
 import { ResizeSeparator } from "../../components/shared/ResizeSeparator.tsx";
 import type { SkillDependencyRecord } from "./SkillDependencyGraph.tsx";
 import { SkillInfoMenu } from "./SkillInfoMenu.tsx";
+import { LinkedSessionsDrawerFallback } from "../sessions/LinkedSessionsDrawerFallback.tsx";
 import { loadCodeMirrorFileEditor } from "../../components/shared/code-mirror-loader.ts";
 
 const DiscardChangesDialog = lazy(() => import("../../components/shared/DiscardChangesDialog.tsx").then(({ DiscardChangesDialog: component }) => ({ default: component })));
@@ -60,7 +60,7 @@ export type SkillIndexStatus = {
 };
 
 export type SkillEditorViewProps = {
-  skill?: SkillEditorRecord | null;
+  skill: SkillEditorRecord;
   skills?: SkillDependencyRecord[];
   back: () => void;
   skillIndexStatus?: SkillIndexStatus | null;
@@ -108,11 +108,12 @@ type SkillFileWriteResult = {
 };
 
 export function SkillEditorView({ skill, skills = [], back, skillIndexStatus, onOpenSession, onOpenSkill, onSaved }: SkillEditorViewProps) {
-  const currentSkill = skill ?? fallbackSkills[0];
+  const currentSkill = skill;
   const readOnly = isReadOnlySkillSource(currentSkill);
   const [files, setFiles] = useState<SkillFileEntry[]>([]);
   const [linkedSessions, setLinkedSessions] = useState<Record<string, unknown>[]>([]);
   const [loadingLinkedSessions, setLoadingLinkedSessions] = useState(false);
+  const [linkedSessionsError, setLinkedSessionsError] = useState("");
   const [showLinkedSessions, setShowLinkedSessions] = useState(false);
   const [activePath, setActivePath] = useState("SKILL.md");
   const [selectedPath, setSelectedPath] = useState("SKILL.md");
@@ -124,10 +125,13 @@ export function SkillEditorView({ skill, skills = [], back, skillIndexStatus, on
   const [renamingPath, setRenamingPath] = useState("");
   const [renameValue, setRenameValue] = useState("");
   const [loadingFiles, setLoadingFiles] = useState(true);
+  const [fileError, setFileError] = useState("");
   const [loadingContent, setLoadingContent] = useState(false);
+  const [contentError, setContentError] = useState("");
   const [saveState, setSaveState] = useState<"idle" | "saving" | "saved" | "error">("idle");
   const [saveError, setSaveError] = useState("");
   const renameInputRef = useRef<HTMLInputElement>(null);
+  const linkedSessionsRequestRef = useRef(0);
   const fileTreePanelRef = usePanelRef();
   const activeDraft = drafts[activePath] ?? { content: "", originalContent: "", sha256: "" };
   const content = activeDraft.content;
@@ -143,6 +147,7 @@ export function SkillEditorView({ skill, skills = [], back, skillIndexStatus, on
     let cancelled = false;
     async function loadFiles() {
       setLoadingFiles(true);
+      setFileError("");
       setFiles([]);
       setActivePath("SKILL.md");
       setSelectedPath("SKILL.md");
@@ -151,9 +156,18 @@ export function SkillEditorView({ skill, skills = [], back, skillIndexStatus, on
       setRenamingPath("");
       setCollapsedFolders(new Set());
       setShowDiscardDialog(false);
-      const fileListRead = safeInvoke(TauriCommand.SkillFiles, { name: currentSkill.name });
+      const fileListRead = invokeCommand(TauriCommand.SkillFiles, { name: currentSkill.name });
       void loadCodeMirrorFileEditor();
-      const result = await fileListRead;
+      let result: unknown;
+      try {
+        result = await fileListRead;
+      } catch (error) {
+        if (!cancelled) {
+          setFileError(error instanceof Error ? error.message : `${error}`);
+          setLoadingFiles(false);
+        }
+        return;
+      }
       if (cancelled) return;
       const next = normalizeSkillFileEntries(result);
       const firstFile = preferredSkillFileName(next);
@@ -180,6 +194,7 @@ export function SkillEditorView({ skill, skills = [], back, skillIndexStatus, on
   useEffect(() => {
     setSaveState("idle");
     setSaveError("");
+    setContentError("");
   }, [activePath]);
 
   useEffect(() => {
@@ -187,9 +202,19 @@ export function SkillEditorView({ skill, skills = [], back, skillIndexStatus, on
     let cancelled = false;
     async function loadContent() {
       setLoadingContent(true);
-      const fileRead = safeInvoke(TauriCommand.SkillFileRead, { name: currentSkill.name, relativePath: activePath });
+      setContentError("");
+      const fileRead = invokeCommand<SkillFileReadResult>(TauriCommand.SkillFileRead, { name: currentSkill.name, relativePath: activePath });
       if (isMarkdownPath(activePath)) void loadCodeMirrorFileEditor();
-      const result = await fileRead as SkillFileReadResult | null;
+      let result: SkillFileReadResult;
+      try {
+        result = await fileRead;
+      } catch (error) {
+        if (!cancelled) {
+          setContentError(error instanceof Error ? error.message : `${error}`);
+          setLoadingContent(false);
+        }
+        return;
+      }
       if (cancelled) return;
       if (typeof result?.content === "string") {
         const fileContent = result.content;
@@ -200,16 +225,6 @@ export function SkillEditorView({ skill, skills = [], back, skillIndexStatus, on
             originalContent: fileContent,
             sha256: result.sha256 ?? "",
           },
-        }, activePath));
-      } else {
-        const fallback = fallbackSkillContent({
-          name: currentSkill.name,
-          description: currentSkill.description ?? "",
-          visibility: currentSkill.visibility ?? SkillVisibility.Auto,
-        });
-        setDrafts((current) => trimCleanDrafts({
-          ...current,
-          [activePath]: { content: fallback, originalContent: fallback, sha256: "" },
         }, activePath));
       }
       setLoadingContent(false);
@@ -226,7 +241,7 @@ export function SkillEditorView({ skill, skills = [], back, skillIndexStatus, on
     setSaveState("saving");
     setSaveError("");
     try {
-      const result = await invoke<SkillFileWriteResult>(TauriCommand.SkillFileSave, {
+      const result = await invokeCommand<SkillFileWriteResult>(TauriCommand.SkillFileSave, {
         name: currentSkill.name,
         relativePath: activePath,
         expectedSha256: original.sha256,
@@ -252,8 +267,8 @@ export function SkillEditorView({ skill, skills = [], back, skillIndexStatus, on
     [activePath, files, selectedPath],
   );
   const diffLines = useMemo(
-    () => diffPreview(original.content, deferredContent),
-    [deferredContent, original.content],
+    () => !contentReady || !dirty ? [] : diffPreview(original.content, deferredContent),
+    [contentReady, deferredContent, dirty, original.content],
   );
   const diffStats = useMemo(
     () => diffLines.reduce(
@@ -266,7 +281,14 @@ export function SkillEditorView({ skill, skills = [], back, skillIndexStatus, on
     [diffLines],
   );
   const reloadFiles = async (preferredPath = selectedPath) => {
-    const result = await safeInvoke(TauriCommand.SkillFiles, { name: currentSkill.name });
+    let result: unknown;
+    try {
+      result = await invokeCommand(TauriCommand.SkillFiles, { name: currentSkill.name });
+      setFileError("");
+    } catch (error) {
+      setFileError(error instanceof Error ? error.message : `${error}`);
+      return [];
+    }
     const next = normalizeSkillFileEntries(result);
     const firstFile = preferredSkillFileName(next);
     const preferred = next.find((file) => file.name === preferredPath);
@@ -431,18 +453,34 @@ export function SkillEditorView({ skill, skills = [], back, skillIndexStatus, on
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [save]);
 
+  const loadLinkedSessions = useCallback(async () => {
+    const request = ++linkedSessionsRequestRef.current;
+    setLoadingLinkedSessions(true);
+    setLinkedSessionsError("");
+    try {
+      const links = await invokeCommand<unknown[]>(TauriCommand.SkillSessionLinks, { skillName: currentSkill.name });
+      if (!Array.isArray(links)) throw new Error("Invalid linked sessions response");
+      if (request === linkedSessionsRequestRef.current) setLinkedSessions(links as Record<string, unknown>[]);
+    } catch (error) {
+      if (request === linkedSessionsRequestRef.current) setLinkedSessionsError(`${error}`);
+    } finally {
+      if (request === linkedSessionsRequestRef.current) setLoadingLinkedSessions(false);
+    }
+  }, [currentSkill.name]);
+
   useEffect(() => {
     if (!showLinkedSessions) return;
-    let cancelled = false;
+    void loadLinkedSessions();
+    return () => { linkedSessionsRequestRef.current += 1; };
+  }, [currentSkill.name, loadLinkedSessions, showLinkedSessions, skillIndexStatus?.indexed, skillIndexStatus?.running]);
+
+  /* The open handler primes the state so the drawer never renders a stale empty result. */
+  const openLinkedSessions = () => {
+    setLinkedSessions([]);
+    setLinkedSessionsError("");
     setLoadingLinkedSessions(true);
-    safeInvoke(TauriCommand.SkillSessionLinks, { skillName: currentSkill.name }).then((links) => {
-      if (!cancelled) {
-        setLinkedSessions(Array.isArray(links) ? links : []);
-        setLoadingLinkedSessions(false);
-      }
-    });
-    return () => { cancelled = true; };
-  }, [currentSkill.name, showLinkedSessions, skillIndexStatus?.indexed, skillIndexStatus?.running]);
+    setShowLinkedSessions(true);
+  };
 
   const fileTreeSize = fileTreeCollapsed ? 44 : 240;
   useLayoutEffect(() => {
@@ -457,30 +495,38 @@ export function SkillEditorView({ skill, skills = [], back, skillIndexStatus, on
         onBack={handleBack}
         actions={(
           <>
-              <button
-              className="headerGhostButton"
-              onClick={() => setShowLinkedSessions(true)}
+              <IconButton
+              onClick={openLinkedSessions}
               aria-label="Open recent sessions"
             >
               <Waypoints size={15} />
-            </button>
+            </IconButton>
             <SkillInfoMenu skill={currentSkill} skills={skills} onOpenSkill={onOpenSkill} />
           </>
         )}
       />
       {showDiscardDialog ? (
-        <Suspense fallback={null}>
+        <Suspense fallback={(
+          <DialogLoadingFallback
+            title="Discard unsaved changes?"
+            label="Loading discard dialog"
+            descriptionId="discard-changes-loading-description"
+            onOpenChange={setShowDiscardDialog}
+          />
+        )}>
           <DiscardChangesDialog open onOpenChange={setShowDiscardDialog} onDiscard={back} />
         </Suspense>
       ) : null}
       {showLinkedSessions ? (
-        <Suspense fallback={null}>
+        <Suspense fallback={<LinkedSessionsDrawerFallback onClose={() => setShowLinkedSessions(false)} />}>
           <LinkedSessionsDrawer
             open
             onOpenChange={setShowLinkedSessions}
             skillName={currentSkill.name}
             links={linkedSessions}
             loading={loadingLinkedSessions}
+            error={linkedSessionsError}
+            onRetry={() => { void loadLinkedSessions(); }}
             onOpenSession={onOpenSession}
           />
         </Suspense>
@@ -512,13 +558,16 @@ export function SkillEditorView({ skill, skills = [], back, skillIndexStatus, on
                     </button>
                     {!readOnly && !fileTreeCollapsed && (
                       <div className="fileTreeActions">
-                        <button aria-label="New file" onClick={() => createEntry("file")}><FilePlus size={13} /></button>
-                        <button aria-label="New folder" onClick={() => createEntry("folder")}><FolderPlus size={13} /></button>
+                        <IconButton aria-label="New file" onClick={() => createEntry("file")}><FilePlus size={13} /></IconButton>
+                        <IconButton aria-label="New folder" onClick={() => createEntry("folder")}><FolderPlus size={13} /></IconButton>
                       </div>
                     )}
                   </div>
                   {!fileTreeCollapsed && loadingFiles && (
-                    <LoadingState className="loadingStateCompact fileTreeEmpty" label="Loading files" />
+                    <LoadingState className="fileTreeLoading" label="Loading files" />
+                  )}
+                  {!fileTreeCollapsed && !loadingFiles && fileError && (
+                    <div className="fileTreeEmpty" role="alert">{fileError}</div>
                   )}
                   {!fileTreeCollapsed && !loadingFiles && rows.map(({ file, depth, isFolder }) => {
                 const isCollapsed = collapsedFolders.has(file.name);
@@ -572,7 +621,7 @@ export function SkillEditorView({ skill, skills = [], back, skillIndexStatus, on
                         {rowChevron}
                         {rowIcon}
                         <span className="fileItemName">{displayFileName(file.name)}</span>
-                        {status && <span className={`fileTreeStatus ${status === "U" ? "untracked" : "modified"}`}>{status}</span>}
+                        {status && <Badge tone={status === "U" ? "success" : "warning"}>{status}</Badge>}
                         </button>
                       </ContextMenu.Trigger>
                     </Tooltip>
@@ -652,7 +701,7 @@ export function SkillEditorView({ skill, skills = [], back, skillIndexStatus, on
             <EditorStatePlaceholder
               label={!contentReady || loadingContent || loadingFiles ? "Loading file" : undefined}
             >
-              {contentReady && !loadingContent && !loadingFiles ? "Select a file" : null}
+              {contentError ? <span role="alert">{contentError}</span> : contentReady && !loadingContent && !loadingFiles ? "Select a file" : null}
             </EditorStatePlaceholder>
           )}
         </Panel>

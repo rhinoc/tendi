@@ -5,6 +5,7 @@ import { join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { performance } from "node:perf_hooks";
 import { createServer } from "vite";
+import { writeStdout } from "./stdio.mjs";
 
 const appDir = resolve(new URL("..", import.meta.url).pathname);
 const repoDir = resolve(appDir, "../..");
@@ -162,6 +163,26 @@ function loadSnapshot() {
   const agent = String(largest.session.agent || "codex").toLowerCase();
   const transcript = runJson(["sessions", "transcript", largest.session.path, "--agent", agent, "--json"]);
   const allItems = Array.isArray(transcript.value) ? transcript.value : [];
+  const locatorItems = [];
+  let pendingLocatorItem = null;
+  let groupedIndex = 0;
+  let previousWasTool = false;
+  for (const item of allItems) {
+    const type = `${item.type || item.kind || ""}`;
+    const itemIndex = type === "tool" && previousWasTool ? groupedIndex - 1 : groupedIndex++;
+    if (type === "user") {
+      pendingLocatorItem = {
+        index: itemIndex,
+        label: `${item.body || ""}`.trim(),
+        response: "",
+      };
+      locatorItems.push(pendingLocatorItem);
+    } else if (type === "assistant" && pendingLocatorItem) {
+      pendingLocatorItem.response = `${item.body || ""}`.trim();
+      pendingLocatorItem = null;
+    }
+    previousWasTool = type === "tool";
+  }
   const pageSize = 160;
   const transcriptPages = [];
   for (let index = 0; index < allItems.length; index += pageSize) {
@@ -169,6 +190,7 @@ function loadSnapshot() {
     const items = allItems.slice(index, index + pageSize);
     transcriptPages.push({
       items,
+      locatorItems: pageIndex === 0 ? locatorItems : [],
       warnings: [],
       nextCursor: index + pageSize < allItems.length ? `real:${pageIndex + 1}` : null,
       done: index + pageSize >= allItems.length,
@@ -426,7 +448,7 @@ try {
   if (searchMetrics) searchMetrics.externalElapsedMs = Number((performance.now() - searchStarted).toFixed(1));
   const finalPerf = await page.evaluate(() => window.__TENDI_REAL_PERF__);
 
-  console.log(JSON.stringify({
+  writeStdout(JSON.stringify({
     source: snapshot.source,
     analyticsInput: {
       days: snapshot.analytics.days.length,

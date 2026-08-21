@@ -11,7 +11,7 @@
 - 首次进入 tab 时，`apps/desktop/src/App.jsx:236-265` 会通过 `${domain}_list` 懒加载数据；因此 Hooks 触发 `hooks_list`，MCP 触发 `mcp_list`。
 - 渲染分发在 `apps/desktop/src/App.jsx:467-470`：Hooks 使用专门的 `HooksView`，MCP 只使用通用 `DataListView`。
 - `normalizeReport` 仅展开 `report.hooks.hooks` 与 `report.mcp.servers`，没有针对 Hooks/MCP 的字段规范化或错误元数据保留，见 `apps/desktop/src/lib/helpers.jsx:843-864`。
-- `safeInvoke` 在失败时只 `console.warn` 并返回 `null`，没有把错误带回 tab 状态，见 `apps/desktop/src/lib/helpers.jsx:939-945`。
+- `safeInvoke` 在失败时只记录 warning 并返回 `null`，没有把错误带回 tab 状态，见当前 `apps/desktop/src/lib/tauri.ts`。
 
 ## MCP Tab 现状
 

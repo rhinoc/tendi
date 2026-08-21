@@ -1,6 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { writeStderr, writeStdout } from "./stdio.mjs";
 
 const DESKTOP_ROOT = fileURLToPath(new URL("../", import.meta.url));
 const REPOSITORY_ROOT = join(DESKTOP_ROOT, "../..");
@@ -35,12 +36,12 @@ const staleUnavailable = [...explicitlyUnavailable].filter((target) => iconKeys.
 
 if (undocumented.length > 0 || staleUnavailable.length > 0) {
   if (undocumented.length > 0) {
-    console.error(`Missing agent icon mappings: ${undocumented.join(", ")}`);
+    writeStderr(`Missing agent icon mappings: ${undocumented.join(", ")}`);
   }
   if (staleUnavailable.length > 0) {
-    console.error(`Remove now-available agents from explicitlyUnavailable: ${staleUnavailable.join(", ")}`);
+    writeStderr(`Remove now-available agents from explicitlyUnavailable: ${staleUnavailable.join(", ")}`);
   }
   process.exitCode = 1;
 } else {
-  console.log(`Agent icon coverage OK: ${targets.length - missing.length}/${targets.length}; explicitly unavailable: ${[...explicitlyUnavailable].join(", ")}`);
+  writeStdout(`Agent icon coverage OK: ${targets.length - missing.length}/${targets.length}; explicitly unavailable: ${[...explicitlyUnavailable].join(", ")}`);
 }

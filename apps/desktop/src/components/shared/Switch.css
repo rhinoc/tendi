@@ -1,0 +1,57 @@
+.appSwitch {
+  position: relative;
+  width: var(--switch-width);
+  height: var(--switch-height);
+  display: inline-flex;
+  align-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: 999px;
+  color: var(--accent-contrast);
+  background: var(--line);
+  box-shadow: none;
+  cursor: pointer;
+  transition-property: background-color, box-shadow;
+  transition-duration: 120ms;
+  transition-timing-function: ease-out;
+}
+
+.appSwitch:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+
+.appSwitch:hover:not([aria-disabled="true"]) {
+  background: var(--hover-fill-strong);
+}
+
+.appSwitch.isOn {
+  background: var(--accent);
+  box-shadow: none;
+}
+
+.appSwitch.isOn:hover:not([aria-disabled="true"]) {
+  background: var(--accent-hover);
+  box-shadow: none;
+}
+
+.appSwitch[aria-disabled="true"] {
+  cursor: default;
+  opacity: 0.52;
+}
+
+.appSwitchThumb {
+  position: absolute;
+  left: 2px;
+  width: var(--switch-thumb-size);
+  height: var(--switch-thumb-size);
+  border-radius: 50%;
+  background: var(--text);
+  box-shadow: none;
+  transition: transform 120ms ease, background-color 120ms ease;
+}
+
+.appSwitch.isOn .appSwitchThumb {
+  background: var(--accent-contrast);
+  transform: translateX(var(--switch-thumb-size));
+}

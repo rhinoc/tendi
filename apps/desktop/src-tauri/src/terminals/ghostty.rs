@@ -6,9 +6,6 @@ impl TerminalProvider for GhosttyProvider {
     fn id(&self) -> &str {
         "ghostty"
     }
-    fn label(&self) -> String {
-        "Ghostty".to_string()
-    }
     fn available(&self) -> bool {
         app_available(&["/Applications/Ghostty.app"])
     }

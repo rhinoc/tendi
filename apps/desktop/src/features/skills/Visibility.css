@@ -1,49 +1,16 @@
-.visibility {
-  --visibility-pad: 3px;
-  height: 28px;
-  width: 176px;
-  display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  gap: 2px;
-  padding: var(--visibility-pad);
-  /* Concentric: outer md, inner = outer − pad */
-  border-radius: var(--radius-md);
-  background: var(--control-fill);
-  border: 0;
-  box-shadow: inset 0 0 0 1px var(--line);
-}
-
-.visibility button {
-  border: 0;
-  border-radius: calc(var(--radius-md) - var(--visibility-pad));
+.selectControlTrigger.visibility {
+  width: 100%;
+  min-width: 0;
   background: transparent;
-  color: var(--muted);
-  font-size: 12px;
-  cursor: pointer;
-  transition-property: background-color, color;
-  transition-duration: 120ms;
-  transition-timing-function: ease-out;
 }
 
-.visibility button:not(:disabled):not([aria-disabled="true"]):hover {
-  color: var(--text);
-  background: var(--hover-fill-strong);
+.selectControlTrigger.visibility > svg {
+  opacity: 0;
+  transition: opacity 140ms ease-out;
 }
 
-.visibility .selected {
-  color: var(--text);
-  background: var(--panel-bg);
-  box-shadow: inset 0 0 0 1px var(--line);
-  font-weight: 600;
-}
-
-.visibility button:disabled,
-.visibility button[aria-disabled="true"] {
-  cursor: default;
-  opacity: 0.45;
-}
-
-.visibility button:disabled:not(.selected),
-.visibility button[aria-disabled="true"]:not(.selected) {
-  opacity: 0.35;
+.selectControlTrigger.visibility:hover > svg,
+.selectControlTrigger.visibility:focus-visible > svg,
+.selectControlTrigger.visibility[data-state="open"] > svg {
+  opacity: 1;
 }

@@ -1,5 +1,5 @@
 .pageHeader.compact {
-  padding: var(--page-top-inset) var(--page-right-inset) var(--page-compact-bottom-inset) var(--page-left-inset);
+  padding: var(--page-top-inset) var(--page-right-inset) var(--page-header-bottom-inset) var(--page-left-inset);
   margin: 0;
 }
 
@@ -8,7 +8,7 @@
   align-items: flex-start;
   justify-content: space-between;
   gap: var(--page-header-gap);
-  margin-bottom: 20px;
+  margin-bottom: var(--page-header-bottom-inset);
 }
 
 .pageHeader h1 {

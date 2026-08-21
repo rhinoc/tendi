@@ -20,6 +20,8 @@ Project documentation is split between user-facing setup and focused implementat
   limitations, and follow-up design options.
 - [Performance gates](performance-gates.md): local performance thresholds, baselines, and the
   pre-push hook.
+- [Logging](logging.md): persistent desktop and Rust logs, rotation, environment overrides, and
+  the frontend logging rule.
 - [Tauri updater](UPDATER.md): signing keys, release artifacts, `latest.json`, and update behavior.
 - The local DMG workflow is documented in the [project README](../README.md#build-a-macos-dmg)
   and implemented by `scripts/build-release.sh` and `scripts/build-dmg.sh`.

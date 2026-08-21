@@ -69,6 +69,7 @@
     </clipPath>
   </defs>
 
+  <g id="icon-content" transform="translate(512 512) scale(0.9196428571428571) translate(-512 -512)">
   <g id="tile" filter="url(#tile-shadow)">
     <rect x="64" y="64" width="896" height="896" rx="220" fill="url(#tile-fill)"/>
     <rect x="64" y="64" width="896" height="896" rx="220" fill="url(#tile-violet)"/>
@@ -93,5 +94,6 @@
 
     <path d="M 426 451 V 593" fill="none" stroke="url(#intersection-flare)" stroke-width="8"/>
     <path d="M 424 456 V 575" fill="none" stroke="url(#intersection-flare)" stroke-width="21" stroke-linecap="round" filter="url(#flare-blur)" opacity="0.7"/>
+  </g>
   </g>
 </svg>

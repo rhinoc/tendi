@@ -2,6 +2,8 @@ import { forwardRef, type ComponentPropsWithoutRef, type ReactNode } from "react
 import { ChevronDown } from "lucide-react";
 import { Select } from "radix-ui";
 
+import "./SelectTrigger.css";
+
 type RadixSelectTriggerProps = ComponentPropsWithoutRef<typeof Select.Trigger>;
 
 export type SelectTriggerProps = Omit<RadixSelectTriggerProps, "children"> & {

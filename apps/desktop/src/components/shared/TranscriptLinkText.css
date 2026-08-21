@@ -60,5 +60,8 @@
 }
 
 .transcriptLink.isSearchMatch {
+  padding-inline: 2px;
+  border-radius: 2px;
+  background: var(--tone-warn-soft);
   text-decoration-color: var(--tone-warn);
 }

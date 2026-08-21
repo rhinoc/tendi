@@ -1,0 +1,77 @@
+.emptyState {
+  min-width: 0;
+  min-height: 72px;
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding: 24px;
+  color: var(--muted);
+  text-align: center;
+  pointer-events: auto;
+}
+
+.emptyStateIcon {
+  width: 46px;
+  height: 46px;
+  display: grid;
+  place-items: center;
+}
+
+.emptyStateIcon--accent {
+  color: var(--accent);
+}
+
+.emptyStateIcon--muted {
+  color: var(--muted);
+}
+
+.emptyStateCopy {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+}
+
+.emptyStateCopy strong {
+  color: var(--text);
+  font-size: var(--text-title);
+  font-weight: 650;
+  line-height: var(--leading-tight);
+}
+
+.emptyStateCopy span {
+  max-width: 320px;
+  color: var(--muted);
+  font-size: var(--text-ui);
+  line-height: var(--leading-body);
+}
+
+.emptyStateAction {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.emptyState--compact {
+  min-height: 72px;
+  padding: 16px;
+  gap: 8px;
+}
+
+.emptyState--compact .emptyStateIcon {
+  width: 24px;
+  height: 24px;
+}
+
+.emptyState--compact .emptyStateCopy strong {
+  font-size: var(--text-ui);
+  font-weight: 600;
+}
+
+.emptyState--compact .emptyStateCopy span {
+  font-size: var(--text-sm);
+}

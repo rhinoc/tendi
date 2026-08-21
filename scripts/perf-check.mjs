@@ -13,6 +13,7 @@ import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { performance } from "node:perf_hooks";
+import { writeStderr, writeStdout } from "../apps/desktop/scripts/stdio.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const binary = join(root, "target/debug/tendi");
@@ -80,9 +81,6 @@ const thresholds = {
   tertiaryPromptCrudMs: envNumber("TENDI_PERF_TERTIARY_PROMPT_CRUD_MS", 40),
   tertiaryPromptCrudRssBytes: envNumber("TENDI_PERF_TERTIARY_PROMPT_CRUD_RSS_MIB", 24) * mib,
   tertiaryPromptCrudPayloadBytes: envNumber("TENDI_PERF_TERTIARY_PROMPT_CRUD_PAYLOAD_MIB", 1) * mib,
-  tertiarySessionProjectsMs: envNumber("TENDI_PERF_TERTIARY_SESSION_PROJECTS_MS", 10),
-  tertiarySessionProjectsRssBytes: envNumber("TENDI_PERF_TERTIARY_SESSION_PROJECTS_RSS_MIB", 24) * mib,
-  tertiarySessionProjectsPayloadBytes: envNumber("TENDI_PERF_TERTIARY_SESSION_PROJECTS_PAYLOAD_MIB", 0.0625) * mib,
   tertiaryRuleSaveMs: envNumber("TENDI_PERF_TERTIARY_RULE_SAVE_MS", 40),
   tertiaryRuleSaveRssBytes: envNumber("TENDI_PERF_TERTIARY_RULE_SAVE_RSS_MIB", 16) * mib,
   tertiaryRuleSavePayloadBytes: envNumber("TENDI_PERF_TERTIARY_RULE_SAVE_PAYLOAD_MIB", 0.25) * mib,
@@ -108,8 +106,8 @@ if (baselinePath) {
   baseline = JSON.parse(readFileSync(resolve(root, baselinePath), "utf8"));
 }
 
-console.log(`Tendi performance check (${options.profile})`);
-console.log(`root: ${root}`);
+writeStdout(`Tendi performance check (${options.profile})`);
+writeStdout(`root: ${root}`);
 
 if (!options.noBuild) {
   runRequired("build tendi-cli", "cargo", [
@@ -193,11 +191,6 @@ benchmarkCoreScenario("tertiary-prompt-crud", {
   maxRssBytes: thresholds.tertiaryPromptCrudRssBytes,
   maxPayloadBytes: thresholds.tertiaryPromptCrudPayloadBytes,
 });
-benchmarkCoreScenario("tertiary-session-projects", {
-  maxOperationMs: thresholds.tertiarySessionProjectsMs,
-  maxRssBytes: thresholds.tertiarySessionProjectsRssBytes,
-  maxPayloadBytes: thresholds.tertiarySessionProjectsPayloadBytes,
-});
 benchmarkCoreScenario("tertiary-rule-save", {
   maxOperationMs: thresholds.tertiaryRuleSaveMs,
   maxRssBytes: thresholds.tertiaryRuleSaveRssBytes,
@@ -276,11 +269,11 @@ mkdirSync(outputDir, { recursive: true });
 writeFileSync(latestPath, `${JSON.stringify(report, null, 2)}\n`);
 if (options.saveBaseline) {
   writeFileSync(defaultBaselinePath, `${JSON.stringify(report, null, 2)}\n`);
-  console.log(`\nbaseline saved: ${defaultBaselinePath}`);
+  writeStdout(`\nbaseline saved: ${defaultBaselinePath}`);
 }
 
 printSummary();
-console.log(`result: ${latestPath}`);
+writeStdout(`result: ${latestPath}`);
 if (results.some((result) => result.status === "fail")) process.exit(1);
 
 function parseArgs(args) {
@@ -301,7 +294,7 @@ function parseArgs(args) {
     else if (arg === "--baseline") parsed.baseline = args[++index];
     else if (arg === "--app-pid") parsed.appPid = Number(args[++index]);
     else if (arg === "--help" || arg === "-h") {
-      console.log(`Usage: node scripts/perf-check.mjs [options]
+      writeStdout(`Usage: node scripts/perf-check.mjs [options]
 
   --fast                    Run the pre-push checks
   --full                    Run local-data and memory checks (default)
@@ -608,12 +601,12 @@ function gate(name, passed, metrics, threshold) {
   const previous = baseline?.results?.find((item) => item.name === name);
   if (previous) result.baseline = comparableMetrics(previous, result);
   results.push(result);
-  console.log(`${passed ? "PASS" : "FAIL"} ${name}: ${formatMetrics(result)} (${threshold})`);
+  writeStdout(`${passed ? "PASS" : "FAIL"} ${name}: ${formatMetrics(result)} (${threshold})`);
 }
 
 function skip(name, reason) {
   results.push({ name, status: "skip", reason });
-  console.log(`SKIP ${name}: ${reason}`);
+  writeStdout(`SKIP ${name}: ${reason}`);
 }
 
 function comparableMetrics(previous, current) {
@@ -660,9 +653,9 @@ function formatMetrics(result) {
 }
 
 function printSummary() {
-  console.log("\nSummary");
+  writeStdout("\nSummary");
   for (const result of results) {
-    console.log(`  ${result.status.toUpperCase().padEnd(4)} ${result.name}`);
+    writeStdout(`  ${result.status.toUpperCase().padEnd(4)} ${result.name}`);
   }
 }
 
@@ -679,6 +672,6 @@ function signed(value) {
 }
 
 function failNow(message) {
-  console.error(`ERROR ${message}`);
+  writeStderr(`ERROR ${message}`);
   process.exit(2);
 }

@@ -8,27 +8,6 @@
   border-bottom: 1px solid var(--line);
 }
 
-.backButton,
-.headerGhostButton {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-}
-
-.backButton {
-  width: 30px;
-  height: 30px;
-  border: 0;
-  border-radius: 7px;
-  background: transparent;
-  color: var(--muted);
-  cursor: pointer;
-}
-
-.backButton:hover {
-  color: var(--text);
-}
-
 .editorTitle {
   min-width: 0;
 }
@@ -39,8 +18,8 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: 18px;
-  line-height: 1.15;
+  font-size: var(--text-title);
+  line-height: var(--leading-lg);
   font-weight: 720;
 }
 
@@ -48,29 +27,4 @@
   display: flex;
   align-items: center;
   gap: 8px;
-}
-
-.headerGhostButton {
-  width: 32px;
-  height: 32px;
-  border: 0;
-  border-radius: 7px;
-  color: var(--muted);
-  background: transparent;
-  cursor: pointer;
-}
-
-.headerGhostButton:hover {
-  color: var(--text);
-  background: var(--hover-fill-strong);
-}
-
-.headerGhostButton.danger:hover:not(:disabled) {
-  color: var(--danger-text);
-  background: var(--danger-soft);
-}
-
-.headerGhostButton:disabled {
-  opacity: 0.42;
-  cursor: not-allowed;
 }

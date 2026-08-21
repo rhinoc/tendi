@@ -20,9 +20,9 @@
   color: var(--muted);
   background: var(--panel-bg);
   box-shadow: 0 1px 3px color-mix(in oklch, var(--overlay-scrim) 18%, transparent);
-  font-family: var(--font-mono);
-  font-size: 11px;
-  line-height: 1.2;
+  font-family: var(--font-sans);
+  font-size: var(--text-xs);
+  line-height: var(--leading-tight);
   overflow: visible;
 }
 
@@ -81,8 +81,8 @@
   color: var(--muted);
   background: transparent;
   font: inherit;
-  font-size: 11px;
-  line-height: 18px;
+  font-size: var(--text-xs);
+  line-height: var(--leading-tight);
   cursor: pointer;
 }
 
@@ -167,7 +167,7 @@
   right: 0;
   bottom: calc(100% + 8px);
   z-index: var(--z-drawer);
-  width: min(360px, calc(100vw - 32px));
+  width: 100%;
   max-height: min(320px, calc(100vh - 96px));
   display: grid;
   grid-template-rows: auto minmax(0, 1fr) auto;
@@ -178,10 +178,10 @@
   color: var(--muted);
   background: var(--panel-bg);
   box-shadow: var(--shadow-menu);
-  font-family: inherit;
-  font-size: 11px;
+  font-family: var(--font-sans);
+  font-size: var(--text-xs);
   font-weight: 500;
-  line-height: 1.35;
+  line-height: var(--leading-body);
   white-space: normal;
   cursor: text;
   visibility: hidden;
@@ -196,7 +196,7 @@
   position: absolute;
   right: 0;
   bottom: -10px;
-  width: min(360px, calc(100vw - 32px));
+  width: 100%;
   height: 10px;
 }
 
@@ -227,8 +227,8 @@
 
 .tokenBreakdownHeader span:last-child {
   color: var(--muted);
-  font-size: 10px;
-  line-height: 1.35;
+  font-size: var(--text-xs);
+  line-height: var(--leading-body);
 }
 
 .tokenBreakdownHeader a {
@@ -270,7 +270,7 @@
   z-index: var(--z-content);
   color: var(--muted);
   background: var(--panel-bg);
-  font-size: 10px;
+  font-size: var(--text-xs);
   font-weight: 760;
   text-transform: uppercase;
 }
@@ -320,34 +320,12 @@
   font-variant-numeric: tabular-nums;
 }
 
-.tokenBucket {
-  display: inline-flex;
-  max-width: 100%;
-  padding: 2px 5px;
-  border-radius: 5px;
-  overflow: hidden;
-  font-size: 10px;
-  font-weight: 760;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.tokenBucket-input {
-  color: var(--tone-info);
-  background: var(--tone-info-soft);
-}
-
-.tokenBucket-output {
-  color: var(--tone-warn);
-  background: var(--tone-warn-soft);
-}
-
 .tokenBreakdownNotes {
   display: grid;
   gap: 4px;
   color: var(--muted);
-  font-size: 10px;
-  line-height: 1.35;
+  font-size: var(--text-xs);
+  line-height: var(--leading-body);
 }
 
 .tokenTone-tiny {

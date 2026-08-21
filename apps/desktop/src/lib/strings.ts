@@ -12,6 +12,12 @@ export function compactCommand(value: unknown): string {
   return text.length > 90 ? `${text.slice(0, 87)}...` : text;
 }
 
+export function formatUserPath(value: unknown): string {
+  const path = `${value ?? ""}`;
+  const homePrefix = path.match(/^(?:\/(?:Users|home)\/[^/]+|\/root|[A-Za-z]:[\\/]Users[\\/][^\\/]+)(?=[\\/]|$)/i);
+  return homePrefix ? `~${path.slice(homePrefix[0].length)}` : path;
+}
+
 function parseDateTimeParts(value: unknown) {
   const text = `${value ?? ""}`.trim();
   if (!text) return null;
@@ -45,7 +51,12 @@ export function compactDateTime(value: unknown, options: { year?: boolean } = {}
   const parts = parseDateTimeParts(value);
   if (parts) {
     const { year, month, day, hour, minute } = parts;
-    return options.year ? `${year}/${month}/${day} ${hour}:${minute}` : `${month}/${day} ${hour}:${minute}`;
+    if (options.year) {
+      const monthLabel = String(month).padStart(2, "0");
+      const dayLabel = String(day).padStart(2, "0");
+      return `${year}-${monthLabel}-${dayLabel} ${hour}:${minute}`;
+    }
+    return `${month}/${day} ${hour}:${minute}`;
   }
 
   const text = `${value ?? ""}`.trim();

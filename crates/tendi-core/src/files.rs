@@ -11,7 +11,6 @@ use walkdir::WalkDir;
 
 use crate::{
     fsutil::{atomic_write, sha256_text},
-    skills,
 };
 
 #[derive(Debug, Clone, Serialize)]
@@ -219,26 +218,15 @@ pub fn delete_skill_path(
 }
 
 fn resolve_skill_dir(
-    cwd: &Path,
+    _cwd: &Path,
     skill_name: &str,
     cached_skill_dir: Option<&Path>,
 ) -> Result<PathBuf> {
-    if let Some(path) = cached_skill_dir.filter(|path| path.is_dir()) {
-        return path
-            .canonicalize()
-            .with_context(|| format!("failed to canonicalize {}", path.display()));
-    }
-    let scan = skills::scan_skills(cwd)?;
-    let skill = scan
-        .skills
-        .iter()
-        .find(|skill| skill.name == skill_name)
-        .with_context(|| format!("skill {skill_name} was not found"))?;
-    skill
-        .paths
-        .first()
-        .map(|path| path.path.clone())
-        .with_context(|| format!("skill {skill_name} has no path"))
+    let path = cached_skill_dir
+        .filter(|path| path.is_dir())
+        .with_context(|| format!("skill {skill_name} is not available in the current projection"))?;
+    path.canonicalize()
+        .with_context(|| format!("failed to canonicalize {}", path.display()))
 }
 
 fn safe_join(root: &Path, relative_path: &str) -> Result<PathBuf> {
@@ -362,6 +350,25 @@ mod tests {
             fs::read_to_string(skill_dir.join("SKILL.md")).expect("read saved skill"),
             updated.content
         );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn skill_file_tools_require_a_resolved_skill_directory() {
+        let root = std::env::temp_dir().join(format!(
+            "tendi-file-projection-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("system time before epoch")
+                .as_nanos()
+        ));
+        let skill_dir = root.join(".agents/skills/demo");
+        fs::create_dir_all(&skill_dir).expect("create skill dir");
+        fs::write(skill_dir.join("SKILL.md"), "---\nname: demo\n---\n").expect("write skill");
+
+        assert!(read_skill_file(&root, "demo", "SKILL.md", None).is_err());
 
         let _ = fs::remove_dir_all(root);
     }

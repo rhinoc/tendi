@@ -5,12 +5,13 @@ import { TauriCommand, diffPreview, ruleTitle, safeInvoke } from "../../lib/inde
 import { DiscardChangesDialog } from "../../components/shared/DiscardChangesDialog.tsx";
 import { EditorStatePlaceholder } from "../../components/shared/EditorStatePlaceholder.tsx";
 import { EditorHeader } from "../../components/shared/EditorHeader.tsx";
+import { IconButton } from "../../components/shared/IconButton.tsx";
 import { MarkdownFilePane, type DiffStats } from "../../components/shared/MarkdownFilePane.tsx";
 
 export type RuleEditorRecord = {
   path?: string;
   sha256?: string;
-  agent?: string;
+  agents?: string[];
   kind?: string;
   scope?: string;
 };
@@ -36,8 +37,8 @@ export function RuleEditorView({ rule, back }: RuleEditorViewProps) {
   const contentReady = !loadingRule && (!currentRule.path || Boolean(draft.sha256));
   const dirty = content !== draft.originalContent;
   const diffLines = useMemo(
-    () => diffPreview(draft.originalContent, deferredContent),
-    [deferredContent, draft.originalContent],
+    () => !contentReady || !dirty ? [] : diffPreview(draft.originalContent, deferredContent),
+    [contentReady, deferredContent, dirty, draft.originalContent],
   );
   const diffStats = useMemo(
     () => diffLines.reduce(
@@ -117,13 +118,12 @@ export function RuleEditorView({ rule, back }: RuleEditorViewProps) {
         backLabel="Back to rules"
         onBack={handleBack}
         actions={(
-          <button
-            className="headerGhostButton"
+          <IconButton
             aria-label="Reveal rule in Finder"
             onClick={() => currentRule.path && safeInvoke(TauriCommand.RevealInFinder, { path: currentRule.path })}
           >
             <FolderOpen size={15} />
-          </button>
+          </IconButton>
         )}
       />
       <DiscardChangesDialog open={showDiscardDialog} onOpenChange={setShowDiscardDialog} onDiscard={back} />

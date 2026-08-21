@@ -1,0 +1,104 @@
+.badge {
+  --badge-fill: var(--control-fill);
+  --badge-color: var(--muted);
+  box-sizing: border-box;
+  min-width: 0;
+  max-width: 100%;
+  height: var(--badge-height);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  padding: 0 var(--badge-padding-inline);
+  overflow: hidden;
+  border: 0;
+  border-radius: var(--badge-radius);
+  color: var(--badge-color);
+  background: var(--badge-fill);
+  font: inherit;
+  font-size: var(--text-xs);
+  font-weight: 600;
+  line-height: var(--leading-micro);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.badge[data-tone="accent"] {
+  --badge-fill: var(--accent-soft);
+  --badge-color: var(--text);
+}
+
+.badge[data-tone="info"] {
+  --badge-fill: var(--tone-info-soft);
+  --badge-color: var(--tone-info);
+}
+
+.badge[data-tone="success"],
+.badge[data-tone="meta"] {
+  --badge-fill: var(--tone-meta-soft);
+  --badge-color: var(--tone-meta-ink);
+}
+
+.badge[data-tone="warning"] {
+  --badge-fill: var(--tone-warn-soft);
+  --badge-color: var(--tone-warn);
+}
+
+.badge[data-tone="danger"] {
+  --badge-fill: var(--danger-soft);
+  --badge-color: var(--danger-text);
+}
+
+.badge[data-tone="neutral"] {
+  --badge-fill: var(--hover-fill-strong);
+  --badge-color: var(--muted);
+}
+
+.badge[data-interactive="true"] {
+  appearance: none;
+  cursor: pointer;
+  transition: background-color 120ms ease, color 120ms ease, border-color 120ms ease;
+}
+
+.badge[data-interactive="true"]:hover {
+  --badge-fill: color-mix(in oklch, var(--badge-color) 18%, var(--control-fill));
+  --badge-color: var(--text);
+}
+
+.badge[data-interactive="true"]:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+
+.badge:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+
+.badge[data-mono="true"] {
+  font-family: var(--font-mono);
+  font-weight: 400;
+}
+
+.badge[data-uppercase="true"] {
+  text-transform: uppercase;
+}
+
+.badgeRemove {
+  width: 16px;
+  height: 16px;
+  flex: 0 0 16px;
+  display: inline-grid;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: 999px;
+  color: inherit;
+  background: transparent;
+  cursor: pointer;
+}
+
+.badgeRemove:hover {
+  color: var(--text);
+  background: var(--active-fill);
+}

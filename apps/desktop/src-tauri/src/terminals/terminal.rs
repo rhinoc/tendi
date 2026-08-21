@@ -11,9 +11,6 @@ impl TerminalProvider for Terminal {
     fn aliases(&self) -> &'static [&'static str] {
         &["auto"]
     }
-    fn label(&self) -> String {
-        "Terminal".to_string()
-    }
     fn available(&self) -> bool {
         app_available(&[
             "/System/Applications/Utilities/Terminal.app",

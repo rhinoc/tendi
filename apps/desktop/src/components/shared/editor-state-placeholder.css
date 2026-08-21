@@ -1,3 +1,11 @@
 .editorStatePlaceholder {
+  width: 100%;
   flex: 1;
+  min-width: 0;
+  min-height: 72px;
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+  color: var(--faint);
+  font-size: var(--text-ui);
 }

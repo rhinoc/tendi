@@ -1,8 +1,6 @@
 export {
   navItems,
   fallbackAgents,
-  fallbackSkills,
-  fallbackSkillFiles,
   SIDEBAR_SIZE,
   COLLAPSED_SIDEBAR_SIZE,
   SESSION_FREEZE_COLUMN,
@@ -31,6 +29,7 @@ export {
   basename,
   titleValue,
   compactCommand,
+  formatUserPath,
   compactDateTime,
   dayGroupKey,
   formatDayGroupLabel,
@@ -88,8 +87,15 @@ export type { NormalizedSkill } from "./skills.ts";
 
 export { suppressNextClick } from "./dom.ts";
 
+export { logger } from "./logger.ts";
+export type { LogFields, LogLevel } from "./logger.ts";
+
 export {
   normalizeSession,
+  normalizeSessionResumeTarget,
+  sessionResumeTargetForAgent,
+  codexSessionDeepLink,
+  sessionAppDeepLink,
   isAbsolutePath,
   sessionWorkspacePath,
   sessionRepositoryPath,
@@ -110,10 +116,8 @@ export {
   sessionTimeMs,
 } from "./sessions.ts";
 export { sessionExternalKey, resolveInitialSession, resolveInitialSessionId } from "./session-selection.ts";
-export type { SessionIdentityRecord } from "./sessions.ts";
+export type { SessionIdentityRecord, SessionResumeTarget } from "./sessions.ts";
 export type { SessionKind, SessionRecord, SessionTokenUsage } from "./sessions.ts";
-export { applySessionProjectDelta } from "./session-project-delta.ts";
-export type { SessionProjectDelta } from "./session-project-delta.ts";
 
 export { summarizeSessionUsage } from "./overview.ts";
 export { formatSessionTitle, formatTranscriptPreview, summarizeSessionPreviewRecord } from "./session-preview.ts";
@@ -137,10 +141,12 @@ export {
   normalizePromptTags,
   promptTagsLabel,
   promptPreview,
+  promptTitleFromBody,
 } from "./prompt-model.ts";
 export type { PromptRecord } from "./prompt-model.ts";
 
 export {
+  ruleAgents,
   ruleTitle,
   ruleKey,
   ruleSearchText,
@@ -168,6 +174,7 @@ export {
   mergeTranscriptItems,
   transcriptItemsSize,
   normalizeTranscript,
+  normalizeTranscriptLocatorPage,
   normalizeTranscriptPage,
   normalizeTranscriptSearchResult,
   parseJsonlTranscript,
@@ -178,6 +185,8 @@ export type {
   JsonlTranscriptParseResult,
   TranscriptItem,
   TranscriptGroup,
+  TranscriptLocatorItem,
+  TranscriptLocatorPage,
   TranscriptPage,
   TranscriptSearchHit,
   TranscriptSearchResult,
@@ -201,7 +210,6 @@ export {
   parentPath,
   joinRelativePath,
   uniqueChildPath,
-  fallbackSkillContent,
   splitMarkdownFrontmatter,
   isMarkdownPath,
   isYamlPath,
@@ -217,8 +225,9 @@ export {
   shouldPairInlineDiff,
   addInlineDiffSegments,
   currentLineDiffMap,
+  mergeThreeWay,
 } from "./diff.ts";
-export type { DiffSegment, DiffLine } from "./diff.ts";
+export type { DiffSegment, DiffLine, ThreeWayMergeResult } from "./diff.ts";
 
 export {
   clamp,
@@ -240,12 +249,13 @@ export {
   startWindowDrag,
 } from "./window-drag.ts";
 
-export { TauriCommand, invokeCommand, isTauriRuntime, safeInvoke, safeListen, copyText } from "./tauri.ts";
+export { DaemonCommandError, TauriCommand, invokeCommand, isTauriRuntime, safeInvoke, subscribeDaemonEvents, copyText } from "./tauri.ts";
 export type {
   BundledSkillInstallReport,
   BundledSkillStatus,
   CliInstallState,
   CliInstallStatus,
+  DaemonEvent,
 } from "./tauri.ts";
 
 export { textMatchRank, boostedTextMatchRank } from "./text-search.ts";

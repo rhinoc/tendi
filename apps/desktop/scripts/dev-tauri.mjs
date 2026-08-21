@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import {
   mkdirSync,
   readFileSync,
@@ -7,6 +7,7 @@ import {
 } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { writeStderr, writeStdout } from "./stdio.mjs";
 
 const scriptDir = dirname(fileURLToPath(import.meta.url));
 const desktopDir = resolve(scriptDir, "..");
@@ -68,16 +69,31 @@ function releaseLock() {
 try {
   acquireLock();
 } catch (error) {
-  console.error(`[tendi] ${error.message}`);
+  writeStderr(`[tendi] ${error.message}`);
   process.exit(1);
 }
 
-console.log(`[tendi] CARGO_TARGET_DIR=${targetDir}`);
+writeStdout(`[tendi] CARGO_TARGET_DIR=${targetDir}`);
+
+const cliBuild = spawnSync("cargo", ["build", "-p", "tendi-cli"], {
+  cwd: repoDir,
+  env: { ...process.env, CARGO_TARGET_DIR: targetDir },
+  stdio: "inherit",
+});
+if (cliBuild.error || cliBuild.status !== 0) {
+  releaseLock();
+  writeStderr(`[tendi] failed to build the dev CLI${cliBuild.error ? `: ${cliBuild.error.message}` : ""}`);
+  process.exit(cliBuild.status || 1);
+}
 
 const tauriCommand = process.platform === "win32" ? "tauri.cmd" : "tauri";
 const child = spawn(tauriCommand, ["dev", ...process.argv.slice(2)], {
   cwd: desktopDir,
-  env: { ...process.env, CARGO_TARGET_DIR: targetDir },
+  env: {
+    ...process.env,
+    CARGO_TARGET_DIR: targetDir,
+    TENDI_CWD: process.env.TENDI_CWD || desktopDir,
+  },
   stdio: "inherit",
 });
 
@@ -91,7 +107,7 @@ process.once("exit", releaseLock);
 
 child.once("error", (error) => {
   releaseLock();
-  console.error(`[tendi] failed to start Tauri: ${error.message}`);
+  writeStderr(`[tendi] failed to start Tauri: ${error.message}`);
   process.exit(1);
 });
 

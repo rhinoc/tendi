@@ -15,6 +15,7 @@
     "core:window:allow-set-min-size",
     "core:window:allow-set-position",
     "core:window:allow-set-focus",
+    "core:window:allow-set-icon",
     "core:window:allow-unminimize",
     "core:window:allow-center",
     "updater:default"

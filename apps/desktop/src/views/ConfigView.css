@@ -8,7 +8,7 @@
   min-width: 0;
   display: flex;
   align-items: center;
-  gap: 9px;
+  gap: 8px;
 }
 
 .configAgentCell > .agentOptionLabel {
@@ -21,21 +21,15 @@
   flex: 1 1 auto;
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: 0;
 }
 
-.configAgentText strong {
-  font-size: 13px;
-  font-weight: 650;
+.configAgentText .dataCellSubLine {
+  width: 100%;
 }
 
-.configAgentText > span {
-  overflow: hidden;
-  color: var(--faint);
+.configAgentText .dataCellSub {
   font-family: var(--font-mono);
-  font-size: 10px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
 .configListPane .dataRow {
@@ -43,7 +37,8 @@
 }
 
 .configListPane .dataRow.configRowActive::after {
-  background: var(--amber-soft);
+  background: var(--selection-fill);
+  box-shadow: none;
 }
 
 .configListPane .dataRow.configRowActive::before,
@@ -75,10 +70,37 @@
   flex: 1;
 }
 
+.configEditorContent {
+  position: relative;
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+}
+
+.configEditorContent > .codePane {
+  flex: 1;
+}
+
+.configEditorLoading {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  display: grid;
+  place-items: center;
+  background: var(--editor-bg);
+}
+
 .configEditorHeader {
   min-width: 0;
   display: flex;
   align-items: stretch;
+}
+
+.configConflictActions {
+  flex: 0 0 auto;
+  display: flex;
+  gap: 6px;
 }
 
 .configEditorPanel .configEditorHeader .threadTitleLine {
@@ -100,12 +122,6 @@
   flex: 1 1 auto;
 }
 
-.configDirty {
-  flex: 0 0 auto;
-  color: var(--orange);
-  font-size: 12px;
-}
-
 .configProfileFloating {
   flex: 0 0 auto;
   display: inline-flex;
@@ -115,82 +131,9 @@
   margin-right: 12px;
 }
 
-.configProfileSelect {
+.configProfileFloating > .selectControlTrigger {
   min-width: 132px;
   max-width: 156px;
-  height: 26px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 6px;
-  border: 0;
-  border-radius: var(--radius-sm);
-  background: var(--panel-bg);
-  box-shadow: var(--shadow-border);
-  color: var(--text);
-  padding: 0 6px;
-  font-size: 11px;
-  outline: none;
-  cursor: pointer;
-}
-
-.configProfileSelect:focus-visible {
-  box-shadow: var(--shadow-border-hover), 0 0 0 3px var(--focus-ring-soft);
-}
-
-.configProfileSelectContent {
-  min-width: 156px;
-}
-
-.configProfileSwitchButton {
-  height: 26px;
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  padding: 0 8px;
-  border: 0;
-  border-radius: var(--radius-sm);
-  color: var(--accent-contrast);
-  background: var(--accent);
-  font-size: 11px;
-  font-weight: 600;
-  cursor: pointer;
-}
-
-.configProfileStateButton {
-  width: 80px;
-  flex: 0 0 80px;
-  justify-content: center;
-  white-space: nowrap;
-}
-
-.configProfileSwitchButton:hover:not(:disabled) {
-  background: var(--accent-hover);
-}
-
-.configProfileSwitchButton:active:not(:disabled) {
-  transform: scale(var(--press-scale));
-}
-
-.configProfileSwitchButton:focus-visible {
-  outline: 2px solid var(--focus-ring);
-  outline-offset: -2px;
-}
-
-.configProfileSwitchButton:disabled,
-.configProfileSwitchButton:disabled:hover {
-  color: var(--faint);
-  background: var(--control-fill);
-  cursor: default;
-  transform: none;
-}
-
-.configProfileSwitchButton.isActive,
-.configProfileSwitchButton.isActive:disabled,
-.configProfileSwitchButton.isActive:disabled:hover {
-  color: var(--green);
-  background: var(--green-soft);
-  box-shadow: 0 0 0 1px var(--green-soft-strong);
 }
 
 .configProfileDialog {
@@ -210,5 +153,5 @@
 .configProfileHint {
   margin: 0;
   color: var(--faint);
-  font-size: 12px;
+  font-size: var(--text-sm);
 }

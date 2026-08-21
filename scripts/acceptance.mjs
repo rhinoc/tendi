@@ -3,6 +3,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { writeStdout } from "../apps/desktop/scripts/stdio.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const desktop = join(root, "apps/desktop");
@@ -99,7 +100,7 @@ assert.equal(plainCount("sessions"), scan.sessions.sessions.length, "plain scan 
 assert.equal(plainCount("rules"), scan.rules.rules.length, "plain scan rules count mismatch");
 assert.equal(plainCount("hooks"), scan.hooks.hooks.length, "plain scan hooks count mismatch");
 assert.equal(plainCount("mcp servers"), scan.mcp.servers.length, "plain scan mcp count mismatch");
-console.log(
+writeStdout(
   [
     `agents=${scan.agents.agents.length}`,
     `skills=${scan.skills.skills.length}`,
@@ -130,4 +131,4 @@ run("npm run e2e:align", "npm", ["run", "e2e:align"], { cwd: desktop });
 run("npm run build", "npm", ["run", "build"], { cwd: desktop });
 run("npm run build:tauri", "npm", ["run", "build:tauri"], { cwd: desktop });
 
-console.log("\nacceptance ok");
+writeStdout("\nacceptance ok");

@@ -62,6 +62,8 @@ export type DataTableProps<TRow> = {
   onSortChange?: (sort: SortState) => void;
   manualSorting?: boolean;
   rowHeight?: number;
+  scrollToRowId?: string;
+  onScrollToRowComplete?: (rowId: string) => void;
   freezeColumn?: FreezeColumnConfig;
   onRowClick?: (row: TRow) => void;
   rowProps?: (row: TRow) => { className?: string };

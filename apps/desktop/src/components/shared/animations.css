@@ -19,7 +19,7 @@
   place-items: center;
   width: 1em;
   height: 1em;
-  line-height: 0;
+  line-height: var(--leading-none);
 }
 
 .copyIconSwapLayer {

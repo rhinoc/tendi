@@ -1,6 +1,8 @@
-import { forwardRef, type ButtonHTMLAttributes, type ReactNode } from "react";
+import { forwardRef, type ReactNode } from "react";
 
-export type IconButtonProps = Omit<ButtonHTMLAttributes<HTMLButtonElement>, "children"> & {
+import { Button, type ButtonProps } from "./Button.tsx";
+
+export type IconButtonProps = Omit<ButtonProps, "children" | "variant"> & {
   children: ReactNode;
 };
 
@@ -9,8 +11,8 @@ export const IconButton = forwardRef<HTMLButtonElement, IconButtonProps>(functio
   ref,
 ) {
   return (
-    <button ref={ref} type={type} {...props} className={`iconButton${className ? ` ${className}` : ""}`}>
+    <Button ref={ref} type={type} {...props} variant="icon" className={className}>
       {children}
-    </button>
+    </Button>
   );
 });

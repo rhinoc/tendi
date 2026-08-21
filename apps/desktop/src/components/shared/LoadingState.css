@@ -1,20 +1,28 @@
 .loadingState {
   width: 100%;
+  height: 100%;
   min-height: 208px;
   flex: 1 1 auto;
   display: grid;
   place-items: center;
+  align-self: stretch;
+  justify-self: stretch;
+  box-sizing: border-box;
   overflow: hidden;
-  color: var(--chart-track);
+  color: var(--chart-track, var(--line-strong));
 }
 
-.loadingStateDots {
+.loadingState > .loadingStateDots {
   width: 100%;
   height: 100%;
-  min-height: 208px;
+  min-height: inherit;
+  align-self: stretch;
+  justify-self: stretch;
+  box-sizing: border-box;
 }
 
 .loadingStateCompact {
+  height: auto;
   min-height: 72px;
   flex: 0 0 auto;
 }

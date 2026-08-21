@@ -8,9 +8,6 @@ impl TerminalProvider for OrcaProvider {
     fn id(&self) -> &str {
         "orca"
     }
-    fn label(&self) -> String {
-        "Orca".to_string()
-    }
     fn available(&self) -> bool {
         app_available(&["/Applications/Orca.app"]) && orca_cli_path().is_some()
     }

@@ -11,7 +11,6 @@ import {
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 
-import { SkillVisibility } from "./skills.ts";
 
 export type NavItem = { id: string; label: string; icon: LucideIcon };
 
@@ -31,63 +30,6 @@ export const fallbackAgents = [
   { label: "Codex", count: 1 },
   { label: "Cursor", count: 1 },
   { label: "Claude", count: 1 },
-];
-
-export const fallbackSkills = [
-  {
-    id: "lark-im",
-    section: "Local",
-    name: "lark-im",
-    description: "Send messages, search chats, manage groups, files, reactions, and feed pins.",
-    agents: ["Codex", "Cursor"],
-    visibility: SkillVisibility.Manual,
-    statusTone: "warn",
-    source: "local",
-    installTargets: ["shared"],
-    updateStatus: "local",
-  },
-  {
-    id: "lark-doc",
-    section: "Local",
-    name: "lark-doc",
-    description: "Read, create, and edit Lark cloud documents from URLs or tokens.",
-    agents: ["Codex", "Cursor"],
-    visibility: SkillVisibility.Manual,
-    statusTone: "warn",
-    source: "local",
-    installTargets: ["shared"],
-    updateStatus: "local",
-  },
-  {
-    id: "pr",
-    section: "Local",
-    name: "pr",
-    description: "Focused GitHub pull request workflow for creating, updating, and validating PRs.",
-    agents: ["Codex", "Cursor", "Claude"],
-    visibility: SkillVisibility.Auto,
-    statusTone: "ok",
-    source: "local",
-    installTargets: ["shared"],
-    updateStatus: "local",
-  },
-  {
-    id: "openai-docs",
-    section: "System",
-    name: "openai-docs",
-    description: "Official OpenAI and Codex product documentation lookup.",
-    agents: ["Codex"],
-    visibility: SkillVisibility.Auto,
-    statusTone: "muted",
-    source: "system",
-    installTargets: ["codex"],
-    updateStatus: "local",
-  },
-];
-
-export const fallbackSkillFiles = [
-  { name: "SKILL.md", kind: "file" },
-  { name: "references", kind: "folder" },
-  { name: "references/example.md", kind: "file" },
 ];
 
 export const SIDEBAR_SIZE = "200px";

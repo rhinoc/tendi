@@ -1,6 +1,3 @@
-import {
-  fallbackSkills,
-} from "./constants.ts";
 import { normalizePrompt } from "./prompt-model.ts";
 import { normalizeSession } from "./sessions.ts";
 import { normalizeSkill, type NormalizedSkill } from "./skills.ts";
@@ -66,7 +63,6 @@ export function normalizeDomainRows(current: RuntimeData, domain: RuntimeDomainK
 
 export function normalizeReport(
   report: Record<string, unknown> | null | undefined,
-  { fallback = true }: { fallback?: boolean } = {},
 ): RuntimeData {
   const skillsRaw = (report?.skills as { skills?: unknown[] } | unknown[]) ?? [];
   const promptsRaw = (report?.prompts as { prompts?: unknown[] } | unknown[]) ?? [];
@@ -97,7 +93,7 @@ export function normalizeReport(
 
   const normalizedAgents = agentsList as Record<string, unknown>[];
   const normalizedSessions = sessions;
-  const normalizedSkills = skills.length || !fallback ? skills : fallbackSkills.map((skill, index) => normalizeSkill(skill as Record<string, unknown>, index));
+  const normalizedSkills = skills;
   return {
     agents: normalizedAgents,
     skills: normalizedSkills,

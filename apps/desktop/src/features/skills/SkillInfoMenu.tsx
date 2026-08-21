@@ -2,6 +2,7 @@ import { Tooltip } from "../../components/shared/Tooltip.tsx";
 import { ExternalLink, FolderOpen, Info } from "lucide-react";
 
 import {
+  formatUserPath,
   openSource,
   safeInvoke,
   SkillVisibility,
@@ -18,6 +19,7 @@ import { AgentChips } from "../../components/shared/AgentChips.tsx";
 import { CopyButton } from "../../components/shared/CopyButton.tsx";
 import { InfoDropdownMenu } from "../../components/shared/InfoDropdownMenu.tsx";
 import { InfoSection } from "../../components/shared/InfoSection.tsx";
+import { IconButton } from "../../components/shared/IconButton.tsx";
 import type { SkillDependencyRecord } from "./SkillDependencyGraph.tsx";
 import { Visibility } from "./Visibility.tsx";
 
@@ -80,6 +82,7 @@ export function SkillInfoMenu({ skill, skills = [], onOpenSkill }: SkillInfoMenu
   const sourceDetails = skillSourceDetails(skill);
   const sourceIcon = sourceIconDetails(sourceDetails);
   const sourceValue = sourceDetails.value;
+  const displaySourceValue = isWebSource(sourceValue.trim()) ? sourceValue : formatUserPath(sourceValue);
   const sourceUrl = sourceOpenUrl(sourceValue, sourceDetails.kind, sourceDetails.relativePath);
   const installLocations = skillTargets(skill);
   const dependencies = relationList(skill.dependencies ?? [], skills);
@@ -91,9 +94,9 @@ export function SkillInfoMenu({ skill, skills = [], onOpenSkill }: SkillInfoMenu
   return (
     <InfoDropdownMenu
       trigger={(
-        <button className="headerGhostButton" aria-label="Show skill info">
+        <IconButton aria-label="Show skill info">
           <Info size={15} />
-        </button>
+        </IconButton>
       )}
       label="Skill info"
       title={skill.name}
@@ -113,18 +116,18 @@ export function SkillInfoMenu({ skill, skills = [], onOpenSkill }: SkillInfoMenu
                   </span></Tooltip>
                 )}
                 {sourceValue && (isWebSource(sourceValue.trim())
-                  ? <code>{sourceValue}</code>
-                  : <Tooltip content={sourceValue} onlyWhenTruncated><code>{sourceValue}</code></Tooltip>)}
+                  ? <code>{displaySourceValue}</code>
+                  : <Tooltip content={displaySourceValue} onlyWhenTruncated><code>{displaySourceValue}</code></Tooltip>)}
                 {sourceValue && (
                   <>
                     <button
                       aria-label={sourceUrl ? "Open source link" : "Reveal source in Finder"}
-                      className="skillInfoIconButton"
+                      className="appButton appButton-icon"
                       onClick={() => openSource(sourceValue, sourceDetails.kind, sourceDetails.relativePath)}
                     >
                       {sourceUrl ? <ExternalLink size={13} /> : <FolderOpen size={13} />}
                     </button>
-                    <CopyButton className="skillInfoIconButton" value={sourceValue} copyLabel="Copy source" copiedLabel="Source copied" />
+                    <CopyButton className="appButton appButton-icon" value={sourceValue} copyLabel="Copy source" copiedLabel="Source copied" />
                   </>
                 )}
             </InfoSection>
@@ -146,16 +149,16 @@ export function SkillInfoMenu({ skill, skills = [], onOpenSkill }: SkillInfoMenu
                     <span className="skillInfoInstallAgent">
                       <AgentBadge agent={target.agent} small />
                     </span>
-                    <Tooltip content={target.path ?? ""} onlyWhenTruncated><code>{target.path ?? ""}</code></Tooltip>
+                    <Tooltip content={formatUserPath(target.path)} onlyWhenTruncated><code>{formatUserPath(target.path)}</code></Tooltip>
                     <button
                       aria-label={`Reveal ${target.label} in Finder`}
-                      className="skillInfoIconButton"
+                      className="appButton appButton-icon"
                       onClick={() => target.path && safeInvoke(TauriCommand.RevealInFinder, { path: target.path })}
                     >
                       <FolderOpen size={13} />
                     </button>
                     <CopyButton
-                      className="skillInfoIconButton"
+                      className="appButton appButton-icon"
                       value={target.path}
                       copyLabel={`Copy ${target.label} path`}
                       copiedLabel={`${target.label} path copied`}

@@ -1,7 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
-import { listen, type EventCallback, type EventName, type Options, type UnlistenFn } from "@tauri-apps/api/event";
 
 import type { SkillChangeCommand } from "./skills.ts";
+import { logger } from "./logger.ts";
 
 export type CliInstallState = "installed" | "not-installed" | "stale" | "conflict" | "unsupported";
 
@@ -30,15 +30,17 @@ export type BundledSkillInstallReport = {
 };
 
 export enum TauriCommand {
-  Scan = "scan",
   BundledSkillStatus = "bundled_skill_status",
   BundledSkillInstall = "bundled_skill_install",
+  BundledSkillRemove = "bundled_skill_remove",
   BundledSkillPromptDismiss = "bundled_skill_prompt_dismiss",
   CliStatus = "cli_status",
   CliInstall = "cli_install",
   CliRemove = "cli_remove",
   AgentsList = "agents_list",
+  OverviewCount = "overview_count",
   AgentConfigsList = "agent_configs_list",
+  AgentConfigWatch = "agent_config_watch",
   AgentConfigRead = "agent_config_read",
   AgentConfigSave = "agent_config_save",
   ConfigProfileCreate = "config_profile_create",
@@ -46,8 +48,6 @@ export enum TauriCommand {
   SkillsList = "skills_list",
   SkillsRefresh = "skills_refresh",
   SessionsList = "sessions_list",
-  SessionsProjectMerge = "sessions_project_merge",
-  SessionsProjectSplit = "sessions_project_split",
   SessionsScanStart = "sessions_scan_start",
   AnalyticsOverview = "analytics_overview",
   AnalyticsRevision = "analytics_revision",
@@ -58,6 +58,7 @@ export enum TauriCommand {
   SkillSessionLinks = "skill_session_links",
   SettingsGet = "settings_get",
   SettingsSave = "settings_save",
+  AppIconSet = "app_icon_set",
   TerminalAppsList = "terminal_apps_list",
   TerminalAppTest = "terminal_app_test",
   EditorAppTest = "editor_app_test",
@@ -76,13 +77,14 @@ export enum TauriCommand {
   PromptSave = "prompt_save",
   PromptsDeleteMany = "prompts_delete_many",
   SessionTranscript = "session_transcript",
+  SessionTranscriptLocator = "session_transcript_locator",
   SessionTranscriptSearch = "session_transcript_search",
   SkillsUpdates = "skills_updates",
-  SkillsUpdate = "skills_update",
   SkillsTargets = "skills_targets",
   SkillsMarketplaceSearch = "skills_marketplace_search",
   SkillsAdd = "skills_add",
   SkillsAddPreviewRead = "skills_add_preview_read",
+  SkillsDistribute = "skills_distribute",
   SkillFiles = "skill_files",
   SkillFileRead = "skill_file_read",
   SkillFileSave = "skill_file_save",
@@ -92,6 +94,7 @@ export enum TauriCommand {
   SkillPathDelete = "skill_path_delete",
   OpenInEditor = "open_in_editor",
   RevealInFinder = "reveal_in_finder",
+  LogsExport = "logs_export",
   OpenUrl = "open_url",
   CheckForUpdates = "check_for_updates",
 }
@@ -112,8 +115,124 @@ export function isTauriRuntime(): boolean {
 type WebInvokeResponse<T> = {
   ok: boolean;
   result?: T;
-  error?: string;
+  error?: string | { code?: string; message?: string; data?: unknown };
 };
+
+export class DaemonCommandError extends Error {
+  readonly code: string;
+  readonly data: unknown;
+
+  constructor(code: string, message: string, data?: unknown) {
+    super(message);
+    this.name = "DaemonCommandError";
+    this.code = code;
+    this.data = data;
+  }
+}
+
+export type DaemonEvent = {
+  id: number;
+  event: string;
+  payload: unknown;
+};
+
+type DaemonEventHandler = (event: DaemonEvent) => void;
+
+const DAEMON_COMMANDS = new Set<string>([
+  "agents_list",
+  "overview_count",
+  "bundled_skill_status",
+  "bundled_skill_install",
+  "bundled_skill_remove",
+  "bundled_skill_prompt_dismiss",
+  "agent_configs_list",
+  "agent_config_watch",
+  "agent_config_read",
+  "agent_config_save",
+  "config_profile_create",
+  "config_profile_set",
+  "skills_list",
+  "skills_refresh",
+  "skills_targets",
+  "skills_add",
+  "skills_add_preview_read",
+  "skills_distribute",
+  "skills_set",
+  "skills_wrap",
+  "skills_updates",
+  "skills_updates_cancel",
+  "skills_update",
+  "skills_update_many",
+  "skills_delete_many",
+  "skills_marketplace_search",
+  "skill_files",
+  "skill_file_read",
+  "skill_file_save",
+  "skill_file_create",
+  "skill_folder_create",
+  "skill_path_rename",
+  "skill_path_delete",
+  "sessions_list",
+  "sessions_scan_start",
+  "sessions_search",
+  "analytics_overview",
+  "analytics_revision",
+  "session_skill_index_status",
+  "session_skill_index_run",
+  "session_skill_links",
+  "skill_session_links",
+  "settings_get",
+  "settings_save",
+  "terminal_apps_list",
+  "rules_list",
+  "rule_file_read",
+  "rule_file_save",
+  "hooks_list",
+  "hook_delete",
+  "hook_delete_many",
+  "hook_set_enabled",
+  "hook_review",
+  "hook_source_read",
+  "mcp_list",
+  "prompts_list",
+  "prompt_save",
+  "prompts_delete_many",
+  "session_transcript",
+  "session_transcript_locator",
+  "session_transcript_search",
+]);
+
+// These commands are native desktop lifecycle/OS integration, not business
+// operations. Web must fail explicitly instead of sending an unsupported RPC
+// to the daemon and turning METHOD_NOT_FOUND into a silent null fallback.
+const DESKTOP_ONLY_COMMANDS = new Set<string>([
+  "app_icon_set",
+  "cli_status",
+  "cli_install",
+  "cli_remove",
+  "terminal_app_test",
+  "editor_app_test",
+  "session_resume_in_terminal",
+  "open_in_editor",
+  "reveal_in_finder",
+  "logs_export",
+  "open_url",
+  "check_for_updates",
+]);
+
+function daemonError(
+  error: WebInvokeResponse<unknown>["error"],
+  fallbackMessage: string,
+): DaemonCommandError {
+  if (typeof error === "string") {
+    return new DaemonCommandError("DAEMON_ERROR", error || fallbackMessage);
+  }
+  return new DaemonCommandError(
+    error?.code || "DAEMON_ERROR",
+    error?.message || error?.code || fallbackMessage,
+    error?.data,
+  );
+}
 
 async function invokeWeb<T>(command: TauriCommand | SkillChangeCommand, args?: Record<string, unknown>): Promise<T> {
   const response = await fetch("/__tendi/invoke", {
@@ -123,33 +242,124 @@ async function invokeWeb<T>(command: TauriCommand | SkillChangeCommand, args?: R
   });
   const payload = await response.json() as WebInvokeResponse<T>;
   if (!response.ok || !payload.ok) {
-    throw new Error(payload.error || `Web bridge request failed (${response.status})`);
+    throw daemonError(payload.error, `Web bridge request failed (${response.status})`);
   }
   return payload.result as T;
 }
 
 export async function invokeCommand<T = unknown>(command: TauriCommand | SkillChangeCommand, args?: Record<string, unknown>): Promise<T> {
-  if (!isTauriRuntime()) return invokeWeb<T>(command, args);
-  return invoke<T>(command, args);
+  try {
+    if (DAEMON_COMMANDS.has(command)) {
+      if (!isTauriRuntime()) return invokeWeb<T>(command, args);
+      const response = await invoke<WebInvokeResponse<T>>("daemon_invoke", {
+        request: { command, args: args ?? {} },
+      });
+      if (!response.ok) throw daemonError(response.error, "Daemon request failed");
+      return response.result as T;
+    }
+    if (!isTauriRuntime()) {
+      if (DESKTOP_ONLY_COMMANDS.has(command)) {
+        throw new Error(`Command ${command} is only available in the Tauri desktop runtime`);
+      }
+      throw new Error(`Command ${command} is not exposed by the shared daemon API`);
+    }
+    return await invoke<T>(command, args);
+  } catch (error) {
+    logger.error("tendi command failed", { command, error });
+    throw error;
+  }
 }
 
 export async function safeInvoke<T = unknown>(command: TauriCommand | SkillChangeCommand, args?: Record<string, unknown>): Promise<T | null> {
   try {
     return await invokeCommand<T>(command, args);
-  } catch (error) {
-    console.warn(`tendi command failed: ${command}`, error);
+  } catch {
     return null;
   }
 }
 
-export function safeListen<T>(event: EventName, handler: EventCallback<T>, options?: Options): Promise<UnlistenFn> {
-  if (!isTauriRuntime()) return Promise.resolve(() => {});
-  return listen(event, handler, options);
+export async function subscribeDaemonEvents(handler: DaemonEventHandler): Promise<() => void> {
+  if (!isTauriRuntime()) {
+    const controller = new AbortController();
+    const response = await fetch("/__tendi/events", {
+      headers: { accept: "text/event-stream" },
+      signal: controller.signal,
+    });
+    if (!response.ok || !response.body) {
+      throw new Error(`Daemon event stream failed (${response.status})`);
+    }
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    let disposed = false;
+    const consume = async () => {
+      try {
+        while (!disposed) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          const blocks = buffer.split("\n\n");
+          buffer = blocks.pop() || "";
+          for (const block of blocks) {
+            const event = parseSseEvent(block);
+            if (event) handler(event);
+          }
+        }
+      } catch (error) {
+        if (!disposed) logger.warn("daemon event stream failed", { error });
+      }
+    };
+    void consume();
+    return () => {
+      disposed = true;
+      controller.abort();
+      void reader.cancel();
+    };
+  }
+
+  const subscriptionId = await invoke<string>("daemon_subscribe_events");
+  let disposed = false;
+  const consume = async () => {
+    try {
+      while (!disposed) {
+        const event = await invoke<DaemonEvent | null>("daemon_next_event", {
+          subscriptionId,
+          timeoutMs: 25_000,
+        });
+        if (event && !disposed) handler(event);
+      }
+    } catch (error) {
+      if (!disposed) logger.warn("daemon event subscription failed", { error });
+    }
+  };
+  void consume();
+  return () => {
+    disposed = true;
+    void invoke("daemon_unsubscribe_events", { subscriptionId });
+  };
+}
+
+function parseSseEvent(block: string): DaemonEvent | null {
+  let id = 0;
+  let event = "message";
+  const data: string[] = [];
+  for (const line of block.split("\n")) {
+    if (line.startsWith("id:")) id = Number(line.slice(3).trim()) || 0;
+    else if (line.startsWith("event:")) event = line.slice(6).trim();
+    else if (line.startsWith("data:")) data.push(line.slice(5).trimStart());
+  }
+  if (data.length === 0) return null;
+  try {
+    return { id, event, payload: JSON.parse(data.join("\n")) as unknown };
+  } catch (error) {
+    logger.warn("invalid daemon SSE event", { error });
+    return null;
+  }
 }
 
 export async function copyText(value: string | null | undefined): Promise<void> {
   if (!value) return;
   await navigator.clipboard?.writeText(value).catch((error) => {
-    console.warn("copy failed", error);
+    logger.warn("copy failed", { error });
   });
 }

@@ -10,6 +10,13 @@ export type SelectOption = {
   label: string;
 };
 
+export type SelectMenuAction = {
+  label: string;
+  onSelect: () => void;
+  icon?: ReactNode;
+  disabled?: boolean;
+};
+
 type SelectContentProps = ComponentPropsWithoutRef<typeof Select.Content>;
 
 export type SelectControlProps = {
@@ -24,9 +31,15 @@ export type SelectControlProps = {
   renderValue?: (option: SelectOption | undefined) => ReactNode;
   side?: SelectContentProps["side"];
   align?: SelectContentProps["align"];
+  indicatorPosition?: "left" | "right";
   showChevron?: boolean;
+  showOptionTooltip?: boolean;
+  disabled?: boolean;
   triggerTooltipContent?: ReactNode;
+  menuAction?: SelectMenuAction;
 };
+
+const SELECT_MENU_ACTION_VALUE = "__select_control_menu_action__";
 
 export function SelectControl({
   value,
@@ -40,15 +53,28 @@ export function SelectControl({
   renderValue,
   side,
   align,
+  indicatorPosition = "right",
   showChevron = true,
+  showOptionTooltip = true,
+  disabled = false,
   triggerTooltipContent,
+  menuAction,
 }: SelectControlProps) {
   const selectedOption = options.find((option) => option.value === value);
   const selectedLabel = selectedOption?.label ?? value;
   return (
-    <Select.Root value={value} onValueChange={onValueChange}>
+    <Select.Root
+      value={value}
+      onValueChange={(nextValue) => {
+        if (nextValue === SELECT_MENU_ACTION_VALUE) {
+          menuAction?.onSelect();
+          return;
+        }
+        onValueChange(nextValue);
+      }}
+    >
       <Tooltip content={triggerTooltipContent}>
-        <SelectTrigger className={className} label={label} showChevron={showChevron}>
+        <SelectTrigger className={className} label={label} showChevron={showChevron} disabled={disabled}>
           <Select.Value>
             {renderValue ? renderValue(selectedOption) : <span className="selectValueText">{selectedLabel}</span>}
           </Select.Value>
@@ -56,7 +82,7 @@ export function SelectControl({
       </Tooltip>
       <Select.Portal>
         <Select.Content
-          className={`skillMenuContent ${contentClassName}`.trim()}
+          className={`skillMenuContent selectControlContent ${contentClassName}`.trim()}
           position="popper"
           side={side}
           align={align}
@@ -64,20 +90,51 @@ export function SelectControl({
         >
           <Select.Viewport className="selectViewport">
             {options.map((option) => (
-              <Select.Item className={`skillMenuItem ${itemClassName}`.trim()} value={option.value} key={option.value}>
-                <Tooltip content={option.label} onlyWhenTruncated>
+              <Select.Item
+                className={`skillMenuItem ${itemClassName} ${indicatorPosition === "right" ? "selectItemIndicatorRight" : ""}`.trim()}
+                value={option.value}
+                key={option.value}
+              >
+                <span className="selectItemLeadingIcon" aria-hidden="true">
+                  <Select.ItemIndicator className="selectItemIndicator">
+                    <Check size={14} />
+                  </Select.ItemIndicator>
+                </span>
+                {showOptionTooltip ? (
+                  <Tooltip content={option.label} onlyWhenTruncated>
+                    <Select.ItemText asChild>
+                      <span className="selectItemText">
+                        {renderOption ? renderOption(option) : option.label}
+                      </span>
+                    </Select.ItemText>
+                  </Tooltip>
+                ) : (
                   <Select.ItemText asChild>
                     <span className="selectItemText">
                       {renderOption ? renderOption(option) : option.label}
                     </span>
                   </Select.ItemText>
-                </Tooltip>
-                <Select.ItemIndicator className="selectItemIndicator">
-                  <Check size={14} aria-hidden="true" />
-                </Select.ItemIndicator>
+                )}
               </Select.Item>
             ))}
           </Select.Viewport>
+          {menuAction ? (
+            <>
+              <Select.Separator className="selectMenuActionSeparator" />
+              <Select.Item
+                className="skillMenuItem selectMenuActionItem"
+                value={SELECT_MENU_ACTION_VALUE}
+                disabled={menuAction.disabled}
+              >
+                <span className="selectItemLeadingIcon selectMenuActionIcon" aria-hidden="true">
+                  {menuAction.icon}
+                </span>
+                <Select.ItemText asChild>
+                  <span className="selectItemText">{menuAction.label}</span>
+                </Select.ItemText>
+              </Select.Item>
+            </>
+          ) : null}
         </Select.Content>
       </Select.Portal>
     </Select.Root>

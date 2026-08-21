@@ -1,16 +1,18 @@
-import { invoke } from "@tauri-apps/api/core";
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { AlertCircle, Check, Info, Monitor, Moon, Sun } from "lucide-react";
-import { TauriCommand, safeInvoke, type BundledSkillInstallReport, type BundledSkillStatus, type CliInstallStatus } from "../../lib/index.ts";
-import { normalizeAppearance, normalizeColorTheme, type Appearance, type ColorTheme, type ResolvedAppearance, type ThemePreferences } from "../../lib/appearance.ts";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { Monitor, Moon, Sun } from "lucide-react";
+import { TauriCommand, invokeCommand, normalizeSessionResumeTarget, safeInvoke, type BundledSkillInstallReport, type BundledSkillStatus, type CliInstallStatus, type SessionResumeTarget } from "../../lib/index.ts";
+import { normalizeAppearance, normalizeColorTheme, normalizeFontFamily, type Appearance, type ColorTheme, type FontFamily, type ResolvedAppearance, type ThemePreferences } from "../../lib/appearance.ts";
+import { appIconOptions, appIconPreviewDataUrl, normalizeAppIcon, type AppIcon } from "../../lib/app-icon.ts";
 import { ContentTopDragStrip } from "../../components/shared/ContentTopDragStrip.tsx";
-import { SelectionCheckbox } from "../../components/shared/SelectionCheckbox.tsx";
+import { LoadErrorState } from "../../components/shared/LoadErrorState.tsx";
 import { LoadingIcon } from "../../components/shared/LoadingIcon.tsx";
 import { PageHeader } from "../../components/shared/PageHeader.tsx";
 import { SegmentedControl, SegmentedControlItem } from "../../components/shared/SegmentedControl.tsx";
 import { SelectControl } from "../../components/shared/SelectControl.tsx";
 import { StatefulButton } from "../../components/shared/StatefulButton.tsx";
+import { Switch } from "../../components/shared/Switch.tsx";
 import { SettingsApplicationPicker, type SettingsApplicationOption } from "./SettingsApplicationPicker.tsx";
+import { codingAgentsAction, isCodingAgentsInstalled } from "./settings-agent-status.ts";
 import "./SettingsView.css";
 
 type TerminalApp = {
@@ -23,7 +25,10 @@ type AppSettings = {
   appearance: Appearance;
   lightTheme: ColorTheme;
   darkTheme: ColorTheme;
+  appIcon: AppIcon;
+  fontFamily: FontFamily;
   terminal: string;
+  sessionResumeTarget: SessionResumeTarget;
   editor: string;
   developerMode: boolean;
   additionalSessionRoots: string[];
@@ -33,10 +38,16 @@ type AppSettings = {
 type SettingsViewProps = {
   appearance: Appearance;
   themePreferences: ThemePreferences;
+  fontFamily: FontFamily;
   developerMode: boolean;
   onAppearanceChange: (appearance: Appearance) => void;
   onThemeChange: (mode: ResolvedAppearance, theme: ColorTheme) => void;
+  onFontFamilyChange: (fontFamily: FontFamily) => void;
   onDeveloperModeChange: (enabled: boolean) => void;
+  sessionResumeTarget: SessionResumeTarget;
+  onSessionResumeTargetChange: (target: SessionResumeTarget) => void;
+  appIcon: AppIcon;
+  onAppIconChange: (appIcon: AppIcon) => void;
 };
 
 const appearanceOptions = [
@@ -46,12 +57,45 @@ const appearanceOptions = [
 ] as const;
 
 const themeOptions = [
+  { value: "sakura-pop", label: "Sakura Pop" },
   { value: "gruvbox", label: "Gruvbox" },
   { value: "dracula", label: "Dracula" },
   { value: "nord", label: "Nord" },
   { value: "catppuccin", label: "Catppuccin" },
   { value: "tokyo-night", label: "Tokyo Night" },
+  { value: "vercel", label: "Vercel" },
 ] as const;
+
+const fontOptions = [
+  { value: "geist", label: "Geist" },
+  { value: "manrope", label: "Manrope" },
+  { value: "inter", label: "Inter" },
+  { value: "ibm-plex-sans", label: "IBM Plex Sans" },
+  { value: "instrument-sans", label: "Instrument Sans" },
+  { value: "plus-jakarta-sans", label: "Plus Jakarta Sans" },
+  { value: "bricolage-grotesque", label: "Bricolage Grotesque" },
+] as const satisfies ReadonlyArray<{ value: FontFamily; label: string }>;
+
+const themePreviewColors: Record<ResolvedAppearance, Record<ColorTheme, { foreground: string; background: string }>> = {
+  light: {
+    "sakura-pop": { foreground: "#4b2347", background: "#fff4fb" },
+    gruvbox: { foreground: "#282828", background: "#fbf1c7" },
+    dracula: { foreground: "#282a36", background: "#f8f8f2" },
+    nord: { foreground: "#2e3440", background: "#eceff4" },
+    catppuccin: { foreground: "#4c4f69", background: "#eff1f5" },
+    "tokyo-night": { foreground: "#3760bf", background: "#e1e2e7" },
+    vercel: { foreground: "#171717", background: "#ffffff" },
+  },
+  dark: {
+    "sakura-pop": { foreground: "#f8e8f5", background: "#211331" },
+    gruvbox: { foreground: "#ebdbb2", background: "#282828" },
+    dracula: { foreground: "#f8f8f2", background: "#282a36" },
+    nord: { foreground: "#eceff4", background: "#2e3440" },
+    catppuccin: { foreground: "#cdd6f4", background: "#1e1e2e" },
+    "tokyo-night": { foreground: "#c0caf5", background: "#1a1b26" },
+    vercel: { foreground: "#ededed", background: "#000000" },
+  },
+};
 
 const themeModes = [
   { value: "light", label: "Light theme", key: "lightTheme" },
@@ -71,8 +115,48 @@ function ThemeSelect({ mode, value, onChange }: { mode: ThemeMode; value: ColorT
         value={value}
         onValueChange={(nextValue) => onChange(nextValue as ColorTheme)}
         options={[...themeOptions]}
+        showOptionTooltip={false}
+        renderOption={(option) => {
+          const colors = themePreviewColors[mode.value][option.value as ColorTheme];
+          return (
+            <span className="settingsThemeOption">
+              <span
+                className="settingsThemeSwatch"
+                style={{ background: `linear-gradient(135deg, ${colors.foreground} 0 50%, ${colors.background} 50% 100%)` }}
+                aria-hidden="true"
+              />
+              <span>{option.label}</span>
+            </span>
+          );
+        }}
       />
     </div>
+  );
+}
+
+function AppIconSelect({ value, onChange }: { value: AppIcon; onChange: (value: AppIcon) => void }) {
+  return (
+    <SelectControl
+      className="settingsAppIconSelect"
+      contentClassName="settingsAppIconSelectContent"
+      label="Application icon"
+      value={value}
+      onValueChange={(nextValue) => onChange(nextValue as AppIcon)}
+      options={[...appIconOptions]}
+      showOptionTooltip={false}
+      renderValue={(option) => option ? (
+        <span className="settingsAppIconOption">
+          <img className="settingsAppIconPreview" src={appIconPreviewDataUrl(option.value)} alt="" aria-hidden="true" />
+          <span>{option.label}</span>
+        </span>
+      ) : null}
+      renderOption={(option) => (
+        <span className="settingsAppIconOption">
+          <img className="settingsAppIconPreview" src={appIconPreviewDataUrl(option.value)} alt="" aria-hidden="true" />
+          <span>{option.label}</span>
+        </span>
+      )}
+    />
   );
 }
 
@@ -82,11 +166,28 @@ function normalizeSettings(settings: AppSettings): AppSettings {
     appearance: normalizeAppearance(settings.appearance),
     lightTheme: normalizeColorTheme(settings.lightTheme),
     darkTheme: normalizeColorTheme(settings.darkTheme),
+    appIcon: normalizeAppIcon(settings.appIcon),
+    fontFamily: normalizeFontFamily(settings.fontFamily),
     editor: settings.editor?.trim() || "vscode",
+    sessionResumeTarget: normalizeSessionResumeTarget(settings.sessionResumeTarget),
     developerMode: settings.developerMode === true,
     additionalSessionRoots: settings.additionalSessionRoots ?? [],
     configProfiles: settings.configProfiles ?? {},
   };
+}
+
+function errorMessage(error: unknown): string {
+  if (typeof error === "string") return error;
+  if (error instanceof Error) return error.message;
+  return `${error}`;
+}
+
+async function readSetting<T>(command: TauriCommand): Promise<{ value?: T; error?: string }> {
+  try {
+    return { value: await invokeCommand<T>(command) };
+  } catch (error) {
+    return { error: errorMessage(error) };
+  }
 }
 
 function SettingsSection({ title, description, children }: { title: string; description?: ReactNode; children: ReactNode }) {
@@ -101,31 +202,51 @@ function SettingsSection({ title, description, children }: { title: string; desc
   );
 }
 
-export function SettingsView({ appearance, themePreferences, developerMode, onAppearanceChange, onThemeChange, onDeveloperModeChange }: SettingsViewProps) {
-  const [settings, setSettings] = useState<AppSettings>({ appearance, lightTheme: themePreferences.light, darkTheme: themePreferences.dark, terminal: "auto", editor: "vscode", developerMode, additionalSessionRoots: [], configProfiles: {} });
+function SettingsGroup({ title, children }: { title: string; children: ReactNode }) {
+  return (
+    <section className="settingsGroup">
+      <h2 className="settingsGroupTitle">{title}</h2>
+      <div className="settingsGroupItems">{children}</div>
+    </section>
+  );
+}
+
+export function SettingsView({ appearance, themePreferences, fontFamily, developerMode, sessionResumeTarget, appIcon, onAppearanceChange, onThemeChange, onFontFamilyChange, onDeveloperModeChange, onSessionResumeTargetChange, onAppIconChange }: SettingsViewProps) {
+  const [settings, setSettings] = useState<AppSettings>({ appearance, lightTheme: themePreferences.light, darkTheme: themePreferences.dark, appIcon, fontFamily, terminal: "auto", sessionResumeTarget, editor: "vscode", developerMode, additionalSessionRoots: [], configProfiles: {} });
   const [terminalInput, setTerminalInput] = useState("auto");
   const [editorInput, setEditorInput] = useState("vscode");
   const [additionalSessionRootsInput, setAdditionalSessionRootsInput] = useState("");
   const [terminalApps, setTerminalApps] = useState<TerminalApp[]>([]);
   const [terminalError, setTerminalError] = useState("");
+  const [sessionResumeError, setSessionResumeError] = useState("");
   const [editorError, setEditorError] = useState("");
   const [sessionRootsError, setSessionRootsError] = useState("");
   const [appearanceError, setAppearanceError] = useState("");
   const [themeError, setThemeError] = useState("");
+  const [appIconError, setAppIconError] = useState("");
+  const [fontFamilyError, setFontFamilyError] = useState("");
   const [developerModeError, setDeveloperModeError] = useState("");
   const [cliStatus, setCliStatus] = useState<CliInstallStatus | null>(null);
-  const [cliBusy, setCliBusy] = useState<"install" | "remove" | null>(null);
+  const [cliBusy, setCliBusy] = useState<"install" | null>(null);
   const [cliError, setCliError] = useState("");
   const [bundledSkillStatus, setBundledSkillStatus] = useState<BundledSkillStatus | null>(null);
   const [bundledSkillBusy, setBundledSkillBusy] = useState(false);
   const [bundledSkillError, setBundledSkillError] = useState("");
+  const [settingsLoading, setSettingsLoading] = useState(true);
+  const [settingsLoadError, setSettingsLoadError] = useState("");
   const [updateState, setUpdateState] = useState<"idle" | "loading" | "success" | "error">("idle");
+  const [logExportState, setLogExportState] = useState<"idle" | "loading" | "success" | "error">("idle");
+  const [logExportError, setLogExportError] = useState("");
   const appearanceSaveRequestRef = useRef(0);
   const themeSaveRequestRef = useRef(0);
+  const appIconSaveRequestRef = useRef(0);
+  const fontFamilySaveRequestRef = useRef(0);
+  const onThemeChangeRef = useRef(onThemeChange);
+  onThemeChangeRef.current = onThemeChange;
   const terminalOptions: SettingsApplicationOption[] = useMemo(() => {
     const items = terminalApps.length ? terminalApps : [{ id: "auto", label: "Auto", available: true }];
     return items.map((app) => ({
-      value: app.label,
+      value: app.id,
       label: app.label,
       available: app.available,
     }));
@@ -137,32 +258,42 @@ export function SettingsView({ appearance, themePreferences, developerMode, onAp
     { value: "coteditor", label: "CotEditor" },
   ];
 
+  const loadSettings = useCallback(async () => {
+    setSettingsLoading(true);
+    setSettingsLoadError("");
+    const [nextSettings, apps, nextCliStatus, nextBundledSkillStatus] = await Promise.all([
+      readSetting<AppSettings>(TauriCommand.SettingsGet),
+      readSetting<TerminalApp[]>(TauriCommand.TerminalAppsList),
+      readSetting<CliInstallStatus>(TauriCommand.CliStatus),
+      readSetting<BundledSkillStatus>(TauriCommand.BundledSkillStatus),
+    ]);
+    const errors = [nextSettings, apps, nextCliStatus, nextBundledSkillStatus]
+      .map((result) => result.error)
+      .filter((message): message is string => Boolean(message));
+    if (nextSettings.value) {
+      const normalizedSettings = normalizeSettings(nextSettings.value);
+      setSettings(normalizedSettings);
+      onAppearanceChange(normalizedSettings.appearance);
+      onThemeChangeRef.current("light", normalizedSettings.lightTheme);
+      onThemeChangeRef.current("dark", normalizedSettings.darkTheme);
+      onAppIconChange(normalizedSettings.appIcon);
+      onFontFamilyChange(normalizedSettings.fontFamily);
+      onDeveloperModeChange(normalizedSettings.developerMode);
+      onSessionResumeTargetChange(normalizedSettings.sessionResumeTarget);
+      setTerminalInput(normalizedSettings.terminal);
+      setEditorInput(normalizedSettings.editor);
+      setAdditionalSessionRootsInput(normalizedSettings.additionalSessionRoots.join("\n"));
+    }
+    if (Array.isArray(apps.value)) setTerminalApps(apps.value);
+    if (nextCliStatus.value) setCliStatus(nextCliStatus.value);
+    if (nextBundledSkillStatus.value) setBundledSkillStatus(nextBundledSkillStatus.value);
+    setSettingsLoadError(errors.join("; "));
+    setSettingsLoading(false);
+  }, [onAppearanceChange, onAppIconChange, onDeveloperModeChange, onFontFamilyChange, onSessionResumeTargetChange]);
+
   useEffect(() => {
-    let cancelled = false;
-    Promise.all([
-      safeInvoke(TauriCommand.SettingsGet),
-      safeInvoke(TauriCommand.TerminalAppsList),
-      safeInvoke<CliInstallStatus>(TauriCommand.CliStatus),
-      safeInvoke<BundledSkillStatus>(TauriCommand.BundledSkillStatus),
-    ]).then(([nextSettings, apps, nextCliStatus, nextBundledSkillStatus]) => {
-      if (cancelled) return;
-      if (nextSettings) {
-        const normalizedSettings = normalizeSettings(nextSettings as AppSettings);
-        setSettings(normalizedSettings);
-        onAppearanceChange(normalizedSettings.appearance);
-        onThemeChange("light", normalizedSettings.lightTheme);
-        onThemeChange("dark", normalizedSettings.darkTheme);
-        onDeveloperModeChange(normalizedSettings.developerMode);
-        setTerminalInput(normalizedSettings.terminal);
-        setEditorInput(normalizedSettings.editor);
-        setAdditionalSessionRootsInput(normalizedSettings.additionalSessionRoots.join("\n"));
-      }
-      if (Array.isArray(apps)) setTerminalApps(apps);
-      if (nextCliStatus) setCliStatus(nextCliStatus);
-      if (nextBundledSkillStatus) setBundledSkillStatus(nextBundledSkillStatus);
-    });
-    return () => { cancelled = true; };
-  }, [onAppearanceChange, onDeveloperModeChange]);
+    void loadSettings();
+  }, [loadSettings]);
 
   const applySavedSettings = (value: AppSettings) => {
     const savedSettings = normalizeSettings(value);
@@ -170,7 +301,31 @@ export function SettingsView({ appearance, themePreferences, developerMode, onAp
     setTerminalInput(savedSettings.terminal);
     setEditorInput(savedSettings.editor);
     setAdditionalSessionRootsInput(savedSettings.additionalSessionRoots.join("\n"));
+    onSessionResumeTargetChange(savedSettings.sessionResumeTarget);
+    onAppIconChange(savedSettings.appIcon);
     return savedSettings;
+  };
+
+  const saveAppIcon = async (nextAppIcon: AppIcon) => {
+    const previousAppIcon = settings.appIcon;
+    const requestId = appIconSaveRequestRef.current + 1;
+    appIconSaveRequestRef.current = requestId;
+    setAppIconError("");
+    setSettings((current) => ({ ...current, appIcon: nextAppIcon }));
+    onAppIconChange(nextAppIcon);
+    const nextSettings = await safeInvoke(TauriCommand.SettingsSave, {
+      ...settings,
+      appIcon: nextAppIcon,
+    });
+    if (appIconSaveRequestRef.current !== requestId) return;
+    if (nextSettings) {
+      const savedSettings = applySavedSettings(nextSettings as AppSettings);
+      onAppIconChange(savedSettings.appIcon);
+    } else {
+      setSettings((current) => ({ ...current, appIcon: previousAppIcon }));
+      onAppIconChange(previousAppIcon);
+      setAppIconError("Save failed");
+    }
   };
 
   const saveAppearance = async (nextAppearance: Appearance) => {
@@ -219,6 +374,28 @@ export function SettingsView({ appearance, themePreferences, developerMode, onAp
     }
   };
 
+  const saveFontFamily = async (nextFontFamily: FontFamily) => {
+    const previousFontFamily = settings.fontFamily;
+    const requestId = fontFamilySaveRequestRef.current + 1;
+    fontFamilySaveRequestRef.current = requestId;
+    setFontFamilyError("");
+    setSettings((current) => ({ ...current, fontFamily: nextFontFamily }));
+    onFontFamilyChange(nextFontFamily);
+    const nextSettings = await safeInvoke(TauriCommand.SettingsSave, {
+      ...settings,
+      fontFamily: nextFontFamily,
+    });
+    if (fontFamilySaveRequestRef.current !== requestId) return;
+    if (nextSettings) {
+      const savedSettings = applySavedSettings(nextSettings as AppSettings);
+      onFontFamilyChange(savedSettings.fontFamily);
+    } else {
+      setSettings((current) => ({ ...current, fontFamily: previousFontFamily }));
+      onFontFamilyChange(previousFontFamily);
+      setFontFamilyError("Save failed");
+    }
+  };
+
   const saveTerminal = async (terminal: string) => {
     const normalized = terminal.trim() || "auto";
     setTerminalInput(normalized);
@@ -232,6 +409,26 @@ export function SettingsView({ appearance, themePreferences, developerMode, onAp
       setTerminalError("");
     } else {
       setTerminalError("Save failed");
+    }
+  };
+
+  const saveSessionResumeTarget = async (target: string) => {
+    const normalized = normalizeSessionResumeTarget(target);
+    if (normalized === settings.sessionResumeTarget) return;
+    const previous = settings.sessionResumeTarget;
+    setSettings((current) => ({ ...current, sessionResumeTarget: normalized }));
+    onSessionResumeTargetChange(normalized);
+    const nextSettings = await safeInvoke(TauriCommand.SettingsSave, {
+      ...settings,
+      sessionResumeTarget: normalized,
+    });
+    if (nextSettings) {
+      applySavedSettings(nextSettings as AppSettings);
+      setSessionResumeError("");
+    } else {
+      setSettings((current) => ({ ...current, sessionResumeTarget: previous }));
+      onSessionResumeTargetChange(previous);
+      setSessionResumeError("Save failed");
     }
   };
 
@@ -304,13 +501,27 @@ export function SettingsView({ appearance, themePreferences, developerMode, onAp
     setUpdateState(result?.status === "up-to-date" ? "success" : result ? "success" : "error");
   };
 
-  const changeCliRegistration = async (action: "install" | "remove") => {
+  const exportLogs = async () => {
+    if (logExportState === "loading") return;
+    setLogExportState("loading");
+    setLogExportError("");
+    try {
+      const exportPath = await invokeCommand<string>(TauriCommand.LogsExport);
+      await invokeCommand(TauriCommand.RevealInFinder, { path: exportPath });
+      setLogExportState("success");
+    } catch (error) {
+      setLogExportState("error");
+      setLogExportError(errorMessage(error));
+    }
+  };
+
+  const changeCliRegistration = async () => {
     if (cliBusy) return;
-    setCliBusy(action);
+    setCliBusy("install");
     setCliError("");
     try {
-      const nextStatus = await invoke<CliInstallStatus>(
-        action === "install" ? TauriCommand.CliInstall : TauriCommand.CliRemove,
+      const nextStatus = await invokeCommand<CliInstallStatus>(
+        TauriCommand.CliInstall,
       );
       setCliStatus(nextStatus);
     } catch (error) {
@@ -322,24 +533,58 @@ export function SettingsView({ appearance, themePreferences, developerMode, onAp
     }
   };
 
+  const removeCodingAgents = async () => {
+    if (bundledSkillBusy || cliBusy) return;
+    setBundledSkillBusy(true);
+    setBundledSkillError("");
+    setCliError("");
+    try {
+      const nextSkillStatus = await invokeCommand<BundledSkillStatus>(TauriCommand.BundledSkillRemove);
+      setBundledSkillStatus(nextSkillStatus);
+      if (cliStatus?.supported && cliStatus.state === "installed") {
+        const nextCliStatus = await invokeCommand<CliInstallStatus>(TauriCommand.CliRemove);
+        setCliStatus(nextCliStatus);
+      }
+    } catch (error) {
+      setBundledSkillError(`${error}`);
+      const [nextSkillStatus, nextCliStatus] = await Promise.all([
+        safeInvoke<BundledSkillStatus>(TauriCommand.BundledSkillStatus),
+        safeInvoke<CliInstallStatus>(TauriCommand.CliStatus),
+      ]);
+      if (nextSkillStatus) setBundledSkillStatus(nextSkillStatus);
+      if (nextCliStatus) setCliStatus(nextCliStatus);
+    } finally {
+      setBundledSkillBusy(false);
+    }
+  };
+
   const cliInstalled = cliStatus?.state === "installed";
   const cliNeedsRepair = cliStatus?.state === "stale";
   const cliConflict = cliStatus?.state === "conflict";
-  const cliSupported = cliStatus?.supported ?? false;
+  const cliPathNeedsAttention = cliInstalled && !cliStatus.pathConfigured;
   const cliHealthy = cliInstalled && cliStatus.pathConfigured;
   const bundledSkillHealthy = bundledSkillStatus?.current === true;
   const bundledSkillConflict = bundledSkillStatus?.installed === true && !bundledSkillHealthy;
-  const canInstallBundledSkill = bundledSkillStatus !== null
-    && !bundledSkillStatus.installed
-    && !bundledSkillStatus.current
+  const codingAgentsActionValue = codingAgentsAction(cliStatus, bundledSkillStatus);
+  const bundledSkillNeedsRepair = bundledSkillStatus?.installed === true && !bundledSkillStatus.current;
+  const canInstallBundledSkill = (codingAgentsActionValue === "install" || codingAgentsActionValue === "repair")
+    && bundledSkillStatus?.current !== true
     && !cliConflict;
-  const canRegisterCliSeparately = bundledSkillStatus !== null
-    && !canInstallBundledSkill
-    && !cliHealthy
-    && cliSupported
-    && !cliConflict;
-  const setupReady = cliHealthy && bundledSkillHealthy;
-  const setupConflict = cliConflict || bundledSkillConflict;
+  const canRegisterCliSeparately = (codingAgentsActionValue === "install" || codingAgentsActionValue === "repair")
+    && !canInstallBundledSkill;
+  const setupReady = isCodingAgentsInstalled(cliStatus, bundledSkillStatus);
+  const setupNeedsAttention = cliConflict || cliPathNeedsAttention || bundledSkillConflict;
+  const setupStatusLabel = settingsLoading
+    ? "Checking…"
+    : settingsLoadError && (!cliStatus || !bundledSkillStatus)
+      ? "Unable to load status"
+      : !cliStatus || !bundledSkillStatus
+        ? "Status unavailable"
+        : setupReady
+          ? "Installed"
+          : setupNeedsAttention
+            ? "Needs attention"
+            : "";
 
   const installBundledSkill = async () => {
     if (bundledSkillBusy || cliBusy) return;
@@ -347,19 +592,26 @@ export function SettingsView({ appearance, themePreferences, developerMode, onAp
     setBundledSkillError("");
     try {
       let nextCliStatus = cliStatus;
-      if (!cliHealthy && cliSupported) {
-        nextCliStatus = await invoke<CliInstallStatus>(TauriCommand.CliInstall);
+      if (!cliHealthy && cliStatus?.supported) {
+        nextCliStatus = await invokeCommand<CliInstallStatus>(TauriCommand.CliInstall);
         setCliStatus(nextCliStatus);
         if (nextCliStatus.state !== "installed" || !nextCliStatus.pathConfigured) {
           throw new Error(nextCliStatus.detail || "The Tendi CLI is not available on PATH.");
         }
       }
-      const report = await invoke<BundledSkillInstallReport>(TauriCommand.BundledSkillInstall);
+      const report = await invokeCommand<BundledSkillInstallReport>(
+        TauriCommand.BundledSkillInstall,
+        bundledSkillNeedsRepair ? { overwrite: true } : undefined,
+      );
       setBundledSkillStatus(report.status);
     } catch (error) {
       setBundledSkillError(`${error}`);
-      const nextStatus = await safeInvoke<BundledSkillStatus>(TauriCommand.BundledSkillStatus);
-      if (nextStatus) setBundledSkillStatus(nextStatus);
+      const [nextSkillStatus, nextCliStatus] = await Promise.all([
+        safeInvoke<BundledSkillStatus>(TauriCommand.BundledSkillStatus),
+        safeInvoke<CliInstallStatus>(TauriCommand.CliStatus),
+      ]);
+      if (nextSkillStatus) setBundledSkillStatus(nextSkillStatus);
+      if (nextCliStatus) setCliStatus(nextCliStatus);
     } finally {
       setBundledSkillBusy(false);
     }
@@ -369,10 +621,13 @@ export function SettingsView({ appearance, themePreferences, developerMode, onAp
     <section className="content dataPage settingsPage">
       <ContentTopDragStrip />
       <PageHeader title="Settings" />
+      {settingsLoadError ? <LoadErrorState message={settingsLoadError} onRetry={() => { void loadSettings(); }} /> : null}
       <div className="settingsShell">
-        <div className="settingsGroup">
-          <SettingsSection title="Appearance">
+        <div className="settingsGroups">
+          <SettingsGroup title="Appearance">
+          <SettingsSection title="Mode">
               <SegmentedControl
+                className="settingsAppearanceControl"
                 value={appearance}
                 onValueChange={(value) => {
                   if (value) saveAppearance(value as Appearance);
@@ -408,6 +663,25 @@ export function SettingsView({ appearance, themePreferences, developerMode, onAp
             </div>
             {themeError ? <span className="settingsError" role="alert">{themeError}</span> : null}
           </SettingsSection>
+          <SettingsSection title="App icon">
+            <AppIconSelect value={settings.appIcon} onChange={(value) => { void saveAppIcon(value); }} />
+            {appIconError ? <span className="settingsError" role="alert">{appIconError}</span> : null}
+          </SettingsSection>
+          <SettingsSection title="Font">
+            <SelectControl
+              className="settingsFontSelect"
+              contentClassName="settingsSelectContent"
+              label="Application font"
+              value={settings.fontFamily}
+              onValueChange={(value) => { void saveFontFamily(value as FontFamily); }}
+              options={[...fontOptions]}
+              showOptionTooltip={false}
+              renderOption={(option) => <span style={{ fontFamily: `"${option.label}"` }}>{option.label}</span>}
+            />
+            {fontFamilyError ? <span className="settingsError" role="alert">{fontFamilyError}</span> : null}
+          </SettingsSection>
+          </SettingsGroup>
+          <SettingsGroup title="General">
           <SettingsSection title="Terminal">
             <SettingsApplicationPicker
               id="settings-terminal"
@@ -432,6 +706,18 @@ export function SettingsView({ appearance, themePreferences, developerMode, onAp
               onCancel={() => setTerminalError("")}
               onTest={testTerminal}
             />
+          </SettingsSection>
+          <SettingsSection title="Session resume">
+            <SegmentedControl
+              className="settingsSessionResumeControl"
+              value={settings.sessionResumeTarget}
+              onValueChange={(value) => { void saveSessionResumeTarget(value); }}
+              aria-label="Prefer opening resumed sessions in"
+            >
+              <SegmentedControlItem value="terminal">Terminal</SegmentedControlItem>
+              <SegmentedControlItem value="app">App</SegmentedControlItem>
+            </SegmentedControl>
+            {sessionResumeError ? <span className="settingsError" role="alert">{sessionResumeError}</span> : null}
           </SettingsSection>
           <SettingsSection title="Editor">
             <SettingsApplicationPicker
@@ -482,60 +768,50 @@ export function SettingsView({ appearance, themePreferences, developerMode, onAp
               />
               {sessionRootsError ? <span className="settingsError" role="alert">{sessionRootsError}</span> : null}
           </SettingsSection>
-          <SettingsSection title="Developer mode">
-            <div className="settingsCheckboxRow">
-              <SelectionCheckbox
-                checked={settings.developerMode}
-                label="Enable developer mode"
-                onChange={(checked) => { void saveDeveloperMode(checked); }}
-              />
-              <span>Enable developer mode</span>
-            </div>
-            {developerModeError ? <span className="settingsError" role="alert">{developerModeError}</span> : null}
-          </SettingsSection>
+          </SettingsGroup>
+          <SettingsGroup title="Coding agents">
           <SettingsSection title="Coding agents">
               <div className="settingsAgentRow">
-                {!cliStatus || !bundledSkillStatus ? <LoadingIcon size={14} /> : setupReady ? <Check className="isSuccess" size={14} /> : setupConflict ? <AlertCircle className="isAttention" size={14} /> : <Info size={14} />}
                 <div className="settingsAgentStatus">
-                  <strong>{!cliStatus || !bundledSkillStatus ? "Checking…" : setupReady ? "Installed" : setupConflict ? "Needs attention" : "Not installed"}</strong>
+                  {setupStatusLabel ? <strong>{setupStatusLabel}</strong> : null}
                   <div className="settingsCliActions">
                     {canInstallBundledSkill ? (
                       <StatefulButton
-                        className="settingsUpdateButton settingsCliButton"
+                        size="sm"
                         state={bundledSkillBusy ? "loading" : "idle"}
-                        width={136}
-                        minWidth={136}
+                        width={112}
+                        minWidth={112}
                         disabled={cliBusy !== null}
-                        aria-label={cliHealthy || !cliSupported ? "Install Tendi skill" : "Install CLI and Tendi skill"}
+                        aria-label={bundledSkillNeedsRepair ? "Repair" : "Install"}
                         onClick={() => { void installBundledSkill(); }}
                         loadingContent={<LoadingIcon size={14} />}
                       >
-                        Install
+                        {bundledSkillNeedsRepair ? "Repair" : "Install"}
                       </StatefulButton>
                     ) : null}
                     {canRegisterCliSeparately ? (
                       <StatefulButton
-                        className="settingsUpdateButton settingsCliButton"
+                        size="sm"
                         state={cliBusy === "install" ? "loading" : "idle"}
-                        width={136}
-                        minWidth={136}
+                        width={112}
+                        minWidth={112}
                         disabled={cliBusy !== null}
-                        aria-label={cliBusy === "install" ? "Registering CLI" : cliNeedsRepair ? "Repair CLI" : "Install CLI"}
-                        onClick={() => { void changeCliRegistration("install"); }}
+                        aria-label={cliBusy === "install" ? (cliNeedsRepair ? "Repairing" : "Installing") : cliNeedsRepair ? "Repair" : "Install"}
+                        onClick={() => { void changeCliRegistration(); }}
                         loadingContent={<LoadingIcon size={14} />}
                       >
-                        {cliNeedsRepair ? "Repair CLI" : "Install CLI"}
+                        {cliNeedsRepair ? "Repair" : "Install"}
                       </StatefulButton>
                     ) : null}
-                    {cliInstalled || cliNeedsRepair ? (
+                    {codingAgentsActionValue === "remove" ? (
                       <StatefulButton
-                        className="settingsUpdateButton settingsCliButton"
-                        state={cliBusy === "remove" ? "loading" : "idle"}
-                        width={136}
-                        minWidth={136}
+                        size="sm"
+                        state={bundledSkillBusy ? "loading" : "idle"}
+                        width={112}
+                        minWidth={112}
                         disabled={cliBusy !== null}
-                        aria-label={cliBusy === "remove" ? "Removing CLI" : "Remove CLI"}
-                        onClick={() => { void changeCliRegistration("remove"); }}
+                        aria-label={bundledSkillBusy ? "Removing" : "Remove"}
+                        onClick={() => { void removeCodingAgents(); }}
                         loadingContent={<LoadingIcon size={14} />}
                       >
                         Remove
@@ -547,12 +823,40 @@ export function SettingsView({ appearance, themePreferences, developerMode, onAp
                 </div>
               </div>
           </SettingsSection>
+          </SettingsGroup>
+          <SettingsGroup title="Advanced">
+          <SettingsSection title="Developer mode">
+            <div className="settingsCheckboxRow">
+              <Switch
+                checked={settings.developerMode}
+                label="Enable developer mode"
+                onCheckedChange={(checked) => { void saveDeveloperMode(checked); }}
+              />
+            </div>
+            {developerModeError ? <span className="settingsError" role="alert">{developerModeError}</span> : null}
+          </SettingsSection>
+          <SettingsSection title="Logs">
+            <StatefulButton
+              size="sm"
+              state={logExportState}
+              width={144}
+              minWidth={144}
+              onClick={() => { void exportLogs(); }}
+              aria-label={logExportState === "loading" ? "Exporting logs" : logExportState === "success" ? "Logs exported" : logExportState === "error" ? "Export logs again" : "Export logs"}
+              loadingContent={<LoadingIcon size={16} />}
+              successContent="Exported"
+              errorContent="Export failed"
+            >
+              Export Logs
+            </StatefulButton>
+            {logExportError ? <span className="settingsError" role="alert">{logExportError}</span> : null}
+          </SettingsSection>
           <SettingsSection title="Updates">
-              <StatefulButton
-                className="settingsUpdateButton"
+            <StatefulButton
+                size="sm"
                 state={updateState}
-                width={192}
-                minWidth={192}
+                width={144}
+                minWidth={144}
                 onClick={checkForUpdates}
                 aria-label={updateState === "loading" ? "Checking for updates" : updateState === "success" ? "You're up to date" : updateState === "error" ? "Check for updates again" : "Check for updates"}
                 loadingContent={<LoadingIcon size={16} />}
@@ -562,6 +866,7 @@ export function SettingsView({ appearance, themePreferences, developerMode, onAp
                 Check for Updates…
               </StatefulButton>
           </SettingsSection>
+          </SettingsGroup>
         </div>
       </div>
     </section>

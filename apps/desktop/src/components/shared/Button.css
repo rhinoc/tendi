@@ -7,12 +7,12 @@
   border: 0;
   border-radius: var(--radius-md);
   color: var(--text);
-  background: var(--panel-bg);
-  box-shadow: var(--shadow-border);
+  background: var(--control-fill);
+  box-shadow: none;
   cursor: pointer;
-  font-size: var(--text-ui);
-  font-weight: 600;
-  line-height: 1;
+  font-size: var(--text-sm);
+  font-weight: 400;
+  line-height: var(--leading-ui);
   white-space: nowrap;
   transition-property: box-shadow, background-color, color, transform;
   transition-duration: 140ms;
@@ -20,26 +20,16 @@
 }
 
 .appButton-sm {
-  height: 28px;
+  height: var(--control-height);
   min-width: 0;
   padding: 0 9px;
   border-radius: var(--radius-sm);
-  font-size: 12px;
-}
-
-.appButton-md {
-  height: 38px;
-  min-width: 104px;
-}
-
-.appButton-lg {
-  height: 42px;
-  min-width: 120px;
-  padding: 0 16px;
+  font-size: var(--text-sm);
+  line-height: var(--leading-ui);
 }
 
 .appButton:hover {
-  box-shadow: var(--shadow-border-hover);
+  background: var(--hover-fill-strong);
 }
 
 .appButton:active:not(:disabled) {
@@ -59,6 +49,47 @@
 
 .appButton-primary:hover {
   background: var(--accent-hover);
+  box-shadow: none;
+}
+
+.appButton-icon {
+  width: var(--control-size-icon);
+  height: var(--control-height);
+  min-width: var(--control-size-icon);
+  padding: 0;
+  border-radius: var(--radius-sm);
+  color: var(--muted);
+  background: transparent;
+  box-shadow: none;
+}
+
+.appButton-icon:hover,
+.appButton-icon.menuActive {
+  color: var(--text);
+  background: var(--hover-fill-strong);
+  box-shadow: none;
+}
+
+.appButton-icon.isCopied {
+  color: var(--green);
+  background: var(--green-soft);
+}
+
+.appButton-icon.isCopyError {
+  color: var(--danger);
+  background: var(--danger-soft);
+}
+
+.appButton-icon.filled {
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.appButton-icon:disabled,
+.appButton-icon[aria-disabled="true"] {
+  opacity: 0.45;
+  color: var(--faint);
+  background: var(--control-fill);
   box-shadow: none;
 }
 
@@ -97,4 +128,13 @@
   cursor: default;
   opacity: 1;
   transform: none;
+}
+
+.appButton-icon:disabled,
+.appButton-icon[aria-disabled="true"],
+.appButton-icon:disabled:hover,
+.appButton-icon[aria-disabled="true"]:hover {
+  color: var(--faint);
+  background: transparent;
+  box-shadow: none;
 }

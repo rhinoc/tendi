@@ -1,4 +1,5 @@
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { logger } from "./logger.ts";
 import { isTauriRuntime } from "./tauri.ts";
 
 export const WINDOW_DRAG_REGION_SELECTOR = "[data-window-drag], [data-tauri-drag-region]";
@@ -52,6 +53,6 @@ export function startWindowDrag(event: DragEventLike): void {
   if (!shouldStartWindowDrag(event)) return;
   if (!isTauriRuntime()) return;
   getCurrentWindow().startDragging().catch((error) => {
-    console.warn("window drag failed", error);
+    logger.warn("window drag failed", { error });
   });
 }

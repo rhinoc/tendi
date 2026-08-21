@@ -6,9 +6,6 @@ impl TerminalProvider for WarpProvider {
     fn id(&self) -> &str {
         "warp"
     }
-    fn label(&self) -> String {
-        "Warp".to_string()
-    }
     fn available(&self) -> bool {
         app_available(&["/Applications/Warp.app"])
     }

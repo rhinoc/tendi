@@ -3,6 +3,7 @@ import { PanelLeftClose, PanelLeftOpen } from "lucide-react";
 
 import { navItems, startWindowDrag } from "../../lib/index.ts";
 import { AgentOptionLabel } from "./AgentOptionLabel.tsx";
+import { Button } from "./Button.tsx";
 import { SelectControl } from "./SelectControl.tsx";
 
 export type SidebarSource = {
@@ -65,7 +66,6 @@ export function Sidebar<TView extends string = string>({
         </nav>
         <div className="agentSelectGroup">
           <SelectControl
-            className="agentSelectTrigger"
             contentClassName="agentSelectContent"
             label="Agent filter"
             value={agentFilter}
@@ -73,6 +73,7 @@ export function Sidebar<TView extends string = string>({
             options={agentOptions}
             side="top"
             align="start"
+            indicatorPosition="right"
             showChevron={!collapsed}
             triggerTooltipContent={collapsed ? selectedAgentLabel : undefined}
             renderValue={(option) => (
@@ -85,13 +86,14 @@ export function Sidebar<TView extends string = string>({
             )}
             renderOption={(option) => <AgentOptionLabel agent={option.value} label={option.label} variant="filter" />}
           />
-          <button
-            className="paneButton sidebarToggle"
+          <Button
+            variant="icon"
+            className="sidebarToggle"
             aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"}
             onClick={() => setCollapsed((value) => !value)}
           >
             {collapsed ? <PanelLeftOpen size={15} /> : <PanelLeftClose size={15} />}
-          </button>
+          </Button>
         </div>
       </div>
     </aside>

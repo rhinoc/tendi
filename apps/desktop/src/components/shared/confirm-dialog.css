@@ -9,8 +9,8 @@
   margin: 0;
   padding: 20px 22px 0;
   color: var(--text);
-  font-size: 16px;
-  line-height: 1.3;
+  font-size: var(--text-body);
+  line-height: var(--leading-body);
   font-weight: 650;
   letter-spacing: -0.015em;
   text-wrap: balance;
@@ -47,22 +47,23 @@
   width: min(1180px, calc(100vw - 48px));
 }
 
-.skillDeleteConfirmDialog {
-  box-sizing: border-box;
-  width: min(420px, calc(100vw - 48px));
-  height: min(260px, calc(100vh - 48px));
-  display: flex;
-  flex-direction: column;
+.skillDeleteNames {
+  display: grid;
+  gap: 8px;
+  margin: -8px 22px 18px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--inset-fill);
 }
 
-.skillDeleteConfirmDialog .skillChangeDialogBody {
-  min-height: 0;
-  flex: 1 1 auto;
-  overflow: auto;
-}
-
-.skillDeleteConfirmDialog .confirmDialogActions {
-  flex: 0 0 auto;
+.skillDeleteNames span {
+  overflow: hidden;
+  color: var(--text);
+  font-size: var(--text-sm);
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .skillUpdateDiffFrame {
@@ -108,8 +109,8 @@
   color: var(--muted);
   cursor: pointer;
   font-family: var(--font-mono);
-  font-size: 12px;
-  line-height: 28px;
+  font-size: var(--text-sm);
+  line-height: var(--leading-large);
   text-align: left;
 }
 
@@ -160,38 +161,75 @@
   overflow: hidden;
 }
 
-.skillUpdateDiffEditor .codeMirrorEditor,
-.skillUpdateDiffEditor .codeMirrorEditor > div {
+.skillUpdateDiffEditorBody {
+  width: 100%;
   height: 100%;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.skillUpdateDiffEditor .codeMirrorEditor {
+  width: 100%;
+  min-width: 0;
+  min-height: 0;
+  flex: 1 1 auto;
+  overflow: hidden;
+}
+
+.skillUpdateDiffEditor .codeMirrorEditor > div {
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+}
+
+.skillMergeResolutionBar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 0 0 auto;
+  padding: 8px 10px;
+  border-top: 1px solid var(--line);
+  background: var(--surface-2);
+  color: var(--muted);
+  font-size: var(--text-sm);
+}
+
+.skillMergeResolutionBar span {
+  flex: 1 1 auto;
+}
+
+.skillMergeResolutionBar button {
+  flex: 0 0 auto;
+  padding: 4px 8px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-sm);
+  background: var(--panel-bg);
+  color: var(--text);
+  cursor: pointer;
+  font-size: var(--text-sm);
+}
+
+.skillMergeResolutionBar button:hover {
+  background: var(--hover-fill);
 }
 
 .skillUpdatePreviewLoading,
-.skillDeletePreviewLoading,
 .skillUpdatePreviewError {
   margin: 4px 22px 20px;
 }
 
-.skillUpdatePreviewLoading {
-  width: auto;
+.loadingState.skillUpdatePreviewLoading {
+  width: calc(100% - 44px);
   height: min(62vh, 640px);
   margin: -4px 22px 20px;
   display: grid;
   place-items: center;
   border: 1px solid var(--line);
   border-radius: var(--radius-md);
-}
-
-.skillDeletePreviewLoading {
-  margin: -4px 22px 20px;
-  display: grid;
-  place-items: center;
-  border: 1px solid var(--line);
-  border-radius: var(--radius-md);
-}
-
-.skillDeletePreviewLoading .loadingStateDots {
-  min-height: 72px;
-  background-size: 10px 10px;
 }
 
 .skillUpdatePreviewError {
@@ -208,8 +246,8 @@
   border: 1px solid var(--line);
   border-radius: var(--radius-md);
   color: var(--muted);
-  font-size: 13px;
-  line-height: 1.45;
+  font-size: var(--text-ui);
+  line-height: var(--leading-body);
   text-align: center;
   white-space: pre-wrap;
 }
@@ -227,33 +265,7 @@
 .confirmDialogDescription {
   margin: 8px 22px 20px;
   color: var(--muted);
-  font-size: 13px;
-  line-height: 1.45;
+  font-size: var(--text-ui);
+  line-height: var(--leading-body);
   text-wrap: pretty;
-}
-
-.confirmDialogImpact {
-  display: grid;
-  gap: 10px;
-  margin: -8px 22px 18px;
-  padding: 10px;
-  border: 1px solid var(--danger-soft-strong);
-  border-radius: var(--radius-md);
-  background: var(--danger-soft);
-}
-
-.confirmDialogImpact section {
-  display: grid;
-  gap: 4px;
-}
-
-.confirmDialogImpact strong {
-  color: var(--danger-text);
-  font-size: 12px;
-}
-
-.confirmDialogImpact span {
-  color: var(--muted);
-  font-size: 12px;
-  line-height: 1.4;
 }

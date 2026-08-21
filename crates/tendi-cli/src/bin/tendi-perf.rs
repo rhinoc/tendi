@@ -1,5 +1,4 @@
 use std::{
-    collections::BTreeSet,
     env, fs,
     path::{Path, PathBuf},
     time::{Instant, SystemTime, UNIX_EPOCH},
@@ -13,7 +12,6 @@ use tendi_core::{
     hooks::{HookDeleteRequest, delete_hooks, read_hook_source_at_path, scan_hooks},
     rules::read_rule_file_at_path,
     session_skills::{SessionFileState, SessionSkillLink},
-    sessions::SessionIdentity,
     skills::{SkillPath, SkillRecord, SkillRoot, SkillScan, SkillVisibility, refresh_skill_scan},
     storage::{PromptWrite, Store},
     transcript::parse_transcript_page,
@@ -26,7 +24,6 @@ const SKILL_REFRESH_COUNT: usize = 240;
 const HOOK_COUNT: usize = 500;
 const HOOK_DELETE_COUNT: usize = 100;
 const PROMPT_COUNT: usize = 500;
-const PROJECT_SESSION_COUNT: usize = 500;
 
 fn main() -> Result<()> {
     let scenario = env::args().nth(1).context("usage: tendi-perf <scenario>")?;
@@ -44,7 +41,6 @@ fn main() -> Result<()> {
         "tertiary-skill-save" => tertiary_skill_save(),
         "tertiary-hook-delete" => tertiary_hook_delete(),
         "tertiary-prompt-crud" => tertiary_prompt_crud(),
-        "tertiary-session-projects" => tertiary_session_projects(),
         "tertiary-rule-save" => tertiary_rule_save(),
         "tertiary-settings-save" => tertiary_settings_save(),
         _ => bail!("unknown performance scenario: {scenario}"),
@@ -464,54 +460,6 @@ fn tertiary_settings_save() -> Result<Value> {
         .map(|index| format!("/tmp/tendi-perf-session-root-{index:02}"))
         .collect();
     measured(|| Ok((store.save_app_settings(settings)?, 1)))
-}
-
-fn tertiary_session_projects() -> Result<Value> {
-    let scratch = Scratch::new("session-projects")?;
-    let store = Store::open(scratch.path().join("projects.sqlite3"))?;
-    let mut sessions = (0..PROJECT_SESSION_COUNT)
-        .map(|index| {
-            session(
-                index,
-                scratch.path().join(format!("session-{index}.jsonl")),
-                index % 20,
-            )
-        })
-        .collect::<Vec<_>>();
-    store.resolve_session_projects(&mut sessions)?;
-    store.save_sessions(&SessionScan {
-        sessions: sessions.clone(),
-        warnings: Vec::new(),
-    })?;
-    let project_ids = sessions
-        .iter()
-        .filter_map(|session| session.logical_project_id.clone())
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect::<Vec<_>>();
-    if project_ids.len() != 20 {
-        bail!("unexpected project fixture count: {}", project_ids.len());
-    }
-    let split = sessions
-        .iter()
-        .take(100)
-        .map(SessionIdentity::from)
-        .collect::<Vec<_>>();
-
-    measured(|| {
-        let target_name = store.merge_session_projects(&project_ids[0], &project_ids[1..10])?;
-        let project_id = store.split_sessions_into_project("Performance split", &split)?;
-        Ok((
-            json!({
-                "targetProjectId": project_ids[0],
-                "targetProjectName": target_name,
-                "mergedProjectIds": &project_ids[..10],
-                "splitProjectId": project_id,
-                "sessions": split,
-            }),
-            110,
-        ))
-    })
 }
 
 fn measured<T, F>(operation: F) -> Result<Value>

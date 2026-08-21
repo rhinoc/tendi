@@ -5,6 +5,7 @@ import { EditorView, type ViewUpdate } from "@codemirror/view";
 
 import { codeMirrorSearchExtension } from "./codemirror-search.ts";
 import { EditorStatePlaceholder } from "./EditorStatePlaceholder.tsx";
+import { conflictMarkersExtension } from "../../lib/codemirror-conflict.ts";
 import { findTextRanges } from "./text-ranges.ts";
 
 const codeMirrorBasicSetup = {
@@ -17,16 +18,21 @@ const codeMirrorBasicSetup = {
 
 export type CodeMirrorLanguage = "json" | "markdown" | "toml" | "yaml";
 
-async function loadCodeMirrorModules(activeLanguage: CodeMirrorLanguage | undefined, showDiff: boolean) {
+async function loadCodeMirrorModules(
+  activeLanguage: CodeMirrorLanguage | undefined,
+  showDiff: boolean,
+  showConflictMarkers: boolean,
+  onConflictResolve: (content: string) => void,
+) {
   const { codeMirrorBaseTheme, codeMirrorHighlightStyle, syntaxHighlighting } = await import("../../lib/codemirror-theme.ts");
   let languageExtension: Extension | undefined;
   let promptXmlTagExtension: Extension | undefined;
   if (activeLanguage === "markdown") {
-    const [{ markdown }, { codeMirrorPromptXmlTagExtension }] = await Promise.all([
-      import("@codemirror/lang-markdown"),
+    const [{ codeMirrorMarkdown }, { codeMirrorPromptXmlTagExtension }] = await Promise.all([
+      import("../../lib/codemirror-markdown.ts"),
       import("../../lib/prompt-codemirror.ts"),
     ]);
-    languageExtension = markdown();
+    languageExtension = codeMirrorMarkdown();
     promptXmlTagExtension = codeMirrorPromptXmlTagExtension();
   } else if (activeLanguage === "json") {
     languageExtension = (await import("../../lib/codemirror-json.ts")).codeMirrorJson();
@@ -53,6 +59,8 @@ async function loadCodeMirrorModules(activeLanguage: CodeMirrorLanguage | undefi
     highlightStyle: codeMirrorHighlightStyle,
     languageExtension,
     promptXmlTagExtension,
+    conflictMarkers: showConflictMarkers ? conflictMarkersExtension(onConflictResolve) : undefined,
+    showConflictMarkers,
     showDiff,
     syntaxHighlighting,
   };
@@ -64,6 +72,8 @@ export type CodeMirrorFileEditorProps = {
   markdown?: boolean;
   language?: CodeMirrorLanguage;
   showDiff?: boolean;
+  showConflictMarkers?: boolean;
+  onConflictResolve?: (content: string) => void;
   onChange?: (value: string) => void;
   readOnly?: boolean;
   searchQuery?: string;
@@ -78,6 +88,8 @@ export function CodeMirrorFileEditor({
   markdown,
   language,
   showDiff = false,
+  showConflictMarkers = false,
+  onConflictResolve,
   onChange,
   readOnly = false,
   searchQuery = "",
@@ -88,8 +100,10 @@ export function CodeMirrorFileEditor({
   const editorViewRef = useRef<EditorView | null>(null);
   const [loadedModules, setLoadedModules] = useState<Awaited<ReturnType<typeof loadCodeMirrorModules>> | null>(null);
   const onChangeRef = useRef(onChange);
+  const onConflictResolveRef = useRef(onConflictResolve);
   const onSelectionChangeRef = useRef(onSelectionChange);
   onChangeRef.current = onChange;
+  onConflictResolveRef.current = onConflictResolve;
   onSelectionChangeRef.current = onSelectionChange;
   const searchMatches = useMemo(() => findTextRanges(content, searchQuery), [content, searchQuery]);
   const emitSelection = useCallback((view: EditorView) => {
@@ -101,6 +115,9 @@ export function CodeMirrorFileEditor({
   }, []);
   const handleChange = useCallback((value: string) => {
     onChangeRef.current?.(value);
+  }, []);
+  const handleConflictResolve = useCallback((value: string) => {
+    onConflictResolveRef.current?.(value);
   }, []);
   const handleCreateEditor = useCallback((view: EditorView) => {
     editorViewRef.current = view;
@@ -114,19 +131,24 @@ export function CodeMirrorFileEditor({
     let cancelled = false;
     editorViewRef.current = null;
     setLoadedModules(null);
-    void loadCodeMirrorModules(activeLanguage, showDiff).then((next) => {
+    void loadCodeMirrorModules(activeLanguage, showDiff, showConflictMarkers, handleConflictResolve).then((next) => {
       if (!cancelled) setLoadedModules(next);
     });
     return () => {
       cancelled = true;
     };
-  }, [activeLanguage, showDiff]);
+  }, [activeLanguage, handleConflictResolve, showConflictMarkers, showDiff]);
   const shellExtensions = useMemo<Extension[]>(() => [
     EditorView.lineWrapping,
     EditorView.editable.of(!readOnly),
   ], [readOnly]);
   const extensions = useMemo(() => {
-    if (!loadedModules || loadedModules.activeLanguage !== activeLanguage || loadedModules.showDiff !== showDiff) return shellExtensions;
+    if (
+      !loadedModules
+      || loadedModules.activeLanguage !== activeLanguage
+      || loadedModules.showConflictMarkers !== showConflictMarkers
+      || loadedModules.showDiff !== showDiff
+    ) return shellExtensions;
     const next: Extension[] = [
       loadedModules.baseTheme,
       ...shellExtensions,
@@ -135,15 +157,21 @@ export function CodeMirrorFileEditor({
     next.push(loadedModules.syntaxHighlighting(loadedModules.highlightStyle));
     if (loadedModules.promptXmlTagExtension) next.push(loadedModules.promptXmlTagExtension);
     if (loadedModules.diffExtensionFactory) next.push(loadedModules.diffExtensionFactory(originalContent ?? ""));
+    if (loadedModules.conflictMarkers) next.push(loadedModules.conflictMarkers);
     if (searchQuery.trim()) {
-      next.push(codeMirrorSearchExtension(
-        searchQuery,
-        Math.min(searchIndex, searchMatches.length - 1),
-        searchMatches,
-      ));
+      next.push(codeMirrorSearchExtension(searchQuery, searchIndex));
     }
     return next;
-  }, [activeLanguage, loadedModules, originalContent, searchIndex, searchMatches, searchQuery, shellExtensions, showDiff]);
+  }, [
+    activeLanguage,
+    loadedModules,
+    originalContent,
+    searchIndex,
+    searchQuery,
+    shellExtensions,
+    showConflictMarkers,
+    showDiff,
+  ]);
 
   useEffect(() => {
     onSearchMatchCount?.(searchMatches.length);
@@ -151,15 +179,26 @@ export function CodeMirrorFileEditor({
 
   useEffect(() => {
     const view = editorViewRef.current;
-    if (!view || !searchQuery.trim() || searchMatches.length === 0) return;
-    const match = searchMatches[Math.min(searchIndex, searchMatches.length - 1)];
-    if (!match) return;
-    view.dispatch({
-      effects: EditorView.scrollIntoView(match.from, { y: "center" }),
+    if (!view || !searchQuery.trim()) return;
+    const frame = window.requestAnimationFrame(() => {
+      if (editorViewRef.current !== view) return;
+      const currentSearchMatches = findTextRanges(view.state.doc.toString(), searchQuery);
+      if (currentSearchMatches.length === 0) return;
+      const match = currentSearchMatches[Math.min(searchIndex, currentSearchMatches.length - 1)];
+      if (!match || match.to > view.state.doc.length) return;
+      view.dispatch({
+        effects: EditorView.scrollIntoView(match.from, { y: "center" }),
+      });
     });
-  }, [searchIndex, searchMatches, searchQuery]);
+    return () => window.cancelAnimationFrame(frame);
+  }, [content, searchIndex, searchQuery]);
 
-  if (!loadedModules || loadedModules.activeLanguage !== activeLanguage || loadedModules.showDiff !== showDiff) {
+  if (
+    !loadedModules
+    || loadedModules.activeLanguage !== activeLanguage
+    || loadedModules.showConflictMarkers !== showConflictMarkers
+    || loadedModules.showDiff !== showDiff
+  ) {
     return <EditorStatePlaceholder label="Loading file" />;
   }
 

@@ -2,6 +2,7 @@ import { ArrowLeft } from "lucide-react";
 import type { ReactNode } from "react";
 
 import { startWindowDrag } from "../../lib/index.ts";
+import { IconButton } from "./IconButton.tsx";
 import "./EditorHeader.css";
 
 export type EditorHeaderProps = {
@@ -14,7 +15,7 @@ export type EditorHeaderProps = {
 export function EditorHeader({ title, backLabel, onBack, actions = null }: EditorHeaderProps) {
   return (
     <header className="editorHeader dragRegion" data-window-drag onMouseDown={(event) => startWindowDrag(event.nativeEvent)}>
-      <button className="backButton" aria-label={backLabel} onClick={onBack}><ArrowLeft size={17} /></button>
+      <IconButton aria-label={backLabel} onClick={onBack}><ArrowLeft size={17} /></IconButton>
       <div className="editorTitle">
         <h1>{title}</h1>
       </div>

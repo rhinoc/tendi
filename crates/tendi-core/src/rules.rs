@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeMap,
     fs,
     path::{Path, PathBuf},
 };
@@ -14,7 +15,8 @@ use crate::{
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct RuleRecord {
-    pub agent: AgentKind,
+    #[serde(default)]
+    pub agents: Vec<AgentKind>,
     pub kind: String,
     pub scope: String,
     pub path: PathBuf,
@@ -45,7 +47,31 @@ pub fn scan_rules(cwd: &Path) -> Result<RuleScan> {
         provider.scan_rules(&ctx, &mut rules, &mut warnings, &mut order);
     }
 
-    Ok(RuleScan { rules, warnings })
+    Ok(RuleScan {
+        rules: merge_rules_by_path(rules),
+        warnings,
+    })
+}
+
+pub(crate) fn merge_rules_by_path(rules: Vec<RuleRecord>) -> Vec<RuleRecord> {
+    let mut merged: Vec<RuleRecord> = Vec::new();
+    let mut indexes: BTreeMap<PathBuf, usize> = BTreeMap::new();
+
+    for mut rule in rules {
+        rule.agents.sort();
+        rule.agents.dedup();
+        if let Some(index) = indexes.get(&rule.path).copied() {
+            let existing = &mut merged[index];
+            existing.agents.extend(rule.agents);
+            existing.agents.sort();
+            existing.agents.dedup();
+        } else {
+            indexes.insert(rule.path.clone(), merged.len());
+            merged.push(rule);
+        }
+    }
+
+    merged
 }
 
 pub fn read_rule_file(cwd: &Path, path: &Path) -> Result<RuleFileContent> {
@@ -116,7 +142,7 @@ pub(crate) fn add_rule_file(
     match sha256_file(&path) {
         Ok(sha256) => {
             rules.push(RuleRecord {
-                agent,
+                agents: vec![agent],
                 kind: kind.to_string(),
                 scope: scope.to_string(),
                 path,
@@ -245,7 +271,7 @@ mod tests {
             .filter(|rule| rule.path.starts_with(&root))
             .map(|rule| {
                 (
-                    rule.agent,
+                    rule.agents.clone(),
                     rule.kind.as_str(),
                     rule.scope.as_str(),
                     rule.path
@@ -261,49 +287,49 @@ mod tests {
             project_rules,
             vec![
                 (
-                    AgentKind::Codex,
+                    vec![AgentKind::Codex],
                     "AGENTS.override.md",
                     "project",
                     "repo/AGENTS.override.md".to_string()
                 ),
                 (
-                    AgentKind::Codex,
+                    vec![AgentKind::Codex],
                     "TEAM_GUIDE.md",
                     "project",
                     "repo/crate/TEAM_GUIDE.md".to_string()
                 ),
                 (
-                    AgentKind::Cursor,
+                    vec![AgentKind::Cursor],
                     "AGENTS.md",
                     "project",
                     "repo/AGENTS.md".to_string()
                 ),
                 (
-                    AgentKind::Cursor,
+                    vec![AgentKind::Cursor],
                     "cursor-rule",
                     "project",
                     "repo/.cursor/rules/project.mdc".to_string()
                 ),
                 (
-                    AgentKind::Claude,
+                    vec![AgentKind::Claude],
                     "CLAUDE.md",
                     "project",
                     "repo/CLAUDE.md".to_string()
                 ),
                 (
-                    AgentKind::Claude,
+                    vec![AgentKind::Claude],
                     ".claude/CLAUDE.md",
                     "project",
                     "repo/.claude/CLAUDE.md".to_string()
                 ),
                 (
-                    AgentKind::Claude,
+                    vec![AgentKind::Claude],
                     "CLAUDE.local.md",
                     "local",
                     "repo/CLAUDE.local.md".to_string()
                 ),
                 (
-                    AgentKind::Claude,
+                    vec![AgentKind::Claude],
                     "claude-rule",
                     "project",
                     "repo/.claude/rules/testing.md".to_string()
@@ -315,6 +341,36 @@ mod tests {
                 .iter()
                 .any(|(_, _, _, path)| path == "repo/.codex/rules/default.rules"),
             "Codex exec-policy .rules files are not prompt rules"
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn scans_same_rule_once_with_all_applicable_agents() {
+        let root = std::env::temp_dir().join(format!(
+            "tendi-rules-shared-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("system time before epoch")
+                .as_nanos()
+        ));
+        let project = root.join("repo");
+        fs::create_dir_all(project.join(".git")).expect("create git root");
+        fs::write(project.join("AGENTS.md"), "shared agents").expect("write AGENTS");
+
+        let scan = scan_rules(&project).expect("scan rules");
+        let project_rules = scan
+            .rules
+            .iter()
+            .filter(|rule| rule.path == project.join("AGENTS.md"))
+            .collect::<Vec<_>>();
+
+        assert_eq!(project_rules.len(), 1);
+        assert_eq!(
+            project_rules[0].agents,
+            vec![AgentKind::Codex, AgentKind::Cursor]
         );
 
         let _ = fs::remove_dir_all(root);

@@ -643,23 +643,50 @@ impl super::AgentProvider for CodexProvider {
         Some("toml")
     }
 
-    fn config_files(&self, _home: &Path, codex_home: &Path) -> Vec<crate::config::AgentConfigFile> {
-        let mut configs = vec![crate::config::AgentConfigFile {
-            agent: self.kind(),
-            label: "Codex".to_string(),
-            path: codex_home.join("config.toml"),
-            format: "toml".to_string(),
-            exists: codex_home.join("config.toml").is_file(),
-            profile: None,
-        }];
-        configs.extend(crate::config::profile_configs_for_root(
-            self.kind(),
-            codex_home,
-            ".config.toml",
-            "toml",
-            "Codex",
-        ));
+    fn config_files(&self, home: &Path, codex_home: &Path) -> Vec<crate::config::AgentConfigFile> {
+        let base_path = codex_home.join("config.toml");
+        let mut configs = vec![self
+            .config_file_for_path(home, codex_home, &base_path)
+            .expect("Codex provider must resolve its base config path")];
+        configs.extend(
+            crate::config::profile_paths_for_root(codex_home, ".config.toml")
+                .into_iter()
+                .filter_map(|path| self.config_file_for_path(home, codex_home, &path)),
+        );
         configs
+    }
+
+    fn config_file_for_path(
+        &self,
+        _home: &Path,
+        codex_home: &Path,
+        path: &Path,
+    ) -> Option<crate::config::AgentConfigFile> {
+        let base_path = codex_home.join("config.toml");
+        if path == base_path {
+            return Some(crate::config::AgentConfigFile {
+                agent: self.kind(),
+                label: "Codex".to_string(),
+                path: base_path.clone(),
+                format: "toml".to_string(),
+                exists: base_path.is_file(),
+                updated_at: None,
+                profile: None,
+            });
+        }
+
+        let profile = path.file_name()?.to_str()?.strip_suffix(".config.toml")?;
+        crate::config::validate_profile_name(profile).ok()?;
+        let expected_path = codex_home.join(format!("{profile}.config.toml"));
+        (path == expected_path).then_some(crate::config::AgentConfigFile {
+            agent: self.kind(),
+            label: format!("Codex / {profile}"),
+            path: expected_path.clone(),
+            format: "toml".to_string(),
+            exists: expected_path.is_file(),
+            updated_at: None,
+            profile: Some(profile.to_string()),
+        })
     }
 
     fn config_order(&self) -> usize {
@@ -781,6 +808,19 @@ impl super::AgentProvider for CodexProvider {
 
     fn parse_transcript_value(&self, value: &Value, items: &mut Vec<TranscriptItem>) {
         parse_transcript(value, items);
+    }
+
+    fn transcript_inherited_history_start_ordinal(&self, value: &Value) -> Option<u64> {
+        if value.get("type").and_then(Value::as_str) != Some("session_meta") {
+            return None;
+        }
+        let payload = value.get("payload")?;
+        if payload.get("thread_source").and_then(Value::as_str) != Some("subagent") {
+            return None;
+        }
+        payload
+            .get("subagent_history_start_ordinal")
+            .and_then(Value::as_u64)
     }
 
     fn config_profile_key(&self) -> Option<&'static str> {

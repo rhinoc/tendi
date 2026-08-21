@@ -1,5 +1,6 @@
 import type { ColumnDef } from "../components/DataTable.types";
 import { AgentBadge } from "../components/shared/AgentBadge.tsx";
+import { AgentChips } from "../components/shared/AgentChips.tsx";
 import { basename, friendlyAgent, titleValue } from "./index.ts";
 
 type AgentRow = { agent?: string | null };
@@ -16,7 +17,7 @@ export const agentColumn: ColumnDef<AgentRow> = {
 };
 
 type RuleRow = {
-  agent?: string | null;
+  agents?: string[] | null;
   kind?: string | null;
   scope?: string | null;
   order?: number | null;
@@ -25,7 +26,16 @@ type RuleRow = {
 };
 
 export const ruleColumns: ColumnDef<RuleRow>[] = [
-  { ...agentColumn, width: "78px" },
+  {
+    key: "agents",
+    header: "Agents",
+    label: "Agents",
+    type: "enum",
+    width: "96px",
+    groupBy: (row) => (row.agents ?? []).join(", "),
+    sortValue: (row) => (row.agents ?? []).join(",").toLowerCase(),
+    render: (row) => <AgentChips agents={row.agents ?? undefined} />,
+  },
   { key: "kind", header: "Kind", label: "Kind", type: "enum", width: "96px" },
   { key: "scope", header: "Scope", label: "Scope", type: "enum", width: "96px" },
   {

@@ -1,9 +1,11 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ComponentType, ReactNode } from "react";
-import { ContextMenu, Dialog, DropdownMenu, ToggleGroup } from "radix-ui";
+import { ContextMenu, Dialog, DropdownMenu } from "radix-ui";
 import {
+  ChevronLeft,
   ChevronRight,
   Copy,
+  ArrowRightLeft,
   Eye,
   FolderOpen,
   Hammer,
@@ -11,7 +13,7 @@ import {
   PackagePlus,
   Plus,
   RefreshCw,
-  Sparkles,
+  SearchX,
   Trash2,
   Waypoints,
   X,
@@ -19,28 +21,32 @@ import {
 
 import { AgentChips } from "../components/shared/AgentChips.tsx";
 import { AgentOptionLabel } from "../components/shared/AgentOptionLabel.tsx";
-import { Button } from "../components/shared/Button.tsx";
+import { Badge } from "../components/shared/Badge.tsx";
+import { BadgeList } from "../components/shared/BadgeList.tsx";
 import { ContentTopDragStrip } from "../components/shared/ContentTopDragStrip.tsx";
+import { DialogActionButton } from "../components/shared/DialogActionButton.tsx";
 import { DialogActionBar } from "../components/shared/DialogActionBar.tsx";
 import { DialogAdvanceButton } from "../components/shared/DialogAdvanceButton.tsx";
 import { DialogShell } from "../components/shared/DialogShell.tsx";
 import { DialogTextField } from "../components/shared/DialogTextField.tsx";
+import { EmptyState } from "../components/shared/EmptyState.tsx";
 import { IconButton } from "../components/shared/IconButton.tsx";
 import { LoadingIcon } from "../components/shared/LoadingIcon.tsx";
-import { LoadingInline } from "../components/shared/LoadingInline.tsx";
 import { LoadingState } from "../components/shared/LoadingState.tsx";
+import { LoadErrorState } from "../components/shared/LoadErrorState.tsx";
 import { PageHeader } from "../components/shared/PageHeader.tsx";
 import { RowActionsMenu } from "../components/shared/RowActionsMenu.tsx";
 import { SelectionCheckbox } from "../components/shared/SelectionCheckbox.tsx";
-import { SegmentedControl, SegmentedControlItem } from "../components/shared/SegmentedControl.tsx";
 import { SearchField } from "../components/shared/SearchField.tsx";
+import { SegmentedControl, SegmentedControlItem } from "../components/shared/SegmentedControl.tsx";
 import { SelectControl } from "../components/shared/SelectControl.tsx";
 import { SkillRelationshipMap } from "../features/skills/SkillRelationshipMap.tsx";
-import { StatefulButton } from "../components/shared/StatefulButton.tsx";
+import { SkillLocationDialog } from "../features/skills/SkillLocationDialog.tsx";
+import { SKILL_BADGE_TONES } from "../features/skills/skill-badge-tones.ts";
 import { Visibility } from "../features/skills/Visibility.tsx";
 import { DataTable } from "../components/DataTable.tsx";
 import type { ColumnDef, SortState } from "../components/DataTable.types";
-import { TauriCommand, SkillVisibility, agentIdentityKey, allSkillVisibilities, compactDateTime, copyText, editableSkillVisibilities, invokeCommand, isSkillRowSelectable, isSkillSelectable, isSkillVisibilityEditable, primarySkillPath, safeInvoke, skillSourceAction, skillSourceDetails, skillTargets, sourceRemoteDetails, suppressNextClick } from "../lib/index.ts";
+import { TauriCommand, SkillVisibility, agentIdentityKey, allSkillVisibilities, compactDateTime, copyText, editableSkillVisibilities, invokeCommand, isReadOnlySkillSource, isSkillRowSelectable, isSkillSelectable, isSkillVisibilityEditable, primarySkillPath, safeInvoke, skillSourceAction, skillSourceDetails, skillTargets, sourceRemoteDetails, suppressNextClick } from "../lib/index.ts";
 
 export type SkillsTableSort = SortState;
 
@@ -178,12 +184,6 @@ type SkillMarkdownPreview = {
   content: string;
 };
 
-type SkillPreviewOverrides = {
-  target?: string;
-  copy?: boolean;
-  visibility?: SkillVisibility;
-};
-
 type SkillAddPlan = {
   available?: AvailableSkill[];
   selected?: AvailableSkill[];
@@ -267,15 +267,28 @@ export type SkillActionsMenuItemsProps = {
   skill: SkillRecord;
   onApplyUpdates: (names: string[]) => void;
   onDeleteSkills: (names: string[]) => void;
+  onManageLocations: (skill: SkillRecord) => void;
 };
 
-export function SkillActionsMenuItems({ Menu, skill, onApplyUpdates, onDeleteSkills }: SkillActionsMenuItemsProps) {
+export function SkillActionsMenuItems({ Menu, skill, onApplyUpdates, onDeleteSkills, onManageLocations }: SkillActionsMenuItemsProps) {
   const targets = skillTargets(skill);
   const primaryPath = primarySkillPath(skill);
   const hasMultipleTargets = targets.length > 1;
   const readOnly = !isSkillSelectable(skill);
+  const locationReadOnly = isReadOnlySkillSource(skill);
   return (
     <>
+      <Menu.Item
+        className="skillMenuItem"
+        disabled={locationReadOnly || targets.length === 0}
+        onSelect={() => {
+          suppressNextClick();
+          onManageLocations(skill);
+        }}
+      >
+        <ArrowRightLeft size={14} />
+        Manage locations
+      </Menu.Item>
       {skill.updateStatus === "update-available" && (
         <>
           <Menu.Item className="skillMenuItem" onSelect={() => {
@@ -423,7 +436,7 @@ export function SkillMainCell({ skill, openSkill, onApplyUpdates }: SkillMainCel
           }}
         >
           <span className="skillNameText">{skill.name}</span>
-          {skill.isWrapper && <em>wrapper</em>}
+          {skill.isWrapper && <Badge tone={SKILL_BADGE_TONES.wrapper}>wrapper</Badge>}
         </button>
         {sourceAction && (
           <button
@@ -438,9 +451,10 @@ export function SkillMainCell({ skill, openSkill, onApplyUpdates }: SkillMainCel
           </button>
         )}
         {skill.updateStatus === "update-available" && (
-          <button
+          <Badge
+            as="button"
+            tone={SKILL_BADGE_TONES.update}
             type="button"
-            className="skillUpdateBadge"
             aria-label={`View update for ${skill.name}`}
             onClick={(event) => {
               event.stopPropagation();
@@ -448,17 +462,17 @@ export function SkillMainCell({ skill, openSkill, onApplyUpdates }: SkillMainCel
             }}
           >
             Update
-          </button>
+          </Badge>
         )}
       </div>
       <button
-        className="skillOpen skillDescriptionOpen"
+        className="skillOpen skillDescriptionOpen dataCellSub"
         onClick={(event) => {
           event.stopPropagation();
           openSkill(skill);
         }}
       >
-        <div className="skillDescription">{skill.description}</div>
+        {skill.description}
       </button>
     </div>
   );
@@ -468,15 +482,16 @@ export type SkillActionsCellProps = {
   skill: SkillRecord;
   onApplyUpdates: (names: string[]) => void;
   onDeleteSkills: (names: string[]) => void;
+  onManageLocations: (skill: SkillRecord) => void;
 };
 
-export function SkillActionsCell({ skill, onApplyUpdates, onDeleteSkills }: SkillActionsCellProps) {
+export function SkillActionsCell({ skill, onApplyUpdates, onDeleteSkills, onManageLocations }: SkillActionsCellProps) {
   return (
     <RowActionsMenu
       ariaLabel={`Skill actions for ${skill.name}`}
       onOpenChange={(open) => { if (!open) suppressNextClick(); }}
     >
-      <SkillActionsMenuItems Menu={DropdownMenu} skill={skill} onApplyUpdates={onApplyUpdates} onDeleteSkills={onDeleteSkills} />
+      <SkillActionsMenuItems Menu={DropdownMenu} skill={skill} onApplyUpdates={onApplyUpdates} onDeleteSkills={onDeleteSkills} onManageLocations={onManageLocations} />
     </RowActionsMenu>
   );
 }
@@ -586,7 +601,6 @@ export function WrapperDialog({ open, selectedSkills, onOpenChange, onApplyWrapp
             <label className="dialogField">
               <span>Description</span>
               <textarea
-                autoFocus
                 className="dialogTextArea"
                 value={description}
                 onChange={(event) => updateDescription(event.target.value)}
@@ -762,11 +776,16 @@ export function AddSkillDialog({ open, onOpenChange, trigger, onClose, onInstall
   const [previewId, setPreviewId] = useState("");
   const [selectedRoots, setSelectedRoots] = useState<string[]>([]);
   const [createWrapper, setCreateWrapper] = useState(false);
+  const [replaceExisting, setReplaceExisting] = useState(false);
+  const [skillFilter, setSkillFilter] = useState<"all" | "new" | "existing">("all");
+  const [reviewingSkills, setReviewingSkills] = useState(false);
+  const [advancedOpen, setAdvancedOpen] = useState(false);
   const [skillSearch, setSkillSearch] = useState("");
   const [busyAction, setBusyAction] = useState("");
   const [error, setError] = useState("");
   const skillItemRefs = useRef(new Map<string, HTMLDivElement>());
   const busy = busyAction !== "";
+  const installing = busyAction === "install";
   const visibleInstallTargets = useMemo(
     () => {
       const installed = new Set(installedAgentKeys);
@@ -819,12 +838,19 @@ export function AddSkillDialog({ open, onOpenChange, trigger, onClose, onInstall
     [dependencyByName, selectableNameSet, selectedRoots],
   );
   const selectedSet = useMemo(() => new Set(selected), [selected]);
+  const selectedHasExisting = useMemo(
+    () => selected.some((name) => isExistingSkillOperationStatus(rawOperationByName.get(name)?.status)),
+    [rawOperationByName, selected],
+  );
+  useEffect(() => {
+    setReplaceExisting(selectedHasExisting);
+  }, [selectedHasExisting]);
   const operationByName = useMemo(
     () => new Map((plan?.operations ?? []).map((operation) => [
       operation.name,
-      selectedExistingSkillOperation(operation, selectedSet.has(operation.name)),
+      selectedExistingSkillOperation(operation, selectedSet.has(operation.name) && replaceExisting),
     ])),
-    [plan, selectedSet],
+    [plan, replaceExisting, selectedSet],
   );
   const selectedRootSet = useMemo(() => new Set(selectedRoots), [selectedRoots]);
   const dependencyReasonsByName = useMemo(
@@ -842,26 +868,27 @@ export function AddSkillDialog({ open, onOpenChange, trigger, onClose, onInstall
     () => available.filter((skill) => isExistingSkillOperationStatus(rawOperationByName.get(skill.name)?.status)),
     [available, rawOperationByName],
   );
-  const selectedHasExisting = useMemo(
-    () => selected.some((name) => isExistingSkillOperationStatus(rawOperationByName.get(name)?.status)),
-    [rawOperationByName, selected],
-  );
   const allSelected = selectableSkills.length > 0 && selectableSkills.every((skill) => selectedSet.has(skill.name));
   const mixedSelected = selected.length > 0 && !allSelected;
-  const newSelected = newSkills.length > 0 && newSkills.every((skill) => selectedSet.has(skill.name));
-  const existingSelected = existingSkills.length > 0 && existingSkills.every((skill) => selectedSet.has(skill.name));
-  const dependencySelectedCount = selected.filter((name) => !selectedRootSet.has(name)).length;
+  const visibleAvailableSkills = useMemo(
+    () => skillFilter === "all"
+      ? available
+      : available.filter((skill) => skillFilter === "new"
+        ? isNewSkillOperationStatus(rawOperationByName.get(skill.name)?.status)
+        : isExistingSkillOperationStatus(rawOperationByName.get(skill.name)?.status)),
+    [available, rawOperationByName, skillFilter],
+  );
   const searchMatches = useMemo(() => {
     if (!normalizedSkillSearch) return [];
-    return available
+    return visibleAvailableSkills
       .filter((skill) => availableSkillSearchText(skill).includes(normalizedSkillSearch))
       .map((skill) => skill.name);
-  }, [available, normalizedSkillSearch]);
+  }, [normalizedSkillSearch, visibleAvailableSkills]);
   const searchMatchSet = useMemo(() => new Set(searchMatches), [searchMatches]);
   const firstSearchMatch = searchMatches[0] ?? "";
-  const canInstall = Boolean(source.trim() && plan && previewId && selected.length > 0 && !busy);
-  const advanceLabel = busyAction === "install" ? "Installing selected skills" : "Install selected skills";
-  const advanceText = busyAction === "install" ? "Installing" : "Install";
+  const canInstall = Boolean(source.trim() && plan && selected.length > 0 && (!selectedHasExisting || replaceExisting) && !busy);
+  const advanceLabel = busy ? "Preparing installation" : "Install selected skills";
+  const advanceText = busy ? "Installing" : `Install ${selected.length}`;
   const sourceCandidates = source.trim() ? marketplaceResults : recommendedSkillSources;
   const sourceCandidatesLabel = source.trim() ? "Matches" : "Recommended";
 
@@ -874,6 +901,9 @@ export function AddSkillDialog({ open, onOpenChange, trigger, onClose, onInstall
     setSelectedRoots([]);
     setSkillPreview(null);
     setSkillPreviewError("");
+    setCopy(false);
+    setReviewingSkills(false);
+    setAdvancedOpen(false);
     setError("");
   };
 
@@ -902,12 +932,9 @@ export function AddSkillDialog({ open, onOpenChange, trigger, onClose, onInstall
     }
   };
 
-  const previewSource = async (nextSource = source, overrides: SkillPreviewOverrides = {}) => {
+  const previewSource = async (nextSource = source) => {
     const normalizedSource = nextSource.trim();
     if (!normalizedSource || busyAction || marketplaceBusy) return;
-    const nextTarget = overrides.target ?? target;
-    const nextCopy = overrides.copy ?? copy;
-    const nextVisibility = overrides.visibility ?? visibility;
     setSource(normalizedSource);
     setMarketplaceError("");
     setSkillPreview(null);
@@ -917,12 +944,12 @@ export function AddSkillDialog({ open, onOpenChange, trigger, onClose, onInstall
     try {
       const response = await invokeCommand(TauriCommand.SkillsAdd, {
         source: normalizedSource,
-        target: nextTarget,
+        target,
         scope: "global",
         skills: [],
-        copy: nextCopy,
+        copy,
         overwrite: false,
-        visibility: nextVisibility.toLowerCase(),
+        visibility: visibility.toLowerCase(),
         dryRun: true,
       }) as { plan?: SkillAddPlan; previewId?: string } | null;
       if (!response?.plan || !response.previewId) {
@@ -933,6 +960,9 @@ export function AddSkillDialog({ open, onOpenChange, trigger, onClose, onInstall
       setPlan(nextPlan);
       setPreviewId(response?.previewId ?? "");
       setCreateWrapper(false);
+      setReplaceExisting(false);
+      setReviewingSkills(false);
+      setSkillFilter("all");
       setSkillSearch("");
       setSelectedRoots((nextPlan?.available ?? [])
         .filter((skill) => {
@@ -982,20 +1012,70 @@ export function AddSkillDialog({ open, onOpenChange, trigger, onClose, onInstall
     }
   };
 
+  const closeDialog = () => {
+    setReviewingSkills(false);
+    setAdvancedOpen(false);
+    onClose();
+  };
+
+  const goBack = () => {
+    if (busy) return;
+    if (advancedOpen) {
+      setAdvancedOpen(false);
+      return;
+    }
+    if (reviewingSkills) {
+      setReviewingSkills(false);
+      setSkillPreview(null);
+      return;
+    }
+    handleSourceChange("");
+    setMarketplaceError("");
+    setSkillFilter("all");
+    setSkillSearch("");
+    setReplaceExisting(false);
+    setCreateWrapper(false);
+  };
+
   const install = async () => {
-    if (!canInstall) return;
-    setBusyAction("install");
+    if (!canInstall || busy) return;
     setError("");
     try {
+      setBusyAction("preview");
+      const previewResponse = await invokeCommand<{ plan?: SkillAddPlan; previewId?: string }>(TauriCommand.SkillsAdd, {
+        source: source.trim(),
+        target,
+        scope: "global",
+        skills: selected,
+        copy,
+        overwrite: replaceExisting,
+        visibility: visibility.toLowerCase(),
+        dryRun: true,
+      });
+      if (!previewResponse?.plan || !previewResponse.previewId) {
+        throw new Error("Skill preview returned no data. Restart the development service and try again.");
+      }
+      const finalPlan = normalizeSkillAddPlan(previewResponse.plan);
+      if (!finalPlan) {
+        throw new Error("Skill preview returned an invalid plan. Restart the development service and try again.");
+      }
+      setPlan(finalPlan);
+      setPreviewId(previewResponse.previewId);
+      const finalOperationByName = new Map((finalPlan.operations ?? []).map((operation) => [operation.name, operation]));
+      const finalSelectedHasExisting = selected.some((name) => isExistingSkillOperationStatus(finalOperationByName.get(name)?.status));
+      if (finalSelectedHasExisting && !replaceExisting) {
+        throw new Error("Some selected skills already exist at this destination. Choose Replace existing skills and try again.");
+      }
+      setBusyAction("install");
       const result = await invokeCommand<SkillInstallResult>(TauriCommand.SkillsAdd, {
         source: source.trim(),
         target,
         scope: "global",
         skills: selected,
         copy,
-        overwrite: selectedHasExisting,
+        overwrite: replaceExisting,
         visibility: visibility.toLowerCase(),
-        previewId,
+        previewId: previewResponse.previewId,
         dryRun: false,
       });
       onInstalled(result);
@@ -1009,7 +1089,7 @@ export function AddSkillDialog({ open, onOpenChange, trigger, onClose, onInstall
             description: skill.description,
           })));
       }
-      onClose();
+      closeDialog();
     } catch (installError) {
       setError(`${installError}`);
     } finally {
@@ -1018,6 +1098,7 @@ export function AddSkillDialog({ open, onOpenChange, trigger, onClose, onInstall
   };
 
   const advance = () => {
+    if (busy) return;
     if (plan) install();
   };
 
@@ -1039,6 +1120,13 @@ export function AddSkillDialog({ open, onOpenChange, trigger, onClose, onInstall
     });
   }, [firstSearchMatch]);
 
+  useEffect(() => {
+    if (!open) {
+      setReviewingSkills(false);
+      setAdvancedOpen(false);
+    }
+  }, [open]);
+
   const toggleSkill = (name: string) => {
     const status = operationByName.get(name)?.status;
     if (!isSelectableOperationStatus(status)) return;
@@ -1051,35 +1139,40 @@ export function AddSkillDialog({ open, onOpenChange, trigger, onClose, onInstall
     setSelectedRoots(allSelected ? [] : selectableSkills.map((skill) => skill.name));
   };
 
-  const toggleSkillGroup = (skills: AvailableSkill[]) => {
-    if (skills.length === 0) return;
-    setSelectedRoots((current) => {
-      const currentSet = new Set(current);
-      const groupNames = new Set(skills.map((skill) => skill.name));
-      const groupSelected = skills.every((skill) => selectedSet.has(skill.name));
-      for (const name of groupNames) {
-        if (groupSelected) currentSet.delete(name);
-        else currentSet.add(name);
-      }
-      return selectableSkills
-        .filter((skill) => currentSet.has(skill.name))
-        .map((skill) => skill.name);
-    });
-  };
-
   return (
     <DialogShell
       open={open}
-      onOpenChange={onOpenChange}
+      onOpenChange={(nextOpen) => {
+        if (!nextOpen) {
+          setReviewingSkills(false);
+          setAdvancedOpen(false);
+        }
+        onOpenChange(nextOpen);
+      }}
       trigger={trigger}
-      className="addSkillPanel"
+      className={`addSkillPanel ${plan ? "hasPlan" : "sourceStage"} ${reviewingSkills ? "isReviewing" : ""} ${advancedOpen ? "hasAdvanced" : ""} ${skillPreview ? "hasSkillPreview" : ""}`}
       descriptionId="add-skill-dialog-description"
     >
-      <Dialog.Title className="confirmDialogTitle">{plan ? "Review & install" : "Add skill"}</Dialog.Title>
+      <div className="addSkillBody">
+        <div className="addSkillMain">
+        <div className="addSkillHeader">
+        {plan && (
+          <IconButton aria-label="Back to source" disabled={installing} onClick={goBack}>
+            <ChevronLeft size={18} />
+          </IconButton>
+        )}
+        <Dialog.Title className="confirmDialogTitle">
+          {!plan ? "Add skill" : reviewingSkills ? "Select skills" : "Add skills"}
+        </Dialog.Title>
+      </div>
       <Dialog.Description id="add-skill-dialog-description" className="dialogVisuallyHidden">
-        {plan ? "Review the selected skills and install them with the chosen settings." : "Choose a skill source and review it before installation."}
+        {!plan
+          ? "Choose a skill source and review it before installation."
+          : reviewingSkills
+            ? "Select the skills to install."
+            : "Review the selected skills and install them with the default settings."}
       </Dialog.Description>
-      <div className={`addSkillGrid ${plan ? "hasPlan" : "sourceStage"}`}>
+      {!reviewingSkills && <div className={`addSkillGrid ${plan ? "hasPlan" : "sourceStage"}`}>
         <div className="skillSourceField">
           <form
             className="skillSourceForm"
@@ -1102,9 +1195,8 @@ export function AddSkillDialog({ open, onOpenChange, trigger, onClose, onInstall
               aria-label="Search skills or paste a source"
             />
           </form>
-          {(marketplaceBusy || busyAction === "preview") && (
+          {!plan && (marketplaceBusy || busyAction === "preview") && (
             <LoadingState
-              className={plan ? "loadingStateCompact" : ""}
               label={marketplaceBusy ? "Searching marketplaces" : "Loading skill"}
             />
           )}
@@ -1121,15 +1213,11 @@ export function AddSkillDialog({ open, onOpenChange, trigger, onClose, onInstall
                     key={skill.id + "-" + skill.source}
                     onClick={() => selectMarketplaceSource(skill)}
                   >
-                    <span className="sourceCandidateIcon" aria-hidden="true">
-                      <Sparkles size={15} />
-                    </span>
                     <span className="sourceCandidateCopy">
-                      <strong>
+                      <strong className="dataCellTitle">
                         {skill.name}
-                        <em>{skill.kind}</em>
                       </strong>
-                      <small>{skill.description || skill.source}</small>
+                      <small className="dataCellSub">{skill.description || skill.source}</small>
                     </span>
                     <span className="sourceCandidateMeta">
                       {skill.metric != null
@@ -1144,60 +1232,108 @@ export function AddSkillDialog({ open, onOpenChange, trigger, onClose, onInstall
           )}
           {marketplaceError && <div className="dialogError" data-selectable-text>{marketplaceError}</div>}
         </div>
-      </div>
+        {plan && !reviewingSkills && (
+          <div className="addSkillQuickSetup">
+            <div className="addSkillQuickField">
+              <span className="addSkillQuickLabel">Skills</span>
+              <button
+                type="button"
+                className="addSkillSelectionCard"
+                disabled={installing}
+                onClick={() => {
+                  if (busy) return;
+                  setAdvancedOpen(false);
+                  setReviewingSkills(true);
+                }}
+              >
+                <BadgeList items={selected} ariaLabel="Selected skills" active={open && Boolean(plan) && !reviewingSkills} />
+                <ChevronRight size={16} aria-hidden="true" />
+              </button>
+            </div>
+            <div className="addSkillQuickField">
+              <span className="addSkillQuickLabel">Install to</span>
+              <SelectControl
+                value={target}
+                onValueChange={(value) => {
+                  if (busy) return;
+                  setTarget(value);
+                }}
+                label="Skill install target"
+                disabled={installing}
+                contentClassName="dialogSelectContent"
+                options={visibleInstallTargets.map((option) => ({ value: option.id, label: option.displayName }))}
+                side="bottom"
+                align="start"
+                renderValue={(option) => option ? <AgentOptionLabel agent={option.value} label={option.label} /> : null}
+                renderOption={(option) => <AgentOptionLabel agent={option.value} label={option.label} />}
+              />
+            </div>
+            <button
+              type="button"
+              className="addSkillAdvancedTrigger"
+              disabled={installing}
+              onClick={() => {
+                if (busy) return;
+                setAdvancedOpen((current) => !current);
+              }}
+            >
+              <span>Advanced settings</span>
+              {advancedOpen
+                ? <ChevronLeft size={16} aria-hidden="true" />
+                : <ChevronRight size={16} aria-hidden="true" />}
+            </button>
+          </div>
+        )}
+      </div>}
       {error && <div className="dialogError" data-no-drag data-selectable-text>{error}</div>}
-      {plan && (
+      {plan && reviewingSkills && (
         <div className="addSkillReview">
           <div className="addSkillResults">
-          <div className="addSkillSummary">
-            <span>{available.length === 1 ? "1 skill found" : `${available.length} skills found`}</span>
-            {dependencySelectedCount > 0 && (
-              <span>{dependencySelectedCount === 1 ? "1 dependency selected" : `${dependencySelectedCount} dependencies selected`}</span>
-            )}
-          </div>
-          <div className="addSkillSelectionBar">
-            <div
-              className="addSkillSelectAll"
-              role="button"
-              tabIndex={0}
-              onClick={(event) => {
-                if ((event.target as Element).closest(".selectionCheckbox")) return;
-                toggleAll();
-              }}
-              onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") toggleAll(); }}
-            >
-              <SelectionCheckbox
-                checked={allSelected}
-                mixed={mixedSelected}
-                label="Select all installable skills"
-                disabled={selectableSkills.length === 0}
-                onChange={toggleAll}
-              />
-              <span>Select all</span>
-            </div>
-            <div className="addSkillQuickSelect" aria-label="Skill selection toggles">
-              <Button
-                size="sm"
-                variant={newSelected ? "primary" : "ghost"}
-                aria-pressed={newSelected}
-                onClick={() => toggleSkillGroup(newSkills)}
-                disabled={newSkills.length === 0}
+            <div className="addSkillSelectionBar">
+              <div
+                className="addSkillSelectAll"
+                role="button"
+                tabIndex={0}
+                onClick={(event) => {
+                  if ((event.target as Element).closest(".selectionCheckbox")) return;
+                  toggleAll();
+                }}
+                onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") toggleAll(); }}
               >
-                New
-              </Button>
-              <Button
-                size="sm"
-                variant={existingSelected ? "primary" : "ghost"}
-                aria-pressed={existingSelected}
-                onClick={() => toggleSkillGroup(existingSkills)}
-                disabled={existingSkills.length === 0}
+                <SelectionCheckbox
+                  checked={allSelected}
+                  mixed={mixedSelected}
+                  label="Select all installable skills"
+                  disabled={selectableSkills.length === 0}
+                  onChange={toggleAll}
+                />
+                <span>Select all</span>
+              </div>
+              <SegmentedControl
+                className="addSkillFilterTabs"
+                value={skillFilter}
+                onValueChange={(value) => {
+                  if (value === "all" || value === "new" || value === "existing") setSkillFilter(value);
+                }}
+                aria-label="Filter skills"
               >
-                Existing
-              </Button>
+                {([
+                  ["all", "All", available.length],
+                  ["new", "New", newSkills.length],
+                  ["existing", "Existing", existingSkills.length],
+                ] as const).map(([value, label, count]) => (
+                  <SegmentedControlItem
+                    value={value}
+                    key={value}
+                  >
+                    {label} <span className="addSkillFilterCount">{count}</span>
+                  </SegmentedControlItem>
+                ))}
+              </SegmentedControl>
             </div>
-          </div>
           {showSkillSearch && (
             <SearchField
+              className="addSkillReviewSearch"
               value={skillSearch}
               onChange={(event) => setSkillSearch(event.target.value)}
               onClear={() => setSkillSearch("")}
@@ -1209,10 +1345,9 @@ export function AddSkillDialog({ open, onOpenChange, trigger, onClose, onInstall
             />
           )}
           <div className="addSkillList">
-            {available.map((skill) => {
+            {visibleAvailableSkills.map((skill) => {
               const operation = operationByName.get(skill.name);
               const blocked = !isSelectableOperationStatus(operation?.status);
-              const dependencyNames = skill.dependencies ?? [];
               const requiredBy = dependencyReasonsByName.get(skill.name) ?? [];
               const lockedDependency = requiredBy.length > 0 && !selectedRootSet.has(skill.name);
               const statusLabel = skillOperationStatusLabel(operation?.status);
@@ -1220,7 +1355,7 @@ export function AddSkillDialog({ open, onOpenChange, trigger, onClose, onInstall
               const firstMatch = skill.name === firstSearchMatch;
               return (
               <div
-                className={`addSkillItem ${selectedSet.has(skill.name) ? "selected" : ""} ${blocked || lockedDependency ? "blocked" : ""} ${searchMatch ? "searchMatch" : ""} ${firstMatch ? "firstSearchMatch" : ""}`}
+                className={`addSkillItem ${selectedSet.has(skill.name) ? "selected" : ""} ${blocked || lockedDependency ? "blocked" : ""} ${searchMatch ? "searchMatch" : ""} ${firstMatch ? "firstSearchMatch" : ""} ${skillPreview?.name === skill.name ? "previewing" : ""}`}
                 key={`${skill.name}-${skill.relative_path ?? skill.relativePath ?? ""}`}
                 ref={(node) => {
                   if (node) skillItemRefs.current.set(skill.name, node);
@@ -1241,19 +1376,15 @@ export function AddSkillDialog({ open, onOpenChange, trigger, onClose, onInstall
                   onChange={() => toggleSkill(skill.name)}
                 />
                 <span className="addSkillItemContent">
-                  <strong>
+                  <span className="addSkillItemTitle">
                     {skill.name}
-                    {statusLabel && <em>{statusLabel}</em>}
-                    {requiredBy.length > 0 && <em>Required</em>}
-                  </strong>
-                  <small>{skill.description || skill.relative_path || skill.relativePath || "No description"}</small>
-                  {(dependencyNames.length > 0 || requiredBy.length > 0) && (
-                    <small>
-                      {dependencyNames.length > 0 ? `Depends on ${dependencyNames.join(", ")}` : `Required by ${requiredBy.join(", ")}`}
-                    </small>
-                  )}
+                    {statusLabel && <Badge tone="meta">{statusLabel}</Badge>}
+                    {requiredBy.length > 0 && <Badge tone="info">Required</Badge>}
+                  </span>
                 </span>
-                <IconButton
+                <button
+                  type="button"
+                  className="addSkillPreviewButton"
                   aria-label={`Preview ${skill.name} SKILL.md`}
                   aria-busy={skillPreviewBusy === skill.name}
                   disabled={Boolean(skillPreviewBusy)}
@@ -1262,71 +1393,56 @@ export function AddSkillDialog({ open, onOpenChange, trigger, onClose, onInstall
                     void previewSkill(skill.name);
                   }}
                 >
-                  {skillPreviewBusy === skill.name ? <LoadingIcon size={13} /> : <Eye size={14} />}
-                </IconButton>
+                  {skillPreviewBusy === skill.name
+                    ? <LoadingIcon size={13} />
+                    : <><span>Preview</span><ChevronRight size={14} aria-hidden="true" /></>}
+                </button>
               </div>
             );})}
           </div>
           {skillPreviewError && <div className="skillPreviewError" data-selectable-text>{skillPreviewError}</div>}
+          </div>
+        </div>
+      )}
+        </div>
+      {plan && reviewingSkills && (
+        <section
+          className={`skillMarkdownPreview ${skillPreview ? "isOpen" : ""}`}
+          aria-label="Skill preview"
+          aria-hidden={!skillPreview}
+          data-no-drag
+        >
           {skillPreview && (
-            <section className="skillMarkdownPreview" data-no-drag>
-              <header className="skillMarkdownPreviewHeader">
-                <div>
-                  <strong>{skillPreview.name}</strong>
-                  <small>{skillPreview.relativePath}</small>
-                </div>
-                <IconButton
-                  aria-label="Close skill preview"
-                  onClick={() => setSkillPreview(null)}
-                >
-                  <X size={14} />
-                </IconButton>
-              </header>
+            <>
+              <IconButton
+                className="skillPreviewCloseButton"
+                aria-label="Close skill preview"
+                onClick={() => setSkillPreview(null)}
+              >
+                <X size={14} />
+              </IconButton>
               <div className="skillMarkdownPreviewBody">
-                <Suspense fallback={<LoadingInline label="Loading preview" />}>
+                <Suspense fallback={<LoadingState label="Loading preview" />}>
                   <TiptapMarkdownPreview content={skillPreview.content} />
                 </Suspense>
               </div>
-            </section>
+            </>
           )}
-          {selectedRoots.length > 1 && (
-            <label className="checkboxLine">
-              <SelectionCheckbox
-                checked={createWrapper}
-                label="Create a wrapper skill after installation"
-                onChange={(checked: boolean | "indeterminate") => setCreateWrapper(Boolean(checked))}
-              />
-              <span>
-                <strong>Create wrapper skill after install</strong>
-                <br />
-                <small>Continue to name a wrapper for the selected skills.</small>
-              </span>
-            </label>
-          )}
-          </div>
-          <aside className="addSkillSettings" aria-label="Install options">
-            <div className="dialogField">
-              <strong>Install options</strong>
-              <small>{selected.length} selected</small>
-            </div>
-            <div className="dialogField">
-              <span>Target</span>
-              <SelectControl
-                value={target}
-                onValueChange={(value) => {
-                  if (busy) return;
-                  setTarget(value);
-                  void previewSource(source, { target: value });
-                }}
-                label="Skill install target"
-                options={visibleInstallTargets.map((option) => ({ value: option.id, label: option.displayName }))}
-                className="dialogSelectTrigger"
-                side="bottom"
-                align="start"
-                renderValue={(option) => option ? <AgentOptionLabel agent={option.value} label={option.label} /> : null}
-                renderOption={(option) => <AgentOptionLabel agent={option.value} label={option.label} />}
-              />
-            </div>
+        </section>
+      )}
+      {plan && (
+        <aside
+          className={`addSkillAdvancedPanel ${advancedOpen ? "isOpen" : ""}`}
+          aria-label="Advanced settings"
+          aria-hidden={!advancedOpen}
+        >
+          <header className="addSkillAdvancedHeader">
+            <strong>Advanced settings</strong>
+            <IconButton aria-label="Close advanced settings" onClick={() => setAdvancedOpen(false)}>
+              <X size={14} />
+            </IconButton>
+          </header>
+          <div className="addSkillAdvancedBody">
             <div className="dialogField">
               <span>Visibility</span>
               <SelectControl
@@ -1334,27 +1450,25 @@ export function AddSkillDialog({ open, onOpenChange, trigger, onClose, onInstall
                 onValueChange={(value) => {
                   if (busy) return;
                   setVisibility(value as SkillVisibility);
-                  void previewSource(source, { visibility: value as SkillVisibility });
                 }}
                 label="Skill visibility"
+                disabled={installing}
+                contentClassName="dialogSelectContent"
                 options={editableSkillVisibilities.map((option) => ({ value: option, label: option }))}
-                className="dialogSelectTrigger"
                 side="bottom"
                 align="start"
               />
             </div>
             <div className="dialogField">
-              <span>Mode</span>
+              <span>Install mode</span>
               <SegmentedControl
-                variant="accent"
                 fullWidth
                 value={copy ? "copy" : "symlink"}
+                disabled={installing}
                 onValueChange={(value) => {
-                  if (!value) return;
-                  if (busy) return;
+                  if (!value || busy) return;
                   const nextCopy = value === "copy";
                   setCopy(nextCopy);
-                  void previewSource(source, { copy: nextCopy });
                 }}
                 aria-label="Skill install mode"
               >
@@ -1366,19 +1480,48 @@ export function AddSkillDialog({ open, onOpenChange, trigger, onClose, onInstall
                 </SegmentedControlItem>
               </SegmentedControl>
             </div>
-          </aside>
-        </div>
+            <label className="addSkillAdvancedCheckbox">
+              <SelectionCheckbox
+                  checked={replaceExisting}
+                  label="Replace existing skills"
+                  disabled={!selectedHasExisting || installing}
+                  onChange={(checked) => {
+                    if (busy) return;
+                    setReplaceExisting(checked);
+                  }}
+              />
+              <span>Replace existing skills</span>
+            </label>
+            {selectedRoots.length > 1 && (
+              <label className="addSkillAdvancedCheckbox">
+                <SelectionCheckbox
+                  checked={createWrapper}
+                  label="Create a wrapper skill after installation"
+                  disabled={installing}
+                  onChange={(checked) => {
+                    if (busy) return;
+                    setCreateWrapper(checked);
+                  }}
+                />
+                <span>Create wrapper after install</span>
+              </label>
+            )}
+          </div>
+        </aside>
       )}
-      <DialogActionBar onCancel={onClose}>
-        {plan && (
+      </div>
+      <DialogActionBar onCancel={closeDialog}>
+        {plan && reviewingSkills ? (
+          <DialogActionButton variant="primary" onClick={() => setReviewingSkills(false)}>Done</DialogActionButton>
+        ) : plan ? (
           <DialogAdvanceButton
             label={advanceText}
             ariaLabel={advanceLabel}
-            busy={busyAction === "install"}
+            busy={busy}
             disabled={!canInstall}
             onClick={advance}
           />
-        )}
+        ) : null}
       </DialogActionBar>
     </DialogShell>
   );
@@ -1388,8 +1531,9 @@ export type SkillsViewProps = {
   openSkill: (skill: SkillRecord) => void;
   skills: SkillRecord[];
   loadingSkills: boolean;
+  loadError: string;
+  hasRows: boolean;
   checkingUpdates: boolean;
-  applyingUpdates: boolean;
   updateError: string;
   onRefresh: () => void | Promise<void>;
   onSetVisibility: (names: string[], visibility: SkillVisibility) => void | Promise<void>;
@@ -1404,8 +1548,9 @@ export function SkillsView({
   openSkill,
   skills: skillItems,
   loadingSkills,
+  loadError,
+  hasRows,
   checkingUpdates,
-  applyingUpdates,
   updateError,
   onRefresh,
   onSetVisibility,
@@ -1422,13 +1567,14 @@ export function SkillsView({
   const [showAddSkill, setShowAddSkill] = useState(false);
   const [installedWrapperSkills, setInstalledWrapperSkills] = useState<SkillRecord[]>([]);
   const [skillLocatorRequest, setSkillLocatorRequest] = useState("");
-  const skillListBodyRef = useRef<HTMLDivElement | null>(null);
+  const [locationSkills, setLocationSkills] = useState<SkillRecord[]>([]);
+  const [locationAgent, setLocationAgent] = useState<string | undefined>(undefined);
   const normalizedQuery = query.trim().toLowerCase();
   const visibleSkills = useMemo(() => {
     if (!normalizedQuery) return skillItems;
     return skillItems.filter((skill) => [skill.name, skill.description].some((value) => `${value ?? ""}`.toLowerCase().includes(normalizedQuery)));
   }, [normalizedQuery, skillItems]);
-  const tableRows = loadingSkills ? [] : visibleSkills;
+  const tableRows = visibleSkills;
   const networkNodes = useMemo(
     () => visibleSkills.map((skill) => ({
       name: skill.name,
@@ -1469,6 +1615,22 @@ export function SkillsView({
   const deleteSkillsAndClear = useCallback((names: string[]) => {
     onDeleteSkills(names, clearSelection);
   }, [clearSelection, onDeleteSkills]);
+  const openManageLocations = useCallback((skill: SkillRecord, agent?: string) => {
+    setLocationSkills([skill]);
+    setLocationAgent(agent);
+  }, []);
+  const openManageLocationsBatch = useCallback((skills: SkillRecord[]) => {
+    const movableSkills = skills.filter((skill) => !isReadOnlySkillSource(skill) && skillTargets(skill).length > 0);
+    if (movableSkills.length === 0) return;
+    setLocationSkills(movableSkills);
+    setLocationAgent(undefined);
+  }, []);
+  const applyLocationsAndClear = useCallback(async () => {
+    setLocationSkills([]);
+    setLocationAgent(undefined);
+    clearSelection();
+    await onRefresh();
+  }, [clearSelection, onRefresh]);
 
   const handleInstalled = useCallback((result: SkillInstallResult) => {
     onAddInstalled(result);
@@ -1478,52 +1640,9 @@ export function SkillsView({
     setViewMode("list");
     setSkillLocatorRequest(name);
   }, [onAddInstalled]);
-
-  useEffect(() => {
-    if (!skillLocatorRequest) return undefined;
-    let frame = 0;
-    let attempts = 0;
-    const locate = () => {
-      frame = 0;
-      const root = skillListBodyRef.current?.querySelector<HTMLElement>(".dataTableBodyScroll");
-      if (!root) {
-        if (attempts < 20) {
-          attempts += 1;
-          frame = window.requestAnimationFrame(locate);
-        } else {
-          setSkillLocatorRequest("");
-        }
-        return;
-      }
-      const row = [...root.querySelectorAll<HTMLElement>("[data-row-id]")]
-        .find((candidate) => candidate.dataset.rowId === skillLocatorRequest);
-      if (row) {
-        const rootBounds = root.getBoundingClientRect();
-        const rowBounds = row.getBoundingClientRect();
-        const desiredTop = root.scrollTop
-          + rowBounds.top
-          - rootBounds.top
-          - (root.clientHeight - rowBounds.height) / 2;
-        const maxScrollTop = Math.max(0, root.scrollHeight - root.clientHeight);
-        root.scrollTo({
-          top: Math.min(maxScrollTop, Math.max(0, desiredTop)),
-          behavior: "smooth",
-        });
-        setSkillLocatorRequest("");
-        return;
-      }
-      if (attempts < 20) {
-        attempts += 1;
-        frame = window.requestAnimationFrame(locate);
-      } else {
-        setSkillLocatorRequest("");
-      }
-    };
-    frame = window.requestAnimationFrame(locate);
-    return () => {
-      if (frame !== 0) window.cancelAnimationFrame(frame);
-    };
-  }, [skillLocatorRequest, tableRows]);
+  const completeSkillLocator = useCallback((rowId: string) => {
+    setSkillLocatorRequest((current) => current === rowId ? "" : current);
+  }, []);
 
   const columns = useMemo((): ColumnDef<SkillTableRow>[] => [
     {
@@ -1541,7 +1660,7 @@ export function SkillsView({
       groupBy: (skill) => (skill.agents ?? []).join(", ") || "None",
       sortValue: (skill) => (skill.agents ?? []).join(",").toLowerCase(),
       width: "120px",
-      render: (skill) => <AgentChips agents={skill.agents} />,
+      render: (skill) => <AgentChips agents={skill.agents} onAgentClick={(agent) => openManageLocations(skill, agent)} />,
     },
     {
       key: "origin",
@@ -1573,7 +1692,7 @@ export function SkillsView({
     },
     {
       key: "mtime",
-      header: "Modified",
+      header: "Updated",
       type: "date",
       sortValue: (skill) => skill.mtime ?? "",
       width: "104px",
@@ -1584,9 +1703,9 @@ export function SkillsView({
       key: "actions",
       header: "",
       width: "40px",
-      render: (skill) => <SkillActionsCell skill={skill} onApplyUpdates={applyUpdatesAndClear} onDeleteSkills={deleteSkillsAndClear} />,
+      render: (skill) => <SkillActionsCell skill={skill} onApplyUpdates={applyUpdatesAndClear} onDeleteSkills={deleteSkillsAndClear} onManageLocations={openManageLocations} />,
     },
-  ], [applyUpdatesAndClear, deleteSkillsAndClear, openSkill, setVisibilityAndClear]);
+  ], [applyUpdatesAndClear, deleteSkillsAndClear, openManageLocations, openSkill, setVisibilityAndClear]);
 
   const rowContextMenu = useCallback((skill: SkillTableRow, { selectedRows, selected: isSelected }: { selectedRows: SkillTableRow[]; selected: boolean }) => {
     const showBulk = isSelected && selectedRows.length > 1;
@@ -1598,9 +1717,9 @@ export function SkillsView({
         onDeleteSkills={deleteSkillsAndClear}
       />
     ) : (
-      <SkillActionsMenuItems Menu={ContextMenu} skill={skill} onApplyUpdates={applyUpdatesAndClear} onDeleteSkills={deleteSkillsAndClear} />
+      <SkillActionsMenuItems Menu={ContextMenu} skill={skill} onApplyUpdates={applyUpdatesAndClear} onDeleteSkills={deleteSkillsAndClear} onManageLocations={openManageLocations} />
     );
-  }, [applyUpdatesAndClear, deleteSkillsAndClear]);
+  }, [applyUpdatesAndClear, deleteSkillsAndClear, openManageLocations]);
 
   const bottomBar = useCallback((selectedRows: SkillTableRow[]) => {
     const deletable = selectedRows.filter(isSkillSelectable);
@@ -1611,7 +1730,7 @@ export function SkillsView({
       <>
         <DropdownMenu.Root>
           <DropdownMenu.Trigger asChild>
-            <button aria-label="Set visibility">Set visibility</button>
+            <button aria-label="Set visibility"><Eye size={15} />Set visibility</button>
           </DropdownMenu.Trigger>
           <DropdownMenu.Portal>
             <DropdownMenu.Content className="skillMenuContent" align="start" sideOffset={6}>
@@ -1619,19 +1738,23 @@ export function SkillsView({
             </DropdownMenu.Content>
           </DropdownMenu.Portal>
         </DropdownMenu.Root>
-        <StatefulButton
+        <button
           className="skillApplyUpdatesButton"
-          size="sm"
-          width={136}
-          minWidth={136}
-          state={applyingUpdates ? "loading" : "idle"}
-          aria-label={applyingUpdates ? "Preparing update preview" : `Update${updateNames.length ? ` (${updateNames.length})` : ""}`}
+          aria-label={`Update${updateNames.length ? ` (${updateNames.length})` : ""}`}
           disabled={updateNames.length === 0}
           onClick={() => applyUpdatesAndClear(updateNames)}
-          loadingContent={<LoadingIcon size={15} />}
         >
-          Update{updateNames.length ? ` (${updateNames.length})` : ""}
-        </StatefulButton>
+          <RefreshCw size={15} aria-hidden="true" />
+          <span>Update{updateNames.length ? ` (${updateNames.length})` : ""}</span>
+        </button>
+        <button
+          aria-label="Manage selected skill locations"
+          disabled={selectedRows.every((skill) => isReadOnlySkillSource(skill) || skillTargets(skill).length === 0)}
+          onClick={() => openManageLocationsBatch(selectedRows)}
+        >
+          <ArrowRightLeft size={15} />
+          <span>{selectedRows.length > 1 ? "Manage locations" : "Manage location"}</span>
+        </button>
         <button aria-label="Create wrapper skill" onClick={() => setShowWrapper(true)}><PackagePlus size={15} />Create wrapper skill</button>
         <button
           className="danger"
@@ -1644,29 +1767,28 @@ export function SkillsView({
         </button>
       </>
     );
-  }, [applyUpdatesAndClear, deleteSkillsAndClear, setVisibilityAndClear]);
+  }, [applyUpdatesAndClear, deleteSkillsAndClear, openManageLocationsBatch, setVisibilityAndClear]);
 
   return (
     <section className="content skillsPage">
       <ContentTopDragStrip />
       <PageHeader title="Skills">
-        <ToggleGroup.Root
-          className="skillsViewToggle"
-          type="single"
+        <SegmentedControl
+          variant="icon"
           value={viewMode}
           onValueChange={(value) => {
             if (value === "list" || value === "network") setViewMode(value);
           }}
           aria-label="Skills view"
         >
-          <ToggleGroup.Item className="skillsViewToggleItem" value="list" aria-label="Show skills as a list">
+          <SegmentedControlItem value="list" aria-label="Show skills as a list">
             <List size={15} aria-hidden="true" />
-          </ToggleGroup.Item>
-          <ToggleGroup.Item className="skillsViewToggleItem" value="network" aria-label="Show skill relationships">
+          </SegmentedControlItem>
+          <SegmentedControlItem value="network" aria-label="Show skill relationships">
             <Waypoints size={15} aria-hidden="true" />
-          </ToggleGroup.Item>
-        </ToggleGroup.Root>
-        <SearchField placeholder="Search skills" value={query} onChange={(event) => setQuery(event.target.value)} onClear={() => setQuery("")} />
+          </SegmentedControlItem>
+        </SegmentedControl>
+        <SearchField pageSearch placeholder="Search skills" value={query} onChange={(event) => setQuery(event.target.value)} onClear={() => setQuery("")} />
         <IconButton
           disabled={loadingSkills}
           onClick={onRefresh}
@@ -1693,16 +1815,20 @@ export function SkillsView({
           }}
         />
       </PageHeader>
+      {loadError && hasRows ? <LoadErrorState message={loadError} onRetry={() => { void onRefresh(); }} /> : null}
       {viewMode === "network" ? (
         <SkillRelationshipMap
-          nodes={loadingSkills ? [] : networkNodes}
+          nodes={networkNodes}
+          loading={loadingSkills}
+          error={hasRows ? "" : loadError}
+          onRetry={() => { void onRefresh(); }}
           onOpenSkill={(name) => {
             const skill = skillItems.find((item) => item.name === name);
             if (skill) openSkill(skill);
           }}
         />
       ) : (
-        <div className="skillsListBody" ref={skillListBodyRef}>
+        <div className="skillsListBody">
           <DataTable
             rows={tableRows}
             columns={columns}
@@ -1712,6 +1838,8 @@ export function SkillsView({
             selectedIds={selected}
             onSelectionChange={setSelected}
             enableMarquee
+            scrollToRowId={skillLocatorRequest}
+            onScrollToRowComplete={completeSkillLocator}
             defaultGroupBy="origin"
             defaultSort={{ key: "mtime", direction: "desc" }}
             onRowClick={openSkill}
@@ -1719,12 +1847,15 @@ export function SkillsView({
             bottomBar={bottomBar}
             bottomBarCheckboxLabel="Select visible skills from toolbar"
             selectionLabel="skills"
-            loading={loadingSkills}
+            loading={loadingSkills && !hasRows}
             loadingLabel="Loading skills"
-            emptyState={normalizedQuery ? (
-              <><Hammer size={20} /><span>No skills match this search</span><span>Try another search or clear filters.</span></>
-            ) : (
-              <><Hammer size={20} /><span>No skills yet</span><span>Add a skill to install and manage it here.</span></>
+            emptyState={loadError && !hasRows ? <LoadErrorState message={loadError} onRetry={() => { void onRefresh(); }} /> : (
+              <EmptyState
+                icon={normalizedQuery ? <SearchX size={21} strokeWidth={1.8} /> : <Hammer size={27} strokeWidth={1.55} />}
+                iconTone={normalizedQuery ? "muted" : "accent"}
+                title={normalizedQuery ? "No skills match this search" : "No skills yet"}
+                description={normalizedQuery ? "Try another search or clear filters." : "Add a skill to install and manage it here."}
+              />
             )}
           />
         </div>
@@ -1737,6 +1868,18 @@ export function SkillsView({
           if (!open) setInstalledWrapperSkills([]);
         }}
         onApplyWrapper={applyWrapperAndClear}
+      />
+      <SkillLocationDialog
+        open={locationSkills.length > 0}
+        skills={locationSkills}
+        initialAgent={locationAgent}
+        onOpenChange={(open) => {
+          if (!open) {
+            setLocationSkills([]);
+            setLocationAgent(undefined);
+          }
+        }}
+        onApplied={applyLocationsAndClear}
       />
     </section>
   );

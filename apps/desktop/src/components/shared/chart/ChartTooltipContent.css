@@ -17,7 +17,7 @@
 
 .chartTooltipHeader > strong {
   color: var(--text);
-  font-size: 12px;
+  font-size: var(--text-sm);
   font-weight: 700;
 }
 
@@ -64,6 +64,6 @@
   padding-block-start: 6px;
   border-block-start: 1px solid var(--line);
   color: var(--muted);
-  font-size: 10px;
+  font-size: var(--text-xs);
   font-variant-numeric: tabular-nums;
 }

@@ -15,14 +15,27 @@ export type TranscriptItem = {
 
 export type TranscriptGroup = TranscriptItem | { type: "toolGroup"; tools: TranscriptItem[] };
 
+export type TranscriptLocatorItem = {
+  index: number;
+  label: string;
+  response: string;
+};
+
 export type TranscriptPage = {
   items: TranscriptItem[];
+  locatorItems: TranscriptLocatorItem[];
   warnings: string[];
   nextCursor?: string;
   done: boolean;
   sourceVersion: string;
   restartRequired: boolean;
   unchanged: boolean;
+};
+
+export type TranscriptLocatorPage = {
+  locatorItems: TranscriptLocatorItem[];
+  warnings: string[];
+  sourceVersion: string;
 };
 
 export type TranscriptSearchScopes = {
@@ -172,10 +185,24 @@ export function normalizeTranscriptPage(value: unknown): TranscriptPage {
   const page = value && typeof value === "object" && !Array.isArray(value)
     ? value as Record<string, unknown>
     : {};
+  const locatorItems = Array.isArray(page.locatorItems)
+    ? page.locatorItems.flatMap((value) => {
+      if (!value || typeof value !== "object" || Array.isArray(value)) return [];
+      const item = value as Record<string, unknown>;
+      const index = Number(item.index);
+      if (!Number.isSafeInteger(index) || index < 0) return [];
+      return [{
+        index,
+        label: `${item.label ?? ""}`,
+        response: `${item.response ?? ""}`,
+      }];
+    })
+    : [];
   return {
     items: Array.isArray(page.items)
       ? normalizeTranscript(page.items as Array<Record<string, unknown>>)
       : [],
+    locatorItems,
     warnings: Array.isArray(page.warnings)
       ? page.warnings.map((warning) => `${warning}`)
       : [],
@@ -186,6 +213,32 @@ export function normalizeTranscriptPage(value: unknown): TranscriptPage {
     sourceVersion: `${page.sourceVersion ?? ""}`,
     restartRequired: page.restartRequired === true,
     unchanged: page.unchanged === true,
+  };
+}
+
+export function normalizeTranscriptLocatorPage(value: unknown): TranscriptLocatorPage {
+  const page = value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : {};
+  const locatorItems = Array.isArray(page.locatorItems)
+    ? page.locatorItems.flatMap((value) => {
+      if (!value || typeof value !== "object" || Array.isArray(value)) return [];
+      const item = value as Record<string, unknown>;
+      const index = Number(item.index);
+      if (!Number.isSafeInteger(index) || index < 0) return [];
+      return [{
+        index,
+        label: `${item.label ?? ""}`,
+        response: `${item.response ?? ""}`,
+      }];
+    })
+    : [];
+  return {
+    locatorItems,
+    warnings: Array.isArray(page.warnings)
+      ? page.warnings.map((warning) => `${warning}`)
+      : [],
+    sourceVersion: `${page.sourceVersion ?? ""}`,
   };
 }
 

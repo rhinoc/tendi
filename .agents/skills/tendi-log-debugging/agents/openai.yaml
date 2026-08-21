@@ -1,0 +1,4 @@
+interface:
+  display_name: "Tendi Log Debugging"
+  short_description: "Trace Tendi frontend and Rust logs"
+  default_prompt: "Use $tendi-log-debugging to trace a Tendi frontend or Rust logging failure from evidence to a verified fix."

@@ -11,19 +11,25 @@ use sha2::{Digest, Sha256};
 static ATOMIC_WRITE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 pub fn sha256_text(text: &str) -> String {
+    sha256_bytes(text.as_bytes())
+}
+
+pub fn sha256_bytes(bytes: &[u8]) -> String {
     let mut hasher = Sha256::new();
-    hasher.update(text.as_bytes());
+    hasher.update(bytes);
     format!("{:x}", hasher.finalize())
 }
 
 pub fn sha256_file(path: &Path) -> Result<String> {
     let bytes = fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
-    let mut hasher = Sha256::new();
-    hasher.update(bytes);
-    Ok(format!("{:x}", hasher.finalize()))
+    Ok(sha256_bytes(&bytes))
 }
 
 pub fn atomic_write(path: &Path, text: &str) -> Result<()> {
+    atomic_write_bytes(path, text.as_bytes())
+}
+
+pub fn atomic_write_bytes(path: &Path, bytes: &[u8]) -> Result<()> {
     let parent = path
         .parent()
         .with_context(|| format!("{} has no parent directory", path.display()))?;
@@ -41,7 +47,7 @@ pub fn atomic_write(path: &Path, text: &str) -> Result<()> {
     {
         let mut file = fs::File::create(&tmp_path)
             .with_context(|| format!("failed to create {}", tmp_path.display()))?;
-        file.write_all(text.as_bytes())?;
+        file.write_all(bytes)?;
         file.sync_all()?;
     }
 

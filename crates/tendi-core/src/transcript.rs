@@ -44,14 +44,31 @@ pub struct TranscriptScan {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct TranscriptLocatorItem {
+    pub index: usize,
+    pub label: String,
+    pub response: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct TranscriptPage {
     pub items: Vec<TranscriptItem>,
+    pub locator_items: Vec<TranscriptLocatorItem>,
     pub warnings: Vec<String>,
     pub next_cursor: Option<String>,
     pub done: bool,
     pub source_version: String,
     pub restart_required: bool,
     pub unchanged: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TranscriptLocatorPage {
+    pub locator_items: Vec<TranscriptLocatorItem>,
+    pub warnings: Vec<String>,
+    pub source_version: String,
 }
 
 #[derive(Debug, Clone, Deserialize, Default, PartialEq, Eq)]
@@ -226,6 +243,7 @@ struct TranscriptSourceIdentity {
     prefix_hash: u64,
 }
 
+#[derive(Debug, Clone)]
 struct TranscriptSourceSnapshot {
     identity: TranscriptSourceIdentity,
     size: u64,
@@ -340,7 +358,9 @@ pub fn parse_transcript_page(
     cursor: Option<&str>,
     limit: Option<usize>,
 ) -> Result<TranscriptPage> {
-    parse_transcript_page_with_cursor_store(path, agent, cursor, limit, None)
+    parse_transcript_page_with_known_source_version_options(
+        path, agent, cursor, limit, None, None, false,
+    )
 }
 
 pub fn parse_transcript_page_if_changed(
@@ -350,14 +370,48 @@ pub fn parse_transcript_page_if_changed(
     limit: Option<usize>,
     known_source_version: Option<&str>,
 ) -> Result<TranscriptPage> {
-    parse_transcript_page_with_known_source_version(
+    parse_transcript_page_with_known_source_version_options(
         path,
         agent,
         cursor,
         limit,
         None,
         known_source_version,
+        false,
     )
+}
+
+pub fn parse_transcript_page_if_changed_without_locator(
+    path: &Path,
+    agent: AgentKind,
+    cursor: Option<&str>,
+    limit: Option<usize>,
+    known_source_version: Option<&str>,
+) -> Result<TranscriptPage> {
+    parse_transcript_page_with_known_source_version_options(
+        path,
+        agent,
+        cursor,
+        limit,
+        None,
+        known_source_version,
+        false,
+    )
+}
+
+pub fn parse_transcript_locator_page(
+    path: &Path,
+    agent: AgentKind,
+) -> Result<TranscriptLocatorPage> {
+    let mut locator_builder = TranscriptLocatorBuilder::default();
+    let warnings = for_each_transcript_item(path, agent, |item| {
+        locator_builder.push(&item);
+    })?;
+    Ok(TranscriptLocatorPage {
+        locator_items: locator_builder.finish(),
+        warnings,
+        source_version: transcript_source_version(path)?,
+    })
 }
 
 pub fn transcript_source_version(path: &Path) -> Result<String> {
@@ -366,6 +420,7 @@ pub fn transcript_source_version(path: &Path) -> Result<String> {
     Ok(transcript_source_snapshot(&mut file, None)?.version())
 }
 
+#[cfg(test)]
 fn parse_transcript_page_with_cursor_store(
     path: &Path,
     agent: AgentKind,
@@ -373,29 +428,91 @@ fn parse_transcript_page_with_cursor_store(
     limit: Option<usize>,
     cursor_store: Option<&Path>,
 ) -> Result<TranscriptPage> {
-    parse_transcript_page_with_known_source_version(path, agent, cursor, limit, cursor_store, None)
+    parse_transcript_page_with_known_source_version_options(
+        path,
+        agent,
+        cursor,
+        limit,
+        cursor_store,
+        None,
+        false,
+    )
 }
 
-fn parse_transcript_page_with_known_source_version(
+fn parse_transcript_page_with_known_source_version_options(
     path: &Path,
     agent: AgentKind,
     cursor: Option<&str>,
     limit: Option<usize>,
     cursor_store: Option<&Path>,
     known_source_version: Option<&str>,
+    include_locator: bool,
+) -> Result<TranscriptPage> {
+    parse_transcript_page_with_snapshot(
+        path,
+        agent,
+        cursor,
+        limit,
+        cursor_store,
+        known_source_version,
+        None,
+        include_locator,
+    )
+}
+
+fn parse_transcript_page_at_snapshot(
+    path: &Path,
+    agent: AgentKind,
+    cursor: Option<&str>,
+    limit: Option<usize>,
+    snapshot: &TranscriptSourceSnapshot,
+) -> Result<TranscriptPage> {
+    parse_transcript_page_with_snapshot(
+        path,
+        agent,
+        cursor,
+        limit,
+        None,
+        None,
+        Some(snapshot),
+        false,
+    )
+}
+
+fn parse_transcript_page_with_snapshot(
+    path: &Path,
+    agent: AgentKind,
+    cursor: Option<&str>,
+    limit: Option<usize>,
+    cursor_store: Option<&Path>,
+    known_source_version: Option<&str>,
+    search_snapshot: Option<&TranscriptSourceSnapshot>,
+    include_locator: bool,
 ) -> Result<TranscriptPage> {
     let cursor = cursor.map(TranscriptCursor::parse).transpose()?;
     let mut file =
         fs::File::open(path).with_context(|| format!("failed to read {}", path.display()))?;
+    let mut inherited_history_start_ordinal = if cursor.is_some() {
+        transcript_inherited_history_start_ordinal(path, agent)?
+    } else {
+        None
+    };
     let source = transcript_source_snapshot(
         &mut file,
-        cursor.as_ref().map(|cursor| cursor.source.prefix_len),
+        search_snapshot
+            .map(|snapshot| snapshot.identity.prefix_len)
+            .or_else(|| cursor.as_ref().map(|cursor| cursor.source.prefix_len)),
     )
     .with_context(|| format!("failed to inspect {}", path.display()))?;
-    let source_version = source.version();
+    let source_version =
+        search_snapshot.map_or_else(|| source.version(), TranscriptSourceSnapshot::version);
+    let locator_requested = include_locator
+        && cursor.is_none()
+        && known_source_version != Some(source_version.as_str());
     if cursor.is_none() && known_source_version == Some(source_version.as_str()) {
         return Ok(TranscriptPage {
             items: Vec::new(),
+            locator_items: Vec::new(),
             warnings: Vec::new(),
             next_cursor: None,
             done: true,
@@ -405,17 +522,29 @@ fn parse_transcript_page_with_known_source_version(
         });
     }
     let cursor_stale = if let Some(cursor) = cursor.as_ref() {
-        cursor.source != source.identity
-            || cursor.offset > source.size
-            || cursor.source_size != source.size
-            || cursor.source_modified_ns != source.modified_ns
-            || transcript_boundary_hash(path, cursor.offset)? != cursor.boundary_hash
+        if let Some(snapshot) = search_snapshot {
+            source.identity != snapshot.identity
+                || source.size < snapshot.size
+                || cursor.source != snapshot.identity
+                || cursor.offset > snapshot.size
+                || cursor.source_size != snapshot.size
+                || transcript_boundary_hash(path, cursor.offset)? != cursor.boundary_hash
+        } else {
+            cursor.source != source.identity
+                || cursor.offset > source.size
+                || cursor.source_size != source.size
+                || cursor.source_modified_ns != source.modified_ns
+                || transcript_boundary_hash(path, cursor.offset)? != cursor.boundary_hash
+        }
     } else {
-        false
+        search_snapshot.is_some_and(|snapshot| {
+            source.identity != snapshot.identity || source.size < snapshot.size
+        })
     };
     if cursor_stale {
         return Ok(TranscriptPage {
             items: Vec::new(),
+            locator_items: Vec::new(),
             warnings: vec!["transcript source changed; restart from the first page".to_string()],
             next_cursor: None,
             done: false,
@@ -424,15 +553,16 @@ fn parse_transcript_page_with_known_source_version(
             unchanged: false,
         });
     }
+    let cursor_source = search_snapshot.unwrap_or(&source);
     let cursor = match cursor {
         Some(cursor) => cursor,
         None => TranscriptCursor {
             offset: 0,
             line: 0,
-            source: source.identity.clone(),
+            source: cursor_source.identity.clone(),
             boundary_hash: transcript_boundary_hash(path, 0)?,
-            source_size: source.size,
-            source_modified_ns: source.modified_ns,
+            source_size: cursor_source.size,
+            source_modified_ns: cursor_source.modified_ns,
         },
     };
 
@@ -447,17 +577,36 @@ fn parse_transcript_page_with_known_source_version(
     let mut warnings = Vec::new();
     let mut line_number = cursor.line;
     let mut source_bytes = 0u64;
+    let mut snapshot_remaining =
+        search_snapshot.map(|snapshot| snapshot.size.saturating_sub(cursor.offset));
+    let mut page_complete = false;
+    let mut page_offset = None;
+    let mut page_line = None;
+    let mut locator_builder = locator_requested.then(TranscriptLocatorBuilder::default);
 
-    while items.len() < limit
-        && line_number.saturating_sub(cursor.line) < TRANSCRIPT_PAGE_MAX_SOURCE_LINES
-        && source_bytes < TRANSCRIPT_PAGE_MAX_SOURCE_BYTES
-    {
-        let Some(line) = read_bounded_jsonl_line(&mut reader, TRANSCRIPT_PAGE_MAX_LINE_BYTES)?
+    while !page_complete || locator_requested {
+        if !locator_requested
+            && (line_number.saturating_sub(cursor.line) >= TRANSCRIPT_PAGE_MAX_SOURCE_LINES
+                || source_bytes >= TRANSCRIPT_PAGE_MAX_SOURCE_BYTES)
+        {
+            break;
+        }
+        let Some(line) = read_bounded_jsonl_line(
+            &mut reader,
+            TRANSCRIPT_PAGE_MAX_LINE_BYTES,
+            snapshot_remaining,
+        )?
         else {
             break;
         };
         line_number += 1;
         source_bytes = source_bytes.saturating_add(line.consumed);
+        if let Some(remaining) = snapshot_remaining.as_mut() {
+            *remaining = remaining.saturating_sub(line.consumed);
+        }
+        if !line.complete {
+            break;
+        }
         if line.truncated {
             warnings.push(format!(
                 "{}:{} exceeds {} bytes and was skipped",
@@ -484,11 +633,37 @@ fn parse_transcript_page_with_known_source_version(
                 continue;
             }
         };
-        collect_transcript_value(&value, agent, &mut items);
+        if inherited_history_start_ordinal.is_none() {
+            inherited_history_start_ordinal =
+                agent_provider(agent).transcript_inherited_history_start_ordinal(&value);
+        }
+        if is_inherited_transcript_value(&value, inherited_history_start_ordinal) {
+            continue;
+        }
+        let mut parsed_items = Vec::new();
+        collect_transcript_value(&value, agent, &mut parsed_items);
+        if let Some(locator_builder) = locator_builder.as_mut() {
+            for item in &parsed_items {
+                locator_builder.push(item);
+            }
+        }
+        if !page_complete {
+            items.extend(parsed_items);
+            if items.len() >= limit {
+                page_complete = true;
+                page_offset = Some(reader.stream_position()?);
+                page_line = Some(line_number);
+            }
+        }
     }
 
-    let offset = reader.stream_position()?;
-    let done = reader.fill_buf()?.is_empty();
+    let end_offset = reader.stream_position()?;
+    let offset = page_offset.unwrap_or(end_offset);
+    let done = if search_snapshot.is_some() || locator_requested {
+        offset >= cursor_source.size
+    } else {
+        reader.fill_buf()?.is_empty()
+    };
     if done && !agent_provider(agent).transcript_cacheable() {
         if let Some(store_path) = cursor_store
             .map(Path::to_path_buf)
@@ -503,17 +678,20 @@ fn parse_transcript_page_with_known_source_version(
         Some(
             TranscriptCursor {
                 offset,
-                line: line_number,
-                source: source.identity,
+                line: page_line.unwrap_or(line_number),
+                source: cursor_source.identity.clone(),
                 boundary_hash: transcript_boundary_hash(path, offset)?,
-                source_size: source.size,
-                source_modified_ns: source.modified_ns,
+                source_size: cursor_source.size,
+                source_modified_ns: cursor_source.modified_ns,
             }
             .encode()?,
         )
     };
     Ok(TranscriptPage {
         items,
+        locator_items: locator_builder
+            .map(TranscriptLocatorBuilder::finish)
+            .unwrap_or_default(),
         warnings,
         next_cursor,
         done,
@@ -527,16 +705,19 @@ struct BoundedJsonlLine {
     bytes: Vec<u8>,
     consumed: u64,
     truncated: bool,
+    complete: bool,
 }
 
 fn read_bounded_jsonl_line<R: BufRead>(
     reader: &mut R,
     max_bytes: usize,
+    source_remaining: Option<u64>,
 ) -> std::io::Result<Option<BoundedJsonlLine>> {
     let mut bytes = Vec::with_capacity(max_bytes.min(16 * 1024));
     let mut consumed = 0u64;
     let mut truncated = false;
     let mut saw_data = false;
+    let mut source_remaining = source_remaining;
     loop {
         let available = reader.fill_buf()?;
         if available.is_empty() {
@@ -544,27 +725,57 @@ fn read_bounded_jsonl_line<R: BufRead>(
                 bytes,
                 consumed,
                 truncated,
+                complete: true,
             }));
         }
         saw_data = true;
-        let chunk_len = available
+        let visible_len = source_remaining.map_or(available.len(), |remaining| {
+            available
+                .len()
+                .min(usize::try_from(remaining).unwrap_or(usize::MAX))
+        });
+        if visible_len == 0 {
+            return Ok(Some(BoundedJsonlLine {
+                bytes,
+                consumed,
+                truncated,
+                complete: false,
+            }));
+        }
+        let visible = &available[..visible_len];
+        let chunk_len = visible
             .iter()
             .position(|byte| *byte == b'\n')
-            .map_or(available.len(), |index| index + 1);
-        let line_complete = available.get(chunk_len.saturating_sub(1)) == Some(&b'\n');
+            .map_or(visible_len, |index| index + 1);
+        let line_complete = visible.get(chunk_len.saturating_sub(1)) == Some(&b'\n');
+        let source_has_more_bytes = visible_len < available.len();
         let remaining = max_bytes.saturating_sub(bytes.len());
         let copy_len = remaining.min(chunk_len);
-        bytes.extend_from_slice(&available[..copy_len]);
+        bytes.extend_from_slice(&visible[..copy_len]);
         if copy_len < chunk_len {
             truncated = true;
         }
         reader.consume(chunk_len);
         consumed = consumed.saturating_add(chunk_len as u64);
+        let source_exhausted = source_remaining
+            .is_some_and(|remaining| u64::try_from(chunk_len).unwrap_or(u64::MAX) >= remaining);
+        if let Some(remaining) = source_remaining.as_mut() {
+            *remaining = remaining.saturating_sub(chunk_len as u64);
+        }
         if line_complete {
             return Ok(Some(BoundedJsonlLine {
                 bytes,
                 consumed,
                 truncated,
+                complete: true,
+            }));
+        }
+        if source_exhausted && source_has_more_bytes {
+            return Ok(Some(BoundedJsonlLine {
+                bytes,
+                consumed,
+                truncated,
+                complete: false,
             }));
         }
     }
@@ -574,9 +785,44 @@ fn collect_transcript_value(value: &Value, agent: AgentKind, items: &mut Vec<Tra
     agent_provider(agent).parse_transcript_value(value, items);
 }
 
+pub(crate) fn transcript_inherited_history_start_ordinal(
+    path: &Path,
+    agent: AgentKind,
+) -> Result<Option<u64>> {
+    let file =
+        fs::File::open(path).with_context(|| format!("failed to read {}", path.display()))?;
+    for line in BufReader::new(file).lines().take(64) {
+        let Ok(line) = line else {
+            break;
+        };
+        let Ok(value) = serde_json::from_str::<Value>(&line) else {
+            continue;
+        };
+        if let Some(start_ordinal) =
+            agent_provider(agent).transcript_inherited_history_start_ordinal(&value)
+        {
+            return Ok(Some(start_ordinal));
+        }
+        if value.get("type").and_then(Value::as_str) == Some("session_meta") {
+            break;
+        }
+    }
+    Ok(None)
+}
+
+pub(crate) fn is_inherited_transcript_value(value: &Value, start_ordinal: Option<u64>) -> bool {
+    start_ordinal.is_some_and(|start_ordinal| {
+        value
+            .get("ordinal")
+            .and_then(Value::as_u64)
+            .is_some_and(|ordinal| ordinal < start_ordinal)
+    })
+}
+
 pub fn parse_transcript(path: &Path, agent: AgentKind) -> Result<TranscriptScan> {
     let file =
         fs::File::open(path).with_context(|| format!("failed to read {}", path.display()))?;
+    let inherited_history_start_ordinal = transcript_inherited_history_start_ordinal(path, agent)?;
     let mut items = Vec::new();
     let mut warnings = Vec::new();
 
@@ -599,12 +845,93 @@ pub fn parse_transcript(path: &Path, agent: AgentKind) -> Result<TranscriptScan>
             }
         };
 
+        if is_inherited_transcript_value(&value, inherited_history_start_ordinal) {
+            continue;
+        }
         collect_transcript_value(&value, agent, &mut items);
     }
 
     agent_provider(agent).append_transcript_metadata(path, &mut items)?;
 
     Ok(TranscriptScan { items, warnings })
+}
+
+#[derive(Default)]
+struct TranscriptLocatorBuilder {
+    items: Vec<TranscriptLocatorItem>,
+    pending_response: Option<usize>,
+    grouped_index: usize,
+    previous_was_tool: bool,
+}
+
+impl TranscriptLocatorBuilder {
+    fn push(&mut self, item: &TranscriptItem) {
+        let kind = item.kind.as_str();
+        let item_index = if kind == "tool" && self.previous_was_tool {
+            self.grouped_index.saturating_sub(1)
+        } else {
+            let index = self.grouped_index;
+            self.grouped_index += 1;
+            index
+        };
+
+        if kind == "user" {
+            self.items.push(TranscriptLocatorItem {
+                index: item_index,
+                label: item.body.trim().to_string(),
+                response: String::new(),
+            });
+            self.pending_response = Some(self.items.len() - 1);
+        } else if kind == "assistant" {
+            if let Some(locator_index) = self.pending_response.take() {
+                self.items[locator_index].response = item.body.trim().to_string();
+            }
+        }
+        self.previous_was_tool = kind == "tool";
+    }
+
+    fn finish(self) -> Vec<TranscriptLocatorItem> {
+        self.items
+    }
+}
+
+fn for_each_transcript_item<F>(path: &Path, agent: AgentKind, mut visit: F) -> Result<Vec<String>>
+where
+    F: FnMut(TranscriptItem),
+{
+    let file = fs::File::open(path).with_context(|| format!("failed to read {}", path.display()))?;
+    let inherited_history_start_ordinal = transcript_inherited_history_start_ordinal(path, agent)?;
+    let mut warnings = Vec::new();
+
+    for (index, line) in BufReader::new(file).lines().enumerate() {
+        let line = match line {
+            Ok(line) => line,
+            Err(err) => {
+                warnings.push(format!("{}:{}: {err}", path.display(), index + 1));
+                continue;
+            }
+        };
+        if line.trim().is_empty() {
+            continue;
+        }
+        let value = match serde_json::from_str::<Value>(&line) {
+            Ok(value) => value,
+            Err(err) => {
+                warnings.push(format!("{}:{}: {err}", path.display(), index + 1));
+                continue;
+            }
+        };
+        if is_inherited_transcript_value(&value, inherited_history_start_ordinal) {
+            continue;
+        }
+        let mut items = Vec::new();
+        collect_transcript_value(&value, agent, &mut items);
+        for item in items {
+            visit(item);
+        }
+    }
+
+    Ok(warnings)
 }
 
 #[cfg(test)]
@@ -624,6 +951,7 @@ where
 {
     let file =
         fs::File::open(path).with_context(|| format!("failed to read {}", path.display()))?;
+    let inherited_history_start_ordinal = transcript_inherited_history_start_ordinal(path, agent)?;
     let mut warnings = Vec::new();
 
     for (index, line) in BufReader::new(file).lines().enumerate() {
@@ -644,6 +972,10 @@ where
                 continue;
             }
         };
+
+        if is_inherited_transcript_value(&value, inherited_history_start_ordinal) {
+            continue;
+        }
 
         let mut items = Vec::new();
         collect_transcript_value(&value, agent, &mut items);
@@ -956,8 +1288,10 @@ pub fn search_transcript(
         });
     }
 
-    let initial_source_version = transcript_source_version(path)?;
-    let source_size = fs::metadata(path)?.len();
+    let initial_source = transcript_search_snapshot(path)?;
+    let initial_source_version = initial_source.version();
+    let source_size = initial_source.size;
+    let initial_boundary_hash = transcript_boundary_hash(path, source_size)?;
     let cache_source_version = agent_provider(agent)
         .transcript_cacheable()
         .then_some(initial_source_version.as_str());
@@ -1000,13 +1334,19 @@ pub fn search_transcript(
                     chunk.end,
                 )
             } else {
-                let page = parse_transcript_page(path, agent, cursor.as_deref(), Some(400))?;
+                let page = parse_transcript_page_at_snapshot(
+                    path,
+                    agent,
+                    cursor.as_deref(),
+                    Some(TRANSCRIPT_PAGE_DEFAULT_LIMIT),
+                    &initial_source,
+                )?;
                 if page.restart_required {
-                    anyhow::bail!("transcript changed while searching; retry the search")
+                    anyhow::bail!("transcript source changed during search")
                 }
                 let page_source_version = page.source_version.clone();
                 if page_source_version != initial_source_version {
-                    anyhow::bail!("transcript changed while searching; retry the search")
+                    anyhow::bail!("transcript source changed during search")
                 }
                 let chunk_end = match page.next_cursor.as_deref() {
                     Some(next_cursor) => transcript_cursor_offset(Some(next_cursor))?,
@@ -1036,7 +1376,7 @@ pub fn search_transcript(
                 )
             };
         if page_source_version != initial_source_version {
-            anyhow::bail!("transcript changed while searching; retry the search")
+            anyhow::bail!("transcript source changed during search")
         }
         warnings.extend(page_warnings);
         offset_index.record(chunk_start, chunk_end);
@@ -1099,30 +1439,46 @@ pub fn search_transcript(
     };
 
     hits.sort_by_key(|hit| (hit.group_index, hit.tool_index.unwrap_or(0)));
-    let current_source_version = transcript_source_version(path)?;
-    if current_source_version != source_version {
-        anyhow::bail!("transcript changed while searching; retry the search")
+    if !transcript_search_snapshot_is_compatible(path, &initial_source, initial_boundary_hash)? {
+        anyhow::bail!("transcript source changed during search")
     }
     let result = TranscriptSearchResult {
         hits,
         warnings,
-        source_version: current_source_version,
+        source_version,
     };
     if agent_provider(agent).transcript_cacheable() {
-        if let Ok(source_size) = fs::metadata(path).map(|metadata| metadata.len()) {
-            transcript_search_cache_put(
-                path,
-                agent,
-                &needle,
-                scopes,
-                &result.source_version,
-                source_size,
-                offset_index,
-                result.clone(),
-            );
-        }
+        transcript_search_cache_put(
+            path,
+            agent,
+            &needle,
+            scopes,
+            &result.source_version,
+            source_size,
+            offset_index,
+            result.clone(),
+        );
     }
     Ok(result)
+}
+
+fn transcript_search_snapshot(path: &Path) -> Result<TranscriptSourceSnapshot> {
+    let mut file =
+        fs::File::open(path).with_context(|| format!("failed to read {}", path.display()))?;
+    transcript_source_snapshot(&mut file, None)
+}
+
+fn transcript_search_snapshot_is_compatible(
+    path: &Path,
+    snapshot: &TranscriptSourceSnapshot,
+    boundary_hash: u64,
+) -> Result<bool> {
+    let mut file = fs::File::open(path)?;
+    let current = transcript_source_snapshot(&mut file, Some(snapshot.identity.prefix_len))?;
+    Ok(current.identity == snapshot.identity
+        && current.size >= snapshot.size
+        && (current.size > snapshot.size || current.modified_ns == snapshot.modified_ns)
+        && transcript_boundary_hash(path, snapshot.size)? == boundary_hash)
 }
 
 fn scope_enabled(kind: &str, mapped_tool: bool, scopes: &TranscriptSearchScopes) -> bool {
@@ -1838,7 +2194,7 @@ mod tests {
         fs,
         io::Write as _,
         path::PathBuf,
-        time::{Instant, SystemTime, UNIX_EPOCH},
+        time::{SystemTime, UNIX_EPOCH},
     };
 
     use rusqlite::Connection;
@@ -1846,10 +2202,12 @@ mod tests {
 
     use super::{
         TranscriptSearchScopes, append_cursor_model_configs_from_store, collect_claude_item,
-        collect_codex_item, collect_generic_item, parse_search_transcript, parse_transcript_page,
-        parse_transcript_page_if_changed, parse_transcript_page_with_cursor_store,
-        search_transcript, summarize_tool_call, transcript_chunk_cache_hits,
-        transcript_chunk_cache_offsets, transcript_search_cache_offsets, transcript_source_version,
+        collect_codex_item, collect_generic_item, parse_search_transcript, parse_transcript,
+        parse_transcript_page, parse_transcript_page_at_snapshot, parse_transcript_page_if_changed,
+        parse_transcript_locator_page, parse_transcript_page_with_cursor_store, search_transcript,
+        summarize_tool_call,
+        transcript_chunk_cache_hits, transcript_chunk_cache_offsets,
+        transcript_search_cache_offsets, transcript_source_version,
     };
 
     fn temp_path(prefix: &str) -> PathBuf {
@@ -1886,6 +2244,39 @@ mod tests {
     }
 
     #[test]
+    fn codex_child_transcript_skips_inherited_history_before_start_ordinal() {
+        let path = temp_path("tendi-codex-child-transcript-boundary-test.jsonl");
+        let lines = [
+            r#"{"ordinal":0,"type":"session_meta","payload":{"thread_source":"subagent","subagent_history_start_ordinal":3}}"#,
+            r#"{"ordinal":1,"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"parent context"}]}}"#,
+            r#"{"ordinal":2,"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"parent answer"}]}}"#,
+            r#"{"ordinal":3,"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"child answer"}]}}"#,
+        ];
+        fs::write(&path, lines.join("\n")).unwrap();
+
+        let scan = parse_transcript(&path, crate::skills::AgentKind::Codex).unwrap();
+        assert_eq!(
+            scan.items
+                .iter()
+                .map(|item| item.body.as_str())
+                .collect::<Vec<_>>(),
+            ["child answer"]
+        );
+
+        let page =
+            parse_transcript_page(&path, crate::skills::AgentKind::Codex, None, Some(1)).unwrap();
+        assert_eq!(page.items.len(), 1);
+        assert_eq!(page.items[0].body, "child answer");
+        assert!(page.locator_items.is_empty());
+
+        let search = parse_search_transcript(&path, crate::skills::AgentKind::Codex).unwrap();
+        assert_eq!(search.items.len(), 1);
+        assert_eq!(search.items[0].body, "child answer");
+
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
     fn transcript_pages_use_backend_byte_cursors_without_duplicates() {
         let path = temp_path("tendi-transcript-page-test.jsonl");
         fs::write(
@@ -1904,6 +2295,16 @@ mod tests {
         let first =
             parse_transcript_page(&path, crate::skills::AgentKind::Codex, None, Some(2)).unwrap();
         assert_eq!(first.items.len(), 2);
+        assert!(first.locator_items.is_empty());
+        let locator = parse_transcript_locator_page(
+            &path,
+            crate::skills::AgentKind::Codex,
+        )
+        .unwrap();
+        assert_eq!(locator.locator_items.len(), 3);
+        assert_eq!(locator.locator_items[0].index, 0);
+        assert_eq!(locator.locator_items[0].label, "one");
+        assert_eq!(locator.locator_items[0].response, "two");
         assert!(!first.done);
         let second = parse_transcript_page(
             &path,
@@ -2357,6 +2758,36 @@ mod tests {
     }
 
     #[test]
+    fn transcript_search_reads_only_the_start_snapshot_when_source_appends() {
+        let path = temp_path("tendi-transcript-search-snapshot-test.jsonl");
+        let initial = format!("{}\n", codex_message("user", "initial message"));
+        fs::write(&path, &initial).unwrap();
+        let snapshot = super::transcript_search_snapshot(&path).unwrap();
+
+        fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap()
+            .write_all(codex_message("user", "appended message").as_bytes())
+            .unwrap();
+
+        let page = parse_transcript_page_at_snapshot(
+            &path,
+            crate::skills::AgentKind::Codex,
+            None,
+            Some(10),
+            &snapshot,
+        )
+        .unwrap();
+
+        assert!(page.done);
+        assert_eq!(page.source_version, snapshot.version());
+        assert_eq!(page.items.len(), 1);
+        assert_eq!(page.items[0].body, "initial message");
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
     fn transcript_search_streams_large_files_and_returns_logical_indices() {
         let path = temp_path("tendi-transcript-search-large-test.jsonl");
         let filler = "x".repeat(1024);
@@ -2377,7 +2808,6 @@ mod tests {
         }
         fs::write(&path, &contents).unwrap();
 
-        let started = Instant::now();
         let result = search_transcript(
             &path,
             crate::skills::AgentKind::Codex,
@@ -2390,17 +2820,43 @@ mod tests {
             },
         )
         .unwrap();
-        let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
 
-        eprintln!(
-            "[transcript-search] bytes={} hits={} elapsed_ms={elapsed_ms:.2}",
-            contents.len(),
-            result.hits.len(),
-        );
         assert_eq!(result.hits.len(), 1);
         assert_eq!(result.hits[0].group_index, 7_998);
         assert!(result.hits[0].tool_index.is_none());
 
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn transcript_search_group_index_matches_paginated_transcript() {
+        let path = temp_path("tendi-transcript-search-page-index-test.jsonl");
+        let turn_context = json!({
+            "type": "turn_context",
+            "payload": { "model": "gpt-5.6-sol", "effort": "high" }
+        })
+        .to_string();
+        let mut lines = vec![turn_context.clone()];
+        lines.extend((0..159).map(|index| codex_message("user", &format!("filler-{index}"))));
+        lines.push(turn_context);
+        lines.push(codex_message("assistant", "pull link"));
+        fs::write(&path, lines.join("\n")).unwrap();
+
+        let result = search_transcript(
+            &path,
+            crate::skills::AgentKind::Codex,
+            "pull",
+            &TranscriptSearchScopes {
+                user: false,
+                assistant: true,
+                system: false,
+                tool: false,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(result.hits.len(), 1);
+        assert_eq!(result.hits[0].group_index, 161);
         fs::remove_file(path).unwrap();
     }
 

@@ -1,6 +1,6 @@
 .statefulButton {
-  width: 132px;
-  min-width: 132px;
+  width: var(--stateful-button-width);
+  min-width: var(--stateful-button-width);
 }
 
 .statefulButton[data-state="loading"] {
@@ -20,12 +20,12 @@
 .statefulButton[data-state="success"]:hover {
   color: var(--green);
   background: var(--green-soft);
-  box-shadow: 0 0 0 1px var(--green-soft-strong);
+  box-shadow: none;
 }
 
 .statefulButton[data-state="error"],
 .statefulButton[data-state="error"]:hover {
   color: var(--danger);
   background: var(--danger-soft);
-  box-shadow: 0 0 0 1px var(--danger-soft-strong);
+  box-shadow: none;
 }

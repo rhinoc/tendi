@@ -1,0 +1,35 @@
+.badgeList {
+  position: relative;
+  min-width: 0;
+  flex: 1 1 auto;
+  display: flex;
+  align-items: center;
+  flex-wrap: nowrap;
+  gap: 5px;
+  overflow: hidden;
+  padding: 1px 0;
+  white-space: nowrap;
+}
+
+.badgeList > .badge {
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: min(120px, 30%);
+}
+
+.badgeListMeasure {
+  position: fixed;
+  top: -10000px;
+  left: -10000px;
+  display: flex;
+  gap: 5px;
+  width: 0;
+  visibility: hidden;
+  pointer-events: none;
+  white-space: nowrap;
+}
+
+.badgeListMeasure > .badge {
+  flex: 0 0 auto;
+  max-width: min(120px, 30%);
+}

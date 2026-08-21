@@ -2,9 +2,10 @@ import { Tooltip } from "../../components/shared/Tooltip.tsx";
 import { AlertCircle, ArrowLeft, ArrowRight, Check } from "lucide-react";
 
 import type { ColumnDef } from "../../components/DataTable.types";
-import { friendlyAgent, sessionCacheRate, sessionKind, sessionProject, sessionProjectGroupKey, sessionProjectGroupLabel, sortValue, summarizeSessionPreviewRecord, type SessionRecord } from "../../lib/index.ts";
+import { friendlyAgent, sessionCacheRate, sessionKind, sessionProject, sessionProjectGroupKey, sessionProjectGroupLabel, sessionResumeTargetForAgent, sortValue, summarizeSessionPreviewRecord, type SessionRecord, type SessionResumeTarget } from "../../lib/index.ts";
 import { cacheRateTone } from "../../lib/token-style.ts";
 import { AgentBadge } from "../../components/shared/AgentBadge.tsx";
+import { Badge } from "../../components/shared/Badge.tsx";
 import { CopyableSessionId } from "./CopyableSessionId.tsx";
 import { LoadingIcon } from "../../components/shared/LoadingIcon.tsx";
 import { StatefulButton } from "../../components/shared/StatefulButton.tsx";
@@ -40,6 +41,7 @@ export type CreateSessionTableColumnsOptions<T extends SessionTableRow = Session
   normalizedQuery?: string;
   resumeSession?: (session: T) => void | Promise<void>;
   resumeState?: (session: T) => "idle" | "loading" | "success" | "error";
+  resumeTarget?: SessionResumeTarget;
   keys?: string[];
   widths?: Partial<Record<string, string>>;
 };
@@ -48,6 +50,7 @@ export function createSessionTableColumns<T extends SessionTableRow = SessionTab
   normalizedQuery = "",
   resumeSession,
   resumeState,
+  resumeTarget = "terminal",
   keys,
   widths = {},
 }: CreateSessionTableColumnsOptions<T> = {}): ColumnDef<T>[] {
@@ -63,7 +66,7 @@ export function createSessionTableColumns<T extends SessionTableRow = SessionTab
       width: widths.title ?? "var(--data-freeze-column-width, 360px)",
       render: (session) => {
         const preview = summarizeSessionPreviewRecord(session as SessionRecord);
-        const displayTitle = preview?.title || `${session.title ?? ""}`;
+        const displayTitle = `${session.title ?? ""}`;
         const tooltipTitle = formatSessionTitle(displayTitle);
         return (
           <>
@@ -71,7 +74,7 @@ export function createSessionTableColumns<T extends SessionTableRow = SessionTab
               <Tooltip content={tooltipTitle} onlyWhenTruncated>
                 <span className="sessionTitleText"><SessionTitleText interactive={false} value={displayTitle} /></span>
               </Tooltip>
-              {sessionKind(session as SessionRecord) === "child" ? <span className="sessionChildBadge">Child</span> : null}
+              {sessionKind(session as SessionRecord) === "child" ? <Badge tone="warning" uppercase>Child</Badge> : null}
             </span>
             {normalizedQuery && session.searchSnippet ? (
               <span className="dataCellSubLine">
@@ -116,13 +119,14 @@ export function createSessionTableColumns<T extends SessionTableRow = SessionTab
           );
         }
         const state = resumeState?.(session as T) ?? "idle";
+        const targetLabel = sessionResumeTargetForAgent(resumeTarget, session.agent) === "app" ? "app" : "terminal";
         const label = state === "loading"
-          ? `Opening ${session.agent} session in terminal`
+          ? `Opening ${session.agent} session in ${targetLabel}`
           : state === "success"
-            ? "Session opened in terminal"
+            ? `Session opened in ${targetLabel}`
             : state === "error"
-              ? "Could not open session in terminal"
-              : `Resume ${session.agent} session in terminal`;
+              ? `Could not open session in ${targetLabel}`
+              : `Resume ${session.agent} session in ${targetLabel}`;
         return (
           <Tooltip content={label}><StatefulButton
             size="sm"

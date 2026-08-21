@@ -2,6 +2,7 @@ import { cpSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { writeStdout } from "./stdio.mjs";
 import { spawnSync } from "node:child_process";
 
 const scriptDirectory = dirname(fileURLToPath(import.meta.url));
@@ -15,6 +16,10 @@ const icnsPath = join(iconDirectory, "icon.icns");
 // the geometry and palette here; generated SVG/PNG/ICNS files are outputs.
 const icon = {
   canvas: 1024,
+  // macOS peers use an 824px content area inside the 1024px icon canvas.
+  // Keep the existing geometry as the design space and scale the complete
+  // composition, including its shadows, into that content area.
+  contentSize: 824,
   tile: {
     x: 64,
     y: 64,
@@ -116,6 +121,9 @@ function createSvg(spec) {
   const { canvas, tile, topRibbon, stem, palette, effects } = spec;
   const tileBottom = tile.y + tile.size;
   const tileRight = tile.x + tile.size;
+  const canvasCenter = canvas / 2;
+  const contentScale = spec.contentSize / tile.size;
+  const contentTransform = `translate(${canvasCenter} ${canvasCenter}) scale(${contentScale}) translate(${-canvasCenter} ${-canvasCenter})`;
 
   return `<?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${canvas} ${canvas}" role="img" aria-labelledby="title description">
@@ -188,6 +196,7 @@ function createSvg(spec) {
     </clipPath>
   </defs>
 
+  <g id="icon-content" transform="${contentTransform}">
   <g id="tile" filter="url(#tile-shadow)">
     <rect x="${tile.x}" y="${tile.y}" width="${tile.size}" height="${tile.size}" rx="${tile.radius}" fill="url(#tile-fill)"/>
     <rect x="${tile.x}" y="${tile.y}" width="${tile.size}" height="${tile.size}" rx="${tile.radius}" fill="url(#tile-violet)"/>
@@ -212,6 +221,7 @@ function createSvg(spec) {
 
     <path d="M ${stem.foldStartX - 5} ${stem.top + 31} V ${stem.top + 173}" fill="none" stroke="url(#intersection-flare)" stroke-width="8"/>
     <path d="M ${stem.foldStartX - 7} ${stem.top + 36} V ${stem.top + 155}" fill="none" stroke="url(#intersection-flare)" stroke-width="21" stroke-linecap="round" filter="url(#flare-blur)" opacity="0.7"/>
+  </g>
   </g>
 </svg>
 `;
@@ -259,6 +269,6 @@ try {
   rmSync(generatedDirectory, { recursive: true, force: true });
 }
 
-console.log(`Generated ${svgPath}`);
-console.log(`Generated ${pngPath}`);
-console.log(`Generated ${icnsPath}`);
+writeStdout(`Generated ${svgPath}`);
+writeStdout(`Generated ${pngPath}`);
+writeStdout(`Generated ${icnsPath}`);

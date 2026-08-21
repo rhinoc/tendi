@@ -1,5 +1,6 @@
 import type { ReactNode } from "react";
 import { PanelRightClose } from "lucide-react";
+import { IconButton } from "./IconButton.tsx";
 
 export type DetailPanelProps = {
   className?: string;
@@ -27,13 +28,13 @@ export function DetailPanel({
           <h2>{title}</h2>
           <div className="threadHeaderActions">
             {headerActions}
-            <button
+            <IconButton
               className="threadPanelToggle"
               aria-label={collapseLabel}
               onClick={onCollapse}
             >
               <PanelRightClose size={16} />
-            </button>
+            </IconButton>
           </div>
         </div>
         {meta}

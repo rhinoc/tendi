@@ -92,8 +92,8 @@
   text-overflow: ellipsis;
   white-space: nowrap;
   margin: 0;
-  font-size: 18px;
-  line-height: 1.15;
+  font-size: var(--text-title);
+  line-height: var(--leading-lg);
   letter-spacing: 0;
 }
 
@@ -107,32 +107,11 @@
 
 .threadPanelToggle {
   margin-left: auto;
-  width: 30px;
-  height: 30px;
-  display: grid;
-  place-items: center;
-  padding: 0;
-  border: 0;
-  border-radius: 7px;
-  background: transparent;
   color: var(--faint);
-  cursor: pointer;
 }
 
 .threadHeaderActions .threadPanelToggle {
   margin-left: 0;
-}
-
-.threadPanelToggle:hover {
-  background: var(--hover-fill);
-  color: var(--text);
-}
-
-.threadPanelToggle:disabled,
-.threadPanelToggle:disabled:hover {
-  color: var(--disabled);
-  background: transparent;
-  cursor: default;
 }
 
 .threadPanelToggle.sessionResumeButton.isSuccess,
@@ -162,16 +141,16 @@
 
 .railToggle {
   margin-left: 0;
-  flex: 0 0 30px;
+  flex: 0 0 var(--control-size-icon);
 }
 
 .railLabel {
   min-height: 0;
   flex: 1;
   color: var(--faint);
-  font-size: 12px;
+  font-size: var(--text-sm);
   font-weight: 650;
-  line-height: 1;
+  line-height: var(--leading-tight);
   overflow: hidden;
   text-overflow: ellipsis;
   writing-mode: vertical-rl;
@@ -185,7 +164,7 @@
   align-items: center;
   gap: 18px;
   color: var(--faint);
-  font-size: 13px;
+  font-size: var(--text-ui);
   font-weight: 500;
   border-bottom: 1px solid var(--hover-fill-strong);
 }

@@ -1,16 +1,19 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useState, type KeyboardEvent } from "react";
-import { ContextMenu, Dialog } from "radix-ui";
+import { ContextMenu, Dialog, DropdownMenu } from "radix-ui";
 import {
   Copy,
-  FileText,
+  MessageSquareText,
   Pencil,
   Plus,
   RefreshCw,
   Save,
+  SearchX,
   Trash2,
   X,
 } from "lucide-react";
 
+import { Button } from "../components/shared/Button.tsx";
+import { Badge } from "../components/shared/Badge.tsx";
 import { ContentTopDragStrip } from "../components/shared/ContentTopDragStrip.tsx";
 import { CopyButton } from "../components/shared/CopyButton.tsx";
 import { CopyTextMenuItem, DeleteMenuItem } from "../components/shared/DataTableMenus.tsx";
@@ -18,15 +21,18 @@ import { DialogActionBar } from "../components/shared/DialogActionBar.tsx";
 import { DialogStatefulButton } from "../components/shared/DialogStatefulButton.tsx";
 import { DialogShell } from "../components/shared/DialogShell.tsx";
 import { DialogTextField } from "../components/shared/DialogTextField.tsx";
+import { EmptyState } from "../components/shared/EmptyState.tsx";
 import { IconButton } from "../components/shared/IconButton.tsx";
-import { LoadingIcon } from "../components/shared/LoadingIcon.tsx";
 import { LoadingState } from "../components/shared/LoadingState.tsx";
+import { LoadErrorState } from "../components/shared/LoadErrorState.tsx";
 import { PageHeader } from "../components/shared/PageHeader.tsx";
+import { RowActionsMenu } from "../components/shared/RowActionsMenu.tsx";
 import { SearchField } from "../components/shared/SearchField.tsx";
-import { StatefulButton } from "../components/shared/StatefulButton.tsx";
+import { Tooltip } from "../components/shared/Tooltip.tsx";
 import { DataTable } from "../components/DataTable.tsx";
 import type { ColumnDef } from "../components/DataTable.types";
-import { TauriCommand, compactDateTime, normalizePromptTags, promptPreview, promptTagsLabel, safeInvoke } from "../lib/index.ts";
+import type { DataTableMenuComponents } from "../components/shared/DataTableMenus.tsx";
+import { TauriCommand, compactDateTime, normalizePromptTags, promptPreview, promptTagsLabel, safeInvoke, suppressNextClick } from "../lib/index.ts";
 
 const PromptBodyEditor = lazy(() => import("../features/prompts/PromptBodyEditor.tsx").then(({ PromptBodyEditor: component }) => ({ default: component })));
 
@@ -38,6 +44,36 @@ type PromptRecord = {
   createdAt?: string;
   updatedAt?: string;
 };
+
+function PromptActionsMenuItems({
+  Menu,
+  prompt,
+  isDeleting,
+  onEdit,
+  onDelete,
+}: {
+  Menu: DataTableMenuComponents;
+  prompt: PromptRecord;
+  isDeleting: boolean;
+  onEdit: (prompt: PromptRecord) => void;
+  onDelete: (id: string) => void;
+}) {
+  return (
+    <>
+      <Menu.Item className="skillMenuItem" onSelect={() => onEdit(prompt)}>
+        <Pencil size={14} />
+        Edit prompt
+      </Menu.Item>
+      <Menu.Separator className="skillMenuSeparator" />
+      <DeleteMenuItem
+        Menu={Menu}
+        label="Delete prompt"
+        disabled={isDeleting}
+        onSelect={() => onDelete(prompt.id)}
+      />
+    </>
+  );
+}
 
 type PromptDraft = {
   id?: string;
@@ -77,10 +113,11 @@ export function TagInput({ label, value, onChange, placeholder }: TagInputProps)
       <span>{label}</span>
       <div className="tagInput">
         {value.map((tag, index) => (
-          <span className="promptTag" key={`${tag}-${index}`}>
+          <Badge tone="accent" key={`${tag}-${index}`}>
             <span>{tag}</span>
             <button
               type="button"
+              className="badgeRemove"
               aria-label={`Remove ${tag}`}
               onMouseDown={(event) => event.preventDefault()}
               onClick={(event) => {
@@ -91,7 +128,7 @@ export function TagInput({ label, value, onChange, placeholder }: TagInputProps)
             >
               <X size={12} />
             </button>
-          </span>
+          </Badge>
         ))}
         <input
           value={draft}
@@ -195,12 +232,14 @@ export async function copyTextToClipboard(text: string) {
 type PromptsViewProps = {
   prompts: PromptRecord[];
   loadingPrompts?: boolean;
+  loadError?: string;
+  hasRows?: boolean;
   onRefreshPrompts: () => void | Promise<void>;
   onPromptSaved?: (prompt: unknown) => void;
   onPromptsDeleted?: (ids: string[]) => void;
 };
 
-export function PromptsView({ prompts, loadingPrompts = false, onRefreshPrompts, onPromptSaved, onPromptsDeleted }: PromptsViewProps) {
+export function PromptsView({ prompts, loadingPrompts = false, loadError = "", hasRows = false, onRefreshPrompts, onPromptSaved, onPromptsDeleted }: PromptsViewProps) {
   const [selected, setSelected] = useState<string[]>([]);
   const [query, setQuery] = useState("");
   const [editingPrompt, setEditingPrompt] = useState<PromptRecord | null>(null);
@@ -269,11 +308,18 @@ export function PromptsView({ prompts, loadingPrompts = false, onRefreshPrompts,
   const columns = useMemo((): ColumnDef<PromptRecord>[] => [
     {
       key: "title",
-      header: "Title",
+      header: "Prompt",
       type: "text",
       sortValue: (prompt) => prompt.title?.toLowerCase() ?? "",
-      width: "minmax(220px, 1fr)",
-      cell: "title",
+      width: "minmax(300px, 1fr)",
+      render: (prompt) => (
+        <>
+          <Tooltip content={prompt.title} onlyWhenTruncated><span className="dataCellTitle">{prompt.title}</span></Tooltip>
+          <span className="dataCellSubLine">
+            <Tooltip content={prompt.body} onlyWhenTruncated><span className="dataCellSub">{promptPreview(prompt)}</span></Tooltip>
+          </span>
+        </>
+      ),
     },
     {
       key: "tags",
@@ -284,18 +330,11 @@ export function PromptsView({ prompts, loadingPrompts = false, onRefreshPrompts,
       width: "160px",
       render: (prompt) => (
         <span className="promptTags">
-          {prompt.tags.length ? prompt.tags.map((tag) => <span className="promptTag" key={tag}>{tag}</span>) : <span className="promptTag muted">Untagged</span>}
+          {prompt.tags.length
+            ? prompt.tags.map((tag) => <Badge tone="accent" key={tag}>{tag}</Badge>)
+            : <Badge tone="neutral">Untagged</Badge>}
         </span>
       ),
-    },
-    {
-      key: "preview",
-      header: "Prompt",
-      type: "text",
-      sortValue: (prompt) => promptPreview(prompt).toLowerCase(),
-      width: "260px",
-      value: (prompt) => promptPreview(prompt),
-      title: (prompt) => prompt.body,
     },
     {
       key: "updatedAt",
@@ -309,47 +348,31 @@ export function PromptsView({ prompts, loadingPrompts = false, onRefreshPrompts,
     {
       key: "actions",
       header: "",
-      width: "108px",
+      width: "72px",
       render: (prompt) => {
         const isDeleting = deletingPromptIds.includes(prompt.id);
         return (
           <div className="rowActions">
             <CopyButton
-              className="iconButton"
+              className="appButton appButton-icon"
               copyLabel={`Copy ${prompt.title}`}
               copiedLabel="Prompt copied"
               iconSize={15}
               stopPropagation
               onCopy={() => copyPrompts([prompt])}
             />
-            <IconButton
-              aria-label={`Edit ${prompt.title}`}
-              onClick={(event) => {
-                event.stopPropagation();
-                openEditPrompt(prompt);
-              }}
+            <RowActionsMenu
+              ariaLabel={`Prompt actions for ${prompt.title}`}
+              onOpenChange={(open) => { if (!open) suppressNextClick(); }}
             >
-              <Pencil size={15} />
-            </IconButton>
-            <StatefulButton
-              state={isDeleting ? "loading" : "idle"}
-              size="sm"
-              width={28}
-              minWidth={28}
-              variant="ghost"
-              className={`iconButton dangerIcon${isDeleting ? " isBusy" : ""}`}
-              aria-label={`Delete ${prompt.title}`}
-              aria-disabled={isDeleting || undefined}
-              data-no-row-click
-              onClick={(event) => {
-                event.stopPropagation();
-                if (isDeleting) return;
-                deleteSelected([prompt.id]);
-              }}
-              loadingContent={<LoadingIcon size={15} />}
-            >
-              <Trash2 size={15} />
-            </StatefulButton>
+              <PromptActionsMenuItems
+                Menu={DropdownMenu}
+                prompt={prompt}
+                isDeleting={isDeleting}
+                onEdit={openEditPrompt}
+                onDelete={(id) => { void deleteSelected([id]); }}
+              />
+            </RowActionsMenu>
           </div>
         );
       },
@@ -368,20 +391,15 @@ export function PromptsView({ prompts, loadingPrompts = false, onRefreshPrompts,
         >
           Copy
         </CopyButton>
-        <StatefulButton
-          state={isDeleting ? "loading" : "idle"}
-          size="sm"
-          width={94}
-          minWidth={94}
-          variant="ghost"
+        <button
           className="danger promptsDeleteSelectedButton"
           aria-label="Delete selected prompts"
           disabled={isDeleting}
           onClick={() => deleteSelected(selectedRows.map((prompt) => prompt.id))}
-          loadingContent={<LoadingIcon size={15} />}
         >
-          <><Trash2 size={15} /><span>Delete</span></>
-        </StatefulButton>
+          <Trash2 size={15} />
+          <span>Delete</span>
+        </button>
       </>
     );
   }, [copyPrompts, deleteSelected, deletingPromptIds]);
@@ -404,16 +422,12 @@ export function PromptsView({ prompts, loadingPrompts = false, onRefreshPrompts,
     ) : (
       <>
         <CopyTextMenuItem Menu={ContextMenu} text={prompt.body} label="Copy prompt" />
-        <ContextMenu.Item className="skillMenuItem" onSelect={() => openEditPrompt(prompt)}>
-          <Pencil size={14} />
-          Edit prompt
-        </ContextMenu.Item>
-        <ContextMenu.Separator className="skillMenuSeparator" />
-        <DeleteMenuItem
+        <PromptActionsMenuItems
           Menu={ContextMenu}
-          label="Delete prompt"
-          disabled={deletingPromptIds.includes(prompt.id)}
-          onSelect={() => deleteSelected([prompt.id])}
+          prompt={prompt}
+          isDeleting={deletingPromptIds.includes(prompt.id)}
+          onEdit={openEditPrompt}
+          onDelete={(id) => { void deleteSelected([id]); }}
         />
       </>
     );
@@ -423,10 +437,11 @@ export function PromptsView({ prompts, loadingPrompts = false, onRefreshPrompts,
     <section className="content dataPage promptsPage">
       <ContentTopDragStrip />
       <PageHeader title="Prompts">
-        <SearchField placeholder="Search prompts" value={query} onChange={(event) => setQuery(event.target.value)} onClear={() => setQuery("")} />
+        <SearchField pageSearch placeholder="Search prompts" value={query} onChange={(event) => setQuery(event.target.value)} onClear={() => setQuery("")} />
         <IconButton aria-label="Refresh prompts" onClick={onRefreshPrompts}><RefreshCw size={16} /></IconButton>
         <IconButton className="filled" aria-label="Add prompt" onClick={openNewPrompt}><Plus size={16} /></IconButton>
       </PageHeader>
+      {loadError && hasRows ? <LoadErrorState message={loadError} onRetry={() => { void onRefreshPrompts(); }} /> : null}
       <DataTable
         rows={visiblePrompts}
         columns={columns}
@@ -441,12 +456,24 @@ export function PromptsView({ prompts, loadingPrompts = false, onRefreshPrompts,
         bottomBar={bottomBar}
         bottomBarCheckboxLabel="Select visible prompts from toolbar"
         selectionLabel="prompts"
-        loading={loadingPrompts}
+        loading={loadingPrompts && !hasRows}
         loadingLabel="Loading prompts"
-        emptyState={normalizedQuery ? (
-          <><FileText size={20} /><span>No prompts match this search</span><span>Try another search.</span></>
-        ) : (
-          <><FileText size={20} /><span>No prompts yet</span><span>Create a prompt to reuse instructions.</span></>
+        emptyState={loadError && !hasRows ? <LoadErrorState message={loadError} onRetry={() => { void onRefreshPrompts(); }} /> : (
+          <EmptyState
+            icon={normalizedQuery ? <SearchX size={21} strokeWidth={1.8} /> : <MessageSquareText size={29} strokeWidth={1.55} />}
+            iconTone={normalizedQuery ? "muted" : "accent"}
+            title={normalizedQuery ? "No prompts match this search" : "No prompts yet"}
+            description={normalizedQuery ? "Try another search or clear the filter." : "Save reusable instructions for quick access."}
+            action={(
+              <Button
+                size="sm"
+                variant="ghost"
+                onClick={normalizedQuery ? () => setQuery("") : openNewPrompt}
+              >
+                {normalizedQuery ? "Clear search" : <><Plus size={15} />Create prompt</>}
+              </Button>
+            )}
+          />
         )}
       />
       <PromptDialog

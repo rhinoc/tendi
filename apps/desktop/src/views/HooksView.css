@@ -15,7 +15,7 @@
   text-overflow: ellipsis;
   white-space: nowrap;
   font-family: var(--font-mono);
-  font-size: 12px;
+  font-size: var(--text-sm);
 }
 
 .hookEventTitle {
@@ -36,26 +36,6 @@
   flex: 0 1 auto;
 }
 
-.hookReviewBadge {
-  flex: 0 0 auto;
-  padding: 2px 6px;
-  border: 0;
-  border-radius: 999px;
-  background: var(--tone-warn-soft);
-  color: var(--tone-warn);
-  font-size: 10px;
-  font-weight: 700;
-  line-height: 1.2;
-  cursor: pointer;
-  transition: background-color 120ms ease, color 120ms ease;
-}
-
-.hookReviewBadge:hover,
-.hookReviewBadge:focus-visible {
-  background: color-mix(in oklch, var(--tone-warn) 28%, transparent);
-  color: var(--amber-bright);
-}
-
 .hookReviewDialogDetails {
   display: grid;
   gap: 4px;
@@ -64,7 +44,7 @@
   border-radius: 7px;
   background: var(--inset-fill);
   color: var(--muted);
-  font-size: 12px;
+  font-size: var(--text-sm);
 }
 
 .hookReviewDialogDetails strong {
@@ -97,7 +77,7 @@
   color: var(--danger-text);
   background: var(--danger-soft);
   border: 1px solid var(--danger-soft-strong);
-  font-size: 13px;
+  font-size: var(--text-ui);
 }
 
 .hookDetailSection {
@@ -111,7 +91,7 @@
 .hookDetailSection h3 {
   margin: 0 0 12px;
   color: var(--faint);
-  font-size: 11px;
+  font-size: var(--text-sm);
   font-weight: 760;
   letter-spacing: 0.08em;
   text-transform: uppercase;
@@ -146,7 +126,7 @@
   align-items: start;
   padding: 7px 0;
   color: var(--muted);
-  font-size: 13px;
+  font-size: var(--text-ui);
 }
 
 .hookDetailLabel {
@@ -164,12 +144,12 @@
 .hookDetailValue span {
   min-width: 0;
   overflow-wrap: anywhere;
-  line-height: 1.45;
+  line-height: var(--leading-body);
 }
 
 .hookDetailValue.mono span {
   font-family: var(--font-mono);
-  font-size: 12px;
+  font-size: var(--text-sm);
 }
 
 .hookCopyButton {
@@ -197,62 +177,17 @@
   background: var(--green-soft);
 }
 
-.hookEnabledSwitch {
-  width: 36px;
-  height: 20px;
-  position: relative;
-  display: inline-flex;
-  align-items: center;
-  padding: 0;
-  border: 0;
-  border-radius: 999px;
-  background: var(--danger-soft);
-  box-shadow: inset 0 0 0 1px var(--danger-soft-strong);
-  cursor: pointer;
-  transition-property: background-color, box-shadow;
-  transition-duration: 120ms;
-  transition-timing-function: ease-out;
-}
-
-.hookEnabledSwitch:not(:disabled):not([aria-disabled="true"]):hover {
-  box-shadow: inset 0 0 0 1px var(--danger);
-}
-
-.hookEnabledSwitch:disabled,
-.hookEnabledSwitch[aria-disabled="true"] {
-  cursor: default;
-  opacity: 0.52;
-}
-
-.hookEnabledSwitchThumb {
-  width: 16px;
-  height: 16px;
-  position: absolute;
-  left: 2px;
-  border-radius: 50%;
-  background: var(--text);
-  box-shadow: var(--control-thumb-shadow);
-  transition: transform 120ms ease, background-color 120ms ease;
-}
-
-.hookEnabledSwitch.on {
-  background: var(--green);
-  box-shadow: inset 0 0 0 1px var(--green);
-}
-
-.hookEnabledSwitch.on:not(:disabled):not([aria-disabled="true"]):hover {
-  background: color-mix(in oklch, var(--green) 88%, var(--text));
-  box-shadow: inset 0 0 0 1px color-mix(in oklch, var(--green) 88%, var(--text));
-}
-
-.hookEnabledSwitch.on .hookEnabledSwitchThumb {
-  transform: translateX(16px);
-  /* Filled-control contrast ink — readable on solid green in light and dark */
-  background: var(--accent-contrast);
-}
-
-.hookEnabledSwitch.updating .hookEnabledSwitchThumb {
+.hookEnabledSwitch.updating .appSwitchThumb {
   opacity: 0.72;
+}
+
+.hookBatchActionButton {
+  min-width: 72px;
+  justify-content: center;
+}
+
+.hookBatchActionButton.danger {
+  min-width: 64px;
 }
 
 .hookSectionHeaderActions {
@@ -279,7 +214,7 @@
   border-radius: 7px;
   color: var(--faint);
   background: var(--inset-fill);
-  font-size: 13px;
+  font-size: var(--text-ui);
 }
 
 .hookSourceLoading {

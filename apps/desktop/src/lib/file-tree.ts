@@ -1,5 +1,4 @@
 import { basename } from "./strings.ts";
-import { fallbackSkillFiles } from "./constants.ts";
 import type { NormalizedSkill } from "./skills.ts";
 
 export type SkillFileEntry = {
@@ -67,7 +66,7 @@ export function buildFileTreeRows(files: SkillFileEntry[], collapsedFolders: Set
 }
 
 export function normalizeSkillFileEntries(result: unknown): SkillFileEntry[] {
-  if (!Array.isArray(result) || result.length === 0) return fallbackSkillFiles;
+  if (!Array.isArray(result)) return [];
   return result.map((file: Record<string, unknown>) => ({
     name: `${file.relative_path ?? file.name}`,
     kind: `${file.kind ?? "file"}`,
@@ -91,10 +90,6 @@ export function uniqueChildPath(files: SkillFileEntry[], parent: string, kind: s
     if (!existing.has(candidate)) return candidate;
   }
   return joinRelativePath(parent, `${stem}-${Date.now()}${extension}`);
-}
-
-export function fallbackSkillContent(skill: { name: string; description?: string; visibility: string }): string {
-  return `---\nname: ${skill.name}\ndescription: ${skill.description ?? ""}\ntendi:\n  visibility: ${skill.visibility.toLowerCase()}\n---\n\n# ${skill.name}\n\nUse this skill when the user explicitly chooses it.\n`;
 }
 
 export function splitMarkdownFrontmatter(content: string): { frontmatter: string; body: string } {

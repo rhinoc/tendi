@@ -5,10 +5,11 @@ import {
   useRef,
   useState,
 } from "react";
-import type { UnlistenFn } from "@tauri-apps/api/event";
-import { ArrowLeft, ArrowRight, ArrowUpRight, ChevronDown, RefreshCw } from "lucide-react";
+import { ArrowLeft, ArrowRight, ArrowUpRight, RefreshCw } from "lucide-react";
 
 import { AgentBadge } from "../components/shared/AgentBadge.tsx";
+import { Badge } from "../components/shared/Badge.tsx";
+import { Button } from "../components/shared/Button.tsx";
 import { ContentTopDragStrip } from "../components/shared/ContentTopDragStrip.tsx";
 import { ChartFrame } from "../components/shared/chart/ChartFrame.tsx";
 import { ChartLegend } from "../components/shared/chart/ChartLegend.tsx";
@@ -16,9 +17,11 @@ import { IconButton } from "../components/shared/IconButton.tsx";
 import { LoadingDots } from "../components/shared/LoadingDots.tsx";
 import { LoadingIcon } from "../components/shared/LoadingIcon.tsx";
 import { PageHeader } from "../components/shared/PageHeader.tsx";
+import { Toast } from "../components/shared/Toast.tsx";
 import { SelectControl } from "../components/shared/SelectControl.tsx";
 import { Tooltip } from "../components/shared/Tooltip.tsx";
 import { SessionTitleText, TranscriptLinkText } from "../components/shared/TranscriptLinkText.tsx";
+import { SKILL_BADGE_TONES } from "../features/skills/skill-badge-tones.ts";
 import { tokenToneClass } from "../lib/token-style.ts";
 import { formatTokenCount } from "../lib/token-format.ts";
 import { sessionProject, type SessionRecord } from "../lib/sessions.ts";
@@ -30,12 +33,13 @@ import {
   type OverviewAnalytics,
   selectAnalyticsGranularity,
 } from "../lib/analytics.ts";
-import { TauriCommand, safeInvoke, safeListen } from "../lib/tauri.ts";
-import { OverviewTrendChart, type OverviewUsageMetric } from "./OverviewTrendChart.tsx";
+import { TauriCommand, safeInvoke } from "../lib/tauri.ts";
+import { OverviewTrendChart, type OverviewOlderLoadReason, type OverviewUsageMetric } from "./OverviewTrendChart.tsx";
 import type { SkillRecord } from "./SkillsView.tsx";
 import "./OverviewView.css";
 
 export type OverviewNavId = "skills" | "prompts" | "sessions" | "rules" | "hooks" | "mcp";
+export type SessionListStatus = "loading" | "loaded" | "error";
 
 export type OverviewViewProps = {
   counts: Record<OverviewNavId, number>;
@@ -44,9 +48,14 @@ export type OverviewViewProps = {
   sessions: SessionRecord[];
   analyticsRevision: number;
   analyticsRevisionReady: boolean;
+  analyticsRevisionError?: string;
+  onRetryAnalyticsRevision?: () => void | Promise<void>;
   agentFilter: string;
-  loadedDomains: ReadonlySet<string>;
-  sessionListLoaded: boolean;
+  overviewCountsLoaded: ReadonlySet<OverviewNavId>;
+  overviewCountErrors: ReadonlySet<OverviewNavId>;
+  sessionListStatus: SessionListStatus;
+  sessionListError: string;
+  skillUpdateCount?: number;
   onNavigate: (id: OverviewNavId) => void;
   onOpenSession: (session: SessionRecord) => void;
 };
@@ -89,7 +98,7 @@ function AnalyticsLoadingState({
   const total = progress?.total ?? 0;
   return (
     <ChartFrame ariaLabel="Loading usage chart" legend={<ChartLegend items={[]} />}>
-      <LoadingDots variant="surface" className="overviewAnalyticsLoadingDots" />
+      <LoadingDots className="overviewAnalyticsLoadingDots" />
       <div
         role="progressbar"
         aria-label={total ? `Analyzing ${completed} of ${total} sessions` : "Loading usage analytics"}
@@ -102,6 +111,14 @@ function AnalyticsLoadingState({
   );
 }
 
+function SessionsLoadingState() {
+  return (
+    <div className="overviewSessionsLoading" role="status" aria-label="Loading recent sessions">
+      <LoadingDots className="overviewSessionsLoadingDots" />
+    </div>
+  );
+}
+
 export function OverviewView({
   counts,
   hookReviewCount = 0,
@@ -109,9 +126,14 @@ export function OverviewView({
   sessions,
   analyticsRevision,
   analyticsRevisionReady,
+  analyticsRevisionError = "",
+  onRetryAnalyticsRevision,
   agentFilter,
-  loadedDomains,
-  sessionListLoaded,
+  overviewCountsLoaded,
+  overviewCountErrors,
+  sessionListStatus,
+  sessionListError,
+  skillUpdateCount,
   onNavigate,
   onOpenSession,
 }: OverviewViewProps) {
@@ -124,6 +146,7 @@ export function OverviewView({
   const [analyticsProgress, setAnalyticsProgress] = useState<AnalyticsRefreshProgress | null>(null);
   const [analyticsError, setAnalyticsError] = useState("");
   const [analyticsRange, setAnalyticsRange] = useState<number>(retainedAnalyticsRange);
+  const [preparingAnalyticsRange, setPreparingAnalyticsRange] = useState(false);
   const automaticGranularity = selectAnalyticsGranularity(analytics?.days.length ?? analyticsRange);
   const [granularityOverride, setGranularityOverride] = useState<AnalyticsGranularity | null>(null);
   const granularity = granularityOverride ?? automaticGranularity;
@@ -143,7 +166,9 @@ export function OverviewView({
     && firstLoadedDate
     && firstAvailableDate < firstLoadedDate
   );
-  const loadOlderAnalytics = useCallback(() => {
+  const loadOlderAnalytics = useCallback((reason: OverviewOlderLoadReason) => {
+    if (analyticsRange >= analyticsTargetRange) return;
+    if (reason === "auto") setPreparingAnalyticsRange(true);
     setAnalyticsRange((current) => {
       if (current >= analyticsTargetRange) return current;
       const step = ANALYTICS_LOAD_STEPS.find((days) => days > current);
@@ -151,7 +176,7 @@ export function OverviewView({
       retainedAnalyticsRange = next;
       return next;
     });
-  }, [analyticsTargetRange]);
+  }, [analyticsRange, analyticsTargetRange]);
   const loadAnalytics = useCallback(async (refreshTranscripts = false, showLoading = refreshTranscripts) => {
     const request = ++analyticsRequestRef.current;
     const cacheKey = overviewAnalyticsCacheKey(agentFilter, analyticsRange, analyticsRevision);
@@ -160,6 +185,7 @@ export function OverviewView({
       analyticsRef.current = cached;
       setAnalytics(cached);
       setAnalyticsLoading(false);
+      setPreparingAnalyticsRange(false);
       return;
     }
     if (refreshTranscripts) {
@@ -199,9 +225,11 @@ export function OverviewView({
       );
       analyticsRef.current = result;
       setAnalytics(result);
+      setPreparingAnalyticsRange(false);
     }
     else {
       setAnalyticsError((current) => current || "Analytics could not be loaded");
+      setPreparingAnalyticsRange(false);
       const loadedDays = analyticsRef.current?.daysRequested;
       if (loadedDays && analyticsRange > loadedDays) {
         retainedAnalyticsRange = loadedDays;
@@ -210,6 +238,9 @@ export function OverviewView({
     }
     setAnalyticsLoading(false);
   }, [agentFilter, analyticsRange, analyticsRevision]);
+  const showAnalyticsLoading = !analyticsRevisionError && (
+    preparingAnalyticsRange || (analyticsLoading && !analytics)
+  );
   useEffect(() => {
     setGranularityOverride(null);
   }, [automaticGranularity]);
@@ -226,30 +257,11 @@ export function OverviewView({
     void loadAnalytics(false, !cached && analyticsRef.current === null);
   }, [agentFilter, analyticsRange, analyticsRevision, analyticsRevisionReady, loadAnalytics]);
 
-  useEffect(() => {
-    let disposed = false;
-    let unlisten: UnlistenFn | undefined;
-    void safeListen<AnalyticsRefreshProgress>("analytics://progress", ({ payload }) => {
-      if (disposed) return;
-      setAnalyticsProgress(payload);
-      if (payload.error) setAnalyticsError(payload.error);
-    }).then((dispose) => {
-      if (disposed) dispose();
-      else unlisten = dispose;
-    });
-    return () => {
-      disposed = true;
-      unlisten?.();
-    };
-  }, []);
-  const updateSkills = useMemo(
-    () => skills.filter((skill) => skill.updateStatus === "update-available"),
-    [skills],
-  );
+  const updateSkillCount = skillUpdateCount ?? skills.filter((skill) => skill.updateStatus === "update-available").length;
 
-  const inventory: Array<{ id: OverviewNavId; label: string; primary?: boolean }> = [
-    { id: "skills", label: "Skills", primary: true },
-    { id: "sessions", label: "Sessions", primary: true },
+  const inventory: Array<{ id: OverviewNavId; label: string }> = [
+    { id: "skills", label: "Skills" },
+    { id: "sessions", label: "Sessions" },
     { id: "prompts", label: "Prompts" },
     { id: "rules", label: "Rules" },
     { id: "hooks", label: "Hooks" },
@@ -267,26 +279,26 @@ export function OverviewView({
             <button
               key={item.id}
               type="button"
-              className={`overviewInventoryItem${item.primary ? " isPrimary" : ""}`}
+              className="overviewInventoryItem"
               onClick={() => onNavigate(item.id)}
               aria-label={`${item.label}: ${counts[item.id].toLocaleString()}${item.id === "hooks" && hookReviewCount > 0 ? `, ${hookReviewCount} need review` : ""}. Open ${item.label}`}
             >
               <span>
                 <span className="overviewInventoryLabelRow">
                   <span className="overviewInventoryLabel">{item.label}</span>
-                  {item.id === "skills" && updateSkills.length > 0 ? (
-                    <span className="overviewSkillUpdateBadge">
-                      {updateSkills.length} {updateSkills.length === 1 ? "update" : "updates"}
-                    </span>
+                  {item.id === "skills" && updateSkillCount > 0 ? (
+                    <Badge tone={SKILL_BADGE_TONES.update}>
+                      {updateSkillCount} {updateSkillCount === 1 ? "update" : "updates"}
+                    </Badge>
                   ) : null}
                   {item.id === "hooks" && hookReviewCount > 0 ? (
-                    <span className="overviewSkillUpdateBadge">
+                    <Badge tone="warning">
                       {hookReviewCount} review{hookReviewCount === 1 ? "" : "s"}
-                    </span>
+                    </Badge>
                   ) : null}
                 </span>
                 <span className="overviewInventoryValue">
-                  {loadedDomains.has(item.id) || (item.id === "sessions" && sessionListLoaded) ? counts[item.id] : "—"}
+                  {overviewCountsLoaded.has(item.id) ? counts[item.id] : "—"}
                 </span>
               </span>
               <ArrowUpRight size={14} aria-hidden="true" />
@@ -301,7 +313,6 @@ export function OverviewView({
             </div>
             <div className="overviewAnalyticsControls">
               <SelectControl
-                className="overviewMetricSelect"
                 contentClassName="overviewMetricMenu"
                 itemClassName="overviewMetricMenuItem"
                 label={`Usage metric: ${USAGE_METRIC_LABELS[usageMetric]}`}
@@ -313,26 +324,29 @@ export function OverviewView({
                 }}
                 options={USAGE_METRICS.map((value) => ({ value, label: USAGE_METRIC_LABELS[value] }))}
                 align="end"
-                showChevron={false}
-                renderValue={(option) => (
-                  <span className="overviewMetricSelectInner">
-                    <span>{option?.label ?? USAGE_METRIC_LABELS[usageMetric]}</span>
-                    <ChevronDown size={13} aria-hidden="true" />
-                  </span>
-                )}
               />
-              <IconButton type="button" onClick={() => void loadAnalytics(true)} disabled={analyticsLoading} aria-label="Refresh analytics" aria-busy={analyticsLoading}>
-                {analyticsLoading ? <LoadingIcon size={15} /> : <RefreshCw size={15} />}
+              <IconButton type="button" onClick={() => void loadAnalytics(true)} disabled={analyticsLoading || preparingAnalyticsRange} aria-label="Refresh analytics" aria-busy={analyticsLoading || preparingAnalyticsRange}>
+                {analyticsLoading || preparingAnalyticsRange ? <LoadingIcon size={15} /> : <RefreshCw size={15} />}
               </IconButton>
             </div>
           </div>
 
-          {analyticsLoading && !analytics ? (
+          {analyticsRevisionError && !analytics ? (
+            <div className="overviewAnalyticsEmpty" role="alert">
+              <strong>Analytics unavailable</strong>
+              <p>{analyticsRevisionError}</p>
+              {onRetryAnalyticsRevision ? (
+                <Button type="button" variant="ghost" size="sm" className="overviewRetryButton" onClick={() => void onRetryAnalyticsRevision()}>
+                  Retry analytics
+                </Button>
+              ) : null}
+            </div>
+          ) : showAnalyticsLoading ? (
             <AnalyticsLoadingState
               progress={analyticsProgress}
             />
           ) : null}
-          {analytics ? (
+          {analytics && !preparingAnalyticsRange ? (
             <>
               <OverviewTrendChart
                 analytics={analytics}
@@ -350,17 +364,20 @@ export function OverviewView({
                 </p>
               ) : null}
             </>
-          ) : analyticsLoading ? null : (
+          ) : analyticsRevisionError ? null : showAnalyticsLoading ? null : (
             <div className="overviewAnalyticsEmpty">
               <strong>Analytics unavailable</strong>
               <p>{analyticsError || "No transcript analytics are available yet."}</p>
-              <button type="button" className="overviewRetryButton" onClick={() => void loadAnalytics(true)}>
+              <Button type="button" variant="ghost" size="sm" className="overviewRetryButton" onClick={() => void loadAnalytics(true)}>
                 Retry analytics
-              </button>
+              </Button>
             </div>
           )}
           {analyticsError && analytics ? (
             <p className="overviewAnalyticsWarning" role="alert">Refresh failed. Existing analytics are still shown. {analyticsError}</p>
+          ) : null}
+          {analyticsRevisionError && analytics ? (
+            <p className="overviewAnalyticsWarning" role="alert">Analytics revision refresh failed. Existing analytics are still shown. {analyticsRevisionError}</p>
           ) : null}
         </section>
 
@@ -373,15 +390,17 @@ export function OverviewView({
               </button>
             </div>
 
-            {usage.recentSessions.length > 0 ? (
+            {sessionListStatus === "loading" && usage.recentSessions.length === 0 ? (
+              <SessionsLoadingState />
+            ) : usage.recentSessions.length > 0 ? (
               <div className="overviewSessionGrid" aria-label="Recent sessions">
                 {usage.recentSessions.map((session) => {
                   const previewKey = `${session.agent ?? ""}:${session.id ?? ""}`;
                   const preview = summarizeSessionPreviewRecord(session) ?? {
-                    title: session.title || session.id || "Untitled session",
                     userLast: "—",
                     assistantLast: "—",
                   };
+                  const displayTitle = session.title || session.id || "Untitled session";
                   return (
                     <button
                       key={previewKey}
@@ -392,8 +411,8 @@ export function OverviewView({
                       <span className="overviewSessionRowHeader">
                         <span className="overviewSessionTitleLine">
                           <AgentBadge agent={session.agent || "Unknown"} small />
-                          <Tooltip content={formatSessionTitle(preview.title)} onlyWhenTruncated>
-                            <span className="overviewSessionRowTitle"><SessionTitleText interactive={false} value={preview.title} /></span>
+                          <Tooltip content={formatSessionTitle(displayTitle)} onlyWhenTruncated>
+                            <span className="overviewSessionRowTitle"><SessionTitleText interactive={false} value={displayTitle} /></span>
                           </Tooltip>
                         </span>
                         <span className="overviewSessionProject">{sessionProject(session)}</span>
@@ -410,6 +429,8 @@ export function OverviewView({
                   );
                 })}
               </div>
+            ) : sessionListStatus === "error" ? (
+              <Toast tone="error" message={sessionListError || "Could not load sessions. Try again."} />
             ) : (
               <p className="overviewQuiet">No sessions found for this agent.</p>
             )}

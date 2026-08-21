@@ -1,25 +1,30 @@
 import { Tooltip } from "../components/shared/Tooltip.tsx";
-import { lazy, Suspense, useCallback, useDeferredValue, useEffect, useMemo, useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Dialog } from "radix-ui";
-import { ArrowRightLeft, Check, Plus, RefreshCw, Save } from "lucide-react";
+import { ArrowRightLeft, Files, Plus, RefreshCw, Save } from "lucide-react";
 import { Group as PanelGroup, Panel } from "react-resizable-panels";
 
 import { DataTable } from "../components/DataTable.tsx";
 import type { ColumnDef } from "../components/DataTable.types.ts";
 import { AgentOptionLabel } from "../components/shared/AgentOptionLabel.tsx";
+import { Badge } from "../components/shared/Badge.tsx";
+import { Button } from "../components/shared/Button.tsx";
 import { DialogActionBar } from "../components/shared/DialogActionBar.tsx";
 import { DialogShell } from "../components/shared/DialogShell.tsx";
 import { DiscardChangesDialog } from "../components/shared/DiscardChangesDialog.tsx";
 import { DialogTextField } from "../components/shared/DialogTextField.tsx";
+import { EmptyState } from "../components/shared/EmptyState.tsx";
 import { DialogStatefulButton } from "../components/shared/DialogStatefulButton.tsx";
 import { IconButton } from "../components/shared/IconButton.tsx";
 import { LoadingIcon } from "../components/shared/LoadingIcon.tsx";
 import { LoadingState } from "../components/shared/LoadingState.tsx";
+import { LoadErrorState } from "../components/shared/LoadErrorState.tsx";
 import { PageHeader } from "../components/shared/PageHeader.tsx";
 import { ResizeSeparator } from "../components/shared/ResizeSeparator.tsx";
 import { SelectControl } from "../components/shared/SelectControl.tsx";
-import { TauriCommand, diffPreview, friendlyAgent } from "../lib/index.ts";
+import { StatefulButton } from "../components/shared/StatefulButton.tsx";
+import { DaemonCommandError, TauriCommand, compactDateTime, formatUserPath, friendlyAgent, invokeCommand, logger, mergeThreeWay, subscribeDaemonEvents } from "../lib/index.ts";
+import type { DaemonEvent } from "../lib/index.ts";
 import "./ConfigView.css";
 
 const BASE_PROFILE_VALUE = "__tendi_base_config__";
@@ -31,6 +36,7 @@ type AgentConfigFile = Record<string, unknown> & {
   path: string;
   format: "json" | "toml";
   exists: boolean;
+  updatedAt?: string;
   profile?: string;
 };
 
@@ -39,6 +45,17 @@ type AgentConfigContent = {
   content: string;
   sha256: string;
   exists: boolean;
+  updatedAt?: string;
+};
+
+type ConfigConflict = {
+  base: string;
+  local: string;
+  disk: string;
+  diskSha256: string;
+  diskExists: boolean;
+  diskUpdatedAt?: string;
+  merged: boolean;
 };
 
 type AppSettings = {
@@ -51,13 +68,34 @@ function errorMessage(error: unknown): string {
   return "Config operation failed";
 }
 
+function profileValueForConfig(config: AgentConfigFile | undefined): string {
+  return config?.profile ? `profile:${config.profile}` : BASE_PROFILE_VALUE;
+}
+
+function isConfigSnapshot(value: unknown): value is AgentConfigContent {
+  if (!value || typeof value !== "object") return false;
+  const snapshot = value as Partial<AgentConfigContent>;
+  return typeof snapshot.path === "string"
+    && typeof snapshot.content === "string"
+    && typeof snapshot.sha256 === "string"
+    && typeof snapshot.exists === "boolean";
+}
+
+function isConflictMarkerContent(value: string) {
+  return /^(?:<{7} |\|{7} |={7}$|>{7} )/m.test(value);
+}
+
 export function ConfigView() {
   const [configs, setConfigs] = useState<AgentConfigFile[]>([]);
   const [activePath, setActivePath] = useState("");
+  const [selectedPath, setSelectedPath] = useState("");
   const [content, setContent] = useState("");
   const [originalContent, setOriginalContent] = useState("");
   const [sha256, setSha256] = useState("");
-  const [loading, setLoading] = useState(true);
+  const [loadingConfig, setLoadingConfig] = useState(true);
+  const [loadingConfigs, setLoadingConfigs] = useState(true);
+  const [loadError, setLoadError] = useState("");
+  const [contentError, setContentError] = useState("");
   const [saving, setSaving] = useState(false);
   const [pendingPath, setPendingPath] = useState("");
   const [pendingReload, setPendingReload] = useState(false);
@@ -69,8 +107,26 @@ export function ConfigView() {
   const [profileSaving, setProfileSaving] = useState(false);
   const [profileSwitching, setProfileSwitching] = useState(false);
   const [profileError, setProfileError] = useState("");
+  const [conflict, setConflict] = useState<ConfigConflict | null>(null);
+  const [saveError, setSaveError] = useState("");
+  const readRequestRef = useRef(0);
+  const contentRef = useRef(content);
+  const originalContentRef = useRef(originalContent);
+  const sha256Ref = useRef(sha256);
+  const activePathRef = useRef(activePath);
+  contentRef.current = content;
+  originalContentRef.current = originalContent;
+  sha256Ref.current = sha256;
+  activePathRef.current = activePath;
   const activeConfig = configs.find((config) => config.path === activePath) ?? null;
   const dirty = content !== originalContent;
+  const editorSaveError = conflict
+    ? conflict.merged
+      ? "Resolve highlighted conflicts before saving."
+      : conflict.diskExists
+        ? "Source file changed on disk. Review the conflict before saving."
+        : "Source file was deleted."
+    : saveError;
   const profileAgent = activeConfig?.agent ?? null;
   const profileConfigs = useMemo(
     () => profileAgent ? configs.filter((config) => config.agent === profileAgent && config.profile) : [],
@@ -97,61 +153,111 @@ export function ConfigView() {
         <div className="configAgentCell">
           <AgentOptionLabel agent={config.agent} variant="filter" collapsed />
           <span className="configAgentText">
-            <strong>{config.label}</strong>
-            <Tooltip content={config.path} onlyWhenTruncated><span>{config.path}</span></Tooltip>
+            <strong className="dataCellTitle">{config.label}</strong>
+            <span className="dataCellSubLine">
+              <Tooltip content={formatUserPath(config.path)} onlyWhenTruncated><span className="dataCellSub">{formatUserPath(config.path)}</span></Tooltip>
+            </span>
           </span>
         </div>
       ),
     },
+    {
+      key: "updatedAt",
+      header: "Updated",
+      type: "date",
+      sortValue: (config) => config.updatedAt ?? "",
+      width: "116px",
+      value: (config) => compactDateTime(config.updatedAt),
+      empty: "",
+    },
   ], []);
-  const deferredContent = useDeferredValue(content);
-  const diffStats = useMemo(() => {
-    const lines = diffPreview(originalContent, deferredContent);
-    return {
-      added: lines.filter((line) => line.kind === "added").length,
-      removed: lines.filter((line) => line.kind === "removed").length,
-    };
-  }, [deferredContent, originalContent]);
-
-  useEffect(() => {
-    setSelectedProfileValue(activeProfileValue);
-  }, [activeProfileValue, profileAgent]);
-
-  const readConfig = useCallback(async (path: string) => {
-    setLoading(true);
-    try {
-      const next = await invoke<AgentConfigContent>(TauriCommand.AgentConfigRead, { path });
-      setActivePath(next.path);
+  const applyExternalSnapshot = useCallback((next: AgentConfigContent) => {
+    setConfigs((current) => current.map((config) => (
+      config.path === next.path ? { ...config, exists: next.exists, updatedAt: next.updatedAt } : config
+    )));
+    if (next.path !== activePathRef.current || next.sha256 === sha256Ref.current) return;
+    const local = contentRef.current;
+    const base = originalContentRef.current;
+    if (local === base) {
       setContent(next.content);
       setOriginalContent(next.content);
       setSha256(next.sha256);
+      setSaveError("");
+    } else {
+      setConflict({
+        base,
+        local,
+        disk: next.content,
+        diskSha256: next.sha256,
+        diskExists: next.exists,
+        diskUpdatedAt: next.updatedAt,
+        merged: false,
+      });
+      setSaveError("");
+    }
+  }, []);
+  const readExternalSnapshot = useCallback(async (path: string) => {
+    try {
+      const next = await invokeCommand<AgentConfigContent>(TauriCommand.AgentConfigRead, { path });
+      if (next.path === activePathRef.current) applyExternalSnapshot(next);
     } catch (error) {
-      console.error("Failed to read config", errorMessage(error));
+      setSaveError(errorMessage(error));
+    }
+  }, [applyExternalSnapshot]);
+  const readConfig = useCallback(async (path: string, config?: AgentConfigFile) => {
+    const requestId = ++readRequestRef.current;
+    setSelectedPath(path);
+    setLoadingConfig(true);
+    setContentError("");
+    try {
+      const next = await invokeCommand<AgentConfigContent>(TauriCommand.AgentConfigRead, { path });
+      if (requestId !== readRequestRef.current) return;
+      setSelectedPath(next.path);
+      setActivePath(next.path);
+      if (config) setSelectedProfileValue(profileValueForConfig(config));
+      setContent(next.content);
+      setOriginalContent(next.content);
+      setSha256(next.sha256);
+      setConflict(null);
+      setSaveError("");
+      setConfigs((current) => current.map((config) => (
+        config.path === next.path ? { ...config, exists: next.exists, updatedAt: next.updatedAt } : config
+      )));
+    } catch (error) {
+      if (requestId !== readRequestRef.current) return;
+      setContentError(errorMessage(error));
     } finally {
-      setLoading(false);
+      if (requestId === readRequestRef.current) setLoadingConfig(false);
     }
   }, []);
 
   const loadConfigs = useCallback(async () => {
-    setLoading(true);
+    setLoadingConfigs(true);
+    setLoadingConfig(true);
+    setLoadError("");
     try {
-      const next = await invoke<AgentConfigFile[]>(TauriCommand.AgentConfigsList);
+      const next = await invokeCommand<AgentConfigFile[]>(TauriCommand.AgentConfigsList);
       setConfigs(next);
-      const path = next.find((config) => config.path === activePath)?.path ?? next[0]?.path;
-      if (path) await readConfig(path);
-      else setLoading(false);
+      const selected = next.find((config) => config.path === activePath) ?? next[0];
+      if (selected) {
+        setSelectedProfileValue(profileValueForConfig(selected));
+        await readConfig(selected.path, selected);
+      }
+      else setLoadingConfig(false);
     } catch (error) {
-      console.error("Failed to load configs", errorMessage(error));
-      setLoading(false);
+      setLoadError(errorMessage(error));
+      setLoadingConfig(false);
+    } finally {
+      setLoadingConfigs(false);
     }
   }, [activePath, readConfig]);
 
   const loadSettings = useCallback(async () => {
     try {
-      const next = await invoke<AppSettings>(TauriCommand.SettingsGet);
+      const next = await invokeCommand<AppSettings>(TauriCommand.SettingsGet);
       setActiveProfiles(next.configProfiles ?? {});
     } catch (error) {
-      console.error("Failed to load config settings", errorMessage(error));
+      logger.error("failed to load config settings", { error: errorMessage(error) });
     }
   }, []);
 
@@ -162,15 +268,51 @@ export function ConfigView() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  useEffect(() => () => {
+    readRequestRef.current += 1;
+  }, []);
+
+  useEffect(() => {
+    if (!activePath) return undefined;
+    let disposed = false;
+    let unsubscribe: (() => void) | undefined;
+    void invokeCommand(TauriCommand.AgentConfigWatch, { path: activePath }).catch((error) => {
+      if (!disposed) logger.warn("failed to watch config", { path: activePath, error: errorMessage(error) });
+    });
+    void subscribeDaemonEvents((event: DaemonEvent) => {
+      if (disposed || event.event !== "config://changed" || !isConfigSnapshot(event.payload)) return;
+      applyExternalSnapshot(event.payload);
+    }).then((dispose) => {
+      if (disposed) dispose();
+      else unsubscribe = dispose;
+    }).catch((error) => {
+      if (!disposed) logger.warn("failed to subscribe to config changes", { error: errorMessage(error) });
+    });
+    return () => {
+      disposed = true;
+      unsubscribe?.();
+    };
+  }, [activePath, applyExternalSnapshot]);
+
   const chooseConfig = (path: string) => {
-    if (path === activePath) return;
+    if (path === activePath) {
+      if (selectedPath !== path) {
+        readRequestRef.current += 1;
+        setSelectedPath(path);
+        setSelectedProfileValue(profileValueForConfig(configs.find((config) => config.path === path)));
+        setContentError("");
+        setLoadingConfig(false);
+      }
+      return;
+    }
+    if (path === selectedPath) return;
     if (dirty) {
       setPendingPath(path);
       setPendingReload(false);
       setShowDiscardDialog(true);
       return;
     }
-    void readConfig(path);
+    void readConfig(path, configs.find((config) => config.path === path));
   };
 
   const reload = () => {
@@ -184,7 +326,7 @@ export function ConfigView() {
       setShowDiscardDialog(true);
       return;
     }
-    void readConfig(activePath);
+    void loadConfigs();
   };
 
   const discardPendingChanges = () => {
@@ -192,8 +334,11 @@ export function ConfigView() {
     const shouldReload = pendingReload;
     setPendingPath("");
     setPendingReload(false);
-    if (nextPath) void readConfig(nextPath);
-    else if (shouldReload && activePath) void readConfig(activePath);
+    if (nextPath) {
+      setSelectedProfileValue(profileValueForConfig(configs.find((config) => config.path === nextPath)));
+      void readConfig(nextPath, configs.find((config) => config.path === nextPath));
+    }
+    else if (shouldReload) void loadConfigs();
   };
 
   const activateProfile = useCallback(async (agent: string, value: string) => {
@@ -203,7 +348,7 @@ export function ConfigView() {
       config.agent === agent && (profile ? config.profile === profile : !config.profile)
     ));
     if (!target) {
-      console.error("Config profile not found; reload the config list");
+      logger.error("config profile not found", { action: "activate_profile" });
       return;
     }
     if (dirty) {
@@ -211,11 +356,11 @@ export function ConfigView() {
     }
     setProfileSwitching(true);
     try {
-      const next = await invoke<AppSettings>(TauriCommand.ConfigProfileSet, { agent, profile });
+      const next = await invokeCommand<AppSettings>(TauriCommand.ConfigProfileSet, { agent, profile });
       setActiveProfiles(next.configProfiles ?? {});
-      if (target.path !== activePath) await readConfig(target.path);
+      if (target.path !== activePath) await readConfig(target.path, target);
     } catch (error) {
-      console.error("Failed to activate config profile", errorMessage(error));
+      logger.error("failed to activate config profile", { error: errorMessage(error), agent });
     } finally {
       setProfileSwitching(false);
     }
@@ -238,12 +383,12 @@ export function ConfigView() {
     setProfileSaving(true);
     setProfileError("");
     try {
-      await invoke<AgentConfigContent>(TauriCommand.ConfigProfileCreate, {
+      await invokeCommand<AgentConfigContent>(TauriCommand.ConfigProfileCreate, {
         agent: profileAgent,
         name,
         content,
       });
-      const next = await invoke<AgentConfigFile[]>(TauriCommand.AgentConfigsList);
+      const next = await invokeCommand<AgentConfigFile[]>(TauriCommand.AgentConfigsList);
       setConfigs(next);
       setSelectedProfileValue(`profile:${name}`);
       setProfileDialogOpen(false);
@@ -255,27 +400,67 @@ export function ConfigView() {
     }
   }, [content, profileAgent, profileName]);
 
-  const save = useCallback(async () => {
-    if (!activeConfig || !dirty || saving) return;
+  const saveContent = useCallback(async (path: string, nextContent: string, expectedSha256: string) => {
+    if (saving) return false;
     setSaving(true);
+    setSaveError("");
     try {
-      const saved = await invoke<AgentConfigContent>(TauriCommand.AgentConfigSave, {
-        path: activeConfig.path,
-        expectedSha256: sha256,
-        content,
+      const saved = await invokeCommand<AgentConfigContent>(TauriCommand.AgentConfigSave, {
+        path,
+        expectedSha256,
+        content: nextContent,
       });
       setContent(saved.content);
       setOriginalContent(saved.content);
       setSha256(saved.sha256);
+      setConflict(null);
       setConfigs((current) => current.map((config) => (
-        config.path === saved.path ? { ...config, exists: true } : config
+        config.path === saved.path ? { ...config, exists: true, updatedAt: saved.updatedAt } : config
       )));
+      return true;
     } catch (error) {
-      console.error("Failed to save config", errorMessage(error));
+      logger.error("failed to save config", { error: errorMessage(error), path });
+      if (error instanceof DaemonCommandError && error.code === "CONFLICT") {
+        if (isConfigSnapshot(error.data)) applyExternalSnapshot(error.data);
+        else await readExternalSnapshot(path);
+        setSaveError("Source file changed on disk. Review the conflict before saving.");
+      } else {
+        setSaveError(errorMessage(error));
+      }
+      return false;
     } finally {
       setSaving(false);
     }
-  }, [activeConfig, content, dirty, saving, sha256]);
+  }, [applyExternalSnapshot, readExternalSnapshot, saving]);
+
+  const save = useCallback(async () => {
+    if (!activeConfig || !dirty || saving || conflict || isConflictMarkerContent(content)) return;
+    await saveContent(activeConfig.path, content, sha256);
+  }, [activeConfig, conflict, content, dirty, saveContent, saving, sha256]);
+
+  const useDiskVersion = useCallback(() => {
+    if (!conflict) return;
+    setContent(conflict.disk);
+    setOriginalContent(conflict.disk);
+    setSha256(conflict.diskSha256);
+    setConflict(null);
+    setSaveError("");
+  }, [conflict]);
+
+  const mergeConflict = useCallback(() => {
+    if (!conflict) return;
+    const merged = mergeThreeWay(conflict.base, content, conflict.disk);
+    setContent(merged.content);
+    setOriginalContent(conflict.disk);
+    setSha256(conflict.diskSha256);
+    setSaveError("");
+    setConflict(merged.hasConflicts ? { ...conflict, local: merged.content, merged: true } : null);
+  }, [conflict, content]);
+
+  const overwriteDisk = useCallback(() => {
+    if (!activeConfig || !conflict || saving) return;
+    void saveContent(activeConfig.path, content, conflict.diskSha256);
+  }, [activeConfig, conflict, content, saveContent, saving]);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -335,11 +520,11 @@ export function ConfigView() {
           <PageHeader title="Config" compact>
             <IconButton
               aria-label="Reload config"
-              aria-busy={loading}
-              disabled={loading}
+              aria-busy={loadingConfigs}
+              disabled={loadingConfigs}
               onClick={reload}
             >
-              {loading ? <LoadingIcon size={14} /> : <RefreshCw size={14} />}
+              {loadingConfigs ? <LoadingIcon size={14} /> : <RefreshCw size={14} />}
             </IconButton>
           </PageHeader>
           <div className="sessionListBody">
@@ -350,12 +535,18 @@ export function ConfigView() {
               getRowLabel={(config) => config.label}
               onRowClick={(config) => chooseConfig(config.path)}
               rowProps={(config) => ({
-                className: config.path === activePath ? "configRowActive" : "",
-                "aria-current": config.path === activePath ? "true" : undefined,
+                className: config.path === selectedPath ? "configRowActive" : "",
+                "aria-current": config.path === selectedPath ? "true" : undefined,
               })}
-              loading={loading && configs.length === 0}
+              loading={loadingConfigs && configs.length === 0}
               loadingLabel="Loading configs"
-              emptyState="No supported agent configs found. Open a supported agent, then refresh."
+              emptyState={loadError ? <LoadErrorState message={loadError} onRetry={() => { void loadConfigs(); }} /> : (
+                <EmptyState
+                  icon={<Files size={27} strokeWidth={1.55} />}
+                  title="No supported agent configs found"
+                  description="Open a supported agent, then refresh."
+                />
+              )}
             />
           </div>
         </div>
@@ -367,58 +558,86 @@ export function ConfigView() {
             <div className="threadTitleLine">
               <div className="configTitle">
                 <h2>{activeConfig?.label ?? "Config file"}</h2>
-                {!loading && activeConfig && dirty ? <span className="configDirty">modified</span> : null}
+                {!loadingConfig && activeConfig && dirty ? <Badge tone="warning">modified</Badge> : null}
               </div>
             </div>
+            {conflict ? (
+              <div className="configConflictActions" role="group" aria-label="Resolve config conflict">
+                <Button variant="secondary" onClick={useDiskVersion} disabled={saving}>Use disk</Button>
+                <Button variant="danger" onClick={overwriteDisk} disabled={saving}>Overwrite</Button>
+                {!conflict.merged ? <Button variant="primary" onClick={mergeConflict} disabled={saving}>Merge</Button> : null}
+              </div>
+            ) : null}
             {profileAgent ? (
               <div className="configProfileFloating">
                 <SelectControl
-                  className="configProfileSelect"
                   contentClassName="configProfileSelectContent"
                   label={`Active ${friendlyAgent(profileAgent)} profile`}
                   value={selectedProfileValue}
                   onValueChange={setSelectedProfileValue}
                   options={profileOptions}
+                  indicatorPosition="left"
+                  menuAction={{
+                    label: "Create profile",
+                    icon: <Plus size={14} aria-hidden="true" />,
+                    onSelect: openProfileDialog,
+                  }}
                 />
-                <Tooltip content={dirty ? "Save or discard current changes before switching a profile" : undefined}><button
-                  className={`configProfileSwitchButton configProfileStateButton ${profileSelectionChanged ? "" : "isActive"}`}
+                <Tooltip content={dirty ? "Save or discard current changes before switching a profile" : undefined}><StatefulButton
+                  state={profileSwitching ? "loading" : profileSelectionChanged ? "idle" : "success"}
+                  variant="primary"
+                  size="sm"
+                  width={80}
+                  minWidth={80}
+                  successLabel="Active"
                   aria-label={dirty ? "Save or discard changes before switching a config profile" : profileSwitching ? "Switching config profile" : profileSelectionChanged ? "Switch selected config profile" : "Active config profile"}
-                  aria-busy={profileSwitching}
                   disabled={!profileSelectionChanged || dirty || profileSwitching || profileSaving}
                   onClick={() => { void activateProfile(profileAgent, selectedProfileValue); }}
                 >
-                  {profileSwitching ? <LoadingIcon size={14} /> : profileSelectionChanged ? <><ArrowRightLeft size={14} /><span>Switch</span></> : <><Check size={14} /><span>Active</span></>}
-                </button></Tooltip>
-                <IconButton
-                  aria-label="Create config profile"
-                  disabled={profileSaving}
-                  onClick={openProfileDialog}
-                >
-                  <Plus size={14} />
-                </IconButton>
+                  <><ArrowRightLeft size={14} /><span>Switch</span></>
+                </StatefulButton></Tooltip>
               </div>
             ) : null}
           </header>
-          {loading ? (
-            <div className="configEditorMessage"><LoadingState label="Loading config" /></div>
+          {contentError ? (
+            <div className="configEditorMessage"><LoadErrorState message={contentError} onRetry={() => { if (selectedPath) void readConfig(selectedPath, configs.find((config) => config.path === selectedPath)); }} /></div>
           ) : activeConfig ? (
-            <Suspense fallback={<div className="configEditorMessage"><LoadingState label="Loading editor" /></div>}>
-              <MarkdownFilePane
-                activePath={activeConfig.path}
-                dirty={dirty}
-                diffStats={diffStats}
-                content={content}
-                originalContent={originalContent}
-                language={activeConfig.format}
-                onChange={(value) => {
-                  setContent(value);
-                }}
-                onSave={() => { void save(); }}
-                copyablePath
-                showDirtyIndicator={false}
-                showTokenStatusBar={false}
-              />
-            </Suspense>
+            <div className="configEditorContent">
+              <Suspense fallback={<div className="configEditorMessage"><LoadingState label="Loading editor" /></div>}>
+                <MarkdownFilePane
+                  activePath={activeConfig.path}
+                  dirty={dirty}
+                  content={content}
+                  originalContent={originalContent}
+                  language={activeConfig.format}
+                  onChange={(value) => {
+                    setContent(value);
+                    setSaveError("");
+                    if (conflict?.merged) {
+                      if (isConflictMarkerContent(value)) setConflict((current) => current ? { ...current, local: value } : current);
+                      else setConflict(null);
+                    }
+                  }}
+                  onSave={() => { void save(); }}
+                  showConflictMarkers={Boolean(conflict?.merged) || isConflictMarkerContent(content)}
+                  onConflictResolve={(value) => {
+                    setContent(value);
+                    setSaveError("");
+                    if (isConflictMarkerContent(value)) setConflict((current) => current ? { ...current, local: value } : current);
+                    else setConflict(null);
+                  }}
+                  saveDisabled={Boolean(conflict) || isConflictMarkerContent(content)}
+                  copyablePath
+                  showDirtyIndicator={false}
+                  showTokenStatusBar={false}
+                  saveState={editorSaveError ? "error" : "idle"}
+                  saveError={editorSaveError}
+                />
+              </Suspense>
+              {loadingConfig ? <div className="configEditorLoading"><LoadingState label="Loading config" /></div> : null}
+            </div>
+          ) : loadingConfig ? (
+            <div className="configEditorMessage"><LoadingState label="Loading config" /></div>
           ) : (
             <div className="configEditorMessage">Select a config file</div>
           )}

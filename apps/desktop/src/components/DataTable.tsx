@@ -5,6 +5,7 @@ import {
   useMemo,
   useRef,
   useState,
+  useLayoutEffect,
   type CSSProperties,
   type MouseEvent as ReactMouseEvent,
   type ReactNode,
@@ -156,7 +157,7 @@ function renderTextCell<TRow>(column: ColumnDef<TRow>, row: TRow) {
   const explicitTitle = column.title?.(row);
   const title = explicitTitle
     ?? (typeof display === "string" && display !== (column.empty ?? "-") ? display : undefined);
-  return <Tooltip content={title} onlyWhenTruncated={!explicitTitle}><span className={className}>{display}</span></Tooltip>;
+  return <Tooltip content={title} interactive={Boolean(explicitTitle)} onlyWhenTruncated={!explicitTitle}><span className={className}>{display}</span></Tooltip>;
 }
 
 function renderCell<TRow>(column: ColumnDef<TRow>, row: TRow): ReactNode {
@@ -215,6 +216,8 @@ export function DataTable<TRow extends Record<string, unknown>>({
   onSortChange,
   manualSorting = false,
   rowHeight = DATA_TABLE_ROW_HEIGHT,
+  scrollToRowId,
+  onScrollToRowComplete,
   freezeColumn,
   onRowClick,
   rowProps,
@@ -227,6 +230,7 @@ export function DataTable<TRow extends Record<string, unknown>>({
   emptyState = "No items",
 }: DataTableProps<TRow>) {
   const shellRef = useRef<HTMLDivElement>(null);
+  const scrollAnchorRef = useRef<{ id: string; offsetTop: number } | null>(null);
   const { ref: scrollRef, size: scrollSize } = useElementSize<HTMLDivElement>(
     { width: 0, height: 720 },
     {
@@ -235,6 +239,35 @@ export function DataTable<TRow extends Record<string, unknown>>({
       isEqual: (current, next) => current.height === next.height,
     },
   );
+
+  useLayoutEffect(() => {
+    const scroll = scrollRef.current;
+    if (!scroll) return undefined;
+    const anchor = scrollAnchorRef.current;
+    if (anchor) {
+      const viewport = scroll.getBoundingClientRect();
+      const row = [...scroll.querySelectorAll<HTMLElement>("[data-row-id]")]
+        .find((candidate) => candidate.dataset.rowId === anchor.id && candidate.getBoundingClientRect().bottom > viewport.top);
+      if (row) {
+        const currentOffsetTop = row.getBoundingClientRect().top - viewport.top;
+        scroll.scrollTop += currentOffsetTop - anchor.offsetTop;
+      }
+      scrollAnchorRef.current = null;
+    }
+    return () => {
+      const currentScroll = scrollRef.current;
+      if (!currentScroll) return;
+      const viewport = currentScroll.getBoundingClientRect();
+      const row = [...currentScroll.querySelectorAll<HTMLElement>("[data-row-id]")]
+        .find((candidate) => candidate.getBoundingClientRect().bottom > viewport.top);
+      if (row) {
+        scrollAnchorRef.current = {
+          id: row.dataset.rowId ?? "",
+          offsetTop: row.getBoundingClientRect().top - viewport.top,
+        };
+      }
+    };
+  }, [rows]);
   const marqueeDragRef = useRef<MarqueeDrag | null>(null);
   const suppressClickRef = useRef(false);
   const [marquee, setMarquee] = useState<MarqueeRect | null>(null);
@@ -533,7 +566,7 @@ export function DataTable<TRow extends Record<string, unknown>>({
       if (!enableMarquee || event.button !== 0) return;
       const target = event.target;
       if (!(target instanceof Element)) return;
-      if (target.closest(".selectionCheckbox, .visibility, .iconButton, .sectionHeader, input, textarea, select, a, [data-no-drag], [data-selectable-text]")) return;
+      if (target.closest(".selectionCheckbox, .visibility, .appButton-icon, .sectionHeader, input, textarea, select, a, [data-no-drag], [data-selectable-text]")) return;
       const scroll = scrollRef.current;
       if (!scroll) return;
       event.preventDefault();
@@ -731,8 +764,8 @@ export function DataTable<TRow extends Record<string, unknown>>({
         className={rowClassName(row, extraClassName)}
         data-row-id={id}
         data-row-selectable={rowSelectable ? "true" : "false"}
-        onMouseEnter={() => setHoveredRowId(id)}
-        onMouseLeave={() => setHoveredRowId((current) => (current === id ? null : current))}
+        onMouseEnter={freezeColumn ? () => setHoveredRowId(id) : undefined}
+        onMouseLeave={freezeColumn ? () => setHoveredRowId((current) => (current === id ? null : current)) : undefined}
         onClick={onRowClick ? (event) => {
           const target = event.target;
           if (target instanceof Element && target.closest(DATA_TABLE_INTERACTIVE_SELECTOR)) return;
@@ -763,8 +796,8 @@ export function DataTable<TRow extends Record<string, unknown>>({
         className={`${rowClassName(row, extraClassName)} dataRow--${pane}Pane`}
         data-row-id={id}
         data-row-selectable={rowSelectable ? "true" : "false"}
-        onMouseEnter={() => setHoveredRowId(id)}
-        onMouseLeave={() => setHoveredRowId((current) => (current === id ? null : current))}
+        onMouseEnter={freezeColumn ? () => setHoveredRowId(id) : undefined}
+        onMouseLeave={freezeColumn ? () => setHoveredRowId((current) => (current === id ? null : current)) : undefined}
         onClick={onRowClick ? (event) => {
           const target = event.target;
           if (target instanceof Element && target.closest(DATA_TABLE_INTERACTIVE_SELECTOR)) return;
@@ -821,6 +854,66 @@ export function DataTable<TRow extends Record<string, unknown>>({
       return layout;
     });
   }, [expandedGroupSet, freezeColumn, groupRows, rowHeight, showColumnHeader]);
+
+  useLayoutEffect(() => {
+    if (!scrollToRowId) return;
+    const scroll = scrollRef.current;
+    if (!scroll) return;
+    const viewportHeight = scroll.clientHeight || 720;
+    const row = [...scroll.querySelectorAll<HTMLElement>("[data-row-id]")]
+      .find((candidate) => candidate.dataset.rowId === scrollToRowId);
+    if (row) {
+      const viewport = scroll.getBoundingClientRect();
+      const bounds = row.getBoundingClientRect();
+      const desiredTop = scroll.scrollTop
+        + bounds.top
+        - viewport.top
+        - (viewportHeight - bounds.height) / 2;
+      const maxScrollTop = Math.max(0, scroll.scrollHeight - viewportHeight);
+      scroll.scrollTo({
+        top: Math.min(maxScrollTop, Math.max(0, desiredTop)),
+        behavior: "smooth",
+      });
+      onScrollToRowComplete?.(scrollToRowId);
+      return;
+    }
+
+    if (!grouping[0]) {
+      const targetIndex = modelRows.findIndex((candidate) => candidate.id === scrollToRowId);
+      if (targetIndex < 0) return;
+      const headerHeight = showColumnHeader && !freezeColumn
+        ? scroll.querySelector<HTMLElement>(".dataTableHeader")?.offsetHeight ?? 0
+        : 0;
+      const targetTop = headerHeight
+        + targetIndex * rowHeight
+        - (viewportHeight - rowHeight) / 2;
+      const maxScrollTop = Math.max(0, scroll.scrollHeight - viewportHeight);
+      const nextScrollTop = Math.min(maxScrollTop, Math.max(0, targetTop));
+      if (Math.abs(scroll.scrollTop - nextScrollTop) > 1) scroll.scrollTop = nextScrollTop;
+      setScrollTop((current) => current === nextScrollTop ? current : nextScrollTop);
+      return;
+    }
+
+    const targetGroupIndex = groupRows.findIndex((group) => group.subRows.some((candidate) => candidate.id === scrollToRowId));
+    if (targetGroupIndex < 0) return;
+    const group = groupRows[targetGroupIndex];
+    const groupKey = `${group.groupingValue}`;
+    if (!expandedGroupSet.has(groupKey)) {
+      setExpandedGroups((current) => current.includes(groupKey) ? current : [...current, groupKey]);
+      return;
+    }
+    const targetIndex = group.subRows.findIndex((candidate) => candidate.id === scrollToRowId);
+    if (targetIndex < 0) return;
+    const layout = groupLayouts[targetGroupIndex];
+    if (!layout) return;
+    const targetTop = layout.bodyTop
+      + targetIndex * rowHeight
+      - (viewportHeight - rowHeight) / 2;
+    const maxScrollTop = Math.max(0, scroll.scrollHeight - viewportHeight);
+    const nextScrollTop = Math.min(maxScrollTop, Math.max(0, targetTop));
+    if (Math.abs(scroll.scrollTop - nextScrollTop) > 1) scroll.scrollTop = nextScrollTop;
+    setScrollTop((current) => current === nextScrollTop ? current : nextScrollTop);
+  }, [expandedGroupSet, freezeColumn, groupLayouts, groupRows, grouping, modelRows, onScrollToRowComplete, rowHeight, scrollRef, scrollToRowId, setExpandedGroups, showColumnHeader]);
 
   const renderGroupedRows = (
     group: Row<TRow>,
@@ -949,13 +1042,14 @@ export function DataTable<TRow extends Record<string, unknown>>({
   const handleBodyScroll = useCallback(() => {
     const scroll = scrollRef.current;
     if (!scroll) return;
-    setScrollLeft(scroll.scrollLeft);
+    if (freezeColumn) setScrollLeft(scroll.scrollLeft);
+    if (!virtualizedRows && !virtualizedGroups) return;
     if (scrollUpdateFrameRef.current !== null) return;
     scrollUpdateFrameRef.current = window.requestAnimationFrame(() => {
       scrollUpdateFrameRef.current = null;
       setScrollTop(scrollRef.current?.scrollTop ?? 0);
     });
-  }, []);
+  }, [freezeColumn, virtualizedGroups, virtualizedRows]);
 
   const renderFrozenTable = () => (
     <>

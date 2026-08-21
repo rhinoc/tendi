@@ -1,0 +1,71 @@
+.skillMenuContent.selectControlContent {
+  min-width: max(168px, var(--radix-select-trigger-width));
+}
+
+.selectControlTrigger {
+  min-width: 0;
+  height: var(--control-height);
+  min-height: var(--control-height);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: var(--control-fill);
+  color: var(--text);
+  font: inherit;
+  font-size: var(--text-sm);
+  line-height: var(--leading-ui);
+  text-align: left;
+  cursor: pointer;
+  transition-property: background-color, color;
+  transition-duration: 140ms;
+  transition-timing-function: ease-out;
+}
+
+.selectControlTrigger:hover:not(:disabled),
+.selectControlTrigger[data-state="open"] {
+  background: var(--active-fill);
+  color: var(--text);
+}
+
+.selectControlTrigger:disabled {
+  color: var(--muted);
+  cursor: default;
+  opacity: 0.7;
+}
+
+.selectControlTrigger:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: -2px;
+}
+
+.selectControlTrigger [data-radix-select-value],
+.selectControlTrigger > span:first-child {
+  min-width: 0;
+  flex: 1 1 auto;
+  display: inline-flex;
+  align-items: center;
+  max-width: 100%;
+  overflow: hidden;
+}
+
+.selectControlTrigger .agentOptionLabel {
+  width: 100%;
+}
+
+.selectControlTrigger .agentOptionLabel > span:last-child {
+  min-width: 0;
+  height: 18px;
+  line-height: var(--leading-ui);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.selectControlTrigger > svg {
+  flex: 0 0 14px;
+  color: var(--muted);
+}

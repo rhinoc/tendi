@@ -1,4 +1,5 @@
 import { Tooltip } from "./shared/Tooltip.tsx";
+import { Badge } from "./shared/Badge.tsx";
 import { Info } from "lucide-react";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 
@@ -104,14 +105,14 @@ export function TokenBreakdownPanel({ segments, usageSource = "estimated" }: { s
             <thead>
               <tr>
                 <th>Bucket</th>
-                <th>Category</th>
+                <th>Detail</th>
                 <th>Tokens</th>
               </tr>
             </thead>
             <tbody>
               {rows.map((row) => (
                 <tr key={`${row.bucket}-${row.label}`}>
-                  <td><span className={`tokenBucket tokenBucket-${row.bucket.toLowerCase()}`}>{row.bucket}</span></td>
+                  <td><Badge tone={row.bucket.toLowerCase() === "input" ? "info" : "warning"}>{row.bucket}</Badge></td>
                   <Tooltip content={row.label} onlyWhenTruncated><td>{row.label}</td></Tooltip>
                   <td className={tokenToneClass(row.value)}>{tokenValue(row.value, usageSource)}</td>
                 </tr>
@@ -123,7 +124,7 @@ export function TokenBreakdownPanel({ segments, usageSource = "estimated" }: { s
         <div className="tokenBreakdownSingle">
           {rows.length === 1 ? (
             <>
-              <span className={`tokenBucket tokenBucket-${rows[0].bucket.toLowerCase()}`}>{rows[0].bucket}</span>
+              <Badge tone={rows[0].bucket.toLowerCase() === "input" ? "info" : "warning"}>{rows[0].bucket}</Badge>
               <Tooltip content={rows[0].label} onlyWhenTruncated><span>{rows[0].label}</span></Tooltip>
               <strong className={tokenToneClass(rows[0].value)}>{tokenValue(rows[0].value, usageSource)}</strong>
             </>
@@ -144,9 +145,9 @@ export function TokenBreakdownPanel({ segments, usageSource = "estimated" }: { s
 export function TokenEstimateInfo() {
   return (
     <span className="tokenEstimateInfo">
-      <Tooltip content="Token breakdown"><button type="button" className="tokenEstimateInfoButton" aria-label="Show token breakdown">
+      <button type="button" className="tokenEstimateInfoButton" aria-label="Show token breakdown">
         <Info size={12} />
-      </button></Tooltip>
+      </button>
     </span>
   );
 }

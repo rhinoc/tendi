@@ -1,29 +1,64 @@
 .settingsShell {
+  min-height: 0;
+  flex: 1 1 auto;
   width: 100%;
   display: grid;
-  gap: 8px;
-}
-
-.settingsPage {
   overflow-x: hidden;
   overflow-y: auto;
 }
 
+.settingsPage {
+  min-height: 0;
+  overflow-x: hidden;
+  overflow-y: hidden;
+}
+
+.settingsGroups {
+  width: calc(100% + var(--page-left-inset) + var(--page-right-inset));
+  box-sizing: border-box;
+  margin-inline-start: calc(-1 * var(--page-left-inset));
+  padding-inline-start: var(--page-left-inset);
+  padding-inline-end: var(--page-right-inset);
+  display: grid;
+  gap: 0;
+  border-block-start: 1px solid var(--line);
+}
+
 .settingsGroup {
-  border-top: 1px solid var(--line);
+  display: grid;
+  gap: 0;
+  padding: 20px 0;
+}
+
+.settingsGroup + .settingsGroup {
+  border-block-start: 1px solid var(--line);
+}
+
+.settingsGroupTitle {
+  margin: 0 0 16px;
+  color: var(--text);
+  font-size: var(--text-ui);
+  font-weight: 650;
+  line-height: var(--leading-ui);
+}
+
+.settingsGroupItems {
+  min-width: 0;
+  display: grid;
+  gap: 24px;
 }
 
 .settingsError {
   color: var(--danger);
-  font-size: 11px;
-  line-height: 16px;
+  font-size: var(--text-sm);
+  line-height: var(--leading-tight);
 }
 
 .settingsThemeControls {
   width: min(100%, 420px);
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 10px;
+  gap: 8px;
 }
 
 .settingsThemePicker {
@@ -33,81 +68,142 @@
 
 .settingsThemePickerLabel {
   color: var(--muted);
-  font-size: 11px;
+  font-size: var(--text-sm);
   font-weight: 650;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
+  line-height: var(--leading-ui);
 }
 
 .settingsThemeSelect {
-  height: 38px;
   width: 100%;
-  padding: 0 10px;
-  border: 1px solid var(--control-border);
-  border-radius: var(--radius-md);
-  background: var(--panel-bg);
-  box-shadow: var(--shadow-border);
-  color: var(--text);
-  font-size: 13px;
-  text-align: left;
 }
 
-.settingsThemeSelect:focus-visible {
-  outline: 2px solid var(--focus-ring);
-  outline-offset: -2px;
+.settingsThemeOption {
+  min-width: 0;
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 10px;
 }
 
-.settingsThemeSelectContent {
-  min-width: 180px;
+.settingsThemeSelectContent .selectItemText {
+  min-width: 0;
+  flex: 1;
+}
+
+.settingsThemeSwatch {
+  width: 18px;
+  height: 18px;
+  flex: 0 0 18px;
+  border-radius: 50%;
+  box-shadow: 0 0 0 1px var(--line);
+}
+
+.settingsAppIconSelect {
+  width: 240px;
+  max-width: 100%;
+}
+
+.settingsAppIconSelect:focus-visible {
+  outline: none;
+}
+
+.settingsAppIconOption {
+  min-width: 0;
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 10px;
+}
+
+.settingsAppIconPreview {
+  width: 28px;
+  height: 28px;
+  flex: 0 0 28px;
+  border-radius: 6px;
+}
+
+.settingsAppearanceControl {
+  width: max-content;
+  max-width: 100%;
+}
+
+.settingsAppearanceControl .segmentedControlItem span {
+  min-width: max-content;
+  overflow: visible;
+  text-overflow: clip;
+}
+
+.settingsFontSelect {
+  width: 240px;
+  max-width: 100%;
+}
+
+.settingsSessionResumeControl {
+  width: max-content;
+  max-width: 100%;
+}
+
+.settingsSessionResumeControl .segmentedControlItem {
+  flex: 0 0 auto;
 }
 
 .settingsApplicationRow {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
 }
 
 .settingsApplicationInput {
   position: relative;
   min-width: 0;
   flex: 1 1 auto;
+  overflow: hidden;
+  border-radius: var(--radius-sm);
+}
+
+.settingsApplicationInput:focus-within {
+  box-shadow: 0 0 0 2px var(--focus-ring);
 }
 
 .settingsSelect {
-  height: 38px;
+  box-sizing: border-box;
+  height: var(--control-height);
   width: 100%;
-  padding: 0 38px 0 10px;
+  padding: 0 34px 0 8px;
   border: 0;
-  border-radius: var(--radius-md);
-  background: var(--panel-bg);
-  box-shadow: var(--shadow-border);
+  border-radius: var(--radius-sm);
+  background: var(--control-fill);
   color: var(--text);
-  font-size: 13px;
+  font: inherit;
+  font-size: var(--text-sm);
+  line-height: var(--leading-ui);
 }
 
 .settingsTextarea {
   box-sizing: border-box;
   width: 100%;
-  min-height: 106px;
+  min-height: var(--textarea-min-height);
   resize: vertical;
-  padding: 10px;
+  padding: 8px;
   border: 0;
-  border-radius: var(--radius-md);
-  background: var(--panel-bg);
-  box-shadow: var(--shadow-border);
+  border-radius: var(--radius-sm);
+  background: var(--control-fill);
   color: var(--text);
+  font: inherit;
   font-family: var(--font-mono);
-  font-size: 12px;
-  line-height: 1.45;
+  font-size: var(--text-sm);
+  line-height: var(--leading-ui);
 }
 
 .settingsCheckboxRow {
-  min-height: 38px;
+  min-height: var(--control-height);
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 7px;
   color: var(--text);
-  font-size: 13px;
+  font-size: var(--text-sm);
 }
 
 .settingsSelect::placeholder,
@@ -117,132 +213,52 @@
 
 .settingsSelect:focus,
 .settingsTextarea:focus {
-  box-shadow: var(--shadow-border-hover), 0 0 0 3px var(--focus-ring-soft);
+  background: var(--active-fill);
   outline: none;
+  box-shadow: 0 0 0 2px var(--focus-ring);
+}
+
+.settingsApplicationInput .settingsSelect:focus {
+  box-shadow: none;
 }
 
 .settingsSelectContent {
-  width: min(280px, calc(100vw - 32px));
+  width: max-content;
+  max-width: calc(100vw - 32px);
   box-sizing: border-box;
 }
 
 .settingsApplicationMenuButton {
   position: absolute;
-  top: 5px;
-  right: 5px;
+  top: 1px;
+  right: 1px;
 }
 
-.settingsApplicationTestButton.statefulButton {
-  flex: 0 0 38px;
-  width: 38px;
-  min-width: 38px;
-  height: 38px;
-  display: inline-grid;
-  place-items: center;
-  gap: 0;
-  padding: 0;
-  border: 1px solid var(--control-border);
-  border-radius: var(--radius-md);
-  background: var(--control-fill);
-  box-shadow: none;
-  color: var(--muted);
-}
-
-.settingsApplicationTestButton.statefulButton:hover:not(:disabled) {
+.settingsApplicationInput .settingsApplicationMenuButton:hover:not(:disabled) {
+  background: transparent;
   color: var(--text);
-  background: var(--hover-fill-strong);
-  box-shadow: none;
-}
-
-.settingsApplicationTestButton.statefulButton:active:not(:disabled) {
-  transform: scale(var(--press-scale));
-}
-
-.settingsApplicationTestButton.statefulButton[data-state="success"],
-.settingsApplicationTestButton.statefulButton[data-state="success"]:hover {
-  border-color: var(--green-soft-strong);
-  color: var(--green);
-  background: var(--green-soft);
-  box-shadow: none;
-}
-
-.settingsApplicationTestButton.statefulButton[data-state="error"],
-.settingsApplicationTestButton.statefulButton[data-state="error"]:hover {
-  border-color: var(--danger-soft-strong);
-  color: var(--danger);
-  background: var(--danger-soft);
-  box-shadow: none;
-}
-
-.settingsApplicationTestButton.statefulButton:disabled {
-  opacity: 0.45;
-}
-
-.settingsUpdateButton.statefulButton {
-  justify-self: start;
-  width: 192px;
-  min-width: 192px;
-  height: 38px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  padding: 0 12px;
-  border: 1px solid var(--control-border);
-  border-radius: var(--radius-md);
-  background: var(--control-fill);
-  color: var(--text);
-  font-size: 13px;
-  white-space: nowrap;
-}
-
-.settingsCliButton.statefulButton {
-  width: 136px;
-  min-width: 136px;
-  flex: 0 0 136px;
-}
-
-.settingsUpdateButton.statefulButton:hover:not(:disabled) {
-  background: var(--hover-fill-strong);
-}
-
-.settingsUpdateButton.statefulButton[data-state="success"],
-.settingsUpdateButton.statefulButton[data-state="success"]:hover {
-  color: var(--green);
-  border-color: var(--green-soft-strong);
-  background: var(--green-soft);
-}
-
-.settingsUpdateButton.statefulButton[data-state="error"],
-.settingsUpdateButton.statefulButton[data-state="error"]:hover {
-  color: var(--danger);
-  border-color: var(--danger-soft-strong);
-  background: var(--danger-soft);
 }
 
 .settingsSection {
   display: grid;
-  grid-template-columns: minmax(180px, 220px) minmax(0, 1fr);
+  grid-template-columns: 120px minmax(0, 420px);
   align-items: start;
-  gap: 24px;
-  padding: 16px 0;
-}
-
-.settingsSection + .settingsSection {
-  border-top: 1px solid var(--line);
+  gap: 16px;
+  padding: 0;
 }
 
 .settingsSectionText h2 {
   margin: 0;
-  font-size: 14px;
-  font-weight: 650;
-  line-height: 1.25;
+  font-size: var(--text-sm);
+  font-weight: 600;
+  line-height: var(--leading-ui);
 }
 
 .settingsSectionText p {
   margin: 5px 0 0;
   color: var(--muted);
-  font-size: 12px;
-  line-height: 1.45;
+  font-size: var(--text-sm);
+  line-height: var(--leading-body);
 }
 
 .settingsAgentRow {
@@ -251,36 +267,24 @@
   gap: 8px;
 }
 
-.settingsAgentRow > svg {
-  flex: 0 0 14px;
-}
-
 .settingsAgentStatus {
   min-width: 0;
   flex: 1;
   display: flex;
   align-items: center;
   justify-content: flex-start;
-  gap: 16px;
+  gap: 10px;
   color: var(--muted);
 }
 
 .settingsAgentStatus strong {
-  flex: 0 0 104px;
+  flex: 0 0 92px;
   color: var(--text);
-  font-size: 12px;
-}
-
-.settingsAgentRow > svg.isSuccess {
-  color: var(--green);
-}
-
-.settingsAgentRow > svg.isAttention {
-  color: var(--danger);
+  font-size: var(--text-sm);
 }
 
 .settingsCliActions {
-  min-height: 38px;
+  min-height: var(--control-height);
   display: flex;
   flex-wrap: wrap;
   align-items: center;
@@ -290,6 +294,16 @@
 
 .settingsControlGroup {
   min-width: 0;
+  width: min(100%, 420px);
   display: grid;
-  gap: 7px;
+  gap: 6px;
+  font-size: var(--text-sm);
+  line-height: var(--leading-ui);
+}
+
+@media (max-width: 980px) {
+  .settingsSection {
+    grid-template-columns: 1fr;
+    gap: 8px;
+  }
 }

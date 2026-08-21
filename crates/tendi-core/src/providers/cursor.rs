@@ -2,12 +2,11 @@ use std::{fs, path::Path};
 
 use anyhow::Result;
 use anyhow::bail;
-use rusqlite::{Connection, OpenFlags};
 use serde_json::Value;
 use walkdir::WalkDir;
 
 use crate::{
-    sessions::extract_cursor_blob_model,
+    sessions::cursor_store_models_for_path,
     transcript::{TranscriptItem, collect_generic_item},
 };
 
@@ -133,34 +132,7 @@ pub(super) fn append_transcript_metadata_from_store(
     path: &Path,
     items: &mut Vec<TranscriptItem>,
 ) -> Result<()> {
-    let Ok(connection) = Connection::open_with_flags(
-        path,
-        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    ) else {
-        return Ok(());
-    };
-    let Ok(mut statement) = connection.prepare(
-        "select data from blobs
-         where instr(data, 'modelName') > 0
-         order by rowid",
-    ) else {
-        return Ok(());
-    };
-    let Ok(rows) = statement.query_map([], |row| row.get::<_, Vec<u8>>(0)) else {
-        return Ok(());
-    };
-
-    let mut models = Vec::new();
-    for bytes in rows.filter_map(Result::ok) {
-        let Ok(value) = serde_json::from_slice::<Value>(&bytes) else {
-            continue;
-        };
-        let Some(model) = extract_cursor_blob_model(&value) else {
-            continue;
-        };
-        models.push(model);
-    }
-
+    let models = cursor_store_models_for_path(path);
     insert_cursor_model_configs(items, &models);
     Ok(())
 }
@@ -174,7 +146,7 @@ pub(super) fn may_contain_search_message(line: &str) -> bool {
     )
 }
 
-pub(super) fn find_cursor_store_db(path: &Path) -> Option<std::path::PathBuf> {
+pub(crate) fn find_cursor_store_db(path: &Path) -> Option<std::path::PathBuf> {
     let session_id = path.file_stem()?.to_str()?.trim();
     if session_id.is_empty() {
         return None;
@@ -282,19 +254,56 @@ impl super::AgentProvider for CursorProvider {
         Some("json")
     }
 
-    fn config_files(&self, home: &Path, _codex_home: &Path) -> Vec<crate::config::AgentConfigFile> {
-        let mut configs = vec![crate::config::AgentConfigFile {
-            agent: self.kind(),
-            label: "Cursor".to_string(),
-            path: home.join(".cursor/cli-config.json"),
-            format: "json".to_string(),
-            exists: home.join(".cursor/cli-config.json").is_file(),
-            profile: None,
-        }];
-        configs.extend(crate::config::cursor_profile_configs_for_root(
-            &home.join(".cursor/tendi-profiles"),
-        ));
+    fn config_files(&self, home: &Path, codex_home: &Path) -> Vec<crate::config::AgentConfigFile> {
+        let base_path = home.join(".cursor/cli-config.json");
+        let mut configs = vec![self
+            .config_file_for_path(home, codex_home, &base_path)
+            .expect("Cursor provider must resolve its base config path")];
+        configs.extend(
+            crate::config::cursor_profile_paths_for_root(&home.join(".cursor/tendi-profiles"))
+                .into_iter()
+                .filter_map(|path| self.config_file_for_path(home, codex_home, &path)),
+        );
         configs
+    }
+
+    fn config_file_for_path(
+        &self,
+        home: &Path,
+        _codex_home: &Path,
+        path: &Path,
+    ) -> Option<crate::config::AgentConfigFile> {
+        let base_path = home.join(".cursor/cli-config.json");
+        if path == base_path {
+            return Some(crate::config::AgentConfigFile {
+                agent: self.kind(),
+                label: "Cursor".to_string(),
+                path: base_path.clone(),
+                format: "json".to_string(),
+                exists: base_path.is_file(),
+                updated_at: None,
+                profile: None,
+            });
+        }
+
+        if path.file_name()?.to_str()? != "cli-config.json" {
+            return None;
+        }
+        let profile = path.parent()?.file_name()?.to_str()?;
+        crate::config::validate_profile_name(profile).ok()?;
+        let expected_path = home
+            .join(".cursor/tendi-profiles")
+            .join(profile)
+            .join("cli-config.json");
+        (path == expected_path).then_some(crate::config::AgentConfigFile {
+            agent: self.kind(),
+            label: format!("Cursor / {profile}"),
+            path: expected_path.clone(),
+            format: "json".to_string(),
+            exists: expected_path.is_file(),
+            updated_at: None,
+            profile: Some(profile.to_string()),
+        })
     }
 
     fn config_order(&self) -> usize {

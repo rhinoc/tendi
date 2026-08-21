@@ -14,11 +14,12 @@ path = "src/main.rs"
 
 [dependencies]
 tendi-core = { path = "../../../crates/tendi-core" }
+tendi-daemon = { path = "../../../crates/tendi-daemon" }
 anyhow.workspace = true
 dirs.workspace = true
-notify = "8.2"
 serde.workspace = true
 serde_json.workspace = true
+zip.workspace = true
 tauri = { version = "2", features = ["macos-private-api"] }
 window-vibrancy = "0.7.1"
 tauri-plugin-updater = "2.10.1"

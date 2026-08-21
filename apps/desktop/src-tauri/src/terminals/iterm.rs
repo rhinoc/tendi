@@ -11,9 +11,6 @@ impl TerminalProvider for Iterm {
     fn aliases(&self) -> &'static [&'static str] {
         &["iterm2"]
     }
-    fn label(&self) -> String {
-        "iTerm".to_string()
-    }
     fn available(&self) -> bool {
         app_available(&["/Applications/iTerm.app", "/Applications/iTerm2.app"])
     }

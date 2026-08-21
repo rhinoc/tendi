@@ -3,6 +3,8 @@ import type { KeyboardEvent, PointerEvent, WheelEvent } from "react";
 
 import { formatSessionTitle } from "../../lib/session-preview.ts";
 import { useTrackpadZoom } from "../../lib/zoom-gesture.ts";
+import { LoadErrorState } from "../../components/shared/LoadErrorState.tsx";
+import { LoadingState } from "../../components/shared/LoadingState.tsx";
 import type { SkillDependencyRecord } from "./SkillDependencyGraph.tsx";
 
 const VIEWBOX_WIDTH = 1200;
@@ -409,6 +411,9 @@ export type SkillRelationshipMapProps = {
   edges?: RelationshipGraphEdge[];
   focusName?: string;
   compact?: boolean;
+  loading?: boolean;
+  error?: string;
+  onRetry?: () => void;
   onOpenSkill?: (name: string) => void;
 };
 
@@ -418,6 +423,9 @@ export function SkillRelationshipMap({
   edges,
   focusName,
   compact = false,
+  loading = false,
+  error = "",
+  onRetry,
   onOpenSkill,
 }: SkillRelationshipMapProps) {
   const [hoveredName, setHoveredName] = useState<string | null>(null);
@@ -641,8 +649,12 @@ export function SkillRelationshipMap({
 
   return (
     <section className={`skillRelationshipMap${compact ? " isCompact" : ""}`} aria-label="Skill relationships">
-      {graphNodes.length === 0 ? (
-        <div className="skillRelationshipEmpty" aria-hidden="true" />
+      {loading && graphNodes.length === 0 ? (
+        <LoadingState label="Loading skill relationships" />
+      ) : error ? (
+        <LoadErrorState message={error} onRetry={onRetry} />
+      ) : graphNodes.length === 0 ? (
+        <div className="skillRelationshipEmpty">No skill relationships found.</div>
       ) : (
         <div className="skillRelationshipCanvas" onWheel={handleWheel}>
           <svg

@@ -2,6 +2,7 @@ import { readdir, readFile } from "node:fs/promises";
 import { join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import ts from "typescript";
+import { writeStderr, writeStdout } from "./stdio.mjs";
 
 const PACKAGE_ROOT = fileURLToPath(new URL("../", import.meta.url));
 const SOURCE_ROOT = join(PACKAGE_ROOT, "src");
@@ -95,9 +96,9 @@ for (const fileName of await sourceFiles(SOURCE_ROOT)) {
 }
 
 if (violations.length > 0) {
-  console.error("UI boundary violations found in desktop source:");
-  for (const violation of violations) console.error(`- ${violation}`);
+  writeStderr("UI boundary violations found in desktop source:");
+  for (const violation of violations) writeStderr(`- ${violation}`);
   process.exitCode = 1;
 } else {
-  console.log("UI boundaries passed: no native title tooltips or out-of-bound Radix Tooltip imports.");
+  writeStdout("UI boundaries passed: no native title tooltips or out-of-bound Radix Tooltip imports.");
 }

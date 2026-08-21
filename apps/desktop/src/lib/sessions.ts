@@ -1,5 +1,5 @@
 import { basename, compactDateTime } from "./strings.ts";
-import { friendlyAgent } from "./agents.ts";
+import { friendlyAgent, normalizedAgentKey } from "./agents.ts";
 
 export type SessionRecord = {
   id: string;
@@ -34,6 +34,31 @@ export type SessionRecord = {
   tokenUsage?: SessionTokenUsage;
   [key: string]: unknown;
 };
+
+export type SessionResumeTarget = "terminal" | "app";
+
+export function normalizeSessionResumeTarget(value: unknown): SessionResumeTarget {
+  return value === "app" || value === "codex" ? "app" : "terminal";
+}
+
+export function sessionResumeTargetForAgent(target: SessionResumeTarget, agent: unknown): SessionResumeTarget {
+  const agentKey = normalizedAgentKey(agent);
+  return target === "app" && (agentKey === "codex" || agentKey === "claudecode") ? "app" : "terminal";
+}
+
+export function codexSessionDeepLink(sessionId: string): string {
+  return `codex://threads/${encodeURIComponent(sessionId)}`;
+}
+
+export function sessionAppDeepLink(session: Pick<SessionRecord, "id" | "agent" | "project" | "projectPath">): string | undefined {
+  const agentKey = normalizedAgentKey(session.agent);
+  if (agentKey === "codex") return codexSessionDeepLink(session.id);
+  if (agentKey !== "claudecode") return undefined;
+  const params = new URLSearchParams({ session: session.id });
+  const cwd = session.projectPath || session.project;
+  if (cwd) params.set("cwd", cwd);
+  return `claude://resume?${params.toString()}`;
+}
 
 export type SessionTokenUsage = {
   inputTokens: number;

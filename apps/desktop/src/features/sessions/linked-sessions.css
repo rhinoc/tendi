@@ -21,13 +21,13 @@
 .linkedSessionsSummary span,
 .linkedSessionsMeta {
   color: var(--muted);
-  font-size: 12px;
+  font-size: var(--text-sm);
   font-weight: 650;
 }
 
 .linkedSessionsSummary strong {
   color: var(--text);
-  font-size: 14px;
+  font-size: var(--text-ui);
 }
 
 .linkedSessionsMeta {
@@ -77,8 +77,8 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: 18px;
-  line-height: 1.15;
+  font-size: var(--text-title);
+  line-height: var(--leading-lg);
   font-weight: 720;
 }
 

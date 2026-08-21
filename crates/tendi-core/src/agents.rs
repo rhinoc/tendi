@@ -1,13 +1,17 @@
 use std::{
     env,
     path::{Path, PathBuf},
-    process::Command,
+    process::{Command, Output, Stdio},
+    thread,
+    time::{Duration, Instant},
 };
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
 use crate::{providers::ProviderContext, skills::AgentKind};
+
+const VERSION_COMMAND_TIMEOUT: Duration = Duration::from_secs(2);
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct AgentRecord {
@@ -80,7 +84,7 @@ fn which(name: &str) -> Option<String> {
 }
 
 fn command_version(path: &str) -> Option<String> {
-    let output = Command::new(path).arg("--version").output().ok()?;
+    let output = run_command_with_timeout(path, &["--version"])?;
     if !output.status.success() {
         return None;
     }
@@ -95,13 +99,34 @@ fn app_version(name: &str) -> Option<String> {
         "Codex" => "/Applications/Codex.app",
         _ => return None,
     };
-    let output = Command::new("mdls")
-        .args(["-name", "kMDItemVersion", "-raw", app_path])
-        .output()
-        .ok()?;
+    let output = run_command_with_timeout("mdls", &["-name", "kMDItemVersion", "-raw", app_path])?;
     if !output.status.success() {
         return None;
     }
     let value = String::from_utf8(output.stdout).ok()?.trim().to_string();
     (!value.is_empty() && value != "(null)").then_some(value)
+}
+
+fn run_command_with_timeout(program: &str, args: &[&str]) -> Option<Output> {
+    let mut child = Command::new(program)
+        .args(args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    let deadline = Instant::now() + VERSION_COMMAND_TIMEOUT;
+
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => return child.wait_with_output().ok(),
+            Ok(None) if Instant::now() < deadline => {
+                thread::sleep(Duration::from_millis(20));
+            }
+            Ok(None) | Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+        }
+    }
 }

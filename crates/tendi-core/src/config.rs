@@ -4,6 +4,7 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail};
+use chrono::{DateTime, SecondsFormat, Utc};
 use serde::Serialize;
 
 use crate::{
@@ -20,6 +21,8 @@ pub struct AgentConfigFile {
     pub format: String,
     pub exists: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub updated_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub profile: Option<String>,
 }
 
@@ -30,7 +33,22 @@ pub struct AgentConfigContent {
     pub content: String,
     pub sha256: String,
     pub exists: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub updated_at: Option<String>,
 }
+
+#[derive(Debug)]
+pub struct ConfigChangedError {
+    pub current: AgentConfigContent,
+}
+
+impl std::fmt::Display for ConfigChangedError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "config changed on disk; review it before saving")
+    }
+}
+
+impl std::error::Error for ConfigChangedError {}
 
 pub fn list_agent_configs() -> Result<Vec<AgentConfigFile>> {
     let home = dirs::home_dir().context("home directory is unavailable")?;
@@ -39,8 +57,9 @@ pub fn list_agent_configs() -> Result<Vec<AgentConfigFile>> {
 
 pub fn read_agent_config(path: &Path) -> Result<AgentConfigContent> {
     let home = dirs::home_dir().context("home directory is unavailable")?;
-    let configs = configs_for_environment(&home);
-    read_config(&configs, path)
+    let codex_home = codex_home_for_environment(&home);
+    let config = resolve_config_for_path(&home, &codex_home, path)?;
+    read_config(&config)
 }
 
 pub fn save_agent_config(
@@ -49,8 +68,9 @@ pub fn save_agent_config(
     content: &str,
 ) -> Result<AgentConfigContent> {
     let home = dirs::home_dir().context("home directory is unavailable")?;
-    let configs = configs_for_environment(&home);
-    save_config(&configs, path, expected_sha256, content)
+    let codex_home = codex_home_for_environment(&home);
+    let config = resolve_config_for_path(&home, &codex_home, path)?;
+    save_config(&config, expected_sha256, content)
 }
 
 pub fn create_config_profile(
@@ -107,17 +127,14 @@ fn configs_for_roots(home: &Path, codex_home: &Path) -> Vec<AgentConfigFile> {
         .into_iter()
         .flat_map(|provider| provider.config_files(home, codex_home))
         .collect::<Vec<_>>();
+    for config in &mut configs {
+        config.updated_at = file_updated_at(&config.path);
+    }
     configs.sort_by_key(|config| crate::providers::agent_provider(config.agent).config_order());
     configs
 }
 
-pub(crate) fn profile_configs_for_root(
-    agent: AgentKind,
-    root: &Path,
-    suffix: &str,
-    format: &str,
-    label: &str,
-) -> Vec<AgentConfigFile> {
+pub(crate) fn profile_paths_for_root(root: &Path, suffix: &str) -> Vec<PathBuf> {
     let Ok(entries) = fs::read_dir(root) else {
         return Vec::new();
     };
@@ -136,18 +153,11 @@ pub(crate) fn profile_configs_for_root(
     names.dedup();
     names
         .into_iter()
-        .map(|profile| AgentConfigFile {
-            agent,
-            label: format!("{label} / {profile}"),
-            path: root.join(format!("{profile}{suffix}")),
-            format: format.to_string(),
-            exists: true,
-            profile: Some(profile),
-        })
+        .map(|profile| root.join(format!("{profile}{suffix}")))
         .collect()
 }
 
-pub(crate) fn cursor_profile_configs_for_root(root: &Path) -> Vec<AgentConfigFile> {
+pub(crate) fn cursor_profile_paths_for_root(root: &Path) -> Vec<PathBuf> {
     let Ok(entries) = fs::read_dir(root) else {
         return Vec::new();
     };
@@ -166,14 +176,7 @@ pub(crate) fn cursor_profile_configs_for_root(root: &Path) -> Vec<AgentConfigFil
     names.dedup();
     names
         .into_iter()
-        .map(|profile| AgentConfigFile {
-            agent: AgentKind::Cursor,
-            label: format!("Cursor / {profile}"),
-            path: root.join(&profile).join("cli-config.json"),
-            format: "json".to_string(),
-            exists: true,
-            profile: Some(profile),
-        })
+        .map(|profile| root.join(&profile).join("cli-config.json"))
         .collect()
 }
 
@@ -189,22 +192,20 @@ fn config_profile_path_for_roots(
         .ok_or_else(|| anyhow::anyhow!("config profiles are not supported for this agent"))
 }
 
-fn resolve_config(configs: &[AgentConfigFile], path: &Path) -> Result<AgentConfigFile> {
-    configs
-        .iter()
-        .cloned()
+fn resolve_config_for_path(home: &Path, codex_home: &Path, path: &Path) -> Result<AgentConfigFile> {
+    crate::providers::agent_providers()
         .into_iter()
-        .find(|config| config.path == path)
+        .find_map(|provider| provider.config_file_for_path(home, codex_home, path))
         .ok_or_else(|| anyhow::anyhow!("unsupported agent config path: {}", path.display()))
 }
 
 #[cfg(test)]
 fn read_config_from_home(home: &Path, path: &Path) -> Result<AgentConfigContent> {
-    read_config(&configs_for_home(home), path)
+    let config = resolve_config_for_path(home, &home.join(".codex"), path)?;
+    read_config(&config)
 }
 
-fn read_config(configs: &[AgentConfigFile], path: &Path) -> Result<AgentConfigContent> {
-    let config = resolve_config(configs, path)?;
+fn read_config(config: &AgentConfigFile) -> Result<AgentConfigContent> {
     let exists = config.path.is_file();
     let content = if exists {
         fs::read_to_string(&config.path)
@@ -214,11 +215,13 @@ fn read_config(configs: &[AgentConfigFile], path: &Path) -> Result<AgentConfigCo
     } else {
         String::new()
     };
+    let updated_at = file_updated_at(&config.path);
     Ok(AgentConfigContent {
-        path: config.path,
+        path: config.path.clone(),
         sha256: sha256_text(if exists { &content } else { "" }),
         content,
         exists,
+        updated_at,
     })
 }
 
@@ -229,16 +232,15 @@ fn save_config_from_home(
     expected_sha256: &str,
     content: &str,
 ) -> Result<AgentConfigContent> {
-    save_config(&configs_for_home(home), path, expected_sha256, content)
+    let config = resolve_config_for_path(home, &home.join(".codex"), path)?;
+    save_config(&config, expected_sha256, content)
 }
 
 fn save_config(
-    configs: &[AgentConfigFile],
-    path: &Path,
+    config: &AgentConfigFile,
     expected_sha256: &str,
     content: &str,
 ) -> Result<AgentConfigContent> {
-    let config = resolve_config(configs, path)?;
     let current = if config.path.is_file() {
         fs::read_to_string(&config.path)
             .with_context(|| format!("failed to read {}", config.path.display()))?
@@ -246,15 +248,20 @@ fn save_config(
         String::new()
     };
     if sha256_text(&current) != expected_sha256 {
-        bail!("config changed on disk; reload it before saving");
+        return Err(ConfigChangedError {
+            current: read_config(config)?,
+        }
+        .into());
     }
     validate_config(&config.format, content)?;
     atomic_write(&config.path, content)?;
+    let updated_at = file_updated_at(&config.path);
     Ok(AgentConfigContent {
-        path: config.path,
+        path: config.path.clone(),
         content: content.to_string(),
         sha256: sha256_text(content),
         exists: true,
+        updated_at,
     })
 }
 
@@ -274,12 +281,23 @@ fn create_profile_for_roots(
         bail!("config profile already exists: {name}");
     }
     atomic_write(&path, content)?;
+    let updated_at = file_updated_at(&path);
     Ok(AgentConfigContent {
         path,
         content: content.to_string(),
         sha256: sha256_text(content),
         exists: true,
+        updated_at,
     })
+}
+
+fn file_updated_at(path: &Path) -> Option<String> {
+    fs::metadata(path)
+        .ok()
+        .and_then(|metadata| metadata.modified().ok())
+        .map(|modified| {
+            DateTime::<Utc>::from(modified).to_rfc3339_opts(SecondsFormat::Millis, true)
+        })
 }
 
 fn validate_config(format: &str, content: &str) -> Result<()> {
@@ -322,11 +340,66 @@ mod tests {
     }
 
     #[test]
+    fn lists_config_updated_at_for_existing_files() {
+        let home = temp_home("updated-at");
+        let path = home.join(".codex/config.toml");
+        fs::create_dir_all(path.parent().expect("config parent")).expect("create config home");
+        fs::write(&path, "model = \"one\"\n").expect("write config");
+
+        let configs = configs_for_home(&home);
+        let config = configs
+            .iter()
+            .find(|config| config.path == path)
+            .expect("config should be listed");
+        assert!(config.updated_at.is_some());
+
+        fs::remove_dir_all(home).expect("temporary home should be removable");
+    }
+
+    #[test]
     fn accepts_a_custom_codex_home() {
         let home = temp_home("custom-codex");
         let codex_home = home.join("custom-codex");
         let configs = configs_for_roots(&home, &codex_home);
         assert_eq!(configs[0].path, codex_home.join("config.toml"));
+    }
+
+    #[test]
+    fn resolves_supported_profile_paths_without_listing_catalog() {
+        let home = temp_home("direct-resolve");
+        let codex_home = home.join(".codex");
+        let cases = vec![
+            (
+                codex_home.join("deep-review.config.toml"),
+                AgentKind::Codex,
+                "Codex / deep-review",
+                "toml",
+            ),
+            (
+                home.join(".claude/tendi-profiles/safe-mode.settings.json"),
+                AgentKind::Claude,
+                "Claude Code / safe-mode",
+                "json",
+            ),
+            (
+                home.join(".cursor/tendi-profiles/safe-mode/cli-config.json"),
+                AgentKind::Cursor,
+                "Cursor / safe-mode",
+                "json",
+            ),
+        ];
+
+        for (path, agent, label, format) in cases {
+            let config = resolve_config_for_path(&home, &codex_home, &path)
+                .expect("supported profile path should resolve directly");
+            assert_eq!(config.agent, agent);
+            assert_eq!(config.label, label);
+            assert_eq!(config.format, format);
+            assert_eq!(config.path, path);
+            assert!(!config.exists);
+        }
+
+        let _ = fs::remove_dir_all(home);
     }
 
     #[test]
@@ -492,6 +565,7 @@ mod tests {
         let saved = save_config_from_home(&home, &path, &initial.sha256, "{\"theme\":\"dark\"}\n")
             .expect("valid config should save");
         assert!(saved.exists);
+        assert!(saved.updated_at.is_some());
         assert_eq!(
             read_config_from_home(&home, &path)
                 .expect("saved config should read")
@@ -515,12 +589,14 @@ mod tests {
         );
         save_config_from_home(&home, &path, &initial.sha256, "model = \"one\"\n")
             .expect("valid TOML should save");
-        assert!(
-            save_config_from_home(&home, &path, &initial.sha256, "model = \"two\"\n")
-                .expect_err("stale write should fail")
-                .to_string()
-                .contains("changed on disk")
-        );
+        let stale_error = save_config_from_home(&home, &path, &initial.sha256, "model = \"two\"\n")
+            .expect_err("stale write should fail");
+        assert!(stale_error.to_string().contains("changed on disk"));
+        let conflict = stale_error
+            .downcast_ref::<ConfigChangedError>()
+            .expect("stale write should carry the current snapshot");
+        assert_eq!(conflict.current.content, "model = \"one\"\n");
+        assert!(conflict.current.exists);
         fs::remove_dir_all(home).expect("temporary home should be removable");
     }
 

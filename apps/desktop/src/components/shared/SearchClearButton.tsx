@@ -1,5 +1,7 @@
 import { X } from "lucide-react";
 
+import "./SearchClearButton.css";
+
 export type SearchClearButtonProps = {
   value: string;
   onClear: () => void;

@@ -4,6 +4,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { dirname, resolve } from "node:path";
 import { rm } from "node:fs/promises";
 import { build } from "esbuild";
+import { writeStdout } from "./stdio.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const tokenizerBundle = resolve(root, `.tmp-tendi-tokenizer-perf-${process.pid}.mjs`);
@@ -75,7 +76,7 @@ const workerResult = await measureWorker();
 await worker.terminate();
 await rm(tokenizerBundle, { force: true });
 
-console.log(JSON.stringify({
+writeStdout(JSON.stringify({
   itemCount: items.length,
   payloadCharacters: JSON.stringify(items).length,
   mainThread: {

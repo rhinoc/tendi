@@ -3,7 +3,7 @@ import { ToggleGroup } from "radix-ui";
 
 import "./SegmentedControl.css";
 
-export type SegmentedControlVariant = "default" | "accent";
+export type SegmentedControlVariant = "default" | "icon";
 
 export type SegmentedControlProps = Omit<
   ToggleGroup.ToggleGroupSingleProps,

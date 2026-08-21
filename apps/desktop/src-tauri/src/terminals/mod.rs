@@ -1,7 +1,5 @@
 use std::{env, fs, path::PathBuf, process::Command};
 
-use serde::Serialize;
-
 mod custom;
 mod ghostty;
 mod iterm;
@@ -17,37 +15,9 @@ pub(crate) trait TerminalProvider {
     fn matches(&self, value: &str) -> bool {
         self.id() == value || self.aliases().contains(&value)
     }
-    fn label(&self) -> String;
     fn available(&self) -> bool;
     fn application_name(&self) -> String;
     fn launch(&self, command: &tendi_core::SessionCommand) -> Result<(), String>;
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct TerminalApp {
-    pub id: String,
-    pub label: String,
-    pub available: bool,
-}
-
-pub(crate) fn terminal_apps() -> Vec<TerminalApp> {
-    let mut apps = vec![TerminalApp {
-        id: "auto".to_string(),
-        label: "Auto".to_string(),
-        available: true,
-    }];
-    apps.extend(
-        providers()
-            .into_iter()
-            .map(|provider| TerminalApp {
-                id: provider.id().to_string(),
-                label: provider.label(),
-                available: provider.available(),
-            })
-            .collect::<Vec<_>>(),
-    );
-    apps
 }
 
 pub(crate) fn resolve_terminal(value: &str) -> String {

@@ -38,11 +38,11 @@ export const codeMirrorBaseTheme = EditorView.theme({
     height: "100%",
     backgroundColor: "var(--editor-bg)",
     color: "var(--syntax-text)",
-    fontSize: "13px",
+    fontSize: "var(--text-ui)",
   },
   ".cm-scroller": {
     fontFamily: "var(--font-mono)",
-    lineHeight: "1.55",
+    lineHeight: "var(--leading-body)",
   },
   ".cm-content": {
     minHeight: "100%",
@@ -85,6 +85,109 @@ export const codeMirrorBaseTheme = EditorView.theme({
   ".cmDiffAddedCharChanged": {
     borderRadius: "3px",
     backgroundColor: "var(--green-soft-strong)",
+  },
+  ".cmConflictLocalLine": {
+    backgroundColor: "var(--danger-soft)",
+    boxShadow: "inset 3px 0 var(--danger)",
+  },
+  ".cmConflictBaseLine": {
+    backgroundColor: "var(--surface-3)",
+    boxShadow: "inset 3px 0 var(--muted)",
+  },
+  ".cmConflictIncomingLine": {
+    backgroundColor: "var(--green-soft)",
+    boxShadow: "inset 3px 0 var(--green)",
+  },
+  ".cmConflictLocalText": {
+    color: "var(--danger-text) !important",
+  },
+  ".cmConflictBaseText": {
+    color: "var(--muted) !important",
+  },
+  ".cmConflictIncomingText": {
+    color: "var(--green) !important",
+  },
+  ".cmConflictLocalCharChanged": {
+    borderRadius: "3px",
+    backgroundColor: "var(--danger-soft-strong)",
+  },
+  ".cmConflictBaseCharChanged": {
+    borderRadius: "3px",
+    backgroundColor: "var(--line-strong)",
+  },
+  ".cmConflictIncomingCharChanged": {
+    borderRadius: "3px",
+    backgroundColor: "var(--green-soft-strong)",
+  },
+  ".cmConflictMarkerLine": {
+    fontWeight: "650",
+  },
+  ".cmConflictLocalMarkerLine": {
+    backgroundColor: "var(--danger-soft-strong)",
+    color: "var(--danger-text)",
+  },
+  ".cmConflictBaseMarkerLine": {
+    backgroundColor: "var(--surface-3)",
+    color: "var(--muted)",
+  },
+  ".cmConflictSeparatorLine": {
+    backgroundColor: "var(--accent-soft-strong)",
+    color: "var(--accent)",
+  },
+  ".cmConflictIncomingMarkerLine": {
+    backgroundColor: "var(--green-soft-strong)",
+    color: "var(--green)",
+  },
+  ".cmConflictMarkerText": {
+    fontWeight: "700",
+  },
+  ".cmConflictLocalMarkerText": {
+    color: "var(--danger-text) !important",
+  },
+  ".cmConflictBaseMarkerText": {
+    color: "var(--muted) !important",
+  },
+  ".cmConflictSeparatorText": {
+    color: "var(--accent) !important",
+  },
+  ".cmConflictIncomingMarkerText": {
+    color: "var(--green) !important",
+  },
+  ".cmConflictActionGroup": {
+    display: "inline-flex",
+    alignItems: "center",
+    gap: "4px",
+    marginRight: "10px",
+    verticalAlign: "middle",
+  },
+  ".cmConflictActionButton": {
+    padding: "2px 6px",
+    border: "1px solid var(--line-strong)",
+    borderRadius: "var(--radius-sm)",
+    backgroundColor: "var(--surface-2)",
+    color: "var(--text)",
+    cursor: "pointer",
+    fontFamily: "var(--font-sans)",
+    fontSize: "var(--text-sm)",
+    lineHeight: "var(--leading-body)",
+  },
+  ".cmConflictActionButton:hover": {
+    backgroundColor: "var(--hover-fill-strong)",
+  },
+  ".cmConflictActionLocal": {
+    borderColor: "var(--danger-soft-strong)",
+    backgroundColor: "var(--danger-soft)",
+    color: "var(--danger-text)",
+  },
+  ".cmConflictActionRemote": {
+    borderColor: "var(--green-soft-strong)",
+    backgroundColor: "var(--green-soft)",
+    color: "var(--green)",
+  },
+  ".cmConflictActionBoth": {
+    borderColor: "var(--accent-soft-strong)",
+    backgroundColor: "var(--accent-soft)",
+    color: "var(--accent)",
   },
 }, { dark: false });
 

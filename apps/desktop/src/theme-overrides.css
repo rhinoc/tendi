@@ -1,5 +1,65 @@
 /* Non-Gruvbox palettes share the same semantic token mapping. */
 
+:root[data-color-theme="sakura-pop"] {
+  --theme-bg: #fff4fb;
+  --theme-window: #fffafd;
+  --theme-sidebar: #f7e7f2;
+  --theme-sidebar-2: #f0d2e6;
+  --theme-surface: #fffafd;
+  --theme-surface-2: #fbeaf5;
+  --theme-surface-3: #f4d7e8;
+  --theme-text: #4b2347;
+  --theme-muted: #8d5d85;
+  --theme-faint: #b184ad;
+  --theme-link: #087caa;
+  --theme-accent: #e24792;
+  --theme-accent-hover: #d93481;
+  --theme-accent-active: #b82669;
+  --theme-accent-contrast: #fff8fc;
+  --theme-green: #168f86;
+  --theme-orange: #ed7c4d;
+  --theme-red: #d52f68;
+  --theme-blue: #278cbd;
+  --theme-cyan: #008fa4;
+  --theme-yellow: #e9aa4b;
+  --theme-purple: #9d5ddd;
+  --theme-comment: #a66e99;
+  --theme-syntax-text: #4b2347;
+  --theme-overlay: #3b1e39;
+  --theme-icon-filter: none;
+  --theme-on-chat: #fff8fc;
+}
+
+:root[data-theme="dark"][data-color-theme="sakura-pop"] {
+  --theme-bg: #1a0b3b;
+  --theme-window: #160a32;
+  --theme-sidebar: #20104a;
+  --theme-sidebar-2: #2d1760;
+  --theme-surface: #24134f;
+  --theme-surface-2: #1d1040;
+  --theme-surface-3: #46247b;
+  --theme-text: #fff0fb;
+  --theme-muted: #d0b5d9;
+  --theme-faint: #a88bb7;
+  --theme-link: #01cdfe;
+  --theme-accent: #ff2d92;
+  --theme-accent-hover: #ff71ce;
+  --theme-accent-active: #e61d7c;
+  --theme-accent-contrast: #160a32;
+  --theme-green: #05ffa1;
+  --theme-orange: #ff9500;
+  --theme-red: #ff4f9a;
+  --theme-blue: #01cdfe;
+  --theme-cyan: #01cdfe;
+  --theme-yellow: #fffb96;
+  --theme-purple: #b967ff;
+  --theme-comment: #a88bb7;
+  --theme-syntax-text: #fff0fb;
+  --theme-overlay: #09051c;
+  --theme-icon-filter: invert(1) sepia(0.12) saturate(0.8) brightness(0.94);
+  --theme-on-chat: #160a32;
+}
+
 :root[data-color-theme="dracula"] {
   --theme-bg: #f8f8f2;
   --theme-window: #ffffff;
@@ -240,7 +300,67 @@
   --theme-on-chat: #1a1b26;
 }
 
-:root[data-theme][data-color-theme]:not([data-color-theme="gruvbox"]) {
+:root[data-color-theme="vercel"] {
+  --theme-bg: #ffffff;
+  --theme-window: #ffffff;
+  --theme-sidebar: #fafafa;
+  --theme-sidebar-2: #f2f2f2;
+  --theme-surface: #ffffff;
+  --theme-surface-2: #fafafa;
+  --theme-surface-3: #ebebeb;
+  --theme-text: #171717;
+  --theme-muted: #4d4d4d;
+  --theme-faint: #8f8f8f;
+  --theme-link: #0064e2;
+  --theme-accent: #171717;
+  --theme-accent-hover: #333333;
+  --theme-accent-active: #000000;
+  --theme-accent-contrast: #ffffff;
+  --theme-green: #107d32;
+  --theme-orange: #a64f00;
+  --theme-red: #d60020;
+  --theme-blue: #0064e2;
+  --theme-cyan: #0064e2;
+  --theme-yellow: #a64f00;
+  --theme-purple: #7c00c9;
+  --theme-comment: #4d4d4d;
+  --theme-syntax-text: #171717;
+  --theme-overlay: #000000;
+  --theme-icon-filter: none;
+  --theme-on-chat: #ffffff;
+}
+
+:root[data-theme="dark"][data-color-theme="vercel"] {
+  --theme-bg: #000000;
+  --theme-window: #000000;
+  --theme-sidebar: #000000;
+  --theme-sidebar-2: #1a1a1a;
+  --theme-surface: #000000;
+  --theme-surface-2: #1a1a1a;
+  --theme-surface-3: #1f1f1f;
+  --theme-text: #ededed;
+  --theme-muted: #a0a0a0;
+  --theme-faint: #7d7d7d;
+  --theme-link: #50a8ff;
+  --theme-accent: #ededed;
+  --theme-accent-hover: #ffffff;
+  --theme-accent-active: #c9c9c9;
+  --theme-accent-contrast: #000000;
+  --theme-green: #00ca52;
+  --theme-orange: #ff9900;
+  --theme-red: #ff5e63;
+  --theme-blue: #50a8ff;
+  --theme-cyan: #50a8ff;
+  --theme-yellow: #ff9900;
+  --theme-purple: #c472fb;
+  --theme-comment: #a0a0a0;
+  --theme-syntax-text: #ededed;
+  --theme-overlay: #000000;
+  --theme-icon-filter: invert(1) grayscale(1) brightness(1.1);
+  --theme-on-chat: #000000;
+}
+
+:root[data-theme][data-color-theme]:where(:not([data-color-theme="gruvbox"])) {
   --bg: var(--theme-bg);
   --window: var(--theme-window);
   --sidebar: var(--theme-sidebar);
@@ -275,7 +395,9 @@
   --accent-soft-strong: color-mix(in oklch, var(--theme-accent) 28%, transparent);
   --selection-fill: color-mix(in oklch, var(--theme-accent) 22%, transparent);
   --selection-fill-strong: color-mix(in oklch, var(--theme-accent) 36%, transparent);
-  --file-tree-selected-bg: var(--accent-soft);
+  --selection-marquee-fill: color-mix(in oklch, var(--theme-accent) 8%, transparent);
+  --selection-border: var(--accent-soft-strong);
+  --file-tree-selected-bg: var(--selection-fill);
   --focus-ring: color-mix(in oklch, var(--theme-accent) 55%, transparent);
   --focus-ring-soft: color-mix(in oklch, var(--theme-accent) 16%, transparent);
 
@@ -357,4 +479,189 @@
   --image-outline: color-mix(in oklch, var(--theme-text) 16%, transparent);
   --control-thumb-shadow: 0 1px 3px color-mix(in oklch, var(--theme-overlay) 24%, transparent);
   --monochrome-icon-filter: var(--theme-icon-filter);
+}
+
+/* Vercel keeps interaction, status, syntax, and data-viz colors semantically separate. */
+:root[data-theme][data-color-theme="vercel"] {
+  --line: #00000014;
+  --line-strong: #00000036;
+  --control-border: var(--line);
+  --row-frame-line: var(--line);
+  --data-table-frozen-divider-color: var(--line);
+  --image-outline: var(--line);
+
+  --tone-alert: var(--theme-red);
+  --agent-claude: var(--theme-orange);
+
+  --accent-soft: #f2f2f2;
+  --accent-soft-strong: #ebebeb;
+  --selection-fill: color-mix(in oklch, var(--theme-text) 22%, transparent);
+  --selection-fill-strong: color-mix(in oklch, var(--theme-text) 36%, transparent);
+  --selection-marquee-fill: color-mix(in oklch, var(--theme-text) 8%, transparent);
+  --selection-border: #d4d4d4;
+  --file-tree-selected-bg: var(--selection-fill);
+  --focus-ring: #0070f7;
+  --focus-ring-soft: color-mix(in oklch, #0070f7 16%, transparent);
+
+  --chat-user-bg: var(--theme-accent);
+  --chat-user-fg: var(--theme-accent-contrast);
+  --chat-user-muted: color-mix(in oklch, var(--theme-accent-contrast) 76%, transparent);
+  --chat-user-ring: color-mix(in oklch, var(--theme-text) 28%, transparent);
+
+  --syntax-text: #171717;
+  --syntax-muted: #171717;
+  --syntax-comment: #4d4d4d;
+  --syntax-keyword: #c41562;
+  --syntax-string: #107d32;
+  --syntax-number: #0064e2;
+  --syntax-atom: #0064e2;
+  --syntax-property: #0064e2;
+  --syntax-tag: #107d32;
+  --syntax-bracket: #171717;
+  --syntax-link: #107d32;
+  --syntax-mono: #a64f00;
+  --syntax-variable: #a64f00;
+  --syntax-xml-0: #107d32;
+  --syntax-xml-0-soft: color-mix(in oklch, #107d32 18%, transparent);
+  --syntax-xml-1: #c41562;
+  --syntax-xml-1-soft: color-mix(in oklch, #c41562 18%, transparent);
+  --syntax-xml-2: #7c00c9;
+  --syntax-xml-2-soft: color-mix(in oklch, #7c00c9 18%, transparent);
+  --syntax-xml-3: #0064e2;
+  --syntax-xml-3-soft: color-mix(in oklch, #0064e2 18%, transparent);
+  --syntax-xml-4: #a64f00;
+  --syntax-xml-4-soft: color-mix(in oklch, #a64f00 18%, transparent);
+  --syntax-xml-5: #007a6e;
+  --syntax-xml-5-soft: color-mix(in oklch, #007a6e 18%, transparent);
+
+  --chart-category-0: #0064e2;
+  --chart-category-1: #7c00c9;
+  --chart-category-2: #107d32;
+  --chart-category-3: #a64f00;
+}
+
+:root[data-theme][data-color-theme="sakura-pop"] {
+  /* Personal-site geometry: compact, crisp, and badge-like. */
+  --radius-sm: 3px;
+  --radius-md: 5px;
+  --radius-lg: 7px;
+  --row-frame-radius: 4px;
+  --badge-radius: 3px;
+  --selection-checkbox-radius: 2px;
+
+  --line: color-mix(in oklch, var(--theme-purple) 20%, transparent);
+  --line-strong: color-mix(in oklch, var(--theme-purple) 34%, transparent);
+  --control-border: color-mix(in oklch, var(--theme-purple) 22%, transparent);
+  --row-frame-line: color-mix(in oklch, var(--theme-purple) 18%, transparent);
+  --data-table-frozen-divider-color: color-mix(in oklch, var(--theme-purple) 24%, transparent);
+  --image-outline: color-mix(in oklch, var(--theme-purple) 20%, transparent);
+  --focus-ring: color-mix(in oklch, var(--theme-accent) 68%, transparent);
+  --focus-ring-soft: color-mix(in oklch, var(--theme-accent) 18%, transparent);
+
+  --chart-category-0: var(--theme-blue);
+  --chart-category-1: var(--theme-purple);
+  --chart-category-2: var(--theme-green);
+  --chart-category-3: var(--theme-orange);
+}
+
+:root[data-theme="dark"][data-color-theme="sakura-pop"] {
+  --shadow-border:
+    0 0 0 1px color-mix(in oklch, var(--theme-purple) 18%, transparent),
+    0 2px 0 color-mix(in oklch, var(--theme-purple) 10%, transparent);
+  --shadow-border-hover:
+    0 0 0 1px color-mix(in oklch, var(--theme-accent) 35%, transparent),
+    0 0 16px color-mix(in oklch, var(--theme-accent) 14%, transparent);
+  --shadow-elevated:
+    0 0 0 1px color-mix(in oklch, var(--theme-purple) 30%, transparent),
+    0 16px 36px color-mix(in oklch, var(--theme-overlay) 50%, transparent);
+  --shadow-menu:
+    0 0 0 1px color-mix(in oklch, var(--theme-purple) 30%, transparent),
+    0 12px 28px color-mix(in oklch, var(--theme-overlay) 48%, transparent);
+  --line: color-mix(in oklch, var(--theme-purple) 28%, transparent);
+  --line-strong: color-mix(in oklch, var(--theme-purple) 42%, transparent);
+  --control-border: color-mix(in oklch, var(--theme-purple) 30%, transparent);
+  --row-frame-line: color-mix(in oklch, var(--theme-purple) 24%, transparent);
+  --data-table-frozen-divider-color: color-mix(in oklch, var(--theme-purple) 34%, transparent);
+  --image-outline: color-mix(in oklch, var(--theme-purple) 28%, transparent);
+  --focus-ring: color-mix(in oklch, var(--theme-accent) 74%, transparent);
+  --focus-ring-soft: color-mix(in oklch, var(--theme-accent) 22%, transparent);
+}
+
+:root[data-theme="dark"][data-color-theme="sakura-pop"] .sidebar {
+  background: linear-gradient(180deg, var(--sidebar) 0%, var(--window) 100%);
+  box-shadow: inset -1px 0 0 color-mix(in oklch, var(--theme-purple) 34%, transparent);
+}
+
+:root[data-theme="dark"][data-color-theme="sakura-pop"] .navItem:hover {
+  background: color-mix(in oklch, var(--theme-blue) 12%, transparent);
+  color: var(--theme-text);
+}
+
+:root[data-theme="dark"][data-color-theme="sakura-pop"] .navItem.active {
+  background: linear-gradient(
+    90deg,
+    color-mix(in oklch, var(--theme-accent) 24%, transparent),
+    color-mix(in oklch, var(--theme-purple) 12%, transparent)
+  );
+  box-shadow: inset 3px 0 0 var(--theme-accent), 0 0 18px color-mix(in oklch, var(--theme-accent) 12%, transparent);
+}
+
+:root[data-theme="dark"][data-color-theme="sakura-pop"] .pageHeader h1 {
+  letter-spacing: 0.025em;
+  text-shadow: 0 0 16px color-mix(in oklch, var(--theme-accent) 20%, transparent);
+}
+
+:root[data-theme="dark"][data-color-theme="sakura-pop"] .appButton-primary {
+  box-shadow: 0 0 16px color-mix(in oklch, var(--theme-accent) 22%, transparent);
+}
+
+:root[data-theme="dark"][data-color-theme="sakura-pop"] .badge[data-tone="accent"],
+:root[data-theme="dark"][data-color-theme="sakura-pop"] .badge[data-tone="info"] {
+  border: 1px solid color-mix(in oklch, var(--badge-color) 30%, transparent);
+}
+
+:root[data-theme="dark"][data-color-theme="vercel"] {
+  --line: #ffffff24;
+  --line-strong: #ffffff3d;
+
+  --accent-soft: #1a1a1a;
+  --accent-soft-strong: #292929;
+  --selection-fill: color-mix(in oklch, var(--theme-text) 22%, transparent);
+  --selection-fill-strong: color-mix(in oklch, var(--theme-text) 36%, transparent);
+  --selection-marquee-fill: color-mix(in oklch, var(--theme-text) 8%, transparent);
+  --selection-border: #333333;
+  --file-tree-selected-bg: var(--selection-fill);
+  --focus-ring: #50a8ff;
+  --focus-ring-soft: color-mix(in oklch, #50a8ff 16%, transparent);
+
+  --syntax-text: #ededed;
+  --syntax-muted: #ededed;
+  --syntax-comment: #b3b3b3;
+  --syntax-keyword: #f19baa;
+  --syntax-string: #80cd82;
+  --syntax-number: #8fbcec;
+  --syntax-atom: #8fbcec;
+  --syntax-property: #8fbcec;
+  --syntax-tag: #80cd82;
+  --syntax-bracket: #ededed;
+  --syntax-link: #80cd82;
+  --syntax-mono: #eda661;
+  --syntax-variable: #eda661;
+  --syntax-xml-0: #80cd82;
+  --syntax-xml-0-soft: color-mix(in oklch, #80cd82 22%, transparent);
+  --syntax-xml-1: #f19baa;
+  --syntax-xml-1-soft: color-mix(in oklch, #f19baa 22%, transparent);
+  --syntax-xml-2: #c8a7ea;
+  --syntax-xml-2-soft: color-mix(in oklch, #c8a7ea 22%, transparent);
+  --syntax-xml-3: #8fbcec;
+  --syntax-xml-3-soft: color-mix(in oklch, #8fbcec 22%, transparent);
+  --syntax-xml-4: #eda661;
+  --syntax-xml-4-soft: color-mix(in oklch, #eda661 22%, transparent);
+  --syntax-xml-5: #6bccb4;
+  --syntax-xml-5-soft: color-mix(in oklch, #6bccb4 22%, transparent);
+
+  --chart-category-0: #50a8ff;
+  --chart-category-1: #c472fb;
+  --chart-category-2: #00ca52;
+  --chart-category-3: #ff9900;
 }

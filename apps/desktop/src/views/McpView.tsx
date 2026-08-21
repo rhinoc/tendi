@@ -1,12 +1,15 @@
 import { useCallback, useEffect, useMemo, useState, type ComponentType, type ReactNode } from "react";
 import { ContextMenu, DropdownMenu } from "radix-ui";
+import { Server } from "lucide-react";
 
 import { DataTable } from "../components/DataTable.tsx";
 import type { ColumnDef } from "../components/DataTable.types";
 import { ContentTopDragStrip } from "../components/shared/ContentTopDragStrip.tsx";
 import { CopyPathMenuItem, RevealInFinderMenuItem } from "../components/shared/DataTableMenus.tsx";
 import { CopyButton } from "../components/shared/CopyButton.tsx";
+import { EmptyState } from "../components/shared/EmptyState.tsx";
 import { PageHeader } from "../components/shared/PageHeader.tsx";
+import { LoadErrorState } from "../components/shared/LoadErrorState.tsx";
 import { RowActionsMenu } from "../components/shared/RowActionsMenu.tsx";
 import { mcpColumns as defaultMcpColumns } from "../lib/tableColumns.tsx";
 import { MCP_FREEZE_COLUMN, TauriCommand, safeInvoke } from "../lib/index.ts";
@@ -68,9 +71,12 @@ type DataListViewProps = {
   rows: McpRow[];
   columns?: ColumnDef<McpRow>[];
   loading?: boolean;
+  loadError?: string;
+  hasRows?: boolean;
+  onRetry?: () => void;
 };
 
-export function DataListView({ title, rows, columns = defaultMcpColumns, loading = false }: DataListViewProps) {
+export function DataListView({ title, rows, columns = defaultMcpColumns, loading = false, loadError = "", hasRows = false, onRetry }: DataListViewProps) {
   const [selected, setSelected] = useState<string[]>([]);
   const getRowId = useCallback(
     (row: McpRow) => row.id ?? JSON.stringify([row.agent ?? "", row.name ?? "", mcpSourcePath(row)]),
@@ -122,6 +128,7 @@ export function DataListView({ title, rows, columns = defaultMcpColumns, loading
     <section className="content dataPage">
       <ContentTopDragStrip />
       <PageHeader title={title}>{null}</PageHeader>
+      {loadError && hasRows ? <LoadErrorState message={loadError} onRetry={onRetry} /> : null}
       <DataTable
         rows={rows}
         columns={tableColumns}
@@ -136,9 +143,15 @@ export function DataListView({ title, rows, columns = defaultMcpColumns, loading
         bottomBar={bottomBar}
         bottomBarCheckboxLabel={`Select visible ${title.toLowerCase()}`}
         selectionLabel="servers"
-        loading={loading}
+        loading={loading && !hasRows}
         loadingLabel={`Loading ${title.toLowerCase()}`}
-        emptyState="No MCP servers found. Adjust the agent filter to see more."
+        emptyState={loadError && !hasRows ? <LoadErrorState message={loadError} onRetry={onRetry} /> : (
+          <EmptyState
+            icon={<Server size={27} strokeWidth={1.55} />}
+            title="No MCP servers found"
+            description="Adjust the agent filter to see more."
+          />
+        )}
       />
     </section>
   );

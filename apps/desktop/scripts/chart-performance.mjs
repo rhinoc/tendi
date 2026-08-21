@@ -2,12 +2,13 @@ import { performance } from "node:perf_hooks";
 import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { createServer } from "vite";
+import { writeStderr, writeStdout } from "./stdio.mjs";
 
 const appDir = new URL("..", import.meta.url).pathname;
 const scenarios = new Set(["overview-trend", "overview-trend-zoomed", "skill-session-project", "relationship-graph"]);
 const scenario = process.argv[2];
 if (!scenarios.has(scenario)) {
-  console.error("usage: node apps/desktop/scripts/chart-performance.mjs <overview-trend|overview-trend-zoomed|skill-session-project|relationship-graph>");
+  writeStderr("usage: node apps/desktop/scripts/chart-performance.mjs <overview-trend|overview-trend-zoomed|skill-session-project|relationship-graph>");
   process.exit(2);
 }
 
@@ -44,7 +45,7 @@ try {
   }
   samplesMs.sort((left, right) => left - right);
   const p95Index = Math.min(samplesMs.length - 1, Math.ceil(samplesMs.length * 0.95) - 1);
-  console.log(JSON.stringify({
+  writeStdout(JSON.stringify({
     scenario,
     operationMs: samplesMs[Math.floor(samplesMs.length / 2)],
     p95Ms: samplesMs[p95Index],

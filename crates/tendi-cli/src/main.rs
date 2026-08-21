@@ -226,6 +226,7 @@ impl From<VisibilityArg> for tendi_core::SkillVisibility {
 
 fn ensure_projection<T, Ready, Refresh>(
     store: &tendi_core::storage::Store,
+    domain: &str,
     ready: Ready,
     mut refresh: Refresh,
 ) -> Result<T>
@@ -237,7 +238,7 @@ where
         if let Some(value) = ready()? {
             return Ok(value);
         }
-        if let Some(result) = store.with_projection_refresh_lock(|| refresh())? {
+        if let Some(result) = store.with_projection_refresh_lock(domain, || refresh())? {
             return Ok(result);
         }
         thread::sleep(Duration::from_millis(50));
@@ -255,6 +256,7 @@ fn main() -> Result<()> {
             let store = tendi_core::storage::Store::open_default()?;
             let report = ensure_projection(
                 &store,
+                "agents",
                 || Ok(None),
                 || {
                     let report = tendi_core::scan(&cwd)?;
@@ -273,6 +275,7 @@ fn main() -> Result<()> {
                 let store = tendi_core::storage::Store::open_default()?;
                 let report = ensure_projection(
                     &store,
+                    "agents",
                     || store.list_agents_for_workspace(&cwd),
                     || {
                         let report = tendi_core::agents::scan_agents(&cwd)?;
@@ -307,6 +310,7 @@ fn main() -> Result<()> {
                 let store = tendi_core::storage::Store::open_default()?;
                 let report = ensure_projection(
                     &store,
+                    "skills",
                     || store.list_skills_for_workspace(&cwd),
                     || {
                         let report = tendi_core::skills::scan_skills_synced(&cwd)?;
@@ -642,6 +646,7 @@ fn main() -> Result<()> {
                 let store = tendi_core::storage::Store::open_default()?;
                 let report = ensure_projection(
                     &store,
+                    "rules",
                     || store.list_rules_for_workspace(&cwd),
                     || {
                         let report = tendi_core::rules::scan_rules(&cwd)?;
@@ -661,6 +666,7 @@ fn main() -> Result<()> {
                 let store = tendi_core::storage::Store::open_default()?;
                 let report = ensure_projection(
                     &store,
+                    "hooks",
                     || store.list_hooks_for_workspace(&cwd),
                     || {
                         let report = tendi_core::hooks::scan_hooks(&cwd)?;
@@ -680,6 +686,7 @@ fn main() -> Result<()> {
                 let store = tendi_core::storage::Store::open_default()?;
                 let report = ensure_projection(
                     &store,
+                    "mcp",
                     || store.list_mcp_for_workspace(&cwd),
                     || {
                         let report = tendi_core::mcp::scan_mcp(&cwd)?;
@@ -939,14 +946,21 @@ fn print_rules(rules: &[tendi_core::RuleRecord]) -> Result<()> {
     let mut stdout = std::io::stdout().lock();
     writeln!(
         stdout,
-        "{:<8} {:<12} {:<8} {:<5} {}",
-        "agent", "kind", "scope", "order", "path"
+        "{:<16} {:<12} {:<8} {:<5} {}",
+        "agents", "kind", "scope", "order", "path"
     )?;
     for rule in rules {
+        let agents = rule
+            .agents
+            .iter()
+            .copied()
+            .map(agent_label)
+            .collect::<Vec<_>>()
+            .join(",");
         writeln!(
             stdout,
-            "{:<8} {:<12} {:<8} {:<5} {}",
-            agent_label(rule.agent),
+            "{:<16} {:<12} {:<8} {:<5} {}",
+            agents,
             rule.kind,
             rule.scope,
             rule.order,

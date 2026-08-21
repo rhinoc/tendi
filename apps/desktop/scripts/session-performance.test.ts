@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { resolveInitialSession, resolveInitialSessionId } from "../src/lib/session-selection.ts";
-import { applySessionProjectDelta } from "../src/lib/session-project-delta.ts";
 import { createLatestRequestAuthority, mergeTranscriptItems, normalizeTranscriptSearchResult, transcriptItemsSize } from "../src/lib/transcript.ts";
 import { selectAnalyticsGranularity, stepAnalyticsGranularity } from "../src/lib/analytics.ts";
 import { trackpadZoomDirection, trackpadZoomFactor } from "../src/lib/zoom-gesture.ts";
@@ -37,43 +36,6 @@ test("latest transcript request is the only current request", () => {
   assert.equal(authority.isCurrent(second), true);
   authority.invalidate(second);
   assert.equal(authority.isCurrent(second), false);
-});
-
-test("project merge updates only affected session rows", () => {
-  const rows = [
-    { id: "target", title: "Target", agent: "Codex", path: "/target", logicalProjectId: "p1", logicalProjectName: "Target" },
-    { id: "source", title: "Source", agent: "Claude", path: "/source", logicalProjectId: "p2", logicalProjectName: "Source" },
-    { id: "other", title: "Other", agent: "Cursor", path: "/other", logicalProjectId: "p3", logicalProjectName: "Other" },
-  ];
-
-  const next = applySessionProjectDelta(rows, {
-    kind: "merge",
-    projectId: "p1",
-    projectName: "Target",
-    mergedProjectIds: ["p1", "p2"],
-  });
-
-  assert.equal(next[0], rows[0]);
-  assert.notEqual(next[1], rows[1]);
-  assert.equal(next[1].logicalProjectId, "p1");
-  assert.equal(next[2], rows[2]);
-});
-
-test("project split matches normalized agent identity", () => {
-  const rows = [
-    { id: "selected", title: "Selected", agent: "Claude", path: "/selected", logicalProjectId: "old", logicalProjectName: "Old" },
-    { id: "other", title: "Other", agent: "Claude", path: "/other", logicalProjectId: "old", logicalProjectName: "Old" },
-  ];
-
-  const next = applySessionProjectDelta(rows, {
-    kind: "split",
-    projectId: "new",
-    projectName: "Focused",
-    sessions: [{ id: "selected", agent: "claude-code", path: "/selected" }],
-  });
-
-  assert.equal(next[0].logicalProjectId, "new");
-  assert.equal(next[1], rows[1]);
 });
 
 test("cross-page tool result merges by stable call id", () => {

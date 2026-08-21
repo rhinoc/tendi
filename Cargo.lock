@@ -1741,9 +1741,9 @@ dependencies = [
 
 [[package]]
 name = "inotify"
-version = "0.11.4"
+version = "0.11.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "153be1941a183ec9ccd095ddbe17a8b8d435ef6c76e9e02451b933c3999af2c8"
+checksum = "4cc00ea907cab49550b7da656f80ebb97be1b997d931fbcd28d39734e17ce592"
 dependencies = [
  "bitflags 2.13.0",
  "inotify-sys",
@@ -3897,20 +3897,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "tendi-daemon"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "notify",
+ "serde",
+ "serde_json",
+ "tendi-core",
+]
+
+[[package]]
 name = "tendi-desktop"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "cocoa",
  "dirs",
- "notify",
  "serde",
  "serde_json",
  "tauri",
  "tauri-build",
  "tauri-plugin-updater",
  "tendi-core",
+ "tendi-daemon",
  "window-vibrancy 0.7.1",
+ "zip",
 ]
 
 [[package]]

@@ -1,8 +1,9 @@
 import type { ButtonHTMLAttributes } from "react";
 
+import { Button, type ButtonVariant } from "./Button.tsx";
 import "./dialog-action-button.css";
 
-export type DialogActionButtonVariant = "primary" | "secondary" | "danger" | "danger-subtle";
+export type DialogActionButtonVariant = "primary" | "secondary" | "danger";
 
 export type DialogActionButtonProps = Omit<ButtonHTMLAttributes<HTMLButtonElement>, "className"> & {
   variant: DialogActionButtonVariant;
@@ -10,11 +11,13 @@ export type DialogActionButtonProps = Omit<ButtonHTMLAttributes<HTMLButtonElemen
 };
 
 export function DialogActionButton({ variant, className, ...buttonProps }: DialogActionButtonProps) {
-  const variantClass = variant === "danger-subtle" ? "danger subtle" : variant;
+  const buttonVariant: ButtonVariant = variant === "secondary" ? "ghost" : variant;
   return (
-    <button
+    <Button
       {...buttonProps}
-      className={["dialogActionButton", variantClass, className].filter(Boolean).join(" ")}
+      variant={buttonVariant}
+      size="sm"
+      className={["dialogActionButton", className].filter(Boolean).join(" ")}
     />
   );
 }

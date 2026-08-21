@@ -14,6 +14,8 @@ use sha2::{Digest, Sha256};
 
 use crate::{sessions::SessionRecord, skills::AgentKind};
 
+const ANALYTICS_PARSER_VERSION: u32 = 2;
+
 #[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct AnalyticsTokenUsage {
@@ -198,6 +200,8 @@ pub(crate) struct AnalyticsOverviewIndex {
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct AnalyticsParserState {
+    #[serde(default)]
+    parser_version: u32,
     previous_usage: AnalyticsTokenUsage,
     cumulative_usage: AnalyticsTokenUsage,
     current_model: String,
@@ -215,6 +219,8 @@ pub(crate) struct AnalyticsParserState {
     source_prefix_hash: String,
     #[serde(default)]
     source_boundary_hash: String,
+    #[serde(default)]
+    last_codex_usage_key: String,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -784,6 +790,7 @@ pub(crate) fn analyze_session(
                 && record.state.source_inode == source_inode
                 && record.state.source_prefix_hash == hashes.0
                 && record.state.source_boundary_hash == hashes.1
+                && record.state.parser_version == ANALYTICS_PARSER_VERSION
                 && record.file_size >= 0
                 && record.file_size < file_size
                 && record.file_mtime <= file_mtime
@@ -865,6 +872,7 @@ fn empty_record(
             ..SessionAnalytics::default()
         },
         state: AnalyticsParserState {
+            parser_version: ANALYTICS_PARSER_VERSION,
             current_model: session.model.clone().unwrap_or_default(),
             last_timestamp: session
                 .started_at
@@ -1050,7 +1058,20 @@ pub(crate) fn parse_codex_line(line: &str, record: &mut SessionAnalyticsRecord) 
     if current.total_tokens == 0 {
         return;
     }
-    let usage = diff_usage(record.state.previous_usage, current);
+    let last = payload
+        .pointer("/info/last_token_usage")
+        .map(codex_usage)
+        .filter(|usage| usage.total_tokens > 0);
+    let usage_key = format!(
+        "{}|{}",
+        usage_signature(&current),
+        last.as_ref().map(usage_signature).unwrap_or_default()
+    );
+    if record.state.last_codex_usage_key == usage_key {
+        return;
+    }
+    record.state.last_codex_usage_key = usage_key;
+    let usage = last.unwrap_or_else(|| diff_usage(record.state.previous_usage, current));
     record.state.previous_usage = current;
     if usage.total_tokens == 0 {
         return;
@@ -1331,6 +1352,23 @@ fn codex_usage(value: &Value) -> AnalyticsTokenUsage {
     }
 }
 
+fn usage_signature(usage: &AnalyticsTokenUsage) -> String {
+    format!(
+        "{},{},{},{},{},{}",
+        usage.input_tokens,
+        usage.cached_input_tokens,
+        usage.cache_write_input_tokens,
+        usage.output_tokens,
+        usage.reasoning_output_tokens,
+        usage.total_tokens,
+    )
+}
+
+pub(crate) fn parser_state_is_current(serialized: &str) -> bool {
+    serde_json::from_str::<AnalyticsParserState>(serialized)
+        .is_ok_and(|state| state.parser_version == ANALYTICS_PARSER_VERSION)
+}
+
 fn message_usage(value: &Value) -> AnalyticsTokenUsage {
     let fresh = u64_field(value, "input_tokens");
     let cached = u64_field(value, "cache_read_input_tokens");
@@ -1544,6 +1582,61 @@ mod tests {
             ..AnalyticsTokenUsage::default()
         };
         assert_eq!(diff_usage(first, reset), reset);
+    }
+
+    #[test]
+    fn codex_parser_uses_last_usage_for_non_monotonic_cumulative_totals() {
+        let root = temp_dir("tendi-analytics-codex-last-usage");
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("rollout-session-1.jsonl");
+        let events = [
+            ("2026-08-01T01:00:00Z", 1_000_u64, 100_u64),
+            ("2026-08-01T01:00:01Z", 2_000, 120),
+            ("2026-08-01T01:00:02Z", 2_000, 120),
+            ("2026-08-01T01:00:03Z", 1_500, 130),
+            ("2026-08-01T01:00:04Z", 2_500, 140),
+        ];
+        let content = events
+            .iter()
+            .map(|(timestamp, cumulative, last)| {
+                serde_json::json!({
+                    "timestamp": timestamp,
+                    "type": "event_msg",
+                    "payload": {
+                        "type": "token_count",
+                        "info": {
+                            "total_token_usage": { "total_tokens": cumulative },
+                            "last_token_usage": { "total_tokens": last },
+                        },
+                    },
+                })
+                .to_string()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        fs::write(&path, format!("{content}\n")).unwrap();
+
+        let parsed = analyze_session(&session(&path, AgentKind::Codex), None).unwrap();
+
+        assert_eq!(
+            parsed
+                .analytics
+                .responses
+                .iter()
+                .map(|response| response.usage.total_tokens)
+                .collect::<Vec<_>>(),
+            vec![100, 120, 130, 140]
+        );
+        assert_eq!(
+            parsed
+                .analytics
+                .responses
+                .last()
+                .map(|response| response.cumulative.total_tokens),
+            Some(490)
+        );
+        assert_eq!(parsed.state.parser_version, ANALYTICS_PARSER_VERSION);
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]

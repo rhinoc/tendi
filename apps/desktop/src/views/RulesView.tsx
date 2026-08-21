@@ -1,30 +1,34 @@
 import { Tooltip } from "../components/shared/Tooltip.tsx";
 import { lazy, Suspense, useCallback, useDeferredValue, useEffect, useMemo, useState, type ComponentType, type ReactNode } from "react";
 import { ContextMenu, DropdownMenu } from "radix-ui";
-import { FolderOpen, Info } from "lucide-react";
+import { FolderOpen, Info, ScrollText, SearchX } from "lucide-react";
 import { Group as PanelGroup, Panel } from "react-resizable-panels";
 
 import { DataTable } from "../components/DataTable.tsx";
 import type { ColumnDef, SortState } from "../components/DataTable.types";
-import { AgentBadge } from "../components/shared/AgentBadge.tsx";
+import { AgentChips } from "../components/shared/AgentChips.tsx";
 import { CopyButton } from "../components/shared/CopyButton.tsx";
 import { CopyPathMenuItem, RevealInFinderMenuItem } from "../components/shared/DataTableMenus.tsx";
 import { DetailPanel } from "../components/shared/DetailPanel.tsx";
 import { DetailPanelHost } from "../components/shared/DetailPanelHost.tsx";
 import { DiscardChangesDialog } from "../components/shared/DiscardChangesDialog.tsx";
+import { EmptyState } from "../components/shared/EmptyState.tsx";
 import { EditorStatePlaceholder } from "../components/shared/EditorStatePlaceholder.tsx";
 import { InfoDropdownMenu } from "../components/shared/InfoDropdownMenu.tsx";
 import { InfoSection } from "../components/shared/InfoSection.tsx";
+import { IconButton } from "../components/shared/IconButton.tsx";
+import { LoadErrorState } from "../components/shared/LoadErrorState.tsx";
 import { PageHeader } from "../components/shared/PageHeader.tsx";
 import { RowActionsMenu } from "../components/shared/RowActionsMenu.tsx";
 import { SearchField } from "../components/shared/SearchField.tsx";
 import type { SkillDependencyRecord } from "../features/skills/SkillDependencyGraph.tsx";
 import { ruleColumns as sharedRuleColumns } from "../lib/tableColumns.tsx";
-import { RULE_FREEZE_COLUMN, TauriCommand, diffPreview, friendlyAgent, ruleKey, ruleSearchText, ruleSortValue, ruleTitle, safeInvoke, suppressNextClick } from "../lib/index.ts";
+import { RULE_FREEZE_COLUMN, TauriCommand, diffPreview, formatUserPath, friendlyAgent, ruleAgents, ruleKey, ruleSearchText, ruleSortValue, ruleTitle, safeInvoke, suppressNextClick } from "../lib/index.ts";
 
 const MarkdownFilePane = lazy(() => import("../components/shared/MarkdownFilePane.tsx").then(({ MarkdownFilePane: component }) => ({ default: component })));
 
 type RuleRecord = {
+  agents?: string[] | null;
   agent?: string | null;
   kind?: string | null;
   scope?: string | null;
@@ -100,23 +104,25 @@ function RuleInfoMenu({
 }) {
   const title = ruleTitle(rule);
   const path = ruleSourcePath(rule);
-  const agent = friendlyAgent(rule.agent);
+  const displayPath = formatUserPath(path);
+  const agents = ruleAgents(rule);
+  const agentLabels = agents.map((agent) => friendlyAgent(agent)).join(", ");
   const kind = rule.kind && rule.kind !== title ? rule.kind : "";
   const order = typeof rule.order === "number" && rule.order !== 0 ? `${rule.order}` : "";
   return (
     <InfoDropdownMenu
       trigger={(
-        <button className="threadPanelToggle" aria-label="Show rule info">
+        <IconButton className="threadPanelToggle" aria-label="Show rule info">
           <Info size={15} />
-        </button>
+        </IconButton>
       )}
       label="Rule info"
       title={title}
       contentClassName="ruleInfoContent"
     >
-            <InfoSection label="Agent">
-                <AgentBadge agent={agent} small />
-                <span className="ruleInfoValue">{agent}</span>
+            <InfoSection label="Agents">
+                <AgentChips agents={agents} />
+                <span className="ruleInfoValue">{agentLabels}</span>
             </InfoSection>
             {rule.scope && (
               <InfoSection label="Scope"><span className="ruleInfoValue">{rule.scope}</span></InfoSection>
@@ -129,15 +135,15 @@ function RuleInfoMenu({
             )}
             {path && (
               <InfoSection label="Path">
-                  <Tooltip content={path} onlyWhenTruncated><code>{path}</code></Tooltip>
+                  <Tooltip content={displayPath} onlyWhenTruncated><code>{displayPath}</code></Tooltip>
                   <button
                     aria-label="Reveal rule in Finder"
-                    className="skillInfoIconButton"
+                    className="appButton appButton-icon"
                     onClick={() => safeInvoke(TauriCommand.RevealInFinder, { path })}
                   >
                     <FolderOpen size={13} />
                   </button>
-                  <CopyButton className="skillInfoIconButton" value={path} copyLabel="Copy rule path" copiedLabel="Rule path copied" />
+                  <CopyButton className="appButton appButton-icon" value={path} copyLabel="Copy rule path" copiedLabel="Rule path copied" />
               </InfoSection>
             )}
             {referencedSkillNames.length > 0 && (
@@ -166,11 +172,17 @@ export function RulesView({
   rows,
   skills = [],
   loadingRows = false,
+  loadError = "",
+  hasRows = false,
+  onRetry,
   onOpenSkill,
 }: {
   rows: RuleRecord[];
   skills?: SkillDependencyRecord[];
   loadingRows?: boolean;
+  loadError?: string;
+  hasRows?: boolean;
+  onRetry?: () => void;
   onOpenSkill?: (name: string) => void;
 }) {
   const ruleItems = useMemo(() => rows.map((rule, index) => ({ key: ruleKey(rule, index), rule })), [rows]);
@@ -192,8 +204,8 @@ export function RulesView({
   const referencedSkillNames = useMemo(() => ruleSkillRefs(content, skills), [content, skills]);
   const dirty = content !== draft.originalContent;
   const diffLines = useMemo(
-    () => diffPreview(draft.originalContent, deferredContent),
-    [deferredContent, draft.originalContent],
+    () => loading || !dirty ? [] : diffPreview(draft.originalContent, deferredContent),
+    [deferredContent, dirty, draft.originalContent, loading],
   );
   const diffStats = useMemo(
     () => diffLines.reduce(
@@ -224,10 +236,11 @@ export function RulesView({
       width: "var(--data-freeze-column-width, 292px)",
       render: (row) => {
         const path = `${row.rule.path ?? row.rule.source ?? ""}`;
+        const displayPath = formatUserPath(path);
         return (
           <>
             <span className="dataCellTitle">{ruleTitle(row.rule)}</span>
-            <Tooltip content={path} onlyWhenTruncated><span className="dataCellSub">{path || "-"}</span></Tooltip>
+            <Tooltip content={displayPath} onlyWhenTruncated><span className="dataCellSub">{displayPath || "-"}</span></Tooltip>
           </>
         );
       },
@@ -239,13 +252,13 @@ export function RulesView({
           key: column.key,
           width: column.width,
           header: column.label ?? column.header,
-          type: column.type ?? (["agent", "kind", "scope"].includes(column.key) ? "enum" : "text"),
+          type: column.type ?? (["agents", "kind", "scope"].includes(column.key) ? "enum" : "text"),
           sortable: true,
           sortValue: (row) => ruleSortValue({ rule: row.rule }, column.key),
         };
-        if (column.key === "agent") {
-          next.groupBy = (row) => friendlyAgent(row.rule.agent);
-          next.render = (row) => column.render?.({ agent: row.rule.agent });
+        if (column.key === "agents") {
+          next.groupBy = (row) => ruleAgents(row.rule).join(", ");
+          next.render = (row) => column.render?.({ agents: ruleAgents(row.rule) });
         } else if (column.key === "kind") {
           next.groupBy = (row) => `${row.rule.kind ?? ""}`;
           next.value = (row) => row.rule.kind;
@@ -379,8 +392,9 @@ export function RulesView({
       <Panel className="sessionListPanel ruleListPanel" defaultSize="54%" minSize="360px">
         <div className="sessionListPane ruleListPane">
           <PageHeader title="Rules" compact>
-            <SearchField placeholder="Search rules" value={query} onChange={(event) => setQuery(event.target.value)} onClear={() => setQuery("")} />
+            <SearchField pageSearch placeholder="Search rules" value={query} onChange={(event) => setQuery(event.target.value)} onClear={() => setQuery("")} />
           </PageHeader>
+          {loadError && hasRows ? <LoadErrorState message={loadError} onRetry={onRetry} /> : null}
           <div className="sessionListBody">
             <DataTable
               rows={tableRows}
@@ -400,11 +414,16 @@ export function RulesView({
               bottomBar={bottomBar}
               bottomBarCheckboxLabel="Select visible rules from toolbar"
               selectionLabel="rules"
-              loading={loadingRows}
+              loading={loadingRows && !hasRows}
               loadingLabel="Loading rules"
-              emptyState={normalizedQuery
-                ? "No rules match this search. Try another search."
-                : "No rules found. Try another agent filter."}
+              emptyState={loadError && !hasRows ? <LoadErrorState message={loadError} onRetry={onRetry} /> : (
+                <EmptyState
+                  icon={normalizedQuery ? <SearchX size={21} strokeWidth={1.8} /> : <ScrollText size={27} strokeWidth={1.55} />}
+                  iconTone={normalizedQuery ? "muted" : "accent"}
+                  title={normalizedQuery ? "No rules match this search" : "No rules found"}
+                  description={normalizedQuery ? "Try another search." : "Try another agent filter."}
+                />
+              )}
             />
           </div>
         </div>
@@ -415,7 +434,7 @@ export function RulesView({
         expandLabel="Expand rule detail"
         railLabel={activeRule ? ruleTitle(activeRule) : "Rule detail"}
         hasSelection={Boolean(activeRule)}
-        emptyState={<div className="emptyState">Select a rule to view its contents.</div>}
+        emptyState={<EmptyState compact title="Select a rule to view its contents." />}
         hostClassName="ruleEditorPanelHost"
       >
         {activeRule ? (

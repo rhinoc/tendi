@@ -6,6 +6,7 @@ pub mod files;
 mod fsutil;
 mod git;
 pub mod hooks;
+pub mod logging;
 pub mod mcp;
 mod providers;
 pub mod rules;

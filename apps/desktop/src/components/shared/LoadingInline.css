@@ -5,5 +5,5 @@
   gap: 8px;
   min-width: 0;
   color: inherit;
-  line-height: 1;
+  line-height: var(--leading-tight);
 }

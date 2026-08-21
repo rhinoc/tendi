@@ -1,0 +1,85 @@
+.appToast {
+  position: fixed;
+  top: 46px;
+  left: 50%;
+  z-index: var(--z-drawer);
+  width: min(420px, calc(100vw - 32px));
+  min-height: 40px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 11px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-menu);
+  transform: translateX(-50%);
+  animation: appToastIn 140ms var(--ease-out-soft);
+}
+
+.appToast--error {
+  color: var(--accent-contrast);
+  background: var(--danger);
+}
+
+.appToast--success {
+  color: var(--accent-contrast);
+  background: var(--green);
+}
+
+.appToast--info {
+  color: var(--chat-user-fg);
+  background: var(--chat-user-bg);
+}
+
+.appToastIcon {
+  flex: 0 0 auto;
+}
+
+.appToastMessage {
+  min-width: 0;
+  flex: 1 1 auto;
+  color: inherit;
+  font-size: var(--text-sm);
+  line-height: var(--leading-body);
+  overflow-wrap: anywhere;
+  user-select: text;
+}
+
+.appToastDismiss {
+  width: 22px;
+  height: 22px;
+  flex: 0 0 22px;
+  display: grid;
+  place-items: center;
+  margin: 0 -3px 0 0;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-sm);
+  color: inherit;
+  background: transparent;
+  opacity: 0.82;
+  cursor: pointer;
+}
+
+.appToastDismiss:hover {
+  opacity: 1;
+  background: color-mix(in oklch, currentColor 18%, transparent);
+}
+
+@keyframes appToastIn {
+  from {
+    opacity: 0;
+    transform: translate(-50%, -4px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translate(-50%, 0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .appToast {
+    animation: none;
+  }
+}

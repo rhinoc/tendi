@@ -85,6 +85,13 @@ pub fn install(
     })
 }
 
+pub fn remove(agent: AgentKind) -> Result<BundledSkillStatus> {
+    let target = global_agent_skill_root(agent)?.join(SKILL_NAME);
+    let marker = prompt_marker_path()?;
+    remove_at(&target)?;
+    status_at(&target, &marker)
+}
+
 pub fn dismiss_prompt() -> Result<()> {
     mark_prompt_handled_at(&prompt_marker_path()?)
 }
@@ -152,6 +159,40 @@ fn plan_install_at(target: &Path) -> Result<BundledSkillInstallPlan> {
     })
 }
 
+fn remove_at(target: &Path) -> Result<()> {
+    let desired = [
+        (target.join("SKILL.md"), SKILL_MARKDOWN),
+        (target.join("agents/openai.yaml"), OPENAI_YAML),
+    ];
+    for (path, expected) in &desired {
+        if let Some(before) = read_optional(path)? {
+            if before != *expected {
+                bail!(
+                    "{} contains different content; refusing to remove it",
+                    path.display()
+                );
+            }
+        }
+    }
+    for (path, _) in desired {
+        if read_optional(&path)?.is_some() {
+            fs::remove_file(&path).with_context(|| format!("remove {}", path.display()))?;
+        }
+    }
+    for directory in [target.join("agents"), target.to_path_buf()] {
+        match fs::remove_dir(&directory) {
+            Ok(()) => {}
+            Err(error)
+                if error.kind() == std::io::ErrorKind::NotFound
+                    || error.kind() == std::io::ErrorKind::DirectoryNotEmpty => {}
+            Err(error) => {
+                return Err(error).with_context(|| format!("remove {}", directory.display()));
+            }
+        }
+    }
+    Ok(())
+}
+
 fn mark_prompt_handled_at(path: &Path) -> Result<()> {
     atomic_write(path, "handled\n")
 }
@@ -173,7 +214,7 @@ mod tests {
 
     use super::{
         GUIDE_MARKDOWN, OPENAI_YAML, SKILL_MARKDOWN, mark_prompt_handled_at, plan_install_at,
-        status_at,
+        remove_at, status_at,
     };
     use crate::skills::apply_changes;
 
@@ -228,6 +269,42 @@ mod tests {
         assert!(status.installed);
         assert!(!status.current);
         assert!(!status.should_prompt);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn removes_only_unchanged_bundled_files() {
+        let root = temp_dir("remove");
+        let target = root.join("skills/tendi");
+        let marker = root.join("prompt");
+        let plan = plan_install_at(&target).unwrap();
+        apply_changes(&plan.changes).unwrap();
+        mark_prompt_handled_at(&marker).unwrap();
+
+        remove_at(&target).unwrap();
+
+        let status = status_at(&target, &marker).unwrap();
+        assert!(!status.installed);
+        assert!(!status.current);
+        assert!(!target.exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn refuses_to_remove_changed_bundled_files() {
+        let root = temp_dir("remove-conflict");
+        let target = root.join("skills/tendi");
+        fs::create_dir_all(target.join("agents")).unwrap();
+        fs::write(target.join("SKILL.md"), "user content\n").unwrap();
+        fs::write(target.join("agents/openai.yaml"), OPENAI_YAML).unwrap();
+
+        let error = remove_at(&target).unwrap_err().to_string();
+
+        assert!(error.contains("refusing to remove"));
+        assert_eq!(
+            fs::read_to_string(target.join("SKILL.md")).unwrap(),
+            "user content\n"
+        );
         fs::remove_dir_all(root).unwrap();
     }
 

@@ -5,6 +5,7 @@ import { useRef, useState } from "react";
 import { IconButton } from "../../components/shared/IconButton.tsx";
 import { LoadingIcon } from "../../components/shared/LoadingIcon.tsx";
 import { StatefulButton } from "../../components/shared/StatefulButton.tsx";
+import { useElementSize } from "../../components/shared/useElementSize.ts";
 
 export type SettingsApplicationOption = {
   value: string;
@@ -53,6 +54,7 @@ export function SettingsApplicationPicker({
   const [menuOpen, setMenuOpen] = useState(false);
   const [testState, setTestState] = useState<TestState>("idle");
   const testRequestRef = useRef(0);
+  const { ref: applicationInputRef, size: applicationInputSize } = useElementSize<HTMLDivElement>({ width: 0, height: 0 });
   const selectedOption = options.find((option) => option.value === value);
   const displayValue = selectedOption?.label ?? value;
 
@@ -90,7 +92,7 @@ export function SettingsApplicationPicker({
   return (
     <>
       <div className="settingsApplicationRow">
-        <div className="settingsApplicationInput">
+        <div ref={applicationInputRef} className="settingsApplicationInput">
           <input
             id={id}
             className="settingsSelect"
@@ -120,13 +122,21 @@ export function SettingsApplicationPicker({
               </IconButton>
             </DropdownMenu.Trigger>
             <DropdownMenu.Portal>
-              <DropdownMenu.Content className="skillMenuContent settingsSelectContent" align="end" sideOffset={6}>
+              <DropdownMenu.Content
+                className="skillMenuContent settingsSelectContent"
+                style={{ minWidth: applicationInputSize.width || undefined }}
+                align="end"
+                sideOffset={6}
+              >
                 {options.map((option) => (
                   <DropdownMenu.Item
-                    className="skillMenuItem"
+                    className="skillMenuItem selectItemIndicatorRight"
                     key={option.value}
                     onSelect={() => chooseOption(option.value)}
                   >
+                    <span className="selectItemLeadingIcon" aria-hidden="true">
+                      {option.value === value ? <Check className="selectItemIndicator" size={14} /> : null}
+                    </span>
                     {option.available === false ? `${option.label} (not found)` : option.label}
                   </DropdownMenu.Item>
                 ))}
@@ -135,10 +145,9 @@ export function SettingsApplicationPicker({
           </DropdownMenu.Root>
         </div>
         <StatefulButton
-          className="settingsApplicationTestButton"
           size="sm"
-          width={38}
-          minWidth={38}
+          width={30}
+          minWidth={30}
           state={testState}
           aria-label={testLabel}
           disabled={!value.trim()}

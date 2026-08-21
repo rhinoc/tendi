@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use walkdir::WalkDir;
 
-use crate::{git, skills::AgentKind};
+use crate::{git, providers::cursor::find_cursor_store_db, skills::AgentKind};
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct SessionTokenUsage {
@@ -127,8 +127,7 @@ impl SessionScanCache {
         let (file_mtime, file_size) = file_state(path)?;
         (entry.file_mtime == file_mtime
             && entry.file_size == file_size
-            && !session_preview_requires_rescan(&entry.session)
-            && !session_title_requires_rescan(&entry.session))
+            && !session_requires_rescan(&entry.session))
         .then(|| entry.session.clone())
     }
 
@@ -140,8 +139,7 @@ impl SessionScanCache {
             let (file_mtime, file_size) = file_state(&entry.session.path)?;
             (entry.file_mtime == file_mtime
                 && entry.file_size == file_size
-                && !session_preview_requires_rescan(&entry.session)
-                && !session_title_requires_rescan(&entry.session))
+                && !session_requires_rescan(&entry.session))
             .then(|| entry.session.clone())
         })
     }
@@ -154,8 +152,7 @@ impl SessionScanCache {
         if current_size <= cached_size
             || file_mtime < entry.file_mtime
             || !is_line_boundary(path, cached_size)
-            || session_preview_requires_rescan(&entry.session)
-            || session_title_requires_rescan(&entry.session)
+            || session_requires_rescan(&entry.session)
         {
             return None;
         }
@@ -700,7 +697,7 @@ fn is_line_boundary(path: &Path, offset: u64) -> bool {
 
 pub fn infer_session_project(path: &Path, agent: AgentKind) -> Option<PathBuf> {
     let project = if path.extension().is_some_and(|ext| ext == "jsonl") {
-        let meta = scan_jsonl_meta(path);
+        let meta = scan_jsonl_meta_for_agent(path, Some(agent));
         meta.project
     } else if path.file_name().and_then(|name| name.to_str()) == Some("meta.json") {
         fs::read_to_string(path)
@@ -821,7 +818,7 @@ pub(crate) fn scan_codex_jsonl(
                 continue;
             }
         }
-        let meta = scan_jsonl_meta(&path);
+        let meta = scan_jsonl_meta_for_agent(&path, Some(AgentKind::Codex));
         if !meta.has_content {
             continue;
         }
@@ -972,7 +969,7 @@ fn scan_detected_jsonl_session(
             }
         }
     }
-    let meta = scan_jsonl_meta(path);
+    let meta = scan_jsonl_meta_for_agent(path, Some(agent));
     if !meta.has_content {
         return;
     }
@@ -1072,7 +1069,7 @@ pub(crate) fn scan_claude_projects(
             sessions.push(session);
             continue;
         }
-        let meta = scan_jsonl_meta(&path);
+        let meta = scan_jsonl_meta_for_agent(&path, Some(AgentKind::Claude));
         if !meta.has_content {
             continue;
         }
@@ -1212,12 +1209,13 @@ struct JsonlMeta {
     repository_url: Option<String>,
     title: Option<String>,
     title_candidates: Vec<String>,
+    task_name: Option<String>,
     model: Option<String>,
     parent_session_id: Option<String>,
     token_usage: Option<SessionTokenUsage>,
 }
 
-fn scan_jsonl_meta(path: &Path) -> JsonlMeta {
+fn scan_jsonl_meta_for_agent(path: &Path, agent: Option<AgentKind>) -> JsonlMeta {
     let Ok(file) = fs::File::open(path) else {
         return JsonlMeta::default();
     };
@@ -1228,11 +1226,17 @@ fn scan_jsonl_meta(path: &Path) -> JsonlMeta {
         ..Default::default()
     };
     let mut claude_message_usage = BTreeMap::new();
+    let inherited_history_start_ordinal = agent.and_then(|agent| {
+        crate::transcript::transcript_inherited_history_start_ordinal(path, agent)
+            .ok()
+            .flatten()
+    });
 
     scan_jsonl_meta_lines(
         BufReader::new(file).lines().map_while(Result::ok),
         &mut meta,
         &mut claude_message_usage,
+        inherited_history_start_ordinal,
     );
     finalize_jsonl_title(&mut meta);
 
@@ -1264,15 +1268,21 @@ fn scan_jsonl_meta_from_offset(
         repository_url: session.repository_url,
         title: session.title,
         title_candidates: Vec::new(),
+        task_name: None,
         model: session.model,
         parent_session_id: session.parent_session_id,
         token_usage: session.token_usage,
     };
     let mut claude_message_usage = BTreeMap::new();
+    let inherited_history_start_ordinal =
+        crate::transcript::transcript_inherited_history_start_ordinal(path, session.agent)
+            .ok()
+            .flatten();
     scan_jsonl_meta_lines(
         BufReader::new(file).lines().map_while(Result::ok),
         &mut meta,
         &mut claude_message_usage,
+        inherited_history_start_ordinal,
     );
     finalize_jsonl_title(&mut meta);
 
@@ -1302,6 +1312,7 @@ fn scan_jsonl_meta_lines<I, S>(
     lines: I,
     meta: &mut JsonlMeta,
     claude_message_usage: &mut BTreeMap<String, SessionTokenUsage>,
+    inherited_history_start_ordinal: Option<u64>,
 ) where
     I: IntoIterator<Item = S>,
     S: AsRef<str>,
@@ -1323,6 +1334,16 @@ fn scan_jsonl_meta_lines<I, S>(
         let Ok(value) = serde_json::from_str::<Value>(line) else {
             continue;
         };
+        if meta.task_name.is_none() {
+            meta.task_name = extract_session_task_name(&value);
+        }
+        if meta.parent_session_id.is_none() {
+            meta.parent_session_id = extract_parent_session_id(&value);
+        }
+        if crate::transcript::is_inherited_transcript_value(&value, inherited_history_start_ordinal)
+        {
+            continue;
+        }
         if let Some(title) = extract_session_title(&value) {
             meta.turn_count = meta.turn_count.map(|count| count + 1);
             meta.title_candidates.push(title);
@@ -1365,9 +1386,6 @@ fn scan_jsonl_meta_lines<I, S>(
         if let Some(model) = extract_session_model(&value) {
             meta.model = Some(model);
         }
-        if meta.parent_session_id.is_none() {
-            meta.parent_session_id = extract_parent_session_id(&value);
-        }
         if let Some(token_usage) = extract_codex_token_usage(&value) {
             meta.token_usage = Some(token_usage);
         }
@@ -1381,11 +1399,13 @@ fn finalize_jsonl_title(meta: &mut JsonlMeta) {
     if meta.title.is_some() {
         return;
     }
-    meta.title = if meta.parent_session_id.is_some() {
-        meta.title_candidates.last().cloned()
-    } else {
-        meta.title_candidates.first().cloned()
-    };
+    if meta.parent_session_id.is_some() {
+        if let Some(task_name) = meta.task_name.clone() {
+            meta.title = Some(task_name);
+            return;
+        }
+    }
+    meta.title = meta.title_candidates.first().cloned();
 }
 
 const METADATA_HINT_PREFIX_BYTES: usize = 16 * 1024;
@@ -1537,6 +1557,32 @@ fn extract_parent_session_id(value: &Value) -> Option<String> {
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|id| !id.is_empty())
+        .map(str::to_string)
+}
+
+fn extract_session_task_name(value: &Value) -> Option<String> {
+    if value.get("type").and_then(Value::as_str) != Some("session_meta") {
+        return None;
+    }
+
+    let task_name = value
+        .pointer("/payload/source/subagent/thread_spawn/task_name")
+        .or_else(|| value.pointer("/payload/task_name"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|task_name| !task_name.is_empty())
+        .map(str::to_string);
+    if task_name.is_some() {
+        return task_name;
+    }
+
+    value
+        .pointer("/payload/source/subagent/thread_spawn/agent_path")
+        .or_else(|| value.pointer("/payload/agent_path"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|agent_path| !agent_path.is_empty())
+        .and_then(|agent_path| agent_path.rsplit('/').find(|part| !part.is_empty()))
         .map(str::to_string)
 }
 
@@ -1885,7 +1931,7 @@ pub(crate) fn scan_cursor_agent_transcripts(
             }
         }
         let file_updated_at = file_modified_iso(&path);
-        let meta = scan_jsonl_meta(&path);
+        let meta = scan_jsonl_meta_for_agent(&path, Some(AgentKind::Cursor));
         if !meta.has_content {
             continue;
         }
@@ -1931,6 +1977,7 @@ struct CursorStoreMeta {
     updated_at: Option<String>,
     title: Option<String>,
     model: Option<String>,
+    models: Vec<String>,
     mode: Option<String>,
     approval_mode: Option<String>,
     is_run_everything: Option<bool>,
@@ -2139,6 +2186,7 @@ fn scan_cursor_store_db(path: Option<PathBuf>) -> CursorStoreMeta {
     let mut first_user_message = None;
     let mut last_user_message = None;
     let mut last_assistant_message = None;
+    let mut models = Vec::new();
     if let Ok(mut statement) = connection.prepare("select data from blobs") {
         if let Ok(rows) = statement.query_map([], |row| row.get::<_, Vec<u8>>(0)) {
             for bytes in rows.filter_map(Result::ok) {
@@ -2154,8 +2202,11 @@ fn scan_cursor_store_db(path: Option<PathBuf>) -> CursorStoreMeta {
                 if title.is_none() {
                     title = extract_session_title(&value);
                 }
-                if model.is_none() {
-                    model = extract_cursor_blob_model(&value);
+                if let Some(blob_model) = extract_cursor_blob_model(&value) {
+                    if model.is_none() {
+                        model = Some(blob_model.clone());
+                    }
+                    models.push(blob_model);
                 }
                 if let Some((role, body)) = extract_session_message(&value) {
                     if let Some(body) = clean_preview_text(&body) {
@@ -2185,6 +2236,7 @@ fn scan_cursor_store_db(path: Option<PathBuf>) -> CursorStoreMeta {
         updated_at: None,
         title,
         model,
+        models,
         mode,
         approval_mode,
         is_run_everything,
@@ -2192,6 +2244,15 @@ fn scan_cursor_store_db(path: Option<PathBuf>) -> CursorStoreMeta {
     };
     cursor_store_cache_put(&path, version, meta.clone());
     meta
+}
+
+pub(crate) fn cursor_store_models_for_path(path: &Path) -> Vec<String> {
+    let store_path = (path.is_file() && path.file_name().and_then(|name| name.to_str()) == Some("store.db"))
+        .then(|| path.to_path_buf())
+        .or_else(|| find_cursor_store_db(path));
+    store_path
+        .map(|store_path| scan_cursor_store_db(Some(store_path)).models)
+        .unwrap_or_default()
 }
 
 fn cursor_store_model(value: &Value) -> Option<String> {
@@ -2634,18 +2695,76 @@ fn session_preview_requires_rescan(session: &SessionRecord) -> bool {
     .any(|text| contains_internal_context(text) || contains_image_marker(text))
 }
 
+fn session_requires_rescan(session: &SessionRecord) -> bool {
+    if session_preview_requires_rescan(session) {
+        return true;
+    }
+    if session.agent == AgentKind::Codex && session.parent_session_id.is_some() {
+        if let Some(meta) = codex_session_meta(&session.path) {
+            return meta.title != session.title
+                || meta.first_user_message != session.first_user_message
+                || meta.last_user_message != session.last_user_message
+                || meta.last_assistant_message != session.last_assistant_message
+                || meta.parent_session_id != session.parent_session_id;
+        }
+    }
+    session_title_requires_rescan(session)
+}
+
 fn session_title_requires_rescan(session: &SessionRecord) -> bool {
+    let Some(title) = session.title.as_deref() else {
+        return session.parent_session_id.is_some()
+            || session.turn_count.is_some_and(|count| count > 0);
+    };
     if session.parent_session_id.is_none() {
         return false;
     }
-    let Some(title) = session.title.as_deref() else {
-        return true;
-    };
+    if session.agent == AgentKind::Codex {
+        if let Some(expected_title) = codex_session_title(&session.path) {
+            return expected_title != title;
+        }
+    }
     session
-        .last_user_message
+        .first_user_message
         .as_deref()
         .and_then(|message| clean_title(message))
-        .is_some_and(|last_title| last_title != title)
+        .is_some_and(|first_title| first_title != title)
+}
+
+fn codex_session_meta(path: &Path) -> Option<JsonlMeta> {
+    path.is_file()
+        .then(|| scan_jsonl_meta_for_agent(path, Some(AgentKind::Codex)))
+}
+
+fn codex_session_title(path: &Path) -> Option<String> {
+    if path
+        .extension()
+        .is_none_or(|extension| extension != "jsonl")
+    {
+        return None;
+    }
+    let file = fs::File::open(path).ok()?;
+    let inherited_history_start_ordinal =
+        crate::transcript::transcript_inherited_history_start_ordinal(path, AgentKind::Codex)
+            .ok()
+            .flatten();
+    let mut task_name = None;
+    for line in BufReader::new(file).lines().map_while(Result::ok) {
+        let Ok(value) = serde_json::from_str::<Value>(&line) else {
+            continue;
+        };
+        if task_name.is_none() {
+            task_name = extract_session_task_name(&value);
+        }
+        if crate::transcript::is_inherited_transcript_value(&value, inherited_history_start_ordinal)
+        {
+            continue;
+        }
+        if let Some(title) = extract_session_title(&value) {
+            return task_name.or(Some(title));
+        }
+    }
+    task_name
 }
 
 fn extract_tag_body<'a>(text: &'a str, tag: &str) -> Option<&'a str> {
@@ -2721,14 +2840,16 @@ mod tests {
 
     use super::{
         SESSION_PREVIEW_MAX_CHARS, SessionRecord, SessionRepositoryResolver, SessionScanCache,
-        SessionScanCacheEntry, clean_preview_text, clean_title, collect_recent_codex_paths,
-        collect_tutti_run_session_paths, cursor_store_cache_full_scans, cursor_store_model,
-        cursor_time_field, decode_cursor_project_dir, extract_cursor_blob_model,
-        extract_parent_session_id, extract_session_title, file_state, infer_session_project,
-        merge_sessions, normalize_session_projects, repository_from_git_snapshot,
-        scan_additional_session_roots, scan_codex_index, scan_codex_jsonl,
-        scan_cursor_agent_transcripts, scan_cursor_meta, scan_cursor_store_db, scan_jsonl_meta,
-        session_watch_plan, should_replace_session_path, title_from_project_path, unix_ms_to_iso,
+        SessionScanCacheEntry, clean_preview_text, clean_title, codex_session_title,
+        collect_recent_codex_paths, collect_tutti_run_session_paths, cursor_store_cache_full_scans,
+        cursor_store_model, cursor_time_field, decode_cursor_project_dir,
+        extract_cursor_blob_model, extract_parent_session_id, extract_session_task_name,
+        extract_session_title, file_state, infer_session_project, merge_sessions,
+        normalize_session_projects, repository_from_git_snapshot, scan_additional_session_roots,
+        scan_codex_index, scan_codex_jsonl, scan_cursor_agent_transcripts, scan_cursor_meta,
+        scan_cursor_store_db, scan_jsonl_meta_for_agent, session_requires_rescan,
+        session_title_requires_rescan, session_watch_plan, should_replace_session_path,
+        title_from_project_path, unix_ms_to_iso,
     };
 
     fn temp_dir(prefix: &str) -> PathBuf {
@@ -3109,7 +3230,7 @@ mod tests {
         scan_codex_jsonl(&root, &mut sessions, None);
 
         assert!(sessions.is_empty());
-        assert!(!scan_jsonl_meta(&path).has_content);
+        assert!(!scan_jsonl_meta_for_agent(&path, None).has_content);
 
         fs::remove_dir_all(root).unwrap();
     }
@@ -3251,6 +3372,39 @@ mod tests {
         let mut invalidated_scan = Vec::new();
         scan_codex_jsonl(&root, &mut invalidated_scan, Some(&cache));
         assert_eq!(invalidated_scan[0].message_count, Some(2));
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn cached_codex_session_without_title_is_rechecked() {
+        let root = temp_dir("tendi-titleless-session-scan-cache-test");
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("rollout-12345678-1234-1234-1234-123456789012.jsonl");
+        fs::write(
+            &path,
+            r#"{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Real request"}]}}"#,
+        )
+        .unwrap();
+
+        let mut first_scan = Vec::new();
+        scan_codex_jsonl(&root, &mut first_scan, None);
+        assert_eq!(first_scan[0].title.as_deref(), Some("Real request"));
+        assert!(first_scan[0].turn_count.is_some_and(|count| count > 0));
+
+        let (file_mtime, file_size) = file_state(&path).unwrap();
+        let mut cached_session = first_scan[0].clone();
+        cached_session.title = None;
+        let cache = SessionScanCache::from_entries([SessionScanCacheEntry {
+            session: cached_session,
+            file_mtime,
+            file_size,
+        }]);
+
+        let mut rescanned = Vec::new();
+        scan_codex_jsonl(&root, &mut rescanned, Some(&cache));
+
+        assert_eq!(rescanned[0].title.as_deref(), Some("Real request"));
 
         fs::remove_dir_all(root).unwrap();
     }
@@ -3507,33 +3661,41 @@ mod tests {
     }
 
     #[test]
-    fn child_jsonl_title_prefers_task_after_inherited_parent_prompt() {
+    fn child_jsonl_title_skips_inherited_history_without_spawn_task_name() {
         let root = temp_dir("tendi-child-title-test");
         fs::create_dir_all(&root).unwrap();
         let path = root.join("rollout-12345678-1234-1234-1234-123456789012.jsonl");
         fs::write(
             &path,
             [
-                r#"{"type":"session_meta","payload":{"parent_thread_id":"parent-id"}}"#,
-                r#"{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Parent orchestration"}]}}"#,
-                r#"{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Inherited label"}]}}"#,
-                r#"{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Child-specific task"}]}}"#,
+                r#"{"ordinal":0,"type":"session_meta","payload":{"parent_thread_id":"parent-id","thread_source":"subagent","subagent_history_start_ordinal":3}}"#,
+                r#"{"ordinal":1,"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Parent orchestration"}]}}"#,
+                r#"{"ordinal":2,"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Inherited label"}]}}"#,
+                r#"{"ordinal":3,"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Child-specific task"}]}}"#,
+                r#"{"ordinal":4,"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Follow-up"}]}}"#,
             ]
             .join("\n"),
         )
         .unwrap();
 
         assert_eq!(
-            scan_jsonl_meta(&path).title.as_deref(),
+            scan_jsonl_meta_for_agent(&path, Some(AgentKind::Codex))
+                .title
+                .as_deref(),
             Some("Child-specific task")
         );
 
         let mut first_scan = Vec::new();
         scan_codex_jsonl(&root, &mut first_scan, None);
+        assert_eq!(
+            codex_session_title(&path).as_deref(),
+            Some("Child-specific task")
+        );
         let (file_mtime, file_size) = file_state(&path).unwrap();
         let mut cached_session = first_scan[0].clone();
-        cached_session.title = Some("Inherited label".to_string());
-        cached_session.first_user_message = Some("Parent orchestration".to_string());
+        cached_session.title = Some("Follow-up".to_string());
+        cached_session.first_user_message = Some("Inherited label".to_string());
+        assert!(session_title_requires_rescan(&cached_session));
         let cache = SessionScanCache::from_entries([SessionScanCacheEntry {
             session: cached_session,
             file_mtime,
@@ -3544,6 +3706,101 @@ mod tests {
         scan_codex_jsonl(&root, &mut rescanned, Some(&cache));
 
         assert_eq!(rescanned[0].title.as_deref(), Some("Child-specific task"));
+        assert_eq!(
+            rescanned[0].first_user_message.as_deref(),
+            Some("Child-specific task")
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn child_jsonl_title_uses_spawn_task_name_and_refreshes_cached_parent_title() {
+        let root = temp_dir("tendi-child-spawn-task-title-test");
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("rollout-12345678-1234-1234-1234-123456789012.jsonl");
+        fs::write(
+            &path,
+            [
+                r#"{"type":"session_meta","payload":{"parent_thread_id":"parent-id","source":{"subagent":{"thread_spawn":{"parent_thread_id":"parent-id","task_name":"composer_connection_reuse","agent_path":"/root/legacy_name","agent_nickname":"Schrodinger"}}},"agent_path":"/root/legacy_name"}}"#,
+                r#"{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Parent orchestration"}]}}"#,
+            ]
+            .join("\n"),
+        )
+        .unwrap();
+
+        assert_eq!(
+            scan_jsonl_meta_for_agent(&path, None).title.as_deref(),
+            Some("composer_connection_reuse")
+        );
+
+        let mut first_scan = Vec::new();
+        scan_codex_jsonl(&root, &mut first_scan, None);
+        let (file_mtime, file_size) = file_state(&path).unwrap();
+        let mut cached_session = first_scan[0].clone();
+        cached_session.title = Some("Parent orchestration".to_string());
+        let cache = SessionScanCache::from_entries([SessionScanCacheEntry {
+            session: cached_session,
+            file_mtime,
+            file_size,
+        }]);
+
+        let mut rescanned = Vec::new();
+        scan_codex_jsonl(&root, &mut rescanned, Some(&cache));
+
+        assert_eq!(
+            rescanned[0].title.as_deref(),
+            Some("composer_connection_reuse")
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn child_jsonl_cache_clears_inherited_preview_without_child_user_message() {
+        let root = temp_dir("tendi-child-preview-boundary-test");
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("rollout-12345678-1234-1234-1234-123456789012.jsonl");
+        fs::write(
+            &path,
+            [
+                r#"{"ordinal":0,"type":"session_meta","payload":{"parent_thread_id":"parent-id","thread_source":"subagent","subagent_history_start_ordinal":2,"source":{"subagent":{"thread_spawn":{"parent_thread_id":"parent-id","task_name":"child_without_user"}}}}}"#,
+                r#"{"ordinal":1,"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Parent user message"}]}}"#,
+                r#"{"ordinal":2,"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Child response"}]}}"#,
+                r#"{"ordinal":3,"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Child follow-up"}]}}"#,
+            ]
+            .join("\n"),
+        )
+        .unwrap();
+
+        let mut first_scan = Vec::new();
+        scan_codex_jsonl(&root, &mut first_scan, None);
+        assert_eq!(first_scan[0].title.as_deref(), Some("child_without_user"));
+        assert_eq!(first_scan[0].first_user_message, None);
+        assert_eq!(first_scan[0].last_user_message, None);
+        assert_eq!(
+            first_scan[0].last_assistant_message.as_deref(),
+            Some("Child follow-up")
+        );
+
+        let (file_mtime, file_size) = file_state(&path).unwrap();
+        let mut cached_session = first_scan[0].clone();
+        cached_session.first_user_message = Some("Parent user message".to_string());
+        cached_session.last_user_message = Some("Parent user message".to_string());
+        assert!(session_requires_rescan(&cached_session));
+        let cache = SessionScanCache::from_entries([SessionScanCacheEntry {
+            session: cached_session,
+            file_mtime,
+            file_size,
+        }]);
+
+        let mut rescanned = Vec::new();
+        scan_codex_jsonl(&root, &mut rescanned, Some(&cache));
+
+        assert_eq!(rescanned[0].first_user_message, None);
+        assert_eq!(rescanned[0].last_user_message, None);
+        assert_eq!(
+            rescanned[0].last_assistant_message.as_deref(),
+            Some("Child follow-up")
+        );
         let _ = fs::remove_dir_all(root);
     }
 
@@ -3588,7 +3845,7 @@ mod tests {
         )
         .unwrap();
 
-        let meta = scan_jsonl_meta(&path);
+        let meta = scan_jsonl_meta_for_agent(&path, None);
 
         assert_eq!(meta.message_count, Some(6));
         assert_eq!(meta.turn_count, Some(2));
@@ -3616,7 +3873,7 @@ mod tests {
         )
         .unwrap();
 
-        let meta = scan_jsonl_meta(&path);
+        let meta = scan_jsonl_meta_for_agent(&path, None);
 
         assert_eq!(meta.started_at.as_deref(), Some("2026-08-12T10:00:00Z"));
         assert_eq!(meta.updated_at.as_deref(), Some("2026-08-12T10:00:01Z"));
@@ -3648,11 +3905,15 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            scan_jsonl_meta(&codex_path).model.as_deref(),
+            scan_jsonl_meta_for_agent(&codex_path, None)
+                .model
+                .as_deref(),
             Some("gpt-5.6-sol")
         );
         assert_eq!(
-            scan_jsonl_meta(&claude_path).model.as_deref(),
+            scan_jsonl_meta_for_agent(&claude_path, None)
+                .model
+                .as_deref(),
             Some("claude-opus-4-1")
         );
         let _ = fs::remove_dir_all(root);
@@ -3682,6 +3943,41 @@ mod tests {
         assert_eq!(
             extract_parent_session_id(&nested).as_deref(),
             Some("parent-nested")
+        );
+
+        let task_name = json!({
+            "type": "session_meta",
+            "payload": {
+                "source": {
+                    "subagent": {
+                        "thread_spawn": {
+                            "task_name": "explicit_task_name",
+                            "agent_path": "/root/legacy_name"
+                        }
+                    }
+                }
+            }
+        });
+        assert_eq!(
+            extract_session_task_name(&task_name).as_deref(),
+            Some("explicit_task_name")
+        );
+
+        let legacy_agent_path = json!({
+            "type": "session_meta",
+            "payload": {
+                "source": {
+                    "subagent": {
+                        "thread_spawn": {
+                            "agent_path": "/root/shared_appserver_final_audit"
+                        }
+                    }
+                }
+            }
+        });
+        assert_eq!(
+            extract_session_task_name(&legacy_agent_path).as_deref(),
+            Some("shared_appserver_final_audit")
         );
     }
 
@@ -4055,7 +4351,7 @@ mod tests {
         )
         .unwrap();
 
-        let usage = scan_jsonl_meta(&path).token_usage.unwrap();
+        let usage = scan_jsonl_meta_for_agent(&path, None).token_usage.unwrap();
 
         assert_eq!(usage.input_tokens, 250);
         assert_eq!(usage.cached_input_tokens, 175);
@@ -4082,7 +4378,7 @@ mod tests {
         )
         .unwrap();
 
-        let usage = scan_jsonl_meta(&path).token_usage.unwrap();
+        let usage = scan_jsonl_meta_for_agent(&path, None).token_usage.unwrap();
 
         assert_eq!(usage.input_tokens, 160);
         assert_eq!(usage.cached_input_tokens, 125);

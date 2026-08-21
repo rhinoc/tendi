@@ -2,8 +2,8 @@ import { forwardRef, type ButtonHTMLAttributes, type ReactNode } from "react";
 
 import "./Button.css";
 
-export type ButtonVariant = "primary" | "secondary" | "ghost" | "danger";
-export type ButtonSize = "sm" | "md" | "lg";
+export type ButtonVariant = "primary" | "secondary" | "ghost" | "danger" | "icon";
+export type ButtonSize = "sm";
 
 export type ButtonProps = Omit<ButtonHTMLAttributes<HTMLButtonElement>, "className"> & {
   variant?: ButtonVariant;
@@ -14,7 +14,7 @@ export type ButtonProps = Omit<ButtonHTMLAttributes<HTMLButtonElement>, "classNa
 
 export const Button = forwardRef<HTMLButtonElement, ButtonProps>(function Button({
   variant = "secondary",
-  size = "md",
+  size = "sm",
   className = "",
   type = "button",
   ...buttonProps

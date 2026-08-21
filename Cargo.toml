@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "crates/tendi-core",
+    "crates/tendi-daemon",
     "crates/tendi-cli",
     "apps/desktop/src-tauri",
 ]

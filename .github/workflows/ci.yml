@@ -29,6 +29,9 @@ jobs:
       - name: Check frontend UI boundaries
         run: npm run check:ui-boundaries --prefix apps/desktop
 
+      - name: Check frontend typography tokens
+        run: npm run check:typography --prefix apps/desktop
+
       - name: Rust tests
         run: cargo test --workspace
 

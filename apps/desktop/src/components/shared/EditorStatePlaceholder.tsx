@@ -12,7 +12,7 @@ export type EditorStatePlaceholderProps = {
 
 export function EditorStatePlaceholder({ className, label, children }: EditorStatePlaceholderProps) {
   return (
-    <div className={`emptyState editorStatePlaceholder${className ? ` ${className}` : ""}`}>
+    <div className={`editorStatePlaceholder${className ? ` ${className}` : ""}`}>
       {label ? <LoadingState label={label} /> : children}
     </div>
   );

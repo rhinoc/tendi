@@ -4,6 +4,7 @@ import { ChartFrame } from "../components/shared/chart/ChartFrame.tsx";
 import { ChartLegend, type ChartLegendItem } from "../components/shared/chart/ChartLegend.tsx";
 import { ChartTooltipContent, type ChartTooltipDetail } from "../components/shared/chart/ChartTooltipContent.tsx";
 import { Tooltip } from "../components/shared/Tooltip.tsx";
+import { useElementSize } from "../components/shared/useElementSize.ts";
 import { formatDayGroupLabel, friendlyAgent, normalizedAgentKey } from "../lib/index.ts";
 import { groupAnalyticsDays, stepAnalyticsGranularity, type AnalyticsGranularity, type AnalyticsPeriod, type OverviewAnalytics } from "../lib/analytics.ts";
 import { formatTokenCount } from "../lib/token-format.ts";
@@ -16,8 +17,17 @@ const TREND_EDGE_PADDING = 32;
 const TREND_WINDOW_OVERSCAN = 8;
 const TREND_VIRTUALIZATION_LIMIT = 80;
 const TREND_INITIAL_WINDOW_COLUMNS = 64;
+const TREND_ANIMATION_STAGGER_MS = 12;
+const TREND_RUNG_ANIMATION_STAGGER_MS = 8;
+const TREND_ANIMATION_MAX_DELAY_MS = 480;
+const TREND_LABEL_TARGET_GAP = 84;
+const TREND_DEFAULT_VIEWPORT_WIDTH = 640;
+const TREND_PLOT_HEIGHT = 184;
+const CACHE_RATE_MAX = 100;
+const CACHE_RATE_LOG_SCALE = Math.log1p(CACHE_RATE_MAX);
 
 export type OverviewUsageMetric = "sessions" | "turns" | "tokens" | "cache" | "tools" | "skills";
+export type OverviewOlderLoadReason = "auto" | "scroll";
 
 type TrendSegment = {
   key: string;
@@ -59,6 +69,11 @@ type ScrollSnapshot = {
 type TrendWindow = {
   start: number;
   end: number;
+};
+
+type TrendLinePoint = {
+  x: number;
+  y: number;
 };
 
 function periodStartTimestamp(key: string, granularity: AnalyticsGranularity): number {
@@ -106,9 +121,92 @@ function rungWidth(periodIndex: number, rungIndex: number, segmentIndex: number)
   return 74 + (seed % 27);
 }
 
-function cacheRate(period: AnalyticsPeriod): number {
-  if (period.inputTokens <= 0) return 0;
+function cacheRate(period: AnalyticsPeriod): number | null {
+  if (period.inputTokens <= 0) return null;
   return period.cachedInputTokens / period.inputTokens * 100;
+}
+
+function tokensPerResponse(period: AnalyticsPeriod): number | null {
+  if (period.responses <= 0) return null;
+  return period.totalTokens / period.responses;
+}
+
+function tokensPerResponsePlotPosition(value: number, max: number): number {
+  if (max <= 0) return 0;
+  return Math.max(0, Math.min(1, value / max));
+}
+
+function smoothTrendLineSegmentPath(points: TrendLinePoint[]): string {
+  if (!points.length) return "";
+  if (points.length === 1) return `M${points[0].x} ${points[0].y}`;
+
+  let path = `M${points[0].x} ${points[0].y}`;
+  for (let index = 0; index < points.length - 1; index += 1) {
+    const previous = points[index - 1] ?? points[index];
+    const current = points[index];
+    const next = points[index + 1];
+    const following = points[index + 2] ?? next;
+    const controlOne = {
+      x: current.x + (next.x - previous.x) / 6,
+      y: current.y + (next.y - previous.y) / 6,
+    };
+    const controlTwo = {
+      x: next.x - (following.x - current.x) / 6,
+      y: next.y - (following.y - current.y) / 6,
+    };
+    path += ` C${controlOne.x} ${Math.max(0, Math.min(TREND_PLOT_HEIGHT, controlOne.y))} ${controlTwo.x} ${Math.max(0, Math.min(TREND_PLOT_HEIGHT, controlTwo.y))} ${next.x} ${next.y}`;
+  }
+  return path;
+}
+
+function trendLinePath(
+  models: TrendPeriodModel[],
+  valueForPeriod: (period: AnalyticsPeriod) => number | null,
+  plotPosition: (value: number) => number,
+): string {
+  let path = "";
+  let points: TrendLinePoint[] = [];
+  const flush = () => {
+    path += smoothTrendLineSegmentPath(points);
+    points = [];
+  };
+
+  for (const [localIndex, model] of models.entries()) {
+    const value = valueForPeriod(model.period);
+    if (value === null) {
+      flush();
+      continue;
+    }
+    points.push({
+      x: localIndex * TREND_COLUMN_WIDTH + TREND_COLUMN_WIDTH / 2,
+      y: TREND_PLOT_HEIGHT - plotPosition(value) * TREND_PLOT_HEIGHT,
+    });
+  }
+  flush();
+  return path;
+}
+
+function formatTokensPerResponse(value: number): string {
+  return formatTokenCount(value);
+}
+
+function cacheRatePlotPosition(rate: number): number {
+  const clampedRate = Math.max(0, Math.min(CACHE_RATE_MAX, rate));
+  return 1 - Math.log1p(CACHE_RATE_MAX - clampedRate) / CACHE_RATE_LOG_SCALE;
+}
+
+function cacheRateAxisValue(position: number): number {
+  const clampedPosition = Math.max(0, Math.min(1, position));
+  return CACHE_RATE_MAX - Math.expm1((1 - clampedPosition) * CACHE_RATE_LOG_SCALE);
+}
+
+function isCacheTurningPoint(periods: AnalyticsPeriod[], index: number): boolean {
+  if (index <= 0 || index >= periods.length - 1) return false;
+  const previous = cacheRate(periods[index - 1]);
+  const current = cacheRate(periods[index]);
+  const next = cacheRate(periods[index + 1]);
+  if (previous === null || current === null || next === null) return false;
+  return (current > previous && current > next) || (current < previous && current < next);
 }
 
 function callTotal(calls: AnalyticsPeriod["tools"]): number {
@@ -118,7 +216,7 @@ function callTotal(calls: AnalyticsPeriod["tools"]): number {
 function metricValue(period: AnalyticsPeriod, metric: OverviewUsageMetric): number {
   if (metric === "sessions") return period.sessions;
   if (metric === "turns") return period.runs;
-  if (metric === "cache") return cacheRate(period);
+  if (metric === "cache") return cacheRate(period) ?? 0;
   if (metric === "tools") return callTotal(period.tools);
   if (metric === "skills") return callTotal(period.skills);
   return period.totalTokens;
@@ -208,7 +306,11 @@ function periodAriaLabel(
   const peakDate = metric === "sessions" && granularity !== "day" && period.sessionPeakDate
     ? ` Peak day ${formatDayGroupLabel(period.sessionPeakDate)}.`
     : "";
-  return `${period.label}: ${formatMetricValue(metricValue(period, metric), metric)} ${metricLabel(metric, granularity)}.${coverage}${peakDate}${breakdown ? ` ${breakdown}.` : ""}`;
+  const value = metric === "cache" ? cacheRate(period) : metricValue(period, metric);
+  const valueLabel = value === null ? "No data" : `${formatMetricValue(value, metric)} ${metricLabel(metric, granularity)}`;
+  const average = metric === "tokens" ? tokensPerResponse(period) : null;
+  const averageLabel = average === null ? "" : ` Average ${formatTokensPerResponse(average)} tokens per response.`;
+  return `${period.label}: ${valueLabel}.${averageLabel}${coverage}${peakDate}${breakdown ? ` ${breakdown}.` : ""}`;
 }
 
 function turnSegments(period: AnalyticsPeriod): TrendSegment[] {
@@ -270,11 +372,11 @@ export function buildTrendPeriodModel(
     : metric === "sessions"
       ? sessionSegments(period)
       : metric === "cache"
-        ? [{ key: "cache", label: "Cached input rate", value: cacheRate(period), className: "cacheRate" }]
+        ? [{ key: "cache", label: "Cached input rate", value: cacheRate(period) ?? 0, className: "cacheRate" }]
         : turnSegments(period);
   const total = metricValue(period, metric);
-  const totalRungs = total ? Math.max(1, Math.round(total / rungUnit)) : 0;
-  const segmentRungs = apportionRungs(segments.map((segment) => segment.value), totalRungs);
+  const totalRungs = metric === "cache" ? 0 : total ? Math.max(1, Math.round(total / rungUnit)) : 0;
+  const segmentRungs = metric === "cache" ? [] : apportionRungs(segments.map((segment) => segment.value), totalRungs);
   const rungs = segmentRungs.flatMap((count, segmentIndex) => (
     Array.from({ length: count }, (_, rungIndex) => ({
       key: `${segments[segmentIndex].key}-${rungIndex}`,
@@ -317,7 +419,7 @@ export function OverviewTrendChart({
   hasOlder: boolean;
   loadingOlder: boolean;
   metric: OverviewUsageMetric;
-  onLoadOlder: () => void;
+  onLoadOlder: (reason: OverviewOlderLoadReason) => void;
   onGranularityChange?: (granularity: AnalyticsGranularity) => void;
 }) {
   const chartDays = useMemo(() => {
@@ -376,8 +478,9 @@ export function OverviewTrendChart({
   const hasMetricActivity = visible.some((period) => (
     metric === "cache" ? period.inputTokens > 0 : metricValue(period, metric) > 0
   ));
-  const max = metric === "cache" ? 100 : Math.max(1, ...visible.map((period) => metricValue(period, metric)));
-  const maxRungs = metric === "tokens" || metric === "cache"
+  const max = metric === "cache" ? CACHE_RATE_MAX : Math.max(1, ...visible.map((period) => metricValue(period, metric)));
+  const tokensPerResponseMax = Math.max(1, ...visible.map((period) => tokensPerResponse(period) ?? 0));
+  const maxRungs = metric === "tokens"
     ? MAX_RUNG_COUNT
     : Math.min(MAX_RUNG_COUNT, Math.max(1, max));
   const rungUnit = max / maxRungs;
@@ -390,6 +493,15 @@ export function OverviewTrendChart({
   const loadRequestedRef = useRef(false);
   const scrollSnapshotRef = useRef<ScrollSnapshot | null>(null);
   const viewportRef = useRef<HTMLDivElement>(null);
+  const { size: trendViewportSize } = useElementSize<HTMLDivElement>(
+    { width: 0, height: 0 },
+    {
+      ref: viewportRef,
+      readSize: (element) => ({ width: element.clientWidth, height: element.clientHeight }),
+      isValidSize: ({ width }) => width > 0,
+      isEqual: (current, next) => current.width === next.width,
+    },
+  );
   const [trendWindow, setTrendWindow] = useState<TrendWindow>(() => initialTrendWindow(visible.length));
   const pendingFocusIndexRef = useRef<number | null>(null);
   const zoomScaleRef = useRef(1);
@@ -476,9 +588,9 @@ export function OverviewTrendChart({
       && viewport.scrollWidth <= viewport.clientWidth + 1
     ) {
       loadRequestedRef.current = true;
-      onLoadOlder();
+      onLoadOlder("auto");
     }
-  }, [granularity, hasOlder, loadingOlder, metric, onLoadOlder, visible, windowed]);
+  }, [granularity, hasOlder, loadingOlder, metric, onLoadOlder, trendViewportSize.width, visible, windowed]);
 
   useEffect(() => {
     const pendingIndex = pendingFocusIndexRef.current;
@@ -531,7 +643,7 @@ export function OverviewTrendChart({
     syncTrendWindow(viewport);
     if (viewport.scrollLeft > 48 || !hasOlder || loadingOlder || loadRequestedRef.current) return;
     loadRequestedRef.current = true;
-    onLoadOlder();
+    onLoadOlder("scroll");
   };
 
   if (!visible.length || !hasMetricActivity) {
@@ -540,7 +652,7 @@ export function OverviewTrendChart({
         ariaLabelledBy="overview-trend-title"
         legend={<ChartLegend items={[]} />}
         emptyState={(
-          <div className="overviewTrendPlotLayout">
+          <div className={`overviewTrendPlotLayout${metric === "tokens" ? " hasTokensPerResponse" : ""}`}>
             <div className="overviewTrendYAxis" aria-hidden="true">
               <span>—</span>
               <span>—</span>
@@ -561,6 +673,13 @@ export function OverviewTrendChart({
                 <span />
               </div>
             </div>
+            {metric === "tokens" ? (
+              <div className="overviewTrendSecondaryYAxis" aria-hidden="true">
+                <span>—</span>
+                <span>—</span>
+                <span>—</span>
+              </div>
+            ) : null}
           </div>
         )}
       >
@@ -569,7 +688,10 @@ export function OverviewTrendChart({
     );
   }
 
-  const labelStep = Math.max(1, Math.ceil(visible.length / 6));
+  const trendViewportWidth = trendViewportSize.width || TREND_DEFAULT_VIEWPORT_WIDTH;
+  const viewportColumns = Math.max(1, Math.floor(trendViewportWidth / TREND_COLUMN_WIDTH));
+  const targetLabelCount = Math.max(4, Math.floor(trendViewportWidth / TREND_LABEL_TARGET_GAP));
+  const labelStep = Math.max(1, Math.ceil(Math.min(visible.length, viewportColumns) / targetLabelCount));
   const moveSelection = (event: KeyboardEvent<HTMLButtonElement>, index: number) => {
     let nextIndex = index;
     if (event.key === "ArrowLeft") nextIndex = Math.max(0, index - 1);
@@ -589,19 +711,25 @@ export function OverviewTrendChart({
     }
   };
 
-  const legend: ChartLegendItem[] = metric === "tokens" || metric === "tools" || metric === "skills"
+  const legend: ChartLegendItem[] = metric === "tokens"
+    ? [
+        ...topCategories.map((item, index) => ({ key: item.key, label: item.label, swatchClassName: `category${index}` })),
+        ...(hasOtherCategories ? [{ key: "other", label: "Other", swatchClassName: "categoryOther" }] : []),
+        { key: "tokensPerResponse", label: "Avg tokens / response", swatchClassName: "tokensPerResponse" },
+      ]
+    : metric === "tools" || metric === "skills"
     ? [
         ...topCategories.map((item, index) => ({ key: item.key, label: item.label, swatchClassName: `category${index}` })),
         ...(hasOtherCategories ? [{ key: "other", label: "Other", swatchClassName: "categoryOther" }] : []),
       ]
-    : metric === "sessions"
-      ? sessionAgentKeys.map((agent) => ({
+      : metric === "sessions"
+        ? sessionAgentKeys.map((agent) => ({
           key: `session-agent:${agent}`,
           label: sessionAgentLabel(agent),
           swatchClassName: sessionAgentClass(agent),
         }))
       : metric === "cache"
-        ? [{ key: "cache", label: "Cached input rate", swatchClassName: "cacheRate" }]
+        ? []
         : [
           { key: "completed", label: "Completed", swatchClassName: "statusCompleted" },
           { key: "aborted", label: "Aborted", swatchClassName: "statusAborted" },
@@ -609,6 +737,22 @@ export function OverviewTrendChart({
         ];
   const renderedModels = periodModels;
   const renderedPeriods = visible.slice(windowStart, windowEnd);
+  const cacheLinePath = metric === "cache"
+    ? trendLinePath(renderedModels, cacheRate, cacheRatePlotPosition)
+    : "";
+  const tokensPerResponsePath = metric === "tokens"
+    ? trendLinePath(
+      renderedModels,
+      tokensPerResponse,
+      (value) => tokensPerResponsePlotPosition(value, tokensPerResponseMax),
+    )
+    : "";
+  const yAxisValues = metric === "cache"
+    ? [CACHE_RATE_MAX, cacheRateAxisValue(0.5), 0]
+    : [max, max / 2, 0];
+  const secondaryYAxisValues = metric === "tokens"
+    ? [tokensPerResponseMax, tokensPerResponseMax / 2, 0]
+    : [];
   const windowStyle = windowed
     ? {
         minWidth: 0,
@@ -621,7 +765,7 @@ export function OverviewTrendChart({
   return (
     <ChartFrame
       ariaLabel={`${metricLabel(metric, granularity)} trend`}
-      legend={(
+      legend={metric === "cache" ? <ChartLegend items={[]} /> : (
         <ChartLegend
           items={legend.map((item) => ({
             ...item,
@@ -633,13 +777,13 @@ export function OverviewTrendChart({
     >
       <p id="overview-trend-instructions" className="overviewVisuallyHidden">
         {granularity === "day" ? null : "Click a period to zoom in. "}
+        {metric === "tokens" ? "The line shows average tokens per response. " : null}
+        {metric === "cache" ? "Cache rate uses a logarithmic scale based on uncached input. " : null}
         Use Left and Right Arrow keys to inspect periods. Use Home and End to jump to the first or last period.
       </p>
-      <div className="overviewTrendPlotLayout">
+      <div className={`overviewTrendPlotLayout${metric === "tokens" ? " hasTokensPerResponse" : ""}`}>
         <div className="overviewTrendYAxis" aria-hidden="true">
-          <span>{formatMetricValue(max, metric)}</span>
-          <span>{formatMetricValue(max / 2, metric)}</span>
-          <span>{formatMetricValue(0, metric)}</span>
+          {yAxisValues.map((value) => <span key={value}>{formatMetricValue(value, metric)}</span>)}
         </div>
         <div
           className="overviewTrendViewport"
@@ -661,10 +805,34 @@ export function OverviewTrendChart({
               aria-describedby="overview-trend-instructions"
               style={windowStyle}
             >
-              {renderedModels.map(({ period, index, total, totalRungs, segments, rungs, tooltipSegments }) => {
+              {metric === "tokens" ? (
+                <svg
+                  className="overviewTrendLine"
+                  viewBox={`0 0 ${Math.max(1, renderedModels.length) * TREND_COLUMN_WIDTH} ${TREND_PLOT_HEIGHT}`}
+                  preserveAspectRatio="none"
+                  aria-hidden="true"
+                >
+                  <path className="overviewTrendLinePath" d={tokensPerResponsePath} />
+                </svg>
+              ) : metric === "cache" ? (
+                <svg
+                  className="overviewTrendLine"
+                  viewBox={`0 0 ${Math.max(1, renderedModels.length) * TREND_COLUMN_WIDTH} ${TREND_PLOT_HEIGHT}`}
+                  preserveAspectRatio="none"
+                  aria-hidden="true"
+                >
+                  <path className="overviewTrendLinePath" d={cacheLinePath} />
+                </svg>
+              ) : null}
+              {renderedModels.map(({ period, index, total, totalRungs, segments, rungs, tooltipSegments }, localIndex) => {
                 const isActive = period.key === activeKey;
                 const isHovered = period.key === hoveredKey;
                 const isPeak = period.key === peakPeriod.key;
+                const showValueLabel = metric === "cache"
+                  ? isCacheTurningPoint(visible, index)
+                  : isPeak;
+                const cacheValue = metric === "cache" ? cacheRate(period) : null;
+                const tokensPerResponseValue = metric === "tokens" ? tokensPerResponse(period) : null;
                 return (
                   <Tooltip
                     key={period.key}
@@ -672,7 +840,18 @@ export function OverviewTrendChart({
                     content={(
                       <ChartTooltipContent
                         title={period.label}
-                        value={`${formatMetricValue(total, metric)} ${metricLabel(metric, granularity)}`}
+                        value={metric === "tokens" ? (
+                          <span className="overviewTrendTooltipValues">
+                            <span>{formatMetricValue(total, metric)} total tokens</span>
+                            <strong>
+                              {tokensPerResponseValue === null
+                                ? "— avg / response"
+                                : `${formatTokensPerResponse(tokensPerResponseValue)} avg / response`}
+                            </strong>
+                          </span>
+                        ) : metric === "cache" && cacheValue === null
+                          ? "No cache rate"
+                          : `${formatMetricValue(total, metric)} ${metricLabel(metric, granularity)}`}
                         details={tooltipSegments.map((segment): ChartTooltipDetail => ({
                           key: segment.key,
                           label: segment.label,
@@ -690,11 +869,14 @@ export function OverviewTrendChart({
                           </p>
                         ) : metric === "cache" ? (
                             <p className="chartTooltipMeta">
-                            {period.cachedInputTokens.toLocaleString()} cached of {period.inputTokens.toLocaleString()} input tokens
+                            {cacheValue === null
+                              ? "No input tokens"
+                              : `${formatTokenCount(period.cachedInputTokens)} cached of ${formatTokenCount(period.inputTokens)} input tokens`}
                           </p>
                         ) : metric === "tokens" ? (
                             <p className="chartTooltipMeta">
-                            {period.responses.toLocaleString()} responses · {period.compacted.toLocaleString()} compactions
+                            {period.responses.toLocaleString()} responses
+                            {` · ${period.compacted.toLocaleString()} compactions`}
                           </p>
                         ) : metric === "turns" ? (
                             <p className="chartTooltipMeta">
@@ -718,25 +900,46 @@ export function OverviewTrendChart({
                       onMouseLeave={() => setHoveredKey(null)}
                       onKeyDown={(event) => moveSelection(event, index)}
                     >
-                      <span
-                        className="overviewTrendBar"
-                        style={{ height: `${totalRungs / maxRungs * 100}%` }}
-                        aria-hidden="true"
-                      >
-                        <span className="overviewTrendRungs">
-                          {rungs.map((rung, rungIndex) => (
-                            <span
-                              key={rung.key}
-                              className={`overviewTrendRung ${rung.className}${rung.isSegmentStart ? " isSegmentStart" : ""}`}
-                              style={{
-                                width: `${rung.width}%`,
-                                animationDelay: `${index * 12 + rungIndex * 8}ms`,
-                              }}
-                            />
-                          ))}
+                      {tokensPerResponseValue === null || !isHovered ? null : (
+                        <span
+                          className="overviewTrendLineMarker isHovered"
+                          style={{ bottom: `${tokensPerResponsePlotPosition(tokensPerResponseValue, tokensPerResponseMax) * 100}%` }}
+                          aria-hidden="true"
+                        />
+                      )}
+                      {metric === "cache" ? cacheValue === null || !isHovered ? null : (
+                        <span
+                          className="overviewTrendLineMarker isHovered"
+                          style={{ bottom: `${cacheRatePlotPosition(cacheValue) * 100}%` }}
+                          aria-hidden="true"
+                        >
+                          {showValueLabel ? <span className="overviewTrendValueLabel">{formatMetricValue(total, metric)}</span> : null}
                         </span>
-                        {isPeak ? <span className="overviewTrendPeakValue">{formatMetricValue(total, metric)}</span> : null}
-                      </span>
+                      ) : (
+                        <span
+                          className="overviewTrendBar"
+                          style={{ height: `${totalRungs / maxRungs * 100}%` }}
+                          aria-hidden="true"
+                        >
+                          <span className="overviewTrendRungs">
+                            {rungs.map((rung, rungIndex) => (
+                              <span
+                                key={rung.key}
+                                className={`overviewTrendRung ${rung.className}${rung.isSegmentStart ? " isSegmentStart" : ""}`}
+                                style={{
+                                  width: `${rung.width}%`,
+                                  animationDelay: `${Math.min(
+                                    localIndex * TREND_ANIMATION_STAGGER_MS
+                                      + rungIndex * TREND_RUNG_ANIMATION_STAGGER_MS,
+                                    TREND_ANIMATION_MAX_DELAY_MS,
+                                  )}ms`,
+                                }}
+                              />
+                            ))}
+                          </span>
+                          {showValueLabel ? <span className="overviewTrendValueLabel">{formatMetricValue(total, metric)}</span> : null}
+                        </span>
+                      )}
                     </button>
                   </Tooltip>
                 );
@@ -752,10 +955,15 @@ export function OverviewTrendChart({
               const index = windowStart + localIndex;
               const showLabel = index === 0 || index === visible.length - 1 || index % labelStep === 0;
               return <span key={period.key}>{showLabel ? period.label : ""}</span>;
-            })}
+              })}
+            </div>
           </div>
+          {metric === "tokens" ? (
+            <div className="overviewTrendSecondaryYAxis" aria-hidden="true">
+              {secondaryYAxisValues.map((value) => <span key={value}>{formatTokensPerResponse(value)}</span>)}
+            </div>
+          ) : null}
         </div>
-      </div>
     </ChartFrame>
   );
 }

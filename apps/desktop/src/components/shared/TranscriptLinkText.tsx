@@ -3,6 +3,7 @@ import type { MouseEvent as ReactMouseEvent, ReactNode } from "react";
 
 import { safeInvoke, TauriCommand } from "../../lib/tauri.ts";
 import { formatMarkdownLinkLabels, transcriptLinkLabel, transcriptLinkTokens } from "../../lib/transcript-format.ts";
+import { findTextRanges } from "./text-ranges.ts";
 import "./TranscriptLinkText.css";
 
 export type TranscriptLinkTextProps = {
@@ -16,18 +17,15 @@ export type SessionTitleTextProps = Omit<TranscriptLinkTextProps, "value"> & {
 };
 
 function highlightText(value: string, query: string): ReactNode {
-  const needle = query.trim().toLowerCase();
-  if (!needle) return value;
+  const ranges = findTextRanges(value, query);
+  if (ranges.length === 0) return value;
 
   const parts: ReactNode[] = [];
-  const haystack = value.toLowerCase();
   let offset = 0;
-  let matchIndex = haystack.indexOf(needle, offset);
-  while (matchIndex >= 0) {
-    if (matchIndex > offset) parts.push(value.slice(offset, matchIndex));
-    parts.push(<mark className="transcriptSearchMark" key={`${matchIndex}-${parts.length}`}>{value.slice(matchIndex, matchIndex + needle.length)}</mark>);
-    offset = matchIndex + needle.length;
-    matchIndex = haystack.indexOf(needle, offset);
+  for (const range of ranges) {
+    if (range.from > offset) parts.push(value.slice(offset, range.from));
+    parts.push(<mark className="transcriptSearchMark" key={`${range.from}-${parts.length}`}>{value.slice(range.from, range.to)}</mark>);
+    offset = range.to;
   }
   if (offset < value.length) parts.push(value.slice(offset));
   return parts;

@@ -3,7 +3,9 @@ import { Waypoints, X } from "lucide-react";
 import { Dialog } from "radix-ui";
 
 import { LoadingState } from "../../components/shared/LoadingState.tsx";
-import { formatSessionTitle, normalizeSession, sessionProject, sessionProjectGroupKey, summarizeSessionPreviewRecord } from "../../lib/index.ts";
+import { LoadErrorState } from "../../components/shared/LoadErrorState.tsx";
+import { IconButton } from "../../components/shared/IconButton.tsx";
+import { formatSessionTitle, normalizeSession, sessionProject, sessionProjectGroupKey } from "../../lib/index.ts";
 import { SkillSessionProjectChart, type SkillSessionProjectItem } from "./SkillSessionProjectChart.tsx";
 import "../../components/shared/confirm-dialog.css";
 import "./linked-sessions.css";
@@ -80,6 +82,8 @@ export type LinkedSessionsDrawerProps = {
   skillName: string;
   links: LinkedSessionLink[];
   loading: boolean;
+  error?: string;
+  onRetry?: () => void;
   onOpenSession?: (session: LinkedSessionLink | LinkedSessionRow) => void;
 };
 
@@ -99,14 +103,14 @@ export function LinkedSessionsSummary({ links, loading, status, onOpen }: Linked
         {indexing ? <span>Indexing</span> : null}
         {failed > 0 ? <span>{failed} failed</span> : null}
       </div>
-      <button className="headerGhostButton" onClick={onOpen} aria-label="Open recent sessions chart">
+      <IconButton onClick={onOpen} aria-label="Open recent sessions chart">
         <Waypoints size={15} />
-      </button>
+      </IconButton>
     </section>
   );
 }
 
-export function LinkedSessionsDrawer({ open, onOpenChange, skillName, links, loading, onOpenSession }: LinkedSessionsDrawerProps) {
+export function LinkedSessionsDrawer({ open, onOpenChange, skillName, links, loading, error = "", onRetry, onOpenSession }: LinkedSessionsDrawerProps) {
   const visibleRows = useMemo(
     () => [...links]
       .sort((left, right) => linkedSessionUpdatedAt(right) - linkedSessionUpdatedAt(left))
@@ -117,7 +121,7 @@ export function LinkedSessionsDrawer({ open, onOpenChange, skillName, links, loa
   const chartItems = useMemo<SkillSessionProjectItem[]>(
     () => visibleRows.map((session, index) => {
       const link = session.linkedSessionLink;
-      const displayedTitle = summarizeSessionPreviewRecord(session)?.title || formatSessionTitle(session.title) || session.id || "Untitled session";
+      const displayedTitle = formatSessionTitle(session.title) || session.id || "Untitled session";
       const project = sessionProject(session) || "Unknown";
       const projectKey = sessionProjectGroupKey(session) || project;
       return {
@@ -149,11 +153,15 @@ export function LinkedSessionsDrawer({ open, onOpenChange, skillName, links, loa
             </Dialog.Description>
             <div className="linkedSessionsDrawerActions">
               <Dialog.Close asChild>
-                <button className="headerGhostButton" aria-label="Close recent sessions"><X size={15} /></button>
+                <IconButton aria-label="Close recent sessions"><X size={15} /></IconButton>
               </Dialog.Close>
             </div>
           </div>
-          {chartItems.length > 0 ? (
+          {loading ? (
+            <LoadingState className="linkedSessionsDrawerEmpty" label="Loading recent sessions" />
+          ) : error ? (
+            <LoadErrorState message={error} onRetry={onRetry} />
+          ) : chartItems.length > 0 ? (
             <div className="linkedSessionsDrawerChart">
               <SkillSessionProjectChart
                 items={chartItems}
@@ -165,7 +173,7 @@ export function LinkedSessionsDrawer({ open, onOpenChange, skillName, links, loa
                 } : undefined}
               />
             </div>
-          ) : loading ? <LoadingState className="linkedSessionsDrawerEmpty" label="Loading recent sessions" /> : <div className="linkedSessionsDrawerEmpty">No recent sessions. Sessions appear when this skill is used.</div>}
+          ) : <div className="linkedSessionsDrawerEmpty">No recent sessions. Sessions appear when this skill is used.</div>}
         </Dialog.Content>
       </Dialog.Portal>
     </Dialog.Root>

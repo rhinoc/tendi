@@ -95,6 +95,15 @@ pub(crate) trait AgentProvider: Sync {
         Vec::new()
     }
 
+    fn config_file_for_path(
+        &self,
+        _home: &Path,
+        _codex_home: &Path,
+        _path: &Path,
+    ) -> Option<crate::config::AgentConfigFile> {
+        None
+    }
+
     fn config_order(&self) -> usize {
         usize::MAX
     }
@@ -135,6 +144,10 @@ pub(crate) trait AgentProvider: Sync {
     }
 
     fn parse_transcript_value(&self, value: &Value, items: &mut Vec<TranscriptItem>);
+
+    fn transcript_inherited_history_start_ordinal(&self, _value: &Value) -> Option<u64> {
+        None
+    }
 
     fn append_transcript_metadata(
         &self,

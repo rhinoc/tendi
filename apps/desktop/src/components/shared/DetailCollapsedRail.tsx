@@ -1,4 +1,5 @@
 import { PanelRightOpen } from "lucide-react";
+import { IconButton } from "./IconButton.tsx";
 
 export type DetailCollapsedRailProps = {
   label: string;
@@ -9,13 +10,13 @@ export type DetailCollapsedRailProps = {
 export function DetailCollapsedRail({ label, expandLabel, onExpand }: DetailCollapsedRailProps) {
   return (
     <aside className="transcriptRail">
-      <button
+      <IconButton
         className="threadPanelToggle railToggle"
         aria-label={expandLabel}
         onClick={onExpand}
       >
         <PanelRightOpen size={16} />
-      </button>
+      </IconButton>
       <div className="railLabel">{label}</div>
     </aside>
   );

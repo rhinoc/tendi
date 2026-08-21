@@ -39,12 +39,12 @@ export function BundledSkillInstallDialog({
             <DialogStatefulButton
               className="dialogStatefulButtonWide"
               state={busy ? "loading" : "idle"}
-              loadingLabel="Setting up CLI and skill"
+              loadingLabel="Setting up"
               variant="primary"
-              aria-label="Set up CLI and skill"
+              aria-label="Set up"
               onClick={onInstall}
             >
-              Set up CLI &amp; skill
+              Set up
             </DialogStatefulButton>
           </div>
     </DialogShell>
