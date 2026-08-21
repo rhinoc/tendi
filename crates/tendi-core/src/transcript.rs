@@ -359,7 +359,7 @@ pub fn parse_transcript_page(
     limit: Option<usize>,
 ) -> Result<TranscriptPage> {
     parse_transcript_page_with_known_source_version_options(
-        path, agent, cursor, limit, None, None, false,
+        path, agent, cursor, limit, None, None, false, true,
     )
 }
 
@@ -378,24 +378,7 @@ pub fn parse_transcript_page_if_changed(
         None,
         known_source_version,
         false,
-    )
-}
-
-pub fn parse_transcript_page_if_changed_without_locator(
-    path: &Path,
-    agent: AgentKind,
-    cursor: Option<&str>,
-    limit: Option<usize>,
-    known_source_version: Option<&str>,
-) -> Result<TranscriptPage> {
-    parse_transcript_page_with_known_source_version_options(
-        path,
-        agent,
-        cursor,
-        limit,
-        None,
-        known_source_version,
-        false,
+        cursor.is_some(),
     )
 }
 
@@ -436,6 +419,7 @@ fn parse_transcript_page_with_cursor_store(
         cursor_store,
         None,
         false,
+        true,
     )
 }
 
@@ -447,6 +431,7 @@ fn parse_transcript_page_with_known_source_version_options(
     cursor_store: Option<&Path>,
     known_source_version: Option<&str>,
     include_locator: bool,
+    include_metadata: bool,
 ) -> Result<TranscriptPage> {
     parse_transcript_page_with_snapshot(
         path,
@@ -457,6 +442,7 @@ fn parse_transcript_page_with_known_source_version_options(
         known_source_version,
         None,
         include_locator,
+        include_metadata,
     )
 }
 
@@ -476,6 +462,7 @@ fn parse_transcript_page_at_snapshot(
         None,
         Some(snapshot),
         false,
+        false,
     )
 }
 
@@ -488,6 +475,7 @@ fn parse_transcript_page_with_snapshot(
     known_source_version: Option<&str>,
     search_snapshot: Option<&TranscriptSourceSnapshot>,
     include_locator: bool,
+    include_metadata: bool,
 ) -> Result<TranscriptPage> {
     let cursor = cursor.map(TranscriptCursor::parse).transpose()?;
     let mut file =
@@ -664,7 +652,7 @@ fn parse_transcript_page_with_snapshot(
     } else {
         reader.fill_buf()?.is_empty()
     };
-    if done && !agent_provider(agent).transcript_cacheable() {
+    if done && include_metadata && !agent_provider(agent).transcript_cacheable() {
         if let Some(store_path) = cursor_store
             .map(Path::to_path_buf)
             .or_else(|| agent_provider(agent).transcript_metadata_store_path(path))

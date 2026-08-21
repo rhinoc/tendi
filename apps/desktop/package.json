@@ -39,7 +39,7 @@
     "@fontsource-variable/plus-jakarta-sans": "^5.3.0",
     "@fontsource/maple-mono": "^5.3.0",
     "@lezer/highlight": "^1.2.3",
-    "@lobehub/icons-static-svg": "^1.91.0",
+    "@lobehub/icons-static-svg": "^1.94.0",
     "@tanstack/react-table": "^8.21.3",
     "@tauri-apps/api": "^2.0.0",
     "@tauri-apps/plugin-updater": "^2.10.1",

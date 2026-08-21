@@ -3357,4 +3357,45 @@ mod tests {
         assert_eq!(holder.join().unwrap(), Some(()));
         let _ = fs::remove_dir_all(root);
     }
+
+    #[test]
+    fn transcript_read_does_not_wait_for_database_authority() {
+        let root = temp_workspace();
+        let transcript = root.join("session.jsonl");
+        fs::write(
+            &transcript,
+            r#"{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"hello"}]}}"#,
+        )
+        .unwrap();
+        let daemon = Daemon::new(root.clone());
+        let holder_daemon = daemon.clone();
+        let (acquired_tx, acquired_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let holder = thread::spawn(move || {
+            let _authority = holder_daemon.state.database_authority.lock().unwrap();
+            acquired_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+        });
+        acquired_rx.recv().unwrap();
+
+        let request_daemon = daemon.clone();
+        let path = transcript.display().to_string();
+        let (response_tx, response_rx) = mpsc::channel();
+        let request = thread::spawn(move || {
+            let response = request_daemon.handle_json(json!({
+                "command": "session_transcript",
+                "args": { "path": path, "agent": "codex", "limit": 1 }
+            }));
+            response_tx.send(response).unwrap();
+        });
+        let response = response_rx.recv_timeout(Duration::from_millis(300));
+        release_tx.send(()).unwrap();
+        holder.join().unwrap();
+        request.join().unwrap();
+
+        let response = response.expect("transcript read should not wait for database authority");
+        assert_eq!(response["ok"], true);
+        assert_eq!(response["result"]["items"].as_array().unwrap().len(), 1);
+        let _ = fs::remove_dir_all(root);
+    }
 }
