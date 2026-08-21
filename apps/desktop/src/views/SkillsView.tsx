@@ -592,11 +592,13 @@ export function WrapperDialog({ open, selectedSkills, onOpenChange, onApplyWrapp
       className="wrapperDialogPanel"
       descriptionId="wrapper-skill-dialog-description"
     >
-          <Dialog.Title className="confirmDialogTitle">Create wrapper skill</Dialog.Title>
+          <div className="addSkillHeader">
+            <Dialog.Title className="confirmDialogTitle">Create wrapper skill</Dialog.Title>
+          </div>
           <Dialog.Description id="wrapper-skill-dialog-description" className="dialogVisuallyHidden">
             Create a wrapper skill from the selected child skills.
           </Dialog.Description>
-          <div className="wrapperDialogBody">
+          <div className="addSkillGrid wrapperDialogBody">
             <DialogTextField label="Name" value={name} onChange={updateName} placeholder="" />
             <label className="dialogField">
               <span>Description</span>
@@ -606,17 +608,13 @@ export function WrapperDialog({ open, selectedSkills, onOpenChange, onApplyWrapp
                 onChange={(event) => updateDescription(event.target.value)}
               />
             </label>
-            <label className="checkboxLine">
+            <label className="addSkillAdvancedCheckbox">
               <SelectionCheckbox
                 checked={manualChildren}
                 label="Only trigger selected skills through this wrapper"
                 onChange={(checked: boolean | "indeterminate") => setManualChildren(Boolean(checked))}
               />
-              <span>
-                <strong>Make children manual</strong>
-                <br />
-                <small>Selected skills will stop triggering on their own.</small>
-              </span>
+              <span>Make children manual</span>
             </label>
             {error ? <div className="dialogError">{error}</div> : null}
           </div>

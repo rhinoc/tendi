@@ -590,7 +590,8 @@ p {
   padding: 0;
 }
 
-.addSkillPanel .dialogActions {
+.addSkillPanel .dialogActions,
+.wrapperDialogPanel .dialogActions {
   justify-content: flex-end;
   gap: 8px;
   padding: 10px 16px;
@@ -662,28 +663,33 @@ p {
   left: 50%;
   z-index: var(--z-dialog);
   box-sizing: border-box;
-  width: min(540px, calc(100vw - 48px));
+  width: min(520px, calc(100vw - 48px));
   height: auto;
   max-height: min(560px, calc(100vh - 64px));
   display: flex;
   flex-direction: column;
   transform: translate(-50%, -50%);
   border: 0;
-  border-radius: var(--radius-lg);
+  border-radius: var(--radius-md);
   padding: 0;
   background: var(--panel-bg);
   box-shadow: var(--shadow-elevated);
   overflow: hidden;
+  font-size: var(--text-ui);
+  line-height: var(--leading-body);
 }
 
-.wrapperDialogBody {
-  flex: 0 1 auto;
+.wrapperDialogPanel .wrapperDialogBody {
+  flex: 1 1 auto;
   min-height: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-  padding: 18px 22px 18px;
+  align-content: start;
   overflow: auto;
+}
+
+.wrapperDialogPanel .dialogField {
+  gap: 4px;
+  font-size: var(--text-sm);
+  font-weight: 600;
 }
 
 .addSkillGrid {
