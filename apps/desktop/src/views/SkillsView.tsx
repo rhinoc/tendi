@@ -65,6 +65,12 @@ type SkillPath = {
   root?: string | null;
 };
 
+type BackupStatusRecord = {
+  skillPath: string;
+  state: "backed-up" | "pending" | "needs-attention" | "excluded" | "not-backed-up" | "unmanaged" | string;
+  reason?: string | null;
+};
+
 export type SkillRecord = {
   id: string;
   name: string;
@@ -116,6 +122,69 @@ type SkillOperation = {
   rawStatus?: string;
   message?: string;
 };
+
+function backupStatusForSkill(skill: SkillRecord, statuses: Map<string, BackupStatusRecord>): BackupStatusRecord {
+  const entries = (skill.paths ?? [])
+    .map((path) => path.path ? statuses.get(path.path) : undefined)
+    .filter((status): status is BackupStatusRecord => Boolean(status));
+  if (entries.length === 0) return { skillPath: "", state: "unmanaged" };
+  if (entries.some((status) => status.state === "needs-attention")) return entries.find((status) => status.state === "needs-attention")!;
+  if (entries.some((status) => status.state === "pending")) return entries.find((status) => status.state === "pending")!;
+  if (entries.some((status) => status.state === "unmanaged")) return entries.find((status) => status.state === "unmanaged")!;
+  if (entries.every((status) => status.state === "backed-up")) return entries[0];
+  if (entries.every((status) => status.state === "excluded")) return entries[0];
+  if (entries.some((status) => status.state === "not-backed-up")) return entries.find((status) => status.state === "not-backed-up")!;
+  return entries[0];
+}
+
+function backupLabel(status: BackupStatusRecord) {
+  if (status.state === "backed-up") return "Backed up";
+  if (status.state === "pending") return "Pending";
+  if (status.state === "needs-attention") return "Needs attention";
+  if (status.state === "excluded") return "Excluded";
+  if (status.state === "not-backed-up") return "Not backed up";
+  return "Add";
+}
+
+function backupTone(status: BackupStatusRecord) {
+  if (status.state === "backed-up") return "success" as const;
+  if (status.state === "pending") return "warning" as const;
+  if (status.state === "needs-attention") return "danger" as const;
+  if (status.state === "excluded") return "neutral" as const;
+  return "info" as const;
+}
+
+function BackupCell({
+  skill,
+  status,
+  busy,
+  onAdopt,
+}: {
+  skill: SkillRecord;
+  status: BackupStatusRecord;
+  busy: boolean;
+  onAdopt: (skill: SkillRecord, path: string) => void;
+}) {
+  if (status.state !== "unmanaged") {
+    return <Badge tone={backupTone(status)}>{backupLabel(status)}</Badge>;
+  }
+  return (
+    <Badge
+      as="button"
+      tone="info"
+      disabled={busy || !status.skillPath}
+      aria-label={`Add ${skill.name} to backup`}
+      aria-busy={busy}
+      style={{ minWidth: 44, justifyContent: "center" }}
+      onClick={(event) => {
+        event.stopPropagation();
+        onAdopt(skill, status.skillPath);
+      }}
+    >
+      {busy ? <LoadingIcon size={13} /> : "Add"}
+    </Badge>
+  );
+}
 
 type AvailableSkill = {
   name: string;
@@ -1567,6 +1636,19 @@ export function SkillsView({
   const [skillLocatorRequest, setSkillLocatorRequest] = useState("");
   const [locationSkills, setLocationSkills] = useState<SkillRecord[]>([]);
   const [locationAgent, setLocationAgent] = useState<string | undefined>(undefined);
+  const [backupStatuses, setBackupStatuses] = useState<Map<string, BackupStatusRecord>>(new Map());
+  const [backupBusyPath, setBackupBusyPath] = useState("");
+  const refreshBackupStatuses = useCallback(async () => {
+    try {
+      const result = await invokeCommand<{ statuses?: BackupStatusRecord[] }>(TauriCommand.SkillsBackupStatus);
+      const next = new Map<string, BackupStatusRecord>();
+      for (const status of result.statuses ?? []) next.set(status.skillPath, status);
+      setBackupStatuses(next);
+    } catch {
+      // Backup availability is auxiliary to skill management; retain the last known state.
+    }
+  }, []);
+  useEffect(() => { void refreshBackupStatuses(); }, [refreshBackupStatuses, skillItems]);
   const normalizedQuery = query.trim().toLowerCase();
   const visibleSkills = useMemo(() => {
     if (!normalizedQuery) return skillItems;
@@ -1629,6 +1711,17 @@ export function SkillsView({
     clearSelection();
     await onRefresh();
   }, [clearSelection, onRefresh]);
+  const adoptSkillForBackup = useCallback(async (skill: SkillRecord, skillPath: string) => {
+    if (!skillPath || backupBusyPath) return;
+    setBackupBusyPath(skillPath);
+    try {
+      await invokeCommand(TauriCommand.SkillsBackupAdopt, { name: skill.name, skillPath });
+      await onRefresh();
+      await refreshBackupStatuses();
+    } finally {
+      setBackupBusyPath("");
+    }
+  }, [backupBusyPath, onRefresh, refreshBackupStatuses]);
 
   const handleInstalled = useCallback((result: SkillInstallResult) => {
     onAddInstalled(result);
@@ -1671,6 +1764,18 @@ export function SkillsView({
       value: skillOriginLabel,
     },
     {
+      key: "backup",
+      header: "Backup",
+      type: "enum",
+      groupBy: (skill) => backupStatusForSkill(skill, backupStatuses).state,
+      sortValue: (skill) => backupStatusForSkill(skill, backupStatuses).state,
+      width: "132px",
+      render: (skill) => {
+        const status = backupStatusForSkill(skill, backupStatuses);
+        return <BackupCell skill={skill} status={status} busy={backupBusyPath === status.skillPath} onAdopt={(target, path) => { void adoptSkillForBackup(target, path); }} />;
+      },
+    },
+    {
       key: "visibility",
       header: "Visibility",
       type: "enum",
@@ -1703,7 +1808,7 @@ export function SkillsView({
       width: "40px",
       render: (skill) => <SkillActionsCell skill={skill} onApplyUpdates={applyUpdatesAndClear} onDeleteSkills={deleteSkillsAndClear} onManageLocations={openManageLocations} />,
     },
-  ], [applyUpdatesAndClear, deleteSkillsAndClear, openManageLocations, openSkill, setVisibilityAndClear]);
+  ], [adoptSkillForBackup, applyUpdatesAndClear, backupBusyPath, backupStatuses, deleteSkillsAndClear, openManageLocations, openSkill, setVisibilityAndClear]);
 
   const rowContextMenu = useCallback((skill: SkillTableRow, { selectedRows, selected: isSelected }: { selectedRows: SkillTableRow[]; selected: boolean }) => {
     const showBulk = isSelected && selectedRows.length > 1;

@@ -65,6 +65,10 @@ enum SkillCommand {
         #[arg(long)]
         json: bool,
     },
+    Backup {
+        #[command(subcommand)]
+        command: BackupCommand,
+    },
     Add {
         source: String,
         #[arg(long = "to", default_value = "shared")]
@@ -142,6 +146,78 @@ enum SkillCommand {
         #[arg(long)]
         yes: bool,
     },
+}
+
+#[derive(Debug, Subcommand)]
+enum BackupCommand {
+    Configure {
+        remote_url: String,
+        #[arg(long)]
+        checkout: Option<std::path::PathBuf>,
+        #[arg(long)]
+        device: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    Status {
+        #[arg(long)]
+        json: bool,
+    },
+    Run {
+        #[arg(long)]
+        json: bool,
+    },
+    Versions {
+        #[arg(long, default_value_t = 50)]
+        limit: usize,
+        #[arg(long)]
+        json: bool,
+    },
+    Restore {
+        revision: String,
+        #[arg(long = "skill")]
+        skills: Vec<String>,
+        #[arg(long = "to", default_value = "shared")]
+        to: tendi_core::SkillTarget,
+        #[arg(long, default_value = "global")]
+        scope: tendi_core::SkillInstallScope,
+        #[arg(long)]
+        dry_run: bool,
+        #[arg(long)]
+        yes: bool,
+        #[arg(long, value_enum)]
+        conflict: Option<BackupRestoreConflictArg>,
+        #[arg(long)]
+        json: bool,
+    },
+    Add {
+        path: std::path::PathBuf,
+        #[arg(long)]
+        name: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    Disconnect {
+        #[arg(long)]
+        yes: bool,
+    },
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum BackupRestoreConflictArg {
+    Skip,
+    Replace,
+    KeepBoth,
+}
+
+impl BackupRestoreConflictArg {
+    fn action(self) -> &'static str {
+        match self {
+            Self::Skip => "skip",
+            Self::Replace => "replace",
+            Self::KeepBoth => "keep-both",
+        }
+    }
 }
 
 #[derive(Debug, Subcommand)]
@@ -344,6 +420,149 @@ fn main() -> Result<()> {
                     }
                 }
             }
+            SkillCommand::Backup { command } => match command {
+                BackupCommand::Configure { remote_url, checkout, device, json } => {
+                    let checkout_path = checkout
+                        .unwrap_or(tendi_core::skill_backup::default_checkout_path()?);
+                    let config = tendi_core::skill_backup::BackupConfig::new(
+                        remote_url,
+                        checkout_path,
+                        device.unwrap_or_else(|| "My device".to_string()),
+                    );
+                    let store = tendi_core::storage::Store::open_default()?;
+                    let config = store.save_skill_backup_config(&config)?;
+                    if json {
+                        println!("{}", serde_json::to_string_pretty(&config)?);
+                    } else {
+                        println!("Backup configured for {}", config.remote_url);
+                    }
+                }
+                BackupCommand::Status { json } => {
+                    let store = tendi_core::storage::Store::open_default()?;
+                    let config = store.skill_backup_config()?;
+                    let versions = if config.is_some() {
+                        tendi_core::skill_backup::backup_versions(&store, 1)?
+                    } else {
+                        Vec::new()
+                    };
+                    if json {
+                        println!("{}", serde_json::to_string_pretty(&serde_json::json!({ "config": config, "versions": versions }))?);
+                    } else if let Some(config) = config {
+                        println!("remote: {}", config.remote_url);
+                        println!("checkout: {}", config.checkout_path.display());
+                        println!("device: {}", config.device_label);
+                        if let Some(version) = versions.first() {
+                            println!("latest: {} {}", version.id, version.summary);
+                        } else {
+                            println!("latest: none");
+                        }
+                    } else {
+                        println!("Backup is not configured");
+                    }
+                }
+                BackupCommand::Run { json } => {
+                    let store = tendi_core::storage::Store::open_default()?;
+                    let report = tendi_core::skill_backup::backup_now(&store)?;
+                    if json {
+                        println!("{}", serde_json::to_string_pretty(&report)?);
+                    } else if let Some(commit) = report.commit {
+                        println!("Backed up {} skills ({commit})", report.manifest.skills.len());
+                    } else {
+                        println!("Backup is already current");
+                    }
+                }
+                BackupCommand::Versions { limit, json } => {
+                    let store = tendi_core::storage::Store::open_default()?;
+                    let versions = tendi_core::skill_backup::backup_versions(&store, limit)?;
+                    if json {
+                        println!("{}", serde_json::to_string_pretty(&versions)?);
+                    } else {
+                        for version in versions {
+                            println!("{} {} {}", version.id, version.created_at, version.summary);
+                        }
+                    }
+                }
+                BackupCommand::Restore { revision, skills, to, scope, dry_run, yes, conflict, json } => {
+                    let store = tendi_core::storage::Store::open_default()?;
+                    let plan = tendi_core::skill_backup::plan_backup_restore(
+                        &store,
+                        &cwd,
+                        &revision,
+                        &skills,
+                        &to,
+                        scope,
+                    )?;
+                    if dry_run {
+                        if json {
+                            println!("{}", serde_json::to_string_pretty(&plan)?);
+                        } else {
+                            print_backup_restore_operations(&plan)?;
+                        }
+                        return Ok(());
+                    }
+                    if json && !yes {
+                        anyhow::bail!("--json requires --yes for a real restore");
+                    }
+                    if !json {
+                        print_backup_restore_operations(&plan)?;
+                    }
+                    let has_conflicts = plan.operations.iter().any(|operation| operation.status == "conflict");
+                    let has_planned = plan.operations.iter().any(|operation| operation.status == "planned");
+                    if has_conflicts && conflict.is_none() {
+                        anyhow::bail!("restore has conflicts; pass --conflict skip, --conflict replace, or --conflict keep-both");
+                    }
+                    if !has_planned && !has_conflicts {
+                        return Ok(());
+                    }
+                    if !yes && !confirm("Restore these backup skills? [y/N] ")? {
+                        println!("aborted");
+                        return Ok(());
+                    }
+                    let resolutions = conflict
+                        .map(|conflict| {
+                            plan.operations
+                                .iter()
+                                .filter(|operation| operation.status == "conflict")
+                                .map(|operation| tendi_core::skill_backup::BackupRestoreResolution {
+                                    id: operation.id.clone(),
+                                    action: conflict.action().to_string(),
+                                })
+                                .collect::<Vec<_>>()
+                        })
+                        .unwrap_or_default();
+                    let operations = tendi_core::skill_backup::apply_backup_restore(&plan, &store, &resolutions)?;
+                    if json {
+                        println!("{}", serde_json::to_string_pretty(&operations)?);
+                    } else {
+                        for operation in operations {
+                            println!("{} {} -> {}", operation.status, operation.name, operation.target.display());
+                        }
+                    }
+                }
+                BackupCommand::Add { path, name, json } => {
+                    let name = name.or_else(|| path.file_name().and_then(|name| name.to_str()).map(str::to_string))
+                        .ok_or_else(|| anyhow::anyhow!("--name is required when the path has no file name"))?;
+                    let store = tendi_core::storage::Store::open_default()?;
+                    let record = tendi_core::skill_backup::adopt_skill_for_backup(&store, &path, name)?;
+                    if json {
+                        println!("{}", serde_json::to_string_pretty(&record)?);
+                    } else {
+                        println!("Added {} to backup", record.skill_name);
+                    }
+                }
+                BackupCommand::Disconnect { yes } => {
+                    if !yes && !confirm("Disconnect this machine from skill backup? [y/N] ")? {
+                        println!("aborted");
+                        return Ok(());
+                    }
+                    let store = tendi_core::storage::Store::open_default()?;
+                    if store.clear_skill_backup_config()? {
+                        println!("Disconnected this machine from skill backup");
+                    } else {
+                        println!("Backup was not configured");
+                    }
+                }
+            },
             SkillCommand::Add {
                 source,
                 to,
@@ -812,6 +1031,23 @@ fn print_skill_restore_operations(
     Ok(())
 }
 
+fn print_backup_restore_operations(plan: &tendi_core::skill_backup::BackupRestorePlan) -> Result<()> {
+    let mut stdout = std::io::stdout().lock();
+    writeln!(stdout, "backup version: {}", plan.revision)?;
+    writeln!(stdout, "target: {}", plan.target_root.display())?;
+    for operation in &plan.operations {
+        writeln!(
+            stdout,
+            "{} {} -> {}{}",
+            operation.status,
+            operation.name,
+            operation.target.display(),
+            operation.message.as_deref().map(|message| format!(" ({message})")).unwrap_or_default(),
+        )?;
+    }
+    Ok(())
+}
+
 fn print_skill_add_results(results: &[tendi_core::skills::MaterializeResult]) -> Result<()> {
     let mut stdout = std::io::stdout().lock();
     for result in results {
@@ -1187,5 +1423,29 @@ mod tests {
         };
         assert!(dry_run);
         assert!(yes);
+    }
+
+    #[test]
+    fn skill_backup_configure_accepts_remote_and_device_label() {
+        let cli = Cli::try_parse_from([
+            "tendi",
+            "skills",
+            "backup",
+            "configure",
+            "git@github.com:example/skills.git",
+            "--device",
+            "Work Mac",
+        ])
+        .unwrap();
+        let Command::Skills {
+            command: SkillCommand::Backup {
+                command: BackupCommand::Configure { remote_url, device, .. },
+            },
+        } = cli.command
+        else {
+            panic!("unexpected command");
+        };
+        assert_eq!(remote_url, "git@github.com:example/skills.git");
+        assert_eq!(device.as_deref(), Some("Work Mac"));
     }
 }

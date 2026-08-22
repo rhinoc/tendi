@@ -273,6 +273,40 @@ impl Store {
         &self.path
     }
 
+    pub fn skill_backup_config(&self) -> Result<Option<crate::skill_backup::BackupConfig>> {
+        let value = self
+            .conn
+            .query_row(
+                "SELECT value FROM app_settings WHERE key = 'skill_backup_config'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        value
+            .map(|value| serde_json::from_str(&value).context("invalid skill backup configuration"))
+            .transpose()
+    }
+
+    pub fn save_skill_backup_config(
+        &self,
+        config: &crate::skill_backup::BackupConfig,
+    ) -> Result<crate::skill_backup::BackupConfig> {
+        config.validate()?;
+        self.conn.execute(
+            "INSERT INTO app_settings (key, value) VALUES ('skill_backup_config', ?1)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![serde_json::to_string(config)?],
+        )?;
+        Ok(config.clone())
+    }
+
+    pub fn clear_skill_backup_config(&self) -> Result<bool> {
+        Ok(self
+            .conn
+            .execute("DELETE FROM app_settings WHERE key = 'skill_backup_config'", [])?
+            > 0)
+    }
+
     pub fn app_settings(&self) -> Result<AppSettings> {
         let appearance = self
             .conn
@@ -5284,6 +5318,37 @@ mod tests {
             store.app_settings().unwrap().config_profiles,
             saved.config_profiles
         );
+
+        drop(store);
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn skill_backup_config_round_trips_and_can_be_cleared() {
+        let temp = temp_dir("tendi-storage-skill-backup-config");
+        fs::create_dir_all(&temp).unwrap();
+        let db = temp.join("tendi.sqlite3");
+        let config = crate::skill_backup::BackupConfig::new(
+            "git@github.com:example/tendi-skills.git",
+            temp.join("backup"),
+            "Test Mac",
+        );
+
+        let store = Store::open(&db).unwrap();
+        assert!(store.skill_backup_config().unwrap().is_none());
+        assert_eq!(
+            store.save_skill_backup_config(&config).unwrap().remote_url,
+            config.remote_url
+        );
+        drop(store);
+
+        let store = Store::open(&db).unwrap();
+        let saved = store.skill_backup_config().unwrap().unwrap();
+        assert_eq!(saved.remote_url, config.remote_url);
+        assert_eq!(saved.checkout_path, config.checkout_path);
+        assert_eq!(saved.device_label, config.device_label);
+        assert!(store.clear_skill_backup_config().unwrap());
+        assert!(store.skill_backup_config().unwrap().is_none());
 
         drop(store);
         fs::remove_dir_all(temp).unwrap();
