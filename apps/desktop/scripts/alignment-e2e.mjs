@@ -136,9 +136,9 @@ function buildReport() {
 }
 
 const tabs = [
-  { id: "skills", nav: "Skills", heading: "Skills", compact: false, selectable: true, listHeader: "section", tableHeader: false, frozen: false },
+  { id: "skills", nav: "Skills", heading: "Skills", compact: false, selectable: true, listHeader: "section", tableHeader: false, frozen: true },
   { id: "prompts", nav: "Prompts", heading: "Prompts", compact: false, selectable: true, listHeader: "table", tableHeader: true, frozen: false },
-  { id: "sessions", nav: "Sessions", heading: "Sessions", compact: true, selectable: true, listHeader: "table", tableHeader: true, frozen: true },
+  { id: "sessions", nav: "Sessions", heading: "Sessions", compact: true, selectable: false, listHeader: "table", tableHeader: true, frozen: true },
   { id: "rules", nav: "Rules", heading: "Rules", compact: true, selectable: true, listHeader: "table", tableHeader: true, frozen: true },
   { id: "hooks", nav: "Hooks", heading: "Hooks", compact: true, selectable: true, listHeader: "table", tableHeader: true, frozen: true },
   { id: "mcp", nav: "MCP", heading: "MCP", compact: false, selectable: true, listHeader: "table", tableHeader: true, frozen: true },
@@ -559,7 +559,7 @@ async function runFrozenBugSmokeChecks(page, tab) {
       const scrollRect = scrollRow.getBoundingClientRect();
       return {
         missing: false,
-        startX: frozenRect.left + Math.min(80, Math.max(12, frozenRect.width / 3)),
+        startX: frozenRect.right - 12,
         startY: frozenRect.top + Math.min(24, Math.max(8, frozenRect.height / 2)),
         endX: scrollRect.left + Math.min(120, Math.max(16, scrollRect.width / 2)),
         endY: scrollRect.top + Math.min(44, Math.max(18, scrollRect.height - 8)),
@@ -972,7 +972,13 @@ async function runFrozenBugSmokeChecks(page, tab) {
     const clearSelectionButton = page.getByRole("button", { name: "Clear selection", exact: true });
     if (await clearSelectionButton.count()) await clearSelectionButton.click();
     await groupButton.click();
-    await page.waitForTimeout(80);
+    await page.waitForFunction(
+      () => Boolean(
+        document.querySelector(".dataTableFrozenPane .dataGroup .dataRow--frozenPane")
+        && document.querySelector(".dataTableScrollPane .dataGroup .dataRow--scrollPane"),
+      ),
+      { timeout: 2000 },
+    ).catch(() => {});
     const groupedMetrics = await page.evaluate(() => {
       const round = (value) => Math.round(value * 100) / 100;
       const frozenGroup = document.querySelector(".dataTableFrozenPane .dataGroup");
@@ -1026,7 +1032,8 @@ async function runFrozenBugSmokeChecks(page, tab) {
         ? "missing grouped frozen/scroll rows"
         : `frozen separator ${groupedMetrics.frozenSeparatorVisible}, scroll separator ${groupedMetrics.scrollSeparatorVisible}`,
     );
-    await groupButton.click();
+    const activeGroupButton = page.locator(".dataTableHeader .dataHeaderGroupButton.activeGroup").first();
+    if (await activeGroupButton.count()) await activeGroupButton.click({ force: true });
     await page.waitForTimeout(40);
   } else {
     check(tab.id, "bug13-grouped-frozen-scroll-row-sync", true, "no groupable header");
@@ -1241,6 +1248,17 @@ try {
       }
       if (command === "skills_refresh") return { skills: report.skills.skills, updateCheck: "completed" };
       if (command === "skills_list") return report.skills.skills;
+      if (command === "skills_backup_status") return { config: null, statuses: [], versions: [] };
+      if (command === "skills_backup_sync") return null;
+      if (command === "projects_list") return [
+        { id: "project-1", name: "project-1", rootPath: "/Users/dev/.cursor/projects/project-1" },
+        { id: "project-2", name: "project-2", rootPath: "/Users/dev/.cursor/projects/project-2" },
+      ];
+      if (command === "session_projects_list") return [];
+      if (command === "project_scan_scopes_list") return [];
+      if (command === "app_icon_set") return null;
+      if (command === "plugin:window|set_icon") return null;
+      if (command === "check_for_updates") return { status: "up-to-date" };
       if (command === "skills_targets") {
         return [
           { id: "claude", displayName: "Claude", supportsGlobal: true },
@@ -1360,7 +1378,7 @@ try {
   check(
     "navigation",
     "all-pages-listed",
-    JSON.stringify(navLabels) === JSON.stringify(["Overview", "Skills", "Sessions", "Rules", "MCP", "Hooks", "Prompts", "Config", "Settings"]),
+    JSON.stringify(navLabels) === JSON.stringify(["Overview", "Skills", "Backup", "Sessions", "Rules", "MCP", "Hooks", "Prompts", "Config", "Settings"]),
     navLabels.join(", "),
   );
   await page.getByRole("button", { name: "Skills", exact: true }).click();
@@ -1688,7 +1706,7 @@ try {
     }
 
     if (tab.id === "skills") {
-      const groupCounts = await page.evaluate(() => [...document.querySelectorAll(".dataGroup")].map((group) => {
+      const groupCounts = await page.evaluate(() => [...document.querySelectorAll(".dataTableFrozenPane .dataGroup")].map((group) => {
         const label = group.querySelector(".sectionHeaderLabel")?.textContent?.trim() ?? "";
         const countText = group.querySelector(".sectionHeaderCount")?.textContent?.trim() ?? "";
         const count = Number.parseInt(countText, 10);
@@ -1781,6 +1799,7 @@ try {
     if (!tab.selectable) {
       await runReq8TabChecks(page, tab);
       await runFrozenBugSmokeChecks(page, tab);
+      if (tab.id === "sessions") await runSessionLocatorChecks(page);
       continue;
     }
 
@@ -2005,6 +2024,7 @@ try {
   }
 
   for (const pageSpec of [
+    { id: "backup", nav: "Backup", heading: "Backup", compact: false, ready: ".backupPage" },
     { id: "config", nav: "Config", heading: "Config", compact: true, ready: ".configListPane" },
     { id: "settings", nav: "Settings", heading: "Settings", compact: false, ready: ".settingsShell" },
   ]) {

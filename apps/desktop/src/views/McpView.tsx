@@ -84,16 +84,22 @@ export function DataListView({ title, rows, columns = defaultMcpColumns, loading
     [],
   );
   const rowIds = useMemo(() => rows.map(getRowId), [getRowId, rows]);
-  const tableColumns = useMemo((): ColumnDef<McpRow>[] => [
-    ...columns.filter((column) => column.key !== "scope"),
-    ...(projects.length > 0 ? [scopeColumn<McpRow>(projects, mcpSourcePath)] : []),
-    {
-      key: "actions",
-      header: "",
-      width: "40px",
-      render: (row) => <McpActionsCell row={row} />,
-    },
-  ], [columns, projects]);
+  const tableColumns = useMemo((): ColumnDef<McpRow>[] => {
+    const nextColumns = columns.filter((column) => column.key !== "scope");
+    if (projects.length > 0) {
+      const scopeIndex = columns.findIndex((column) => column.key === "scope");
+      nextColumns.splice(scopeIndex >= 0 ? scopeIndex : nextColumns.length, 0, scopeColumn<McpRow>(projects, mcpSourcePath));
+    }
+    return [
+      ...nextColumns,
+      {
+        key: "actions",
+        header: "",
+        width: "40px",
+        render: (row) => <McpActionsCell row={row} />,
+      },
+    ];
+  }, [columns, projects]);
   const rowContextMenu = useCallback((row: McpRow, { selectedRows, selected: isSelected }: { selectedRows: McpRow[]; selected: boolean }) => {
     if (isSelected && selectedRows.length > 1) return null;
     return <McpActionsMenuItems Menu={ContextMenu} row={row} />;
