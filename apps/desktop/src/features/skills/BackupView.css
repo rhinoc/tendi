@@ -20,7 +20,7 @@
 
 .backupPanel h2 {
   margin: 0;
-  font-size: 15px;
+  font-size: var(--text-ui);
 }
 
 .backupSummary,
@@ -34,7 +34,7 @@
   gap: 8px;
   align-items: start;
   color: var(--muted);
-  font-size: 13px;
+  font-size: var(--text-sm);
 }
 
 .backupCounts {
@@ -51,12 +51,12 @@
 
 .backupCounts dt {
   color: var(--muted);
-  font-size: 12px;
+  font-size: var(--text-xs);
 }
 
 .backupCounts dd {
   margin: 0;
-  font-size: 20px;
+  font-size: var(--text-stat);
   font-weight: 650;
 }
 
@@ -73,7 +73,7 @@
   gap: 10px;
   align-items: baseline;
   color: var(--muted);
-  font-size: 13px;
+  font-size: var(--text-sm);
 }
 
 .backupVersionList .dialogActionButton {
