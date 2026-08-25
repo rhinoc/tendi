@@ -8,7 +8,6 @@ use std::{
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use sha2::Digest;
 use toml::Value as TomlValue;
 
 use crate::{
@@ -39,10 +38,12 @@ pub struct HookRecord {
     pub path: PathBuf,
     pub trust_hash: String,
     pub needs_review: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub read_only_reason: Option<String>,
     #[serde(skip)]
-    pub(crate) codex_hook_key: Option<String>,
+    pub(crate) provider_review_key: Option<String>,
     #[serde(skip)]
-    pub(crate) codex_current_hash: Option<String>,
+    pub(crate) provider_current_hash: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -121,189 +122,6 @@ pub struct HookReviewRequest {
     pub status_message: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
-struct NormalizedHookIdentity {
-    event_name: String,
-    #[serde(flatten)]
-    group: NormalizedMatcherGroup,
-}
-
-#[derive(Debug, Serialize)]
-struct NormalizedMatcherGroup {
-    #[serde(default)]
-    matcher: Option<String>,
-    #[serde(default)]
-    hooks: Vec<NormalizedHookHandler>,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(tag = "type")]
-enum NormalizedHookHandler {
-    #[serde(rename = "command")]
-    Command {
-        command: String,
-        #[serde(default, rename = "commandWindows")]
-        command_windows: Option<String>,
-        #[serde(default, rename = "timeout")]
-        timeout_sec: Option<u64>,
-        #[serde(default)]
-        r#async: bool,
-        #[serde(default, rename = "statusMessage")]
-        status_message: Option<String>,
-        #[serde(
-            default,
-            rename = "additionalContextLimit",
-            skip_serializing_if = "Option::is_none"
-        )]
-        additional_context_limit: Option<usize>,
-    },
-}
-
-fn load_codex_hook_states(path: &Path) -> HashMap<String, String> {
-    let Ok(text) = fs::read_to_string(path) else {
-        return HashMap::new();
-    };
-    let mut states = HashMap::new();
-    let mut current_key: Option<String> = None;
-    for line in text.lines() {
-        let line = line.trim();
-        if line.starts_with('[') && line.ends_with(']') {
-            current_key = line
-                .strip_prefix("[hooks.state.\"")
-                .and_then(|key| key.strip_suffix("\"]"))
-                .map(|key| key.replace("\\\"", "\"").replace("\\\\", "\\"));
-            continue;
-        }
-        let Some(key) = current_key.as_ref() else {
-            continue;
-        };
-        let Some(value) = line
-            .strip_prefix("trusted_hash = ")
-            .or_else(|| line.strip_prefix("trustedHash = "))
-        else {
-            continue;
-        };
-        if let Ok(trusted_hash) = serde_json::from_str::<String>(value) {
-            states.insert(key.clone(), trusted_hash);
-        }
-    }
-    states
-}
-
-fn codex_event_key_label(event: &str) -> String {
-    let mut label = String::with_capacity(event.len() + 4);
-    for (index, character) in event.chars().enumerate() {
-        if character.is_uppercase() && index > 0 {
-            label.push('_');
-        }
-        label.extend(character.to_lowercase());
-    }
-    label
-}
-
-pub(crate) fn codex_hook_key(
-    path: &Path,
-    event: &str,
-    group_index: usize,
-    handler_index: usize,
-) -> String {
-    format!(
-        "{}:{}:{group_index}:{handler_index}",
-        path.display(),
-        codex_event_key_label(event),
-    )
-}
-
-pub(crate) fn codex_hook_timeout(event: &str, configured: Option<u64>) -> u64 {
-    if event == "SessionEnd" {
-        configured.unwrap_or(1).clamp(1, 3)
-    } else {
-        configured.unwrap_or(600).max(1)
-    }
-}
-
-fn codex_hook_matcher(event: &str, matcher: Option<&str>) -> Option<String> {
-    match event {
-        "UserPromptSubmit" | "Stop" => None,
-        _ => matcher.map(str::to_string),
-    }
-}
-
-fn codex_hook_additional_context_limit(event: &str, value: Option<usize>) -> Option<usize> {
-    let supported = matches!(
-        event,
-        "PreToolUse" | "PostToolUse" | "SessionStart" | "UserPromptSubmit" | "SubagentStart"
-    );
-    supported
-        .then_some(value)
-        .flatten()
-        .filter(|limit| *limit != 2_500)
-}
-
-fn canonical_json(value: &Value) -> Value {
-    match value {
-        Value::Object(map) => {
-            let mut sorted = serde_json::Map::new();
-            let mut keys = map.keys().cloned().collect::<Vec<_>>();
-            keys.sort();
-            for key in keys {
-                if let Some(value) = map.get(&key) {
-                    sorted.insert(key, canonical_json(value));
-                }
-            }
-            Value::Object(sorted)
-        }
-        Value::Array(items) => Value::Array(items.iter().map(canonical_json).collect()),
-        other => other.clone(),
-    }
-}
-
-pub(crate) fn codex_hook_hash(
-    event: &str,
-    matcher: Option<&str>,
-    command: &str,
-    timeout: u64,
-    is_async: bool,
-    status_message: Option<&str>,
-    additional_context_limit: Option<usize>,
-) -> Option<String> {
-    let identity = NormalizedHookIdentity {
-        event_name: codex_event_key_label(event),
-        group: NormalizedMatcherGroup {
-            matcher: codex_hook_matcher(event, matcher),
-            hooks: vec![NormalizedHookHandler::Command {
-                command: command.to_string(),
-                command_windows: None,
-                timeout_sec: Some(timeout),
-                r#async: is_async,
-                status_message: status_message.map(str::to_string),
-                additional_context_limit: codex_hook_additional_context_limit(
-                    event,
-                    additional_context_limit,
-                ),
-            }],
-        },
-    };
-    let value = toml::Value::try_from(identity).ok()?;
-    let canonical = canonical_json(&serde_json::to_value(value).ok()?);
-    let serialized = serde_json::to_vec(&canonical).ok()?;
-    let mut hasher = sha2::Sha256::new();
-    sha2::Digest::update(&mut hasher, serialized);
-    Some(format!("sha256:{:x}", sha2::Digest::finalize(hasher)))
-}
-
-fn apply_codex_hook_review_states(hooks: &mut [HookRecord], states: &HashMap<String, String>) {
-    for hook in hooks {
-        let (Some(key), Some(current_hash)) = (&hook.codex_hook_key, &hook.codex_current_hash)
-        else {
-            continue;
-        };
-        hook.needs_review = states
-            .get(key)
-            .is_none_or(|trusted_hash| trusted_hash != current_hash);
-    }
-}
-
 fn tendi_hook_review_state_path() -> Option<PathBuf> {
     dirs::data_dir()
         .or_else(|| dirs::home_dir().map(|home| home.join("Library/Application Support")))
@@ -358,18 +176,13 @@ pub fn scan_hooks(cwd: &Path) -> Result<HookScan> {
     let mut warnings = Vec::new();
     let mut scanned_files = HashSet::new();
     let context = crate::providers::ProviderContext::new(cwd);
-    let codex_root = crate::providers::agent_provider(AgentKind::Codex).config_dir(&context);
-    let codex_hook_states = codex_root
-        .as_ref()
-        .map(|home| load_codex_hook_states(&home.join("config.toml")))
-        .unwrap_or_default();
     let tendi_hook_review_states = load_tendi_hook_review_states();
 
     for provider in crate::providers::agent_providers() {
         provider.scan_hooks(&context, &mut scanned_files, &mut hooks, &mut warnings);
+        provider.apply_hook_review_states(&mut hooks, &context);
     }
 
-    apply_codex_hook_review_states(&mut hooks, &codex_hook_states);
     apply_tendi_hook_review_states(&mut hooks, &tendi_hook_review_states);
 
     Ok(HookScan { hooks, warnings })
@@ -517,52 +330,6 @@ pub(crate) fn review_hook_with_tendi_state(hook: &HookRecord) -> Result<()> {
         &path,
         &format!("{}\n", serde_json::to_string_pretty(&states)?),
     )
-}
-
-pub(crate) fn write_codex_trusted_hash(path: &Path, key: &str, trusted_hash: &str) -> Result<()> {
-    let original = fs::read_to_string(path)
-        .with_context(|| format!("failed to read Codex config {}", path.display()))?;
-    let escaped_key = key.replace('\\', "\\\\").replace('"', "\\\"");
-    let header = format!(r#"[hooks.state."{escaped_key}"]"#);
-    let mut lines = Vec::new();
-    let mut in_target = false;
-    let mut found_target = false;
-    let mut wrote_hash = false;
-    for line in original.lines() {
-        if line.trim_start().starts_with('[') && line.trim_end().ends_with(']') {
-            if in_target && !wrote_hash {
-                lines.push(format!("trusted_hash = {trusted_hash:?}"));
-                wrote_hash = true;
-            }
-            in_target = line.trim() == header;
-            found_target |= in_target;
-        }
-        if in_target && line.trim_start().starts_with("trusted_hash =") {
-            lines.push(format!("trusted_hash = {trusted_hash:?}"));
-            wrote_hash = true;
-        } else if in_target && line.trim_start().starts_with("trustedHash =") {
-            lines.push(format!("trusted_hash = {trusted_hash:?}"));
-            wrote_hash = true;
-        } else {
-            lines.push(line.to_string());
-        }
-    }
-    if in_target && !wrote_hash {
-        lines.push(format!("trusted_hash = {trusted_hash:?}"));
-    }
-    if !found_target {
-        if !lines.is_empty() {
-            lines.push(String::new());
-        }
-        lines.push(header);
-        lines.push(format!("trusted_hash = {trusted_hash:?}"));
-    }
-    let mut updated = lines.join("\n");
-    if original.ends_with('\n') {
-        updated.push('\n');
-    }
-    atomic_write(path, &updated)
-        .with_context(|| format!("failed to write Codex config {}", path.display()))
 }
 
 pub fn read_hook_source(
@@ -1593,8 +1360,8 @@ fn push_hook_record(
         .or_else(|| object.get("status_message"))
         .and_then(Value::as_str)
         .map(str::to_string);
-    let (codex_hook_key, codex_current_hash) = crate::providers::agent_provider(agent)
-        .codex_hook_metadata(
+    let (provider_review_key, provider_current_hash) = crate::providers::agent_provider(agent)
+        .hook_review_metadata(
             path,
             event,
             group_index,
@@ -1628,8 +1395,9 @@ fn push_hook_record(
         path: path.to_path_buf(),
         trust_hash: trust_hash.to_string(),
         needs_review: false,
-        codex_hook_key,
-        codex_current_hash,
+        read_only_reason: hook_management_disabled_reason(path).map(str::to_string),
+        provider_review_key,
+        provider_current_hash,
     });
 }
 
@@ -1651,7 +1419,7 @@ mod tests {
     #[test]
     fn matches_codex_current_hash_for_command_hook() {
         assert_eq!(
-            super::codex_hook_hash(
+            crate::providers::codex::hook_current_hash(
                 "PreToolUse",
                 None,
                 "/Users/ryan/.codex/hooks/block-hook-bypass.py",
@@ -1696,10 +1464,13 @@ mod tests {
         let mut warnings = Vec::new();
         super::scan_hook_file(&path, AgentKind::Codex, &mut hooks, &mut warnings);
         assert!(warnings.is_empty(), "{warnings:?}");
-        let trusted_key = hooks[0].codex_hook_key.clone().expect("trusted key");
-        let trusted_hash = hooks[0].codex_current_hash.clone().expect("trusted hash");
-        let modified_key = hooks[1].codex_hook_key.clone().expect("modified key");
-        super::apply_codex_hook_review_states(
+        let trusted_key = hooks[0].provider_review_key.clone().expect("trusted key");
+        let trusted_hash = hooks[0]
+            .provider_current_hash
+            .clone()
+            .expect("trusted hash");
+        let modified_key = hooks[1].provider_review_key.clone().expect("modified key");
+        crate::providers::codex::apply_hook_review_states(
             &mut hooks,
             &std::collections::HashMap::from([
                 (trusted_key, trusted_hash),
@@ -1820,8 +1591,12 @@ mod tests {
         )
         .expect("write config");
 
-        super::write_codex_trusted_hash(&path, "/tmp/hooks.json:pre_tool_use:0:0", "sha256:new")
-            .expect("write trusted hash");
+        crate::providers::codex::write_trusted_hash(
+            &path,
+            "/tmp/hooks.json:pre_tool_use:0:0",
+            "sha256:new",
+        )
+        .expect("write trusted hash");
         let text = fs::read_to_string(&path).expect("read config");
         assert!(text.contains("trusted_hash = \"sha256:new\""));
         assert!(text.contains("[notice]\nhide = true"));

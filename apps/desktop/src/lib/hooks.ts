@@ -18,6 +18,8 @@ export type HookRecord = {
   trust_hash?: string | null;
   trustHash?: string | null;
   hash?: string | null;
+  read_only_reason?: string | null;
+  readOnlyReason?: string | null;
   status_message?: string | null;
   statusMessage?: string | null;
 };
@@ -93,12 +95,8 @@ export function hookSourcePath(hook: HookRecord | null | undefined): string {
 export function hookDeleteDisabledReason(hook: HookRecord | null | undefined): string {
   const path = hookSourcePath(hook);
   if (!path) return "Missing hook source path";
-  if (path.startsWith("/etc/cursor/") || path.startsWith("/Library/Application Support/Cursor/") || path.startsWith("/etc/claude-code/") || path.startsWith("/Library/Application Support/ClaudeCode/")) {
-    return "Managed or system hooks are read only";
-  }
-  if (path.includes("/.claude/plugins/")) {
-    return "Plugin hooks are read only";
-  }
+  const readOnlyReason = hook?.read_only_reason ?? hook?.readOnlyReason;
+  if (readOnlyReason) return readOnlyReason;
   if (!path.endsWith(".json") && !path.endsWith(".toml")) {
     return "Deleting hooks from this source type is not supported";
   }

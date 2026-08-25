@@ -1,5 +1,6 @@
 import { lazy, Suspense, useCallback, useDeferredValue, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { listen } from "@tauri-apps/api/event";
 import { Group as PanelGroup, Panel, usePanelRef } from "react-resizable-panels";
 import { Accordion, Checkbox, ContextMenu, Dialog, DropdownMenu, Select } from "radix-ui";
 import {
@@ -58,28 +59,14 @@ import {
   Wrench,
   X,
 } from "lucide-react";
-import antigravityIcon from "@lobehub/icons-static-svg/icons/antigravity-color.svg";
-import claudeIcon from "@lobehub/icons-static-svg/icons/claude-color.svg";
-import clineIcon from "@lobehub/icons-static-svg/icons/cline.svg";
-import codebuddyIcon from "@lobehub/icons-static-svg/icons/codebuddy-color.svg";
-import codexIcon from "@lobehub/icons-static-svg/icons/codex-color.svg";
-import githubIcon from "@lobehub/icons-static-svg/icons/github.svg";
-import copilotIcon from "@lobehub/icons-static-svg/icons/githubcopilot.svg";
-import cursorIcon from "@lobehub/icons-static-svg/icons/cursor.svg";
-import geminiCliIcon from "@lobehub/icons-static-svg/icons/geminicli-color.svg";
-import hermesIcon from "@lobehub/icons-static-svg/icons/hermesagent.svg";
-import kimiIcon from "@lobehub/icons-static-svg/icons/kimi-color.svg";
-import opencodeIcon from "@lobehub/icons-static-svg/icons/opencode.svg";
-import qoderIcon from "@lobehub/icons-static-svg/icons/qoder-color.svg";
-import qwenIcon from "@lobehub/icons-static-svg/icons/qwen-color.svg";
 import stepfunIcon from "@lobehub/icons-static-svg/icons/stepfun-color.svg";
 import traeIcon from "@lobehub/icons-static-svg/icons/trae-color.svg";
 
 import type { ComponentProps } from "react";
 import { applyAppearance, applyFontFamily, listenForSystemAppearanceChange, normalizeAppearance, normalizeFontFamily, normalizeThemePreferences, readCachedAppearance, readCachedFontFamily, readCachedThemePreferences, type Appearance, type ColorTheme, type FontFamily, type ThemePreferences } from "./lib/appearance.ts";
 import { applyAppIcon, normalizeAppIcon, readCachedAppIcon, type AppIcon } from "./lib/app-icon.ts";
-import { COLLAPSED_SIDEBAR_SIZE, SIDEBAR_SIZE, SkillChangeCommand, SkillVisibility, TauriCommand, agentIdentityKey, applySessionDelta, applyVisibilityState, clearSkillUpdateAvailability, fallbackAgents, hookSourcePath, hookTrustHash, invokeCommand, isConcreteAgent, logger, mergeSessionRows, navItems, normalizeDomainRows, normalizeReport, normalizeSession, normalizeSessionResumeTarget, normalizeTranscriptLocatorPage, normalizeTranscriptPage, normalizeTranscriptSearchResult, promptTitleFromBody, replaceSkillReportPreservingUpdates, ruleAgents, safeInvoke, sameAgent, sessionAppDeepLink, sessionIdentity, sessionLaunchPayload, sessionLogicalIdentity, sessionResumeTargetForAgent, subscribeDaemonEvents } from "./lib/index.ts";
-import type { BundledSkillStatus, CliInstallStatus, DaemonEvent, SessionIdentityRecord, SessionResumeTarget, TranscriptLocatorPage, TranscriptPage, TranscriptSearchResult, TranscriptSearchScopes } from "./lib/index.ts";
+import { COLLAPSED_SIDEBAR_SIZE, SIDEBAR_SIZE, SkillChangeCommand, SkillVisibility, TauriCommand, UPDATE_AVAILABLE_EVENT, agentIdentityKey, applySessionDelta, applyVisibilityState, clearSkillUpdateAvailability, fallbackAgents, hookSourcePath, hookTrustHash, invokeCommand, isConcreteAgent, isTauriRuntime, logger, mergeSessionRows, navItems, normalizeDomainRows, normalizeReport, normalizeSession, normalizeSessionResumeTarget, normalizeTranscriptLocatorPage, normalizeTranscriptPage, normalizeTranscriptSearchResult, promptTitleFromBody, replaceSkillReportPreservingUpdates, ruleAgents, safeInvoke, sameAgent, sessionAppDeepLink, sessionIdentity, sessionLaunchPayload, sessionLogicalIdentity, sessionResumeTargetForAgent, subscribeDaemonEvents } from "./lib/index.ts";
+import type { BundledSkillStatus, CliInstallStatus, DaemonEvent, DesktopUpdateState, MissingSessionProjectPolicy, ProjectSummary, SessionIdentityRecord, SessionProjectSummary, SessionResumeOptions, SessionResumeOutcome, SessionResumeTarget, TranscriptLocatorPage, TranscriptPage, TranscriptSearchResult, TranscriptSearchScopes, UpdateCheckResult } from "./lib/index.ts";
 import { sortSidebarSources, type OrderedSidebarSource } from "./lib/sidebar-sources.ts";
 import { mcpColumns } from "./lib/tableColumns.tsx";
 import { PlaceholderView } from "./components/shared/PlaceholderView.tsx";
@@ -89,6 +76,7 @@ import { DialogShell } from "./components/shared/DialogShell.tsx";
 import { DialogStatefulButton } from "./components/shared/DialogStatefulButton.tsx";
 import { LoadingState } from "./components/shared/LoadingState.tsx";
 import { Sidebar } from "./components/shared/Sidebar.tsx";
+import { Toast } from "./components/shared/Toast.tsx";
 import type { SessionRecord, SkillLinkRecord } from "./views/SessionsView.tsx";
 import type { SkillInstallResult, SkillRecord } from "./views/SkillsView.tsx";
 import { ConfigView } from "./views/ConfigView.tsx";
@@ -176,6 +164,8 @@ function SkillChangeDialogFallback({
 }
 
 const SESSION_EVENT_FLUSH_MS = 200;
+const AUTO_UPDATE_CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000;
+const AUTO_UPDATE_LAST_CHECK_KEY = "tendi-update-last-check-at";
 
 type SkillPreview = {
   summary?: string;
@@ -340,7 +330,12 @@ export function App() {
   const [fontFamily, setFontFamily] = useState<FontFamily>(() => readCachedFontFamily());
   const [appIcon, setAppIcon] = useState<AppIcon>(() => readCachedAppIcon());
   const [developerMode, setDeveloperMode] = useState(false);
-  const [sessionResumeTarget, setSessionResumeTarget] = useState<SessionResumeTarget>("terminal");
+  const [projects, setProjects] = useState<ProjectSummary[]>([]);
+  const [sessionProjects, setSessionProjects] = useState<SessionProjectSummary[]>([]);
+  const [missingSessionProjectPolicy, setMissingSessionProjectPolicy] = useState<MissingSessionProjectPolicy>("show");
+  const [desktopUpdate, setDesktopUpdate] = useState<DesktopUpdateState>({ status: "idle" });
+  const [updateNoticeDismissed, setUpdateNoticeDismissed] = useState(false);
+  const [sessionResumeTarget, setSessionResumeTarget] = useState<SessionResumeTarget>("auto");
   const changeAppIcon = useCallback((nextAppIcon: AppIcon) => {
     setAppIcon(nextAppIcon);
     void applyAppIcon(nextAppIcon);
@@ -357,10 +352,108 @@ export function App() {
   const pendingRecentSessions = useRef(new Map<string, SessionRecord>());
   const pendingWatchSessions = useRef(new Map<string, SessionRecord>());
   const pendingDeletedSessions = useRef(new Map<string, SessionIdentityRecord>());
+  const updateOperationInFlight = useRef(false);
   const sidebarPanelRef = usePanelRef();
   const skillListRevision = useRef(0);
   const skillUpdateCheckRevision = useRef(0);
+  const refreshSessionProjects = useCallback(async () => {
+    const result = await safeInvoke<unknown[]>(TauriCommand.SessionProjectsList);
+    if (Array.isArray(result)) setSessionProjects(result as SessionProjectSummary[]);
+  }, []);
+  const refreshProjects = useCallback(async () => {
+    const [projectsResult, sessionProjectsResult] = await Promise.all([
+      safeInvoke<unknown[]>(TauriCommand.ProjectsList),
+      safeInvoke<unknown[]>(TauriCommand.SessionProjectsList),
+    ]);
+    if (Array.isArray(projectsResult)) setProjects(projectsResult as ProjectSummary[]);
+    if (Array.isArray(sessionProjectsResult)) setSessionProjects(sessionProjectsResult as SessionProjectSummary[]);
+  }, []);
+  const applyUpdateCheckResult = useCallback((result: UpdateCheckResult, manual: boolean) => {
+    if (result.status === "available" && result.version) {
+      setDesktopUpdate({
+        status: "available",
+        version: result.version,
+        body: result.body ?? undefined,
+      });
+      setUpdateNoticeDismissed(false);
+      return;
+    }
+    if (result.status === "up-to-date") {
+      setDesktopUpdate({ status: manual ? "up-to-date" : "idle" });
+      return;
+    }
+    if (result.status === "busy" && manual) {
+      setDesktopUpdate({ status: "error", error: "Another update operation is already running." });
+    }
+  }, []);
+  const checkForUpdates = useCallback(async (manual = false) => {
+    if (!isTauriRuntime() || updateOperationInFlight.current) return;
+    updateOperationInFlight.current = true;
+    if (manual) setDesktopUpdate({ status: "checking" });
+    try {
+      try {
+        window.localStorage.setItem(AUTO_UPDATE_LAST_CHECK_KEY, `${Date.now()}`);
+      } catch (error) {
+        logger.warn("automatic desktop update check timestamp write failed", { error });
+      }
+      const result = await invokeCommand<UpdateCheckResult>(TauriCommand.CheckForUpdates);
+      applyUpdateCheckResult(result, manual);
+    } catch (error) {
+      if (manual) {
+        setDesktopUpdate({ status: "error", error: errorMessage(error) });
+      } else {
+        logger.warn("automatic desktop update check failed", { error });
+      }
+    } finally {
+      updateOperationInFlight.current = false;
+    }
+  }, [applyUpdateCheckResult]);
+  const installUpdate = useCallback(async () => {
+    if (desktopUpdate.status !== "available" || updateOperationInFlight.current) return;
+    updateOperationInFlight.current = true;
+    setDesktopUpdate((current) => ({ ...current, status: "installing" }));
+    try {
+      const result = await invokeCommand<UpdateCheckResult>(TauriCommand.InstallUpdate);
+      applyUpdateCheckResult(result, true);
+    } catch (error) {
+      setDesktopUpdate({ status: "error", error: errorMessage(error) });
+    } finally {
+      updateOperationInFlight.current = false;
+    }
+  }, [applyUpdateCheckResult, desktopUpdate.status]);
   const activeNav = navItems.find((item) => item.id === view);
+  useEffect(() => {
+    void refreshProjects();
+  }, [refreshProjects]);
+  useEffect(() => {
+    if (!isTauriRuntime()) return;
+    let lastCheckedAt = 0;
+    try {
+      lastCheckedAt = Number(window.localStorage.getItem(AUTO_UPDATE_LAST_CHECK_KEY) ?? 0);
+    } catch (error) {
+      logger.warn("automatic desktop update check timestamp read failed", { error });
+    }
+    if (Number.isFinite(lastCheckedAt) && Date.now() - lastCheckedAt < AUTO_UPDATE_CHECK_INTERVAL_MS) return;
+    const timer = window.setTimeout(() => { void checkForUpdates(); }, 1000);
+    return () => window.clearTimeout(timer);
+  }, [checkForUpdates]);
+  useEffect(() => {
+    if (!isTauriRuntime()) return;
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    void listen<UpdateCheckResult>(UPDATE_AVAILABLE_EVENT, (event) => {
+      if (!disposed) applyUpdateCheckResult(event.payload, false);
+    }).then((cleanup) => {
+      if (disposed) cleanup();
+      else unlisten = cleanup;
+    }).catch((error) => {
+      logger.warn("desktop update event subscription failed", { error });
+    });
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, [applyUpdateCheckResult]);
   const availableSidebarSources = useMemo(
     () => sidebarSources(
       agentTargets,
@@ -889,14 +982,17 @@ export function App() {
     if (!sessionsRefreshInFlight.current) {
       sessionsRefreshInFlight.current = sessionEventReady.current
         .then(() => invokeCommand<number>(TauriCommand.SessionsScanStart))
-        .then((generation) => {
+        .then(async (generation) => {
           sessionScanGeneration.current = Math.max(sessionScanGeneration.current, generation);
-          if (completedSessionScans.current.has(generation)) return generation;
-          return new Promise<number>((resolve) => {
-            const waiters = sessionScanWaiters.current.get(generation) ?? [];
-            waiters.push(() => resolve(generation));
-            sessionScanWaiters.current.set(generation, waiters);
-          });
+          if (!completedSessionScans.current.has(generation)) {
+            await new Promise<void>((resolve) => {
+              const waiters = sessionScanWaiters.current.get(generation) ?? [];
+              waiters.push(resolve);
+              sessionScanWaiters.current.set(generation, waiters);
+            });
+          }
+          await refreshSessionProjects();
+          return generation;
         })
         .catch((error) => {
           logger.error("sessions scan start failed", { error });
@@ -909,7 +1005,7 @@ export function App() {
         });
     }
     return sessionsRefreshInFlight.current;
-  }, []);
+  }, [refreshSessionProjects]);
 
   const refreshSkillIndexStatus = useCallback(async () => {
     const status = await safeInvoke(TauriCommand.SessionSkillIndexStatus);
@@ -1215,20 +1311,42 @@ export function App() {
     navigateTo("sessions");
   }, [navigateTo]);
 
-  const resumeSession = useCallback(async (session: SessionRecord) => {
-    if (sessionResumeTargetForAgent(sessionResumeTarget, session.agent) === "app") {
+  const resolveSessionResumeTarget = useCallback(async (session: SessionRecord): Promise<"terminal" | "app"> => {
+    const configuredTarget = sessionResumeTargetForAgent(sessionResumeTarget, session.agent);
+    if (configuredTarget !== "auto") return configuredTarget;
+    try {
+      const inferredTarget = await invokeCommand<"terminal" | "app">(TauriCommand.SessionResumeTarget, {
+        session: sessionLaunchPayload(session),
+      });
+      return inferredTarget === "app" ? "app" : "terminal";
+    } catch (error) {
+      logger.warn("session resume target inference failed; using terminal", { error });
+      return "terminal";
+    }
+  }, [sessionResumeTarget]);
+
+  const resumeSession = useCallback(async (session: SessionRecord, options: SessionResumeOptions = {}): Promise<SessionResumeOutcome> => {
+    if (await resolveSessionResumeTarget(session) === "app") {
       const appUrl = sessionAppDeepLink(session);
       if (appUrl) {
         try {
           await invokeCommand(TauriCommand.OpenUrl, { url: appUrl });
-          return { target: "app" as const };
+          return { status: "launched", target: "app" };
         } catch (error) {
           logger.warn("session app resume unavailable; using terminal", { agent: session.agent, error });
         }
       }
     }
-    return invokeCommand<{ terminal?: string }>(TauriCommand.SessionResumeInTerminal, { session: sessionLaunchPayload(session) });
-  }, [sessionResumeTarget]);
+    const result = await invokeCommand<
+      | { status: "activeWriter"; lockPath: string; pids: number[] }
+      | { status: "launched"; agent: string; terminal: string; commandLine: string }
+    >(TauriCommand.SessionResumeInTerminal, {
+      session: sessionLaunchPayload(session),
+      forceActiveWriter: options.forceActiveWriter ?? false,
+    });
+    if (result.status === "activeWriter") return result;
+    return { status: "launched", target: "terminal", terminal: result.terminal };
+  }, [resolveSessionResumeTarget]);
 
   const previewAndApply = async (
     command: SkillChangeCommand,
@@ -1345,12 +1463,26 @@ export function App() {
     new URLSearchParams(window.location.search).get("forceSidebarResizeHover") === "1";
   const sidebarSize = sidebarCollapsed ? COLLAPSED_SIDEBAR_SIZE : SIDEBAR_SIZE;
 
+  const updateToast = desktopUpdate.status === "available" && desktopUpdate.version && !updateNoticeDismissed ? (
+    <Toast
+      tone="success"
+      message={`Tendi ${desktopUpdate.version} is available.`}
+      action={{ label: "Install", onClick: () => { void installUpdate(); } }}
+      onDismiss={() => setUpdateNoticeDismissed(true)}
+    />
+  ) : desktopUpdate.status === "installing" ? (
+    <Toast tone="info" message="Installing Tendi update…" />
+  ) : desktopUpdate.status === "error" && desktopUpdate.error ? (
+    <Toast tone="error" message={`Update failed: ${desktopUpdate.error}`} onDismiss={() => setDesktopUpdate({ status: "idle" })} />
+  ) : null;
+
   useLayoutEffect(() => {
     sidebarPanelRef.current?.resize(Number.parseFloat(sidebarSize));
   }, [sidebarPanelRef, sidebarSize]);
 
   return (
     <main className="appShell">
+      {updateToast}
       {bundledSkillPrompt ? (
         <Suspense fallback={(
           <DialogLoadingFallback
@@ -1442,6 +1574,7 @@ export function App() {
           ) : contentView === "skills" ? (
             <SkillsView
               skills={filteredData.skills as SkillRecord[]}
+              projects={projects}
               installedAgentKeys={installedAgentKeys}
               loadingSkills={loadingDomains.has("skills")}
               loadError={domainErrors.skills ?? ""}
@@ -1474,6 +1607,9 @@ export function App() {
               onRefreshSessions={refreshSessionsFromScan}
               onResumeSession={resumeSession}
               sessionResumeTarget={sessionResumeTarget}
+              missingSessionProjectPolicy={missingSessionProjectPolicy}
+              projects={projects}
+              sessionProjects={sessionProjects}
               onOpenSkill={openSkillByName}
               activeSessionKey={activeSessionKey}
               skillIndexStatus={skillIndexStatus}
@@ -1490,11 +1626,11 @@ export function App() {
               onPromptsDeleted={removePrompts}
             />
           ) : contentView === "rules" ? (
-              <RulesView rows={filteredData.rules} skills={data.skills} loadingRows={loadingDomains.has("rules")} loadError={domainErrors.rules ?? ""} hasRows={data.rules.length > 0} onRetry={() => { void loadDomainForRetry("rules"); }} onOpenSkill={openSkillByName} />
-          ) : contentView === "hooks" ? (
-              <HooksView rows={filteredData.hooks} loadingRows={loadingDomains.has("hooks")} loadError={domainErrors.hooks ?? ""} hasRows={data.hooks.length > 0} onRetry={() => { void loadDomainForRetry("hooks"); }} onDeleteHook={deleteHook} onDeleteHooks={deleteHooks} onSetHookEnabled={setHookEnabled} onReviewHook={reviewHook} />
-          ) : contentView === "mcp" ? (
-            <DataListView title="MCP" rows={filteredData.mcp} columns={mcpColumns} loading={loadingDomains.has("mcp")} loadError={domainErrors.mcp ?? ""} hasRows={data.mcp.length > 0} onRetry={() => { void loadDomainForRetry("mcp"); }} />
+              <RulesView rows={filteredData.rules} skills={data.skills} projects={projects} loadingRows={loadingDomains.has("rules")} loadError={domainErrors.rules ?? ""} hasRows={data.rules.length > 0} onRetry={() => { void loadDomainForRetry("rules"); }} onOpenSkill={openSkillByName} />
+            ) : contentView === "hooks" ? (
+              <HooksView rows={filteredData.hooks} projects={projects} loadingRows={loadingDomains.has("hooks")} loadError={domainErrors.hooks ?? ""} hasRows={data.hooks.length > 0} onRetry={() => { void loadDomainForRetry("hooks"); }} onDeleteHook={deleteHook} onDeleteHooks={deleteHooks} onSetHookEnabled={setHookEnabled} onReviewHook={reviewHook} />
+            ) : contentView === "mcp" ? (
+            <DataListView title="MCP" rows={filteredData.mcp} columns={mcpColumns} projects={projects} loading={loadingDomains.has("mcp")} loadError={domainErrors.mcp ?? ""} hasRows={data.mcp.length > 0} onRetry={() => { void loadDomainForRetry("mcp"); }} />
           ) : contentView === "config" ? (
             <ConfigView />
           ) : contentView === "settings" ? (
@@ -1505,11 +1641,24 @@ export function App() {
               appIcon={appIcon}
               developerMode={developerMode}
               sessionResumeTarget={sessionResumeTarget}
+              missingSessionProjectPolicy={missingSessionProjectPolicy}
               onAppearanceChange={changeAppearance}
               onFontFamilyChange={setFontFamily}
               onDeveloperModeChange={setDeveloperMode}
               onSessionResumeTargetChange={setSessionResumeTarget}
+              onMissingSessionProjectPolicyChange={setMissingSessionProjectPolicy}
               onAppIconChange={changeAppIcon}
+              projects={projects}
+              onProjectsScanned={(nextProjects) => {
+                setProjects(nextProjects);
+                void refreshSessionProjects();
+                loadDomainForRetry("skills");
+                loadDomainForRetry("rules");
+                loadDomainForRetry("mcp");
+              }}
+              update={desktopUpdate}
+              onCheckForUpdates={() => { void checkForUpdates(true); }}
+              onInstallUpdate={() => { void installUpdate(); }}
               onThemeChange={(mode, theme) => {
                 setThemePreferences((current) => ({ ...current, [mode]: theme }));
               }}

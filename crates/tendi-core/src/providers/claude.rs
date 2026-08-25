@@ -1,4 +1,4 @@
-use std::{fs, path::Path};
+use std::{collections::BTreeMap, fs, path::Path};
 
 use anyhow::{Result, bail};
 use serde_json::Value;
@@ -16,6 +16,75 @@ pub(super) struct ClaudeProvider;
 
 pub(super) fn matches_name(normalized: &str) -> bool {
     matches!(normalized, "claude" | "claudecode")
+}
+
+fn extract_model(value: &Value) -> Option<String> {
+    if value.get("type").and_then(Value::as_str) != Some("assistant") {
+        return None;
+    }
+    value
+        .pointer("/message/model")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|model| !model.is_empty())
+        .map(str::to_string)
+}
+
+fn extract_token_usage(value: &Value) -> Option<(String, crate::sessions::SessionTokenUsage)> {
+    if value.get("type").and_then(Value::as_str) != Some("assistant") {
+        return None;
+    }
+    let message = value.get("message")?;
+    let message_id = message.get("id")?.as_str()?.to_string();
+    let usage = message.get("usage")?;
+    let direct_input_tokens = usage.get("input_tokens")?.as_u64()?;
+    let cache_creation_input_tokens = usage
+        .get("cache_creation_input_tokens")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let cached_input_tokens = usage
+        .get("cache_read_input_tokens")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let output_tokens = usage.get("output_tokens")?.as_u64()?;
+    let input_tokens = direct_input_tokens
+        .checked_add(cache_creation_input_tokens)?
+        .checked_add(cached_input_tokens)?;
+    let total_tokens = input_tokens.checked_add(output_tokens)?;
+    (total_tokens > 0).then_some((
+        message_id,
+        crate::sessions::SessionTokenUsage {
+            input_tokens,
+            cached_input_tokens,
+            output_tokens,
+            reasoning_output_tokens: 0,
+            total_tokens,
+        },
+    ))
+}
+
+fn valid_resume_query(value: &str) -> bool {
+    let mut has_session = false;
+    for parameter in value.split('&') {
+        let Some((key, value)) = parameter.split_once('=') else {
+            return false;
+        };
+        let valid_value = !value.is_empty()
+            && value.len() <= 4096
+            && value.bytes().all(|byte| {
+                byte.is_ascii_alphanumeric()
+                    || matches!(byte, b'-' | b'_' | b'.' | b'~' | b'%' | b'+')
+            });
+        if !valid_value {
+            return false;
+        }
+        match key {
+            "session" if value.len() <= 128 => has_session = true,
+            "cwd" => {}
+            _ => return false,
+        }
+    }
+    has_session
 }
 
 pub(crate) fn scan_claude_plugin_hooks(
@@ -190,9 +259,7 @@ fn collect_claude_item(value: &Value, items: &mut Vec<TranscriptItem>) {
         let content = value
             .get("message")
             .and_then(|message| message.get("content"));
-        if kind == "user"
-            && attach_claude_tool_results(value, content, items, time.clone(), timestamp_ms)
-        {
+        if kind == "user" && attach_claude_tool_results(value, content, items, timestamp_ms) {
             return;
         }
         if kind == "assistant" {
@@ -233,26 +300,8 @@ fn collect_claude_item(value: &Value, items: &mut Vec<TranscriptItem>) {
             .or_else(|| value.get("tool_use_id"))
             .or_else(|| value.get("toolUseId"))
             .and_then(Value::as_str);
-        if !attach_tool_result(
-            items,
-            call_id,
-            Some(body.clone()),
-            extract_duration_ms(value, None),
-            timestamp_ms,
-        ) {
-            push_tool_item(
-                items,
-                "tool_result",
-                "Tool result".to_string(),
-                Some("tool_result".to_string()),
-                time,
-                None,
-                Some(body),
-                extract_duration_ms(value, None),
-                call_id.map(str::to_string),
-                timestamp_ms,
-            );
-        }
+        let duration_ms = extract_duration_ms(value, None);
+        attach_tool_result(items, call_id, Some(body), duration_ms, timestamp_ms);
     }
 }
 
@@ -260,7 +309,6 @@ fn attach_claude_tool_results(
     value: &Value,
     content: Option<&Value>,
     items: &mut Vec<TranscriptItem>,
-    time: Option<String>,
     timestamp_ms: Option<i64>,
 ) -> bool {
     let Some(Value::Array(content_items)) = content else {
@@ -284,26 +332,8 @@ fn attach_claude_tool_results(
             .or_else(|| item.get("toolUseID"))
             .or_else(|| item.get("toolUseId"))
             .and_then(Value::as_str);
-        if !attach_tool_result(
-            items,
-            call_id,
-            Some(body.clone()),
-            extract_duration_ms(value, Some(&body)),
-            timestamp_ms,
-        ) {
-            push_tool_item(
-                items,
-                "tool_result",
-                "Tool result".to_string(),
-                Some("tool_result".to_string()),
-                time.clone(),
-                None,
-                Some(body.clone()),
-                extract_duration_ms(value, Some(&body)),
-                call_id.map(str::to_string),
-                timestamp_ms,
-            );
-        }
+        let duration_ms = extract_duration_ms(value, Some(&body));
+        attach_tool_result(items, call_id, Some(body), duration_ms, timestamp_ms);
     }
     handled
 }
@@ -324,7 +354,7 @@ impl super::AgentProvider for ClaudeProvider {
         Some(home.join(".claude/skills"))
     }
 
-    fn config_profile_path(&self, home: &Path, _codex_home: &Path, name: &str) -> Option<PathBuf> {
+    fn config_profile_path(&self, home: &Path, _agent_home: &Path, name: &str) -> Option<PathBuf> {
         Some(
             home.join(".claude/tendi-profiles")
                 .join(format!("{name}.settings.json")),
@@ -335,18 +365,19 @@ impl super::AgentProvider for ClaudeProvider {
         Some("json")
     }
 
-    fn config_files(&self, home: &Path, codex_home: &Path) -> Vec<crate::config::AgentConfigFile> {
+    fn config_files(&self, home: &Path, agent_home: &Path) -> Vec<crate::config::AgentConfigFile> {
         let base_path = home.join(".claude/settings.json");
-        let mut configs = vec![self
-            .config_file_for_path(home, codex_home, &base_path)
-            .expect("Claude provider must resolve its base config path")];
+        let mut configs = vec![
+            self.config_file_for_path(home, agent_home, &base_path)
+                .expect("Claude provider must resolve its base config path"),
+        ];
         configs.extend(
             crate::config::profile_paths_for_root(
                 &home.join(".claude/tendi-profiles"),
                 ".settings.json",
             )
             .into_iter()
-            .filter_map(|path| self.config_file_for_path(home, codex_home, &path)),
+            .filter_map(|path| self.config_file_for_path(home, agent_home, &path)),
         );
         configs
     }
@@ -354,7 +385,7 @@ impl super::AgentProvider for ClaudeProvider {
     fn config_file_for_path(
         &self,
         home: &Path,
-        _codex_home: &Path,
+        _agent_home: &Path,
         path: &Path,
     ) -> Option<crate::config::AgentConfigFile> {
         let base_path = home.join(".claude/settings.json");
@@ -398,12 +429,40 @@ impl super::AgentProvider for ClaudeProvider {
         Some("Claude Code")
     }
 
+    fn app_bundle_path(&self) -> Option<&'static str> {
+        Some("/Applications/Claude.app")
+    }
+
     fn executable_names(&self) -> &'static [&'static str] {
         &["claude"]
     }
 
     fn config_dir(&self, ctx: &ProviderContext) -> Option<PathBuf> {
         ctx.home.as_ref().map(|home| home.join(".claude"))
+    }
+
+    fn config_home(&self, home: &Path) -> PathBuf {
+        home.join(".claude")
+    }
+
+    fn projection_directories(&self) -> &'static [&'static str] {
+        &[".claude"]
+    }
+
+    fn projection_candidate_files(&self, domain: &str, ancestor: &Path) -> Vec<PathBuf> {
+        match domain {
+            "rules" => vec![ancestor.join("CLAUDE.md")],
+            "hooks" => vec![
+                ancestor.join(".claude/settings.json"),
+                ancestor.join(".claude/settings.local.json"),
+            ],
+            "skills" => vec![ancestor.join(".claude/skills")],
+            _ => Vec::new(),
+        }
+    }
+
+    fn session_scan_priority(&self, root: &Path) -> Option<u8> {
+        root.to_string_lossy().contains("/.claude/").then_some(2)
     }
 
     fn skill_roots(&self, ctx: &ProviderContext) -> Vec<SkillRoot> {
@@ -435,7 +494,13 @@ impl super::AgentProvider for ClaudeProvider {
         cache: Option<&SessionScanCache>,
     ) -> Result<()> {
         if let Some(home) = &ctx.home {
-            sessions::scan_claude_projects(&home.join(".claude/projects"), sessions_out, cache);
+            sessions::scan_jsonl_sessions(
+                &home.join(".claude/projects"),
+                self.kind(),
+                3,
+                sessions_out,
+                cache,
+            );
         }
         Ok(())
     }
@@ -539,6 +604,25 @@ impl super::AgentProvider for ClaudeProvider {
         })
     }
 
+    fn accepts_session_app_url(&self, url: &str) -> bool {
+        url.strip_prefix("claude://resume?")
+            .is_some_and(valid_resume_query)
+    }
+
+    fn update_session_metadata(
+        &self,
+        value: &Value,
+        meta: &mut crate::sessions::SessionMetadata,
+        deduplicated_usage: &mut BTreeMap<String, crate::sessions::SessionTokenUsage>,
+    ) {
+        if let Some(model) = extract_model(value) {
+            meta.model = Some(model);
+        }
+        if let Some((message_id, token_usage)) = extract_token_usage(value) {
+            deduplicated_usage.insert(message_id, token_usage);
+        }
+    }
+
     fn parse_transcript_value(&self, value: &Value, items: &mut Vec<TranscriptItem>) {
         parse_transcript(value, items);
     }
@@ -556,7 +640,11 @@ impl super::AgentProvider for ClaudeProvider {
     }
 
     fn recognizes_transcript(&self, value: &Value) -> bool {
-        value.get("sessionId").is_some() && value.get("type").and_then(Value::as_str).is_some()
+        (value.get("type").and_then(Value::as_str) == Some("assistant")
+            && value.get("message").is_some())
+            || (value.get("type").and_then(Value::as_str) == Some("user")
+                && value.get("sessionId").is_some()
+                && value.get("message").is_some())
     }
 
     fn parse_analytics_line(&self, line: &str, record: &mut SessionAnalyticsRecord) {

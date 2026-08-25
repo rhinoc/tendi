@@ -1,27 +1,415 @@
 use std::{
-    collections::BTreeMap,
-    env, fs,
+    collections::{BTreeMap, BTreeSet, HashMap},
+    env,
+    fs::{self, OpenOptions, TryLockError},
     path::{Path, PathBuf},
+    process::Command,
+    time::Duration,
 };
 
-use anyhow::{Result, bail};
-use serde::Deserialize;
+use anyhow::{Context, Result, bail};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use serde_yaml::Value as YamlValue;
+use sha2::Digest;
 use toml::Value as TomlValue;
+use toml_edit::{ArrayOfTables, DocumentMut, Item, Table, value};
 use walkdir::WalkDir;
 
 use crate::transcript::{
-    TranscriptItem, attach_tool_result, collect_message_content, compact_time, extract_call_id,
-    extract_duration_ms, extract_raw_content_text, extract_thinking_text, extract_tool_command,
-    extract_tool_result, parse_timestamp_ms, push_item, push_tool_item, summarize_tool_call,
+    InternalContextMarker, TranscriptItem, attach_tool_result,
+    collect_message_content_with_markers, compact_time, extract_call_id, extract_duration_ms,
+    extract_raw_content_text, extract_thinking_text, extract_tool_command, extract_tool_result,
+    parse_timestamp_ms, push_item, push_tool_item, summarize_tool_call,
 };
 
 use super::*;
 
 pub(super) struct CodexProvider;
 
+const CODEX_BUNDLED_SKILL_FILES: [(&str, &str); 1] = [(
+    "agents/openai.yaml",
+    include_str!("../../../../skills/tendi/agents/openai.yaml"),
+)];
+
+const CODEX_INTERNAL_CONTEXT_MARKERS: [InternalContextMarker; 1] = [(
+    "<codex_internal_context",
+    "Codex internal",
+    Some("</codex_internal_context>"),
+)];
+
+pub(crate) fn scan_session_index(
+    path: &Path,
+    sessions: &mut Vec<SessionRecord>,
+    warnings: &mut Vec<String>,
+) -> Result<()> {
+    let text = match fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(err).with_context(|| format!("failed to read {}", path.display())),
+    };
+
+    for (index, line) in text.lines().enumerate() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        match serde_json::from_str::<Value>(line) {
+            Ok(value) => {
+                if let Some(id) = value.get("id").and_then(Value::as_str) {
+                    sessions.push(SessionRecord {
+                        id: id.to_string(),
+                        agent: AgentKind::Codex,
+                        title: value
+                            .get("thread_name")
+                            .and_then(Value::as_str)
+                            .and_then(crate::sessions::clean_title),
+                        project: None,
+                        repository: None,
+                        repository_url: None,
+                        logical_project_id: None,
+                        logical_project_name: None,
+                        path: path.to_path_buf(),
+                        started_at: value
+                            .get("started_at")
+                            .and_then(Value::as_str)
+                            .map(str::to_string),
+                        updated_at: value
+                            .get("updated_at")
+                            .and_then(Value::as_str)
+                            .map(str::to_string),
+                        message_count: None,
+                        first_user_message: None,
+                        last_user_message: None,
+                        last_assistant_message: None,
+                        turn_count: None,
+                        model: None,
+                        mode: None,
+                        approval_mode: None,
+                        is_run_everything: None,
+                        parent_session_id: None,
+                        token_usage: None,
+                    });
+                }
+            }
+            Err(err) => warnings.push(format!("{}:{}: {err}", path.display(), index + 1)),
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn session_id_from_path(path: &Path) -> String {
+    let raw_id = path
+        .file_stem()
+        .and_then(|name| name.to_str())
+        .unwrap_or("codex-session")
+        .trim_start_matches("rollout-");
+    if raw_id.len() >= 36 {
+        raw_id[raw_id.len() - 36..].to_string()
+    } else {
+        raw_id.to_string()
+    }
+}
+
+fn normalize_ephemeral_chat_root(path: PathBuf) -> PathBuf {
+    let Some(parent) = path.parent() else {
+        return path;
+    };
+    let Some(parent_name) = parent.file_name().and_then(|name| name.to_str()) else {
+        return path;
+    };
+    let Some(root) = parent.parent() else {
+        return path;
+    };
+    if root.file_name().and_then(|name| name.to_str()) == Some("Codex")
+        && root
+            .parent()
+            .and_then(|parent| parent.file_name())
+            .and_then(|name| name.to_str())
+            == Some("Documents")
+        && is_date_directory(parent_name)
+        && path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| !name.is_empty())
+    {
+        return root.to_path_buf();
+    }
+    path
+}
+
+fn is_date_directory(value: &str) -> bool {
+    value.len() == 10
+        && value.bytes().enumerate().all(|(index, byte)| match index {
+            4 | 7 => byte == b'-',
+            _ => byte.is_ascii_digit(),
+        })
+}
+
+fn is_tutti_run_root(root: &Path) -> bool {
+    root.file_name().and_then(|name| name.to_str()) == Some("runs")
+        && root
+            .parent()
+            .and_then(Path::file_name)
+            .and_then(|name| name.to_str())
+            == Some("agent")
+}
+
+fn tutti_run_session_roots(root: &Path) -> Vec<PathBuf> {
+    let Ok(runs) = fs::read_dir(root) else {
+        return Vec::new();
+    };
+    let mut roots = runs
+        .filter_map(Result::ok)
+        .filter(|entry| entry.path().is_dir())
+        .map(|run| run.path().join("codex-home/sessions"))
+        .filter(|sessions| sessions.is_dir())
+        .collect::<Vec<_>>();
+    roots.sort();
+    roots
+}
+
+pub(crate) fn collect_tutti_run_session_paths(root: &Path, session_paths: &mut BTreeSet<PathBuf>) {
+    for sessions in tutti_run_session_roots(root) {
+        for entry in WalkDir::new(sessions)
+            .follow_links(false)
+            .max_depth(6)
+            .into_iter()
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                entry.file_type().is_file()
+                    && entry
+                        .path()
+                        .extension()
+                        .is_some_and(|extension| extension == "jsonl")
+            })
+        {
+            session_paths.insert(entry.into_path());
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct NormalizedHookIdentity {
+    event_name: String,
+    #[serde(flatten)]
+    group: NormalizedMatcherGroup,
+}
+
+#[derive(Debug, Serialize)]
+struct NormalizedMatcherGroup {
+    #[serde(default)]
+    matcher: Option<String>,
+    #[serde(default)]
+    hooks: Vec<NormalizedHookHandler>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(tag = "type")]
+enum NormalizedHookHandler {
+    #[serde(rename = "command")]
+    Command {
+        command: String,
+        #[serde(default, rename = "commandWindows")]
+        command_windows: Option<String>,
+        #[serde(default, rename = "timeout")]
+        timeout_sec: Option<u64>,
+        #[serde(default)]
+        r#async: bool,
+        #[serde(default, rename = "statusMessage")]
+        status_message: Option<String>,
+        #[serde(
+            default,
+            rename = "additionalContextLimit",
+            skip_serializing_if = "Option::is_none"
+        )]
+        additional_context_limit: Option<usize>,
+    },
+}
+
 pub(super) fn matches_name(normalized: &str) -> bool {
     normalized == "codex"
+}
+
+fn valid_thread_id(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+}
+
+fn load_hook_review_states(path: &Path) -> HashMap<String, String> {
+    let Ok(text) = fs::read_to_string(path) else {
+        return HashMap::new();
+    };
+    let mut states = HashMap::new();
+    let mut current_key = None;
+    for line in text.lines() {
+        let line = line.trim();
+        if line.starts_with('[') && line.ends_with(']') {
+            current_key = line
+                .strip_prefix("[hooks.state.\"")
+                .and_then(|key| key.strip_suffix("\"]"))
+                .map(|key| key.replace("\\\"", "\"").replace("\\\\", "\\"));
+            continue;
+        }
+        let Some(key) = current_key.as_ref() else {
+            continue;
+        };
+        let Some(value) = line
+            .strip_prefix("trusted_hash = ")
+            .or_else(|| line.strip_prefix("trustedHash = "))
+        else {
+            continue;
+        };
+        if let Ok(trusted_hash) = serde_json::from_str::<String>(value) {
+            states.insert(key.clone(), trusted_hash);
+        }
+    }
+    states
+}
+
+fn hook_event_key_label(event: &str) -> String {
+    let mut label = String::with_capacity(event.len() + 4);
+    for (index, character) in event.chars().enumerate() {
+        if character.is_uppercase() && index > 0 {
+            label.push('_');
+        }
+        label.extend(character.to_lowercase());
+    }
+    label
+}
+
+fn hook_review_key(path: &Path, event: &str, group_index: usize, handler_index: usize) -> String {
+    format!(
+        "{}:{}:{group_index}:{handler_index}",
+        path.display(),
+        hook_event_key_label(event),
+    )
+}
+
+fn hook_timeout(event: &str, configured: Option<u64>) -> u64 {
+    if event == "SessionEnd" {
+        configured.unwrap_or(1).clamp(1, 3)
+    } else {
+        configured.unwrap_or(600).max(1)
+    }
+}
+
+fn hook_matcher(event: &str, matcher: Option<&str>) -> Option<String> {
+    match event {
+        "UserPromptSubmit" | "Stop" => None,
+        _ => matcher.map(str::to_string),
+    }
+}
+
+fn hook_additional_context_limit(event: &str, value: Option<usize>) -> Option<usize> {
+    let supported = matches!(
+        event,
+        "PreToolUse" | "PostToolUse" | "SessionStart" | "UserPromptSubmit" | "SubagentStart"
+    );
+    supported
+        .then_some(value)
+        .flatten()
+        .filter(|limit| *limit != 2_500)
+}
+
+fn canonical_json(value: &Value) -> Value {
+    match value {
+        Value::Object(map) => {
+            let mut sorted = serde_json::Map::new();
+            let mut keys = map.keys().cloned().collect::<Vec<_>>();
+            keys.sort();
+            for key in keys {
+                if let Some(value) = map.get(&key) {
+                    sorted.insert(key, canonical_json(value));
+                }
+            }
+            Value::Object(sorted)
+        }
+        Value::Array(items) => Value::Array(items.iter().map(canonical_json).collect()),
+        other => other.clone(),
+    }
+}
+
+pub(crate) fn hook_current_hash(
+    event: &str,
+    matcher: Option<&str>,
+    command: &str,
+    timeout: u64,
+    is_async: bool,
+    status_message: Option<&str>,
+    additional_context_limit: Option<usize>,
+) -> Option<String> {
+    let identity = NormalizedHookIdentity {
+        event_name: hook_event_key_label(event),
+        group: NormalizedMatcherGroup {
+            matcher: hook_matcher(event, matcher),
+            hooks: vec![NormalizedHookHandler::Command {
+                command: command.to_string(),
+                command_windows: None,
+                timeout_sec: Some(timeout),
+                r#async: is_async,
+                status_message: status_message.map(str::to_string),
+                additional_context_limit: hook_additional_context_limit(
+                    event,
+                    additional_context_limit,
+                ),
+            }],
+        },
+    };
+    let value = toml::Value::try_from(identity).ok()?;
+    let canonical = canonical_json(&serde_json::to_value(value).ok()?);
+    let serialized = serde_json::to_vec(&canonical).ok()?;
+    let mut hasher = sha2::Sha256::new();
+    hasher.update(serialized);
+    Some(format!("sha256:{:x}", hasher.finalize()))
+}
+
+pub(crate) fn write_trusted_hash(path: &Path, key: &str, trusted_hash: &str) -> Result<()> {
+    let original = fs::read_to_string(path)
+        .with_context(|| format!("failed to read Codex config {}", path.display()))?;
+    let escaped_key = key.replace('\\', "\\\\").replace('"', "\\\"");
+    let header = format!(r#"[hooks.state."{escaped_key}"]"#);
+    let mut lines = Vec::new();
+    let mut in_target = false;
+    let mut found_target = false;
+    let mut wrote_hash = false;
+    for line in original.lines() {
+        if line.trim_start().starts_with('[') && line.trim_end().ends_with(']') {
+            if in_target && !wrote_hash {
+                lines.push(format!("trusted_hash = {trusted_hash:?}"));
+                wrote_hash = true;
+            }
+            in_target = line.trim() == header;
+            found_target |= in_target;
+        }
+        if in_target && line.trim_start().starts_with("trusted_hash =") {
+            lines.push(format!("trusted_hash = {trusted_hash:?}"));
+            wrote_hash = true;
+        } else if in_target && line.trim_start().starts_with("trustedHash =") {
+            lines.push(format!("trusted_hash = {trusted_hash:?}"));
+            wrote_hash = true;
+        } else {
+            lines.push(line.to_string());
+        }
+    }
+    if in_target && !wrote_hash {
+        lines.push(format!("trusted_hash = {trusted_hash:?}"));
+    }
+    if !found_target {
+        if !lines.is_empty() {
+            lines.push(String::new());
+        }
+        lines.push(header);
+        lines.push(format!("trusted_hash = {trusted_hash:?}"));
+    }
+    let mut updated = lines.join("\n");
+    if original.ends_with('\n') {
+        updated.push('\n');
+    }
+    crate::fsutil::atomic_write(path, &updated)
+        .with_context(|| format!("failed to write Codex config {}", path.display()))
 }
 
 /// Codex lifecycle hook events from the official `HookEventsToml` schema.
@@ -172,6 +560,786 @@ fn codex_home(ctx: &ProviderContext) -> PathBuf {
         .map(PathBuf::from)
         .or_else(|| ctx.home.as_ref().map(|home| home.join(".codex")))
         .unwrap_or_else(|| PathBuf::from(".codex"))
+}
+
+fn codex_home_from_system() -> Option<PathBuf> {
+    dirs::home_dir().map(|home| {
+        codex_home(&ProviderContext {
+            home: Some(home),
+            project_dirs: Vec::new(),
+        })
+    })
+}
+
+fn codex_skill_policy(path: &Path) -> Result<Option<bool>> {
+    let Some(text) = fs::read_to_string(path).ok() else {
+        return Ok(None);
+    };
+    let root = serde_yaml::from_str::<YamlValue>(&text)
+        .with_context(|| format!("failed to parse {}", path.display()))?;
+    Ok(root
+        .get("policy")
+        .and_then(|policy| policy.get("allow_implicit_invocation"))
+        .and_then(YamlValue::as_bool))
+}
+
+fn path_lookup_keys(path: &Path) -> Vec<PathBuf> {
+    let mut keys = vec![path.to_path_buf()];
+    if let Ok(canonical) = path.canonicalize() {
+        if !keys.iter().any(|key| key == &canonical) {
+            keys.push(canonical);
+        }
+    }
+    keys
+}
+
+fn codex_skill_enabled_for_path(config_path: &Path, skill_file: &Path) -> Option<bool> {
+    let text = fs::read_to_string(config_path).ok()?;
+    let value = toml::from_str::<TomlValue>(&text).ok()?;
+    let configs = value
+        .get("skills")
+        .and_then(|skills| skills.get("config"))
+        .and_then(TomlValue::as_array)?;
+    configs.iter().find_map(|config| {
+        let path = config.get("path").and_then(TomlValue::as_str)?;
+        let enabled = config.get("enabled").and_then(TomlValue::as_bool)?;
+        path_lookup_keys(Path::new(path))
+            .into_iter()
+            .any(|key| path_lookup_keys(skill_file).contains(&key))
+            .then_some(enabled)
+    })
+}
+
+fn ensure_yaml_mapping_child<'a>(
+    root: &'a mut YamlValue,
+    key: &str,
+) -> &'a mut serde_yaml::Mapping {
+    if !matches!(root, YamlValue::Mapping(_)) {
+        *root = YamlValue::Mapping(Default::default());
+    }
+    let map = root.as_mapping_mut().expect("root was made a mapping");
+    let key = YamlValue::String(key.to_string());
+    if !matches!(map.get(&key), Some(YamlValue::Mapping(_))) {
+        map.insert(key.clone(), YamlValue::Mapping(Default::default()));
+    }
+    map.get_mut(&key)
+        .and_then(YamlValue::as_mapping_mut)
+        .expect("child was made a mapping")
+}
+
+fn render_codex_policy(before: Option<&str>, visibility: SkillVisibility) -> Result<String> {
+    if visibility == SkillVisibility::Mixed {
+        bail!("mixed visibility is a scan summary and cannot be written to Codex policy");
+    }
+    let desired = matches!(visibility, SkillVisibility::Auto);
+    let mut root = match before {
+        Some(text) => serde_yaml::from_str::<YamlValue>(text)?,
+        None => YamlValue::Mapping(Default::default()),
+    };
+    let current = root
+        .get("policy")
+        .and_then(|policy| policy.get("allow_implicit_invocation"))
+        .and_then(YamlValue::as_bool);
+    if current == Some(desired) || (before.is_none() && desired) {
+        return Ok(before.unwrap_or_default().to_string());
+    }
+    let policy = ensure_yaml_mapping_child(&mut root, "policy");
+    policy.insert(
+        YamlValue::String("allow_implicit_invocation".to_string()),
+        YamlValue::Bool(desired),
+    );
+    Ok(serde_yaml::to_string(&root)?)
+}
+
+fn plan_codex_policy(skill_dir: &Path, visibility: SkillVisibility) -> Result<FileChange> {
+    let path = skill_dir.join("agents/openai.yaml");
+    let before = fs::read_to_string(&path).ok();
+    let after = render_codex_policy(before.as_deref(), visibility)
+        .with_context(|| format!("failed to parse {}", path.display()))?;
+    Ok(FileChange {
+        path,
+        before_sha256: before.as_deref().map(crate::fsutil::sha256_text),
+        before,
+        after,
+    })
+}
+
+fn codex_skill_config_matches_path(config: &Table, skill_file: &Path) -> bool {
+    let Some(path) = config.get("path").and_then(Item::as_str) else {
+        return false;
+    };
+    let skill_keys = path_lookup_keys(skill_file);
+    path_lookup_keys(Path::new(path))
+        .into_iter()
+        .any(|key| skill_keys.iter().any(|skill_key| skill_key == &key))
+}
+
+fn render_codex_skill_config(before: &str, skill_file: &Path, enabled: bool) -> Result<String> {
+    let mut doc = if before.trim().is_empty() {
+        DocumentMut::new()
+    } else {
+        before.parse::<DocumentMut>()?
+    };
+    if !doc.as_table().contains_key("skills") {
+        doc["skills"] = Item::Table(Table::new());
+    }
+    let skills = doc["skills"]
+        .as_table_mut()
+        .context("skills config root was not a table")?;
+    if !skills.contains_key("config") {
+        skills["config"] = Item::ArrayOfTables(ArrayOfTables::new());
+    }
+    let configs = skills["config"]
+        .as_array_of_tables_mut()
+        .context("skills.config was not an array of tables")?;
+    if let Some(config) = configs
+        .iter_mut()
+        .find(|config| codex_skill_config_matches_path(config, skill_file))
+    {
+        config["enabled"] = value(enabled);
+    } else {
+        let mut config = Table::new();
+        config["path"] = value(skill_file.to_string_lossy().to_string());
+        config["enabled"] = value(enabled);
+        configs.push(config);
+    }
+    Ok(doc.to_string())
+}
+
+fn plan_codex_skill_config(
+    skill_dir: &Path,
+    visibility: SkillVisibility,
+) -> Result<Option<FileChange>> {
+    if visibility == SkillVisibility::Mixed {
+        bail!("mixed visibility is a scan summary and cannot be written to Codex config");
+    }
+    let Some(config_home) = codex_home_from_system() else {
+        return Ok(None);
+    };
+    let config_path = config_home.join("config.toml");
+    let desired_enabled = visibility != SkillVisibility::Off;
+    let before = fs::read_to_string(&config_path).ok();
+    if before.is_none() && desired_enabled {
+        return Ok(None);
+    }
+    let before_text = before.as_deref().unwrap_or("");
+    let skill_file = skill_dir.join("SKILL.md");
+    let after = render_codex_skill_config(before_text, &skill_file, desired_enabled)
+        .with_context(|| format!("failed to update {}", config_path.display()))?;
+    if before.as_deref() == Some(after.as_str()) {
+        return Ok(None);
+    }
+    Ok(Some(FileChange {
+        path: config_path,
+        before_sha256: before.as_deref().map(crate::fsutil::sha256_text),
+        before,
+        after,
+    }))
+}
+
+fn codex_usage(value: &Value) -> crate::analytics::AnalyticsTokenUsage {
+    crate::analytics::AnalyticsTokenUsage {
+        input_tokens: value
+            .get("input_tokens")
+            .and_then(Value::as_u64)
+            .unwrap_or(0),
+        cached_input_tokens: value
+            .get("cached_input_tokens")
+            .and_then(Value::as_u64)
+            .unwrap_or(0),
+        cache_write_input_tokens: value
+            .get("cache_write_input_tokens")
+            .and_then(Value::as_u64)
+            .unwrap_or(0),
+        output_tokens: value
+            .get("output_tokens")
+            .and_then(Value::as_u64)
+            .unwrap_or(0),
+        reasoning_output_tokens: value
+            .get("reasoning_output_tokens")
+            .and_then(Value::as_u64)
+            .unwrap_or(0),
+        total_tokens: value
+            .get("total_tokens")
+            .and_then(Value::as_u64)
+            .unwrap_or(0),
+    }
+}
+
+fn usage_signature(usage: &crate::analytics::AnalyticsTokenUsage) -> String {
+    format!(
+        "{},{},{},{},{},{}",
+        usage.input_tokens,
+        usage.cached_input_tokens,
+        usage.cache_write_input_tokens,
+        usage.output_tokens,
+        usage.reasoning_output_tokens,
+        usage.total_tokens,
+    )
+}
+
+pub(crate) fn parse_analytics_line(line: &str, record: &mut SessionAnalyticsRecord) {
+    let head = &line.as_bytes()[..line.len().min(1024)];
+    const MARKERS: [&[u8]; 11] = [
+        b"\"turn_context\"",
+        b"\"thread_settings_applied\"",
+        b"\"token_count\"",
+        b"\"task_started\"",
+        b"\"task_complete\"",
+        b"\"turn_aborted\"",
+        b"\"context_compacted\"",
+        b"\"function_call\"",
+        b"\"custom_tool_call\"",
+        b"\"local_shell_call\"",
+        b"\"mcp_tool_call_end\"",
+    ];
+    if !MARKERS
+        .iter()
+        .any(|marker| crate::analytics::bytes_contains(head, marker))
+    {
+        return;
+    }
+    let Ok(value) = serde_json::from_str::<Value>(line) else {
+        record.analytics.malformed_lines += 1;
+        return;
+    };
+    let timestamp = crate::analytics::string_at(&value, &["timestamp"]);
+    if let Some(timestamp) = timestamp
+        .as_deref()
+        .filter(|timestamp| !timestamp.is_empty())
+    {
+        record.state.last_timestamp = timestamp.to_string();
+    }
+    let entry_type = value.get("type").and_then(Value::as_str).unwrap_or("");
+    let payload = value.get("payload").unwrap_or(&Value::Null);
+    let payload_type = payload.get("type").and_then(Value::as_str).unwrap_or("");
+
+    if entry_type == "turn_context" {
+        if let Some(model) = payload.get("model").and_then(Value::as_str) {
+            crate::analytics::set_model(record, model);
+        }
+        return;
+    }
+    if payload_type == "thread_settings_applied" {
+        if let Some(model) = payload
+            .pointer("/thread_settings/model")
+            .and_then(Value::as_str)
+        {
+            crate::analytics::set_model(record, model);
+        }
+        return;
+    }
+    if matches!(
+        payload_type,
+        "function_call" | "custom_tool_call" | "local_shell_call"
+    ) {
+        crate::analytics::record_tool_call(payload, timestamp.as_deref().unwrap_or(""), record);
+        return;
+    }
+    if payload_type == "mcp_tool_call_end" {
+        if let (Some(server), Some(tool)) = (
+            payload
+                .pointer("/invocation/server")
+                .and_then(Value::as_str),
+            payload.pointer("/invocation/tool").and_then(Value::as_str),
+        ) {
+            if let Some(call) = record
+                .analytics
+                .tools
+                .iter_mut()
+                .rev()
+                .find(|call| call.name == tool && call.server.is_empty())
+            {
+                call.server = server.to_string();
+            }
+        }
+        return;
+    }
+    if payload_type == "turn_aborted" {
+        let stamp = timestamp.unwrap_or_default();
+        if !stamp.is_empty() {
+            record.analytics.aborts.push(stamp.clone());
+        }
+        crate::analytics::close_open_run(record, &stamp, false);
+        return;
+    }
+    if payload_type == "context_compacted" {
+        if let Some(stamp) = timestamp.filter(|stamp| !stamp.is_empty()) {
+            record.analytics.compactions.push(stamp);
+        }
+        return;
+    }
+    if payload_type == "task_started" {
+        let stamp = timestamp.unwrap_or_default();
+        crate::analytics::close_open_run(record, &stamp, false);
+        if !stamp.is_empty() {
+            record.state.open_run = Some(stamp);
+        }
+        return;
+    }
+    if payload_type == "task_complete" {
+        crate::analytics::close_open_run(record, timestamp.as_deref().unwrap_or(""), true);
+        return;
+    }
+    if payload_type != "token_count" {
+        return;
+    }
+
+    crate::analytics::record_rate_limits(payload, timestamp.as_deref().unwrap_or(""), record);
+    let Some(raw_usage) = payload.pointer("/info/total_token_usage") else {
+        return;
+    };
+    let current = codex_usage(raw_usage);
+    if current.total_tokens == 0 {
+        return;
+    }
+    let last = payload
+        .pointer("/info/last_token_usage")
+        .map(codex_usage)
+        .filter(|usage| usage.total_tokens > 0);
+    let usage_key = format!(
+        "{}|{}",
+        usage_signature(&current),
+        last.as_ref().map(usage_signature).unwrap_or_default()
+    );
+    if record.state.last_usage_key == usage_key {
+        return;
+    }
+    record.state.last_usage_key = usage_key;
+    let usage =
+        last.unwrap_or_else(|| crate::analytics::diff_usage(record.state.previous_usage, current));
+    record.state.previous_usage = current;
+    if usage.total_tokens == 0 {
+        return;
+    }
+    record.state.cumulative_usage.add_assign(usage);
+    record.state.response_index += 1;
+    record
+        .analytics
+        .responses
+        .push(crate::analytics::AnalyticsResponseUsage {
+            index: record.state.response_index,
+            timestamp: timestamp.unwrap_or_default(),
+            model: record.state.current_model.clone(),
+            usage,
+            cumulative: record.state.cumulative_usage,
+        });
+}
+
+pub(super) fn resume_target_from_transcript_value(value: &Value) -> Option<&'static str> {
+    if value.get("type").and_then(Value::as_str) != Some("session_meta") {
+        return None;
+    }
+    let source = value
+        .get("source")
+        .or_else(|| value.pointer("/payload/source"))
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let originator = value
+        .get("originator")
+        .or_else(|| value.pointer("/payload/originator"))
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if source == "vscode"
+        || originator == "codex desktop"
+        || originator.contains("desktop")
+        || originator.contains("work_desktop")
+    {
+        return Some("app");
+    }
+    if source == "cli"
+        || source == "exec"
+        || originator.contains("tui")
+        || originator.contains("exec")
+    {
+        return Some("terminal");
+    }
+    None
+}
+
+fn session_line_has_content(prefix: &str) -> bool {
+    match crate::sessions::json_string_field(prefix, "\"type\"") {
+        Some("session_meta" | "turn_context" | "world_state") => false,
+        Some("response_item") => !matches!(
+            crate::sessions::json_string_field(prefix, "\"role\""),
+            Some("developer" | "system")
+        ),
+        Some("event_msg") => [
+            "user_message",
+            "agent_message",
+            "agent_reasoning",
+            "sub_agent_activity",
+            "context_compacted",
+        ]
+        .iter()
+        .any(|kind| crate::sessions::line_contains_json_string_value(prefix, kind)),
+        Some("compacted") => true,
+        _ => crate::sessions::line_has_message_role(prefix),
+    }
+}
+
+fn session_line_requires_metadata_parse(
+    prefix: &str,
+    meta: &crate::sessions::SessionMetadata,
+) -> bool {
+    match crate::sessions::json_string_field(prefix, "\"type\"") {
+        Some("session_meta" | "turn_context") => true,
+        Some("event_msg") => {
+            prefix.contains("\"thread_settings_applied\"")
+                || prefix.contains("\"token_count\"")
+                || crate::sessions::line_has_message_role(prefix)
+        }
+        Some("response_item") => crate::sessions::line_has_message_role(prefix),
+        _ => {
+            crate::sessions::line_has_message_role(prefix)
+                || (meta.project.is_none() && prefix.contains("\"cwd\""))
+                || (meta.repository_url.is_none() && prefix.contains("\"repository_url\""))
+        }
+    }
+}
+
+fn extract_model(value: &Value) -> Option<String> {
+    let model = match value.get("type").and_then(Value::as_str) {
+        Some("turn_context") => value.pointer("/payload/model"),
+        Some("event_msg")
+            if value.pointer("/payload/type").and_then(Value::as_str)
+                == Some("thread_settings_applied") =>
+        {
+            value.pointer("/payload/thread_settings/model")
+        }
+        _ => None,
+    }?;
+    model
+        .as_str()
+        .map(str::trim)
+        .filter(|model| !model.is_empty())
+        .map(str::to_string)
+}
+
+pub(crate) fn extract_parent_session_id(value: &Value) -> Option<String> {
+    if value.get("type").and_then(Value::as_str) != Some("session_meta") {
+        return None;
+    }
+    value
+        .pointer("/payload/parent_thread_id")
+        .or_else(|| value.pointer("/payload/source/subagent/thread_spawn/parent_thread_id"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .map(str::to_string)
+}
+
+pub(crate) fn apply_hook_review_states(hooks: &mut [HookRecord], states: &HashMap<String, String>) {
+    for hook in hooks
+        .iter_mut()
+        .filter(|hook| hook.agent == AgentKind::Codex)
+    {
+        let (Some(key), Some(current_hash)) =
+            (&hook.provider_review_key, &hook.provider_current_hash)
+        else {
+            continue;
+        };
+        hook.needs_review = states
+            .get(key)
+            .is_none_or(|trusted_hash| trusted_hash != current_hash);
+    }
+}
+
+pub(crate) fn extract_provider_title(value: &Value) -> Option<String> {
+    if value.get("type").and_then(Value::as_str) != Some("session_meta") {
+        return None;
+    }
+    let task_name = value
+        .pointer("/payload/source/subagent/thread_spawn/task_name")
+        .or_else(|| value.pointer("/payload/task_name"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|task_name| !task_name.is_empty())
+        .map(str::to_string);
+    if task_name.is_some() {
+        return task_name;
+    }
+    value
+        .pointer("/payload/source/subagent/thread_spawn/agent_path")
+        .or_else(|| value.pointer("/payload/agent_path"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|agent_path| !agent_path.is_empty())
+        .and_then(|agent_path| agent_path.rsplit('/').find(|part| !part.is_empty()))
+        .map(str::to_string)
+}
+
+fn extract_token_usage(value: &Value) -> Option<crate::sessions::SessionTokenUsage> {
+    if value.pointer("/payload/type").and_then(Value::as_str) != Some("token_count") {
+        return None;
+    }
+    let usage = value.pointer("/payload/info/total_token_usage")?;
+    let total_tokens = usage.get("total_tokens")?.as_u64()?;
+    if total_tokens == 0 {
+        return None;
+    }
+    Some(crate::sessions::SessionTokenUsage {
+        input_tokens: usage.get("input_tokens")?.as_u64()?,
+        cached_input_tokens: usage.get("cached_input_tokens")?.as_u64()?,
+        output_tokens: usage.get("output_tokens")?.as_u64()?,
+        reasoning_output_tokens: usage
+            .get("reasoning_output_tokens")
+            .and_then(Value::as_u64)
+            .unwrap_or(0),
+        total_tokens,
+    })
+}
+
+fn session_metadata(path: &Path) -> Option<crate::sessions::SessionMetadata> {
+    path.is_file()
+        .then(|| crate::sessions::scan_jsonl_metadata(path, AgentKind::Codex))
+}
+
+pub(crate) fn session_title(path: &Path) -> Option<String> {
+    if path
+        .extension()
+        .is_none_or(|extension| extension != "jsonl")
+    {
+        return None;
+    }
+    let file = fs::File::open(path).ok()?;
+    let inherited_history_start_ordinal =
+        crate::transcript::transcript_inherited_history_start_ordinal(path, AgentKind::Codex)
+            .ok()
+            .flatten();
+    let mut provider_title = None;
+    for line in std::io::BufRead::lines(std::io::BufReader::new(file)).map_while(Result::ok) {
+        let Ok(value) = serde_json::from_str::<Value>(&line) else {
+            continue;
+        };
+        if provider_title.is_none() {
+            provider_title = extract_provider_title(&value);
+        }
+        if crate::transcript::is_inherited_transcript_value(&value, inherited_history_start_ordinal)
+        {
+            continue;
+        }
+        if let Some(title) = crate::sessions::extract_session_title(&value) {
+            return provider_title.or(Some(title));
+        }
+    }
+    provider_title
+}
+
+pub(super) fn codex_thread_writer_lock_path(
+    session_path: &Path,
+    session_id: &str,
+) -> Option<PathBuf> {
+    if session_id.is_empty() {
+        return None;
+    }
+    session_path.ancestors().find_map(|ancestor| {
+        let name = ancestor.file_name()?.to_str()?;
+        if !matches!(name, "sessions" | "archived_sessions") {
+            return None;
+        }
+        Some(
+            ancestor
+                .parent()?
+                .join("thread-writer-locks")
+                .join(format!("{session_id}.lock")),
+        )
+    })
+}
+
+pub(super) fn active_session_writer(session: &SessionRecord) -> Result<Option<SessionWriter>> {
+    let Some(lock_path) = codex_thread_writer_lock_path(&session.path, &session.id) else {
+        return Ok(None);
+    };
+    let lock_file = match OpenOptions::new().read(true).write(true).open(&lock_path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(error).with_context(|| {
+                format!(
+                    "failed to inspect Codex writer lock {}",
+                    lock_path.display()
+                )
+            });
+        }
+    };
+
+    match lock_file.try_lock() {
+        Ok(()) => {
+            lock_file.unlock().with_context(|| {
+                format!(
+                    "failed to release Codex writer lock {}",
+                    lock_path.display()
+                )
+            })?;
+            Ok(None)
+        }
+        Err(TryLockError::WouldBlock) => {
+            let pids = writer_pids(&lock_path)?;
+            if pids.is_empty() {
+                bail!(
+                    "Codex session {} has an active writer, but its process could not be identified ({})",
+                    session.id,
+                    lock_path.display()
+                );
+            }
+            Ok(Some(SessionWriter { lock_path, pids }))
+        }
+        Err(TryLockError::Error(error)) => Err(error).with_context(|| {
+            format!(
+                "failed to inspect Codex writer lock {}",
+                lock_path.display()
+            )
+        }),
+    }
+}
+
+pub(super) fn validate_session_writer(session: &SessionRecord) -> Result<()> {
+    if let Some(writer) = active_session_writer(session)? {
+        bail!(
+            "Codex session {} already has an active writer (pid {}; {})",
+            session.id,
+            writer
+                .pids
+                .iter()
+                .map(u32::to_string)
+                .collect::<Vec<_>>()
+                .join(", "),
+            writer.lock_path.display()
+        );
+    }
+    Ok(())
+}
+
+pub(super) fn terminate_session_writer(session: &SessionRecord) -> Result<()> {
+    let Some(writer) = active_session_writer(session)? else {
+        return Ok(());
+    };
+    terminate_writer_pids(&writer.pids, "-TERM")?;
+    if wait_for_writer_release(session)? {
+        return Ok(());
+    }
+
+    let Some(writer) = active_session_writer(session)? else {
+        return Ok(());
+    };
+    terminate_writer_pids(&writer.pids, "-KILL")?;
+    if wait_for_writer_release(session)? {
+        return Ok(());
+    }
+    bail!(
+        "failed to release Codex writer lock for session {} ({})",
+        session.id,
+        writer.lock_path.display()
+    )
+}
+
+fn writer_pids(lock_path: &Path) -> Result<Vec<u32>> {
+    #[cfg(unix)]
+    {
+        let program = if cfg!(target_os = "macos") {
+            "/usr/sbin/lsof"
+        } else {
+            "lsof"
+        };
+        let output = Command::new(program)
+            .args(["-nP", "-t"])
+            .arg(lock_path)
+            .output()
+            .with_context(|| {
+                format!(
+                    "failed to inspect Codex writer process for {}",
+                    lock_path.display()
+                )
+            })?;
+        if !output.status.success() && output.status.code() != Some(1) {
+            bail!(
+                "failed to inspect Codex writer process for {}: {}",
+                lock_path.display(),
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
+        }
+        let mut pids = String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .filter_map(|line| line.trim().parse::<u32>().ok())
+            .collect::<Vec<_>>();
+        pids.sort_unstable();
+        pids.dedup();
+        return Ok(pids);
+    }
+
+    #[cfg(not(unix))]
+    {
+        let _ = lock_path;
+        bail!("identifying Codex writer processes is unsupported on this platform");
+    }
+}
+
+fn terminate_writer_pids(pids: &[u32], signal: &str) -> Result<()> {
+    #[cfg(unix)]
+    {
+        for pid in pids {
+            Command::new("/bin/kill")
+                .args([signal, &pid.to_string()])
+                .status()
+                .with_context(|| format!("failed to terminate Codex writer process {pid}"))?;
+        }
+        return Ok(());
+    }
+
+    #[cfg(not(unix))]
+    {
+        let _ = (pids, signal);
+        bail!("terminating Codex writer processes is unsupported on this platform");
+    }
+}
+
+fn wait_for_writer_release(session: &SessionRecord) -> Result<bool> {
+    for _ in 0..40 {
+        if !writer_lock_is_held(session)? {
+            return Ok(true);
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    Ok(false)
+}
+
+fn writer_lock_is_held(session: &SessionRecord) -> Result<bool> {
+    let Some(lock_path) = codex_thread_writer_lock_path(&session.path, &session.id) else {
+        return Ok(false);
+    };
+    let lock_file = match OpenOptions::new().read(true).write(true).open(&lock_path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => {
+            return Err(error).with_context(|| {
+                format!(
+                    "failed to inspect Codex writer lock {}",
+                    lock_path.display()
+                )
+            });
+        }
+    };
+    match lock_file.try_lock() {
+        Ok(()) => {
+            lock_file.unlock().with_context(|| {
+                format!(
+                    "failed to release Codex writer lock {}",
+                    lock_path.display()
+                )
+            })?;
+            Ok(false)
+        }
+        Err(TryLockError::WouldBlock) => Ok(true),
+        Err(TryLockError::Error(error)) => Err(error).with_context(|| {
+            format!(
+                "failed to inspect Codex writer lock {}",
+                lock_path.display()
+            )
+        }),
+    }
 }
 
 pub(super) fn codex_skill_roots(
@@ -414,7 +1582,13 @@ fn collect_codex_item(value: &Value, items: &mut Vec<TranscriptItem>) {
             if role != "user" && role != "assistant" {
                 return;
             }
-            collect_message_content(content, items, role, time);
+            collect_message_content_with_markers(
+                content,
+                items,
+                role,
+                time,
+                &CODEX_INTERNAL_CONTEXT_MARKERS,
+            );
         }
         Some("reasoning") | Some("thinking") => {
             let kind = payload
@@ -452,26 +1626,8 @@ fn collect_codex_item(value: &Value, items: &mut Vec<TranscriptItem>) {
         Some("function_call_output") | Some("custom_tool_call_output") => {
             let result = extract_tool_result(payload);
             let call_id = extract_call_id(payload);
-            if !attach_tool_result(
-                items,
-                call_id.as_deref(),
-                result.clone(),
-                extract_duration_ms(payload, result.as_deref()),
-                timestamp_ms,
-            ) {
-                push_tool_item(
-                    items,
-                    "tool_result",
-                    "Tool result".to_string(),
-                    Some("tool_result".to_string()),
-                    time,
-                    None,
-                    result,
-                    extract_duration_ms(payload, None),
-                    call_id,
-                    timestamp_ms,
-                );
-            }
+            let duration_ms = extract_duration_ms(payload, result.as_deref());
+            attach_tool_result(items, call_id.as_deref(), result, duration_ms, timestamp_ms);
         }
         Some("web_search_call") | Some("image_generation_call") => {
             let kind = payload
@@ -635,6 +1791,10 @@ impl super::AgentProvider for CodexProvider {
         )
     }
 
+    fn bundled_skill_files(&self) -> &'static [(&'static str, &'static str)] {
+        &CODEX_BUNDLED_SKILL_FILES
+    }
+
     fn config_profile_path(&self, _home: &Path, codex_home: &Path, name: &str) -> Option<PathBuf> {
         Some(codex_home.join(format!("{name}.config.toml")))
     }
@@ -645,9 +1805,10 @@ impl super::AgentProvider for CodexProvider {
 
     fn config_files(&self, home: &Path, codex_home: &Path) -> Vec<crate::config::AgentConfigFile> {
         let base_path = codex_home.join("config.toml");
-        let mut configs = vec![self
-            .config_file_for_path(home, codex_home, &base_path)
-            .expect("Codex provider must resolve its base config path")];
+        let mut configs = vec![
+            self.config_file_for_path(home, codex_home, &base_path)
+                .expect("Codex provider must resolve its base config path"),
+        ];
         configs.extend(
             crate::config::profile_paths_for_root(codex_home, ".config.toml")
                 .into_iter()
@@ -693,7 +1854,7 @@ impl super::AgentProvider for CodexProvider {
         0
     }
 
-    fn materialized_skill_is_shared_or_codex(&self) -> bool {
+    fn uses_shared_skill_layout(&self) -> bool {
         true
     }
 
@@ -705,12 +1866,92 @@ impl super::AgentProvider for CodexProvider {
         Some("Codex")
     }
 
+    fn app_bundle_path(&self) -> Option<&'static str> {
+        Some("/Applications/Codex.app")
+    }
+
     fn executable_names(&self) -> &'static [&'static str] {
         &["codex"]
     }
 
     fn config_dir(&self, ctx: &ProviderContext) -> Option<PathBuf> {
         Some(codex_home(ctx))
+    }
+
+    fn config_home(&self, home: &Path) -> PathBuf {
+        codex_home(&ProviderContext {
+            home: Some(home.to_path_buf()),
+            project_dirs: Vec::new(),
+        })
+    }
+
+    fn projection_directories(&self) -> &'static [&'static str] {
+        &[".codex"]
+    }
+
+    fn projection_candidate_files(&self, domain: &str, ancestor: &Path) -> Vec<PathBuf> {
+        match domain {
+            "rules" => vec![ancestor.join("AGENTS.md")],
+            "hooks" => vec![
+                ancestor.join(".codex/hooks.json"),
+                ancestor.join(".codex/config.toml"),
+            ],
+            "mcp" => vec![
+                ancestor.join(".codex/mcp.json"),
+                ancestor.join(".codex/config.toml"),
+            ],
+            "skills" => vec![ancestor.join(".codex/skills")],
+            _ => Vec::new(),
+        }
+    }
+
+    fn skill_visibility_metadata(
+        &self,
+        skill_dir: &Path,
+        skill_file: &Path,
+        _frontmatter: Option<&serde_yaml::Value>,
+    ) -> Result<SkillProviderMetadata> {
+        let allow_implicit_invocation = codex_skill_policy(&skill_dir.join("agents/openai.yaml"))?;
+        let enabled = codex_home_from_system()
+            .map(|home| codex_skill_enabled_for_path(&home.join("config.toml"), skill_file))
+            .flatten();
+        Ok(SkillProviderMetadata {
+            allow_implicit_invocation,
+            enabled,
+            disable_model_invocation: None,
+        })
+    }
+
+    fn plan_skill_visibility(
+        &self,
+        skill_dir: &Path,
+        visibility: SkillVisibility,
+        update_provider_config: bool,
+    ) -> Result<Vec<FileChange>> {
+        let mut changes = vec![plan_codex_policy(skill_dir, visibility)?];
+        if update_provider_config {
+            if let Some(change) = plan_codex_skill_config(skill_dir, visibility)? {
+                changes.push(change);
+            }
+        }
+        Ok(changes)
+    }
+
+    fn is_managed_skill_file(&self, relative_path: &str) -> bool {
+        relative_path == "agents/openai.yaml" || relative_path.ends_with("/agents/openai.yaml")
+    }
+
+    fn session_scan_priority(&self, root: &Path) -> Option<u8> {
+        let path = root.to_string_lossy();
+        if path.contains("/.codex/sessions") {
+            Some(0)
+        } else if path.contains("/.codex/archived_sessions")
+            || path.ends_with("/.codex/session_index.jsonl")
+        {
+            Some(4)
+        } else {
+            None
+        }
     }
 
     fn skill_roots(&self, ctx: &ProviderContext) -> Vec<SkillRoot> {
@@ -726,9 +1967,15 @@ impl super::AgentProvider for CodexProvider {
         cache: Option<&SessionScanCache>,
     ) -> Result<()> {
         let root = codex_home(ctx);
-        sessions::scan_codex_index(&root.join("session_index.jsonl"), sessions_out, warnings)?;
-        sessions::scan_codex_jsonl(&root.join("sessions"), sessions_out, cache);
-        sessions::scan_codex_jsonl(&root.join("archived_sessions"), sessions_out, cache);
+        scan_session_index(&root.join("session_index.jsonl"), sessions_out, warnings)?;
+        sessions::scan_jsonl_sessions(&root.join("sessions"), self.kind(), 6, sessions_out, cache);
+        sessions::scan_jsonl_sessions(
+            &root.join("archived_sessions"),
+            self.kind(),
+            6,
+            sessions_out,
+            cache,
+        );
         Ok(())
     }
 
@@ -739,6 +1986,55 @@ impl super::AgentProvider for CodexProvider {
             root.join("sessions"),
             root.join("archived_sessions"),
         ]
+    }
+
+    fn session_watch_targets(
+        &self,
+        root: &Path,
+    ) -> Option<(Vec<crate::sessions::SessionWatchTarget>, bool)> {
+        if !is_tutti_run_root(root) {
+            return None;
+        }
+        let mut targets = vec![crate::sessions::SessionWatchTarget {
+            path: root.to_path_buf(),
+            recursive: false,
+        }];
+        targets.extend(tutti_run_session_roots(root).into_iter().map(|path| {
+            crate::sessions::SessionWatchTarget {
+                path,
+                recursive: true,
+            }
+        }));
+        Some((targets, true))
+    }
+
+    fn session_watch_expansion(
+        &self,
+        dynamic_roots: &[PathBuf],
+        event_path: &Path,
+    ) -> Option<crate::sessions::SessionWatchExpansion> {
+        let root = dynamic_roots
+            .iter()
+            .find(|root| event_path.starts_with(root))?;
+        let run_name = event_path.strip_prefix(root).ok()?.components().next()?;
+        let run_dir = root.join(run_name.as_os_str());
+        Some(crate::sessions::SessionWatchExpansion {
+            agent_home: run_dir.join("codex-home"),
+            session_root: run_dir.join("codex-home/sessions"),
+            run_dir,
+        })
+    }
+
+    fn collect_additional_session_paths(
+        &self,
+        root: &Path,
+        session_paths: &mut BTreeSet<PathBuf>,
+    ) -> bool {
+        if !is_tutti_run_root(root) {
+            return false;
+        }
+        collect_tutti_run_session_paths(root, session_paths);
+        true
     }
 
     fn scan_rules(
@@ -806,8 +2102,83 @@ impl super::AgentProvider for CodexProvider {
         })
     }
 
+    fn validate_session_resume(&self, session: &SessionRecord) -> Result<()> {
+        validate_session_writer(session)
+    }
+
+    fn active_session_writer(&self, session: &SessionRecord) -> Result<Option<SessionWriter>> {
+        active_session_writer(session)
+    }
+
+    fn terminate_session_writer(&self, session: &SessionRecord) -> Result<()> {
+        terminate_session_writer(session)
+    }
+
+    fn session_requires_rescan(&self, session: &SessionRecord) -> Option<bool> {
+        if session.parent_session_id.is_none() {
+            return None;
+        }
+        if let Some(meta) = session_metadata(&session.path) {
+            return Some(
+                meta.title != session.title
+                    || meta.first_user_message != session.first_user_message
+                    || meta.last_user_message != session.last_user_message
+                    || meta.last_assistant_message != session.last_assistant_message
+                    || meta.parent_session_id != session.parent_session_id,
+            );
+        }
+        session_title(&session.path).map(|title| Some(title) != session.title)
+    }
+
+    fn session_line_has_content(&self, prefix: &str) -> Option<bool> {
+        Some(session_line_has_content(prefix))
+    }
+
+    fn session_line_requires_metadata_parse(
+        &self,
+        prefix: &str,
+        meta: &crate::sessions::SessionMetadata,
+    ) -> Option<bool> {
+        Some(session_line_requires_metadata_parse(prefix, meta))
+    }
+
+    fn update_session_metadata(
+        &self,
+        value: &Value,
+        meta: &mut crate::sessions::SessionMetadata,
+        _deduplicated_usage: &mut BTreeMap<String, crate::sessions::SessionTokenUsage>,
+    ) {
+        if meta.provider_title.is_none() {
+            meta.provider_title = extract_provider_title(value);
+        }
+        if meta.parent_session_id.is_none() {
+            meta.parent_session_id = extract_parent_session_id(value);
+        }
+        if let Some(model) = extract_model(value) {
+            meta.model = Some(model);
+        }
+        if let Some(token_usage) = extract_token_usage(value) {
+            meta.token_usage = Some(token_usage);
+        }
+    }
+
+    fn resume_target_from_transcript_value(&self, value: &Value) -> Option<&'static str> {
+        resume_target_from_transcript_value(value)
+    }
+
+    fn accepts_session_app_url(&self, url: &str) -> bool {
+        url.strip_prefix("codex://threads/")
+            .is_some_and(valid_thread_id)
+    }
+
     fn parse_transcript_value(&self, value: &Value, items: &mut Vec<TranscriptItem>) {
         parse_transcript(value, items);
+    }
+
+    fn transcript_internal_context_markers(
+        &self,
+    ) -> &'static [crate::transcript::InternalContextMarker] {
+        &CODEX_INTERNAL_CONTEXT_MARKERS
     }
 
     fn transcript_inherited_history_start_ordinal(&self, value: &Value) -> Option<u64> {
@@ -856,7 +2227,7 @@ impl super::AgentProvider for CodexProvider {
     }
 
     fn parse_analytics_line(&self, line: &str, record: &mut SessionAnalyticsRecord) {
-        crate::analytics::parse_codex_line(line, record);
+        parse_analytics_line(line, record);
     }
 
     fn extract_skill_tool_payloads<'a>(&self, value: &'a Value) -> Vec<(&'a Value, Evidence)> {
@@ -864,11 +2235,15 @@ impl super::AgentProvider for CodexProvider {
     }
 
     fn infer_session_project(&self, _path: &Path, project: Option<PathBuf>) -> Option<PathBuf> {
-        project.and_then(|path| sessions::ephemeral_chat_root(&path).or(Some(path)))
+        project
+    }
+
+    fn normalize_session_project(&self, project: PathBuf) -> PathBuf {
+        normalize_ephemeral_chat_root(project)
     }
 
     fn session_id_from_path(&self, path: &Path) -> String {
-        sessions::codex_session_id_from_path(path)
+        session_id_from_path(path)
     }
 
     fn scan_mcp(
@@ -962,7 +2337,7 @@ impl super::AgentProvider for CodexProvider {
         parse_codex_hook_file(path, trust_hash, hooks, warnings)
     }
 
-    fn codex_hook_metadata(
+    fn hook_review_metadata(
         &self,
         path: &Path,
         event: &str,
@@ -975,13 +2350,13 @@ impl super::AgentProvider for CodexProvider {
         status_message: Option<&str>,
         additional_context_limit: Option<usize>,
     ) -> (Option<String>, Option<String>) {
-        let key = crate::hooks::codex_hook_key(path, event, group_index, handler_index);
+        let key = hook_review_key(path, event, group_index, handler_index);
         let hash = command.and_then(|command| {
-            crate::hooks::codex_hook_hash(
+            hook_current_hash(
                 event,
                 matcher,
                 command,
-                crate::hooks::codex_hook_timeout(event, configured_timeout),
+                hook_timeout(event, configured_timeout),
                 is_async,
                 status_message,
                 additional_context_limit,
@@ -990,18 +2365,26 @@ impl super::AgentProvider for CodexProvider {
         (Some(key), hash)
     }
 
+    fn apply_hook_review_states(&self, hooks: &mut [HookRecord], ctx: &ProviderContext) {
+        let Some(home) = self.config_dir(ctx) else {
+            return;
+        };
+        let states = load_hook_review_states(&home.join("config.toml"));
+        apply_hook_review_states(hooks, &states);
+    }
+
     fn review_hook(&self, hook: &HookRecord) -> Result<()> {
         let key = hook
-            .codex_hook_key
+            .provider_review_key
             .as_deref()
             .context("this hook does not support review")?;
         let current_hash = hook
-            .codex_current_hash
+            .provider_current_hash
             .as_deref()
             .filter(|hash| *hash != "unsupported")
             .context("this hook type does not support review")?;
         let home = dirs::home_dir().context("home directory is unavailable")?;
-        crate::hooks::write_codex_trusted_hash(
+        write_trusted_hash(
             &codex_home(&ProviderContext {
                 home: Some(home),
                 project_dirs: Vec::new(),

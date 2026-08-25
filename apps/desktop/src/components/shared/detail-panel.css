@@ -184,8 +184,11 @@
 }
 
 @media (max-width: 980px) {
-  .sessionsLayout .panelResizeHandle,
-  .transcriptPanelHost {
+  .sessionsLayout .panelResizeHandle {
     display: none;
+  }
+
+  .sessionsLayout > [data-panel][data-detail-panel] {
+    display: none !important;
   }
 }

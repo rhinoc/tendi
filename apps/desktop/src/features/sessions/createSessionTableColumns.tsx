@@ -50,7 +50,7 @@ export function createSessionTableColumns<T extends SessionTableRow = SessionTab
   normalizedQuery = "",
   resumeSession,
   resumeState,
-  resumeTarget = "terminal",
+  resumeTarget = "auto",
   keys,
   widths = {},
 }: CreateSessionTableColumnsOptions<T> = {}): ColumnDef<T>[] {
@@ -119,7 +119,8 @@ export function createSessionTableColumns<T extends SessionTableRow = SessionTab
           );
         }
         const state = resumeState?.(session as T) ?? "idle";
-        const targetLabel = sessionResumeTargetForAgent(resumeTarget, session.agent) === "app" ? "app" : "terminal";
+        const resolvedTarget = sessionResumeTargetForAgent(resumeTarget, session.agent);
+        const targetLabel = resolvedTarget === "app" ? "app" : resolvedTarget === "auto" ? "auto" : "terminal";
         const label = state === "loading"
           ? `Opening ${session.agent} session in ${targetLabel}`
           : state === "success"

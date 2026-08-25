@@ -80,7 +80,7 @@ export const mcpColumns: ColumnDef<McpRow>[] = [
     key: "scope",
     header: "Scope",
     label: "Scope",
-    type: "text",
+    type: "enum",
     width: "180px",
     sortValue: (row) => `${row.scope ?? ""}`.toLowerCase(),
   },

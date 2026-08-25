@@ -11,8 +11,10 @@ use chrono::{SecondsFormat, TimeZone, Utc};
 use serde::{Deserialize, Serialize};
 use serde_yaml::Value;
 use sha2::{Digest, Sha256};
-use toml_edit::{ArrayOfTables, DocumentMut, Item, Table, value};
 use walkdir::WalkDir;
+
+#[cfg(test)]
+use toml_edit::{ArrayOfTables, DocumentMut, Item, Table, value};
 
 use crate::fsutil::{atomic_write, atomic_write_bytes, sha256_bytes, sha256_file, sha256_text};
 use crate::git::{self, CommandFailure};
@@ -88,9 +90,9 @@ pub struct SkillPath {
     pub tags: Vec<String>,
     pub tendi_visibility: Option<SkillVisibility>,
     pub effective_visibility: SkillVisibility,
-    pub codex_allow_implicit_invocation: Option<bool>,
-    pub codex_skill_enabled: Option<bool>,
-    pub cursor_disable_model_invocation: Option<bool>,
+    pub provider_allow_implicit_invocation: Option<bool>,
+    pub provider_skill_enabled: Option<bool>,
+    pub provider_disable_model_invocation: Option<bool>,
     pub plugin_id: Option<String>,
     pub plugin_enabled: Option<bool>,
 }
@@ -331,9 +333,10 @@ pub struct GitUpdateAction {
 pub struct MaterializedGitTarget {
     pub name: String,
     pub target: PathBuf,
+    pub agent: AgentKind,
     pub source_relative_path: Option<String>,
     pub visibility: SkillVisibility,
-    pub shared_or_codex: bool,
+    pub uses_shared_layout: bool,
     pub files: Vec<GitUpdateFile>,
 }
 
@@ -360,6 +363,7 @@ pub struct GitUpdateFile {
 #[derive(Debug, Clone, Serialize)]
 pub struct GitSkillVisibility {
     pub skill_dir: PathBuf,
+    pub agent: AgentKind,
     pub visibility: SkillVisibility,
 }
 
@@ -380,48 +384,82 @@ struct InstallableSkillCandidate {
     dependency_files: Vec<PathBuf>,
 }
 
-#[derive(Debug, Default, Deserialize)]
-struct CodexAgentConfig {
-    policy: Option<CodexPolicy>,
-}
-
-#[derive(Debug, Default, Deserialize)]
-struct CodexPolicy {
-    allow_implicit_invocation: Option<bool>,
-}
-
 pub fn scan_skills(cwd: &Path) -> Result<SkillScan> {
     let store = crate::storage::Store::open_default()?;
     scan_skills_with_source_store(cwd, &store)
 }
 
+pub fn scan_skills_for_project_roots(cwd: &Path, project_roots: &[PathBuf]) -> Result<SkillScan> {
+    let store = crate::storage::Store::open_default()?;
+    scan_skills_for_project_roots_with_store(cwd, &store, project_roots)
+}
+
+pub fn scan_skills_for_project_roots_with_store(
+    cwd: &Path,
+    store: &crate::storage::Store,
+    project_roots: &[PathBuf],
+) -> Result<SkillScan> {
+    scan_skills_with_source_store_for_projects(cwd, store, project_roots)
+}
+
+pub fn scan_skills_synced_for_project_roots(
+    cwd: &Path,
+    project_roots: &[PathBuf],
+) -> Result<SkillScan> {
+    let store = crate::storage::Store::open_default()?;
+    scan_skills_synced_for_project_roots_with_store(cwd, &store, project_roots)
+}
+
+pub fn scan_skills_synced_for_project_roots_with_store(
+    cwd: &Path,
+    store: &crate::storage::Store,
+    project_roots: &[PathBuf],
+) -> Result<SkillScan> {
+    let scan = scan_skills_with_source_store_for_projects(cwd, store, project_roots)?;
+    let changeset = plan_wrapper_sync(&scan)?;
+    if changeset.changes.is_empty() {
+        return Ok(scan);
+    }
+    apply_changes(&changeset)?;
+    scan_skills_with_source_store_for_projects(cwd, store, project_roots)
+}
+
 fn scan_skills_with_source_store(cwd: &Path, store: &crate::storage::Store) -> Result<SkillScan> {
+    scan_skills_with_source_store_for_projects(cwd, store, &[])
+}
+
+fn scan_skills_with_source_store_for_projects(
+    cwd: &Path,
+    store: &crate::storage::Store,
+    project_roots: &[PathBuf],
+) -> Result<SkillScan> {
     let source_records = store.skill_source_records()?;
     let mut provenance_resolver = ProvenanceResolver::managed(cwd, source_records);
-    let scan = scan_skills_with_resolver(cwd, &mut provenance_resolver)?;
+    let scan =
+        scan_skills_with_resolver_for_projects(cwd, &mut provenance_resolver, project_roots)?;
     store.insert_skill_source_records_if_missing(&provenance_resolver.migrations)?;
     Ok(scan)
 }
 
 #[cfg(test)]
 fn scan_skills_without_source_database(cwd: &Path) -> Result<SkillScan> {
-    scan_skills_with_resolver(cwd, &mut ProvenanceResolver::default())
+    scan_skills_with_resolver_for_projects(cwd, &mut ProvenanceResolver::default(), &[])
 }
 
-fn scan_skills_with_resolver(
+fn scan_skills_with_resolver_for_projects(
     cwd: &Path,
     provenance_resolver: &mut ProvenanceResolver,
+    project_roots: &[PathBuf],
 ) -> Result<SkillScan> {
     let mut warnings = Vec::new();
-    let mut roots = discover_roots(cwd);
-    let codex_skill_enabled = codex_skill_enabled_by_path(codex_config_path().as_deref());
+    let mut roots = discover_roots_for_projects(cwd, project_roots);
     let mut raw_skills = Vec::new();
     let mut scanned_files = BTreeSet::new();
     let mut referenced_files = VecDeque::new();
 
     for root in &roots {
         for skill_file in find_skill_files(&root.path) {
-            match read_skill(root, &skill_file, &codex_skill_enabled, provenance_resolver) {
+            match read_skill(root, &skill_file, provenance_resolver) {
                 Ok(skill) => {
                     scanned_files.insert(skill_file_key(&skill_file));
                     referenced_files.extend(skill.dependency_files.iter().cloned());
@@ -446,12 +484,7 @@ fn scan_skills_with_resolver(
             plugin_id: None,
             plugin_enabled: None,
         };
-        match read_skill(
-            &root,
-            &skill_file,
-            &codex_skill_enabled,
-            provenance_resolver,
-        ) {
+        match read_skill(&root, &skill_file, provenance_resolver) {
             Ok(skill) => {
                 referenced_files.extend(skill.dependency_files.iter().cloned());
                 raw_skills.push(skill);
@@ -549,7 +582,6 @@ pub fn refresh_skill_scan(
         }
     }
 
-    let codex_skill_enabled = codex_skill_enabled_by_path(codex_config_path().as_deref());
     let mut provenance_resolver = ProvenanceResolver::from_scan(scan);
     let mut refreshed_raw = Vec::new();
     let known_files = remaining
@@ -582,12 +614,7 @@ pub fn refresh_skill_scan(
             plugin_id: None,
             plugin_enabled: None,
         });
-        let skill = read_skill(
-            &root,
-            &skill_file,
-            &codex_skill_enabled,
-            &mut provenance_resolver,
-        )?;
+        let skill = read_skill(&root, &skill_file, &mut provenance_resolver)?;
         refreshed_files.insert(skill_file_key(&skill_file));
         referenced_files.extend(skill.dependency_files.iter().cloned());
         refreshed_raw.push(skill);
@@ -607,12 +634,7 @@ pub fn refresh_skill_scan(
             plugin_id: None,
             plugin_enabled: None,
         };
-        let skill = read_skill(
-            &root,
-            &skill_file,
-            &codex_skill_enabled,
-            &mut provenance_resolver,
-        )?;
+        let skill = read_skill(&root, &skill_file, &mut provenance_resolver)?;
         referenced_files.extend(skill.dependency_files.iter().cloned());
         refreshed_raw.push(skill);
     }
@@ -692,7 +714,9 @@ pub fn plan_visibility(
     let mut changes = Vec::new();
     for skill in &matches {
         for path in &skill.paths {
-            changes.extend(plan_skill_visibility_at_path(&path.path, visibility, true)?);
+            changes.extend(plan_skill_visibility_at_path(
+                &path.path, path.agent, visibility, true,
+            )?);
         }
     }
 
@@ -727,7 +751,9 @@ pub fn plan_visibility_many_for_scan(
     let mut changes = Vec::new();
     for skill in &matches {
         for path in &skill.paths {
-            changes.extend(plan_skill_visibility_at_path(&path.path, visibility, true)?);
+            changes.extend(plan_skill_visibility_at_path(
+                &path.path, path.agent, visibility, true,
+            )?);
         }
     }
 
@@ -775,19 +801,12 @@ pub fn plan_wrapper(
                 continue;
             }
             for path in &skill.paths {
-                changes.push(plan_skill_frontmatter(
-                    path.path.join("SKILL.md"),
+                changes.extend(plan_skill_visibility_at_path(
+                    &path.path,
+                    path.agent,
                     SkillVisibility::Manual,
+                    true,
                 )?);
-                changes.push(plan_codex_policy(
-                    path.path.join("agents/openai.yaml"),
-                    SkillVisibility::Manual,
-                )?);
-                if let Some(change) =
-                    plan_codex_skill_config(path.path.join("SKILL.md"), SkillVisibility::Manual)?
-                {
-                    changes.push(change);
-                }
             }
         }
     }
@@ -1619,8 +1638,9 @@ fn apply_built_skill_add_plan(
         )?;
         visibility_changes.extend(plan_skill_visibility_at_path(
             &result.target,
+            options.target.agent_kind(),
             options.visibility,
-            options.target.is_shared_or_codex(),
+            options.target.uses_shared_layout(),
         )?);
         results.push(result);
     }
@@ -2024,11 +2044,15 @@ fn discover_installable_skills(root: &Path) -> Result<Vec<InstallableSkill>> {
         root.join("skills/.curated"),
         root.join("skills/.experimental"),
         root.join("skills/.system"),
-        root.join(".agents/skills"),
-        root.join(".codex/skills"),
-        root.join(".cursor/skills"),
-        root.join(".claude/skills"),
     ];
+    let provider_context = crate::providers::ProviderContext::new(&root);
+    search_roots.extend(
+        crate::providers::all_providers()
+            .into_iter()
+            .flat_map(|provider| provider.skill_roots(&provider_context))
+            .filter(|skill_root| skill_root.scope == "project")
+            .map(|skill_root| skill_root.path),
+    );
     search_roots.retain(|path| path.is_dir());
 
     for search_root in search_roots {
@@ -2556,19 +2580,12 @@ fn plan_wrapper_for_matches(
                 continue;
             }
             for path in &skill.paths {
-                changes.push(plan_skill_frontmatter(
-                    path.path.join("SKILL.md"),
+                changes.extend(plan_skill_visibility_at_path(
+                    &path.path,
+                    path.agent,
                     SkillVisibility::Manual,
+                    true,
                 )?);
-                changes.push(plan_codex_policy(
-                    path.path.join("agents/openai.yaml"),
-                    SkillVisibility::Manual,
-                )?);
-                if let Some(change) =
-                    plan_codex_skill_config(path.path.join("SKILL.md"), SkillVisibility::Manual)?
-                {
-                    changes.push(change);
-                }
             }
         }
     }
@@ -2626,9 +2643,9 @@ fn plan_wrapper_sync(scan: &SkillScan) -> Result<ChangeSet> {
     })
 }
 
-fn discover_roots(cwd: &Path) -> Vec<SkillRoot> {
+fn discover_roots_for_projects(cwd: &Path, project_roots: &[PathBuf]) -> Vec<SkillRoot> {
     let mut roots = Vec::new();
-    let ctx = crate::providers::ProviderContext::new(cwd);
+    let ctx = crate::providers::ProviderContext::with_additional_project_dirs(cwd, project_roots);
     for provider in crate::providers::all_providers() {
         for root in provider.skill_roots(&ctx) {
             push_root(
@@ -2772,7 +2789,6 @@ fn find_skill_files(root: &Path) -> Vec<PathBuf> {
 fn read_skill(
     root: &SkillRoot,
     skill_file: &Path,
-    codex_skill_enabled_by_path: &BTreeMap<PathBuf, bool>,
     provenance_resolver: &mut ProvenanceResolver,
 ) -> Result<RawSkill> {
     let text = fs::read_to_string(skill_file)
@@ -2812,19 +2828,15 @@ fn read_skill(
         .filter_map(|path| resolve_skill_file_reference(skill_file, &path))
         .collect();
 
-    let cursor_disable_model_invocation = frontmatter
-        .as_ref()
-        .and_then(|value| value.get("disable-model-invocation"))
-        .and_then(Value::as_bool);
     let tendi_visibility = frontmatter.as_ref().and_then(parse_tendi_visibility);
-
-    let codex_allow_implicit_invocation = read_codex_policy(skill_dir)?;
-    let codex_skill_enabled = skill_enabled_for_path(codex_skill_enabled_by_path, skill_file);
+    let provider = crate::providers::agent_provider(root.agent);
+    let metadata =
+        provider.skill_visibility_metadata(skill_dir, skill_file, frontmatter.as_ref())?;
     let effective_visibility = effective_path_visibility(
         tendi_visibility,
-        codex_allow_implicit_invocation,
-        codex_skill_enabled,
-        cursor_disable_model_invocation,
+        metadata.allow_implicit_invocation,
+        metadata.enabled,
+        metadata.disable_model_invocation,
         root.plugin_enabled,
     );
     let provenance_dir = skill_dir
@@ -2870,9 +2882,9 @@ fn read_skill(
             tags,
             tendi_visibility,
             effective_visibility,
-            codex_allow_implicit_invocation,
-            codex_skill_enabled,
-            cursor_disable_model_invocation,
+            provider_allow_implicit_invocation: metadata.allow_implicit_invocation,
+            provider_skill_enabled: metadata.enabled,
+            provider_disable_model_invocation: metadata.disable_model_invocation,
             plugin_id: root.plugin_id.clone(),
             plugin_enabled: root.plugin_enabled,
         },
@@ -3177,96 +3189,22 @@ fn parse_frontmatter_tags(frontmatter: &Value) -> Vec<String> {
     values.into_iter().collect()
 }
 
-fn read_codex_policy(skill_dir: &Path) -> Result<Option<bool>> {
-    let path = skill_dir.join("agents/openai.yaml");
-    if !path.is_file() {
-        return Ok(None);
-    }
-
-    let text =
-        fs::read_to_string(&path).with_context(|| format!("failed to read {}", path.display()))?;
-    let config: CodexAgentConfig = serde_yaml::from_str(&text)
-        .with_context(|| format!("failed to parse {}", path.display()))?;
-    Ok(config
-        .policy
-        .and_then(|policy| policy.allow_implicit_invocation))
-}
-
-fn codex_config_path() -> Option<PathBuf> {
-    env::var_os("CODEX_HOME")
-        .map(PathBuf::from)
-        .or_else(|| dirs::home_dir().map(|home| home.join(".codex")))
-        .map(|home| home.join("config.toml"))
-}
-
-fn codex_skill_enabled_by_path(config_path: Option<&Path>) -> BTreeMap<PathBuf, bool> {
-    let Some(config_path) = config_path else {
-        return BTreeMap::new();
-    };
-    let Ok(text) = fs::read_to_string(config_path) else {
-        return BTreeMap::new();
-    };
-    let Ok(value) = toml::from_str::<toml::Value>(&text) else {
-        return BTreeMap::new();
-    };
-    let Some(configs) = value
-        .get("skills")
-        .and_then(|skills| skills.get("config"))
-        .and_then(toml::Value::as_array)
-    else {
-        return BTreeMap::new();
-    };
-
-    let mut by_path = BTreeMap::new();
-    for config in configs {
-        let Some(path) = config.get("path").and_then(toml::Value::as_str) else {
-            continue;
-        };
-        let Some(enabled) = config.get("enabled").and_then(toml::Value::as_bool) else {
-            continue;
-        };
-        for key in path_lookup_keys(Path::new(path)) {
-            by_path.insert(key, enabled);
-        }
-    }
-    by_path
-}
-
-fn skill_enabled_for_path(
-    enabled_by_path: &BTreeMap<PathBuf, bool>,
-    skill_file: &Path,
-) -> Option<bool> {
-    path_lookup_keys(skill_file)
-        .into_iter()
-        .find_map(|key| enabled_by_path.get(&key).copied())
-}
-
-fn path_lookup_keys(path: &Path) -> Vec<PathBuf> {
-    let mut keys = vec![path.to_path_buf()];
-    if let Ok(canonical) = path.canonicalize() {
-        if !keys.iter().any(|key| key == &canonical) {
-            keys.push(canonical);
-        }
-    }
-    keys
-}
-
 fn effective_path_visibility(
     tendi_visibility: Option<SkillVisibility>,
-    codex_allow_implicit_invocation: Option<bool>,
-    codex_skill_enabled: Option<bool>,
-    cursor_disable_model_invocation: Option<bool>,
+    allow_implicit_invocation: Option<bool>,
+    provider_enabled: Option<bool>,
+    disable_model_invocation: Option<bool>,
     plugin_enabled: Option<bool>,
 ) -> SkillVisibility {
     if plugin_enabled == Some(false)
-        || codex_skill_enabled == Some(false)
+        || provider_enabled == Some(false)
         || tendi_visibility == Some(SkillVisibility::Off)
     {
         return SkillVisibility::Off;
     }
     if tendi_visibility == Some(SkillVisibility::Manual)
-        || codex_allow_implicit_invocation == Some(false)
-        || cursor_disable_model_invocation == Some(true)
+        || allow_implicit_invocation == Some(false)
+        || disable_model_invocation == Some(true)
     {
         return SkillVisibility::Manual;
     }
@@ -3306,12 +3244,6 @@ fn merge_skill(name: String, raws: Vec<RawSkill>) -> SkillRecord {
         is_system &= raw.is_system;
         tags.extend(raw.tags);
         dependencies.extend(raw.dependencies);
-        if raw.path.codex_allow_implicit_invocation.is_some() {
-            agents.insert(AgentKind::Codex);
-        }
-        if raw.path.cursor_disable_model_invocation.is_some() {
-            agents.insert(AgentKind::Cursor);
-        }
         agents.insert(raw.path.agent);
         source_summaries.insert(match &raw.path.source {
             Some(source) => format!("{}:{}", raw.path.source_kind, source),
@@ -4408,15 +4340,21 @@ fn git_merge_file_text(base: &str, local: &str, incoming: &str) -> Option<(Strin
     result
 }
 
-fn normalize_skill_manifest_for_visibility(text: &str, visibility: SkillVisibility) -> String {
+fn normalize_skill_manifest_for_visibility(
+    text: &str,
+    agent: AgentKind,
+    visibility: SkillVisibility,
+) -> String {
     let Ok(doc) = MarkdownDoc::parse_lenient(text) else {
         return text.to_string();
     };
-    render_skill_frontmatter_update(text, visibility, doc).unwrap_or_else(|_| text.to_string())
-}
-
-fn is_tendi_managed_skill_file(path: &str) -> bool {
-    path == "agents/openai.yaml" || path.ends_with("/agents/openai.yaml")
+    render_skill_frontmatter_update(
+        text,
+        visibility,
+        doc,
+        crate::providers::agent_provider(agent).skill_frontmatter_policy(),
+    )
+    .unwrap_or_else(|_| text.to_string())
 }
 
 fn git_files_at_revision(
@@ -4531,6 +4469,7 @@ fn merge_git_path_files(
         relative,
         &path.path.display().to_string(),
         path.effective_visibility,
+        path.agent,
     )
 }
 
@@ -4556,6 +4495,7 @@ fn merge_materialized_git_path_files(
         relative,
         &path.path.display().to_string(),
         visibility,
+        path.agent,
     )
 }
 
@@ -4566,6 +4506,7 @@ fn merge_file_maps(
     relative: &str,
     key_prefix: &str,
     visibility: SkillVisibility,
+    agent: AgentKind,
 ) -> Vec<GitUpdateFile> {
     let base_available = base.is_some();
     let base = base.unwrap_or_default();
@@ -4581,7 +4522,7 @@ fn merge_file_maps(
                 .strip_prefix(prefix)
                 .unwrap_or(&path)
                 .trim_start_matches('/');
-            if is_tendi_managed_skill_file(path_in_skill) {
+            if crate::providers::agent_provider(agent).is_managed_skill_file(path_in_skill) {
                 return None;
             }
             let before_bytes = local.get(&path);
@@ -4632,9 +4573,10 @@ fn merge_file_maps(
             let mut base = base_text.flatten();
             let mut incoming = incoming_text.flatten();
             if path_in_skill == "SKILL.md" {
-                base = base.map(|text| normalize_skill_manifest_for_visibility(&text, visibility));
-                incoming =
-                    incoming.map(|text| normalize_skill_manifest_for_visibility(&text, visibility));
+                base = base
+                    .map(|text| normalize_skill_manifest_for_visibility(&text, agent, visibility));
+                incoming = incoming
+                    .map(|text| normalize_skill_manifest_for_visibility(&text, agent, visibility));
             }
             let merged = merge_text(base.as_deref(), before.as_deref(), incoming.as_deref());
             if merged.status == "unchanged" {
@@ -4709,10 +4651,11 @@ fn plan_git_update(
             .then(|| MaterializedGitTarget {
                 name: skill.name.clone(),
                 target: path.path.clone(),
+                agent: path.agent,
                 source_relative_path: path.source_relative_path.clone(),
                 visibility: path.effective_visibility,
-                shared_or_codex: crate::providers::agent_provider(path.agent)
-                    .materialized_skill_is_shared_or_codex(),
+                uses_shared_layout: crate::providers::agent_provider(path.agent)
+                    .uses_shared_skill_layout(),
                 files: materialized_files,
             })
             .into_iter()
@@ -4728,12 +4671,13 @@ fn git_tendi_settings(scan: &SkillScan, repo: &Path) -> Vec<GitSkillVisibility> 
             let visibility = path.tendi_visibility?;
             let skill_dir = path.path.canonicalize().ok()?;
             let skill_repo = git_repository_boundary(&skill_dir)?;
-            (skill_repo == repo).then_some((skill_dir, visibility))
+            (skill_repo == repo).then_some((skill_dir, (path.agent, visibility)))
         })
         .collect::<BTreeMap<_, _>>()
         .into_iter()
-        .map(|(skill_dir, visibility)| GitSkillVisibility {
+        .map(|(skill_dir, (agent, visibility))| GitSkillVisibility {
             skill_dir,
+            agent,
             visibility,
         })
         .collect()
@@ -4753,7 +4697,8 @@ fn plan_registry_update(
     };
     let skill_file = path.path.join("SKILL.md");
     let before = read_optional(&skill_file)?.context("SKILL.md does not exist")?;
-    let incoming = normalize_skill_manifest_for_visibility(&incoming, path.effective_visibility);
+    let incoming =
+        normalize_skill_manifest_for_visibility(&incoming, path.agent, path.effective_visibility);
     let snapshot = store.skill_snapshot(&path.path)?;
     let base = snapshot
         .filter(|snapshot| path.source_version.as_deref() == Some(snapshot.source_version.as_str()))
@@ -4951,8 +4896,9 @@ fn apply_materialized_git_update(
         }
         changes.extend(plan_skill_visibility_at_path(
             &target.target,
+            target.agent,
             target.visibility,
-            target.shared_or_codex,
+            target.uses_shared_layout,
         )?);
     }
     apply_changes(&ChangeSet {
@@ -4991,8 +4937,11 @@ fn clear_tendi_git_changes(action: &GitUpdateAction) -> Result<()> {
             )
         })?;
         let skill_baseline = git_show_file(&action.repo, skill_relative)?;
-        let skill_expected =
-            render_skill_frontmatter_for_visibility(&skill_baseline, setting.visibility)?;
+        let skill_expected = render_skill_frontmatter_for_visibility(
+            &skill_baseline,
+            setting.agent,
+            setting.visibility,
+        )?;
         let skill_current =
             read_optional(&skill_file)?.context("SKILL.md disappeared before update")?;
         if skill_current != skill_expected {
@@ -5080,19 +5029,12 @@ fn restore_tendi_git_settings(action: &GitUpdateAction) -> Result<()> {
         if !setting.skill_dir.join("SKILL.md").is_file() {
             continue;
         }
-        changes.push(plan_skill_frontmatter(
-            setting.skill_dir.join("SKILL.md"),
+        changes.extend(plan_skill_visibility_at_path(
+            &setting.skill_dir,
+            setting.agent,
             setting.visibility,
+            true,
         )?);
-        changes.push(plan_codex_policy(
-            setting.skill_dir.join("agents/openai.yaml"),
-            setting.visibility,
-        )?);
-        if let Some(change) =
-            plan_codex_skill_config(setting.skill_dir.join("SKILL.md"), setting.visibility)?
-        {
-            changes.push(change);
-        }
     }
     apply_changes(&ChangeSet {
         changes: dedupe_changes(changes),
@@ -5690,13 +5632,18 @@ fn matches_pattern(value: &str, pattern: &str) -> bool {
     true
 }
 
-fn plan_skill_frontmatter(path: PathBuf, visibility: SkillVisibility) -> Result<FileChange> {
+fn plan_skill_frontmatter_for_agent(
+    path: PathBuf,
+    agent: AgentKind,
+    visibility: SkillVisibility,
+) -> Result<FileChange> {
     if visibility == SkillVisibility::Mixed {
         bail!("mixed visibility is a scan summary and cannot be written to SKILL.md");
     }
     let before = read_optional(&path)?.context("SKILL.md does not exist")?;
     let doc = MarkdownDoc::parse_lenient(&before)?;
-    if skill_frontmatter_satisfies(&doc.meta, visibility) {
+    let policy = crate::providers::agent_provider(agent).skill_frontmatter_policy();
+    if skill_frontmatter_satisfies(&doc.meta, visibility, policy) {
         return Ok(FileChange {
             path,
             before_sha256: Some(sha256_text(&before)),
@@ -5704,7 +5651,7 @@ fn plan_skill_frontmatter(path: PathBuf, visibility: SkillVisibility) -> Result<
             after: before,
         });
     }
-    let after = render_skill_frontmatter_update(&before, visibility, doc)?;
+    let after = render_skill_frontmatter_update(&before, visibility, doc, policy)?;
     Ok(FileChange {
         path,
         before_sha256: Some(sha256_text(&before)),
@@ -5715,59 +5662,71 @@ fn plan_skill_frontmatter(path: PathBuf, visibility: SkillVisibility) -> Result<
 
 fn plan_skill_visibility_at_path(
     skill_dir: &Path,
+    agent: AgentKind,
     visibility: SkillVisibility,
-    update_codex_config: bool,
+    update_provider_config: bool,
 ) -> Result<Vec<FileChange>> {
-    let mut changes = vec![plan_skill_frontmatter(
+    let mut changes = vec![plan_skill_frontmatter_for_agent(
         skill_dir.join("SKILL.md"),
+        agent,
         visibility,
     )?];
-    changes.push(plan_codex_policy(
-        skill_dir.join("agents/openai.yaml"),
-        visibility,
-    )?);
-    if update_codex_config {
-        if let Some(change) = plan_codex_skill_config(skill_dir.join("SKILL.md"), visibility)? {
-            changes.push(change);
-        }
-    }
+    changes.extend(
+        crate::providers::agent_provider(agent).plan_skill_visibility(
+            skill_dir,
+            visibility,
+            update_provider_config,
+        )?,
+    );
     Ok(changes)
+}
+
+#[cfg(test)]
+fn plan_skill_frontmatter(path: PathBuf, visibility: SkillVisibility) -> Result<FileChange> {
+    plan_skill_frontmatter_for_agent(path, AgentKind::Cursor, visibility)
 }
 
 #[cfg(test)]
 fn render_skill_frontmatter_for_visibility(
     before: &str,
+    agent: AgentKind,
     visibility: SkillVisibility,
 ) -> Result<String> {
     let doc = MarkdownDoc::parse_lenient(before)?;
-    if skill_frontmatter_satisfies(&doc.meta, visibility) {
+    let policy = crate::providers::agent_provider(agent).skill_frontmatter_policy();
+    if skill_frontmatter_satisfies(&doc.meta, visibility, policy) {
         return Ok(before.to_string());
     }
-    render_skill_frontmatter_update(before, visibility, doc)
+    render_skill_frontmatter_update(before, visibility, doc, policy)
 }
 
 fn render_skill_frontmatter_update(
     before: &str,
     visibility: SkillVisibility,
     mut doc: MarkdownDoc,
+    policy: Option<crate::providers::SkillFrontmatterPolicy>,
 ) -> Result<String> {
     if let Some((yaml, tail)) = split_frontmatter_raw(before) {
         let mut lines = yaml.lines().map(str::to_string).collect::<Vec<_>>();
-        set_top_level_bool(
-            &mut lines,
-            "disable-model-invocation",
-            !matches!(visibility, SkillVisibility::Auto),
-        );
+        if policy.is_some() {
+            set_top_level_bool(
+                &mut lines,
+                "disable-model-invocation",
+                !matches!(visibility, SkillVisibility::Auto),
+            );
+        }
         set_tendi_visibility_lines(&mut lines, visibility);
         return Ok(format!("---\n{}\n---{}", lines.join("\n"), tail));
     }
 
     set_tendi_visibility(&mut doc.meta, visibility);
-    let disable_model_invocation = Value::String("disable-model-invocation".to_string());
-    if matches!(visibility, SkillVisibility::Auto) {
-        doc.meta.remove(&disable_model_invocation);
-    } else {
-        doc.meta.insert(disable_model_invocation, Value::Bool(true));
+    if policy.is_some() {
+        let disable_model_invocation = Value::String("disable-model-invocation".to_string());
+        if matches!(visibility, SkillVisibility::Auto) {
+            doc.meta.remove(&disable_model_invocation);
+        } else {
+            doc.meta.insert(disable_model_invocation, Value::Bool(true));
+        }
     }
     doc.render()
 }
@@ -5831,23 +5790,34 @@ fn set_tendi_visibility_lines(lines: &mut Vec<String>, visibility: SkillVisibili
     lines.push(format!("  {rendered}"));
 }
 
-fn skill_frontmatter_satisfies(meta: &serde_yaml::Mapping, visibility: SkillVisibility) -> bool {
+fn skill_frontmatter_satisfies(
+    meta: &serde_yaml::Mapping,
+    visibility: SkillVisibility,
+    policy: Option<crate::providers::SkillFrontmatterPolicy>,
+) -> bool {
     let meta = Value::Mapping(meta.clone());
     let tendi_visibility = parse_tendi_visibility(&meta);
-    let cursor_disable = meta
-        .get("disable-model-invocation")
-        .and_then(Value::as_bool);
+    let provider_disabled = policy.is_some_and(|_| {
+        meta.get("disable-model-invocation")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+    });
 
     match visibility {
         SkillVisibility::Auto => {
-            cursor_disable.is_none() && tendi_visibility == Some(SkillVisibility::Auto)
+            !provider_disabled && tendi_visibility == Some(SkillVisibility::Auto)
         }
         SkillVisibility::Manual => {
-            cursor_disable == Some(true)
-                && matches!(tendi_visibility, None | Some(SkillVisibility::Manual))
+            if policy.is_some() {
+                provider_disabled
+                    && matches!(tendi_visibility, None | Some(SkillVisibility::Manual))
+            } else {
+                tendi_visibility == Some(SkillVisibility::Manual)
+            }
         }
         SkillVisibility::Off => {
-            cursor_disable == Some(true) && tendi_visibility == Some(SkillVisibility::Off)
+            (!policy.is_some() || provider_disabled)
+                && tendi_visibility == Some(SkillVisibility::Off)
         }
         SkillVisibility::Mixed => false,
     }
@@ -5866,6 +5836,7 @@ fn set_tendi_visibility(meta: &mut serde_yaml::Mapping, visibility: SkillVisibil
     }
 }
 
+#[cfg(test)]
 fn plan_codex_policy(path: PathBuf, visibility: SkillVisibility) -> Result<FileChange> {
     let before = read_optional(&path)?;
     let after = render_codex_policy_for_visibility(before.as_deref(), visibility)
@@ -5878,6 +5849,7 @@ fn plan_codex_policy(path: PathBuf, visibility: SkillVisibility) -> Result<FileC
     })
 }
 
+#[cfg(test)]
 fn render_codex_policy_for_visibility(
     before: Option<&str>,
     visibility: SkillVisibility,
@@ -5904,6 +5876,7 @@ fn render_codex_policy_for_visibility(
 }
 
 #[cfg(test)]
+#[cfg(test)]
 fn codex_policy_matches_visibility_change(
     baseline: Option<&str>,
     current: Option<&str>,
@@ -5919,6 +5892,7 @@ fn codex_policy_matches_visibility_change(
     Ok(serde_yaml::from_str::<Value>(&expected)? == serde_yaml::from_str::<Value>(current)?)
 }
 
+#[cfg(test)]
 fn codex_policy_satisfies(
     root: Option<&serde_yaml::Mapping>,
     desired_allow_implicit_invocation: bool,
@@ -5933,16 +5907,18 @@ fn codex_policy_satisfies(
         || (!file_exists && desired_allow_implicit_invocation)
 }
 
-fn plan_codex_skill_config(
-    skill_file: PathBuf,
-    visibility: SkillVisibility,
-) -> Result<Option<FileChange>> {
-    let Some(config_path) = codex_config_path() else {
-        return Ok(None);
-    };
-    plan_codex_skill_config_at(config_path, skill_file, visibility)
+#[cfg(test)]
+fn path_lookup_keys(path: &Path) -> Vec<PathBuf> {
+    let mut keys = vec![path.to_path_buf()];
+    if let Ok(canonical) = path.canonicalize() {
+        if !keys.iter().any(|key| key == &canonical) {
+            keys.push(canonical);
+        }
+    }
+    keys
 }
 
+#[cfg(test)]
 fn plan_codex_skill_config_at(
     config_path: PathBuf,
     skill_file: PathBuf,
@@ -5970,6 +5946,7 @@ fn plan_codex_skill_config_at(
     }))
 }
 
+#[cfg(test)]
 fn render_codex_skill_config_update(
     before: &str,
     skill_file: &Path,
@@ -6010,6 +5987,7 @@ fn render_codex_skill_config_update(
     Ok(doc.to_string())
 }
 
+#[cfg(test)]
 fn codex_skill_config_matches_path(config: &Table, skill_file: &Path) -> bool {
     let Some(path) = config.get("path").and_then(Item::as_str) else {
         return false;
@@ -6020,6 +5998,7 @@ fn codex_skill_config_matches_path(config: &Table, skill_file: &Path) -> bool {
         .any(|key| skill_keys.iter().any(|skill_key| skill_key == &key))
 }
 
+#[cfg(test)]
 fn ensure_mapping_child<'a>(root: &'a mut Value, key: &str) -> &'a mut serde_yaml::Mapping {
     if !matches!(root, Value::Mapping(_)) {
         *root = Value::Mapping(Default::default());
@@ -6840,12 +6819,10 @@ mod tests {
         .unwrap();
 
         let installed_skill = target_root.join("demo/SKILL.md");
-        let installed_policy = target_root.join("demo/agents/openai.yaml");
         let frontmatter = fs::read_to_string(installed_skill).unwrap();
-        let policy = fs::read_to_string(installed_policy).unwrap();
         assert!(frontmatter.contains("disable-model-invocation: true"));
         assert!(frontmatter.contains("visibility: manual"));
-        assert!(policy.contains("allow_implicit_invocation: false"));
+        assert!(!target_root.join("demo/agents/openai.yaml").exists());
         assert_eq!(report.results.len(), 1);
         let source_records = super::skill_source_records_for_add(&report);
         assert_eq!(source_records.len(), 1);
@@ -7697,15 +7674,23 @@ mod tests {
         run_test_git(&root, &["commit", "--quiet", "-m", "baseline"]);
 
         let initial_changes = vec![
-            plan_skill_frontmatter(tracked_skill.join("SKILL.md"), SkillVisibility::Manual)
-                .unwrap(),
+            super::plan_skill_frontmatter_for_agent(
+                tracked_skill.join("SKILL.md"),
+                AgentKind::Codex,
+                SkillVisibility::Manual,
+            )
+            .unwrap(),
             plan_codex_policy(
                 tracked_skill.join("agents/openai.yaml"),
                 SkillVisibility::Auto,
             )
             .unwrap(),
-            plan_skill_frontmatter(untracked_skill.join("SKILL.md"), SkillVisibility::Manual)
-                .unwrap(),
+            super::plan_skill_frontmatter_for_agent(
+                untracked_skill.join("SKILL.md"),
+                AgentKind::Codex,
+                SkillVisibility::Manual,
+            )
+            .unwrap(),
             plan_codex_policy(
                 untracked_skill.join("agents/openai.yaml"),
                 SkillVisibility::Manual,
@@ -7742,10 +7727,12 @@ mod tests {
             tendi_settings: vec![
                 GitSkillVisibility {
                     skill_dir: tracked_skill.clone(),
+                    agent: AgentKind::Codex,
                     visibility: SkillVisibility::Manual,
                 },
                 GitSkillVisibility {
                     skill_dir: untracked_skill.clone(),
+                    agent: AgentKind::Codex,
                     visibility: SkillVisibility::Manual,
                 },
             ],
@@ -7800,6 +7787,7 @@ mod tests {
             files: Vec::new(),
             tendi_settings: vec![GitSkillVisibility {
                 skill_dir: skill_dir.clone(),
+                agent: AgentKind::Codex,
                 visibility: SkillVisibility::Manual,
             }],
             materialized_targets: Vec::new(),
@@ -7872,9 +7860,10 @@ mod tests {
             materialized_targets: vec![MaterializedGitTarget {
                 name: "demo".to_string(),
                 target: target.clone(),
+                agent: AgentKind::Shared,
                 source_relative_path: Some("skills/demo/SKILL.md".to_string()),
                 visibility: SkillVisibility::Auto,
-                shared_or_codex: true,
+                uses_shared_layout: true,
                 files: Vec::new(),
             }],
         };
@@ -8357,7 +8346,7 @@ Keep this handmade intro.
     }
 
     #[test]
-    fn codex_skill_config_disabled_path_reports_off_visibility() {
+    fn non_codex_skill_ignores_codex_skill_config() {
         let root = temp_dir("tendi-codex-skill-config-disabled-test");
         let skills_root = root.join(".agents/skills");
         let skill_dir = skills_root.join("pr");
@@ -8379,7 +8368,6 @@ Keep this handmade intro.
         )
         .unwrap();
 
-        let enabled_by_path = super::codex_skill_enabled_by_path(Some(&config_path));
         let root_record = super::SkillRoot {
             path: skills_root,
             scope: "global".to_string(),
@@ -8390,13 +8378,12 @@ Keep this handmade intro.
         let skill = super::read_skill(
             &root_record,
             &skill_file,
-            &enabled_by_path,
             &mut super::ProvenanceResolver::default(),
         )
         .unwrap();
 
-        assert_eq!(skill.path.codex_skill_enabled, Some(false));
-        assert_eq!(skill.path.effective_visibility, SkillVisibility::Off);
+        assert_eq!(skill.path.provider_skill_enabled, None);
+        assert_eq!(skill.path.effective_visibility, SkillVisibility::Auto);
 
         let _ = fs::remove_dir_all(root);
     }
@@ -8789,6 +8776,51 @@ Keep this handmade intro.
     }
 
     #[test]
+    fn scan_skills_includes_additional_project_roots() {
+        let cwd = temp_dir("tendi-skills-scan-cwd");
+        let project = temp_dir("tendi-skills-scan-project");
+        let skill_dir = project.join(".agents/skills/project-skill");
+        fs::create_dir_all(&skill_dir).unwrap();
+        fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: project-skill\ndescription: Project skill\n---\n",
+        )
+        .unwrap();
+
+        let store = crate::storage::Store::open(cwd.join("tendi.sqlite3")).unwrap();
+        let scan = super::scan_skills_with_source_store_for_projects(
+            &cwd,
+            &store,
+            std::slice::from_ref(&project),
+        )
+        .unwrap();
+
+        let skill = scan
+            .skills
+            .iter()
+            .find(|skill| skill.name == "project-skill")
+            .unwrap();
+        let skill_dir = skill_dir.canonicalize().unwrap();
+        assert!(
+            skill.paths.iter().any(|path| path.path == skill_dir),
+            "skill paths: {:#?}; expected: {}",
+            skill.paths,
+            skill_dir.display()
+        );
+        store.save_skills_for_workspace(&cwd, &scan).unwrap();
+        let persisted = store.list_skills_for_workspace(&cwd).unwrap().unwrap();
+        assert!(
+            persisted
+                .skills
+                .iter()
+                .any(|skill| skill.name == "project-skill")
+        );
+
+        let _ = fs::remove_dir_all(cwd);
+        let _ = fs::remove_dir_all(project);
+    }
+
+    #[test]
     fn global_skills_cli_v3_lock_uses_source_url_and_tree_hash() {
         let root = temp_dir("tendi-global-skills-cli-lock-test");
         let lock_path = root.join(".skill-lock.json");
@@ -8898,9 +8930,9 @@ Keep this handmade intro.
                 tags: Vec::new(),
                 tendi_visibility: None,
                 effective_visibility: SkillVisibility::Auto,
-                codex_allow_implicit_invocation: None,
-                codex_skill_enabled: None,
-                cursor_disable_model_invocation: None,
+                provider_allow_implicit_invocation: None,
+                provider_skill_enabled: None,
+                provider_disable_model_invocation: None,
                 plugin_id: None,
                 plugin_enabled: None,
             }],
@@ -8995,9 +9027,9 @@ Keep this handmade intro.
             tags: Vec::new(),
             tendi_visibility: None,
             effective_visibility,
-            codex_allow_implicit_invocation: None,
-            codex_skill_enabled: None,
-            cursor_disable_model_invocation: None,
+            provider_allow_implicit_invocation: None,
+            provider_skill_enabled: None,
+            provider_disable_model_invocation: None,
             plugin_id: plugin_enabled.map(|_| "browser@openai-bundled".to_string()),
             plugin_enabled,
         }

@@ -1,10 +1,10 @@
 import { randomBytes } from "node:crypto";
-import { spawn, spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { createServer } from "node:http";
 import { Readable } from "node:stream";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { spawnOwned, stopOwned } from "./process-lifecycle.mjs";
 import { writeStderr, writeStdout } from "./stdio.mjs";
 
 const scriptDir = resolve(fileURLToPath(new URL(".", import.meta.url)));
@@ -16,35 +16,82 @@ const workspace = resolve(process.env.TENDI_CWD || desktopDir);
 const cargoTargetDir = resolve(repoDir, process.env.CARGO_TARGET_DIR || "target");
 const daemonBin = resolve(process.env.TENDI_DAEMON_BIN || join(cargoTargetDir, "debug/tendi-daemon"));
 const token = process.env.TENDI_DAEMON_TOKEN || randomBytes(24).toString("hex");
+let buildProcess = null;
+let daemon = null;
+let server = null;
+let shuttingDown = false;
 
-if (!existsSync(daemonBin)) {
+function waitForProcess(child) {
+  return new Promise((resolveProcess, reject) => {
+    child.once("error", reject);
+    child.once("exit", (code, signal) => resolveProcess({ code, signal }));
+  });
+}
+
+async function ensureDaemonBinary() {
+  if (existsSync(daemonBin)) return;
+
   writeStdout(`[tendi] building Rust daemon at ${daemonBin}`);
-  const result = spawnSync("cargo", ["build", "-p", "tendi-daemon"], {
+  buildProcess = spawnOwned("cargo", ["build", "-p", "tendi-daemon"], {
     cwd: repoDir,
     stdio: "inherit",
   });
-  if (result.status !== 0 || !existsSync(daemonBin)) {
-    throw new Error(`Tendi daemon build failed at ${daemonBin}. Set TENDI_DAEMON_BIN to an existing binary.`);
+  try {
+    const result = await waitForProcess(buildProcess);
+    if (result.code !== 0 || !existsSync(daemonBin)) {
+      throw new Error(`Tendi daemon build failed at ${daemonBin}. Set TENDI_DAEMON_BIN to an existing binary.`);
+    }
+  } finally {
+    buildProcess = null;
   }
 }
 
-const daemon = spawn(daemonBin, [
-  "--port", `${daemonPort}`,
-  "--workspace", workspace,
-  "--token", token,
-], {
-  cwd: repoDir,
-  env: { ...process.env, TENDI_CWD: workspace, TENDI_DAEMON_TOKEN: token },
-  stdio: "inherit",
-});
-let shuttingDown = false;
+function close(code = 0) {
+  if (shuttingDown) return;
+  shuttingDown = true;
 
-daemon.on("exit", (code, signal) => {
-  if (!shuttingDown) {
-    writeStderr(`[tendi] Rust daemon exited (${code ?? signal})`);
-    process.exit(code || 1);
-  }
-});
+  server?.closeAllConnections?.();
+  if (server?.listening) server.close();
+
+  const ownedChildren = [buildProcess, daemon].filter(Boolean);
+  void Promise.all(ownedChildren.map((child) => stopOwned(child))).finally(() => process.exit(code));
+}
+
+for (const signal of ["SIGINT", "SIGTERM", "SIGHUP", ...(process.platform === "win32" ? [] : ["SIGQUIT"])]) {
+  process.once(signal, () => close());
+}
+
+async function startDaemon() {
+  await ensureDaemonBinary();
+  daemon = spawnOwned(daemonBin, [
+    "--port", `${daemonPort}`,
+    "--workspace", workspace,
+    "--token", token,
+  ], {
+    cwd: repoDir,
+    env: { ...process.env, TENDI_CWD: workspace, TENDI_DAEMON_TOKEN: token },
+    stdio: "inherit",
+  });
+
+  daemon.on("exit", (code, signal) => {
+    if (!shuttingDown) {
+      writeStderr(`[tendi] Rust daemon exited (${code ?? signal})`);
+      close(code || 1);
+    }
+  });
+}
+
+/* istanbul ignore next -- startup failures are covered by the lifecycle smoke test. */
+function reportStartupFailure(error) {
+  writeStderr(`[tendi] web data bridge startup failed: ${error?.message || error}`);
+  close(1);
+}
+
+/* istanbul ignore next -- the server error is environment-dependent. */
+function reportListenFailure(error) {
+  writeStderr(`[tendi] web proxy failed to listen on 127.0.0.1:${bridgePort}: ${error?.message || error}`);
+  close(1);
+}
 
 async function daemonFetch(path, init = {}) {
   return fetch(`http://127.0.0.1:${daemonPort}${path}`, {
@@ -89,7 +136,7 @@ function sendJson(response, status, value) {
   response.end(body);
 }
 
-const server = createServer(async (request, response) => {
+server = createServer(async (request, response) => {
   if (request.method === "OPTIONS") {
     response.writeHead(204, { "access-control-allow-origin": "*", "access-control-allow-headers": "content-type" });
     response.end();
@@ -179,18 +226,15 @@ const server = createServer(async (request, response) => {
   }
 });
 
-await waitForDaemon();
-server.listen(bridgePort, "127.0.0.1", () => {
-  writeStdout(`[tendi] web proxy listening on http://127.0.0.1:${bridgePort}`);
-  writeStdout(`[tendi] Rust daemon workspace=${workspace}`);
-});
+server.on("error", reportListenFailure);
 
-function close() {
-  if (shuttingDown) return;
-  shuttingDown = true;
-  server.close(() => daemon.kill("SIGTERM"));
-  setTimeout(() => process.exit(0), 250);
+try {
+  await startDaemon();
+  await waitForDaemon();
+  server.listen(bridgePort, "127.0.0.1", () => {
+    writeStdout(`[tendi] web proxy listening on http://127.0.0.1:${bridgePort}`);
+    writeStdout(`[tendi] Rust daemon workspace=${workspace}`);
+  });
+} catch (error) {
+  reportStartupFailure(error);
 }
-
-process.once("SIGINT", close);
-process.once("SIGTERM", close);

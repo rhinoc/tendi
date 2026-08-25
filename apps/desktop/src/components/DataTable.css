@@ -200,7 +200,7 @@
 }
 
 .dataTableShell:not(.dataTableShell--frozen) .dataTableBodyScroll {
-  overflow-x: hidden;
+  overflow-x: auto;
 }
 
 .sectionHeading {

@@ -13,6 +13,7 @@
     "check:typography": "node scripts/check-typography-tokens.mjs",
     "check:ui-boundaries": "node scripts/check-ui-boundaries.mjs",
     "typecheck": "tsc --noEmit",
+    "test:process-lifecycle": "node --test scripts/process-lifecycle.test.mjs",
     "build": "vite build",
     "e2e:align": "node scripts/alignment-e2e.mjs",
     "test:codemirror-highlighting": "node --test scripts/codemirror-markdown.test.mjs",

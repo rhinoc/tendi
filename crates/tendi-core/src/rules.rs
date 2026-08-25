@@ -38,11 +38,15 @@ pub struct RuleFileContent {
 }
 
 pub fn scan_rules(cwd: &Path) -> Result<RuleScan> {
+    scan_rules_for_project_roots(cwd, &[])
+}
+
+pub fn scan_rules_for_project_roots(cwd: &Path, project_roots: &[PathBuf]) -> Result<RuleScan> {
     let mut rules = Vec::new();
     let mut warnings = Vec::new();
     let mut order = 0;
 
-    let ctx = crate::providers::ProviderContext::new(cwd);
+    let ctx = crate::providers::ProviderContext::with_additional_project_dirs(cwd, project_roots);
     for provider in crate::providers::agent_providers() {
         provider.scan_rules(&ctx, &mut rules, &mut warnings, &mut order);
     }
@@ -75,7 +79,15 @@ pub(crate) fn merge_rules_by_path(rules: Vec<RuleRecord>) -> Vec<RuleRecord> {
 }
 
 pub fn read_rule_file(cwd: &Path, path: &Path) -> Result<RuleFileContent> {
-    ensure_known_rule(cwd, path)?;
+    read_rule_file_for_project_roots(cwd, path, &[])
+}
+
+pub fn read_rule_file_for_project_roots(
+    cwd: &Path,
+    path: &Path,
+    project_roots: &[PathBuf],
+) -> Result<RuleFileContent> {
+    ensure_known_rule_for_project_roots(cwd, path, project_roots)?;
     read_rule_file_at_path(path)
 }
 
@@ -95,7 +107,17 @@ pub fn save_rule_file(
     expected_sha256: &str,
     content: &str,
 ) -> Result<RuleFileContent> {
-    ensure_known_rule(cwd, path)?;
+    save_rule_file_for_project_roots(cwd, path, expected_sha256, content, &[])
+}
+
+pub fn save_rule_file_for_project_roots(
+    cwd: &Path,
+    path: &Path,
+    expected_sha256: &str,
+    content: &str,
+    project_roots: &[PathBuf],
+) -> Result<RuleFileContent> {
+    ensure_known_rule_for_project_roots(cwd, path, project_roots)?;
     save_rule_file_at_path(path, expected_sha256, content)
 }
 
@@ -118,8 +140,12 @@ pub fn save_rule_file_at_path(
     })
 }
 
-fn ensure_known_rule(cwd: &Path, path: &Path) -> Result<()> {
-    let scan = scan_rules(cwd)?;
+fn ensure_known_rule_for_project_roots(
+    cwd: &Path,
+    path: &Path,
+    project_roots: &[PathBuf],
+) -> Result<()> {
+    let scan = scan_rules_for_project_roots(cwd, project_roots)?;
     if scan.rules.iter().any(|rule| rule.path == path) {
         return Ok(());
     }
@@ -217,7 +243,7 @@ mod tests {
         time::{SystemTime, UNIX_EPOCH},
     };
 
-    use super::scan_rules;
+    use super::{scan_rules, scan_rules_for_project_roots};
     use crate::skills::AgentKind;
 
     #[test]
@@ -341,6 +367,37 @@ mod tests {
                 .iter()
                 .any(|(_, _, _, path)| path == "repo/.codex/rules/default.rules"),
             "Codex exec-policy .rules files are not prompt rules"
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn scans_rules_from_additional_project_roots() {
+        let root = std::env::temp_dir().join(format!(
+            "tendi-rules-additional-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("system time before epoch")
+                .as_nanos()
+        ));
+        let cwd = root.join("cwd");
+        let project = root.join("project");
+        fs::create_dir_all(&cwd).expect("create cwd");
+        fs::create_dir_all(project.join(".git")).expect("create git root");
+        fs::write(project.join("AGENTS.md"), "project rule").expect("write project rule");
+        let project_root = project.canonicalize().expect("canonicalize project root");
+
+        let scan = scan_rules_for_project_roots(&cwd, std::slice::from_ref(&project_root))
+            .expect("scan additional project rules");
+
+        assert!(
+            scan.rules
+                .iter()
+                .any(|rule| rule.path == project_root.join("AGENTS.md")),
+            "rules: {:#?}",
+            scan.rules
         );
 
         let _ = fs::remove_dir_all(root);

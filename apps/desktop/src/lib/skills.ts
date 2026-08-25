@@ -143,7 +143,7 @@ export function normalizeSkill(skill: Record<string, unknown>, index: number): N
   const agents = rawAgents
     .filter(Boolean)
     .map((agent) => friendlyAgent(agent));
-  const uniqueAgents = [...new Set(agents.length ? agents : (skill.agents as string[] | undefined) ?? ["Codex"])];
+  const uniqueAgents = [...new Set(agents.length ? agents : (skill.agents as string[] | undefined) ?? ["Unknown"])];
   const tags = (skill.tags as string[] | undefined) ?? [];
   const dependencies = (skill.dependencies as string[] | undefined) ?? [];
   const dependents = (skill.dependents as string[] | undefined) ?? [];

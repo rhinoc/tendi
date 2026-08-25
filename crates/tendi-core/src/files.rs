@@ -9,9 +9,7 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 use walkdir::WalkDir;
 
-use crate::{
-    fsutil::{atomic_write, sha256_text},
-};
+use crate::fsutil::{atomic_write, sha256_text};
 
 #[derive(Debug, Clone, Serialize)]
 pub struct SkillFileEntry {
@@ -224,7 +222,9 @@ fn resolve_skill_dir(
 ) -> Result<PathBuf> {
     let path = cached_skill_dir
         .filter(|path| path.is_dir())
-        .with_context(|| format!("skill {skill_name} is not available in the current projection"))?;
+        .with_context(|| {
+            format!("skill {skill_name} is not available in the current projection")
+        })?;
     path.canonicalize()
         .with_context(|| format!("failed to canonicalize {}", path.display()))
 }

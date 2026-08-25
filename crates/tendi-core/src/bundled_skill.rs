@@ -8,13 +8,13 @@ use serde::Serialize;
 
 use crate::{
     fsutil::{atomic_write, sha256_text},
+    providers::agent_provider,
     skills::{AgentKind, ChangeSet, FileChange, apply_changes, global_agent_skill_root},
     storage::default_db_path,
 };
 
 const SKILL_NAME: &str = "tendi";
 const SKILL_MARKDOWN: &str = include_str!("../../../skills/tendi/SKILL.md");
-const OPENAI_YAML: &str = include_str!("../../../skills/tendi/agents/openai.yaml");
 const GUIDE_MARKDOWN: &str = include_str!("../../../skill-guides/tendi.md");
 const PROMPT_MARKER: &str = "bundled-skill-prompt-v1";
 
@@ -53,12 +53,12 @@ pub fn guide_markdown() -> &'static str {
 
 pub fn status(agent: AgentKind) -> Result<BundledSkillStatus> {
     let target = global_agent_skill_root(agent)?.join(SKILL_NAME);
-    status_at(&target, &prompt_marker_path()?)
+    status_at(&target, &prompt_marker_path()?, agent)
 }
 
 pub fn plan_install(agent: AgentKind) -> Result<BundledSkillInstallPlan> {
     let target = global_agent_skill_root(agent)?.join(SKILL_NAME);
-    plan_install_at(&target)
+    plan_install_at(&target, agent)
 }
 
 pub fn install(
@@ -80,7 +80,7 @@ pub fn install(
     }
     Ok(BundledSkillInstallReport {
         applied: !dry_run && !plan.changes.changes.is_empty(),
-        status: status_at(&plan.target, &marker)?,
+        status: status_at(&plan.target, &marker, agent)?,
         plan,
     })
 }
@@ -88,8 +88,8 @@ pub fn install(
 pub fn remove(agent: AgentKind) -> Result<BundledSkillStatus> {
     let target = global_agent_skill_root(agent)?.join(SKILL_NAME);
     let marker = prompt_marker_path()?;
-    remove_at(&target)?;
-    status_at(&target, &marker)
+    remove_at(&target, agent)?;
+    status_at(&target, &marker, agent)
 }
 
 pub fn dismiss_prompt() -> Result<()> {
@@ -102,12 +102,28 @@ fn prompt_marker_path() -> Result<PathBuf> {
     Ok(parent.join(PROMPT_MARKER))
 }
 
-fn status_at(target: &Path, marker: &Path) -> Result<BundledSkillStatus> {
-    let skill = read_optional(&target.join("SKILL.md"))?;
-    let openai = read_optional(&target.join("agents/openai.yaml"))?;
-    let installed = skill.is_some() || openai.is_some();
-    let current =
-        skill.as_deref() == Some(SKILL_MARKDOWN) && openai.as_deref() == Some(OPENAI_YAML);
+fn desired_files(agent: AgentKind) -> Vec<(PathBuf, &'static str)> {
+    let mut files = vec![(PathBuf::from("SKILL.md"), SKILL_MARKDOWN)];
+    files.extend(
+        agent_provider(agent)
+            .bundled_skill_files()
+            .iter()
+            .map(|(path, content)| (PathBuf::from(path), *content)),
+    );
+    files
+}
+
+fn status_at(target: &Path, marker: &Path, agent: AgentKind) -> Result<BundledSkillStatus> {
+    let states = desired_files(agent)
+        .iter()
+        .map(|(relative, expected)| {
+            read_optional(&target.join(relative)).map(|actual| (actual, *expected))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let installed = states.iter().any(|(actual, _)| actual.is_some());
+    let current = states
+        .iter()
+        .all(|(actual, expected)| actual.as_deref() == Some(*expected));
     let prompt_handled = marker.is_file();
     Ok(BundledSkillStatus {
         name: SKILL_NAME,
@@ -119,11 +135,11 @@ fn status_at(target: &Path, marker: &Path) -> Result<BundledSkillStatus> {
     })
 }
 
-fn plan_install_at(target: &Path) -> Result<BundledSkillInstallPlan> {
-    let desired = [
-        (target.join("SKILL.md"), SKILL_MARKDOWN),
-        (target.join("agents/openai.yaml"), OPENAI_YAML),
-    ];
+fn plan_install_at(target: &Path, agent: AgentKind) -> Result<BundledSkillInstallPlan> {
+    let desired = desired_files(agent)
+        .into_iter()
+        .map(|(relative, content)| (target.join(relative), content))
+        .collect::<Vec<_>>();
     let mut changes = Vec::new();
     let mut requires_overwrite = false;
     let mut target_exists = false;
@@ -159,11 +175,11 @@ fn plan_install_at(target: &Path) -> Result<BundledSkillInstallPlan> {
     })
 }
 
-fn remove_at(target: &Path) -> Result<()> {
-    let desired = [
-        (target.join("SKILL.md"), SKILL_MARKDOWN),
-        (target.join("agents/openai.yaml"), OPENAI_YAML),
-    ];
+fn remove_at(target: &Path, agent: AgentKind) -> Result<()> {
+    let desired = desired_files(agent)
+        .into_iter()
+        .map(|(relative, content)| (target.join(relative), content))
+        .collect::<Vec<_>>();
     for (path, expected) in &desired {
         if let Some(before) = read_optional(path)? {
             if before != *expected {
@@ -213,10 +229,12 @@ mod tests {
     };
 
     use super::{
-        GUIDE_MARKDOWN, OPENAI_YAML, SKILL_MARKDOWN, mark_prompt_handled_at, plan_install_at,
-        remove_at, status_at,
+        GUIDE_MARKDOWN, SKILL_MARKDOWN, mark_prompt_handled_at, plan_install_at, remove_at,
+        status_at,
     };
-    use crate::skills::apply_changes;
+    use crate::skills::{AgentKind, apply_changes};
+
+    const OPENAI_YAML: &str = include_str!("../../../skills/tendi/agents/openai.yaml");
 
     fn temp_dir(name: &str) -> std::path::PathBuf {
         let nonce = SystemTime::now()
@@ -233,13 +251,13 @@ mod tests {
         let root = temp_dir("install");
         let target = root.join("skills/tendi");
         let marker = root.join("prompt");
-        let plan = plan_install_at(&target).unwrap();
+        let plan = plan_install_at(&target, AgentKind::Shared).unwrap();
         assert_eq!(plan.action, "install");
         assert!(!plan.requires_overwrite);
         apply_changes(&plan.changes).unwrap();
         mark_prompt_handled_at(&marker).unwrap();
 
-        let status = status_at(&target, &marker).unwrap();
+        let status = status_at(&target, &marker, AgentKind::Shared).unwrap();
         assert!(status.installed);
         assert!(status.current);
         assert!(status.prompt_handled);
@@ -248,6 +266,23 @@ mod tests {
             fs::read_to_string(target.join("SKILL.md")).unwrap(),
             SKILL_MARKDOWN
         );
+        assert!(!target.join("agents/openai.yaml").exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn codex_bundle_includes_provider_metadata() {
+        let root = temp_dir("codex-metadata");
+        let target = root.join("skills/tendi");
+        let plan = plan_install_at(&target, AgentKind::Codex).unwrap();
+
+        assert!(
+            plan.changes
+                .changes
+                .iter()
+                .any(|change| change.path.ends_with("agents/openai.yaml"))
+        );
+        apply_changes(&plan.changes).unwrap();
         assert_eq!(
             fs::read_to_string(target.join("agents/openai.yaml")).unwrap(),
             OPENAI_YAML
@@ -262,10 +297,10 @@ mod tests {
         fs::create_dir_all(&target).unwrap();
         fs::write(target.join("SKILL.md"), "user content\n").unwrap();
 
-        let plan = plan_install_at(&target).unwrap();
+        let plan = plan_install_at(&target, AgentKind::Shared).unwrap();
         assert_eq!(plan.action, "replace");
         assert!(plan.requires_overwrite);
-        let status = status_at(&target, &root.join("prompt")).unwrap();
+        let status = status_at(&target, &root.join("prompt"), AgentKind::Shared).unwrap();
         assert!(status.installed);
         assert!(!status.current);
         assert!(!status.should_prompt);
@@ -277,13 +312,13 @@ mod tests {
         let root = temp_dir("remove");
         let target = root.join("skills/tendi");
         let marker = root.join("prompt");
-        let plan = plan_install_at(&target).unwrap();
+        let plan = plan_install_at(&target, AgentKind::Shared).unwrap();
         apply_changes(&plan.changes).unwrap();
         mark_prompt_handled_at(&marker).unwrap();
 
-        remove_at(&target).unwrap();
+        remove_at(&target, AgentKind::Shared).unwrap();
 
-        let status = status_at(&target, &marker).unwrap();
+        let status = status_at(&target, &marker, AgentKind::Shared).unwrap();
         assert!(!status.installed);
         assert!(!status.current);
         assert!(!target.exists());
@@ -298,7 +333,9 @@ mod tests {
         fs::write(target.join("SKILL.md"), "user content\n").unwrap();
         fs::write(target.join("agents/openai.yaml"), OPENAI_YAML).unwrap();
 
-        let error = remove_at(&target).unwrap_err().to_string();
+        let error = remove_at(&target, AgentKind::Codex)
+            .unwrap_err()
+            .to_string();
 
         assert!(error.contains("refusing to remove"));
         assert_eq!(

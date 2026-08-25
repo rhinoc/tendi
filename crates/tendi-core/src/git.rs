@@ -125,6 +125,18 @@ pub(crate) struct GitRepositorySnapshot {
     pub(crate) error: Option<String>,
 }
 
+pub(crate) fn logical_repository_root(snapshot: &GitRepositorySnapshot) -> Option<PathBuf> {
+    match (&snapshot.repo_root, &snapshot.git_dir, &snapshot.common_dir) {
+        (Some(_), Some(git_dir), Some(common_dir))
+            if git_dir != common_dir
+                && common_dir.file_name().and_then(|name| name.to_str()) == Some(".git") =>
+        {
+            common_dir.parent().map(Path::to_path_buf)
+        }
+        (repo_root, _, _) => repo_root.clone(),
+    }
+}
+
 #[derive(Debug)]
 pub(crate) enum GitRepositorySnapshotError {
     Command(CommandError),

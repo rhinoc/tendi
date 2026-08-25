@@ -29,6 +29,21 @@ export type BundledSkillInstallReport = {
   status: BundledSkillStatus;
 };
 
+export type UpdateCheckResult = {
+  status: "up-to-date" | "available" | "busy";
+  version?: string | null;
+  body?: string | null;
+};
+
+export type DesktopUpdateState = {
+  status: "idle" | "checking" | "up-to-date" | "available" | "installing" | "error";
+  version?: string;
+  body?: string;
+  error?: string;
+};
+
+export const UPDATE_AVAILABLE_EVENT = "tendi://update-available";
+
 export enum TauriCommand {
   BundledSkillStatus = "bundled_skill_status",
   BundledSkillInstall = "bundled_skill_install",
@@ -58,10 +73,16 @@ export enum TauriCommand {
   SkillSessionLinks = "skill_session_links",
   SettingsGet = "settings_get",
   SettingsSave = "settings_save",
+  SessionProjectsList = "session_projects_list",
+  ProjectScanScopesList = "project_scan_scopes_list",
+  ProjectScanScopesSave = "project_scan_scopes_save",
+  ProjectsList = "projects_list",
+  ProjectsScan = "projects_scan",
   AppIconSet = "app_icon_set",
   TerminalAppsList = "terminal_apps_list",
   TerminalAppTest = "terminal_app_test",
   EditorAppTest = "editor_app_test",
+  SessionResumeTarget = "session_resume_target",
   SessionResumeInTerminal = "session_resume_in_terminal",
   RulesList = "rules_list",
   RuleFileRead = "rule_file_read",
@@ -97,6 +118,7 @@ export enum TauriCommand {
   LogsExport = "logs_export",
   OpenUrl = "open_url",
   CheckForUpdates = "check_for_updates",
+  InstallUpdate = "install_update",
 }
 
 type TauriWindow = Window & {
@@ -183,6 +205,11 @@ const DAEMON_COMMANDS = new Set<string>([
   "skill_session_links",
   "settings_get",
   "settings_save",
+  "session_projects_list",
+  "project_scan_scopes_list",
+  "project_scan_scopes_save",
+  "projects_list",
+  "projects_scan",
   "terminal_apps_list",
   "rules_list",
   "rule_file_read",
@@ -212,12 +239,14 @@ const DESKTOP_ONLY_COMMANDS = new Set<string>([
   "cli_remove",
   "terminal_app_test",
   "editor_app_test",
+  "session_resume_target",
   "session_resume_in_terminal",
   "open_in_editor",
   "reveal_in_finder",
   "logs_export",
   "open_url",
   "check_for_updates",
+  "install_update",
 ]);
 
 function daemonError(

@@ -59,7 +59,10 @@ fn detect_agent(
     let version = executable
         .as_ref()
         .and_then(|path| command_version(path))
-        .or_else(|| app_version(name));
+        .or_else(|| {
+            let app_path = crate::providers::agent_provider(kind).app_bundle_path()?;
+            app_version(app_path)
+        });
     let config_exists = config_dir.as_ref().is_some_and(|path| path.is_dir());
 
     AgentRecord {
@@ -92,13 +95,7 @@ fn command_version(path: &str) -> Option<String> {
     text.lines().next().map(str::trim).map(str::to_string)
 }
 
-fn app_version(name: &str) -> Option<String> {
-    let app_path = match name {
-        "Cursor" => "/Applications/Cursor.app",
-        "Claude Code" => "/Applications/Claude.app",
-        "Codex" => "/Applications/Codex.app",
-        _ => return None,
-    };
+fn app_version(app_path: &str) -> Option<String> {
     let output = run_command_with_timeout("mdls", &["-name", "kMDItemVersion", "-raw", app_path])?;
     if !output.status.success() {
         return None;

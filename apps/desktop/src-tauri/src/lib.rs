@@ -11,7 +11,7 @@ use std::{
     process::Command,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -19,7 +19,7 @@ use std::{
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tauri::{
-    ActivationPolicy, Manager, RunEvent,
+    ActivationPolicy, Emitter, Manager, RunEvent,
     menu::{MenuBuilder, MenuItemBuilder, PredefinedMenuItem, SubmenuBuilder},
 };
 #[cfg(target_os = "macos")]
@@ -33,11 +33,45 @@ struct DaemonState {
     next_subscription_id: AtomicU64,
 }
 
-#[derive(Debug, Serialize)]
+const UPDATE_AVAILABLE_EVENT: &str = "tendi://update-available";
+
+struct UpdateState {
+    operation_in_flight: Arc<AtomicBool>,
+}
+
+impl Default for UpdateState {
+    fn default() -> Self {
+        Self {
+            operation_in_flight: Arc::new(AtomicBool::new(false)),
+        }
+    }
+}
+
+struct UpdateOperationGuard {
+    operation_in_flight: Arc<AtomicBool>,
+}
+
+impl Drop for UpdateOperationGuard {
+    fn drop(&mut self) {
+        self.operation_in_flight.store(false, Ordering::Release);
+    }
+}
+
+fn begin_update_operation(operation_in_flight: Arc<AtomicBool>) -> Option<UpdateOperationGuard> {
+    operation_in_flight
+        .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+        .ok()
+        .map(|_| UpdateOperationGuard {
+            operation_in_flight,
+        })
+}
+
+#[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct UpdateCheckResult {
     status: &'static str,
     version: Option<String>,
+    body: Option<String>,
 }
 
 #[tauri::command]
@@ -73,7 +107,8 @@ fn app_icon_set(app: tauri::AppHandle, icon: String) -> Result<(), String> {
             };
 
             unsafe {
-                let data = NSData::dataWithBytes_length_(nil, icon.as_ptr() as *const _, icon.len() as _);
+                let data =
+                    NSData::dataWithBytes_length_(nil, icon.as_ptr() as *const _, icon.len() as _);
                 let image = NSImage::initWithData_(NSImage::alloc(nil), data);
                 if image != nil {
                     NSApp().setApplicationIconImage_(image);
@@ -105,13 +140,59 @@ async fn cli_remove() -> Result<cli_registration::CliInstallStatus, String> {
         .map_err(|error| error.to_string())
 }
 
-#[tauri::command]
-async fn check_for_updates(app: tauri::AppHandle) -> Result<UpdateCheckResult, String> {
+async fn check_for_updates_inner(
+    app: tauri::AppHandle,
+    operation_in_flight: Arc<AtomicBool>,
+) -> Result<UpdateCheckResult, String> {
+    let Some(_operation) = begin_update_operation(operation_in_flight) else {
+        return Ok(UpdateCheckResult {
+            status: "busy",
+            version: None,
+            body: None,
+        });
+    };
     let updater = app.updater().map_err(|error| error.to_string())?;
     let Some(update) = updater.check().await.map_err(|error| error.to_string())? else {
         return Ok(UpdateCheckResult {
             status: "up-to-date",
             version: None,
+            body: None,
+        });
+    };
+
+    Ok(UpdateCheckResult {
+        status: "available",
+        version: Some(update.version),
+        body: update.body,
+    })
+}
+
+#[tauri::command]
+async fn check_for_updates(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, UpdateState>,
+) -> Result<UpdateCheckResult, String> {
+    check_for_updates_inner(app, state.operation_in_flight.clone()).await
+}
+
+#[tauri::command]
+async fn install_update(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, UpdateState>,
+) -> Result<UpdateCheckResult, String> {
+    let Some(_operation) = begin_update_operation(state.operation_in_flight.clone()) else {
+        return Ok(UpdateCheckResult {
+            status: "busy",
+            version: None,
+            body: None,
+        });
+    };
+    let updater = app.updater().map_err(|error| error.to_string())?;
+    let Some(update) = updater.check().await.map_err(|error| error.to_string())? else {
+        return Ok(UpdateCheckResult {
+            status: "up-to-date",
+            version: None,
+            body: None,
         });
     };
 
@@ -248,14 +329,35 @@ struct SessionResumeRequest {
     title: Option<String>,
     project: Option<String>,
     path: String,
+    #[serde(default)]
+    force_active_writer: bool,
 }
 
 #[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct SessionResumeLaunch {
-    agent: AgentKind,
-    terminal: String,
-    command_line: String,
+#[serde(tag = "status", rename_all = "camelCase")]
+enum SessionResumeResponse {
+    ActiveWriter {
+        lock_path: String,
+        pids: Vec<u32>,
+    },
+    Launched {
+        agent: AgentKind,
+        terminal: String,
+        command_line: String,
+    },
+}
+
+#[tauri::command(rename_all = "camelCase")]
+async fn session_resume_target(session: SessionResumeRequest) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let agent = parse_agent_result(&session.agent)?;
+        let target =
+            tendi_core::sessions::infer_session_resume_target(&PathBuf::from(session.path), agent)
+                .unwrap_or("terminal");
+        Ok(target.to_string())
+    })
+    .await
+    .map_err(|error| format!("background task failed: {error}"))?
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -287,6 +389,7 @@ async fn session_resume_in_terminal(
     tauri::async_runtime::spawn_blocking(move || {
         let agent = parse_agent_result(&session.agent)?;
         let path = PathBuf::from(session.path);
+        let force_active_writer = session.force_active_writer;
         let project = absolute_project_path(session.project)?
             .or_else(|| tendi_core::sessions::infer_session_project(&path, agent));
         let record = tendi_core::SessionRecord {
@@ -313,6 +416,17 @@ async fn session_resume_in_terminal(
             parent_session_id: None,
             token_usage: None,
         };
+        if force_active_writer {
+            tendi_core::terminate_session_writer(&record).map_err(|error| format!("{error:#}"))?;
+        } else if let Some(writer) =
+            tendi_core::active_session_writer(&record).map_err(|error| format!("{error:#}"))?
+        {
+            return serde_json::to_value(SessionResumeResponse::ActiveWriter {
+                lock_path: writer.lock_path.display().to_string(),
+                pids: writer.pids,
+            })
+            .map_err(|error| error.to_string());
+        }
         let mut plan =
             tendi_core::plan_session_resume(&record).map_err(|error| format!("{error:#}"))?;
         let store =
@@ -327,7 +441,7 @@ async fn session_resume_in_terminal(
         }
         let terminal = terminals::resolve_terminal(&settings.terminal);
         let command_line = terminals::launch_command_in_terminal(&plan.command, &terminal)?;
-        serde_json::to_value(SessionResumeLaunch {
+        serde_json::to_value(SessionResumeResponse::Launched {
             agent: plan.agent,
             terminal,
             command_line,
@@ -610,49 +724,12 @@ fn is_rotated_log_name(name: &str, rotated_prefix: &str, suffix: &str) -> bool {
 fn open_url(url: String) -> Result<(), String> {
     let trimmed = url.trim();
     let is_web_url = trimmed.starts_with("http://") || trimmed.starts_with("https://");
-    let is_codex_thread_url = trimmed
-        .strip_prefix("codex://threads/")
-        .is_some_and(valid_codex_thread_id);
-    let is_claude_resume_url = trimmed
-        .strip_prefix("claude://resume?")
-        .is_some_and(valid_claude_resume_query);
-    if !is_web_url && !is_codex_thread_url && !is_claude_resume_url {
+    let is_agent_session_url = tendi_core::accepts_session_app_url(trimmed);
+    if !is_web_url && !is_agent_session_url {
         return Err(format!("unsupported url: {trimmed}"));
     }
 
     open_external_url(trimmed)
-}
-
-fn valid_codex_thread_id(value: &str) -> bool {
-    !value.is_empty()
-        && value.len() <= 128
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
-}
-
-fn valid_claude_resume_query(value: &str) -> bool {
-    let mut has_session = false;
-    for parameter in value.split('&') {
-        let Some((key, value)) = parameter.split_once('=') else {
-            return false;
-        };
-        let valid_value = !value.is_empty()
-            && value.len() <= 4096
-            && value.bytes().all(|byte| {
-                byte.is_ascii_alphanumeric()
-                    || matches!(byte, b'-' | b'_' | b'.' | b'~' | b'%' | b'+')
-            });
-        if !valid_value {
-            return false;
-        }
-        match key {
-            "session" if value.len() <= 128 => has_session = true,
-            "cwd" => {}
-            _ => return false,
-        }
-    }
-    has_session
 }
 
 fn open_external_url(trimmed: &str) -> Result<(), String> {
@@ -742,6 +819,7 @@ pub fn run() {
     }
     tendi_core::logging::global().info("desktop process starting", Value::Null);
     let mut app = tauri::Builder::default()
+        .manage(UpdateState::default())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
             app.set_activation_policy(ActivationPolicy::Regular);
@@ -761,12 +839,19 @@ pub fn run() {
         .on_menu_event(|app, event| {
             if event.id() == "check_for_updates_menu" {
                 let app = app.clone();
+                let operation_in_flight = app.state::<UpdateState>().operation_in_flight.clone();
                 tauri::async_runtime::spawn(async move {
-                    if let Err(error) = check_for_updates(app).await {
-                        tendi_core::logging::global().error(
-                            "desktop update check failed",
-                            serde_json::json!({ "error": error }),
-                        );
+                    match check_for_updates_inner(app.clone(), operation_in_flight).await {
+                        Ok(result) if result.status == "available" => {
+                            let _ = app.emit(UPDATE_AVAILABLE_EVENT, result);
+                        }
+                        Ok(_) => {}
+                        Err(error) => {
+                            tendi_core::logging::global().error(
+                                "desktop update check failed",
+                                serde_json::json!({ "error": error }),
+                            );
+                        }
                     }
                 });
             }
@@ -783,12 +868,14 @@ pub fn run() {
             app_icon_set,
             terminal_app_test,
             editor_app_test,
+            session_resume_target,
             session_resume_in_terminal,
             logs_export,
             reveal_in_finder,
             open_in_editor,
             open_url,
-            check_for_updates
+            check_for_updates,
+            install_update
         ])
         .build(tauri::generate_context!())
         .expect("error while building tendi desktop");

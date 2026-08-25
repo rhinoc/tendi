@@ -46,7 +46,7 @@ import { SKILL_BADGE_TONES } from "../features/skills/skill-badge-tones.ts";
 import { Visibility } from "../features/skills/Visibility.tsx";
 import { DataTable } from "../components/DataTable.tsx";
 import type { ColumnDef, SortState } from "../components/DataTable.types";
-import { TauriCommand, SkillVisibility, agentIdentityKey, allSkillVisibilities, compactDateTime, copyText, editableSkillVisibilities, invokeCommand, isReadOnlySkillSource, isSkillRowSelectable, isSkillSelectable, isSkillVisibilityEditable, primarySkillPath, safeInvoke, skillSourceAction, skillSourceDetails, skillTargets, sourceRemoteDetails, suppressNextClick } from "../lib/index.ts";
+import { SKILL_FREEZE_COLUMN, TauriCommand, SkillVisibility, agentIdentityKey, allSkillVisibilities, compactDateTime, copyText, editableSkillVisibilities, invokeCommand, isReadOnlySkillSource, isSkillRowSelectable, isSkillSelectable, isSkillVisibilityEditable, primarySkillPath, safeInvoke, scopeColumn, skillSourceAction, skillSourceDetails, skillTargets, sourceRemoteDetails, suppressNextClick, type ProjectSummary } from "../lib/index.ts";
 
 export type SkillsTableSort = SortState;
 
@@ -1540,6 +1540,7 @@ export type SkillsViewProps = {
   onDeleteSkills: (names: string[], onApplied?: () => void) => void;
   onAddInstalled: (result: SkillInstallResult) => void;
   installedAgentKeys: string[];
+  projects?: ProjectSummary[];
 };
 
 export function SkillsView({
@@ -1557,6 +1558,7 @@ export function SkillsView({
   onDeleteSkills,
   onAddInstalled,
   installedAgentKeys,
+  projects = [],
 }: SkillsViewProps) {
   const [selected, setSelected] = useState<string[]>([]);
   const [query, setQuery] = useState("");
@@ -1670,13 +1672,14 @@ export function SkillsView({
       width: "180px",
       value: skillOriginLabel,
     },
+    ...(projects.length > 0 ? [scopeColumn<SkillTableRow>(projects, (skill) => primarySkillPath(skill))] : []),
     {
       key: "visibility",
       header: "Visibility",
       type: "enum",
       groupOrder: [...allSkillVisibilities],
       sortValue: (skill) => skill.visibility?.toLowerCase() ?? "",
-      width: "176px",
+      width: "104px",
       render: (skill) => <Visibility value={skill.visibility ?? SkillVisibility.Auto} skill={skill} onSetVisibility={setVisibilityAndClear} />,
     },
     {
@@ -1703,7 +1706,7 @@ export function SkillsView({
       width: "40px",
       render: (skill) => <SkillActionsCell skill={skill} onApplyUpdates={applyUpdatesAndClear} onDeleteSkills={deleteSkillsAndClear} onManageLocations={openManageLocations} />,
     },
-  ], [applyUpdatesAndClear, deleteSkillsAndClear, openManageLocations, openSkill, setVisibilityAndClear]);
+  ], [applyUpdatesAndClear, deleteSkillsAndClear, openManageLocations, openSkill, projects, setVisibilityAndClear]);
 
   const rowContextMenu = useCallback((skill: SkillTableRow, { selectedRows, selected: isSelected }: { selectedRows: SkillTableRow[]; selected: boolean }) => {
     const showBulk = isSelected && selectedRows.length > 1;
@@ -1832,6 +1835,7 @@ export function SkillsView({
             columns={columns}
             getRowId={(skill) => skill.id}
             getRowLabel={(skill) => skill.name}
+            freezeColumn={SKILL_FREEZE_COLUMN}
             selectable={(skill) => isSkillRowSelectable(skill)}
             selectedIds={selected}
             onSelectionChange={setSelected}

@@ -1,9 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Monitor, Moon, Sun } from "lucide-react";
-import { TauriCommand, invokeCommand, normalizeSessionResumeTarget, safeInvoke, type BundledSkillInstallReport, type BundledSkillStatus, type CliInstallStatus, type SessionResumeTarget } from "../../lib/index.ts";
+import { Popover } from "radix-ui";
+import { compactDateTime, formatUserPath, remoteRepositoryLabel, TauriCommand, invokeCommand, normalizeMissingSessionProjectPolicy, normalizeSessionResumeTarget, safeInvoke, type BundledSkillInstallReport, type BundledSkillStatus, type CliInstallStatus, type DesktopUpdateState, type MissingSessionProjectPolicy, type ProjectSummary, type SessionResumeTarget } from "../../lib/index.ts";
 import { normalizeAppearance, normalizeColorTheme, normalizeFontFamily, type Appearance, type ColorTheme, type FontFamily, type ResolvedAppearance, type ThemePreferences } from "../../lib/appearance.ts";
 import { appIconOptions, appIconPreviewDataUrl, normalizeAppIcon, type AppIcon } from "../../lib/app-icon.ts";
+import { Button } from "../../components/shared/Button.tsx";
 import { ContentTopDragStrip } from "../../components/shared/ContentTopDragStrip.tsx";
+import { CompactTable, type CompactTableColumn } from "../../components/shared/CompactTable.tsx";
 import { LoadErrorState } from "../../components/shared/LoadErrorState.tsx";
 import { LoadingIcon } from "../../components/shared/LoadingIcon.tsx";
 import { PageHeader } from "../../components/shared/PageHeader.tsx";
@@ -21,6 +24,78 @@ type TerminalApp = {
   available?: boolean;
 };
 
+type ProjectScanScope = {
+  path: string;
+  excluded?: boolean;
+  enabled: boolean;
+  lastScannedAt?: string | null;
+  projectCount: number;
+};
+
+const projectTableColumns: CompactTableColumn<ProjectSummary>[] = [
+  { key: "name", header: "Project", width: "160px", cellClassName: "compactTableCell--title", empty: "Project" },
+  {
+    key: "rootPath",
+    header: "Path",
+    width: "minmax(180px, 1fr)",
+    cellClassName: "compactTableCell--muted",
+    value: (project) => formatUserPath(project.rootPath),
+    title: (project) => project.rootPath || undefined,
+    empty: "-",
+  },
+  {
+    key: "remoteUrl",
+    header: "Remote",
+    width: "minmax(140px, 0.8fr)",
+    cellClassName: "compactTableCell--muted",
+    value: (project) => remoteRepositoryLabel(project.remoteUrl) || undefined,
+    title: (project) => project.remoteUrl || undefined,
+    empty: "-",
+  },
+  {
+    key: "lastScannedAt",
+    header: "Last scanned",
+    width: "minmax(140px, 0.7fr)",
+    cellClassName: "compactTableCell--muted",
+    value: (project) => compactDateTime(project.lastScannedAt, { year: true }) || undefined,
+    title: (project) => project.lastScannedAt || undefined,
+    empty: "-",
+  },
+];
+
+function ProjectsPopover({ projects }: { projects: ProjectSummary[] }) {
+  return (
+    <Popover.Root>
+      <Popover.Trigger asChild>
+        <Button
+          variant="ghost"
+          size="sm"
+          className="settingsProjectCountTrigger"
+          aria-label={`Show ${projects.length} scanned projects`}
+        >
+          {projects.length} projects found
+        </Button>
+      </Popover.Trigger>
+      <Popover.Portal>
+        <Popover.Content className="settingsProjectsPopover" side="bottom" align="start" sideOffset={8}>
+          <div className="settingsProjectsPopoverHeader">
+            <strong>Scanned projects</strong>
+            <span>{projects.length}</span>
+          </div>
+          <CompactTable
+            className="settingsProjectsTable"
+            ariaLabel="Scanned projects"
+            rows={projects}
+            columns={projectTableColumns}
+            getRowId={(project) => project.id ?? project.rootPath ?? project.name ?? "project"}
+            emptyState="No projects found"
+          />
+        </Popover.Content>
+      </Popover.Portal>
+    </Popover.Root>
+  );
+}
+
 type AppSettings = {
   appearance: Appearance;
   lightTheme: ColorTheme;
@@ -29,6 +104,7 @@ type AppSettings = {
   fontFamily: FontFamily;
   terminal: string;
   sessionResumeTarget: SessionResumeTarget;
+  missingSessionProjectPolicy: MissingSessionProjectPolicy;
   editor: string;
   developerMode: boolean;
   additionalSessionRoots: string[];
@@ -45,9 +121,16 @@ type SettingsViewProps = {
   onFontFamilyChange: (fontFamily: FontFamily) => void;
   onDeveloperModeChange: (enabled: boolean) => void;
   sessionResumeTarget: SessionResumeTarget;
+  missingSessionProjectPolicy: MissingSessionProjectPolicy;
   onSessionResumeTargetChange: (target: SessionResumeTarget) => void;
+  onMissingSessionProjectPolicyChange: (policy: MissingSessionProjectPolicy) => void;
   appIcon: AppIcon;
   onAppIconChange: (appIcon: AppIcon) => void;
+  projects: ProjectSummary[];
+  onProjectsScanned?: (projects: ProjectSummary[]) => void;
+  update: DesktopUpdateState;
+  onCheckForUpdates: () => void;
+  onInstallUpdate: () => void;
 };
 
 const appearanceOptions = [
@@ -170,6 +253,7 @@ function normalizeSettings(settings: AppSettings): AppSettings {
     fontFamily: normalizeFontFamily(settings.fontFamily),
     editor: settings.editor?.trim() || "vscode",
     sessionResumeTarget: normalizeSessionResumeTarget(settings.sessionResumeTarget),
+    missingSessionProjectPolicy: normalizeMissingSessionProjectPolicy(settings.missingSessionProjectPolicy),
     developerMode: settings.developerMode === true,
     additionalSessionRoots: settings.additionalSessionRoots ?? [],
     configProfiles: settings.configProfiles ?? {},
@@ -190,12 +274,11 @@ async function readSetting<T>(command: TauriCommand): Promise<{ value?: T; error
   }
 }
 
-function SettingsSection({ title, description, children }: { title: string; description?: ReactNode; children: ReactNode }) {
+function SettingsSection({ title, children, className = "" }: { title: string; children: ReactNode; className?: string }) {
   return (
-    <section className="settingsSection">
+    <section className={`settingsSection ${className}`.trim()}>
       <div className="settingsSectionText">
         <h2>{title}</h2>
-        {description}
       </div>
       <div className="settingsControlGroup">{children}</div>
     </section>
@@ -211,16 +294,21 @@ function SettingsGroup({ title, children }: { title: string; children: ReactNode
   );
 }
 
-export function SettingsView({ appearance, themePreferences, fontFamily, developerMode, sessionResumeTarget, appIcon, onAppearanceChange, onThemeChange, onFontFamilyChange, onDeveloperModeChange, onSessionResumeTargetChange, onAppIconChange }: SettingsViewProps) {
-  const [settings, setSettings] = useState<AppSettings>({ appearance, lightTheme: themePreferences.light, darkTheme: themePreferences.dark, appIcon, fontFamily, terminal: "auto", sessionResumeTarget, editor: "vscode", developerMode, additionalSessionRoots: [], configProfiles: {} });
+export function SettingsView({ appearance, themePreferences, fontFamily, developerMode, sessionResumeTarget, missingSessionProjectPolicy, appIcon, projects, onAppearanceChange, onThemeChange, onFontFamilyChange, onDeveloperModeChange, onSessionResumeTargetChange, onMissingSessionProjectPolicyChange, onAppIconChange, onProjectsScanned, update, onCheckForUpdates, onInstallUpdate }: SettingsViewProps) {
+  const [settings, setSettings] = useState<AppSettings>({ appearance, lightTheme: themePreferences.light, darkTheme: themePreferences.dark, appIcon, fontFamily, terminal: "auto", sessionResumeTarget, missingSessionProjectPolicy, editor: "vscode", developerMode, additionalSessionRoots: [], configProfiles: {} });
   const [terminalInput, setTerminalInput] = useState("auto");
   const [editorInput, setEditorInput] = useState("vscode");
   const [additionalSessionRootsInput, setAdditionalSessionRootsInput] = useState("");
+  const [projectScanScopesInput, setProjectScanScopesInput] = useState("");
   const [terminalApps, setTerminalApps] = useState<TerminalApp[]>([]);
   const [terminalError, setTerminalError] = useState("");
   const [sessionResumeError, setSessionResumeError] = useState("");
+  const [missingSessionProjectError, setMissingSessionProjectError] = useState("");
   const [editorError, setEditorError] = useState("");
   const [sessionRootsError, setSessionRootsError] = useState("");
+  const [projectScanScopesError, setProjectScanScopesError] = useState("");
+  const [projectScanState, setProjectScanState] = useState<"idle" | "loading" | "success" | "error">("idle");
+  const [projectScanSummary, setProjectScanSummary] = useState("");
   const [appearanceError, setAppearanceError] = useState("");
   const [themeError, setThemeError] = useState("");
   const [appIconError, setAppIconError] = useState("");
@@ -234,7 +322,6 @@ export function SettingsView({ appearance, themePreferences, fontFamily, develop
   const [bundledSkillError, setBundledSkillError] = useState("");
   const [settingsLoading, setSettingsLoading] = useState(true);
   const [settingsLoadError, setSettingsLoadError] = useState("");
-  const [updateState, setUpdateState] = useState<"idle" | "loading" | "success" | "error">("idle");
   const [logExportState, setLogExportState] = useState<"idle" | "loading" | "success" | "error">("idle");
   const [logExportError, setLogExportError] = useState("");
   const appearanceSaveRequestRef = useRef(0);
@@ -261,13 +348,14 @@ export function SettingsView({ appearance, themePreferences, fontFamily, develop
   const loadSettings = useCallback(async () => {
     setSettingsLoading(true);
     setSettingsLoadError("");
-    const [nextSettings, apps, nextCliStatus, nextBundledSkillStatus] = await Promise.all([
+    const [nextSettings, apps, nextCliStatus, nextBundledSkillStatus, nextProjectScopes] = await Promise.all([
       readSetting<AppSettings>(TauriCommand.SettingsGet),
       readSetting<TerminalApp[]>(TauriCommand.TerminalAppsList),
       readSetting<CliInstallStatus>(TauriCommand.CliStatus),
       readSetting<BundledSkillStatus>(TauriCommand.BundledSkillStatus),
+      readSetting<ProjectScanScope[]>(TauriCommand.ProjectScanScopesList),
     ]);
-    const errors = [nextSettings, apps, nextCliStatus, nextBundledSkillStatus]
+    const errors = [nextSettings, apps, nextCliStatus, nextBundledSkillStatus, nextProjectScopes]
       .map((result) => result.error)
       .filter((message): message is string => Boolean(message));
     if (nextSettings.value) {
@@ -280,6 +368,7 @@ export function SettingsView({ appearance, themePreferences, fontFamily, develop
       onFontFamilyChange(normalizedSettings.fontFamily);
       onDeveloperModeChange(normalizedSettings.developerMode);
       onSessionResumeTargetChange(normalizedSettings.sessionResumeTarget);
+      onMissingSessionProjectPolicyChange(normalizedSettings.missingSessionProjectPolicy);
       setTerminalInput(normalizedSettings.terminal);
       setEditorInput(normalizedSettings.editor);
       setAdditionalSessionRootsInput(normalizedSettings.additionalSessionRoots.join("\n"));
@@ -287,9 +376,15 @@ export function SettingsView({ appearance, themePreferences, fontFamily, develop
     if (Array.isArray(apps.value)) setTerminalApps(apps.value);
     if (nextCliStatus.value) setCliStatus(nextCliStatus.value);
     if (nextBundledSkillStatus.value) setBundledSkillStatus(nextBundledSkillStatus.value);
+    if (Array.isArray(nextProjectScopes.value)) {
+      setProjectScanScopesInput(nextProjectScopes.value
+        .filter((scope) => scope.enabled)
+        .map((scope) => `${scope.excluded ? "!" : ""}${scope.path}`)
+        .join("\n"));
+    }
     setSettingsLoadError(errors.join("; "));
     setSettingsLoading(false);
-  }, [onAppearanceChange, onAppIconChange, onDeveloperModeChange, onFontFamilyChange, onSessionResumeTargetChange]);
+  }, [onAppearanceChange, onAppIconChange, onDeveloperModeChange, onFontFamilyChange, onMissingSessionProjectPolicyChange, onSessionResumeTargetChange]);
 
   useEffect(() => {
     void loadSettings();
@@ -302,6 +397,7 @@ export function SettingsView({ appearance, themePreferences, fontFamily, develop
     setEditorInput(savedSettings.editor);
     setAdditionalSessionRootsInput(savedSettings.additionalSessionRoots.join("\n"));
     onSessionResumeTargetChange(savedSettings.sessionResumeTarget);
+    onMissingSessionProjectPolicyChange(savedSettings.missingSessionProjectPolicy);
     onAppIconChange(savedSettings.appIcon);
     return savedSettings;
   };
@@ -432,6 +528,26 @@ export function SettingsView({ appearance, themePreferences, fontFamily, develop
     }
   };
 
+  const saveMissingSessionProjectPolicy = async (policy: string) => {
+    const normalized = normalizeMissingSessionProjectPolicy(policy);
+    if (normalized === settings.missingSessionProjectPolicy) return;
+    const previous = settings.missingSessionProjectPolicy;
+    setSettings((current) => ({ ...current, missingSessionProjectPolicy: normalized }));
+    onMissingSessionProjectPolicyChange(normalized);
+    const nextSettings = await safeInvoke(TauriCommand.SettingsSave, {
+      ...settings,
+      missingSessionProjectPolicy: normalized,
+    });
+    if (nextSettings) {
+      applySavedSettings(nextSettings as AppSettings);
+      setMissingSessionProjectError("");
+    } else {
+      setSettings((current) => ({ ...current, missingSessionProjectPolicy: previous }));
+      onMissingSessionProjectPolicyChange(previous);
+      setMissingSessionProjectError("Save failed");
+    }
+  };
+
   const saveEditor = async (editor: string) => {
     const normalized = editor.trim() || "vscode";
     setEditorInput(normalized);
@@ -487,18 +603,42 @@ export function SettingsView({ appearance, themePreferences, fontFamily, develop
     }
   };
 
+  const saveProjectScanScopes = async (value: string) => {
+    const paths = value
+      .split("\n")
+      .map((path) => path.trim())
+      .filter(Boolean);
+    setProjectScanScopesInput(paths.join("\n"));
+    const result = await safeInvoke<ProjectScanScope[]>(TauriCommand.ProjectScanScopesSave, { paths });
+    if (result) {
+      setProjectScanScopesError("");
+      setProjectScanSummary(`${result.length} scan scope${result.length === 1 ? "" : "s"} saved`);
+    } else {
+      setProjectScanScopesError("Save failed: use absolute paths");
+    }
+  };
+
+  const scanProjects = async () => {
+    if (projectScanState === "loading") return;
+    setProjectScanState("loading");
+    setProjectScanSummary("");
+    const result = await safeInvoke<{ projects?: unknown[] }>(TauriCommand.ProjectsScan);
+    if (result) {
+      if (Array.isArray(result.projects)) onProjectsScanned?.(result.projects as ProjectSummary[]);
+      setProjectScanState("success");
+      setProjectScanSummary(`${result.projects?.length ?? 0} projects found`);
+    } else {
+      setProjectScanState("error");
+      setProjectScanSummary("Scan failed");
+    }
+  };
+
   const testTerminal = async (terminal: string) => {
     return Boolean(await safeInvoke<string>(TauriCommand.TerminalAppTest, { terminal }));
   };
 
   const testEditor = async (editor: string) => {
     return Boolean(await safeInvoke<boolean>(TauriCommand.EditorAppTest, { editor }));
-  };
-
-  const checkForUpdates = async () => {
-    setUpdateState("loading");
-    const result = await safeInvoke<{ status?: string }>(TauriCommand.CheckForUpdates);
-    setUpdateState(result?.status === "up-to-date" ? "success" : result ? "success" : "error");
   };
 
   const exportLogs = async () => {
@@ -620,7 +760,21 @@ export function SettingsView({ appearance, themePreferences, fontFamily, develop
   return (
     <section className="content dataPage settingsPage">
       <ContentTopDragStrip />
-      <PageHeader title="Settings" />
+      <PageHeader title="Settings">
+        <StatefulButton
+          size="sm"
+          state={update.status === "checking" || update.status === "installing" ? "loading" : update.status === "up-to-date" ? "success" : update.status === "error" ? "error" : "idle"}
+          width={160}
+          minWidth={160}
+          onClick={update.status === "available" ? onInstallUpdate : onCheckForUpdates}
+          aria-label={update.status === "checking" ? "Checking for updates" : update.status === "installing" ? "Installing update" : update.status === "available" && update.version ? `Install update ${update.version}` : update.status === "up-to-date" ? "You're up to date" : update.status === "error" ? "Check for updates again" : "Check for updates"}
+          loadingContent={<LoadingIcon size={16} />}
+          successContent="You're up to date"
+          errorContent="Check failed — try again"
+        >
+          {update.status === "available" && update.version ? `Install ${update.version}` : "Check for Updates"}
+        </StatefulButton>
+      </PageHeader>
       {settingsLoadError ? <LoadErrorState message={settingsLoadError} onRetry={() => { void loadSettings(); }} /> : null}
       <div className="settingsShell">
         <div className="settingsGroups">
@@ -650,7 +804,7 @@ export function SettingsView({ appearance, themePreferences, fontFamily, develop
               </SegmentedControl>
               {appearanceError ? <span className="settingsError" role="alert">{appearanceError}</span> : null}
           </SettingsSection>
-          <SettingsSection title="Theme">
+          <SettingsSection title="Theme" className="settingsThemeSection">
             <div className="settingsThemeControls">
               {themeModes.map((mode) => (
                 <ThemeSelect
@@ -660,12 +814,13 @@ export function SettingsView({ appearance, themePreferences, fontFamily, develop
                   onChange={(value) => { void saveTheme(mode.value, value); }}
                 />
               ))}
+              <div className="settingsThemePicker">
+                <span className="settingsThemePickerLabel">App icon</span>
+                <AppIconSelect value={settings.appIcon} onChange={(value) => { void saveAppIcon(value); }} />
+                {appIconError ? <span className="settingsError" role="alert">{appIconError}</span> : null}
+              </div>
             </div>
             {themeError ? <span className="settingsError" role="alert">{themeError}</span> : null}
-          </SettingsSection>
-          <SettingsSection title="App icon">
-            <AppIconSelect value={settings.appIcon} onChange={(value) => { void saveAppIcon(value); }} />
-            {appIconError ? <span className="settingsError" role="alert">{appIconError}</span> : null}
           </SettingsSection>
           <SettingsSection title="Font">
             <SelectControl
@@ -681,7 +836,7 @@ export function SettingsView({ appearance, themePreferences, fontFamily, develop
             {fontFamilyError ? <span className="settingsError" role="alert">{fontFamilyError}</span> : null}
           </SettingsSection>
           </SettingsGroup>
-          <SettingsGroup title="General">
+          <SettingsGroup title="Workspace">
           <SettingsSection title="Terminal">
             <SettingsApplicationPicker
               id="settings-terminal"
@@ -714,10 +869,24 @@ export function SettingsView({ appearance, themePreferences, fontFamily, develop
               onValueChange={(value) => { void saveSessionResumeTarget(value); }}
               aria-label="Prefer opening resumed sessions in"
             >
+              <SegmentedControlItem value="auto">Auto</SegmentedControlItem>
               <SegmentedControlItem value="terminal">Terminal</SegmentedControlItem>
               <SegmentedControlItem value="app">App</SegmentedControlItem>
             </SegmentedControl>
             {sessionResumeError ? <span className="settingsError" role="alert">{sessionResumeError}</span> : null}
+          </SettingsSection>
+          <SettingsSection title="Missing session projects">
+            <SegmentedControl
+              className="settingsSessionResumeControl"
+              value={settings.missingSessionProjectPolicy}
+              onValueChange={(value) => { void saveMissingSessionProjectPolicy(value); }}
+              aria-label="Handle sessions whose project path no longer exists"
+            >
+              <SegmentedControlItem value="show">Show</SegmentedControlItem>
+              <SegmentedControlItem value="hide">Hide</SegmentedControlItem>
+              <SegmentedControlItem value="merge-by-name">Merge by name</SegmentedControlItem>
+            </SegmentedControl>
+            {missingSessionProjectError ? <span className="settingsError" role="alert">{missingSessionProjectError}</span> : null}
           </SettingsSection>
           <SettingsSection title="Editor">
             <SettingsApplicationPicker
@@ -768,8 +937,47 @@ export function SettingsView({ appearance, themePreferences, fontFamily, develop
               />
               {sessionRootsError ? <span className="settingsError" role="alert">{sessionRootsError}</span> : null}
           </SettingsSection>
+          <SettingsSection title="Scan scopes">
+            <textarea
+              id="settings-project-scan-scopes"
+              className="settingsTextarea"
+              aria-label="Project scan scopes"
+              placeholder="~/dev\n!~/dev/**/archive"
+              spellCheck={false}
+              value={projectScanScopesInput}
+              onChange={(event) => {
+                setProjectScanScopesInput(event.target.value);
+                setProjectScanScopesError("");
+              }}
+              onBlur={() => { void saveProjectScanScopes(projectScanScopesInput); }}
+              onKeyDown={(event) => {
+                if ((event.metaKey || event.ctrlKey) && event.key === "Enter") event.currentTarget.blur();
+                if (event.key === "Escape") {
+                  setProjectScanScopesError("");
+                  event.currentTarget.blur();
+                }
+              }}
+            />
+            <div className="settingsProjectScanActions">
+              <StatefulButton
+                state={projectScanState}
+                width={112}
+                minWidth={112}
+                aria-label={projectScanState === "loading" ? "Scanning projects" : "Scan projects"}
+                loadingContent={<LoadingIcon size={14} />}
+                successContent="Scan now"
+                errorContent="Scan now"
+                onClick={() => { void scanProjects(); }}
+              >
+                Scan now
+              </StatefulButton>
+              {projects.length > 0 && projectScanState !== "error" ? <ProjectsPopover projects={projects} /> : null}
+              {projectScanSummary && (projects.length === 0 || projectScanState === "error") ? <span className="settingsScanSummary" role={projectScanState === "error" ? "alert" : "status"}>{projectScanSummary}</span> : null}
+            </div>
+            {projectScanScopesError ? <span className="settingsError" role="alert">{projectScanScopesError}</span> : null}
+          </SettingsSection>
           </SettingsGroup>
-          <SettingsGroup title="Coding agents">
+          <SettingsGroup title="Developer">
           <SettingsSection title="Coding agents">
               <div className="settingsAgentRow">
                 <div className="settingsAgentStatus">
@@ -823,8 +1031,6 @@ export function SettingsView({ appearance, themePreferences, fontFamily, develop
                 </div>
               </div>
           </SettingsSection>
-          </SettingsGroup>
-          <SettingsGroup title="Advanced">
           <SettingsSection title="Developer mode">
             <div className="settingsCheckboxRow">
               <Switch
@@ -850,21 +1056,6 @@ export function SettingsView({ appearance, themePreferences, fontFamily, develop
               Export Logs
             </StatefulButton>
             {logExportError ? <span className="settingsError" role="alert">{logExportError}</span> : null}
-          </SettingsSection>
-          <SettingsSection title="Updates">
-            <StatefulButton
-                size="sm"
-                state={updateState}
-                width={144}
-                minWidth={144}
-                onClick={checkForUpdates}
-                aria-label={updateState === "loading" ? "Checking for updates" : updateState === "success" ? "You're up to date" : updateState === "error" ? "Check for updates again" : "Check for updates"}
-                loadingContent={<LoadingIcon size={16} />}
-                successContent="You're up to date"
-                errorContent="Check failed — try again"
-              >
-                Check for Updates…
-              </StatefulButton>
           </SettingsSection>
           </SettingsGroup>
         </div>

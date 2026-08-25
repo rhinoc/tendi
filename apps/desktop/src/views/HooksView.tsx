@@ -43,33 +43,14 @@ import {
   hookTypeLabel,
   invokeCommand,
   isWebSource,
+  type HookRecord,
   safeInvoke,
+  scopeColumn,
   suppressNextClick,
+  type ProjectSummary,
 } from "../lib/index.ts";
 
 const HookSourcePreview = lazy(() => import("../features/hooks/HookSourcePreview.tsx").then(({ HookSourcePreview: component }) => ({ default: component })));
-
-type HookRecord = {
-  agent?: string | null;
-  event?: string | null;
-  matcher?: string | null;
-  enabled?: boolean | null;
-  needs_review?: boolean | null;
-  command?: string | null;
-  script?: string | null;
-  url?: string | null;
-  prompt?: string | null;
-  filter?: string | null;
-  status_message?: string | null;
-  statusMessage?: string | null;
-  hook_type?: string | null;
-  hookType?: string | null;
-  path?: string | null;
-  source?: string | null;
-  trust_hash?: string | null;
-  trustHash?: string | null;
-  hash?: string | null;
-};
 
 type HookItem = { key: string; hook: HookRecord };
 
@@ -126,6 +107,7 @@ type HooksViewProps = {
   onDeleteHooks?: (hooks: HookRecord[]) => Promise<unknown>;
   onSetHookEnabled?: (hook: HookRecord, enabled: boolean) => Promise<unknown>;
   onReviewHook?: (hook: HookRecord) => Promise<unknown>;
+  projects?: ProjectSummary[];
 };
 
 const defaultSort: SortState = { key: "event", direction: "asc" };
@@ -160,12 +142,8 @@ function hookEnableDisabledReason(hook: HookRecord | null): string {
   if (!hook) return "Missing hook source path";
   const path = hookSourcePath(hook);
   if (!path) return "Missing hook source path";
-  if (path.startsWith("/etc/cursor/") || path.startsWith("/Library/Application Support/Cursor/") || path.startsWith("/etc/claude-code/") || path.startsWith("/Library/Application Support/ClaudeCode/")) {
-    return "Managed hook source";
-  }
-  if (path.includes("/.claude/plugins/")) {
-    return "Plugin-managed hook source";
-  }
+  const readOnlyReason = hook.read_only_reason ?? hook.readOnlyReason;
+  if (readOnlyReason) return readOnlyReason;
   if (!path.endsWith(".json") && !path.endsWith(".toml")) {
     return "Hook source cannot be changed";
   }
@@ -279,7 +257,7 @@ function hookParameterRows(hook: HookRecord | null, enabledControl: ReactNode): 
   return rows;
 }
 
-export function HooksView({ rows, loadingRows = false, loadError = "", hasRows = false, onRetry, onDeleteHook, onDeleteHooks, onSetHookEnabled, onReviewHook }: HooksViewProps) {
+export function HooksView({ rows, loadingRows = false, loadError = "", hasRows = false, onRetry, onDeleteHook, onDeleteHooks, onSetHookEnabled, onReviewHook, projects = [] }: HooksViewProps) {
   const hookItems = useMemo(() => hookItemsFromRows(rows), [rows]);
   const [activeKey, setActiveKey] = useState(hookItems[0]?.key ?? "");
   const [selected, setSelected] = useState<string[]>([]);
@@ -481,13 +459,14 @@ export function HooksView({ rows, loadingRows = false, loadError = "", hasRows =
         />
       ),
     },
+    ...(projects.length > 0 ? [scopeColumn<HookItem>(projects, (item) => hookSourcePath(item.hook))] : []),
     {
       key: "actions",
       header: "",
       width: "40px",
       render: (item) => <HookActionsCell item={item} onDeleteHooks={requestDeleteHooks} />,
     },
-  ], [requestDeleteHooks, requestReviewHook, reviewingKey, setHookEnabled, updatingEnabledKeys]);
+  ], [projects, requestDeleteHooks, requestReviewHook, reviewingKey, setHookEnabled, updatingEnabledKeys]);
   const activeItem = useMemo(() => hookItems.find((item) => item.key === activeKey), [activeKey, hookItems]);
   const activeHook = activeItem?.hook ?? null;
   const activeEnableControl = useMemo(() => activeItem ? (

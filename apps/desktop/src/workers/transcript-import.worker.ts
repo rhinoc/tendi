@@ -1,4 +1,5 @@
-import { parseJsonlTranscript } from "../lib/transcript.ts";
+import { agentDefinitions } from "../lib/agent/index.ts";
+import { parseJsonlTranscript } from "../lib/agent/transcript.ts";
 
 type TranscriptImportWorkerResponse =
   | { ok: true; result: ReturnType<typeof parseJsonlTranscript> }
@@ -12,7 +13,7 @@ const workerScope = self as unknown as {
 workerScope.onmessage = async (event) => {
   try {
     const text = await event.data.text();
-    workerScope.postMessage({ ok: true, result: parseJsonlTranscript(text) });
+    workerScope.postMessage({ ok: true, result: parseJsonlTranscript(text, agentDefinitions) });
   } catch (error) {
     workerScope.postMessage({
       ok: false,

@@ -37,8 +37,19 @@ impl SkillTarget {
         &self.0
     }
 
-    pub fn is_shared_or_codex(&self) -> bool {
-        matches!(self.0.as_str(), "shared" | "universal" | "codex")
+    pub fn uses_shared_layout(&self) -> bool {
+        crate::providers::skill_target_uses_shared_layout(&self.0)
+    }
+
+    pub fn agent_kind(&self) -> AgentKind {
+        if matches!(self.0.as_str(), "shared" | "universal") {
+            return AgentKind::Shared;
+        }
+        crate::providers::all_providers()
+            .into_iter()
+            .find(|provider| provider.storage_key() == self.0)
+            .map(|provider| provider.kind())
+            .unwrap_or(AgentKind::Unknown)
     }
 }
 

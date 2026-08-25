@@ -12,7 +12,7 @@ import { PageHeader } from "../components/shared/PageHeader.tsx";
 import { LoadErrorState } from "../components/shared/LoadErrorState.tsx";
 import { RowActionsMenu } from "../components/shared/RowActionsMenu.tsx";
 import { mcpColumns as defaultMcpColumns } from "../lib/tableColumns.tsx";
-import { MCP_FREEZE_COLUMN, TauriCommand, safeInvoke } from "../lib/index.ts";
+import { MCP_FREEZE_COLUMN, TauriCommand, safeInvoke, scopeColumn, type ProjectSummary } from "../lib/index.ts";
 
 export { mcpColumns } from "../lib/tableColumns.tsx";
 
@@ -74,9 +74,10 @@ type DataListViewProps = {
   loadError?: string;
   hasRows?: boolean;
   onRetry?: () => void;
+  projects?: ProjectSummary[];
 };
 
-export function DataListView({ title, rows, columns = defaultMcpColumns, loading = false, loadError = "", hasRows = false, onRetry }: DataListViewProps) {
+export function DataListView({ title, rows, columns = defaultMcpColumns, loading = false, loadError = "", hasRows = false, onRetry, projects = [] }: DataListViewProps) {
   const [selected, setSelected] = useState<string[]>([]);
   const getRowId = useCallback(
     (row: McpRow) => row.id ?? JSON.stringify([row.agent ?? "", row.name ?? "", mcpSourcePath(row)]),
@@ -84,14 +85,15 @@ export function DataListView({ title, rows, columns = defaultMcpColumns, loading
   );
   const rowIds = useMemo(() => rows.map(getRowId), [getRowId, rows]);
   const tableColumns = useMemo((): ColumnDef<McpRow>[] => [
-    ...columns,
+    ...columns.filter((column) => column.key !== "scope"),
+    ...(projects.length > 0 ? [scopeColumn<McpRow>(projects, mcpSourcePath)] : []),
     {
       key: "actions",
       header: "",
       width: "40px",
       render: (row) => <McpActionsCell row={row} />,
     },
-  ], [columns]);
+  ], [columns, projects]);
   const rowContextMenu = useCallback((row: McpRow, { selectedRows, selected: isSelected }: { selectedRows: McpRow[]; selected: boolean }) => {
     if (isSelected && selectedRows.length > 1) return null;
     return <McpActionsMenuItems Menu={ContextMenu} row={row} />;

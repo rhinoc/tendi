@@ -87,6 +87,7 @@ export function SelectControl({
           side={side}
           align={align}
           sideOffset={6}
+          data-no-drag
         >
           <Select.Viewport className="selectViewport">
             {options.map((option) => (
