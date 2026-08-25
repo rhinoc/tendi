@@ -1817,12 +1817,13 @@ try {
     );
     check(tab.id, "req1-rowexists", Boolean(rowId), `selectable row id ${rowId}`);
     if (!rowId) continue;
-    const row = page.locator(`.dataRow[data-row-selectable="true"]`).first();
+    const rowLocator = () => page.locator('.dataRow[data-row-selectable="true"]').first();
+    const row = rowLocator();
 
     const hiddenOpacity = await row.locator(".rowSelection").evaluate((node) => getComputedStyle(node).opacity);
     check(tab.id, "req1-hidden", hiddenOpacity === "0", `default checkbox opacity ${hiddenOpacity}`);
 
-    await row.hover();
+    await rowLocator().hover({ force: true });
     let revealed = "0";
     try {
       await page.waitForFunction(
@@ -1834,12 +1835,12 @@ try {
       );
       revealed = "1";
     } catch {
-      revealed = await row.locator(".rowSelection").evaluate((node) => getComputedStyle(node).opacity);
+      revealed = await rowLocator().locator(".rowSelection").evaluate((node) => getComputedStyle(node).opacity);
     }
     check(tab.id, "req1-reveal", revealed === "1", `hovered checkbox opacity ${revealed}`);
 
     // --- req2: row checkbox aligns with bottom-bar checkbox ----------------
-    await row.locator(".rowSelection").click();
+    await rowLocator().locator(".rowSelection").click({ force: true });
     await page.locator(".actionBar.bottomBar").first().waitFor();
     if (tab.id === "mcp") {
       const identityMetrics = await page.evaluate(() => ({
