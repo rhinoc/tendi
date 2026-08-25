@@ -1,0 +1,135 @@
+.backupPage {
+  overflow: auto;
+}
+
+.backupContent {
+  display: grid;
+  gap: 16px;
+  max-width: 760px;
+  padding: 0 24px 32px;
+}
+
+.backupPanel {
+  display: grid;
+  gap: 12px;
+  padding: 18px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--surface);
+}
+
+.backupPanel h2 {
+  margin: 0;
+  font-size: 15px;
+}
+
+.backupSummary,
+.backupDisconnect {
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+}
+
+.backupAcknowledgement {
+  display: flex;
+  gap: 8px;
+  align-items: start;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.backupCounts {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+  margin: 0;
+}
+
+.backupCounts div {
+  display: grid;
+  gap: 3px;
+}
+
+.backupCounts dt {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.backupCounts dd {
+  margin: 0;
+  font-size: 20px;
+  font-weight: 650;
+}
+
+.backupVersionList {
+  display: grid;
+  gap: 8px;
+  padding: 0;
+  margin: 0;
+  list-style: none;
+}
+
+.backupVersionList li {
+  display: flex;
+  gap: 10px;
+  align-items: baseline;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.backupVersionList .dialogActionButton {
+  margin-left: auto;
+}
+
+.backupRestoreDialog {
+  width: min(620px, calc(100vw - 32px));
+}
+
+.backupRestoreControls {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+  margin: 16px 0;
+}
+
+.backupRestorePlan {
+  display: grid;
+  gap: 6px;
+  max-height: 280px;
+  padding: 0;
+  margin: 0;
+  overflow: auto;
+  list-style: none;
+}
+
+.backupRestorePlan li {
+  display: grid;
+  grid-template-columns: auto minmax(120px, 0.4fr) minmax(0, 1fr);
+  gap: 12px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  font-size: var(--text-sm);
+}
+
+.backupRestorePlan li[data-status="conflict"] {
+  color: var(--danger);
+}
+
+.backupVersionList code {
+  color: var(--text);
+}
+
+@media (max-width: 680px) {
+  .backupSummary,
+  .backupDisconnect {
+    grid-template-columns: 1fr;
+  }
+
+  .backupCounts {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .backupRestoreControls {
+    grid-template-columns: 1fr;
+  }
+}

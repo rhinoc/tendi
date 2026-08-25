@@ -14,6 +14,7 @@ pub mod rules;
 pub mod session_skills;
 pub mod sessions;
 pub mod skill_marketplace;
+pub mod skill_backup;
 pub mod skill_restore;
 mod skill_source;
 pub mod skill_targets;

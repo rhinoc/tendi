@@ -86,6 +86,7 @@ import { PromptsView } from "./views/PromptsView.tsx";
 import { RulesView } from "./views/RulesView.tsx";
 import { SessionsView } from "./views/SessionsView.tsx";
 import { SkillsView } from "./views/SkillsView.tsx";
+import { BackupView } from "./features/skills/BackupView.tsx";
 import { RuleEditorView } from "./features/rules/RuleEditorView.tsx";
 import { SettingsView } from "./features/settings/SettingsView.tsx";
 import { SkillEditorView } from "./features/skills/SkillEditorView.tsx";
@@ -95,6 +96,7 @@ import { desktopStore, useDesktopStore, type AgentTargetOption, type SkillIndexS
 type ViewId =
   | "overview"
   | "skills"
+  | "backup"
   | "prompts"
   | "sessions"
   | "rules"
@@ -477,6 +479,18 @@ export function App() {
       setAgentFilter("All");
     }
   }, [agentFilter, availableSidebarSources]);
+  useEffect(() => {
+    const syncBackup = () => { void safeInvoke(TauriCommand.SkillsBackupSync); };
+    const syncWhenVisible = () => {
+      if (document.visibilityState === "visible") syncBackup();
+    };
+    window.addEventListener("focus", syncBackup);
+    document.addEventListener("visibilitychange", syncWhenVisible);
+    return () => {
+      window.removeEventListener("focus", syncBackup);
+      document.removeEventListener("visibilitychange", syncWhenVisible);
+    };
+  }, []);
   const filteredData = useMemo(() => {
     if (agentFilter === "All") return data;
     return {
@@ -1592,6 +1606,8 @@ export function App() {
                 navigateTo("skillDetail");
               }}
             />
+          ) : contentView === "backup" ? (
+            <BackupView />
           ) : contentView === "sessions" ? (
             <SessionsView
               sessions={filteredData.sessions as SessionRecord[]}
