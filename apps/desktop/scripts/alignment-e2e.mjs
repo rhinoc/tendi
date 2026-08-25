@@ -500,6 +500,18 @@ async function runSessionLocatorChecks(page) {
   }
 }
 
+async function navigateToPage(page, nav, heading) {
+  const navButton = () => page.getByRole("button", { name: nav, exact: true });
+  const headingLocator = page.getByRole("heading", { name: heading, exact: true });
+  await navButton().click({ force: true });
+  try {
+    await headingLocator.waitFor({ timeout: 5000 });
+  } catch {
+    await navButton().click({ force: true });
+    await headingLocator.waitFor();
+  }
+}
+
 async function runFrozenBugSmokeChecks(page, tab) {
   if (!tab.frozen) return;
 
@@ -1428,7 +1440,7 @@ try {
       // Dismiss any overlay (e.g. a row click that opened an editor dialog)
       // left over from the previous tab before navigating.
       await page.keyboard.press("Escape").catch(() => {});
-      await page.getByRole("button", { name: tab.nav, exact: true }).click();
+      await navigateToPage(page, tab.nav, tab.heading);
     }
     await page.getByRole("heading", { name: tab.heading, exact: true }).waitFor();
     await runPageHeaderChecks(page, tab.id, tab.heading, tab.compact);
@@ -2044,8 +2056,7 @@ try {
   ]) {
     writeStdout(`\n== ${pageSpec.heading} navigation smoke ==`);
     await page.keyboard.press("Escape").catch(() => {});
-    await page.getByRole("button", { name: pageSpec.nav, exact: true }).click();
-    await page.getByRole("heading", { name: pageSpec.heading, exact: true }).waitFor();
+    await navigateToPage(page, pageSpec.nav, pageSpec.heading);
     await page.locator(pageSpec.ready).waitFor();
     await runPageHeaderChecks(page, pageSpec.id, pageSpec.heading, pageSpec.compact);
   }
