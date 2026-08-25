@@ -1812,12 +1812,16 @@ try {
     }
 
     // --- req1: checkbox hidden by default, revealed on hover ---------------
-    const rowId = await page.evaluate(() =>
-      document.querySelector('.dataRow[data-row-selectable="true"]')?.dataset.rowId ?? null,
+    const rowSelector = tab.frozen
+      ? '.dataTableFrozenPane .dataRow[data-row-selectable="true"]'
+      : '.dataRow[data-row-selectable="true"]';
+    const rowId = await page.evaluate(
+      (selector) => document.querySelector(selector)?.dataset.rowId ?? null,
+      rowSelector,
     );
     check(tab.id, "req1-rowexists", Boolean(rowId), `selectable row id ${rowId}`);
     if (!rowId) continue;
-    const rowLocator = () => page.locator('.dataRow[data-row-selectable="true"]').first();
+    const rowLocator = () => page.locator(rowSelector).first();
     const row = rowLocator();
 
     const hiddenOpacity = await row.locator(".rowSelection").evaluate((node) => getComputedStyle(node).opacity);
@@ -1827,10 +1831,11 @@ try {
     let revealed = "0";
     try {
       await page.waitForFunction(
-        () => {
-          const node = document.querySelector('.dataRow[data-row-selectable="true"] .rowSelection');
+        (selector) => {
+          const node = document.querySelector(`${selector} .rowSelection`);
           return node && getComputedStyle(node).opacity === "1";
         },
+        rowSelector,
         { timeout: 2000 },
       );
       revealed = "1";
