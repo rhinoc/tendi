@@ -497,19 +497,34 @@ async function runSessionLocatorChecks(page) {
       () => document.querySelector(".transcriptPanelHost")?.classList.contains("collapsed") === true,
       { timeout: 2000 },
     ).catch(() => {});
+    await page.waitForTimeout(100);
   }
 }
 
 async function navigateToPage(page, nav, heading) {
   const navButton = () => page.getByRole("button", { name: nav, exact: true });
   const headingLocator = page.getByRole("heading", { name: heading, exact: true });
-  await navButton().click({ force: true });
-  try {
-    await headingLocator.waitFor({ timeout: 5000 });
-  } catch {
+  for (let attempt = 0; attempt < 4; attempt += 1) {
     await navButton().click({ force: true });
-    await headingLocator.waitFor();
+    try {
+      await page.waitForFunction(
+        ({ navLabel, pageHeading }) => {
+          const activeNav = [...document.querySelectorAll(".navItem")]
+            .find((item) => item.getAttribute("aria-label") === navLabel);
+          const headingVisible = [...document.querySelectorAll("h1, h2, h3")]
+            .some((item) => item.textContent?.trim() === pageHeading && getComputedStyle(item).visibility !== "hidden");
+          return activeNav?.getAttribute("aria-current") === "page" && headingVisible;
+        },
+        { navLabel: nav, pageHeading: heading },
+        { timeout: 3000 },
+      );
+      await page.waitForTimeout(100);
+      if (await headingLocator.isVisible()) return;
+    } catch {
+      await page.waitForTimeout(100);
+    }
   }
+  await headingLocator.waitFor();
 }
 
 async function runFrozenBugSmokeChecks(page, tab) {
