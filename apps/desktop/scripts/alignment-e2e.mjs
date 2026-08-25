@@ -490,6 +490,14 @@ async function runSessionLocatorChecks(page) {
       && await page.locator('[data-transcript-key="user-6"].transcriptTarget').count() === 1,
     "dragging from the first to fourth locator jumps to user-6",
   );
+  const collapseButton = page.getByRole("button", { name: "Collapse session detail", exact: true });
+  if (await collapseButton.count()) {
+    await collapseButton.click({ force: true });
+    await page.waitForFunction(
+      () => document.querySelector(".transcriptPanelHost")?.classList.contains("collapsed") === true,
+      { timeout: 2000 },
+    ).catch(() => {});
+  }
 }
 
 async function runFrozenBugSmokeChecks(page, tab) {
