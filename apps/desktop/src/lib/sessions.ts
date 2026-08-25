@@ -1,5 +1,7 @@
 import { basename, compactDateTime } from "./strings.ts";
 import { friendlyAgent, normalizedAgentKey } from "./agents.ts";
+import { agentDefinition } from "./agent/index.ts";
+import { sessionProjectOptionForPaths, type MissingSessionProjectPolicy, type ProjectSummary, type SessionProjectSummary } from "./projects.ts";
 
 export type SessionRecord = {
   id: string;
@@ -35,29 +37,30 @@ export type SessionRecord = {
   [key: string]: unknown;
 };
 
-export type SessionResumeTarget = "terminal" | "app";
+export type SessionResumeTarget = "auto" | "terminal" | "app";
+
+export type SessionResumeOptions = {
+  forceActiveWriter?: boolean;
+};
+
+export type SessionResumeOutcome =
+  | { status: "activeWriter"; lockPath: string; pids: number[] }
+  | { status: "launched"; target: SessionResumeTarget; terminal?: string };
 
 export function normalizeSessionResumeTarget(value: unknown): SessionResumeTarget {
-  return value === "app" || value === "codex" ? "app" : "terminal";
+  if (value === "app" || value === "codex") return "app";
+  if (value === "terminal") return "terminal";
+  return "auto";
 }
 
 export function sessionResumeTargetForAgent(target: SessionResumeTarget, agent: unknown): SessionResumeTarget {
-  const agentKey = normalizedAgentKey(agent);
-  return target === "app" && (agentKey === "codex" || agentKey === "claudecode") ? "app" : "terminal";
-}
-
-export function codexSessionDeepLink(sessionId: string): string {
-  return `codex://threads/${encodeURIComponent(sessionId)}`;
+  if (target === "auto") return "auto";
+  const definition = agentDefinition(normalizedAgentKey(agent));
+  return target === "app" && definition?.sessionAppDeepLink ? "app" : "terminal";
 }
 
 export function sessionAppDeepLink(session: Pick<SessionRecord, "id" | "agent" | "project" | "projectPath">): string | undefined {
-  const agentKey = normalizedAgentKey(session.agent);
-  if (agentKey === "codex") return codexSessionDeepLink(session.id);
-  if (agentKey !== "claudecode") return undefined;
-  const params = new URLSearchParams({ session: session.id });
-  const cwd = session.projectPath || session.project;
-  if (cwd) params.set("cwd", cwd);
-  return `claude://resume?${params.toString()}`;
+  return agentDefinition(normalizedAgentKey(session.agent))?.sessionAppDeepLink?.(session);
 }
 
 export type SessionTokenUsage = {
@@ -179,21 +182,31 @@ export function sessionWorkspace(session: Pick<SessionRecord, "project" | "proje
   return sessionWorkspacePath(session) || textValue(session.projectPath) || textValue(session.project) || "Unknown";
 }
 
-function isCodexChat(session: Pick<SessionRecord, "project" | "projectPath">): boolean {
-  return sessionWorkspace(session) === "/Users/ryan/Documents/Codex";
-}
-
 export function sessionProject(session: Pick<SessionRecord, "project" | "projectPath" | "repository" | "repositoryPath" | "logicalProjectName">): string {
-  if (isCodexChat(session)) return "Chat";
   return textValue(session.logicalProjectName) || basename(sessionRepositoryPath(session) || sessionWorkspace(session));
 }
 
 export function sessionProjectGroupKey(session: Pick<SessionRecord, "project" | "projectPath" | "repository" | "repositoryPath" | "logicalProjectId" | "logicalProjectName">): string {
-  if (isCodexChat(session)) return "codex-chat";
   const projectId = textValue(session.logicalProjectId);
   return projectId
     ? JSON.stringify(["logical-project", projectId, sessionProject(session)])
     : sessionRepositoryPath(session) || sessionWorkspace(session);
+}
+
+export function sessionProjectOption(
+  session: SessionRecord,
+  policy: MissingSessionProjectPolicy,
+  sessionProjects: readonly SessionProjectSummary[],
+  projects: readonly ProjectSummary[],
+): { key: string; label: string; title: string } | null {
+  return sessionProjectOptionForPaths({
+    key: sessionProjectGroupKey(session),
+    label: sessionProject(session),
+    title: session.repositoryUrl || sessionWorkspace(session),
+    logicalProjectId: textValue(session.logicalProjectId),
+    workspacePath: sessionWorkspacePath(session),
+    repositoryPath: sessionRepositoryPath(session),
+  }, policy, sessionProjects, projects);
 }
 
 export function sessionProjectGroupLabel(key: string): string {

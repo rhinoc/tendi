@@ -44,9 +44,14 @@ The updater manifest includes Apple Silicon entries (`darwin-aarch64` and
 
 ## Application behavior
 
-Open **Settings → Updates → Check for Updates…**. When a signed update is found, Tendi downloads
-and installs it, then restarts into the new version. If no update is available, the settings view
-shows **You're up to date**.
+After startup, Tendi silently checks for updates at most once per day. If a signed update is found,
+it shows a non-blocking notification with the available version; it does not download or install
+the update automatically. Choose **Install** in the notification, or open **Settings → Check for
+Updates** and install it from there. Tendi downloads the signed package, installs it, and restarts
+into the new version only after that action.
+
+Manual checks bypass the daily cooldown. Automatic check failures stay silent; manual failures are
+shown in the settings action.
 
 Local DMGs and unsigned builds remain subject to Gatekeeper rules. See the installation notes in
 the [README](../README.md#first-launch-and-gatekeeper).

@@ -7,6 +7,7 @@ use std::{
 };
 
 use anyhow::{Context, Result};
+use chrono::Local;
 use rusqlite::{Connection, OptionalExtension, Transaction, params, params_from_iter};
 use serde::{Deserialize, Serialize};
 
@@ -22,6 +23,7 @@ use crate::{
         SessionAnalyticsRecord,
     },
     fsutil::sha256_text,
+    projects::{self, ProjectRecord, ProjectScanResult, ProjectScanScope},
     rules::merge_rules_by_path,
     session_skills::{SessionFileState, SessionSkillIndexStatus, SessionSkillLink},
     sessions::{
@@ -107,6 +109,8 @@ pub struct AppSettings {
     pub terminal: String,
     #[serde(default = "default_session_resume_target")]
     pub session_resume_target: String,
+    #[serde(default = "default_missing_session_project_policy")]
+    pub missing_session_project_policy: String,
     #[serde(default = "default_editor")]
     pub editor: String,
     #[serde(default)]
@@ -138,7 +142,11 @@ fn default_editor() -> String {
 }
 
 fn default_session_resume_target() -> String {
-    "terminal".to_string()
+    "auto".to_string()
+}
+
+fn default_missing_session_project_policy() -> String {
+    "show".to_string()
 }
 
 fn normalize_appearance(value: &str) -> Result<String> {
@@ -172,13 +180,7 @@ fn normalize_color_theme(value: &str) -> Result<String> {
     let theme = value.trim().to_ascii_lowercase();
     if matches!(
         theme.as_str(),
-        "sakura-pop"
-            | "gruvbox"
-            | "dracula"
-            | "nord"
-            | "catppuccin"
-            | "tokyo-night"
-            | "vercel"
+        "sakura-pop" | "gruvbox" | "dracula" | "nord" | "catppuccin" | "tokyo-night" | "vercel"
     ) {
         Ok(theme)
     } else {
@@ -189,9 +191,18 @@ fn normalize_color_theme(value: &str) -> Result<String> {
 fn normalize_session_resume_target(value: &str) -> Result<String> {
     let target = value.trim().to_ascii_lowercase();
     match target.as_str() {
-        "terminal" => Ok(target),
+        "auto" | "terminal" => Ok(target),
         "app" | "codex" => Ok("app".to_string()),
         _ => anyhow::bail!("invalid session resume target: {value}"),
+    }
+}
+
+fn normalize_missing_session_project_policy(value: &str) -> Result<String> {
+    let policy = value.trim().to_ascii_lowercase();
+    if matches!(policy.as_str(), "show" | "hide" | "merge-by-name") {
+        Ok(policy)
+    } else {
+        anyhow::bail!("invalid missing session project policy: {value}")
     }
 }
 
@@ -219,6 +230,15 @@ pub struct SessionSearchHit {
     pub session: SessionRecord,
     pub search_score: f64,
     pub search_snippet: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionProjectSummary {
+    pub id: String,
+    pub name: String,
+    pub missing: bool,
+    pub paths: Vec<PathBuf>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -378,6 +398,17 @@ impl Store {
             .map(|value| normalize_session_resume_target(&value))
             .transpose()?
             .unwrap_or_else(default_session_resume_target);
+        let missing_session_project_policy = self
+            .conn
+            .query_row(
+                "SELECT value FROM app_settings WHERE key = 'missing_session_project_policy'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+            .map(|value| normalize_missing_session_project_policy(&value))
+            .transpose()?
+            .unwrap_or_else(default_missing_session_project_policy);
         let editor = self
             .conn
             .query_row(
@@ -444,6 +475,7 @@ impl Store {
             app_icon,
             terminal,
             session_resume_target,
+            missing_session_project_policy,
             editor,
             developer_mode,
             additional_session_roots,
@@ -460,6 +492,8 @@ impl Store {
         let terminal = normalize_setting_value(&settings.terminal, "auto");
         let session_resume_target =
             normalize_session_resume_target(&settings.session_resume_target)?;
+        let missing_session_project_policy =
+            normalize_missing_session_project_policy(&settings.missing_session_project_policy)?;
         let editor = normalize_setting_value(&settings.editor, "vscode");
         let developer_mode = settings.developer_mode;
         let additional_session_roots =
@@ -510,6 +544,11 @@ impl Store {
             params![session_resume_target],
         )?;
         self.conn.execute(
+            "INSERT INTO app_settings (key, value) VALUES ('missing_session_project_policy', ?1)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![missing_session_project_policy],
+        )?;
+        self.conn.execute(
             "INSERT INTO app_settings (key, value) VALUES ('editor', ?1)
              ON CONFLICT(key) DO UPDATE SET value = excluded.value",
             params![editor],
@@ -537,10 +576,172 @@ impl Store {
             app_icon,
             terminal,
             session_resume_target,
+            missing_session_project_policy,
             editor,
             developer_mode,
             additional_session_roots,
             config_profiles,
+        })
+    }
+
+    pub fn project_scan_scopes(&self) -> Result<Vec<ProjectScanScope>> {
+        let mut statement = self.conn.prepare(
+            "SELECT id, path, enabled, last_scanned_at
+             FROM project_scan_scopes
+             ORDER BY path ASC",
+        )?;
+        let rows = statement.query_map([], |row| {
+            let id: String = row.get(0)?;
+            let stored_path: String = row.get(1)?;
+            let excluded = stored_path.starts_with('!');
+            let path = PathBuf::from(stored_path.strip_prefix('!').unwrap_or(&stored_path));
+            let project_count = self.conn.query_row(
+                "SELECT COUNT(*) FROM projects WHERE scope_id = ?1 AND status = 'ready'",
+                [&id],
+                |count| count.get::<_, usize>(0),
+            )?;
+            Ok(ProjectScanScope {
+                id,
+                path,
+                excluded,
+                enabled: row.get::<_, i64>(2)? != 0,
+                last_scanned_at: row.get(3)?,
+                project_count,
+            })
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Into::into)
+    }
+
+    pub fn save_project_scan_scopes(&self, values: Vec<String>) -> Result<Vec<ProjectScanScope>> {
+        let paths = projects::normalize_scope_paths(values)?;
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute("UPDATE project_scan_scopes SET enabled = 0", [])?;
+        for scope in paths {
+            let id = projects::scope_id_for_path(&scope.path, scope.excluded);
+            let stored_path = if scope.excluded {
+                format!("!{}", scope.path.display())
+            } else {
+                scope.path.to_string_lossy().into_owned()
+            };
+            tx.execute(
+                "INSERT INTO project_scan_scopes (id, path, enabled)
+                 VALUES (?1, ?2, 1)
+                 ON CONFLICT(id) DO UPDATE SET path = excluded.path, enabled = 1",
+                params![id, stored_path],
+            )?;
+        }
+        tx.commit()?;
+        self.project_scan_scopes()
+    }
+
+    pub fn list_projects(&self) -> Result<Vec<ProjectRecord>> {
+        let mut statement = self.conn.prepare(
+            "SELECT data_json FROM projects
+             WHERE status = 'ready'
+             ORDER BY name COLLATE NOCASE ASC, root_path ASC",
+        )?;
+        let rows = statement.query_map([], |row| {
+            let data: String = row.get(0)?;
+            serde_json::from_str::<ProjectRecord>(&data).map_err(|error| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    0,
+                    rusqlite::types::Type::Text,
+                    Box::new(error),
+                )
+            })
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Into::into)
+    }
+
+    pub fn scan_projects(&self) -> Result<ProjectScanResult> {
+        let scopes = self.project_scan_scopes()?;
+        let exclusion_matcher = projects::build_exclusion_matcher(&scopes)?;
+        let mut scanned_projects = BTreeMap::new();
+        let mut warnings = Vec::new();
+        for scope in scopes
+            .iter()
+            .filter(|scope| scope.enabled && !scope.excluded)
+        {
+            let (projects, scope_warnings) =
+                projects::scan_scope(&scope.path, &scope.id, &exclusion_matcher);
+            for project in projects {
+                scanned_projects
+                    .entry(project.id.clone())
+                    .or_insert(project);
+            }
+            warnings.extend(scope_warnings);
+        }
+        let scanned_projects = scanned_projects.into_values().collect::<Vec<_>>();
+
+        let tx = self.conn.unchecked_transaction()?;
+        let existing_projects = self.list_projects()?;
+        for scope in scopes
+            .iter()
+            .filter(|scope| scope.enabled && !scope.excluded)
+        {
+            tx.execute(
+                "UPDATE projects SET status = 'missing'
+                 WHERE scope_id = ?1 AND status = 'ready'",
+                [&scope.id],
+            )?;
+        }
+        for project in existing_projects.iter().filter(|project| {
+            projects::path_is_excluded(&exclusion_matcher, &project.root_path, true)
+        }) {
+            tx.execute(
+                "UPDATE projects SET status = 'out-of-scope' WHERE id = ?1",
+                [&project.id],
+            )?;
+        }
+        for scope in scopes.iter().filter(|scope| !scope.enabled) {
+            tx.execute(
+                "UPDATE projects SET status = 'out-of-scope'
+                 WHERE scope_id = ?1 AND status != 'out-of-scope'",
+                [&scope.id],
+            )?;
+        }
+        for project in &scanned_projects {
+            tx.execute(
+                "INSERT INTO projects (
+                    id, root_path, name, remote_url, scope_id, status,
+                    last_scanned_at, data_json
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                 ON CONFLICT(id) DO UPDATE SET
+                    root_path = excluded.root_path,
+                    name = excluded.name,
+                    remote_url = excluded.remote_url,
+                    scope_id = excluded.scope_id,
+                    status = excluded.status,
+                    last_scanned_at = excluded.last_scanned_at,
+                    data_json = excluded.data_json",
+                params![
+                    project.id,
+                    project.root_path.to_string_lossy(),
+                    project.name,
+                    project.remote_url,
+                    project.scope_id,
+                    project.status,
+                    project.last_scanned_at,
+                    serde_json::to_string(project)?,
+                ],
+            )?;
+        }
+        for scope in scopes.iter().filter(|scope| scope.enabled) {
+            tx.execute(
+                "UPDATE project_scan_scopes
+                 SET last_scanned_at = ?2
+                 WHERE id = ?1",
+                params![scope.id, Local::now().to_rfc3339()],
+            )?;
+        }
+        tx.commit()?;
+
+        Ok(ProjectScanResult {
+            projects: self.list_projects()?,
+            scopes: self.project_scan_scopes()?,
+            warnings,
         })
     }
 
@@ -1105,6 +1306,51 @@ impl Store {
         }
 
         Ok(SessionScan { sessions, warnings })
+    }
+
+    pub fn list_session_projects(&self) -> Result<Vec<SessionProjectSummary>> {
+        let mut project_statement = self.conn.prepare(
+            "SELECT id, name
+             FROM session_projects
+             ORDER BY name COLLATE NOCASE ASC, id ASC",
+        )?;
+        let projects = project_statement
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+
+        let mut summaries = Vec::with_capacity(projects.len());
+        for (id, name) in projects {
+            let mut alias_statement = self.conn.prepare(
+                "SELECT kind, value
+                 FROM session_project_aliases
+                 WHERE project_id = ?1
+                 ORDER BY kind ASC, value ASC",
+            )?;
+            let aliases = alias_statement
+                .query_map([&id], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            let mut paths = aliases
+                .into_iter()
+                .filter_map(|(kind, value)| {
+                    matches!(kind.as_str(), "workspace_path" | "repository_path")
+                        .then(|| PathBuf::from(value))
+                })
+                .collect::<Vec<_>>();
+            paths.sort();
+            paths.dedup();
+            let missing = !paths.iter().any(|path| path.is_dir());
+            summaries.push(SessionProjectSummary {
+                id,
+                name,
+                missing,
+                paths,
+            });
+        }
+        Ok(summaries)
     }
 
     pub fn list_agents(&self) -> anyhow::Result<crate::agents::AgentScan> {
@@ -3677,6 +3923,24 @@ impl Store {
             );
             CREATE INDEX IF NOT EXISTS idx_session_project_aliases_project
                 ON session_project_aliases(project_id);
+            CREATE TABLE IF NOT EXISTS project_scan_scopes (
+                id TEXT PRIMARY KEY,
+                path TEXT NOT NULL UNIQUE,
+                enabled INTEGER NOT NULL DEFAULT 1,
+                last_scanned_at TEXT
+            );
+            CREATE TABLE IF NOT EXISTS projects (
+                id TEXT PRIMARY KEY,
+                root_path TEXT NOT NULL UNIQUE,
+                name TEXT NOT NULL,
+                remote_url TEXT,
+                scope_id TEXT NOT NULL,
+                status TEXT NOT NULL,
+                last_scanned_at TEXT NOT NULL,
+                data_json TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_projects_scope_status
+                ON projects(scope_id, status);
             CREATE TABLE IF NOT EXISTS session_skill_index (
                 session_id TEXT NOT NULL,
                 agent TEXT NOT NULL,
@@ -4183,13 +4447,6 @@ fn normalize_project_path(path: &Path) -> String {
         .to_string()
 }
 
-pub(crate) fn cursor_codex_worktree_alias(path: &str) -> Option<String> {
-    let home = dirs::home_dir()?.to_string_lossy().to_string();
-    let prefix = format!("{home}/codex/worktrees/");
-    path.strip_prefix(&prefix)
-        .map(|suffix| format!("{home}/.codex/worktrees/{suffix}"))
-}
-
 fn suggested_project_name(session: &SessionRecord) -> String {
     session
         .repository_url
@@ -4461,13 +4718,17 @@ fn append_manifest_candidates(
     let mut candidates = BTreeSet::new();
     candidates.insert(workspace_root.clone());
     for ancestor in workspace_root.ancestors() {
-        for directory in [".codex", ".cursor", ".claude", ".agents"] {
-            candidates.insert(ancestor.join(directory));
+        for provider in crate::providers::all_providers() {
+            for directory in provider.projection_directories() {
+                candidates.insert(ancestor.join(directory));
+            }
         }
     }
     if let Some(home) = dirs::home_dir() {
-        for directory in [".codex", ".cursor", ".claude", ".agents"] {
-            candidates.insert(home.join(directory));
+        for provider in crate::providers::all_providers() {
+            for directory in provider.projection_directories() {
+                candidates.insert(home.join(directory));
+            }
         }
         for path in domain_candidate_files(domain, &home) {
             candidates.insert(path);
@@ -4500,12 +4761,13 @@ fn append_manifest_candidates(
         let source_kind = if path == workspace_root {
             format!("{kind}-root")
         } else if path.extension().is_some()
+            || crate::providers::all_providers()
+                .into_iter()
+                .any(|provider| provider.projection_candidate_is_file(&path))
             || path.file_name().is_some_and(|name| {
                 matches!(
                     name.to_str(),
                     Some("AGENTS.md")
-                        | Some("CLAUDE.md")
-                        | Some(".cursorrules")
                         | Some("hooks.json")
                         | Some("settings.json")
                         | Some("config.toml")
@@ -4536,51 +4798,13 @@ fn append_manifest_candidates(
 fn domain_candidate_files(domain: &str, root: &Path) -> Vec<PathBuf> {
     let mut paths = Vec::new();
     let ancestors = root.ancestors().collect::<Vec<_>>();
-    match domain {
-        "rules" => {
-            for ancestor in ancestors {
-                paths.extend([
-                    ancestor.join("AGENTS.md"),
-                    ancestor.join("CLAUDE.md"),
-                    ancestor.join(".cursorrules"),
-                    ancestor.join(".github/copilot-instructions.md"),
-                ]);
-            }
+    for ancestor in ancestors {
+        if domain == "mcp" {
+            paths.push(ancestor.join(".mcp.json"));
         }
-        "hooks" => {
-            for ancestor in ancestors {
-                paths.extend([
-                    ancestor.join(".codex/hooks.json"),
-                    ancestor.join(".codex/config.toml"),
-                    ancestor.join(".cursor/hooks.json"),
-                    ancestor.join(".claude/settings.json"),
-                    ancestor.join(".claude/settings.local.json"),
-                ]);
-            }
+        for provider in crate::providers::all_providers() {
+            paths.extend(provider.projection_candidate_files(domain, ancestor));
         }
-        "mcp" => {
-            for ancestor in ancestors {
-                paths.extend([
-                    ancestor.join(".mcp.json"),
-                    ancestor.join(".cursor/mcp.json"),
-                    ancestor.join(".cursor/cli-config.json"),
-                    ancestor.join(".codex/mcp.json"),
-                    ancestor.join(".codex/config.toml"),
-                ]);
-            }
-        }
-        "skills" => {
-            for ancestor in ancestors {
-                paths.extend([
-                    ancestor.join(".agents/skills"),
-                    ancestor.join(".claude/skills"),
-                    ancestor.join(".cursor/skills"),
-                    ancestor.join(".codex/skills"),
-                ]);
-            }
-        }
-        "agents" => {}
-        _ => {}
     }
     paths
 }
@@ -5187,6 +5411,42 @@ mod tests {
     }
 
     #[test]
+    fn project_scan_scope_excludes_bang_prefixed_paths() {
+        let temp = temp_dir("tendi-project-scope-exclude");
+        let scope = temp.join("dev");
+        let included = scope.join("included");
+        let excluded = scope.join("nested").join("excluded");
+        fs::create_dir_all(included.join(".git")).unwrap();
+        fs::create_dir_all(excluded.join(".git")).unwrap();
+        let store = Store::open(temp.join("tendi.sqlite3")).unwrap();
+
+        store
+            .save_project_scan_scopes(vec![
+                scope.to_string_lossy().into_owned(),
+                format!("!{}/**/excluded", scope.display()),
+            ])
+            .unwrap();
+        let result = store.scan_projects().unwrap();
+
+        assert!(result.scopes.iter().any(|scope| scope.excluded));
+        assert!(
+            result
+                .projects
+                .iter()
+                .any(|project| project.root_path == included.canonicalize().unwrap())
+        );
+        assert!(
+            !result
+                .projects
+                .iter()
+                .any(|project| { project.root_path == excluded.canonicalize().unwrap() })
+        );
+
+        drop(store);
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
     fn session_projects_join_worktrees_and_repository_renames_without_joining_basenames() {
         let temp = temp_dir("tendi-storage-session-projects");
         fs::create_dir_all(&temp).unwrap();
@@ -5253,6 +5513,39 @@ mod tests {
     }
 
     #[test]
+    fn list_session_projects_marks_missing_workspace_aliases() {
+        let temp = temp_dir("tendi-storage-session-project-summary");
+        fs::create_dir_all(&temp).unwrap();
+        let active_path = temp.join("active");
+        fs::create_dir_all(&active_path).unwrap();
+        let active_path = fs::canonicalize(active_path).unwrap();
+        let missing_path = temp.join("missing");
+        let store = Store::open(temp.join("tendi.sqlite3")).unwrap();
+        let mut active = session("active", "Active");
+        active.project = Some(active_path.clone());
+        let mut missing = session("missing", "Missing");
+        missing.project = Some(missing_path.clone());
+
+        let mut sessions = vec![active, missing];
+        store.resolve_session_projects(&mut sessions).unwrap();
+        let summaries = store.list_session_projects().unwrap();
+
+        let active_summary = summaries
+            .iter()
+            .find(|summary| summary.paths.contains(&active_path))
+            .unwrap();
+        assert!(!active_summary.missing);
+        let missing_summary = summaries
+            .iter()
+            .find(|summary| summary.paths.contains(&missing_path))
+            .unwrap();
+        assert!(missing_summary.missing);
+
+        drop(store);
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
     fn app_settings_store_normalized_additional_session_roots() {
         let temp = temp_dir("tendi-storage-additional-session-settings");
         fs::create_dir_all(&temp).unwrap();
@@ -5263,9 +5556,10 @@ mod tests {
         assert_eq!(store.app_settings().unwrap().light_theme, "sakura-pop");
         assert_eq!(store.app_settings().unwrap().dark_theme, "sakura-pop");
         assert_eq!(store.app_settings().unwrap().app_icon, "sakura-pop");
+        assert_eq!(store.app_settings().unwrap().session_resume_target, "auto");
         assert_eq!(
-            store.app_settings().unwrap().session_resume_target,
-            "terminal"
+            store.app_settings().unwrap().missing_session_project_policy,
+            "show"
         );
         assert_eq!(store.app_settings().unwrap().editor, "vscode");
         assert!(!store.app_settings().unwrap().developer_mode);
@@ -5279,6 +5573,7 @@ mod tests {
                 app_icon: "dracula".to_string(),
                 terminal: "Warp".to_string(),
                 session_resume_target: "app".to_string(),
+                missing_session_project_policy: "hide".to_string(),
                 editor: "zed".to_string(),
                 developer_mode: true,
                 additional_session_roots: vec![
@@ -5300,6 +5595,7 @@ mod tests {
         assert_eq!(saved.app_icon, "dracula");
         assert_eq!(saved.terminal, "Warp");
         assert_eq!(saved.session_resume_target, "app");
+        assert_eq!(saved.missing_session_project_policy, "hide");
         assert_eq!(saved.editor, "zed");
         assert!(saved.developer_mode);
         assert_eq!(saved.config_profiles["codex"], "deep-review");
@@ -6175,9 +6471,9 @@ mod tests {
                         tags: Vec::new(),
                         tendi_visibility: Some(visibility),
                         effective_visibility: visibility,
-                        codex_allow_implicit_invocation: None,
-                        codex_skill_enabled: None,
-                        cursor_disable_model_invocation: None,
+                        provider_allow_implicit_invocation: None,
+                        provider_skill_enabled: None,
+                        provider_disable_model_invocation: None,
                         plugin_id: None,
                         plugin_enabled: None,
                     }],
@@ -7333,10 +7629,7 @@ mod tests {
 
     #[test]
     fn accepts_sakura_pop_color_theme() {
-        assert_eq!(
-            normalize_color_theme(" SAKURA-POP ").unwrap(),
-            "sakura-pop"
-        );
+        assert_eq!(normalize_color_theme(" SAKURA-POP ").unwrap(), "sakura-pop");
     }
 
     fn temp_dir(prefix: &str) -> PathBuf {

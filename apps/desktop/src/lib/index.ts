@@ -1,9 +1,9 @@
 export {
   navItems,
-  fallbackAgents,
   SIDEBAR_SIZE,
   COLLAPSED_SIDEBAR_SIZE,
   SESSION_FREEZE_COLUMN,
+  SKILL_FREEZE_COLUMN,
   RULE_FREEZE_COLUMN,
   HOOK_FREEZE_COLUMN,
   MCP_FREEZE_COLUMN,
@@ -12,6 +12,8 @@ export {
   MARQUEE_AUTO_SCROLL_MAX_SPEED,
 } from "./constants.ts";
 export type { NavItem, FreezeColumnConfig } from "./constants.ts";
+
+export { agentDefinition, agentDefinitions, fallbackAgents } from "./agent/index.ts";
 
 export {
   agentIcons,
@@ -42,6 +44,7 @@ export {
   isWebSource,
   normalizeGitPath,
   parseRemoteSource,
+  remoteRepositoryLabel,
   isGitSource,
   normalizeSourceFilePath,
   encodeRemotePath,
@@ -90,11 +93,13 @@ export { suppressNextClick } from "./dom.ts";
 export { logger } from "./logger.ts";
 export type { LogFields, LogLevel } from "./logger.ts";
 
+export { normalizeMissingSessionProjectPolicy, projectForPath, scopeColumn, scopeNameForPath } from "./projects.ts";
+export type { MissingSessionProjectPolicy, ProjectSummary, SessionProjectSummary } from "./projects.ts";
+
 export {
   normalizeSession,
   normalizeSessionResumeTarget,
   sessionResumeTargetForAgent,
-  codexSessionDeepLink,
   sessionAppDeepLink,
   isAbsolutePath,
   sessionWorkspacePath,
@@ -106,6 +111,7 @@ export {
   sessionProject,
   sessionProjectGroupKey,
   sessionProjectGroupLabel,
+  sessionProjectOption,
   sessionKind,
   sessionCacheRate,
   sessionSnapshot,
@@ -116,7 +122,7 @@ export {
   sessionTimeMs,
 } from "./sessions.ts";
 export { sessionExternalKey, resolveInitialSession, resolveInitialSessionId } from "./session-selection.ts";
-export type { SessionIdentityRecord, SessionResumeTarget } from "./sessions.ts";
+export type { SessionIdentityRecord, SessionResumeOptions, SessionResumeOutcome, SessionResumeTarget } from "./sessions.ts";
 export type { SessionKind, SessionRecord, SessionTokenUsage } from "./sessions.ts";
 
 export { summarizeSessionUsage } from "./overview.ts";
@@ -177,10 +183,10 @@ export {
   normalizeTranscriptLocatorPage,
   normalizeTranscriptPage,
   normalizeTranscriptSearchResult,
-  parseJsonlTranscript,
   transcriptItemType,
   groupTranscriptItems,
 } from "./transcript.ts";
+export { parseJsonlTranscript } from "./agent/transcript.ts";
 export type {
   JsonlTranscriptParseResult,
   TranscriptItem,
@@ -249,13 +255,15 @@ export {
   startWindowDrag,
 } from "./window-drag.ts";
 
-export { DaemonCommandError, TauriCommand, invokeCommand, isTauriRuntime, safeInvoke, subscribeDaemonEvents, copyText } from "./tauri.ts";
+export { DaemonCommandError, TauriCommand, UPDATE_AVAILABLE_EVENT, invokeCommand, isTauriRuntime, safeInvoke, subscribeDaemonEvents, copyText } from "./tauri.ts";
 export type {
   BundledSkillInstallReport,
   BundledSkillStatus,
   CliInstallState,
   CliInstallStatus,
   DaemonEvent,
+  DesktopUpdateState,
+  UpdateCheckResult,
 } from "./tauri.ts";
 
 export { textMatchRank, boostedTextMatchRank } from "./text-search.ts";

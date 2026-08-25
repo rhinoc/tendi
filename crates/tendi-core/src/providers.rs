@@ -1,9 +1,9 @@
 use std::{
-    collections::HashSet,
+    collections::{BTreeMap, HashSet},
     path::{Path, PathBuf},
 };
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Result, bail};
 use serde_json::Value;
 
 use crate::{
@@ -12,14 +12,18 @@ use crate::{
     mcp::McpServerRecord,
     rules::{self, RuleRecord},
     session_skills::Evidence,
-    sessions::{self, SessionRecord, SessionScanCache},
-    skills::{AgentKind, SkillRoot},
+    sessions::{
+        self, SessionMetadata, SessionRecord, SessionScanCache, SessionTokenUsage,
+        SessionWatchExpansion, SessionWatchTarget,
+    },
+    skills::{AgentKind, FileChange, SkillRoot, SkillVisibility},
     transcript::TranscriptItem,
 };
 
 pub(crate) mod claude;
 pub(crate) mod codex;
 pub(crate) mod cursor;
+pub(crate) mod cursor_sessions;
 pub(crate) mod shared;
 mod unknown;
 
@@ -30,9 +34,25 @@ pub(crate) struct ProviderContext {
 
 impl ProviderContext {
     pub(crate) fn new(cwd: &Path) -> Self {
+        Self::with_additional_project_dirs(cwd, &[])
+    }
+
+    pub(crate) fn with_additional_project_dirs(
+        cwd: &Path,
+        additional_project_dirs: &[PathBuf],
+    ) -> Self {
+        let mut project_dirs = project_dirs(cwd);
+        for directory in additional_project_dirs {
+            let directory = directory
+                .canonicalize()
+                .unwrap_or_else(|_| directory.to_path_buf());
+            if !project_dirs.contains(&directory) {
+                project_dirs.push(directory);
+            }
+        }
         Self {
             home: dirs::home_dir(),
-            project_dirs: project_dirs(cwd),
+            project_dirs,
         }
     }
 
@@ -58,12 +78,62 @@ pub(crate) trait AgentProvider: Sync {
         None
     }
 
+    fn app_bundle_path(&self) -> Option<&'static str> {
+        None
+    }
+
     fn executable_names(&self) -> &'static [&'static str] {
         &[]
     }
 
     fn config_dir(&self, _ctx: &ProviderContext) -> Option<PathBuf> {
         None
+    }
+
+    fn config_home(&self, home: &Path) -> PathBuf {
+        home.to_path_buf()
+    }
+
+    fn projection_directories(&self) -> &'static [&'static str] {
+        &[]
+    }
+
+    fn projection_candidate_files(&self, _domain: &str, _ancestor: &Path) -> Vec<PathBuf> {
+        Vec::new()
+    }
+
+    fn projection_candidate_is_file(&self, _path: &Path) -> bool {
+        false
+    }
+
+    fn session_scan_priority(&self, _root: &Path) -> Option<u8> {
+        None
+    }
+
+    fn skill_visibility_metadata(
+        &self,
+        _skill_dir: &Path,
+        _skill_file: &Path,
+        _frontmatter: Option<&serde_yaml::Value>,
+    ) -> Result<SkillProviderMetadata> {
+        Ok(SkillProviderMetadata::default())
+    }
+
+    fn skill_frontmatter_policy(&self) -> Option<SkillFrontmatterPolicy> {
+        None
+    }
+
+    fn plan_skill_visibility(
+        &self,
+        _skill_dir: &Path,
+        _visibility: SkillVisibility,
+        _update_provider_config: bool,
+    ) -> Result<Vec<FileChange>> {
+        Ok(Vec::new())
+    }
+
+    fn is_managed_skill_file(&self, _relative_path: &str) -> bool {
+        false
     }
 
     fn skill_roots(&self, _ctx: &ProviderContext) -> Vec<SkillRoot> {
@@ -74,10 +144,14 @@ pub(crate) trait AgentProvider: Sync {
         None
     }
 
+    fn bundled_skill_files(&self) -> &'static [(&'static str, &'static str)] {
+        &[]
+    }
+
     fn config_profile_path(
         &self,
         _home: &Path,
-        _codex_home: &Path,
+        _agent_home: &Path,
         _name: &str,
     ) -> Option<PathBuf> {
         None
@@ -90,7 +164,7 @@ pub(crate) trait AgentProvider: Sync {
     fn config_files(
         &self,
         _home: &Path,
-        _codex_home: &Path,
+        _agent_home: &Path,
     ) -> Vec<crate::config::AgentConfigFile> {
         Vec::new()
     }
@@ -98,7 +172,7 @@ pub(crate) trait AgentProvider: Sync {
     fn config_file_for_path(
         &self,
         _home: &Path,
-        _codex_home: &Path,
+        _agent_home: &Path,
         _path: &Path,
     ) -> Option<crate::config::AgentConfigFile> {
         None
@@ -122,6 +196,26 @@ pub(crate) trait AgentProvider: Sync {
         Vec::new()
     }
 
+    fn session_watch_targets(&self, _root: &Path) -> Option<(Vec<SessionWatchTarget>, bool)> {
+        None
+    }
+
+    fn session_watch_expansion(
+        &self,
+        _dynamic_roots: &[PathBuf],
+        _event_path: &Path,
+    ) -> Option<SessionWatchExpansion> {
+        None
+    }
+
+    fn collect_additional_session_paths(
+        &self,
+        _root: &Path,
+        _session_paths: &mut std::collections::BTreeSet<PathBuf>,
+    ) -> bool {
+        false
+    }
+
     fn scan_rules(
         &self,
         _ctx: &ProviderContext,
@@ -135,6 +229,50 @@ pub(crate) trait AgentProvider: Sync {
         None
     }
 
+    fn resume_target_from_transcript_value(&self, _value: &Value) -> Option<&'static str> {
+        None
+    }
+
+    fn accepts_session_app_url(&self, _url: &str) -> bool {
+        false
+    }
+
+    fn active_session_writer(&self, _session: &SessionRecord) -> Result<Option<SessionWriter>> {
+        Ok(None)
+    }
+
+    fn terminate_session_writer(&self, _session: &SessionRecord) -> Result<()> {
+        Ok(())
+    }
+
+    fn validate_session_resume(&self, _session: &SessionRecord) -> Result<()> {
+        Ok(())
+    }
+
+    fn session_requires_rescan(&self, _session: &SessionRecord) -> Option<bool> {
+        None
+    }
+
+    fn session_line_has_content(&self, _prefix: &str) -> Option<bool> {
+        None
+    }
+
+    fn session_line_requires_metadata_parse(
+        &self,
+        _prefix: &str,
+        _meta: &SessionMetadata,
+    ) -> Option<bool> {
+        None
+    }
+
+    fn update_session_metadata(
+        &self,
+        _value: &Value,
+        _meta: &mut SessionMetadata,
+        _deduplicated_usage: &mut BTreeMap<String, SessionTokenUsage>,
+    ) {
+    }
+
     fn config_profile_key(&self) -> Option<&'static str> {
         None
     }
@@ -144,6 +282,12 @@ pub(crate) trait AgentProvider: Sync {
     }
 
     fn parse_transcript_value(&self, value: &Value, items: &mut Vec<TranscriptItem>);
+
+    fn transcript_internal_context_markers(
+        &self,
+    ) -> &'static [crate::transcript::InternalContextMarker] {
+        &[]
+    }
 
     fn transcript_inherited_history_start_ordinal(&self, _value: &Value) -> Option<u64> {
         None
@@ -189,6 +333,10 @@ pub(crate) trait AgentProvider: Sync {
         project
     }
 
+    fn normalize_session_project(&self, project: PathBuf) -> PathBuf {
+        project
+    }
+
     fn infer_meta_project(&self, _value: &Value) -> Option<PathBuf> {
         None
     }
@@ -204,7 +352,7 @@ pub(crate) trait AgentProvider: Sync {
         Vec::new()
     }
 
-    fn materialized_skill_is_shared_or_codex(&self) -> bool {
+    fn uses_shared_skill_layout(&self) -> bool {
         false
     }
 
@@ -250,6 +398,8 @@ pub(crate) trait AgentProvider: Sync {
     ) {
     }
 
+    fn apply_hook_review_states(&self, _hooks: &mut [HookRecord], _ctx: &ProviderContext) {}
+
     fn managed_hook_path(&self, _path: &Path) -> bool {
         false
     }
@@ -272,7 +422,7 @@ pub(crate) trait AgentProvider: Sync {
         false
     }
 
-    fn codex_hook_metadata(
+    fn hook_review_metadata(
         &self,
         _path: &Path,
         _event: &str,
@@ -293,6 +443,18 @@ pub(crate) trait AgentProvider: Sync {
     }
 }
 
+#[derive(Debug, Clone, Default)]
+pub(crate) struct SkillProviderMetadata {
+    pub allow_implicit_invocation: Option<bool>,
+    pub enabled: Option<bool>,
+    pub disable_model_invocation: Option<bool>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum SkillFrontmatterPolicy {
+    DisableModelInvocation,
+}
+
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct SessionCommand {
     pub executable: String,
@@ -306,6 +468,12 @@ pub struct SessionResumePlan {
     pub agent: AgentKind,
     pub display_name: String,
     pub command: SessionCommand,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionWriter {
+    pub lock_path: PathBuf,
+    pub pids: Vec<u32>,
 }
 
 static SHARED: shared::SharedProvider = shared::SharedProvider;
@@ -325,11 +493,28 @@ pub(crate) fn agent_provider(agent: AgentKind) -> &'static dyn AgentProvider {
         .unwrap_or(&UNKNOWN)
 }
 
+pub fn session_root_priority(root: &Path) -> u8 {
+    all_providers()
+        .into_iter()
+        .find_map(|provider| provider.session_scan_priority(root))
+        .unwrap_or(3)
+}
+
 pub(crate) fn agent_providers() -> Vec<&'static dyn AgentProvider> {
     all_providers()
         .into_iter()
         .filter(|provider| provider.discoverable())
         .collect()
+}
+
+pub(crate) fn skill_target_uses_shared_layout(target: &str) -> bool {
+    if matches!(target, "shared" | "universal") {
+        return true;
+    }
+    all_providers()
+        .into_iter()
+        .find(|provider| provider.storage_key() == target)
+        .is_some_and(|provider| provider.uses_shared_skill_layout())
 }
 
 pub(crate) fn session_roots(cwd: &Path) -> Vec<PathBuf> {
@@ -350,6 +535,7 @@ pub fn plan_session_resume(session: &SessionRecord) -> Result<SessionResumePlan>
             agent_display_name(session.agent)
         );
     };
+    provider.validate_session_resume(session)?;
     let Some(command) = provider.resume_session_command(session) else {
         bail!(
             "{} does not expose a supported CLI resume command",
@@ -366,6 +552,20 @@ pub fn plan_session_resume(session: &SessionRecord) -> Result<SessionResumePlan>
             .to_string(),
         command,
     })
+}
+
+pub fn active_session_writer(session: &SessionRecord) -> Result<Option<SessionWriter>> {
+    agent_provider(session.agent).active_session_writer(session)
+}
+
+pub fn terminate_session_writer(session: &SessionRecord) -> Result<()> {
+    agent_provider(session.agent).terminate_session_writer(session)
+}
+
+pub fn accepts_session_app_url(url: &str) -> bool {
+    agent_providers()
+        .into_iter()
+        .any(|provider| provider.accepts_session_app_url(url))
 }
 
 pub fn config_profile_key(agent: AgentKind) -> Option<&'static str> {
@@ -581,5 +781,83 @@ mod tests {
             plan.command.args,
             vec!["resume", "019eef10-7054-7a63-b9c8-fd16cc70cd53"]
         );
+    }
+
+    #[test]
+    fn codex_writer_lock_path_supports_live_and_archived_sessions() {
+        assert_eq!(
+            codex::codex_thread_writer_lock_path(
+                PathBuf::from("/Users/test/.codex/sessions/2026/08/24/session.jsonl").as_path(),
+                "session-id"
+            ),
+            Some(PathBuf::from(
+                "/Users/test/.codex/thread-writer-locks/session-id.lock"
+            ))
+        );
+        assert_eq!(
+            codex::codex_thread_writer_lock_path(
+                PathBuf::from("/Users/test/.codex/archived_sessions/session.jsonl").as_path(),
+                "session-id"
+            ),
+            Some(PathBuf::from(
+                "/Users/test/.codex/thread-writer-locks/session-id.lock"
+            ))
+        );
+        assert_eq!(
+            codex::codex_thread_writer_lock_path(
+                PathBuf::from("/Users/test/session.jsonl").as_path(),
+                "session-id"
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn plan_session_resume_rejects_an_active_codex_writer() {
+        let root = temp_dir("tendi-codex-resume-lock-test");
+        let session_path = root.join(".codex/sessions/2026/08/24/session-id.jsonl");
+        fs::create_dir_all(session_path.parent().unwrap()).unwrap();
+        fs::write(&session_path, "").unwrap();
+        let session = SessionRecord {
+            id: "session-id".to_string(),
+            agent: AgentKind::Codex,
+            title: None,
+            project: None,
+            repository: None,
+            repository_url: None,
+            logical_project_id: None,
+            logical_project_name: None,
+            path: session_path,
+            started_at: None,
+            updated_at: None,
+            message_count: None,
+            first_user_message: None,
+            last_user_message: None,
+            last_assistant_message: None,
+            turn_count: None,
+            model: None,
+            mode: None,
+            approval_mode: None,
+            is_run_everything: None,
+            parent_session_id: None,
+            token_usage: None,
+        };
+        let lock_path = codex::codex_thread_writer_lock_path(&session.path, &session.id).unwrap();
+        fs::create_dir_all(lock_path.parent().unwrap()).unwrap();
+        let lock_file = std::fs::OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .open(&lock_path)
+            .unwrap();
+        lock_file.try_lock().unwrap();
+
+        let error = plan_session_resume(&session).unwrap_err();
+
+        assert!(error.to_string().contains("already has an active writer"));
+        lock_file.unlock().unwrap();
+        drop(lock_file);
+        assert!(plan_session_resume(&session).is_ok());
+        let _ = fs::remove_dir_all(root);
     }
 }

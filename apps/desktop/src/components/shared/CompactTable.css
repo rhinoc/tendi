@@ -1,0 +1,73 @@
+.compactTableFrame {
+  min-height: 0;
+  height: 100%;
+  overflow: auto;
+  scrollbar-gutter: stable;
+}
+
+.compactTable {
+  width: 100%;
+  min-width: 100%;
+  border-collapse: collapse;
+  table-layout: fixed;
+}
+
+.compactTable thead {
+  position: sticky;
+  top: 0;
+  z-index: var(--z-sticky);
+  background: var(--content-bg);
+}
+
+.compactTable th {
+  height: var(--data-table-header-height, 34px);
+  padding: 0 10px;
+  border-bottom: 1px solid var(--data-table-row-line, var(--row-frame-line));
+  color: var(--data-table-header-color, var(--muted));
+  font-size: var(--data-table-header-font-size, var(--text-xs));
+  font-weight: var(--data-table-header-font-weight, 650);
+  letter-spacing: var(--data-table-header-letter-spacing, 0.06em);
+  line-height: var(--leading-ui);
+  text-align: left;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.compactTable td {
+  height: var(--data-table-table-row-height, 58px);
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--data-table-row-line, var(--row-frame-line));
+  color: var(--text);
+  font-size: var(--data-table-row-font-size, var(--text-ui));
+  line-height: var(--leading-ui);
+  vertical-align: middle;
+}
+
+.compactTable tbody tr:hover {
+  background: var(--data-table-row-hover-bg, var(--row-frame-bg));
+}
+
+.compactTable tbody tr:last-child td {
+  border-bottom: 0;
+}
+
+.compactTableCellText {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.compactTableCell--title {
+  font-weight: 720;
+}
+
+.compactTableCell--muted {
+  color: var(--muted);
+}
+
+.compactTableEmpty {
+  color: var(--faint);
+  text-align: center;
+}

@@ -52,7 +52,22 @@ impl super::AgentProvider for SharedProvider {
         Some(home.join(".agents/skills"))
     }
 
-    fn materialized_skill_is_shared_or_codex(&self) -> bool {
+    fn projection_directories(&self) -> &'static [&'static str] {
+        &[".agents"]
+    }
+
+    fn projection_candidate_files(&self, domain: &str, ancestor: &Path) -> Vec<PathBuf> {
+        match domain {
+            "rules" => vec![
+                ancestor.join("AGENTS.md"),
+                ancestor.join(".github/copilot-instructions.md"),
+            ],
+            "skills" => vec![ancestor.join(".agents/skills")],
+            _ => Vec::new(),
+        }
+    }
+
+    fn uses_shared_skill_layout(&self) -> bool {
         true
     }
 

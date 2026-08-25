@@ -202,14 +202,14 @@ pub(crate) struct AnalyticsOverviewIndex {
 pub(crate) struct AnalyticsParserState {
     #[serde(default)]
     parser_version: u32,
-    previous_usage: AnalyticsTokenUsage,
-    cumulative_usage: AnalyticsTokenUsage,
-    current_model: String,
-    open_run: Option<String>,
-    last_timestamp: String,
+    pub(crate) previous_usage: AnalyticsTokenUsage,
+    pub(crate) cumulative_usage: AnalyticsTokenUsage,
+    pub(crate) current_model: String,
+    pub(crate) open_run: Option<String>,
+    pub(crate) last_timestamp: String,
     seen_usage_ids: BTreeSet<String>,
     seen_tool_ids: BTreeSet<String>,
-    response_index: u64,
+    pub(crate) response_index: u64,
     approximate_runs: bool,
     #[serde(default)]
     source_device: u64,
@@ -220,7 +220,7 @@ pub(crate) struct AnalyticsParserState {
     #[serde(default)]
     source_boundary_hash: String,
     #[serde(default)]
-    last_codex_usage_key: String,
+    pub(crate) last_usage_key: String,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -946,147 +946,6 @@ fn is_line_boundary(path: &Path, offset: u64) -> bool {
     std::io::Read::read_exact(&mut file, &mut byte).is_ok() && byte[0] == b'\n'
 }
 
-pub(crate) fn parse_codex_line(line: &str, record: &mut SessionAnalyticsRecord) {
-    let head = &line.as_bytes()[..line.len().min(1024)];
-    const MARKERS: [&[u8]; 11] = [
-        b"\"turn_context\"",
-        b"\"thread_settings_applied\"",
-        b"\"token_count\"",
-        b"\"task_started\"",
-        b"\"task_complete\"",
-        b"\"turn_aborted\"",
-        b"\"context_compacted\"",
-        b"\"function_call\"",
-        b"\"custom_tool_call\"",
-        b"\"local_shell_call\"",
-        b"\"mcp_tool_call_end\"",
-    ];
-    if !MARKERS.iter().any(|marker| bytes_contains(head, marker)) {
-        return;
-    }
-    let Ok(value) = serde_json::from_str::<Value>(line) else {
-        record.analytics.malformed_lines += 1;
-        return;
-    };
-    let timestamp = string_at(&value, &["timestamp"]);
-    if let Some(timestamp) = timestamp
-        .as_deref()
-        .filter(|timestamp| !timestamp.is_empty())
-    {
-        record.state.last_timestamp = timestamp.to_string();
-    }
-    let entry_type = value.get("type").and_then(Value::as_str).unwrap_or("");
-    let payload = value.get("payload").unwrap_or(&Value::Null);
-    let payload_type = payload.get("type").and_then(Value::as_str).unwrap_or("");
-
-    if entry_type == "turn_context" {
-        if let Some(model) = payload.get("model").and_then(Value::as_str) {
-            set_model(record, model);
-        }
-        return;
-    }
-    if payload_type == "thread_settings_applied" {
-        if let Some(model) = payload
-            .pointer("/thread_settings/model")
-            .and_then(Value::as_str)
-        {
-            set_model(record, model);
-        }
-        return;
-    }
-    if matches!(
-        payload_type,
-        "function_call" | "custom_tool_call" | "local_shell_call"
-    ) {
-        record_tool_call(payload, timestamp.as_deref().unwrap_or(""), record);
-        return;
-    }
-    if payload_type == "mcp_tool_call_end" {
-        if let (Some(server), Some(tool)) = (
-            payload
-                .pointer("/invocation/server")
-                .and_then(Value::as_str),
-            payload.pointer("/invocation/tool").and_then(Value::as_str),
-        ) {
-            if let Some(call) = record
-                .analytics
-                .tools
-                .iter_mut()
-                .rev()
-                .find(|call| call.name == tool && call.server.is_empty())
-            {
-                call.server = server.to_string();
-            }
-        }
-        return;
-    }
-    if payload_type == "turn_aborted" {
-        let stamp = timestamp.unwrap_or_default();
-        if !stamp.is_empty() {
-            record.analytics.aborts.push(stamp.clone());
-        }
-        close_open_run(record, &stamp, false);
-        return;
-    }
-    if payload_type == "context_compacted" {
-        if let Some(stamp) = timestamp.filter(|stamp| !stamp.is_empty()) {
-            record.analytics.compactions.push(stamp);
-        }
-        return;
-    }
-    if payload_type == "task_started" {
-        let stamp = timestamp.unwrap_or_default();
-        close_open_run(record, &stamp, false);
-        if !stamp.is_empty() {
-            record.state.open_run = Some(stamp);
-        }
-        return;
-    }
-    if payload_type == "task_complete" {
-        close_open_run(record, timestamp.as_deref().unwrap_or(""), true);
-        return;
-    }
-    if payload_type != "token_count" {
-        return;
-    }
-
-    record_rate_limits(payload, timestamp.as_deref().unwrap_or(""), record);
-    let Some(raw_usage) = payload.pointer("/info/total_token_usage") else {
-        return;
-    };
-    let current = codex_usage(raw_usage);
-    if current.total_tokens == 0 {
-        return;
-    }
-    let last = payload
-        .pointer("/info/last_token_usage")
-        .map(codex_usage)
-        .filter(|usage| usage.total_tokens > 0);
-    let usage_key = format!(
-        "{}|{}",
-        usage_signature(&current),
-        last.as_ref().map(usage_signature).unwrap_or_default()
-    );
-    if record.state.last_codex_usage_key == usage_key {
-        return;
-    }
-    record.state.last_codex_usage_key = usage_key;
-    let usage = last.unwrap_or_else(|| diff_usage(record.state.previous_usage, current));
-    record.state.previous_usage = current;
-    if usage.total_tokens == 0 {
-        return;
-    }
-    record.state.cumulative_usage.add_assign(usage);
-    record.state.response_index += 1;
-    record.analytics.responses.push(AnalyticsResponseUsage {
-        index: record.state.response_index,
-        timestamp: timestamp.unwrap_or_default(),
-        model: record.state.current_model.clone(),
-        usage,
-        cumulative: record.state.cumulative_usage,
-    });
-}
-
 pub(crate) fn parse_message_line(line: &str, record: &mut SessionAnalyticsRecord) {
     let Ok(value) = serde_json::from_str::<Value>(line) else {
         record.analytics.malformed_lines += 1;
@@ -1183,7 +1042,7 @@ pub(crate) fn parse_message_line(line: &str, record: &mut SessionAnalyticsRecord
     });
 }
 
-fn set_model(record: &mut SessionAnalyticsRecord, model: &str) {
+pub(crate) fn set_model(record: &mut SessionAnalyticsRecord, model: &str) {
     let model = model.trim();
     if model.is_empty() {
         return;
@@ -1199,7 +1058,7 @@ fn set_model(record: &mut SessionAnalyticsRecord, model: &str) {
     }
 }
 
-fn close_open_run(record: &mut SessionAnalyticsRecord, end: &str, completed: bool) {
+pub(crate) fn close_open_run(record: &mut SessionAnalyticsRecord, end: &str, completed: bool) {
     let Some(start) = record.state.open_run.take() else {
         return;
     };
@@ -1210,7 +1069,11 @@ fn close_open_run(record: &mut SessionAnalyticsRecord, end: &str, completed: boo
     });
 }
 
-fn record_tool_call(payload: &Value, timestamp: &str, record: &mut SessionAnalyticsRecord) {
+pub(crate) fn record_tool_call(
+    payload: &Value,
+    timestamp: &str,
+    record: &mut SessionAnalyticsRecord,
+) {
     let call_id = payload
         .get("call_id")
         .or_else(|| payload.get("id"))
@@ -1313,7 +1176,11 @@ fn push_skill_call(record: &mut SessionAnalyticsRecord, timestamp: &str, name: &
     });
 }
 
-fn record_rate_limits(payload: &Value, timestamp: &str, record: &mut SessionAnalyticsRecord) {
+pub(crate) fn record_rate_limits(
+    payload: &Value,
+    timestamp: &str,
+    record: &mut SessionAnalyticsRecord,
+) {
     let Some(rate_limits) = payload.get("rate_limits") else {
         return;
     };
@@ -1339,29 +1206,6 @@ fn record_rate_limits(payload: &Value, timestamp: &str, record: &mut SessionAnal
             used_percent,
         });
     }
-}
-
-fn codex_usage(value: &Value) -> AnalyticsTokenUsage {
-    AnalyticsTokenUsage {
-        input_tokens: u64_field(value, "input_tokens"),
-        cached_input_tokens: u64_field(value, "cached_input_tokens"),
-        cache_write_input_tokens: u64_field(value, "cache_write_input_tokens"),
-        output_tokens: u64_field(value, "output_tokens"),
-        reasoning_output_tokens: u64_field(value, "reasoning_output_tokens"),
-        total_tokens: u64_field(value, "total_tokens"),
-    }
-}
-
-fn usage_signature(usage: &AnalyticsTokenUsage) -> String {
-    format!(
-        "{},{},{},{},{},{}",
-        usage.input_tokens,
-        usage.cached_input_tokens,
-        usage.cache_write_input_tokens,
-        usage.output_tokens,
-        usage.reasoning_output_tokens,
-        usage.total_tokens,
-    )
 }
 
 pub(crate) fn parser_state_is_current(serialized: &str) -> bool {
@@ -1504,13 +1348,13 @@ fn collect_strings<'a>(value: &'a Value, output: &mut Vec<&'a str>) {
     }
 }
 
-fn bytes_contains(haystack: &[u8], needle: &[u8]) -> bool {
+pub(crate) fn bytes_contains(haystack: &[u8], needle: &[u8]) -> bool {
     haystack
         .windows(needle.len())
         .any(|window| window == needle)
 }
 
-fn string_at(value: &Value, path: &[&str]) -> Option<String> {
+pub(crate) fn string_at(value: &Value, path: &[&str]) -> Option<String> {
     let mut current = value;
     for segment in path {
         current = current.get(*segment)?;

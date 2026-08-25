@@ -2,7 +2,7 @@ import { Tooltip as AppTooltip } from "../components/shared/Tooltip.tsx";
 import { lazy, memo, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ChangeEvent, type ReactNode } from "react";
 import { AlertCircle, ArrowDownToLine, ArrowUpRight, ArrowUpToLine, BarChart3, Check, ChevronDown, ChevronLeft, ChevronRight, ChevronRight as ChevronRightIcon, Filter, FolderOpen, GitFork, Info, LocateFixed, MessageSquarePlus, MessageSquareText, PanelRightClose, RefreshCw, Search, SearchX, Sparkles, TerminalSquare, Upload, X } from "lucide-react";
 import { Group as PanelGroup, Panel } from "react-resizable-panels";
-import { ContextMenu, DropdownMenu, Popover } from "radix-ui";
+import { ContextMenu, Dialog, DropdownMenu, Popover } from "radix-ui";
 
 import { DataTable } from "../components/DataTable.tsx";
 import type { ColumnDef, SortState } from "../components/DataTable.types";
@@ -15,6 +15,9 @@ import { CopyButton } from "../components/shared/CopyButton.tsx";
 import { CopyableSessionId } from "../features/sessions/CopyableSessionId.tsx";
 import { CopyPathMenuItem, CopyTextMenuItem, RevealInFinderMenuItem } from "../components/shared/DataTableMenus.tsx";
 import { DetailPanelHost } from "../components/shared/DetailPanelHost.tsx";
+import { DialogActionButton } from "../components/shared/DialogActionButton.tsx";
+import { DialogShell } from "../components/shared/DialogShell.tsx";
+import { DialogStatefulButton } from "../components/shared/DialogStatefulButton.tsx";
 import { EmptyState } from "../components/shared/EmptyState.tsx";
 import { InfoDropdownMenu } from "../components/shared/InfoDropdownMenu.tsx";
 import { InfoSection } from "../components/shared/InfoSection.tsx";
@@ -59,6 +62,7 @@ import {
   sessionProject,
   sessionProjectGroupKey,
   sessionResumeTargetForAgent,
+  sessionProjectOption,
   sessionWorkspace,
   sessionWorkspacePath,
   transcriptItemType,
@@ -72,6 +76,11 @@ import type {
   TranscriptSearchHit,
   TranscriptSearchResult,
   TranscriptSearchScopes,
+  MissingSessionProjectPolicy,
+  ProjectSummary,
+  SessionProjectSummary,
+  SessionResumeOptions,
+  SessionResumeOutcome,
   SessionResumeTarget,
 } from "../lib/index.ts";
 
@@ -159,12 +168,16 @@ const TRANSCRIPT_CACHE_ITEM_LIMIT = 1_200;
 const TRANSCRIPT_CACHE_CHARACTER_LIMIT = 8 * 1024 * 1024;
 
 function resumeTargetLabel(target: SessionResumeTarget): string {
-  return target === "app" ? "app" : "terminal";
+  if (target === "app") return "app";
+  if (target === "auto") return "auto";
+  return "terminal";
 }
 
 type SessionResumeState = "idle" | "loading" | "success" | "error";
 type ImportFeedbackState = "idle" | "loading" | "success" | "warning" | "error";
 type ResumeFeedbackState = Exclude<SessionResumeState, "idle">;
+type ActiveWriterConflict = Extract<SessionResumeOutcome, { status: "activeWriter" }>;
+type PendingResumeConflict = { session: SessionRecord; conflict: ActiveWriterConflict };
 
 type TranscriptImportWorkerResponse =
   | { ok: true; result: JsonlTranscriptParseResult }
@@ -850,27 +863,11 @@ export function TranscriptPanel({
   keyboardNavigationScopeRef: KeyboardNavigationScopeRef;
 }) {
   const transcriptItems = useMemo(() => {
-    const grouped = groupTranscriptItems(items) as TranscriptItemRecord[];
-    if (`${session.agent ?? ""}`.toLowerCase() !== "cursor") return grouped;
-    const config = {
-      model: session.model || undefined,
-      mode: session.mode,
-    };
-    if (!config.model && !config.mode) return grouped;
-    const configIndex = grouped.findIndex((item) => transcriptItemType(item) === "model_config");
-    if (configIndex < 0) {
-      return [{ type: "model_config", kind: "model_config", body: "", ...config }, ...grouped];
-    }
-    return grouped.map((item, index) => index === configIndex
-      ? { ...item, ...config, model: item.model || config.model }
-      : item);
+    return groupTranscriptItems(items) as TranscriptItemRecord[];
   }, [items, session]);
-  const syntheticCursorConfig = `${session.agent ?? ""}`.toLowerCase() === "cursor"
-    && Boolean(session.model || session.mode)
-    && !items.some((item) => transcriptItemType(item) === "model_config");
   const locatorItems = useMemo(() => locatorMetadata
-    ? buildSessionLocatorItemsFromMetadata(locatorMetadata, syntheticCursorConfig ? 1 : 0)
-    : buildSessionLocatorItems(transcriptItems), [locatorMetadata, syntheticCursorConfig, transcriptItems]);
+    ? buildSessionLocatorItemsFromMetadata(locatorMetadata, 0)
+    : buildSessionLocatorItems(transcriptItems), [locatorMetadata, transcriptItems]);
   const initialTranscriptLoading = loading && transcriptItems.length === 0;
   const reportedSegments = useMemo(() => reportedTokenSegments(session), [session]);
   const hasReportedUsage = Boolean(session.tokenUsage);
@@ -1263,14 +1260,11 @@ export function TranscriptPanel({
     if (remoteSearchActive) {
       const hit = searchResult?.hits[searchIndex];
       if (!hit) return;
-      const visibleHit = syntheticCursorConfig
-        ? { ...hit, groupIndex: hit.groupIndex + 1 }
-        : hit;
       let cancelled = false;
-      void ensureSearchHitLoaded(visibleHit).then(() => {
+      void ensureSearchHitLoaded(hit).then(() => {
         if (cancelled) return;
         const grouped = groupTranscriptItems(transcriptItemsRef.current) as TranscriptItemRecord[];
-        const target = transcriptSearchTargetForHit(grouped, visibleHit);
+        const target = transcriptSearchTargetForHit(grouped, hit);
         if (target) focusTranscriptTarget(target, true);
       });
       return () => {
@@ -1279,7 +1273,7 @@ export function TranscriptPanel({
     }
     const target = searchTargets[searchIndex];
     if (target) focusTranscriptTarget(target, true);
-  }, [ensureSearchHitLoaded, focusTranscriptTarget, remoteSearchActive, searchError, searchIndex, searchReady, searchResult, searchResultCount, searchLoading, searchTargets, syntheticCursorConfig, transcriptItems]);
+  }, [ensureSearchHitLoaded, focusTranscriptTarget, remoteSearchActive, searchError, searchIndex, searchReady, searchResult, searchResultCount, searchLoading, searchTargets, transcriptItems]);
   const moveSearchResult = useCallback((offset: number) => {
     if (searchResultCount === 0) return;
     setSearchIndex((current) => (current + offset + searchResultCount) % searchResultCount);
@@ -2147,8 +2141,8 @@ function MessageSavePromptButton({ body, onSave }: { body: string; onSave: (body
     <StatefulButton
       state={state}
       size="sm"
-      width={20}
-      minWidth={20}
+      width={30}
+      minWidth={30}
       variant="ghost"
       className="messageActionButton messageSavePromptButton"
       aria-label="Save as prompt"
@@ -2160,7 +2154,7 @@ function MessageSavePromptButton({ body, onSave }: { body: string; onSave: (body
       loadingContent={<LoadingIcon size={14} />}
       successContent={<Check size={14} aria-hidden="true" />}
       errorContent={<AlertCircle size={14} aria-hidden="true" />}
-      style={{ height: "20px", padding: 0, display: "grid", placeItems: "center", gap: 0 }}
+      style={{ height: "30px", padding: 0, display: "grid", placeItems: "center", gap: 0 }}
     >
       <MessageSquarePlus size={14} aria-hidden="true" />
     </StatefulButton>
@@ -2209,7 +2203,7 @@ export const TranscriptItem = memo(function TranscriptItem({
             <CopyButton
               className="messageActionButton"
               value={body}
-              copyLabel={isUser ? "Copy user message" : "Copy model message"}
+              copyLabel={isUser ? "Copy user message" : "Copy assistant message"}
               copiedLabel="Message copied"
             />
           ) : null}
@@ -2336,7 +2330,7 @@ export function ThinkingBlock({
       onToggle={(event) => setOpen(event.currentTarget.open)}
     >
       <summary className="thinkingSummary">
-        <Badge tone="success">{type}</Badge>
+        <Badge tone="neutral">{type}</Badge>
         <AppTooltip content={preview} onlyWhenTruncated><span className="thinkingPreview">{highlightTranscriptText(preview, searchQuery)}</span></AppTooltip>
         {item.time ? <time>{item.time}</time> : null}
         <ChevronRightIcon className="toolCallChevron" size={14} />
@@ -2375,7 +2369,7 @@ export function ToolCallGroup({
       onToggle={(event) => setOpen(event.currentTarget.open)}
     >
       <summary className="toolCallGroupSummary">
-        <span>已运行 {tools.length} 个命令</span>
+        <span>Ran {tools.length} {tools.length === 1 ? "command" : "commands"}</span>
         {duration ? <Badge tone="neutral" mono>{duration}</Badge> : null}
         <ChevronRightIcon className="toolCallChevron" size={14} />
       </summary>
@@ -2420,43 +2414,48 @@ export function ToolCall({
   const command = item.command || item.body || "";
   const result = item.result || "";
   const duration = formatDuration(item.durationMs);
+  const detailsId = `tool-call-details-${itemKey.replace(/[^a-zA-Z0-9_-]/g, "-")}`;
   return (
-    <details
+    <div
       className={`toolCall ${nested ? "nested" : ""} ${highlighted ? "transcriptTarget" : ""}`}
       data-transcript-key={itemKey}
-      onToggle={(event) => setOpen(event.currentTarget.open)}
+      data-state={open ? "open" : "closed"}
     >
-      <summary className="toolCallSummary">
-        {item.tag ? <Badge tone="neutral" mono>{item.tag}</Badge> : null}
-        <AppTooltip content={command} onlyWhenTruncated><code>{highlightTranscriptText(command || "tool call", searchQuery)}</code></AppTooltip>
+      <div className="toolCallSummary">
+        <button
+          type="button"
+          className="toolCallDisclosure"
+          aria-expanded={open}
+          aria-controls={detailsId}
+          onClick={() => setOpen((current) => !current)}
+        >
+          {item.tag ? <Badge tone="neutral" mono>{item.tag}</Badge> : null}
+          <AppTooltip content={command} onlyWhenTruncated><code>{highlightTranscriptText(command || "tool call", searchQuery)}</code></AppTooltip>
+          {duration ? <Badge tone="neutral" mono>{duration}</Badge> : null}
+          <ChevronRightIcon className="toolCallChevron" size={14} />
+        </button>
         {item.linkedSessionId && onOpenLinkedSession ? (
           <button
             type="button"
             className="toolCallSessionLink"
             aria-label="Open child session"
-            onClick={(event) => {
-              event.preventDefault();
-              event.stopPropagation();
-              onOpenLinkedSession(item.linkedSessionId!);
-            }}
+            onClick={() => onOpenLinkedSession(item.linkedSessionId!)}
           >
-            <ArrowUpRight size={13} />
+            <ArrowUpRight size={13} aria-hidden="true" />
           </button>
         ) : null}
-        {duration ? <Badge tone="neutral" mono>{duration}</Badge> : null}
-        <ChevronRightIcon className="toolCallChevron" size={14} />
-      </summary>
-      {open ? <div className="toolCallDetails">
+      </div>
+      {open ? <div id={detailsId} className="toolCallDetails">
         <div className="toolCallBlock">
           <div className="toolCallLabel">Command</div>
           <pre>{highlightTranscriptText(command || "-", searchQuery)}</pre>
         </div>
         <div className="toolCallBlock">
-          <div className="toolCallLabel">Return</div>
+          <div className="toolCallLabel">Output</div>
           <pre>{highlightTranscriptText(result || "No output", searchQuery)}</pre>
         </div>
       </div> : null}
-    </details>
+    </div>
   );
 }
 
@@ -2610,6 +2609,9 @@ export function SessionsView({
   onRefreshSessions,
   onResumeSession,
   sessionResumeTarget,
+  missingSessionProjectPolicy,
+  projects = [],
+  sessionProjects = [],
   onOpenSkill,
   activeSessionKey,
   skillIndexStatus,
@@ -2626,8 +2628,11 @@ export function SessionsView({
   sessionListError?: string;
   sessionRefreshError?: string;
   onRefreshSessions?: () => Promise<unknown>;
-  onResumeSession?: (session: SessionRecord) => Promise<{ terminal?: string; target?: SessionResumeTarget } | null | undefined>;
+  onResumeSession?: (session: SessionRecord, options?: SessionResumeOptions) => Promise<SessionResumeOutcome | null | undefined>;
   sessionResumeTarget: SessionResumeTarget;
+  missingSessionProjectPolicy: MissingSessionProjectPolicy;
+  projects?: ProjectSummary[];
+  sessionProjects?: SessionProjectSummary[];
   onOpenSkill?: (skillName: string) => void;
   activeSessionKey?: string;
   skillIndexStatus?: SkillIndexStatus | null;
@@ -2666,6 +2671,8 @@ export function SessionsView({
   const [refreshing, setRefreshing] = useState(false);
   const [refreshActionError, setRefreshActionError] = useState("");
   const [resumeFeedback, setResumeFeedback] = useState<Record<string, ResumeFeedbackState>>({});
+  const [pendingResumeConflict, setPendingResumeConflict] = useState<PendingResumeConflict | null>(null);
+  const [resolvingResumeConflict, setResolvingResumeConflict] = useState(false);
   const [sessionToast, setSessionToast] = useState("");
   const [detailCollapsed, setDetailCollapsed] = useState(false);
   const [sessionLocatorRequest, setSessionLocatorRequest] = useState("");
@@ -2749,6 +2756,18 @@ export function SessionsView({
       delete resumeFeedbackTimerRef.current[sessionId];
     }, 1800);
   }, []);
+  const clearResumeFeedback = useCallback((sessionId: string) => {
+    const existingTimer = resumeFeedbackTimerRef.current[sessionId];
+    if (existingTimer !== undefined) {
+      window.clearTimeout(existingTimer);
+      delete resumeFeedbackTimerRef.current[sessionId];
+    }
+    setResumeFeedback((current) => {
+      const next = { ...current };
+      delete next[sessionId];
+      return next;
+    });
+  }, []);
   const showSessionError = useCallback((message: string) => {
     if (sessionToastTimerRef.current !== undefined) {
       window.clearTimeout(sessionToastTimerRef.current);
@@ -2781,21 +2800,23 @@ export function SessionsView({
   const projectOptions = useMemo<SessionProjectOption[]>(() => {
     const options = new Map<string, SessionProjectOption>();
     for (const session of projectSourceSessionItems) {
-      const key = sessionProjectGroupKey(session);
-      const option = options.get(key);
+      const projectOption = sessionProjectOption(session, missingSessionProjectPolicy, sessionProjects, projects);
+      if (!projectOption) continue;
+      const option = options.get(projectOption.key);
       if (option) {
         option.count += 1;
       } else {
-        options.set(key, {
-          key,
-          label: sessionProject(session),
-          title: session.repositoryUrl || sessionWorkspace(session),
+        options.set(projectOption.key, {
+          ...projectOption,
           count: 1,
         });
       }
     }
     return [...options.values()].sort((left, right) => left.label.localeCompare(right.label) || left.title.localeCompare(right.title));
-  }, [projectSourceSessionItems]);
+  }, [missingSessionProjectPolicy, projectSourceSessionItems, projects, sessionProjects]);
+  const projectGroupKeyForFilter = useCallback((session: SessionRecord) => (
+    sessionProjectOption(session, missingSessionProjectPolicy, sessionProjects, projects)?.key ?? sessionProjectGroupKey(session)
+  ), [missingSessionProjectPolicy, projects, sessionProjects]);
   const selectedProjectKeySet = useMemo(() => new Set(selectedProjectKeys), [selectedProjectKeys]);
   const visibleProjectOptions = useMemo(() => {
     const normalizedProjectFilterQuery = projectFilterQuery.trim().toLowerCase();
@@ -2894,16 +2915,16 @@ export function SessionsView({
         }
       }
       for (const session of remoteRows) matches.set(sessionTableRowId(session), session);
-      return [...matches.values()].filter((session) => selectedProjectKeySet.size === 0 || selectedProjectKeySet.has(sessionProjectGroupKey(session)));
+      return [...matches.values()].filter((session) => selectedProjectKeySet.size === 0 || selectedProjectKeySet.has(projectGroupKeyForFilter(session)));
     }
     if (!normalizedQuery) return selectedProjectKeySet.size === 0
       ? listSessionItems
-      : listSessionItems.filter((session) => selectedProjectKeySet.has(sessionProjectGroupKey(session)));
+      : listSessionItems.filter((session) => selectedProjectKeySet.has(projectGroupKeyForFilter(session)));
     return listSessionItems.filter((session) => (
       sessionMatchesQuery(session, normalizedQuery)
-      && (selectedProjectKeySet.size === 0 || selectedProjectKeySet.has(sessionProjectGroupKey(session)))
+      && (selectedProjectKeySet.size === 0 || selectedProjectKeySet.has(projectGroupKeyForFilter(session)))
     ));
-  }, [currentSearchRows, listSessionItems, normalizedQuery, searchSessions, selectedProjectKeySet, sessionMatchesQuery]);
+  }, [currentSearchRows, listSessionItems, normalizedQuery, projectGroupKeyForFilter, searchSessions, selectedProjectKeySet, sessionMatchesQuery]);
   const childSessionCount = useMemo(
     () => matchedSessions.filter((session) => sessionKind(session) === "child").length,
     [matchedSessions],
@@ -3148,7 +3169,10 @@ export function SessionsView({
     setResumeFeedback((current) => ({ ...current, [session.id]: "loading" }));
     try {
       const result = await onResumeSession(session);
-      if (result?.terminal || result?.target) {
+      if (result?.status === "activeWriter") {
+        clearResumeFeedback(session.id);
+        setPendingResumeConflict({ session, conflict: result });
+      } else if (result?.status === "launched") {
         finishResumeFeedback(session.id, "success");
       } else {
         finishResumeFeedback(session.id, "error");
@@ -3156,10 +3180,42 @@ export function SessionsView({
       }
     } catch (error) {
       finishResumeFeedback(session.id, "error");
-        logger.warn("sessions resume failed", { error });
+      logger.warn("sessions resume failed", { error });
       showSessionError("Could not open session. Try again.");
     }
-  }, [dismissSessionError, finishResumeFeedback, onResumeSession, showSessionError]);
+  }, [clearResumeFeedback, dismissSessionError, finishResumeFeedback, onResumeSession, showSessionError]);
+  const cancelResumeConflict = useCallback(() => {
+    if (resolvingResumeConflict) return;
+    if (pendingResumeConflict) clearResumeFeedback(pendingResumeConflict.session.id);
+    setPendingResumeConflict(null);
+  }, [clearResumeFeedback, pendingResumeConflict, resolvingResumeConflict]);
+  const confirmResumeConflict = useCallback(async () => {
+    if (!pendingResumeConflict || !onResumeSession || resolvingResumeConflict) return;
+    const { session } = pendingResumeConflict;
+    setResolvingResumeConflict(true);
+    dismissSessionError();
+    setResumeFeedback((current) => ({ ...current, [session.id]: "loading" }));
+    try {
+      const result = await onResumeSession(session, { forceActiveWriter: true });
+      if (result?.status === "activeWriter") {
+        clearResumeFeedback(session.id);
+        setPendingResumeConflict({ session, conflict: result });
+        showSessionError("The session is still active. It was not resumed.");
+      } else if (result?.status === "launched") {
+        setPendingResumeConflict(null);
+        finishResumeFeedback(session.id, "success");
+      } else {
+        finishResumeFeedback(session.id, "error");
+        showSessionError("Could not resume session. Try again.");
+      }
+    } catch (error) {
+      finishResumeFeedback(session.id, "error");
+      logger.warn("forced session resume failed", { error });
+      showSessionError("Could not terminate the active session. Try again.");
+    } finally {
+      setResolvingResumeConflict(false);
+    }
+  }, [clearResumeFeedback, dismissSessionError, finishResumeFeedback, onResumeSession, pendingResumeConflict, resolvingResumeConflict, showSessionError]);
   const getResumeState = useCallback((session: SessionRecord): SessionResumeState => (
     resumeFeedback[session.id] ?? "idle"
   ), [resumeFeedback]);
@@ -3866,6 +3922,41 @@ export function SessionsView({
         </DetailPanelHost>
       ) : null}
     </PanelGroup>
+    <DialogShell
+      open={Boolean(pendingResumeConflict)}
+      onOpenChange={(open) => {
+        if (!open) cancelResumeConflict();
+      }}
+      descriptionId="session-resume-conflict-description"
+    >
+      <Dialog.Title className="confirmDialogTitle">Resume active session?</Dialog.Title>
+      <Dialog.Description id="session-resume-conflict-description" className="confirmDialogDescription">
+        This {pendingResumeConflict ? friendlyAgent(pendingResumeConflict.session.agent) : "agent"} session is still open in another process. Terminating it may lose work that has not been written.
+      </Dialog.Description>
+      {pendingResumeConflict ? (
+        <p className="confirmDialogDescription">
+          Writer process: {pendingResumeConflict.conflict.pids.join(", ")}
+        </p>
+      ) : null}
+      <div className="confirmDialogActions">
+        <DialogActionButton
+          variant="secondary"
+          disabled={resolvingResumeConflict}
+          onClick={cancelResumeConflict}
+        >
+          Cancel
+        </DialogActionButton>
+        <DialogStatefulButton
+          state={resolvingResumeConflict ? "loading" : "idle"}
+          loadingLabel="Terminating session"
+          variant="danger"
+          aria-label="Terminate active session and resume"
+          onClick={() => void confirmResumeConflict()}
+        >
+          Terminate and resume
+        </DialogStatefulButton>
+      </div>
+    </DialogShell>
     </>
   );
 }

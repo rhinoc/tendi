@@ -136,9 +136,9 @@ function buildReport() {
 }
 
 const tabs = [
-  { id: "skills", nav: "Skills", heading: "Skills", compact: false, selectable: true, listHeader: "section", tableHeader: false, frozen: false },
+  { id: "skills", nav: "Skills", heading: "Skills", compact: false, selectable: true, listHeader: "section", tableHeader: false, frozen: true },
   { id: "prompts", nav: "Prompts", heading: "Prompts", compact: false, selectable: true, listHeader: "table", tableHeader: true, frozen: false },
-  { id: "sessions", nav: "Sessions", heading: "Sessions", compact: true, selectable: true, listHeader: "table", tableHeader: true, frozen: true },
+  { id: "sessions", nav: "Sessions", heading: "Sessions", compact: true, selectable: false, listHeader: "table", tableHeader: true, frozen: true },
   { id: "rules", nav: "Rules", heading: "Rules", compact: true, selectable: true, listHeader: "table", tableHeader: true, frozen: true },
   { id: "hooks", nav: "Hooks", heading: "Hooks", compact: true, selectable: true, listHeader: "table", tableHeader: true, frozen: true },
   { id: "mcp", nav: "MCP", heading: "MCP", compact: false, selectable: true, listHeader: "table", tableHeader: true, frozen: true },
@@ -490,6 +490,41 @@ async function runSessionLocatorChecks(page) {
       && await page.locator('[data-transcript-key="user-6"].transcriptTarget').count() === 1,
     "dragging from the first to fourth locator jumps to user-6",
   );
+  const collapseButton = page.getByRole("button", { name: "Collapse session detail", exact: true });
+  if (await collapseButton.count()) {
+    await collapseButton.click({ force: true });
+    await page.waitForFunction(
+      () => document.querySelector(".transcriptPanelHost")?.classList.contains("collapsed") === true,
+      { timeout: 2000 },
+    ).catch(() => {});
+    await page.waitForTimeout(100);
+  }
+}
+
+async function navigateToPage(page, nav, heading) {
+  const navButton = () => page.getByRole("button", { name: nav, exact: true });
+  const headingLocator = page.getByRole("heading", { name: heading, exact: true });
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    await navButton().click({ force: true });
+    try {
+      await page.waitForFunction(
+        ({ navLabel, pageHeading }) => {
+          const activeNav = [...document.querySelectorAll(".navItem")]
+            .find((item) => item.getAttribute("aria-label") === navLabel);
+          const headingVisible = [...document.querySelectorAll("h1, h2, h3")]
+            .some((item) => item.textContent?.trim() === pageHeading && getComputedStyle(item).visibility !== "hidden");
+          return activeNav?.getAttribute("aria-current") === "page" && headingVisible;
+        },
+        { navLabel: nav, pageHeading: heading },
+        { timeout: 3000 },
+      );
+      await page.waitForTimeout(100);
+      if (await headingLocator.isVisible()) return;
+    } catch {
+      await page.waitForTimeout(100);
+    }
+  }
+  await headingLocator.waitFor();
 }
 
 async function runFrozenBugSmokeChecks(page, tab) {
@@ -559,7 +594,7 @@ async function runFrozenBugSmokeChecks(page, tab) {
       const scrollRect = scrollRow.getBoundingClientRect();
       return {
         missing: false,
-        startX: frozenRect.left + Math.min(80, Math.max(12, frozenRect.width / 3)),
+        startX: frozenRect.right - 12,
         startY: frozenRect.top + Math.min(24, Math.max(8, frozenRect.height / 2)),
         endX: scrollRect.left + Math.min(120, Math.max(16, scrollRect.width / 2)),
         endY: scrollRect.top + Math.min(44, Math.max(18, scrollRect.height - 8)),
@@ -972,7 +1007,13 @@ async function runFrozenBugSmokeChecks(page, tab) {
     const clearSelectionButton = page.getByRole("button", { name: "Clear selection", exact: true });
     if (await clearSelectionButton.count()) await clearSelectionButton.click();
     await groupButton.click();
-    await page.waitForTimeout(80);
+    await page.waitForFunction(
+      () => Boolean(
+        document.querySelector(".dataTableFrozenPane .dataGroup .dataRow--frozenPane")
+        && document.querySelector(".dataTableScrollPane .dataGroup .dataRow--scrollPane"),
+      ),
+      { timeout: 2000 },
+    ).catch(() => {});
     const groupedMetrics = await page.evaluate(() => {
       const round = (value) => Math.round(value * 100) / 100;
       const frozenGroup = document.querySelector(".dataTableFrozenPane .dataGroup");
@@ -1026,7 +1067,8 @@ async function runFrozenBugSmokeChecks(page, tab) {
         ? "missing grouped frozen/scroll rows"
         : `frozen separator ${groupedMetrics.frozenSeparatorVisible}, scroll separator ${groupedMetrics.scrollSeparatorVisible}`,
     );
-    await groupButton.click();
+    const activeGroupButton = page.locator(".dataTableHeader .dataHeaderGroupButton.activeGroup").first();
+    if (await activeGroupButton.count()) await activeGroupButton.click({ force: true });
     await page.waitForTimeout(40);
   } else {
     check(tab.id, "bug13-grouped-frozen-scroll-row-sync", true, "no groupable header");
@@ -1241,6 +1283,17 @@ try {
       }
       if (command === "skills_refresh") return { skills: report.skills.skills, updateCheck: "completed" };
       if (command === "skills_list") return report.skills.skills;
+      if (command === "skills_backup_status") return { config: null, statuses: [], versions: [] };
+      if (command === "skills_backup_sync") return null;
+      if (command === "projects_list") return [
+        { id: "project-1", name: "project-1", rootPath: "/Users/dev/.cursor/projects/project-1" },
+        { id: "project-2", name: "project-2", rootPath: "/Users/dev/.cursor/projects/project-2" },
+      ];
+      if (command === "session_projects_list") return [];
+      if (command === "project_scan_scopes_list") return [];
+      if (command === "app_icon_set") return null;
+      if (command === "plugin:window|set_icon") return null;
+      if (command === "check_for_updates") return { status: "up-to-date" };
       if (command === "skills_targets") {
         return [
           { id: "claude", displayName: "Claude", supportsGlobal: true },
@@ -1360,7 +1413,7 @@ try {
   check(
     "navigation",
     "all-pages-listed",
-    JSON.stringify(navLabels) === JSON.stringify(["Overview", "Skills", "Sessions", "Rules", "MCP", "Hooks", "Prompts", "Config", "Settings"]),
+    JSON.stringify(navLabels) === JSON.stringify(["Overview", "Skills", "Backup", "Sessions", "Rules", "MCP", "Hooks", "Prompts", "Config", "Settings"]),
     navLabels.join(", "),
   );
   await page.getByRole("button", { name: "Skills", exact: true }).click();
@@ -1402,7 +1455,7 @@ try {
       // Dismiss any overlay (e.g. a row click that opened an editor dialog)
       // left over from the previous tab before navigating.
       await page.keyboard.press("Escape").catch(() => {});
-      await page.getByRole("button", { name: tab.nav, exact: true }).click();
+      await navigateToPage(page, tab.nav, tab.heading);
     }
     await page.getByRole("heading", { name: tab.heading, exact: true }).waitFor();
     await runPageHeaderChecks(page, tab.id, tab.heading, tab.compact);
@@ -1688,7 +1741,7 @@ try {
     }
 
     if (tab.id === "skills") {
-      const groupCounts = await page.evaluate(() => [...document.querySelectorAll(".dataGroup")].map((group) => {
+      const groupCounts = await page.evaluate(() => [...document.querySelectorAll(".dataTableFrozenPane .dataGroup")].map((group) => {
         const label = group.querySelector(".sectionHeaderLabel")?.textContent?.trim() ?? "";
         const countText = group.querySelector(".sectionHeaderCount")?.textContent?.trim() ?? "";
         const count = Number.parseInt(countText, 10);
@@ -1781,38 +1834,45 @@ try {
     if (!tab.selectable) {
       await runReq8TabChecks(page, tab);
       await runFrozenBugSmokeChecks(page, tab);
+      if (tab.id === "sessions") await runSessionLocatorChecks(page);
       continue;
     }
 
     // --- req1: checkbox hidden by default, revealed on hover ---------------
-    const rowId = await page.evaluate(() =>
-      document.querySelector('.dataRow[data-row-selectable="true"]')?.dataset.rowId ?? null,
+    const rowSelector = tab.frozen
+      ? '.dataTableFrozenPane .dataRow[data-row-selectable="true"]'
+      : '.dataRow[data-row-selectable="true"]';
+    const rowId = await page.evaluate(
+      (selector) => document.querySelector(selector)?.dataset.rowId ?? null,
+      rowSelector,
     );
     check(tab.id, "req1-rowexists", Boolean(rowId), `selectable row id ${rowId}`);
     if (!rowId) continue;
-    const row = page.locator(`.dataRow[data-row-selectable="true"]`).first();
+    const rowLocator = () => page.locator(rowSelector).first();
+    const row = rowLocator();
 
     const hiddenOpacity = await row.locator(".rowSelection").evaluate((node) => getComputedStyle(node).opacity);
     check(tab.id, "req1-hidden", hiddenOpacity === "0", `default checkbox opacity ${hiddenOpacity}`);
 
-    await row.hover();
+    await rowLocator().hover({ force: true });
     let revealed = "0";
     try {
       await page.waitForFunction(
-        () => {
-          const node = document.querySelector('.dataRow[data-row-selectable="true"] .rowSelection');
+        (selector) => {
+          const node = document.querySelector(`${selector} .rowSelection`);
           return node && getComputedStyle(node).opacity === "1";
         },
+        rowSelector,
         { timeout: 2000 },
       );
       revealed = "1";
     } catch {
-      revealed = await row.locator(".rowSelection").evaluate((node) => getComputedStyle(node).opacity);
+      revealed = await rowLocator().locator(".rowSelection").evaluate((node) => getComputedStyle(node).opacity);
     }
     check(tab.id, "req1-reveal", revealed === "1", `hovered checkbox opacity ${revealed}`);
 
     // --- req2: row checkbox aligns with bottom-bar checkbox ----------------
-    await row.locator(".rowSelection").click();
+    await rowLocator().locator(".rowSelection").click({ force: true });
     await page.locator(".actionBar.bottomBar").first().waitFor();
     if (tab.id === "mcp") {
       const identityMetrics = await page.evaluate(() => ({
@@ -2005,13 +2065,13 @@ try {
   }
 
   for (const pageSpec of [
+    { id: "backup", nav: "Backup", heading: "Backup", compact: false, ready: ".backupPage" },
     { id: "config", nav: "Config", heading: "Config", compact: true, ready: ".configListPane" },
     { id: "settings", nav: "Settings", heading: "Settings", compact: false, ready: ".settingsShell" },
   ]) {
     writeStdout(`\n== ${pageSpec.heading} navigation smoke ==`);
     await page.keyboard.press("Escape").catch(() => {});
-    await page.getByRole("button", { name: pageSpec.nav, exact: true }).click();
-    await page.getByRole("heading", { name: pageSpec.heading, exact: true }).waitFor();
+    await navigateToPage(page, pageSpec.nav, pageSpec.heading);
     await page.locator(pageSpec.ready).waitFor();
     await runPageHeaderChecks(page, pageSpec.id, pageSpec.heading, pageSpec.compact);
   }

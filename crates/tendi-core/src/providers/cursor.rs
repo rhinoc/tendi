@@ -5,10 +5,7 @@ use anyhow::bail;
 use serde_json::Value;
 use walkdir::WalkDir;
 
-use crate::{
-    sessions::cursor_store_models_for_path,
-    transcript::{TranscriptItem, collect_generic_item},
-};
+use crate::transcript::{TranscriptItem, collect_generic_item};
 
 use super::*;
 
@@ -16,6 +13,31 @@ pub(super) struct CursorProvider;
 
 pub(super) fn matches_name(normalized: &str) -> bool {
     normalized == "cursor"
+}
+
+fn profile_paths_for_root(root: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = fs::read_dir(root) else {
+        return Vec::new();
+    };
+    let mut names = entries
+        .flatten()
+        .filter_map(|entry| {
+            let path = entry.path();
+            if !path.is_dir() || !path.join("cli-config.json").is_file() {
+                return None;
+            }
+            let name = entry.file_name().to_str()?.to_string();
+            crate::config::validate_profile_name(&name)
+                .ok()
+                .map(|_| name)
+        })
+        .collect::<Vec<_>>();
+    names.sort();
+    names.dedup();
+    names
+        .into_iter()
+        .map(|profile| root.join(profile).join("cli-config.json"))
+        .collect()
 }
 
 pub(crate) fn scan_project_mcp(
@@ -132,7 +154,7 @@ pub(super) fn append_transcript_metadata_from_store(
     path: &Path,
     items: &mut Vec<TranscriptItem>,
 ) -> Result<()> {
-    let models = cursor_store_models_for_path(path);
+    let models = cursor_sessions::cursor_store_models_for_path(path);
     insert_cursor_model_configs(items, &models);
     Ok(())
 }
@@ -242,7 +264,7 @@ impl super::AgentProvider for CursorProvider {
         Some(home.join(".cursor/skills"))
     }
 
-    fn config_profile_path(&self, home: &Path, _codex_home: &Path, name: &str) -> Option<PathBuf> {
+    fn config_profile_path(&self, home: &Path, _agent_home: &Path, name: &str) -> Option<PathBuf> {
         Some(
             home.join(".cursor/tendi-profiles")
                 .join(name)
@@ -254,15 +276,16 @@ impl super::AgentProvider for CursorProvider {
         Some("json")
     }
 
-    fn config_files(&self, home: &Path, codex_home: &Path) -> Vec<crate::config::AgentConfigFile> {
+    fn config_files(&self, home: &Path, agent_home: &Path) -> Vec<crate::config::AgentConfigFile> {
         let base_path = home.join(".cursor/cli-config.json");
-        let mut configs = vec![self
-            .config_file_for_path(home, codex_home, &base_path)
-            .expect("Cursor provider must resolve its base config path")];
+        let mut configs = vec![
+            self.config_file_for_path(home, agent_home, &base_path)
+                .expect("Cursor provider must resolve its base config path"),
+        ];
         configs.extend(
-            crate::config::cursor_profile_paths_for_root(&home.join(".cursor/tendi-profiles"))
+            profile_paths_for_root(&home.join(".cursor/tendi-profiles"))
                 .into_iter()
-                .filter_map(|path| self.config_file_for_path(home, codex_home, &path)),
+                .filter_map(|path| self.config_file_for_path(home, agent_home, &path)),
         );
         configs
     }
@@ -270,7 +293,7 @@ impl super::AgentProvider for CursorProvider {
     fn config_file_for_path(
         &self,
         home: &Path,
-        _codex_home: &Path,
+        _agent_home: &Path,
         path: &Path,
     ) -> Option<crate::config::AgentConfigFile> {
         let base_path = home.join(".cursor/cli-config.json");
@@ -318,12 +341,64 @@ impl super::AgentProvider for CursorProvider {
         Some("Cursor")
     }
 
+    fn app_bundle_path(&self) -> Option<&'static str> {
+        Some("/Applications/Cursor.app")
+    }
+
     fn executable_names(&self) -> &'static [&'static str] {
         &["cursor"]
     }
 
     fn config_dir(&self, ctx: &ProviderContext) -> Option<PathBuf> {
         ctx.home.as_ref().map(|home| home.join(".cursor"))
+    }
+
+    fn config_home(&self, home: &Path) -> PathBuf {
+        home.join(".cursor")
+    }
+
+    fn projection_directories(&self) -> &'static [&'static str] {
+        &[".cursor"]
+    }
+
+    fn projection_candidate_files(&self, domain: &str, ancestor: &Path) -> Vec<PathBuf> {
+        match domain {
+            "rules" => vec![ancestor.join(".cursorrules")],
+            "hooks" => vec![ancestor.join(".cursor/hooks.json")],
+            "mcp" => vec![
+                ancestor.join(".cursor/mcp.json"),
+                ancestor.join(".cursor/cli-config.json"),
+            ],
+            "skills" => vec![ancestor.join(".cursor/skills")],
+            _ => Vec::new(),
+        }
+    }
+
+    fn projection_candidate_is_file(&self, path: &Path) -> bool {
+        path.file_name().and_then(|name| name.to_str()) == Some(".cursorrules")
+    }
+
+    fn skill_visibility_metadata(
+        &self,
+        _skill_dir: &Path,
+        _skill_file: &Path,
+        frontmatter: Option<&serde_yaml::Value>,
+    ) -> Result<SkillProviderMetadata> {
+        Ok(SkillProviderMetadata {
+            allow_implicit_invocation: None,
+            enabled: None,
+            disable_model_invocation: frontmatter
+                .and_then(|value| value.get("disable-model-invocation"))
+                .and_then(serde_yaml::Value::as_bool),
+        })
+    }
+
+    fn skill_frontmatter_policy(&self) -> Option<SkillFrontmatterPolicy> {
+        Some(SkillFrontmatterPolicy::DisableModelInvocation)
+    }
+
+    fn session_scan_priority(&self, root: &Path) -> Option<u8> {
+        root.to_string_lossy().contains("/.cursor/").then_some(1)
     }
 
     fn skill_roots(&self, ctx: &ProviderContext) -> Vec<SkillRoot> {
@@ -355,20 +430,22 @@ impl super::AgentProvider for CursorProvider {
         cache: Option<&SessionScanCache>,
     ) -> Result<()> {
         if let Some(home) = &ctx.home {
-            sessions::scan_cursor_meta(
+            cursor_sessions::scan_cursor_meta(
                 &home.join(".cursor/acp-sessions"),
                 sessions_out,
                 self.kind(),
                 cache,
             );
-            sessions::scan_cursor_meta(
+            cursor_sessions::scan_cursor_meta(
                 &home.join(".cursor/chats"),
                 sessions_out,
                 self.kind(),
                 cache,
             );
-            sessions::scan_cursor_agent_transcripts(
+            sessions::scan_jsonl_sessions(
                 &home.join(".cursor/projects"),
+                self.kind(),
+                4,
                 sessions_out,
                 cache,
             );
@@ -494,15 +571,21 @@ impl super::AgentProvider for CursorProvider {
     }
 
     fn infer_session_project(&self, path: &Path, project: Option<PathBuf>) -> Option<PathBuf> {
-        project.or_else(|| sessions::cursor_project_from_transcript_path(path))
+        project.or_else(|| cursor_sessions::cursor_project_from_transcript_path(path))
     }
 
     fn infer_meta_project(&self, value: &Value) -> Option<PathBuf> {
-        sessions::cursor_project_from_meta(Some(value))
+        cursor_sessions::cursor_project_from_meta(Some(value))
     }
 
     fn session_project_aliases(&self, path: &str) -> Vec<String> {
-        crate::storage::cursor_codex_worktree_alias(path)
+        let home = dirs::home_dir().map(|home| home.to_string_lossy().into_owned());
+        let Some(home) = home else {
+            return Vec::new();
+        };
+        let prefix = format!("{home}/codex/worktrees/");
+        path.strip_prefix(&prefix)
+            .map(|suffix| format!("{home}/.codex/worktrees/{suffix}"))
             .into_iter()
             .collect()
     }
@@ -513,11 +596,11 @@ impl super::AgentProvider for CursorProvider {
         sessions: &mut Vec<SessionRecord>,
         cache: Option<&SessionScanCache>,
     ) -> bool {
-        if sessions::is_cursor_meta_file(path) {
-            sessions::scan_cursor_meta_file(path, sessions, self.kind(), cache);
+        if cursor_sessions::is_cursor_meta_file(path) {
+            cursor_sessions::scan_cursor_meta_file(path, sessions, self.kind(), cache);
             true
         } else if path.file_name().and_then(|name| name.to_str()) == Some("store.db") {
-            sessions::scan_cursor_store_file(path, sessions, self.kind(), cache);
+            cursor_sessions::scan_cursor_store_file(path, sessions, self.kind(), cache);
             true
         } else {
             false

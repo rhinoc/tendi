@@ -470,8 +470,8 @@
   --control-border: color-mix(in oklch, var(--theme-text) 18%, transparent);
   --shadow-border: 0 0 0 1px color-mix(in oklch, var(--theme-text) 8%, transparent);
   --shadow-border-hover: 0 0 0 1px color-mix(in oklch, var(--theme-text) 14%, transparent);
-  --shadow-elevated: 0 0 0 1px color-mix(in oklch, var(--theme-text) 10%, transparent), 0 20px 52px color-mix(in oklch, var(--theme-overlay) 52%, transparent);
-  --shadow-menu: 0 0 0 1px color-mix(in oklch, var(--theme-text) 10%, transparent), 0 14px 38px color-mix(in oklch, var(--theme-overlay) 48%, transparent);
+  --shadow-elevated: 0 0 0 1px color-mix(in oklch, var(--theme-text) 10%, transparent), 0 18px 48px color-mix(in oklch, var(--theme-overlay) 52%, transparent);
+  --shadow-menu: 0 0 0 1px color-mix(in oklch, var(--theme-text) 10%, transparent), 0 12px 36px color-mix(in oklch, var(--theme-overlay) 48%, transparent);
   --row-frame-line: color-mix(in oklch, var(--theme-text) 14%, transparent);
   --row-frame-bg: color-mix(in oklch, var(--theme-text) 6%, transparent);
   --data-table-frozen-cell-hover-bg: var(--theme-sidebar);
@@ -541,14 +541,6 @@
 }
 
 :root[data-theme][data-color-theme="sakura-pop"] {
-  /* Personal-site geometry: compact, crisp, and badge-like. */
-  --radius-sm: 3px;
-  --radius-md: 5px;
-  --radius-lg: 7px;
-  --row-frame-radius: 4px;
-  --badge-radius: 3px;
-  --selection-checkbox-radius: 2px;
-
   --line: color-mix(in oklch, var(--theme-purple) 20%, transparent);
   --line-strong: color-mix(in oklch, var(--theme-purple) 34%, transparent);
   --control-border: color-mix(in oklch, var(--theme-purple) 22%, transparent);
@@ -565,18 +557,6 @@
 }
 
 :root[data-theme="dark"][data-color-theme="sakura-pop"] {
-  --shadow-border:
-    0 0 0 1px color-mix(in oklch, var(--theme-purple) 18%, transparent),
-    0 2px 0 color-mix(in oklch, var(--theme-purple) 10%, transparent);
-  --shadow-border-hover:
-    0 0 0 1px color-mix(in oklch, var(--theme-accent) 35%, transparent),
-    0 0 16px color-mix(in oklch, var(--theme-accent) 14%, transparent);
-  --shadow-elevated:
-    0 0 0 1px color-mix(in oklch, var(--theme-purple) 30%, transparent),
-    0 16px 36px color-mix(in oklch, var(--theme-overlay) 50%, transparent);
-  --shadow-menu:
-    0 0 0 1px color-mix(in oklch, var(--theme-purple) 30%, transparent),
-    0 12px 28px color-mix(in oklch, var(--theme-overlay) 48%, transparent);
   --line: color-mix(in oklch, var(--theme-purple) 28%, transparent);
   --line-strong: color-mix(in oklch, var(--theme-purple) 42%, transparent);
   --control-border: color-mix(in oklch, var(--theme-purple) 30%, transparent);
@@ -585,39 +565,6 @@
   --image-outline: color-mix(in oklch, var(--theme-purple) 28%, transparent);
   --focus-ring: color-mix(in oklch, var(--theme-accent) 74%, transparent);
   --focus-ring-soft: color-mix(in oklch, var(--theme-accent) 22%, transparent);
-}
-
-:root[data-theme="dark"][data-color-theme="sakura-pop"] .sidebar {
-  background: linear-gradient(180deg, var(--sidebar) 0%, var(--window) 100%);
-  box-shadow: inset -1px 0 0 color-mix(in oklch, var(--theme-purple) 34%, transparent);
-}
-
-:root[data-theme="dark"][data-color-theme="sakura-pop"] .navItem:hover {
-  background: color-mix(in oklch, var(--theme-blue) 12%, transparent);
-  color: var(--theme-text);
-}
-
-:root[data-theme="dark"][data-color-theme="sakura-pop"] .navItem.active {
-  background: linear-gradient(
-    90deg,
-    color-mix(in oklch, var(--theme-accent) 24%, transparent),
-    color-mix(in oklch, var(--theme-purple) 12%, transparent)
-  );
-  box-shadow: inset 3px 0 0 var(--theme-accent), 0 0 18px color-mix(in oklch, var(--theme-accent) 12%, transparent);
-}
-
-:root[data-theme="dark"][data-color-theme="sakura-pop"] .pageHeader h1 {
-  letter-spacing: 0.025em;
-  text-shadow: 0 0 16px color-mix(in oklch, var(--theme-accent) 20%, transparent);
-}
-
-:root[data-theme="dark"][data-color-theme="sakura-pop"] .appButton-primary {
-  box-shadow: 0 0 16px color-mix(in oklch, var(--theme-accent) 22%, transparent);
-}
-
-:root[data-theme="dark"][data-color-theme="sakura-pop"] .badge[data-tone="accent"],
-:root[data-theme="dark"][data-color-theme="sakura-pop"] .badge[data-tone="info"] {
-  border: 1px solid color-mix(in oklch, var(--badge-color) 30%, transparent);
 }
 
 :root[data-theme="dark"][data-color-theme="vercel"] {

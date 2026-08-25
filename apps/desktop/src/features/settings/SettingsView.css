@@ -5,6 +5,7 @@
   display: grid;
   overflow-x: hidden;
   overflow-y: auto;
+  scrollbar-gutter: stable;
 }
 
 .settingsPage {
@@ -25,6 +26,7 @@
 }
 
 .settingsGroup {
+  min-width: 0;
   display: grid;
   gap: 0;
   padding: 20px 0;
@@ -55,10 +57,22 @@
 }
 
 .settingsThemeControls {
-  width: min(100%, 420px);
+  width: 100%;
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 8px;
+}
+
+.settingsThemeSection {
+  grid-template-columns: 120px minmax(0, 1fr);
+}
+
+.settingsThemeSection .settingsControlGroup {
+  width: 100%;
+}
+
+.settingsThemeControls .settingsAppIconSelect {
+  width: 100%;
 }
 
 .settingsThemePicker {
@@ -100,7 +114,7 @@
 }
 
 .settingsAppIconSelect {
-  width: 240px;
+  width: 100%;
   max-width: 100%;
 }
 
@@ -117,11 +131,18 @@
   gap: 10px;
 }
 
+.settingsAppIconOption > span:last-child {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .settingsAppIconPreview {
-  width: 28px;
-  height: 28px;
-  flex: 0 0 28px;
-  border-radius: 6px;
+  width: 20px;
+  height: 20px;
+  flex: 0 0 20px;
+  border-radius: 5px;
 }
 
 .settingsAppearanceControl {
@@ -136,7 +157,7 @@
 }
 
 .settingsFontSelect {
-  width: 240px;
+  width: 100%;
   max-width: 100%;
 }
 
@@ -228,6 +249,20 @@
   box-sizing: border-box;
 }
 
+.settingsThemeSelectContent.selectControlContent,
+.settingsAppIconSelectContent.selectControlContent,
+.settingsSelectContent.selectControlContent {
+  width: max(168px, var(--radix-select-trigger-width));
+  max-width: calc(100vw - 32px);
+  box-sizing: border-box;
+}
+
+.settingsThemeSelectContent .selectViewport,
+.settingsAppIconSelectContent .selectViewport,
+.settingsSelectContent.selectControlContent .selectViewport {
+  scrollbar-gutter: stable;
+}
+
 .settingsApplicationMenuButton {
   position: absolute;
   top: 1px;
@@ -241,7 +276,7 @@
 
 .settingsSection {
   display: grid;
-  grid-template-columns: 120px minmax(0, 420px);
+  grid-template-columns: 120px minmax(0, 1fr);
   align-items: start;
   gap: 16px;
   padding: 0;
@@ -252,13 +287,6 @@
   font-size: var(--text-sm);
   font-weight: 600;
   line-height: var(--leading-ui);
-}
-
-.settingsSectionText p {
-  margin: 5px 0 0;
-  color: var(--muted);
-  font-size: var(--text-sm);
-  line-height: var(--leading-body);
 }
 
 .settingsAgentRow {
@@ -292,9 +320,60 @@
   flex: 0 0 auto;
 }
 
+.settingsProjectScanActions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.settingsScanSummary {
+  color: var(--muted);
+  font-size: var(--text-sm);
+}
+
+.settingsProjectCountTrigger {
+  min-width: 0;
+  padding: 0 6px;
+}
+
+.settingsProjectsPopover {
+  z-index: var(--z-popover);
+  width: min(760px, calc(100vw - 32px));
+  max-height: min(480px, calc(100vh - 96px));
+  display: flex;
+  flex-direction: column;
+  padding: 10px;
+  overflow: hidden;
+  border: 0;
+  border-radius: var(--radius-lg);
+  background: var(--panel-bg);
+  box-shadow: var(--shadow-menu);
+}
+
+.settingsProjectsPopoverHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 2px 4px 9px;
+  color: var(--muted);
+  font-size: var(--text-sm);
+  line-height: var(--leading-ui);
+}
+
+.settingsProjectsPopoverHeader strong {
+  color: var(--text);
+}
+
+.settingsProjectsTable {
+  min-height: 0;
+  height: min(380px, calc(100vh - 180px));
+}
+
 .settingsControlGroup {
   min-width: 0;
-  width: min(100%, 420px);
+  width: 100%;
   display: grid;
   gap: 6px;
   font-size: var(--text-sm);

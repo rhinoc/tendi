@@ -5,7 +5,7 @@ import { ChartLegend, type ChartLegendItem } from "../components/shared/chart/Ch
 import { ChartTooltipContent, type ChartTooltipDetail } from "../components/shared/chart/ChartTooltipContent.tsx";
 import { Tooltip } from "../components/shared/Tooltip.tsx";
 import { useElementSize } from "../components/shared/useElementSize.ts";
-import { formatDayGroupLabel, friendlyAgent, normalizedAgentKey } from "../lib/index.ts";
+import { agentDefinition, agentIdentityKey, agentDefinitions, formatDayGroupLabel, friendlyAgent, normalizedAgentKey } from "../lib/index.ts";
 import { groupAnalyticsDays, stepAnalyticsGranularity, type AnalyticsGranularity, type AnalyticsPeriod, type OverviewAnalytics } from "../lib/analytics.ts";
 import { formatTokenCount } from "../lib/token-format.ts";
 import { trackpadZoomDirection, useTrackpadZoom } from "../lib/zoom-gesture.ts";
@@ -236,11 +236,11 @@ function metricLabel(metric: OverviewUsageMetric, granularity?: AnalyticsGranula
   return metric;
 }
 
-const SESSION_AGENT_ORDER = ["codex", "claude", "cursor", "shared", "unknown"];
+const SESSION_AGENT_ORDER = [...agentDefinitions.map((definition) => definition.id), "unknown"];
 
 function sessionAgentSort(left: string, right: string): number {
-  const leftKey = normalizedAgentKey(left);
-  const rightKey = normalizedAgentKey(right);
+  const leftKey = agentIdentityKey(left);
+  const rightKey = agentIdentityKey(right);
   const leftIndex = SESSION_AGENT_ORDER.indexOf(leftKey);
   const rightIndex = SESSION_AGENT_ORDER.indexOf(rightKey);
   return (leftIndex < 0 ? SESSION_AGENT_ORDER.length : leftIndex)
@@ -253,11 +253,7 @@ function sessionAgentLabel(agent: string): string {
 }
 
 function sessionAgentClass(agent: string): string {
-  const key = normalizedAgentKey(agent);
-  if (key === "codex") return "agentCodex";
-  if (key === "claude" || key === "claudecode") return "agentClaude";
-  if (key === "cursor") return "agentCursor";
-  return "agentOther";
+  return agentDefinition(normalizedAgentKey(agent))?.trendClass ?? "agentOther";
 }
 
 function sessionSegments(period: AnalyticsPeriod): TrendSegment[] {

@@ -37,6 +37,7 @@ export function DetailPanelHost({
     <>
       {!collapsed && <ResizeSeparator />}
       <Panel
+        data-detail-panel
         className={`transcriptPanelHost ${hostClassName} ${collapsed ? "collapsed" : ""}`.trim()}
         defaultSize={collapsed ? COLLAPSED_WIDTH : expandedDefaultSize}
         minSize={collapsed ? COLLAPSED_WIDTH : MIN_EXPANDED_WIDTH}

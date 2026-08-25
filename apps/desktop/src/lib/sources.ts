@@ -89,6 +89,11 @@ export function parseRemoteSource(value: unknown): RemoteSource | null {
   return null;
 }
 
+export function remoteRepositoryLabel(value: unknown): string {
+  const remote = parseRemoteSource(value);
+  return remote?.path || `${value ?? ""}`.trim();
+}
+
 export function isGitSource(value: unknown, kind?: unknown): boolean {
   const text = `${value ?? ""}`.trim();
   const sourceKind = `${kind ?? ""}`.toLowerCase();

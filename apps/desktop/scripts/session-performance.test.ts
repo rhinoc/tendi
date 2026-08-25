@@ -3,6 +3,7 @@ import test from "node:test";
 
 import { resolveInitialSession, resolveInitialSessionId } from "../src/lib/session-selection.ts";
 import { createLatestRequestAuthority, mergeTranscriptItems, normalizeTranscriptSearchResult, transcriptItemsSize } from "../src/lib/transcript.ts";
+import { parseJsonlTranscript } from "../src/lib/agent/transcript.ts";
 import { selectAnalyticsGranularity, stepAnalyticsGranularity } from "../src/lib/analytics.ts";
 import { trackpadZoomDirection, trackpadZoomFactor } from "../src/lib/zoom-gesture.ts";
 
@@ -46,6 +47,38 @@ test("cross-page tool result merges by stable call id", () => {
 
   assert.equal(merged.length, 1);
   assert.equal(merged[0].result, "passed");
+});
+
+test("unmatched tool result is dropped during merge", () => {
+  const merged = mergeTranscriptItems(
+    [{ type: "tool", body: "cargo test", callId: "call-1" }],
+    [{ type: "tool_result", body: "Tool result", result: "orphaned", callId: "missing" }],
+  );
+
+  assert.equal(merged.length, 1);
+  assert.equal(merged[0].result, undefined);
+});
+
+test("unmatched tool results are omitted from local transcript parsing", () => {
+  const parsed = parseJsonlTranscript([
+    JSON.stringify({
+      type: "response_item",
+      payload: { type: "function_call_output", call_id: "missing-codex-call", output: "orphaned" },
+    }),
+    JSON.stringify({
+      type: "user",
+      message: {
+        content: [{ type: "tool_result", tool_use_id: "missing-claude-call", content: "orphaned" }],
+      },
+    }),
+    JSON.stringify({
+      type: "user",
+      toolUseID: "missing-claude-legacy-call",
+      toolUseResult: { stdout: "orphaned" },
+    }),
+  ].join("\n"));
+
+  assert.equal(parsed.items.length, 0);
 });
 
 test("transcript cache size includes large bodies and tool results", () => {

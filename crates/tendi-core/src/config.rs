@@ -1,5 +1,5 @@
 use std::{
-    env, fs,
+    fs,
     path::{Path, PathBuf},
 };
 
@@ -57,8 +57,7 @@ pub fn list_agent_configs() -> Result<Vec<AgentConfigFile>> {
 
 pub fn read_agent_config(path: &Path) -> Result<AgentConfigContent> {
     let home = dirs::home_dir().context("home directory is unavailable")?;
-    let codex_home = codex_home_for_environment(&home);
-    let config = resolve_config_for_path(&home, &codex_home, path)?;
+    let config = resolve_config_for_path(&home, path)?;
     read_config(&config)
 }
 
@@ -68,8 +67,7 @@ pub fn save_agent_config(
     content: &str,
 ) -> Result<AgentConfigContent> {
     let home = dirs::home_dir().context("home directory is unavailable")?;
-    let codex_home = codex_home_for_environment(&home);
-    let config = resolve_config_for_path(&home, &codex_home, path)?;
+    let config = resolve_config_for_path(&home, path)?;
     save_config(&config, expected_sha256, content)
 }
 
@@ -79,20 +77,17 @@ pub fn create_config_profile(
     content: &str,
 ) -> Result<AgentConfigContent> {
     let home = dirs::home_dir().context("home directory is unavailable")?;
-    let codex_home = codex_home_for_environment(&home);
-    create_profile_for_roots(agent, &home, &codex_home, name, content)
+    create_profile_for_roots(agent, &home, name, content)
 }
 
 pub fn config_profile_exists(agent: AgentKind, name: &str) -> Result<bool> {
     let home = dirs::home_dir().context("home directory is unavailable")?;
-    let codex_home = codex_home_for_environment(&home);
-    Ok(config_profile_path_for_roots(agent, &home, &codex_home, name)?.is_file())
+    Ok(config_profile_path_for_roots(agent, &home, name)?.is_file())
 }
 
 pub fn config_profile_path(agent: AgentKind, name: &str) -> Result<PathBuf> {
     let home = dirs::home_dir().context("home directory is unavailable")?;
-    let codex_home = codex_home_for_environment(&home);
-    config_profile_path_for_roots(agent, &home, &codex_home, name)
+    config_profile_path_for_roots(agent, &home, name)
 }
 
 pub fn validate_profile_name(name: &str) -> Result<()> {
@@ -108,24 +103,37 @@ pub fn validate_profile_name(name: &str) -> Result<()> {
 
 #[cfg(test)]
 fn configs_for_home(home: &Path) -> Vec<AgentConfigFile> {
-    configs_for_roots(home, &home.join(".codex"))
+    configs_for_roots(home)
 }
 
 fn configs_for_environment(home: &Path) -> Vec<AgentConfigFile> {
-    let codex_home = codex_home_for_environment(home);
-    configs_for_roots(home, &codex_home)
+    configs_for_roots(home)
 }
 
-fn codex_home_for_environment(home: &Path) -> PathBuf {
-    env::var_os("CODEX_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| home.join(".codex"))
-}
-
-fn configs_for_roots(home: &Path, codex_home: &Path) -> Vec<AgentConfigFile> {
+fn configs_for_roots(home: &Path) -> Vec<AgentConfigFile> {
     let mut configs = crate::providers::agent_providers()
         .into_iter()
-        .flat_map(|provider| provider.config_files(home, codex_home))
+        .flat_map(|provider| provider.config_files(home, &provider.config_home(home)))
+        .collect::<Vec<_>>();
+    for config in &mut configs {
+        config.updated_at = file_updated_at(&config.path);
+    }
+    configs.sort_by_key(|config| crate::providers::agent_provider(config.agent).config_order());
+    configs
+}
+
+#[cfg(test)]
+fn configs_for_roots_with_codex_home(home: &Path, codex_home: &Path) -> Vec<AgentConfigFile> {
+    let mut configs = crate::providers::agent_providers()
+        .into_iter()
+        .flat_map(|provider| {
+            let agent_home = if provider.kind() == AgentKind::Codex {
+                codex_home.to_path_buf()
+            } else {
+                provider.config_home(home)
+            };
+            provider.config_files(home, &agent_home)
+        })
         .collect::<Vec<_>>();
     for config in &mut configs {
         config.updated_at = file_updated_at(&config.path);
@@ -157,51 +165,47 @@ pub(crate) fn profile_paths_for_root(root: &Path, suffix: &str) -> Vec<PathBuf> 
         .collect()
 }
 
-pub(crate) fn cursor_profile_paths_for_root(root: &Path) -> Vec<PathBuf> {
-    let Ok(entries) = fs::read_dir(root) else {
-        return Vec::new();
-    };
-    let mut names = entries
-        .flatten()
-        .filter_map(|entry| {
-            let path = entry.path();
-            if !path.is_dir() || !path.join("cli-config.json").is_file() {
-                return None;
-            }
-            let name = entry.file_name().to_str()?.to_string();
-            validate_profile_name(&name).ok().map(|_| name)
-        })
-        .collect::<Vec<_>>();
-    names.sort();
-    names.dedup();
-    names
-        .into_iter()
-        .map(|profile| root.join(&profile).join("cli-config.json"))
-        .collect()
-}
-
-fn config_profile_path_for_roots(
-    agent: AgentKind,
-    home: &Path,
-    codex_home: &Path,
-    name: &str,
-) -> Result<PathBuf> {
+fn config_profile_path_for_roots(agent: AgentKind, home: &Path, name: &str) -> Result<PathBuf> {
     validate_profile_name(name)?;
-    crate::providers::agent_provider(agent)
-        .config_profile_path(home, codex_home, name)
+    let provider = crate::providers::agent_provider(agent);
+    let agent_home = provider.config_home(home);
+    provider
+        .config_profile_path(home, &agent_home, name)
         .ok_or_else(|| anyhow::anyhow!("config profiles are not supported for this agent"))
 }
 
-fn resolve_config_for_path(home: &Path, codex_home: &Path, path: &Path) -> Result<AgentConfigFile> {
+fn resolve_config_for_path(home: &Path, path: &Path) -> Result<AgentConfigFile> {
     crate::providers::agent_providers()
         .into_iter()
-        .find_map(|provider| provider.config_file_for_path(home, codex_home, path))
+        .find_map(|provider| {
+            let agent_home = provider.config_home(home);
+            provider.config_file_for_path(home, &agent_home, path)
+        })
+        .ok_or_else(|| anyhow::anyhow!("unsupported agent config path: {}", path.display()))
+}
+
+#[cfg(test)]
+fn resolve_config_for_roots(
+    home: &Path,
+    codex_home: &Path,
+    path: &Path,
+) -> Result<AgentConfigFile> {
+    crate::providers::agent_providers()
+        .into_iter()
+        .find_map(|provider| {
+            let agent_home = if provider.kind() == AgentKind::Codex {
+                codex_home.to_path_buf()
+            } else {
+                provider.config_home(home)
+            };
+            provider.config_file_for_path(home, &agent_home, path)
+        })
         .ok_or_else(|| anyhow::anyhow!("unsupported agent config path: {}", path.display()))
 }
 
 #[cfg(test)]
 fn read_config_from_home(home: &Path, path: &Path) -> Result<AgentConfigContent> {
-    let config = resolve_config_for_path(home, &home.join(".codex"), path)?;
+    let config = resolve_config_for_path(home, path)?;
     read_config(&config)
 }
 
@@ -232,7 +236,7 @@ fn save_config_from_home(
     expected_sha256: &str,
     content: &str,
 ) -> Result<AgentConfigContent> {
-    let config = resolve_config_for_path(home, &home.join(".codex"), path)?;
+    let config = resolve_config_for_path(home, path)?;
     save_config(&config, expected_sha256, content)
 }
 
@@ -268,14 +272,13 @@ fn save_config(
 fn create_profile_for_roots(
     agent: AgentKind,
     home: &Path,
-    codex_home: &Path,
     name: &str,
     content: &str,
 ) -> Result<AgentConfigContent> {
     let format = crate::providers::agent_provider(agent)
         .config_profile_format()
         .ok_or_else(|| anyhow::anyhow!("config profiles are not supported for this agent"))?;
-    let path = config_profile_path_for_roots(agent, home, codex_home, name)?;
+    let path = config_profile_path_for_roots(agent, home, name)?;
     validate_config(format, content)?;
     if fs::symlink_metadata(&path).is_ok() {
         bail!("config profile already exists: {name}");
@@ -360,7 +363,7 @@ mod tests {
     fn accepts_a_custom_codex_home() {
         let home = temp_home("custom-codex");
         let codex_home = home.join("custom-codex");
-        let configs = configs_for_roots(&home, &codex_home);
+        let configs = configs_for_roots_with_codex_home(&home, &codex_home);
         assert_eq!(configs[0].path, codex_home.join("config.toml"));
     }
 
@@ -390,7 +393,7 @@ mod tests {
         ];
 
         for (path, agent, label, format) in cases {
-            let config = resolve_config_for_path(&home, &codex_home, &path)
+            let config = resolve_config_for_roots(&home, &codex_home, &path)
                 .expect("supported profile path should resolve directly");
             assert_eq!(config.agent, agent);
             assert_eq!(config.label, label);
@@ -415,7 +418,7 @@ mod tests {
         fs::write(codex_home.join("not-a-profile.toml"), "model = \"two\"\n")
             .expect("write unrelated config");
 
-        let configs = configs_for_roots(&home, &codex_home);
+        let configs = configs_for_roots_with_codex_home(&home, &codex_home);
         let profile = configs
             .iter()
             .find(|config| config.profile.as_deref() == Some("deep-review"))
@@ -443,7 +446,7 @@ mod tests {
         )
         .expect("write profile");
 
-        let configs = configs_for_roots(&home, &home.join(".codex"));
+        let configs = configs_for_roots(&home);
         let profile = configs
             .iter()
             .find(|config| config.profile.as_deref() == Some("safe-mode"))
@@ -466,7 +469,7 @@ mod tests {
             .expect("create Cursor profile directory");
         fs::write(&profile_path, "{\"permissions\":{\"allow\":[]}}\n").expect("write profile");
 
-        let configs = configs_for_roots(&home, &home.join(".codex"));
+        let configs = configs_for_roots(&home);
         let profile = configs
             .iter()
             .find(|config| config.profile.as_deref() == Some("safe-mode"))
@@ -485,9 +488,8 @@ mod tests {
         let home = temp_home("create-profile");
         let codex_home = home.join(".codex");
         let content = "# profile comment\nmodel = \"one\"\n";
-        let created =
-            create_profile_for_roots(AgentKind::Codex, &home, &codex_home, "deep-review", content)
-                .expect("valid profile should be created");
+        let created = create_profile_for_roots(AgentKind::Codex, &home, "deep-review", content)
+            .expect("valid profile should be created");
         assert_eq!(created.content, content);
         assert_eq!(
             fs::read_to_string(codex_home.join("deep-review.config.toml"))
@@ -495,7 +497,7 @@ mod tests {
             content
         );
         assert!(
-            create_profile_for_roots(AgentKind::Codex, &home, &codex_home, "deep-review", content,)
+            create_profile_for_roots(AgentKind::Codex, &home, "deep-review", content,)
                 .expect_err("duplicate profile should fail")
                 .to_string()
                 .contains("already exists")
@@ -507,14 +509,8 @@ mod tests {
     fn creates_claude_profile_as_json() {
         let home = temp_home("create-claude-profile");
         let content = "{\"permissions\":{\"defaultMode\":\"plan\"}}\n";
-        let created = create_profile_for_roots(
-            AgentKind::Claude,
-            &home,
-            &home.join(".codex"),
-            "safe-mode",
-            content,
-        )
-        .expect("valid Claude profile should be created");
+        let created = create_profile_for_roots(AgentKind::Claude, &home, "safe-mode", content)
+            .expect("valid Claude profile should be created");
         assert_eq!(
             created.path,
             home.join(".claude/tendi-profiles/safe-mode.settings.json")
@@ -530,14 +526,8 @@ mod tests {
     fn creates_cursor_profile_as_json() {
         let home = temp_home("create-cursor-profile");
         let content = "{\"permissions\":{\"allow\":[]}}\n";
-        let created = create_profile_for_roots(
-            AgentKind::Cursor,
-            &home,
-            &home.join(".codex"),
-            "safe-mode",
-            content,
-        )
-        .expect("valid Cursor profile should be created");
+        let created = create_profile_for_roots(AgentKind::Cursor, &home, "safe-mode", content)
+            .expect("valid Cursor profile should be created");
         assert_eq!(
             created.path,
             home.join(".cursor/tendi-profiles/safe-mode/cli-config.json")

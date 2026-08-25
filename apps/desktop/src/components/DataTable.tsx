@@ -79,6 +79,13 @@ const DATA_TABLE_VIRTUAL_OVERSCAN = 4;
 const DATA_TABLE_GROUP_HEADER_HEIGHT = 34;
 const DATA_TABLE_GROUP_GAP = 18;
 const DATA_TABLE_INTERACTIVE_SELECTOR = "button, a, input, textarea, select, [role='button'], [role='menuitem'], [role='menuitemcheckbox'], [role='menuitemradio'], [data-no-row-click]";
+const DATA_TABLE_MARQUEE_BLOCK_SELECTOR = [
+  DATA_TABLE_INTERACTIVE_SELECTOR,
+  ".visibility",
+  ".sectionHeader",
+  "[data-no-drag]",
+  "[data-selectable-text]",
+].join(", ");
 
 function columnDisplayValue<TRow>(column: ColumnDef<TRow>, row: TRow): ReactNode {
   const raw = column.value ? column.value(row) : row[column.key as keyof TRow];
@@ -300,8 +307,12 @@ export function DataTable<TRow extends Record<string, unknown>>({
 
   useEffect(() => {
     if (groupingControlled) return;
-    setInternalGrouping(defaultGroupingKey ? [defaultGroupingKey] : []);
-  }, [defaultGroupingKey, groupingControlled]);
+    setInternalGrouping((current) => {
+      const currentKey = current[0];
+      if (currentKey && columns.some((column) => column.key === currentKey)) return current;
+      return defaultGroupingKey ? [defaultGroupingKey] : [];
+    });
+  }, [columns, defaultGroupingKey, groupingControlled]);
 
   const [internalSelected, setInternalSelected] = useState<string[]>([]);
   const selected = selectedIds ?? internalSelected;
@@ -566,7 +577,7 @@ export function DataTable<TRow extends Record<string, unknown>>({
       if (!enableMarquee || event.button !== 0) return;
       const target = event.target;
       if (!(target instanceof Element)) return;
-      if (target.closest(".selectionCheckbox, .visibility, .appButton-icon, .sectionHeader, input, textarea, select, a, [data-no-drag], [data-selectable-text]")) return;
+      if (target.closest(DATA_TABLE_MARQUEE_BLOCK_SELECTOR)) return;
       const scroll = scrollRef.current;
       if (!scroll) return;
       event.preventDefault();
@@ -747,7 +758,7 @@ export function DataTable<TRow extends Record<string, unknown>>({
       >
         <ContextMenu.Trigger asChild>{segment}</ContextMenu.Trigger>
         <ContextMenu.Portal>
-          <ContextMenu.Content className="skillMenuContent" alignOffset={6}>
+          <ContextMenu.Content className="skillMenuContent" alignOffset={6} data-no-drag>
             {contextMenuContent}
           </ContextMenu.Content>
         </ContextMenu.Portal>

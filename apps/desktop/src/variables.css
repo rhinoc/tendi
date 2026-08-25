@@ -243,14 +243,8 @@
   --control-fill: oklch(0.411 0.012 51.866 / 0.07);
   --control-border: oklch(0.411 0.012 51.866 / 0.18);
 
-  --shadow-border:
-    0px 0px 0px 1px oklch(0 0 0 / 0.06),
-    0px 1px 2px -1px oklch(0 0 0 / 0.06),
-    0px 2px 4px 0px oklch(0 0 0 / 0.04);
-  --shadow-border-hover:
-    0px 0px 0px 1px oklch(0 0 0 / 0.08),
-    0px 1px 2px -1px oklch(0 0 0 / 0.08),
-    0px 2px 4px 0px oklch(0 0 0 / 0.06);
+  --shadow-border: 0 0 0 1px oklch(0 0 0 / 0.06);
+  --shadow-border-hover: 0 0 0 1px oklch(0 0 0 / 0.08);
   --shadow-elevated:
     0 0 0 1px oklch(0.277 0 0 / 0.08),
     0 18px 48px oklch(0.277 0 0 / 0.16);
@@ -503,10 +497,10 @@
   --shadow-border-hover: 0 0 0 1px oklch(1 0 0 / 0.13);
   --shadow-elevated:
     0 0 0 1px oklch(0.894 0.057 89.24 / 0.1),
-    0 20px 52px oklch(0 0 0 / 0.52);
+    0 18px 48px oklch(0 0 0 / 0.52);
   --shadow-menu:
     0 0 0 1px oklch(0.894 0.057 89.24 / 0.1),
-    0 14px 38px oklch(0 0 0 / 0.48);
+    0 12px 36px oklch(0 0 0 / 0.48);
 
   --row-frame-line: oklch(0.894 0.057 89.24 / 0.1);
   --row-frame-bg: oklch(0.894 0.057 89.24 / 0.05);

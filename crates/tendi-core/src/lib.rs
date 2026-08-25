@@ -8,6 +8,7 @@ mod git;
 pub mod hooks;
 pub mod logging;
 pub mod mcp;
+pub mod projects;
 mod providers;
 pub mod rules;
 pub mod session_skills;
@@ -30,8 +31,9 @@ pub use agents::{AgentRecord, AgentScan};
 pub use hooks::{HookRecord, HookScan};
 pub use mcp::{McpScan, McpServerRecord};
 pub use providers::{
-    SessionCommand, SessionResumePlan, apply_session_config_profile, config_profile_key,
-    parse_agent, plan_session_resume,
+    SessionCommand, SessionResumePlan, SessionWriter, accepts_session_app_url,
+    active_session_writer, apply_session_config_profile, config_profile_key, parse_agent,
+    plan_session_resume, session_root_priority, terminate_session_writer,
 };
 pub use rules::{RuleRecord, RuleScan};
 pub use sessions::{SessionRecord, SessionScan};

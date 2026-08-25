@@ -146,7 +146,7 @@ struct AnalyticsRefreshJob {
 struct SessionWatcherState {
     watcher: Option<RecommendedWatcher>,
     watched_paths: BTreeSet<PathBuf>,
-    tutti_run_roots: Vec<PathBuf>,
+    dynamic_roots: Vec<PathBuf>,
 }
 
 #[derive(Debug)]
@@ -423,6 +423,11 @@ impl Daemon {
             "skill_session_links" => self.skill_session_links(args),
             "settings_get" => self.settings_get(),
             "settings_save" => self.settings_save(args),
+            "session_projects_list" => self.session_projects_list(),
+            "project_scan_scopes_list" => self.project_scan_scopes_list(),
+            "project_scan_scopes_save" => self.project_scan_scopes_save(args),
+            "projects_list" => self.projects_list(),
+            "projects_scan" => self.projects_scan(),
             "terminal_apps_list" => self.terminal_apps_list(),
             "agent_configs_list" => self.agent_configs_list(),
             "agent_config_watch" => self.agent_config_watch(args),
@@ -508,6 +513,16 @@ impl Daemon {
         )))
     }
 
+    fn registered_project_roots(
+        store: &tendi_core::storage::Store,
+    ) -> anyhow::Result<Vec<PathBuf>> {
+        Ok(store
+            .list_projects()?
+            .into_iter()
+            .map(|project| project.root_path)
+            .collect())
+    }
+
     fn agents_list(&self) -> Result<Value, DaemonError> {
         let cwd = self.state.cwd.clone();
         let report = self.ensure_projection(
@@ -584,7 +599,13 @@ impl Daemon {
                         }
                     }
                     "skills" => {
-                        let scan = tendi_core::skills::scan_skills_synced(cwd)?;
+                        let project_roots = Self::registered_project_roots(store)?;
+                        let scan =
+                            tendi_core::skills::scan_skills_synced_for_project_roots_with_store(
+                                cwd,
+                                store,
+                                &project_roots,
+                            )?;
                         store.save_skills_for_workspace(cwd, &scan)?;
                         let skills = scan.skills.iter().filter(|skill| {
                             agent.is_none_or(|expected| skill.agents.contains(&expected))
@@ -599,7 +620,9 @@ impl Daemon {
                         count
                     }
                     "rules" => {
-                        let scan = tendi_core::rules::scan_rules(cwd)?;
+                        let project_roots = Self::registered_project_roots(store)?;
+                        let scan =
+                            tendi_core::rules::scan_rules_for_project_roots(cwd, &project_roots)?;
                         store.save_rules_for_workspace(cwd, &scan)?;
                         tendi_core::storage::ProjectionCount {
                             rows: scan
@@ -635,7 +658,9 @@ impl Daemon {
                         count
                     }
                     "mcp" => {
-                        let scan = tendi_core::mcp::scan_mcp(cwd)?;
+                        let project_roots = Self::registered_project_roots(store)?;
+                        let scan =
+                            tendi_core::mcp::scan_mcp_for_project_roots(cwd, &project_roots)?;
                         store.save_mcp_for_workspace(cwd, &scan)?;
                         tendi_core::storage::ProjectionCount {
                             rows: scan
@@ -936,6 +961,47 @@ impl Daemon {
             .map_err(internal_error)
     }
 
+    fn session_projects_list(&self) -> Result<Value, DaemonError> {
+        let store = tendi_core::storage::Store::open_default().map_err(core_error)?;
+        serde_json::to_value(store.list_session_projects().map_err(core_error)?)
+            .map_err(internal_error)
+    }
+
+    fn project_scan_scopes_list(&self) -> Result<Value, DaemonError> {
+        let store = tendi_core::storage::Store::open_default().map_err(core_error)?;
+        serde_json::to_value(store.project_scan_scopes().map_err(core_error)?)
+            .map_err(internal_error)
+    }
+
+    fn project_scan_scopes_save(&self, args: &Value) -> Result<Value, DaemonError> {
+        let paths = string_vec_arg(args, "paths")?;
+        let _authority = self.control_authority()?;
+        let store = tendi_core::storage::Store::open_default().map_err(core_error)?;
+        serde_json::to_value(store.save_project_scan_scopes(paths).map_err(core_error)?)
+            .map_err(internal_error)
+    }
+
+    fn projects_list(&self) -> Result<Value, DaemonError> {
+        let store = tendi_core::storage::Store::open_default().map_err(core_error)?;
+        serde_json::to_value(store.list_projects().map_err(core_error)?).map_err(internal_error)
+    }
+
+    fn projects_scan(&self) -> Result<Value, DaemonError> {
+        let _authority = self.control_authority()?;
+        let store = tendi_core::storage::Store::open_default().map_err(core_error)?;
+        let result = store.scan_projects().map_err(core_error)?;
+        store
+            .invalidate_projection("skills", &self.state.cwd)
+            .map_err(core_error)?;
+        store
+            .invalidate_projection("rules", &self.state.cwd)
+            .map_err(core_error)?;
+        store
+            .invalidate_projection("mcp", &self.state.cwd)
+            .map_err(core_error)?;
+        serde_json::to_value(result).map_err(internal_error)
+    }
+
     fn agent_configs_list(&self) -> Result<Value, DaemonError> {
         serde_json::to_value(tendi_core::config::list_agent_configs().map_err(core_error)?)
             .map_err(internal_error)
@@ -1022,7 +1088,8 @@ impl Daemon {
             "rules",
             |store| store.list_rules_for_workspace(&cwd),
             |store| {
-                let report = tendi_core::rules::scan_rules(&cwd)?;
+                let project_roots = Self::registered_project_roots(store)?;
+                let report = tendi_core::rules::scan_rules_for_project_roots(&cwd, &project_roots)?;
                 store.save_rules_for_workspace(&cwd, &report)?;
                 Ok(report)
             },
@@ -1032,9 +1099,15 @@ impl Daemon {
 
     fn rule_file_read(&self, args: &Value) -> Result<Value, DaemonError> {
         let path = string_arg(args, "path")?;
+        let store = tendi_core::storage::Store::open_default().map_err(core_error)?;
+        let project_roots = Self::registered_project_roots(&store).map_err(core_error)?;
         serde_json::to_value(
-            tendi_core::rules::read_rule_file(&self.state.cwd, Path::new(&path))
-                .map_err(core_error)?,
+            tendi_core::rules::read_rule_file_for_project_roots(
+                &self.state.cwd,
+                Path::new(&path),
+                &project_roots,
+            )
+            .map_err(core_error)?,
         )
         .map_err(internal_error)
     }
@@ -1044,18 +1117,25 @@ impl Daemon {
         let expected = string_arg(args, "expectedSha256")?;
         let content = string_arg_allow_empty(args, "content")?;
         let _authority = self.control_authority()?;
-        let result = tendi_core::rules::save_rule_file(
+        let store = tendi_core::storage::Store::open_default().map_err(core_error)?;
+        let project_roots = Self::registered_project_roots(&store).map_err(core_error)?;
+        let result = tendi_core::rules::save_rule_file_for_project_roots(
             &self.state.cwd,
             Path::new(&path),
             &expected,
             &content,
+            &project_roots,
         )
         .map_err(core_error)?;
         self.ensure_projection(
             "rules",
             |_| Ok(None),
             |store| {
-                let scan = tendi_core::rules::scan_rules(&self.state.cwd)?;
+                let project_roots = Self::registered_project_roots(store)?;
+                let scan = tendi_core::rules::scan_rules_for_project_roots(
+                    &self.state.cwd,
+                    &project_roots,
+                )?;
                 store.save_rules_for_workspace(&self.state.cwd, &scan)?;
                 Ok(())
             },
@@ -1151,7 +1231,8 @@ impl Daemon {
             "mcp",
             |store| store.list_mcp_for_workspace(&cwd),
             |store| {
-                let report = tendi_core::mcp::scan_mcp(&cwd)?;
+                let project_roots = Self::registered_project_roots(store)?;
+                let report = tendi_core::mcp::scan_mcp_for_project_roots(&cwd, &project_roots)?;
                 store.save_mcp_for_workspace(&cwd, &report)?;
                 Ok(report)
             },
@@ -1283,7 +1364,7 @@ impl Daemon {
             .map_err(|_| internal_error("session watcher is unavailable"))? = SessionWatcherState {
             watcher: Some(watcher),
             watched_paths,
-            tutti_run_roots: plan.tutti_run_roots.clone(),
+            dynamic_roots: plan.dynamic_roots.clone(),
         };
         Ok(())
     }
@@ -1358,7 +1439,12 @@ impl Daemon {
             "skills",
             |store| store.list_skills_for_workspace(&cwd),
             |store| {
-                let scan = tendi_core::skills::scan_skills_synced(&cwd)?;
+                let project_roots = Self::registered_project_roots(store)?;
+                let scan = tendi_core::skills::scan_skills_synced_for_project_roots_with_store(
+                    &cwd,
+                    store,
+                    &project_roots,
+                )?;
                 store.save_skills_for_workspace(&cwd, &scan)?;
                 Ok(scan)
             },
@@ -2132,7 +2218,12 @@ impl Daemon {
             "skills",
             |store| store.list_skills_for_workspace(&cwd),
             |store| {
-                let scan = tendi_core::skills::scan_skills_synced(&cwd)?;
+                let project_roots = Self::registered_project_roots(store)?;
+                let scan = tendi_core::skills::scan_skills_synced_for_project_roots_with_store(
+                    &cwd,
+                    store,
+                    &project_roots,
+                )?;
                 store.save_skills_for_workspace(&cwd, &scan)?;
                 Ok(scan)
             },
@@ -2148,7 +2239,12 @@ impl Daemon {
             "skills",
             |store| store.list_skills_for_names_if_current(&cwd, names),
             |store| {
-                let scan = tendi_core::skills::scan_skills_synced(&cwd)?;
+                let project_roots = Self::registered_project_roots(store)?;
+                let scan = tendi_core::skills::scan_skills_synced_for_project_roots_with_store(
+                    &cwd,
+                    store,
+                    &project_roots,
+                )?;
                 store.save_skills_for_workspace(&cwd, &scan)?;
                 Ok(scan)
             },
@@ -2191,8 +2287,14 @@ impl Daemon {
     }
 
     fn scan_and_persist(&self) -> Result<tendi_core::skills::SkillScan, DaemonError> {
-        let scan = tendi_core::skills::scan_skills_synced(&self.state.cwd).map_err(core_error)?;
         let store = tendi_core::storage::Store::open_default().map_err(core_error)?;
+        let project_roots = Self::registered_project_roots(&store).map_err(core_error)?;
+        let scan = tendi_core::skills::scan_skills_synced_for_project_roots_with_store(
+            &self.state.cwd,
+            &store,
+            &project_roots,
+        )
+        .map_err(core_error)?;
         store
             .save_skills_for_workspace(&self.state.cwd, &scan)
             .map_err(core_error)?;
@@ -2317,20 +2419,7 @@ fn session_scan_is_current(
 }
 
 fn session_root_priority(root: &Path) -> u8 {
-    let path = root.to_string_lossy();
-    if path.contains("/.codex/sessions") {
-        0
-    } else if path.contains("/.cursor/") {
-        1
-    } else if path.contains("/.claude/") {
-        2
-    } else if path.contains("/.codex/archived_sessions")
-        || path.ends_with("/.codex/session_index.jsonl")
-    {
-        4
-    } else {
-        3
-    }
+    tendi_core::session_root_priority(root)
 }
 
 fn run_session_scan(
@@ -2497,7 +2586,7 @@ fn session_watch_loop(daemon: Daemon, receiver: Receiver<notify::Result<Event>>)
             Ok(Ok(event)) => {
                 let mut relevant = false;
                 for path in event.paths {
-                    if let Some(session_root) = advance_tutti_session_watcher(&runtime, &path) {
+                    if let Some(session_root) = advance_session_watcher(&runtime, &path) {
                         relevant = true;
                         pending.extend(tendi_core::sessions::recent_session_paths_in_root(
                             &session_root,
@@ -2650,35 +2739,24 @@ fn process_session_watch_paths(daemon: &Daemon, paths: &[PathBuf]) {
     }
 }
 
-fn advance_tutti_session_watcher(
-    runtime: &Arc<SessionRuntime>,
-    event_path: &Path,
-) -> Option<PathBuf> {
+fn advance_session_watcher(runtime: &Arc<SessionRuntime>, event_path: &Path) -> Option<PathBuf> {
     let mut state = runtime.watcher.lock().ok()?;
-    let run_root = state
-        .tutti_run_roots
-        .iter()
-        .find(|root| event_path.starts_with(root))?
-        .clone();
-    let run_name = event_path
-        .strip_prefix(&run_root)
-        .ok()?
-        .components()
-        .next()?;
-    let run_dir = run_root.join(run_name);
+    let expansion =
+        tendi_core::sessions::session_watch_expansion(&state.dynamic_roots, event_path)?;
+    let run_dir = expansion.run_dir;
     if !run_dir.is_dir() {
         return None;
     }
-    let codex_home = run_dir.join("codex-home");
-    let session_root = codex_home.join("sessions");
+    let agent_home = expansion.agent_home;
+    let session_root = expansion.session_root;
     if session_root.is_dir() {
         let newly_watched = watch_session_path(&mut state, &session_root, true);
         unwatch_session_path(&mut state, &run_dir);
-        unwatch_session_path(&mut state, &codex_home);
+        unwatch_session_path(&mut state, &agent_home);
         return newly_watched.then_some(session_root);
     }
-    if codex_home.is_dir() {
-        watch_session_path(&mut state, &codex_home, false);
+    if agent_home.is_dir() {
+        watch_session_path(&mut state, &agent_home, false);
         unwatch_session_path(&mut state, &run_dir);
     } else {
         watch_session_path(&mut state, &run_dir, false);
@@ -3292,11 +3370,13 @@ mod tests {
 
         assert_eq!(response["ok"], true);
         assert!(!skill_dir.exists());
-        assert!(response["result"]["skills"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .all(|skill| skill["name"] != "demo"));
+        assert!(
+            response["result"]["skills"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|skill| skill["name"] != "demo")
+        );
         let _ = fs::remove_dir_all(root);
     }
 
@@ -3457,9 +3537,11 @@ mod tests {
             "args": { "names": ["demo"], "visibility": "manual" }
         }));
         assert_eq!(visibility["ok"], true);
-        assert!(fs::read_to_string(skill_dir.join("SKILL.md"))
-            .unwrap()
-            .contains("disable-model-invocation: true"));
+        assert!(
+            fs::read_to_string(skill_dir.join("SKILL.md"))
+                .unwrap()
+                .contains("visibility: manual")
+        );
 
         let folder = daemon.handle_json(json!({
             "command": "skill_folder_create",

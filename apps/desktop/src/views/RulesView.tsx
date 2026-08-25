@@ -23,7 +23,7 @@ import { RowActionsMenu } from "../components/shared/RowActionsMenu.tsx";
 import { SearchField } from "../components/shared/SearchField.tsx";
 import type { SkillDependencyRecord } from "../features/skills/SkillDependencyGraph.tsx";
 import { ruleColumns as sharedRuleColumns } from "../lib/tableColumns.tsx";
-import { RULE_FREEZE_COLUMN, TauriCommand, diffPreview, formatUserPath, friendlyAgent, ruleAgents, ruleKey, ruleSearchText, ruleSortValue, ruleTitle, safeInvoke, suppressNextClick } from "../lib/index.ts";
+import { RULE_FREEZE_COLUMN, TauriCommand, diffPreview, formatUserPath, friendlyAgent, ruleAgents, ruleKey, ruleSearchText, ruleSortValue, ruleTitle, safeInvoke, scopeColumn, suppressNextClick, type ProjectSummary } from "../lib/index.ts";
 
 const MarkdownFilePane = lazy(() => import("../components/shared/MarkdownFilePane.tsx").then(({ MarkdownFilePane: component }) => ({ default: component })));
 
@@ -176,6 +176,7 @@ export function RulesView({
   hasRows = false,
   onRetry,
   onOpenSkill,
+  projects,
 }: {
   rows: RuleRecord[];
   skills?: SkillDependencyRecord[];
@@ -184,7 +185,9 @@ export function RulesView({
   hasRows?: boolean;
   onRetry?: () => void;
   onOpenSkill?: (name: string) => void;
+  projects?: ProjectSummary[];
 }) {
+  const projectList = projects ?? [];
   const ruleItems = useMemo(() => rows.map((rule, index) => ({ key: ruleKey(rule, index), rule })), [rows]);
   const [activeKey, setActiveKey] = useState(ruleItems[0]?.key ?? "");
   const [selected, setSelected] = useState<string[]>([]);
@@ -246,7 +249,7 @@ export function RulesView({
       },
     },
     ...sharedRuleColumns
-      .filter((column) => column.key !== "source")
+      .filter((column) => column.key !== "source" && column.key !== "scope")
       .map((column): ColumnDef<RuleTableRow> => {
         const next: ColumnDef<RuleTableRow> = {
           key: column.key,
@@ -274,13 +277,14 @@ export function RulesView({
         }
         return next;
       }),
+    ...(projectList.length > 0 ? [scopeColumn<RuleTableRow>(projectList, (row) => ruleSourcePath(row.rule))] : []),
     {
       key: "actions",
       header: "",
       width: "40px",
       render: (row) => <RuleActionsCell rule={row.rule} />,
     },
-  ], []);
+  ], [projectList]);
   const rowContextMenu = useCallback((row: RuleTableRow, { selectedRows, selected: isSelected }: { selectedRows: RuleTableRow[]; selected: boolean }) => {
     if (isSelected && selectedRows.length > 1) return null;
     return <RuleActionsMenuItems Menu={ContextMenu} rule={row.rule} />;

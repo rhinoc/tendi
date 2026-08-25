@@ -28,12 +28,6 @@ export const navItems: NavItem[] = [
   { id: "settings", label: "Settings", icon: Settings },
 ];
 
-export const fallbackAgents = [
-  { label: "Codex", count: 1 },
-  { label: "Cursor", count: 1 },
-  { label: "Claude", count: 1 },
-];
-
 export const SIDEBAR_SIZE = "200px";
 /** Aligns traffic-light top/left inset with expanded sidebar tab icons (`.nav` 10px + `.navItem` 10px). */
 export const TRAFFIC_LIGHT_INSET = 20;
@@ -45,6 +39,8 @@ export const COLLAPSED_SIDEBAR_SIZE = `${TRAFFIC_LIGHT_INSET * 2 + TRAFFIC_LIGHT
 export type FreezeColumnConfig = { defaultWidth: number; min: number; max: number };
 
 export const SESSION_FREEZE_COLUMN: FreezeColumnConfig = { defaultWidth: 360, min: 220, max: 560 };
+
+export const SKILL_FREEZE_COLUMN: FreezeColumnConfig = { defaultWidth: 320, min: 250, max: 520 };
 
 export const RULE_FREEZE_COLUMN: FreezeColumnConfig = { defaultWidth: 292, min: 220, max: 520 };
 

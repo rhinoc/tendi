@@ -45,6 +45,30 @@
   user-select: text;
 }
 
+.appToastAction {
+  min-height: 24px;
+  flex: 0 0 auto;
+  padding: 3px 8px;
+  border: 1px solid color-mix(in oklch, currentColor 35%, transparent);
+  border-radius: var(--radius-sm);
+  color: inherit;
+  background: color-mix(in oklch, currentColor 12%, transparent);
+  font: inherit;
+  font-size: var(--text-sm);
+  line-height: var(--leading-ui);
+  font-weight: 650;
+  cursor: pointer;
+}
+
+.appToastAction:hover {
+  background: color-mix(in oklch, currentColor 20%, transparent);
+}
+
+.appToastAction:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
 .appToastDismiss {
   width: 22px;
   height: 22px;

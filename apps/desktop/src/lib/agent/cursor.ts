@@ -6,6 +6,7 @@ export const cursorAgent: AgentDefinition = {
   id: "cursor",
   aliases: ["cursor"],
   displayName: "Cursor",
+  trendClass: "agentCursor",
   icon: cursorIcon,
   transcriptFormat: "generic",
 };

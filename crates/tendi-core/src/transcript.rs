@@ -628,19 +628,24 @@ fn parse_transcript_page_with_snapshot(
         if is_inherited_transcript_value(&value, inherited_history_start_ordinal) {
             continue;
         }
-        let mut parsed_items = Vec::new();
-        collect_transcript_value(&value, agent, &mut parsed_items);
-        if let Some(locator_builder) = locator_builder.as_mut() {
-            for item in &parsed_items {
-                locator_builder.push(item);
-            }
-        }
         if !page_complete {
-            items.extend(parsed_items);
+            let item_start = items.len();
+            collect_transcript_value(&value, agent, &mut items);
+            if let Some(locator_builder) = locator_builder.as_mut() {
+                for item in &items[item_start..] {
+                    locator_builder.push(item);
+                }
+            }
             if items.len() >= limit {
                 page_complete = true;
                 page_offset = Some(reader.stream_position()?);
                 page_line = Some(line_number);
+            }
+        } else if let Some(locator_builder) = locator_builder.as_mut() {
+            let mut parsed_items = Vec::new();
+            collect_transcript_value(&value, agent, &mut parsed_items);
+            for item in &parsed_items {
+                locator_builder.push(item);
             }
         }
     }
@@ -887,9 +892,11 @@ fn for_each_transcript_item<F>(path: &Path, agent: AgentKind, mut visit: F) -> R
 where
     F: FnMut(TranscriptItem),
 {
-    let file = fs::File::open(path).with_context(|| format!("failed to read {}", path.display()))?;
+    let file =
+        fs::File::open(path).with_context(|| format!("failed to read {}", path.display()))?;
     let inherited_history_start_ordinal = transcript_inherited_history_start_ordinal(path, agent)?;
     let mut warnings = Vec::new();
+    let mut items = Vec::new();
 
     for (index, line) in BufReader::new(file).lines().enumerate() {
         let line = match line {
@@ -912,11 +919,12 @@ where
         if is_inherited_transcript_value(&value, inherited_history_start_ordinal) {
             continue;
         }
-        let mut items = Vec::new();
+        let item_start = items.len();
         collect_transcript_value(&value, agent, &mut items);
-        for item in items {
+        for item in items[item_start..].iter().cloned() {
             visit(item);
         }
+        items.retain(|item| item.kind == "tool" && item.result.is_none());
     }
 
     Ok(warnings)
@@ -1656,11 +1664,23 @@ pub(crate) fn extract_raw_content_text(value: Option<&Value>) -> Option<String> 
     (!text.trim().is_empty()).then(|| text.trim().to_string())
 }
 
+pub(crate) type InternalContextMarker = (&'static str, &'static str, Option<&'static str>);
+
 pub(crate) fn collect_message_content(
     content: Option<&Value>,
     items: &mut Vec<TranscriptItem>,
     role: &str,
     time: Option<String>,
+) {
+    collect_message_content_with_markers(content, items, role, time, &[]);
+}
+
+pub(crate) fn collect_message_content_with_markers(
+    content: Option<&Value>,
+    items: &mut Vec<TranscriptItem>,
+    role: &str,
+    time: Option<String>,
+    extra_markers: &[InternalContextMarker],
 ) {
     let Some(content) = content else {
         return;
@@ -1678,7 +1698,9 @@ pub(crate) fn collect_message_content(
         let Some(raw_body) = extract_raw_content_text(Some(content_item)) else {
             continue;
         };
-        for (label, segment) in split_internal_context_segments(&raw_body) {
+        for (label, segment) in
+            split_internal_context_segments_with_markers(&raw_body, extra_markers)
+        {
             if let Some(label) = label {
                 push_message_body(&mut pending_body, items, role, time.clone());
                 push_item(
@@ -1786,9 +1808,18 @@ pub(crate) fn clean_body(text: &str) -> Option<String> {
 }
 
 pub(crate) fn split_internal_context_segments(text: &str) -> Vec<(Option<&'static str>, String)> {
+    split_internal_context_segments_with_markers(text, &[])
+}
+
+pub(crate) fn split_internal_context_segments_with_markers(
+    text: &str,
+    extra_markers: &[InternalContextMarker],
+) -> Vec<(Option<&'static str>, String)> {
     let mut segments = Vec::new();
     let mut cursor = 0;
-    while let Some((start, label, prefix, closing)) = find_internal_context_marker(text, cursor) {
+    while let Some((start, label, prefix, closing)) =
+        find_internal_context_marker(text, cursor, extra_markers)
+    {
         if start > cursor {
             segments.push((None, text[cursor..start].to_string()));
         }
@@ -1799,7 +1830,7 @@ pub(crate) fn split_internal_context_segments(text: &str) -> Vec<(Option<&'stati
                     .map(|offset| start + offset + closing.len())
             })
             .or_else(|| {
-                find_internal_context_marker(text, start + prefix.len())
+                find_internal_context_marker(text, start + prefix.len(), extra_markers)
                     .map(|(next_start, _, _, _)| next_start)
             })
             .unwrap_or(text.len());
@@ -1839,15 +1870,18 @@ fn extract_tag_body<'a>(text: &'a str, tag: &str) -> Option<&'a str> {
 fn find_internal_context_marker(
     text: &str,
     offset: usize,
+    extra_markers: &[InternalContextMarker],
 ) -> Option<(usize, &'static str, &'static str, Option<&'static str>)> {
     INTERNAL_CONTEXT_MARKERS
         .iter()
+        .copied()
+        .chain(extra_markers.iter().copied())
         .filter_map(|(prefix, label, closing)| {
             let mut search_from = offset;
             while let Some(relative_start) = text[search_from..].find(prefix) {
                 let start = search_from + relative_start;
                 if start == 0 || text.as_bytes().get(start.wrapping_sub(1)) == Some(&b'\n') {
-                    return Some((start, *label, *prefix, *closing));
+                    return Some((start, label, prefix, closing));
                 }
                 search_from = start + prefix.len();
             }
@@ -1856,16 +1890,11 @@ fn find_internal_context_marker(
         .min_by_key(|(start, _, _, _)| *start)
 }
 
-const INTERNAL_CONTEXT_MARKERS: [(&str, &str, Option<&str>); 19] = [
+const INTERNAL_CONTEXT_MARKERS: [(&str, &str, Option<&str>); 18] = [
     (
         "# AGENTS.md instructions",
         "AGENTS.md",
         Some("</INSTRUCTIONS>"),
-    ),
-    (
-        "<codex_internal_context",
-        "Codex internal",
-        Some("</codex_internal_context>"),
     ),
     (
         "<recommended_plugins>",
@@ -2191,11 +2220,10 @@ mod tests {
     use super::{
         TranscriptSearchScopes, append_cursor_model_configs_from_store, collect_claude_item,
         collect_codex_item, collect_generic_item, parse_search_transcript, parse_transcript,
-        parse_transcript_page, parse_transcript_page_at_snapshot, parse_transcript_page_if_changed,
-        parse_transcript_locator_page, parse_transcript_page_with_cursor_store, search_transcript,
-        summarize_tool_call,
-        transcript_chunk_cache_hits, transcript_chunk_cache_offsets,
-        transcript_search_cache_offsets, transcript_source_version,
+        parse_transcript_locator_page, parse_transcript_page, parse_transcript_page_at_snapshot,
+        parse_transcript_page_if_changed, parse_transcript_page_with_cursor_store,
+        search_transcript, summarize_tool_call, transcript_chunk_cache_hits,
+        transcript_chunk_cache_offsets, transcript_search_cache_offsets, transcript_source_version,
     };
 
     fn temp_path(prefix: &str) -> PathBuf {
@@ -2284,11 +2312,8 @@ mod tests {
             parse_transcript_page(&path, crate::skills::AgentKind::Codex, None, Some(2)).unwrap();
         assert_eq!(first.items.len(), 2);
         assert!(first.locator_items.is_empty());
-        let locator = parse_transcript_locator_page(
-            &path,
-            crate::skills::AgentKind::Codex,
-        )
-        .unwrap();
+        let locator =
+            parse_transcript_locator_page(&path, crate::skills::AgentKind::Codex).unwrap();
         assert_eq!(locator.locator_items.len(), 3);
         assert_eq!(locator.locator_items[0].index, 0);
         assert_eq!(locator.locator_items[0].label, "one");
@@ -2323,6 +2348,53 @@ mod tests {
             ["one", "two", "three", "four", "five"],
         );
 
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn transcript_locator_keeps_tool_result_with_tool_group() {
+        let path = temp_path("tendi-transcript-locator-tool-test.jsonl");
+        let call = json!({
+            "type": "response_item",
+            "payload": {
+                "type": "function_call",
+                "call_id": "call_locator",
+                "name": "exec_command",
+                "arguments": "{\"cmd\":\"cargo test\"}"
+            }
+        });
+        let output = json!({
+            "type": "response_item",
+            "payload": {
+                "type": "function_call_output",
+                "call_id": "call_locator",
+                "output": "passed"
+            }
+        });
+        fs::write(
+            &path,
+            [
+                codex_message("user", "one"),
+                call.to_string(),
+                output.to_string(),
+                codex_message("assistant", "two"),
+                codex_message("user", "three"),
+                codex_message("assistant", "four"),
+            ]
+            .join("\n"),
+        )
+        .unwrap();
+
+        let locator =
+            parse_transcript_locator_page(&path, crate::skills::AgentKind::Codex).unwrap();
+
+        assert_eq!(locator.locator_items.len(), 2);
+        assert_eq!(locator.locator_items[0].index, 0);
+        assert_eq!(locator.locator_items[0].label, "one");
+        assert_eq!(locator.locator_items[0].response, "two");
+        assert_eq!(locator.locator_items[1].index, 3);
+        assert_eq!(locator.locator_items[1].label, "three");
+        assert_eq!(locator.locator_items[1].response, "four");
         fs::remove_file(path).unwrap();
     }
 
@@ -2485,7 +2557,7 @@ mod tests {
     }
 
     #[test]
-    fn transcript_page_preserves_cross_boundary_tool_result_identity() {
+    fn transcript_page_drops_unmatched_cross_boundary_tool_result() {
         let path = temp_path("tendi-transcript-page-cross-tool-test.jsonl");
         let call = json!({
             "type": "response_item",
@@ -2518,7 +2590,7 @@ mod tests {
         assert!(first.items[0].result.is_none());
         assert!(!first.done);
         let mut cursor = first.next_cursor;
-        let result_page = loop {
+        loop {
             let page = parse_transcript_page(
                 &path,
                 crate::skills::AgentKind::Codex,
@@ -2526,21 +2598,13 @@ mod tests {
                 Some(1),
             )
             .unwrap();
-            if !page.items.is_empty() {
-                break page;
+            assert!(page.items.iter().all(|item| item.kind != "tool_result"));
+            if page.done {
+                break;
             }
-            assert!(!page.done);
             cursor = page.next_cursor;
-        };
-        assert_eq!(result_page.items[0].kind, "tool_result");
-        assert_eq!(
-            result_page.items[0].call_id.as_deref(),
-            Some("call_cross_page")
-        );
-        assert_eq!(
-            result_page.items[0].result.as_deref(),
-            Some("cross-page-result")
-        );
+            assert!(cursor.is_some());
+        }
 
         fs::remove_file(path).unwrap();
     }
@@ -2603,7 +2667,40 @@ mod tests {
     }
 
     #[test]
-    fn transcript_page_keeps_strict_item_limit_for_pending_tool() {
+    fn transcript_page_attaches_tool_result_within_same_page() {
+        let path = temp_path("tendi-transcript-page-same-tool-test.jsonl");
+        let call = json!({
+            "type": "response_item",
+            "payload": {
+                "type": "function_call",
+                "call_id": "call_same_page",
+                "name": "exec_command",
+                "arguments": "{\"cmd\":\"cargo test\"}"
+            }
+        });
+        let output = json!({
+            "type": "response_item",
+            "payload": {
+                "type": "function_call_output",
+                "call_id": "call_same_page",
+                "output": "passed"
+            }
+        });
+        fs::write(&path, format!("{call}\n{output}")).unwrap();
+
+        let page =
+            parse_transcript_page(&path, crate::skills::AgentKind::Codex, None, Some(2)).unwrap();
+
+        assert!(page.done);
+        assert_eq!(page.items.len(), 1);
+        assert_eq!(page.items[0].kind, "tool");
+        assert_eq!(page.items[0].call_id.as_deref(), Some("call_same_page"));
+        assert_eq!(page.items[0].result.as_deref(), Some("passed"));
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn transcript_page_drops_unmatched_tool_result_for_pending_tool() {
         let path = temp_path("tendi-transcript-page-tool-test.jsonl");
         let call = json!({
             "type": "response_item",
@@ -2641,8 +2738,8 @@ mod tests {
         )
         .unwrap();
         assert_eq!(second.items.len(), 1);
-        assert_eq!(second.items[0].kind, "tool_result");
-        assert_eq!(second.items[0].result.as_deref(), Some("passed"));
+        assert_eq!(second.items[0].kind, "user");
+        assert_eq!(second.items[0].body, "next");
         fs::remove_file(path).unwrap();
     }
 
@@ -3330,6 +3427,43 @@ mod tests {
                 .unwrap_or("")
                 .contains("all tests passed")
         );
+    }
+
+    #[test]
+    fn unmatched_tool_results_are_ignored() {
+        let codex_output = json!({
+            "type": "response_item",
+            "payload": {
+                "type": "function_call_output",
+                "call_id": "missing-codex-call",
+                "output": "orphaned"
+            }
+        });
+        let claude_content_result = json!({
+            "type": "user",
+            "message": {
+                "content": [{
+                    "type": "tool_result",
+                    "tool_use_id": "missing-claude-call",
+                    "content": "orphaned"
+                }]
+            }
+        });
+        let claude_legacy_result = json!({
+            "type": "user",
+            "toolUseID": "missing-claude-legacy-call",
+            "toolUseResult": { "stdout": "orphaned" }
+        });
+
+        let mut items = Vec::new();
+        collect_codex_item(&codex_output, &mut items);
+        assert!(items.is_empty());
+
+        collect_claude_item(&claude_content_result, &mut items);
+        assert!(items.is_empty());
+
+        collect_claude_item(&claude_legacy_result, &mut items);
+        assert!(items.is_empty());
     }
 
     #[test]

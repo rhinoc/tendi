@@ -16,7 +16,7 @@ export function RowActionsMenu({ ariaLabel, children, onOpenChange }: RowActions
         <MoreActionsButton aria-label={ariaLabel} />
       </DropdownMenu.Trigger>
       <DropdownMenu.Portal>
-        <DropdownMenu.Content className="skillMenuContent" align="end" sideOffset={6}>
+        <DropdownMenu.Content className="skillMenuContent" align="end" sideOffset={6} data-no-drag>
           {children}
         </DropdownMenu.Content>
       </DropdownMenu.Portal>

@@ -1,13 +1,12 @@
+import { agentIdentityKey } from "./agents.ts";
+
 type SessionSelectionRecord = {
   id: string;
   agent?: string;
 };
 
 export function canonicalSessionAgent(agent: unknown): string {
-  const key = `${agent ?? ""}`.toLowerCase().replace(/[^a-z0-9]+/g, "");
-  if (key === "claude" || key === "claudecode") return "claude";
-  if (key === "shared") return "codex";
-  return key;
+  return agentIdentityKey(agent);
 }
 
 export function sessionExternalKey(session: SessionSelectionRecord): string {

@@ -28,10 +28,15 @@ pub struct McpScan {
 }
 
 pub fn scan_mcp(cwd: &Path) -> Result<McpScan> {
+    scan_mcp_for_project_roots(cwd, &[])
+}
+
+pub fn scan_mcp_for_project_roots(cwd: &Path, project_roots: &[PathBuf]) -> Result<McpScan> {
     let mut servers = Vec::new();
     let mut warnings = Vec::new();
 
-    let context = crate::providers::ProviderContext::new(cwd);
+    let context =
+        crate::providers::ProviderContext::with_additional_project_dirs(cwd, project_roots);
     for provider in crate::providers::agent_providers() {
         provider.scan_mcp(&context, &mut servers, &mut warnings)?;
     }
@@ -238,7 +243,7 @@ mod tests {
         time::{SystemTime, UNIX_EPOCH},
     };
 
-    use super::scan_toml_mcp;
+    use super::{scan_mcp_for_project_roots, scan_toml_mcp};
     use crate::skills::AgentKind;
 
     fn temp_root(name: &str) -> std::path::PathBuf {
@@ -290,6 +295,31 @@ enabled = false
         assert_eq!(servers[1].transport, "http");
         assert_eq!(servers[1].status, "disabled");
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn scans_mcp_from_additional_project_roots() {
+        let cwd = temp_root("project-cwd");
+        let project = temp_root("project-root");
+        fs::create_dir_all(&cwd).expect("create cwd");
+        fs::create_dir_all(&project).expect("create project root");
+        let config = project.join(".mcp.json");
+        fs::write(
+            &config,
+            r#"{"mcpServers":{"project-server":{"command":"demo"}}}"#,
+        )
+        .expect("write project mcp");
+
+        let scan = scan_mcp_for_project_roots(&cwd, std::slice::from_ref(&project)).unwrap();
+        let config = config.canonicalize().unwrap();
+        assert!(
+            scan.servers
+                .iter()
+                .any(|server| server.path == config && server.name == "project-server")
+        );
+
+        let _ = fs::remove_dir_all(cwd);
+        let _ = fs::remove_dir_all(project);
     }
 
     #[test]

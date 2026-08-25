@@ -1,4 +1,4 @@
-import { spawn, spawnSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
 import {
   mkdirSync,
   readFileSync,
@@ -7,6 +7,7 @@ import {
 } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { spawnOwned, stopOwned } from "./process-lifecycle.mjs";
 import { writeStderr, writeStdout } from "./stdio.mjs";
 
 const scriptDir = dirname(fileURLToPath(import.meta.url));
@@ -87,7 +88,7 @@ if (cliBuild.error || cliBuild.status !== 0) {
 }
 
 const tauriCommand = process.platform === "win32" ? "tauri.cmd" : "tauri";
-const child = spawn(tauriCommand, ["dev", ...process.argv.slice(2)], {
+const child = spawnOwned(tauriCommand, ["dev", ...process.argv.slice(2)], {
   cwd: desktopDir,
   env: {
     ...process.env,
@@ -96,22 +97,26 @@ const child = spawn(tauriCommand, ["dev", ...process.argv.slice(2)], {
   },
   stdio: "inherit",
 });
+let shuttingDown = false;
 
-function forwardSignal(signal) {
-  child.kill(signal);
+async function shutdown(code = 0) {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  releaseLock();
+  await stopOwned(child);
+  process.exit(code);
 }
 
-process.once("SIGINT", () => forwardSignal("SIGINT"));
-process.once("SIGTERM", () => forwardSignal("SIGTERM"));
+for (const signal of ["SIGINT", "SIGTERM", "SIGHUP", ...(process.platform === "win32" ? [] : ["SIGQUIT"])]) {
+  process.once(signal, () => void shutdown());
+}
 process.once("exit", releaseLock);
 
 child.once("error", (error) => {
-  releaseLock();
   writeStderr(`[tendi] failed to start Tauri: ${error.message}`);
-  process.exit(1);
+  void shutdown(1);
 });
 
 child.once("exit", (code, signal) => {
-  releaseLock();
-  process.exit(code ?? (signal ? 1 : 0));
+  void shutdown(code ?? (signal ? 1 : 0));
 });
