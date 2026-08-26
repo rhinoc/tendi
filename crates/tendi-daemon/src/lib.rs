@@ -4062,6 +4062,8 @@ mod tests {
         let root = temp_workspace();
         let source = root.join(".agents/skills/demo");
         let daemon = Daemon::new(root.clone());
+        let listed = daemon.handle_json(json!({ "command": "skills_list", "args": {} }));
+        assert_eq!(listed["ok"], true, "list response: {listed}");
 
         let preview = daemon.handle_json(json!({
             "command": "skills_distribute",
