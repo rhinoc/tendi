@@ -1005,6 +1005,7 @@ async function runFrozenBugSmokeChecks(page, tab) {
 
   const rowMenuButton = page.locator('.dataTableScrollPane .dataRow--scrollPane button[aria-label*="actions" i]').first();
   if (await rowMenuButton.count()) {
+    await rowMenuButton.scrollIntoViewIfNeeded();
     await rowMenuButton.click({ force: true });
     await page.waitForTimeout(150);
     const openMenuMetrics = await page.evaluate(() => {
@@ -1607,7 +1608,7 @@ try {
       }
       if (command === "sessions_scan_start") {
         queueMicrotask(() => {
-          const recent = { id: 1, event: "sessions://scan", payload: { generation: 1, phase: "recent", upserts: [], deleted: [], scanned: 0, complete: true } };
+          const recent = { id: 1, event: "sessions://scan", payload: { generation: 1, phase: "recent", upserts: report.sessions.sessions, deleted: [], scanned: report.sessions.sessions.length, complete: true } };
           const backfill = { id: 1, event: "sessions://scan", payload: { generation: 1, phase: "backfill", upserts: [], deleted: [], scanned: report.sessions.sessions.length, complete: true } };
           emitDaemonEvent(recent);
           emitDaemonEvent(backfill);
