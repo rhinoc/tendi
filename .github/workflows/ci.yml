@@ -14,7 +14,33 @@ permissions:
   contents: read
 
 jobs:
-  build-test:
+  rust:
+    name: Rust tests and check
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-${{ runner.arch }}-rust-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-rust-
+
+      - name: Rust tests
+        run: cargo test --workspace
+
+      - name: Rust check
+        run: cargo check --workspace
+
+  performance:
+    name: Deterministic performance gate
     runs-on: macos-14
     env:
       # macos-14 runners have higher filesystem and WebView startup variance than local runs.
@@ -37,8 +63,6 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
-          cache: npm
-          cache-dependency-path: apps/desktop/package-lock.json
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -53,6 +77,23 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-${{ runner.arch }}-rust-
 
+      - name: Deterministic performance gate
+        run: |
+          cargo build --quiet -p tendi-cli --features perf-runner --bins
+          node scripts/perf-check.mjs --fast --no-build
+
+  frontend:
+    name: Frontend checks and E2E
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: apps/desktop/package-lock.json
+
       - name: Install frontend dependencies
         run: npm ci --prefix apps/desktop
 
@@ -65,17 +106,6 @@ jobs:
       - name: Check frontend typography tokens
         run: npm run check:typography --prefix apps/desktop
 
-      - name: Rust tests
-        run: cargo test --workspace
-
-      - name: Rust check
-        run: cargo check --workspace
-
-      - name: Deterministic performance gate
-        run: |
-          cargo build --quiet -p tendi-cli --features perf-runner --bins
-          node scripts/perf-check.mjs --fast --no-build
-
       - name: Frontend typecheck
         run: npm run typecheck --prefix apps/desktop
 
@@ -85,6 +115,21 @@ jobs:
       - name: Frontend build
         if: github.event_name == 'pull_request'
         run: npm run build --prefix apps/desktop
+
+      - uses: dtolnay/rust-toolchain@stable
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+
+      - name: Cache Rust build
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-${{ runner.arch }}-rust-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-rust-
 
       - name: Tauri app and DMG build
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
@@ -97,3 +142,18 @@ jobs:
           name: tendi-dmg
           path: dist/*.dmg
           if-no-files-found: error
+
+  build-test:
+    if: ${{ always() }}
+    needs: [rust, performance, frontend]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require all validation jobs
+        env:
+          RUST_RESULT: ${{ needs.rust.result }}
+          PERFORMANCE_RESULT: ${{ needs.performance.result }}
+          FRONTEND_RESULT: ${{ needs.frontend.result }}
+        run: |
+          test "$RUST_RESULT" = success
+          test "$PERFORMANCE_RESULT" = success
+          test "$FRONTEND_RESULT" = success
