@@ -116,7 +116,9 @@ excluded because they are too environment-dependent for every push.
 | Desktop idle CPU | average <= 1%, max <= 5% |
 
 The repeated Sessions check keeps the gate strict without making one filesystem scheduling spike
-the only result. The maximum limit still fails a single long stall.
+the only result. The maximum limit still fails a single long stall. CI uses macOS-runner-specific
+headroom for operation timing in the session-page, linked-session, rule-detail, prompt-CRUD, and
+chart gates. RSS, payload, and local default limits remain unchanged.
 
 `operation` measures only the production API call and response serialization. Fixture setup is
 outside that timer. `process` is still recorded for diagnosis, and RSS covers the whole process,
