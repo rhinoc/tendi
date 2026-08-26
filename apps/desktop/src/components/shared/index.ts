@@ -111,6 +111,10 @@ export type { DataTableMenuComponents } from "./DataTableMenus.tsx";
 
 export { SelectControl } from "./SelectControl.tsx";
 export type { SelectControlProps, SelectMenuAction, SelectOption } from "./SelectControl.tsx";
+export { DialogMenuContent } from "./DialogMenuContent.tsx";
+export type { DialogMenuContentProps } from "./DialogMenuContent.tsx";
+export { MenuContent } from "./MenuContent.tsx";
+export type { MenuContentProps } from "./MenuContent.tsx";
 export { SelectTrigger } from "./SelectTrigger.tsx";
 export type { SelectTriggerProps } from "./SelectTrigger.tsx";
 export { SegmentedControl, SegmentedControlItem } from "./SegmentedControl.tsx";

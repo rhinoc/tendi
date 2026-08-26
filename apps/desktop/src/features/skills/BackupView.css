@@ -1,83 +1,205 @@
-.backupPage {
-  overflow: auto;
-}
-
-.backupContent {
+.settingsBackup {
+  min-width: 0;
   display: grid;
-  gap: 16px;
-  max-width: 760px;
-  padding: 0 24px 32px;
+  gap: 24px;
 }
 
-.backupPanel {
-  display: grid;
-  gap: 12px;
-  padding: 18px;
-  border: 1px solid var(--line);
-  border-radius: 12px;
-  background: var(--surface);
+.settingsBackup .settingsSection {
+  min-width: 0;
 }
 
-.backupPanel h2 {
-  margin: 0;
-  font-size: var(--text-ui);
-}
-
-.backupSummary,
-.backupDisconnect {
-  grid-template-columns: minmax(0, 1fr) auto;
-  align-items: center;
-}
-
-.backupAcknowledgement {
-  display: flex;
+.settingsBackup .settingsControlGroup {
   gap: 8px;
-  align-items: start;
+}
+
+.settingsBackupRepository,
+.settingsBackupActions,
+.settingsBackupDisconnect {
+  min-width: 0;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.settingsBackupRepositoryInfo strong {
+  color: var(--text);
+  font-size: var(--text-sm);
+  font-weight: 600;
+  line-height: var(--leading-ui);
+}
+
+.settingsBackupDescription {
+  margin: 4px 0 0;
   color: var(--muted);
   font-size: var(--text-sm);
+  line-height: var(--leading-ui);
 }
 
-.backupCounts {
+.settingsBackupFormGrid {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 10px;
-  margin: 0;
+  grid-template-columns: minmax(0, 1.7fr) minmax(160px, .8fr);
+  gap: 8px;
 }
 
-.backupCounts div {
+.settingsBackupField {
+  display: grid;
+  gap: 6px;
+  color: var(--muted);
+  font-size: var(--text-sm);
+  line-height: var(--leading-ui);
+}
+
+.settingsTextInput {
+  box-sizing: border-box;
+  height: var(--control-height);
+  width: 100%;
+  padding: 0 8px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: var(--control-fill);
+  color: var(--text);
+  font: inherit;
+  font-size: var(--text-sm);
+  line-height: var(--leading-ui);
+}
+
+.settingsTextInput::placeholder {
+  color: var(--faint);
+}
+
+.settingsTextInput:focus {
+  background: var(--active-fill);
+  outline: none;
+  box-shadow: 0 0 0 2px var(--focus-ring);
+}
+
+.settingsBackupActions {
+  align-items: center;
+  justify-content: flex-start;
+}
+
+.settingsBackupRepositoryInfo > span,
+.settingsBackupCheckout,
+.settingsBackupVersionCopy > span,
+.settingsBackupEmpty,
+.backupDialogHint {
+  color: var(--muted);
+  font-size: var(--text-sm);
+  line-height: var(--leading-ui);
+}
+
+.settingsBackupRepositoryInfo {
+  min-width: 0;
   display: grid;
   gap: 3px;
 }
 
-.backupCounts dt {
-  color: var(--muted);
-  font-size: var(--text-xs);
+.settingsBackupRepositoryInfo strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-.backupCounts dd {
-  margin: 0;
+.settingsBackupCheckout {
+  min-width: 0;
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--line);
+}
+
+.settingsBackupCheckout span {
+  flex: 0 0 auto;
+}
+
+.settingsBackupCheckout code {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text);
+  font-family: inherit;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.settingsBackupStats {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 16px;
+}
+
+.settingsBackupStats > div {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+  padding-top: 8px;
+  border-top: 1px solid var(--line);
+}
+
+.settingsBackupStats strong {
+  color: var(--text);
   font-size: var(--text-stat);
   font-weight: 650;
+  line-height: var(--leading-tight);
 }
 
-.backupVersionList {
+.settingsBackupStats span {
+  color: var(--muted);
+  font-size: var(--text-xs);
+  line-height: var(--leading-ui);
+}
+
+.settingsBackupVersionList {
   display: grid;
-  gap: 8px;
   padding: 0;
   margin: 0;
   list-style: none;
 }
 
-.backupVersionList li {
+.settingsBackupVersionList li {
+  min-width: 0;
   display: flex;
-  gap: 10px;
-  align-items: baseline;
-  color: var(--muted);
-  font-size: var(--text-sm);
+  align-items: center;
+  gap: 12px;
+  min-height: 48px;
+  border-top: 1px solid var(--line);
 }
 
-.backupVersionList .dialogActionButton {
-  margin-left: auto;
+.settingsBackupVersionCopy {
+  min-width: 0;
+  flex: 1 1 auto;
+  display: grid;
+  gap: 3px;
+}
+
+.settingsBackupVersionCopy strong {
+  overflow: hidden;
+  color: var(--text);
+  font-size: var(--text-sm);
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.settingsBackupVersionCopy code {
+  color: var(--text);
+  font-family: var(--font-mono);
+}
+
+.settingsBackupEmpty {
+  margin: 0;
+  padding-top: 8px;
+}
+
+.settingsBackupDisconnect {
+  align-items: center;
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
+  color: var(--muted);
+  font-size: var(--text-sm);
+  line-height: var(--leading-ui);
 }
 
 .backupRestoreDialog {
@@ -91,9 +213,17 @@
   margin: 16px 0;
 }
 
+.backupRestoreEmpty {
+  display: grid;
+  gap: 12px;
+}
+
+.backupRestoreEmpty .backupDialogHint {
+  margin: 0;
+}
+
 .backupRestorePlan {
   display: grid;
-  gap: 6px;
   max-height: 280px;
   padding: 0;
   margin: 0;
@@ -103,11 +233,10 @@
 
 .backupRestorePlan li {
   display: grid;
-  grid-template-columns: auto minmax(120px, 0.4fr) minmax(0, 1fr);
+  grid-template-columns: auto minmax(120px, .4fr) minmax(0, 1fr);
   gap: 12px;
-  padding: 8px 10px;
-  border: 1px solid var(--line);
-  border-radius: 8px;
+  padding: 8px 0;
+  border-top: 1px solid var(--line);
   font-size: var(--text-sm);
 }
 
@@ -115,21 +244,28 @@
   color: var(--danger);
 }
 
-.backupVersionList code {
-  color: var(--text);
-}
-
-@media (max-width: 680px) {
-  .backupSummary,
-  .backupDisconnect {
-    grid-template-columns: 1fr;
-  }
-
-  .backupCounts {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-
+@media (max-width: 760px) {
+  .settingsBackupFormGrid,
   .backupRestoreControls {
     grid-template-columns: 1fr;
+  }
+
+  .settingsBackupStats {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 560px) {
+  .settingsBackupRepository,
+  .settingsBackupDisconnect,
+  .settingsBackupActions {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .settingsBackupRepository .statefulButton,
+  .settingsBackupDisconnect .statefulButton,
+  .settingsBackupActions .statefulButton {
+    align-self: flex-start;
   }
 }

@@ -17,12 +17,14 @@ import { EmptyState } from "../components/shared/EmptyState.tsx";
 import { DialogStatefulButton } from "../components/shared/DialogStatefulButton.tsx";
 import { IconButton } from "../components/shared/IconButton.tsx";
 import { LoadingIcon } from "../components/shared/LoadingIcon.tsx";
+import { LoadingInline } from "../components/shared/LoadingInline.tsx";
 import { LoadingState } from "../components/shared/LoadingState.tsx";
 import { LoadErrorState } from "../components/shared/LoadErrorState.tsx";
 import { PageHeader } from "../components/shared/PageHeader.tsx";
 import { ResizeSeparator } from "../components/shared/ResizeSeparator.tsx";
 import { SelectControl } from "../components/shared/SelectControl.tsx";
 import { StatefulButton } from "../components/shared/StatefulButton.tsx";
+import { Toast } from "../components/shared/Toast.tsx";
 import { DaemonCommandError, TauriCommand, compactDateTime, formatUserPath, friendlyAgent, invokeCommand, logger, mergeThreeWay, subscribeDaemonEvents } from "../lib/index.ts";
 import type { DaemonEvent } from "../lib/index.ts";
 import "./ConfigView.css";
@@ -255,7 +257,7 @@ export function ConfigView() {
   const loadSettings = useCallback(async () => {
     try {
       const next = await invokeCommand<AppSettings>(TauriCommand.SettingsGet);
-      setActiveProfiles(next.configProfiles ?? {});
+      setActiveProfiles(next.configProfiles);
     } catch (error) {
       logger.error("failed to load config settings", { error: errorMessage(error) });
     }
@@ -357,7 +359,7 @@ export function ConfigView() {
     setProfileSwitching(true);
     try {
       const next = await invokeCommand<AppSettings>(TauriCommand.ConfigProfileSet, { agent, profile });
-      setActiveProfiles(next.configProfiles ?? {});
+      setActiveProfiles(next.configProfiles);
       if (target.path !== activePath) await readConfig(target.path, target);
     } catch (error) {
       logger.error("failed to activate config profile", { error: errorMessage(error), agent });
@@ -499,12 +501,13 @@ export function ConfigView() {
             placeholder="deep-review"
           />
           <p className="configProfileHint">Use letters, numbers, hyphens, or underscores.</p>
-          {profileError ? <div className="dialogError">{profileError}</div> : null}
+          {profileError ? <Toast tone="error" message={profileError} /> : null}
         </div>
         <DialogActionBar cancelDisabled={profileSaving} onCancel={() => setProfileDialogOpen(false)}>
           <DialogStatefulButton
             state={profileSaving ? "loading" : "idle"}
             loadingLabel="Creating config profile"
+            loadingContent={<LoadingInline size={16} gap={6} label="Create" />}
             variant="primary"
             className="dialogAdvanceButton"
             aria-label="Create config profile"
@@ -590,6 +593,7 @@ export function ConfigView() {
                   width={80}
                   minWidth={80}
                   successLabel="Active"
+                  loadingContent={<LoadingInline size={14} gap={6} label="Switch" />}
                   aria-label={dirty ? "Save or discard changes before switching a config profile" : profileSwitching ? "Switching config profile" : profileSelectionChanged ? "Switch selected config profile" : "Active config profile"}
                   disabled={!profileSelectionChanged || dirty || profileSwitching || profileSaving}
                   onClick={() => { void activateProfile(profileAgent, selectedProfileValue); }}

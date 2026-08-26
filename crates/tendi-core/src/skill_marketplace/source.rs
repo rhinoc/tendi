@@ -11,7 +11,8 @@ pub struct MarketplaceSource {
     pub name: String,
     pub description: Option<String>,
     pub source: String,
-    pub url: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
     pub version: Option<String>,
     pub metric: Option<u64>,
     pub metric_label: Option<String>,

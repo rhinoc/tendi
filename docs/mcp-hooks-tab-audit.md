@@ -6,28 +6,28 @@
 
 ## 入口与加载链路
 
-- 导航入口在 `apps/desktop/src/lib/helpers.jsx:96-103` 的 `navItems` 中注册，`hooks` 与 `mcp` 都是一级 sidebar tab。
-- 全局状态在 `apps/desktop/src/App.jsx:118-128` 里按 agent 过滤，其中 `hooks` 和 `mcp` 直接过滤原始行数据。
-- 首次进入 tab 时，`apps/desktop/src/App.jsx:236-265` 会通过 `${domain}_list` 懒加载数据；因此 Hooks 触发 `hooks_list`，MCP 触发 `mcp_list`。
-- 渲染分发在 `apps/desktop/src/App.jsx:467-470`：Hooks 使用专门的 `HooksView`，MCP 只使用通用 `DataListView`。
-- `normalizeReport` 仅展开 `report.hooks.hooks` 与 `report.mcp.servers`，没有针对 Hooks/MCP 的字段规范化或错误元数据保留，见 `apps/desktop/src/lib/helpers.jsx:843-864`。
+- 导航入口在 `apps/desktop/src/lib/helpers.ts` 的 `navItems` 中注册，`hooks` 与 `mcp` 都是一级 sidebar tab。
+- 全局状态在 `apps/desktop/src/App.tsx` 里按 agent 过滤，其中 `hooks` 和 `mcp` 直接过滤原始行数据。
+- 首次进入 tab 时，`apps/desktop/src/App.tsx` 会通过 `${domain}_list` 懒加载数据；因此 Hooks 触发 `hooks_list`，MCP 触发 `mcp_list`。
+- Hooks 使用专门的 `HooksView`，MCP 使用 `DataListView`，当前 MCP 行操作由 `apps/desktop/src/views/McpView.tsx` 提供。
+- `normalizeReport` 仅展开 `report.hooks.hooks` 与 `report.mcp.servers`，没有针对 Hooks/MCP 的字段规范化或错误元数据保留。
 - `safeInvoke` 在失败时只记录 warning 并返回 `null`，没有把错误带回 tab 状态，见当前 `apps/desktop/src/lib/tauri.ts`。
 
 ## MCP Tab 现状
 
 ### 前端组件
 
-- 文件入口：`apps/desktop/src/views/McpView.jsx`。
-- 当前组件名仍是通用的 `DataListView`，只负责标题、选择状态和 `DataTable` 渲染，见 `apps/desktop/src/views/McpView.jsx:9-43`。
-- 行 ID 由 `id ?? agent:name:transport` 拼出，未包含 `path`，同一 agent 下同名同 transport 但不同来源时可能冲突，见 `apps/desktop/src/views/McpView.jsx:11-13`。
-- 选择能力已打开，但 `bottomBar={() => null}`，所以选中后没有批量操作，见 `apps/desktop/src/views/McpView.jsx:31-36`。
-- 表格列只有 Agent、Name、Transport、Status、Source，定义在 `apps/desktop/src/components/shared.jsx:2064-2086`。
-- 空状态是通用文案 `No results`，加载态是 `Loading mcp`，没有 MCP 专属的权限、不可用、解析错误或无配置解释，见 `apps/desktop/src/views/McpView.jsx:37-39`。
+- 文件入口：`apps/desktop/src/views/McpView.tsx`。
+- 当前组件名仍是通用的 `DataListView`，负责标题、选择状态、`DataTable` 渲染，以及 MCP 启用状态开关，见 `apps/desktop/src/views/McpView.tsx`。
+- 行 ID 由 `id ?? agent:name:path` 拼出，包含来源路径，见 `apps/desktop/src/views/McpView.tsx`。
+- 选择能力已打开，底部工具栏支持批量 Enable/Disable、Reveal in Finder 和复制路径。
+- 表格列包括 Agent、Name、Transport、Enabled、Status、Source；Enabled 列使用现成 `Switch`。
+- 空状态为 `No MCP servers found`，加载态和失败态由 `DataTable`、`LoadErrorState` 处理。
 
 ### 后端数据
 
-- Tauri 命令只有 `mcp_list`，返回 `tendi_core::mcp::scan_mcp(&cwd).servers`，见 `apps/desktop/src-tauri/src/lib.rs:312-318`。
-- `McpServerRecord` 只有 `agent`、`name`、`transport`、`status`、`path`，见 `crates/tendi-core/src/mcp.rs:14-21`。
+- Tauri 命令包括 `mcp_list` 和 `mcp_set_enabled`；列表返回 `tendi_core::mcp::scan_mcp(&cwd).servers`，启用命令写回配置后重新扫描。
+- `McpServerRecord` 包含 `agent`、`name`、`scope`、`transport`、`status`、`path`、`trust_hash`、`read_only_reason`。
 - 扫描来源包括：
   - `~/.codex/config.toml`
   - `~/.claude/settings.json`
@@ -35,33 +35,33 @@
   - `~/.cursor/projects`
   - 当前工作目录 ancestors 下的 `.mcp.json`、`.cursor/mcp.json`、`.codex/mcp.json`、`.codex/config.toml`
   - 对应实现见 `crates/tendi-core/src/mcp.rs:29-85`。
-- JSON 配置读取 `mcpServers`、`mcp_servers`、`servers`，TOML 读取 `mcp_servers`，见 `crates/tendi-core/src/mcp.rs:125-201`。
-- 当前状态是静态推断：`disabled` 或 `enabled=false` 变成 `disabled`，否则是 `configured`；Cursor plugin metadata 可根据 `STATUS.md` 标记 `needs-auth`。
+- 配置键、文件名、transport/status 推断和写回字段由对应 provider 提供：Codex 在 `providers/codex.rs` 同时处理 TOML/JSON，Claude Code 在 `providers/claude.rs` 处理 JSON，Cursor 在 `providers/cursor.rs` 处理 JSON；`crates/tendi-core/src/mcp.rs` 只提供 JSON/TOML 格式工具。
+- 当前状态是静态推断：`disabled` 或 `enabled=false` 变成 `disabled`，否则是 `configured`；Cursor plugin metadata 可根据 `STATUS.md` 标记 `needs-auth`。标准 JSON/TOML 配置记录源文件 hash，用于启用状态写回时拒绝覆盖外部修改；Cursor plugin metadata 标记为只读。
 
-### 为什么 MCP 可选中但无实际操作能力
+### MCP 当前能力边界
 
-结论：主要是缺后端接口和 UI 未接线，数据也不够深。
+结论：MCP 已具备启用/禁用最小闭环；详情、健康检查和认证等能力仍未实现。
 
-- 缺后端接口：Tauri 只有 `mcp_list`，没有 reveal、open config、enable/disable、delete、health check、auth flow、tool/resource/list detail 等命令。
+- 已补齐最小后端接口：Tauri 现在有 `mcp_list` 和 `mcp_set_enabled`。后者先按 `agent` 分派到 Codex、Claude Code、Cursor provider，再由 provider 选择允许的配置格式；底层校验源文件 hash。仍没有 delete、health check、auth flow、tool/resource/list detail 等命令。
 - 缺数据：`McpServerRecord` 不包含 command、args、env、url、headers、tool/resource counts、last probe result、auth hint、配置 scope、可编辑性等信息。
-- UI 未接线：表格 selectable 已开启但 `bottomBar` 为空，行点击也没有 detail panel 或 action rail。
+- UI 已接线：表格增加 Enabled 开关和选中行的批量 Enable/Disable；仍没有 detail panel。
 - 状态反馈不足：warnings 保留在 `McpScan`，但 `mcp_list` 只返回 servers，前端拿不到 parse/read warnings；`safeInvoke` 也吞掉错误。
 
 ## Hooks Tab 现状
 
 ### 前端组件
 
-- 文件入口：`apps/desktop/src/views/HooksView.jsx`。
+- 文件入口：`apps/desktop/src/views/HooksView.tsx`。
 - 当前 IA 是左右分栏：左侧列表、右侧详情，支持搜索、选择、行点击切换详情、详情折叠。
-- 列表字段：Event、Agent、Type、Matcher、Enabled，定义在 `apps/desktop/src/views/HooksView.jsx:138-202`。
-- 搜索使用 `hookSearchText`，覆盖 agent、event、matcher、filter、status message、type、handler、path/source、trust hash，见 `apps/desktop/src/lib/helpers.jsx:1706-1718`。
-- 详情操作：Reveal in Finder、Delete hook、Collapse，见 `apps/desktop/src/views/HooksView.jsx:272-289`。
+- 列表字段：Event、Agent、Type、Matcher、Enabled，定义在 `apps/desktop/src/views/HooksView.tsx`。
+- 搜索使用 `hookSearchText`，覆盖 agent、event、matcher、filter、status message、type、handler、path/source、trust hash，见 `apps/desktop/src/lib/hooks.ts`。
+- 详情操作：Reveal in Finder、Delete hook、Collapse，见 `apps/desktop/src/views/HooksView.tsx`。
 - 详情字段：
   - Match: Event、Matcher、If
   - Handler: Type、Command、URL、Prompt
   - Source: Path、Trust
-  - 对应实现见 `apps/desktop/src/views/HooksView.jsx:296-314`。
-- Delete 可用性在前端由 `hookDeleteDisabledReason` 判定：系统路径、Claude plugin 路径、非 json/toml 禁止删除，见 `apps/desktop/src/lib/helpers.jsx:1727-1739`。
+  - 对应实现见 `apps/desktop/src/views/HooksView.tsx`。
+- Delete/Enable 可用性由 `HookRecord.read_only_reason` 提供；provider 负责判断托管源，provider 负责选择 JSON/TOML 写回格式，前端不再按扩展名推断能力。
 
 ### 后端数据
 
@@ -71,9 +71,9 @@
   - Codex: `$CODEX_HOME/hooks.json`、`$CODEX_HOME/config.toml`、项目 ancestors 下 `.codex/hooks.json`、`.codex/config.toml`
   - Cursor: `~/.cursor/hooks.json`、`/etc/cursor/hooks.json`、`/Library/Application Support/Cursor/hooks.json`、项目 ancestors 下 `.cursor/hooks.json`
   - Claude: `~/.claude/settings.json`、`.claude/settings(.local).json`、`.claude/plugins`、`.claude/skills`、`.claude/agents`、系统 managed settings
-  - 对应实现见 `crates/tendi-core/src/hooks.rs:50-143`。
+- 对应实现见 `crates/tendi-core/src/providers/{codex,claude,cursor}.rs`，`hooks.rs` 只负责扫描编排、hash 校验和格式工具。
 - `needs_review` 对 Codex 映射官方 hook trust 状态；Cursor 和 Claude 使用 Tendi 的源码 hash 审批记录（`~/Library/Application Support/tendi/hook-reviews.json`），托管和插件来源不要求 review。Claude 的 `disableAllHooks` 会反映到 `enabled`。
-- 删除前会校验当前文件 sha256 是否等于 `trust_hash`，然后只支持 json/toml 源，见 `crates/tendi-core/src/hooks.rs:146-180`。
+- 删除和 Enable/Disable 前会校验当前文件 sha256 是否等于 `trust_hash`；请求携带 `agent`，由 provider 决定允许的源格式和只读语义。
 
 ### Hooks 详情页已具备和缺失能力
 
@@ -107,11 +107,11 @@
 ### 1. MCP tab 核心能力
 
 - 将 `DataListView` 拆成专用 `McpView`，保留 `DataTable` 列表，但增加右侧 detail panel。
-- 后端扩展 `McpServerRecord`：至少增加 `id`、`source_kind/scope`、`editable`、`command`、`args`、`url`、`env_keys`、`warning`。避免把敏感 env value 传到 UI。
+- 后端当前已为 `McpServerRecord` 增加 `trust_hash` 和 `read_only_reason`，用于启用状态写回和只读提示；`id`、`command`、`args`、`url`、`env_keys` 等详情字段仍未增加。启用/禁用由各 provider 的 `set_mcp_enabled` 实现负责分派。
 - Tauri 增加最小命令：
   - `mcp_list` 返回 `{ servers, warnings }` 或新增 `mcp_scan`，前端能显示 warnings。
   - `mcp_reveal_source(path)` 可复用现有 `reveal_in_finder`，前端直接接线即可。
-  - `mcp_set_enabled(id/path/name, enabled, expectedHash)` 或先只支持可编辑 json/toml 的 enable/disable。
+  - `mcp_set_enabled(path, name, enabled, expectedHash)` 已实现，当前只支持可编辑 JSON/TOML 的 enable/disable。
 - UI 首批操作入口：
   - Reveal source
   - Copy command/url

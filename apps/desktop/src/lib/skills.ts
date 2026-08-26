@@ -1,4 +1,3 @@
-import { titleValue } from "./strings.ts";
 import { friendlyAgent } from "./agents.ts";
 import {
   isWebSource,
@@ -34,6 +33,15 @@ export const allSkillVisibilities = [
   SkillVisibility.Mixed,
 ] as const;
 
+export type NormalizedSkillPath = NonNullable<SkillLike["paths"]>[number] & {
+  path: string;
+  root: string;
+  scope: string;
+  agent: string;
+  install_target: string;
+  source_kind: string;
+};
+
 export type NormalizedSkill = {
   id: string;
   section: string;
@@ -48,11 +56,11 @@ export type NormalizedSkill = {
   isSystem: boolean;
   statusTone: string;
   source: string;
-  installTargets?: string[];
+  installTargets: string[];
   updateStatus: string;
   ctime?: string;
   mtime?: string;
-  paths: NonNullable<SkillLike["paths"]>;
+  paths: NormalizedSkillPath[];
   meta?: string;
   [key: string]: unknown;
 };
@@ -71,12 +79,11 @@ export function isPluginSkillSource(skill: SkillLike): boolean {
 export function isSystemSkillSource(skill: SkillLike, source: SourceDetails = skillSourceDetails(skill)): boolean {
   const kind = `${source.kind ?? ""}`.toLowerCase();
   const value = `${source.value ?? ""}`.toLowerCase();
-  const summary = `${skill.source_summary ?? skill.source ?? ""}`.toLowerCase();
+  const summary = `${skill.source ?? ""}`.toLowerCase();
   const pathKinds = (skill.paths ?? []).map((path) => `${path.source_kind ?? ""}`.toLowerCase());
   const pathValues = (skill.paths ?? []).flatMap((path) => [path.path, path.root, path.source]).map((path) => `${path ?? ""}`.toLowerCase());
   return (
     !isPluginSkillSource(skill) && (
-      skill.is_system === true ||
       skill.isSystem === true ||
       skill.source === "system" ||
       summary === "system" ||
@@ -92,12 +99,13 @@ export function isReadOnlySkillSource(skill: SkillLike): boolean {
   return isSystemSkillSource(skill) || isPluginSkillSource(skill);
 }
 
-export function normalizeSkillVisibility(value: unknown): SkillVisibility {
-  const normalized = titleValue(value ?? SkillVisibility.Auto);
-  if (normalized === SkillVisibility.Manual) return SkillVisibility.Manual;
-  if (normalized === SkillVisibility.Off) return SkillVisibility.Off;
-  if (normalized === SkillVisibility.Mixed) return SkillVisibility.Mixed;
-  return SkillVisibility.Auto;
+export function normalizeSkillVisibility(value: unknown): SkillVisibility | undefined {
+  const normalized = `${value ?? ""}`.trim().toLowerCase();
+  if (normalized === "auto") return SkillVisibility.Auto;
+  if (normalized === "manual") return SkillVisibility.Manual;
+  if (normalized === "off") return SkillVisibility.Off;
+  if (normalized === "mixed") return SkillVisibility.Mixed;
+  return undefined;
 }
 
 export function statusTone(skill: { statusTone?: string; visibility?: SkillVisibility | string; isSystem?: boolean } & SkillLike): string {
@@ -133,28 +141,70 @@ export function skillSection(skill: SkillLike & { visibility?: SkillVisibility |
     !kind.includes("system")
   ) return "Remote";
   if (isWebSource(value) || parseRemoteSource(value)) return "Remote";
-  return "Local";
+  if (kind === "local") return "Local";
+  return "";
 }
 
-export function normalizeSkill(skill: Record<string, unknown>, index: number): NormalizedSkill {
-  const rawAgents = (skill.agents as string[] | undefined)?.length
-    ? (skill.agents as string[])
-    : ((skill.paths as SkillLike["paths"]) ?? []).map((path) => path.agent);
+export function normalizeSkill(skill: Record<string, unknown>): NormalizedSkill | undefined {
+  const name = typeof skill.name === "string" && skill.name.trim() ? skill.name.trim() : undefined;
+  if (
+    !name
+    || !Array.isArray(skill.agents)
+    || skill.agents.length === 0
+    || !Array.isArray(skill.tags)
+    || !Array.isArray(skill.dependencies)
+    || !Array.isArray(skill.dependents)
+    || !Array.isArray(skill.paths)
+    || !Array.isArray(skill.install_targets)
+    || skill.install_targets.length === 0
+    || typeof skill.visibility !== "string"
+    || typeof skill.source_summary !== "string"
+    || typeof skill.update_status !== "string"
+    || typeof skill.is_system !== "boolean"
+  ) return undefined;
+  const rawAgents = skill.agents;
   const agents = rawAgents
-    .filter(Boolean)
+    .filter((agent): agent is string => typeof agent === "string" && agent.trim().length > 0)
     .map((agent) => friendlyAgent(agent));
-  const uniqueAgents = [...new Set(agents.length ? agents : (skill.agents as string[] | undefined) ?? ["Unknown"])];
-  const tags = (skill.tags as string[] | undefined) ?? [];
-  const dependencies = (skill.dependencies as string[] | undefined) ?? [];
-  const dependents = (skill.dependents as string[] | undefined) ?? [];
+  if (agents.length !== rawAgents.length) return undefined;
+  const uniqueAgents = [...new Set(agents)];
+  const tags = skill.tags.filter((tag): tag is string => typeof tag === "string");
+  const dependencies = skill.dependencies.filter((dependency): dependency is string => typeof dependency === "string");
+  const dependents = skill.dependents.filter((dependent): dependent is string => typeof dependent === "string");
+  if (
+    tags.length !== skill.tags.length
+    || dependencies.length !== skill.dependencies.length
+    || dependents.length !== skill.dependents.length
+  ) return undefined;
   const visibility = normalizeSkillVisibility(skill.visibility);
-  const isSystem = skill.is_system === true || skill.isSystem === true;
-  const tone = statusTone({ ...(skill as SkillLike), visibility, isSystem } as SkillLike & { visibility?: SkillVisibility; isSystem?: boolean });
+  if (!visibility) return undefined;
+  const isSystem = skill.is_system;
+  const source = skill.source_summary;
+  const paths = skill.paths.flatMap<NormalizedSkillPath>((value) => {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return [];
+    const path = value as Record<string, unknown>;
+    const requiredPathFields = ["path", "root", "scope", "agent", "install_target", "source_kind"];
+    if (requiredPathFields.some((field) => typeof path[field] !== "string" || !(path[field] as string).trim())) return [];
+    if ((path.source_kind as string).trim().toLowerCase() === "unknown") return [];
+    return [{
+      ...path,
+      path: path.path as string,
+      root: path.root as string,
+      scope: path.scope as string,
+      agent: path.agent as string,
+      install_target: path.install_target as string,
+      source_kind: path.source_kind as string,
+    } as NormalizedSkillPath];
+  });
+  if (paths.length !== skill.paths.length || paths.length === 0) return undefined;
+  const installTargets = skill.install_targets.filter((target): target is string => typeof target === "string" && target.trim().length > 0);
+  if (installTargets.length !== skill.install_targets.length) return undefined;
+  const tone = statusTone({ ...(skill as SkillLike), source, visibility, isSystem } as SkillLike & { visibility?: SkillVisibility; isSystem?: boolean });
   return {
-    id: `${skill.id ?? skill.name ?? `skill-${index}`}`,
-    section: skillSection({ ...(skill as SkillLike & { visibility?: SkillVisibility | string; statusTone?: string; isSystem?: boolean }), visibility, statusTone: tone, isSystem }),
-    name: `${skill.name ?? `skill-${index}`}`,
-    description: `${skill.description ?? skill.summary ?? "No description"}`,
+    id: name,
+    section: skillSection({ ...(skill as SkillLike & { visibility?: SkillVisibility | string; statusTone?: string; isSystem?: boolean }), source, paths, visibility, statusTone: tone, isSystem }),
+    name,
+    description: typeof skill.description === "string" ? skill.description : "",
     tags,
     dependencies,
     dependents,
@@ -163,13 +213,13 @@ export function normalizeSkill(skill: Record<string, unknown>, index: number): N
     visibility,
     isSystem,
     statusTone: tone,
-    source: `${skill.source_summary ?? skill.source ?? "local"}`,
-    installTargets: (skill.install_targets as string[] | undefined) ?? (skill.installTargets as string[] | undefined) ?? [],
-    updateStatus: `${skill.update_status ?? skill.updateStatus ?? "local"}`,
+    source,
+    installTargets,
+    updateStatus: skill.update_status,
     ctime: typeof skill.ctime === "string" ? skill.ctime : undefined,
     mtime: typeof skill.mtime === "string" ? skill.mtime : undefined,
-    paths: (skill.paths as SkillLike["paths"]) ?? [],
-    meta: `${skill.update_status ?? skill.updateStatus ?? ""}`,
+    paths,
+    meta: skill.update_status,
   };
 }
 
@@ -179,17 +229,21 @@ export function primarySkillPath(skill: SkillLike): string | null {
 
 export function skillTargets(skill: SkillLike & { name?: string }) {
   return (skill.paths ?? [])
-    .filter((path) => path.path)
-    .map((path, index) => ({
-      id: `${path.install_target ?? path.path}-${index}`,
-      agent: path.install_target?.split(":")[0] ?? path.agent ?? "target",
+    .filter((path): path is NonNullable<SkillLike["paths"]>[number] & { path: string; install_target: string; agent: string } => (
+      typeof path.path === "string" && path.path.length > 0
+      && typeof path.install_target === "string" && path.install_target.length > 0
+      && typeof path.agent === "string" && path.agent.length > 0
+    ))
+    .map((path) => ({
+      id: path.install_target,
+      agent: path.agent,
       label: targetLabel(path),
-      path: path.path ?? "",
+      path: path.path,
     }));
 }
 
 export function targetLabel(target: NonNullable<SkillLike["paths"]>[number]): string {
-  const agent = target.install_target?.split(":")[0] ?? target.agent ?? "target";
+  const agent = target.install_target?.split(":")[0] ?? "";
   const scope = target.scope ? ` ${target.scope}` : "";
   return `${targetAgentLabel(agent)}${scope}`;
 }
@@ -265,7 +319,7 @@ export function applySkillUpdateReports<T extends { skills: NormalizedSkill[] }>
       return {
         ...skill,
         updateStatus: update.status,
-        meta: update.status === "update-available" ? "update" : update.status,
+        meta: update.status,
         statusTone: update.status === "update-available" ? "warn" : skill.statusTone,
       };
     }),
@@ -285,7 +339,7 @@ export function mergeSkillListPreservingUpdates(
     return {
       ...skill,
       updateStatus: prior.updateStatus,
-      meta: prior.meta || "update",
+      meta: prior.meta,
       statusTone: skill.statusTone === "muted" ? skill.statusTone : "warn",
     };
   });

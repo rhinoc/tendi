@@ -28,7 +28,6 @@ type RuleFileResult = {
 
 export function RuleEditorView({ rule, back }: RuleEditorViewProps) {
   const currentRule = rule ?? {};
-  const activePath = ruleTitle(currentRule);
   const [draft, setDraft] = useState({ content: "", originalContent: "", sha256: currentRule.sha256 ?? "" });
   const [showDiscardDialog, setShowDiscardDialog] = useState(false);
   const [loadingRule, setLoadingRule] = useState(Boolean(currentRule.path));
@@ -64,8 +63,8 @@ export function RuleEditorView({ rule, back }: RuleEditorViewProps) {
       setDraft({ content: "", originalContent: "", sha256: currentRule.sha256 ?? "" });
       const result = await safeInvoke(TauriCommand.RuleFileRead, { path: currentRule.path }) as RuleFileResult | null;
       if (cancelled) return;
-      if (typeof result?.content === "string") {
-        setDraft({ content: result.content, originalContent: result.content, sha256: result.sha256 ?? "" });
+      if (typeof result?.content === "string" && typeof result.sha256 === "string") {
+        setDraft({ content: result.content, originalContent: result.content, sha256: result.sha256 });
       }
       setLoadingRule(false);
     }
@@ -87,9 +86,10 @@ export function RuleEditorView({ rule, back }: RuleEditorViewProps) {
       expectedSha256: draft.sha256,
       content,
     }) as RuleFileResult | null;
-    if (result?.sha256) {
-      setDraft({ content: result.content ?? "", originalContent: result.content ?? "", sha256: result.sha256 ?? "" });
+    if (typeof result?.content !== "string" || typeof result.sha256 !== "string") {
+      throw new Error("Save returned incomplete rule content");
     }
+    setDraft({ content: result.content, originalContent: result.content, sha256: result.sha256 });
   }, [content, currentRule.path, dirty, draft.sha256]);
 
   useEffect(() => {
@@ -130,7 +130,7 @@ export function RuleEditorView({ rule, back }: RuleEditorViewProps) {
       <section className="editorShell singlePaneEditor">
         {contentReady ? (
           <MarkdownFilePane
-            activePath={currentRule.path ?? activePath}
+            activePath={currentRule.path ?? ""}
             dirty={dirty}
             diffStats={diffStats}
             content={content}

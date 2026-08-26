@@ -17,7 +17,7 @@ function compactSessionText(value: string): string {
 export function formatTranscriptPreview(value: string | null | undefined): string {
   const raw = `${value ?? ""}`;
   const compact = compactSessionText(raw);
-  if (!compact) return /<\/?image/i.test(raw) || /!\[[^\]]*\]\([^)]*\)/i.test(raw) ? "Image" : "";
+  if (!compact) return "";
   return compact;
 }
 
@@ -27,11 +27,9 @@ export function formatSessionTitle(value: string | null | undefined): string {
 
 export function summarizeSessionPreviewRecord(
   session: Pick<SessionRecord, "firstUserMessage" | "lastUserMessage" | "lastAssistantMessage">,
-): RecentSessionPreview | null {
-  const firstUser = session.firstUserMessage ?? "";
+): RecentSessionPreview {
   const lastUser = session.lastUserMessage ?? "";
   const lastAssistant = session.lastAssistantMessage ?? "";
-  if (!firstUser && !lastUser && !lastAssistant) return null;
   return {
     userLast: lastUser || "—",
     assistantLast: lastAssistant || "—",

@@ -20,6 +20,7 @@ import {
   isReadOnlySkillSource,
   joinRelativePath,
   normalizeSkillFileEntries,
+  normalizeSessionSkillLink,
   parentPath,
   preferredSkillFileName,
   invokeCommand,
@@ -28,6 +29,7 @@ import {
   uniqueChildPath,
   type SkillFileEntry,
   type SkillLike,
+  type SessionSkillLinkRecord,
 } from "../../lib/index.ts";
 import { EditorHeader } from "../../components/shared/EditorHeader.tsx";
 import { DialogLoadingFallback } from "../../components/shared/DialogLoadingFallback.tsx";
@@ -37,32 +39,35 @@ import { IconButton } from "../../components/shared/IconButton.tsx";
 import { LoadingState } from "../../components/shared/LoadingState.tsx";
 import { MarkdownFilePane, type DiffStats } from "../../components/shared/MarkdownFilePane.tsx";
 import { ResizeSeparator } from "../../components/shared/ResizeSeparator.tsx";
+import { Toast } from "../../components/shared/Toast.tsx";
 import type { SkillDependencyRecord } from "./SkillDependencyGraph.tsx";
 import { SkillInfoMenu } from "./SkillInfoMenu.tsx";
 import { LinkedSessionsDrawerFallback } from "../sessions/LinkedSessionsDrawerFallback.tsx";
-import { loadCodeMirrorFileEditor } from "../../components/shared/code-mirror-loader.ts";
 
 const DiscardChangesDialog = lazy(() => import("../../components/shared/DiscardChangesDialog.tsx").then(({ DiscardChangesDialog: component }) => ({ default: component })));
 const LinkedSessionsDrawer = lazy(() => import("../sessions/linked-sessions.tsx").then(({ LinkedSessionsDrawer: component }) => ({ default: component })));
 
 export type SkillEditorRecord = SkillLike & {
   name: string;
-  agents?: string[];
-  visibility?: string;
-  description?: string;
-  dependencies?: string[];
-  dependents?: string[];
+  agents: string[];
+  visibility: string;
+  description: string;
+  dependencies: string[];
+  dependents: string[];
+  paths: NonNullable<SkillLike["paths"]>;
 };
 
 export type SkillIndexStatus = {
   indexed?: number;
   running?: boolean;
+  last_indexed_at?: string | null;
 };
 
 export type SkillEditorViewProps = {
   skill: SkillEditorRecord;
-  skills?: SkillDependencyRecord[];
+  skills: SkillDependencyRecord[];
   back: () => void;
+  onReadSkillIndexStatus?: () => Promise<SkillIndexStatus | null>;
   skillIndexStatus?: SkillIndexStatus | null;
   onOpenSession?: (link: Record<string, unknown>) => void;
   onOpenSkill?: (name: string) => void;
@@ -107,16 +112,17 @@ type SkillFileWriteResult = {
   skills?: SkillDependencyRecord[];
 };
 
-export function SkillEditorView({ skill, skills = [], back, skillIndexStatus, onOpenSession, onOpenSkill, onSaved }: SkillEditorViewProps) {
+export function SkillEditorView({ skill, skills, back, onReadSkillIndexStatus, skillIndexStatus, onOpenSession, onOpenSkill, onSaved }: SkillEditorViewProps) {
   const currentSkill = skill;
+  const skillPath = currentSkill.paths.find((path) => path.path)?.path;
   const readOnly = isReadOnlySkillSource(currentSkill);
   const [files, setFiles] = useState<SkillFileEntry[]>([]);
-  const [linkedSessions, setLinkedSessions] = useState<Record<string, unknown>[]>([]);
+  const [linkedSessions, setLinkedSessions] = useState<SessionSkillLinkRecord[]>([]);
   const [loadingLinkedSessions, setLoadingLinkedSessions] = useState(false);
   const [linkedSessionsError, setLinkedSessionsError] = useState("");
   const [showLinkedSessions, setShowLinkedSessions] = useState(false);
-  const [activePath, setActivePath] = useState("SKILL.md");
-  const [selectedPath, setSelectedPath] = useState("SKILL.md");
+  const [activePath, setActivePath] = useState("");
+  const [selectedPath, setSelectedPath] = useState("");
   const [drafts, setDrafts] = useState<Record<string, SkillDraft>>({});
   const [createdPaths, setCreatedPaths] = useState(() => new Set<string>());
   const [fileTreeCollapsed, setFileTreeCollapsed] = useState(false);
@@ -149,38 +155,63 @@ export function SkillEditorView({ skill, skills = [], back, skillIndexStatus, on
       setLoadingFiles(true);
       setFileError("");
       setFiles([]);
-      setActivePath("SKILL.md");
-      setSelectedPath("SKILL.md");
+      setActivePath("");
+      setSelectedPath("");
       setDrafts({});
       setCreatedPaths(new Set());
       setRenamingPath("");
       setCollapsedFolders(new Set());
       setShowDiscardDialog(false);
-      const fileListRead = invokeCommand(TauriCommand.SkillFiles, { name: currentSkill.name });
-      void loadCodeMirrorFileEditor();
-      let result: unknown;
-      try {
-        result = await fileListRead;
-      } catch (error) {
+      setLoadingContent(true);
+      const fileListRead = invokeCommand(TauriCommand.SkillFiles, {
+        name: currentSkill.name,
+        skillPath,
+      });
+      const initialContentRead = invokeCommand<SkillFileReadResult>(TauriCommand.SkillFileRead, {
+        name: currentSkill.name,
+        relativePath: "SKILL.md",
+        skillPath,
+      });
+      const [fileListResult, initialContentResult] = await Promise.allSettled([fileListRead, initialContentRead]);
+      if (fileListResult.status === "rejected") {
         if (!cancelled) {
+          const error = fileListResult.reason;
           setFileError(error instanceof Error ? error.message : `${error}`);
           setLoadingFiles(false);
+          setLoadingContent(false);
         }
         return;
       }
       if (cancelled) return;
-      const next = normalizeSkillFileEntries(result);
+      const next = normalizeSkillFileEntries(fileListResult.value);
       const firstFile = preferredSkillFileName(next);
       setFiles(next);
-      setActivePath(firstFile);
-      setSelectedPath(firstFile);
+      setActivePath(firstFile ?? "");
+      setSelectedPath(firstFile ?? "");
+      if (firstFile &&
+        initialContentResult.status === "fulfilled"
+        && typeof initialContentResult.value?.content === "string"
+        && typeof initialContentResult.value.sha256 === "string"
+      ) {
+        const fileContent = initialContentResult.value.content;
+        const fileHash = initialContentResult.value.sha256;
+        setDrafts((current) => trimCleanDrafts({
+          ...current,
+          "SKILL.md": {
+            content: fileContent,
+            originalContent: fileContent,
+            sha256: fileHash,
+          },
+        }, firstFile));
+      }
       setLoadingFiles(false);
+      setLoadingContent(false);
     }
     void loadFiles();
     return () => {
       cancelled = true;
     };
-  }, [currentSkill.name]);
+  }, [currentSkill.name, skillPath]);
 
   useEffect(() => {
     if (renamingPath) {
@@ -203,8 +234,11 @@ export function SkillEditorView({ skill, skills = [], back, skillIndexStatus, on
     async function loadContent() {
       setLoadingContent(true);
       setContentError("");
-      const fileRead = invokeCommand<SkillFileReadResult>(TauriCommand.SkillFileRead, { name: currentSkill.name, relativePath: activePath });
-      if (isMarkdownPath(activePath)) void loadCodeMirrorFileEditor();
+      const fileRead = invokeCommand<SkillFileReadResult>(TauriCommand.SkillFileRead, {
+        name: currentSkill.name,
+        relativePath: activePath,
+        skillPath,
+      });
       let result: SkillFileReadResult;
       try {
         result = await fileRead;
@@ -216,14 +250,15 @@ export function SkillEditorView({ skill, skills = [], back, skillIndexStatus, on
         return;
       }
       if (cancelled) return;
-      if (typeof result?.content === "string") {
+      if (typeof result?.content === "string" && typeof result.sha256 === "string") {
         const fileContent = result.content;
+        const fileHash = result.sha256;
         setDrafts((current) => trimCleanDrafts({
           ...current,
           [activePath]: {
             content: fileContent,
             originalContent: fileContent,
-            sha256: result.sha256 ?? "",
+            sha256: fileHash,
           },
         }, activePath));
       }
@@ -234,7 +269,7 @@ export function SkillEditorView({ skill, skills = [], back, skillIndexStatus, on
       cancelled = true;
       setLoadingContent(false);
     };
-  }, [activePath, currentSkill, drafts, loadingFiles]);
+  }, [activePath, currentSkill.name, drafts, loadingFiles, skillPath]);
 
   const save = useCallback(async () => {
     if (readOnly || !dirty || !original.sha256 || saveState === "saving") return;
@@ -247,11 +282,14 @@ export function SkillEditorView({ skill, skills = [], back, skillIndexStatus, on
         expectedSha256: original.sha256,
         content,
       });
-      const savedSha256 = result?.sha256;
-      if (!savedSha256) throw new Error("Save returned no file hash");
+      if (typeof result.content !== "string" || typeof result.sha256 !== "string") {
+        throw new Error("Save returned incomplete file content");
+      }
+      const savedContent = result.content;
+      const savedSha256 = result.sha256;
       setDrafts((current) => ({
         ...current,
-        [activePath]: { content: result.content ?? content, originalContent: result.content ?? content, sha256: savedSha256 },
+        [activePath]: { content: savedContent, originalContent: savedContent, sha256: savedSha256 },
       }));
       setSaveState("saved");
       onSaved?.(result.skills);
@@ -283,7 +321,10 @@ export function SkillEditorView({ skill, skills = [], back, skillIndexStatus, on
   const reloadFiles = async (preferredPath = selectedPath) => {
     let result: unknown;
     try {
-      result = await invokeCommand(TauriCommand.SkillFiles, { name: currentSkill.name });
+      result = await invokeCommand(TauriCommand.SkillFiles, {
+        name: currentSkill.name,
+        skillPath,
+      });
       setFileError("");
     } catch (error) {
       setFileError(error instanceof Error ? error.message : `${error}`);
@@ -291,12 +332,12 @@ export function SkillEditorView({ skill, skills = [], back, skillIndexStatus, on
     }
     const next = normalizeSkillFileEntries(result);
     const firstFile = preferredSkillFileName(next);
-    const preferred = next.find((file) => file.name === preferredPath);
-    const nextSelected = preferred?.name ?? firstFile;
+    const preferred = next.find((file) => file.name === preferredPath && file.kind === "file");
+    const nextSelected = preferred?.name ?? firstFile ?? "";
     setFiles(next);
     setSelectedPath(nextSelected);
     if (!next.some((file) => file.name === activePath && file.kind === "file")) {
-      setActivePath(firstFile);
+      setActivePath(firstFile ?? "");
     }
     return next;
   };
@@ -375,11 +416,13 @@ export function SkillEditorView({ skill, skills = [], back, skillIndexStatus, on
       });
     } else {
       const result = await safeInvoke(TauriCommand.SkillFileCreate, { name: currentSkill.name, relativePath }) as SkillFileReadResult | null;
-      if (result?.content !== undefined) {
+      if (typeof result?.content === "string" && typeof result.sha256 === "string") {
+        const createdContent = result.content;
+        const createdSha256 = result.sha256;
         setActivePath(relativePath);
         setDrafts((current) => ({
           ...current,
-          [relativePath]: { content: result.content ?? "", originalContent: result.content ?? "", sha256: result.sha256 ?? "" },
+          [relativePath]: { content: createdContent, originalContent: createdContent, sha256: createdSha256 },
         }));
       }
     }
@@ -393,7 +436,7 @@ export function SkillEditorView({ skill, skills = [], back, skillIndexStatus, on
     const next = await reloadFiles(activePath === entry.name ? "" : activePath);
     if (activePath === entry.name || entry.kind === "folder" && activePath.startsWith(`${entry.name}/`)) {
       const nextFile = preferredSkillFileName(next);
-      setActivePath(nextFile);
+      setActivePath(nextFile ?? "");
     }
     setDrafts((current) => Object.fromEntries(
       Object.entries(current).filter(([path]) => path !== entry.name && !path.startsWith(`${entry.name}/`)),
@@ -458,21 +501,27 @@ export function SkillEditorView({ skill, skills = [], back, skillIndexStatus, on
     setLoadingLinkedSessions(true);
     setLinkedSessionsError("");
     try {
+      if (onReadSkillIndexStatus) await onReadSkillIndexStatus();
       const links = await invokeCommand<unknown[]>(TauriCommand.SkillSessionLinks, { skillName: currentSkill.name });
       if (!Array.isArray(links)) throw new Error("Invalid linked sessions response");
-      if (request === linkedSessionsRequestRef.current) setLinkedSessions(links as Record<string, unknown>[]);
+      if (request === linkedSessionsRequestRef.current) {
+        setLinkedSessions(links.flatMap((link) => {
+          const normalized = normalizeSessionSkillLink(link);
+          return normalized ? [normalized] : [];
+        }));
+      }
     } catch (error) {
       if (request === linkedSessionsRequestRef.current) setLinkedSessionsError(`${error}`);
     } finally {
       if (request === linkedSessionsRequestRef.current) setLoadingLinkedSessions(false);
     }
-  }, [currentSkill.name]);
+  }, [currentSkill.name, onReadSkillIndexStatus, skillIndexStatus?.last_indexed_at]);
 
   useEffect(() => {
     if (!showLinkedSessions) return;
     void loadLinkedSessions();
     return () => { linkedSessionsRequestRef.current += 1; };
-  }, [currentSkill.name, loadLinkedSessions, showLinkedSessions, skillIndexStatus?.indexed, skillIndexStatus?.running]);
+  }, [currentSkill.name, loadLinkedSessions, showLinkedSessions]);
 
   /* The open handler primes the state so the drawer never renders a stale empty result. */
   const openLinkedSessions = () => {
@@ -505,6 +554,8 @@ export function SkillEditorView({ skill, skills = [], back, skillIndexStatus, on
           </>
         )}
       />
+      {fileError ? <Toast tone="error" message={fileError} onDismiss={() => setFileError("")} /> : null}
+      {contentError ? <Toast tone="error" message={contentError} onDismiss={() => setContentError("")} /> : null}
       {showDiscardDialog ? (
         <Suspense fallback={(
           <DialogLoadingFallback
@@ -522,7 +573,6 @@ export function SkillEditorView({ skill, skills = [], back, skillIndexStatus, on
           <LinkedSessionsDrawer
             open
             onOpenChange={setShowLinkedSessions}
-            skillName={currentSkill.name}
             links={linkedSessions}
             loading={loadingLinkedSessions}
             error={linkedSessionsError}
@@ -565,9 +615,6 @@ export function SkillEditorView({ skill, skills = [], back, skillIndexStatus, on
                   </div>
                   {!fileTreeCollapsed && loadingFiles && (
                     <LoadingState className="fileTreeLoading" label="Loading files" />
-                  )}
-                  {!fileTreeCollapsed && !loadingFiles && fileError && (
-                    <div className="fileTreeEmpty" role="alert">{fileError}</div>
                   )}
                   {!fileTreeCollapsed && !loadingFiles && rows.map(({ file, depth, isFolder }) => {
                 const isCollapsed = collapsedFolders.has(file.name);
@@ -701,7 +748,7 @@ export function SkillEditorView({ skill, skills = [], back, skillIndexStatus, on
             <EditorStatePlaceholder
               label={!contentReady || loadingContent || loadingFiles ? "Loading file" : undefined}
             >
-              {contentError ? <span role="alert">{contentError}</span> : contentReady && !loadingContent && !loadingFiles ? "Select a file" : null}
+              {contentReady && !loadingContent && !loadingFiles ? "Select a file" : null}
             </EditorStatePlaceholder>
           )}
         </Panel>

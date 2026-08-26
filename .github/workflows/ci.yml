@@ -6,6 +6,10 @@ on:
   pull_request:
     branches: [main]
 
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
 
@@ -23,11 +27,25 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
+      - name: Cache Rust build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-${{ runner.arch }}-rust-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-rust-
+
       - name: Install frontend dependencies
         run: npm ci --prefix apps/desktop
 
       - name: Check frontend UI boundaries
         run: npm run check:ui-boundaries --prefix apps/desktop
+
+      - name: Check provider boundaries
+        run: npm run test:provider-boundaries --prefix apps/desktop
 
       - name: Check frontend typography tokens
         run: npm run check:typography --prefix apps/desktop
@@ -38,6 +56,11 @@ jobs:
       - name: Rust check
         run: cargo check --workspace
 
+      - name: Deterministic performance gate
+        run: |
+          cargo build --quiet -p tendi-cli --features perf-runner --bins
+          node scripts/perf-check.mjs --fast --no-build
+
       - name: Frontend typecheck
         run: npm run typecheck --prefix apps/desktop
 
@@ -45,12 +68,15 @@ jobs:
         run: npm run e2e:align --prefix apps/desktop
 
       - name: Frontend build
+        if: github.event_name == 'pull_request'
         run: npm run build --prefix apps/desktop
 
       - name: Tauri app and DMG build
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         run: npm run build:dmg --prefix apps/desktop
 
       - name: Upload DMG artifact
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         uses: actions/upload-artifact@v4
         with:
           name: tendi-dmg

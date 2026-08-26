@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     ffi::{OsStr, OsString},
     fs,
     io::Read,
@@ -478,9 +478,13 @@ fn collect_repository_snapshot(
         "git-common-dir",
     )?;
 
-    let remote_url = query_optional(
+    let remote_url = resolve_remote_url(
         workspace,
-        &["config", "--get", "remote.origin.url"],
+        query_optional(
+            workspace,
+            &["config", "--get", "remote.origin.url"],
+            cancelled,
+        )?,
         cancelled,
     )?;
     let head_oid = query_optional(workspace, &["rev-parse", "HEAD"], cancelled)?;
@@ -526,6 +530,51 @@ fn query_optional(
         .success()
         .then(|| String::from_utf8_lossy(&output.stdout).trim().to_owned())
         .filter(|value| !value.is_empty()))
+}
+
+fn resolve_remote_url(
+    workspace: &Path,
+    remote_url: Option<String>,
+    cancelled: &AtomicBool,
+) -> Result<Option<String>, GitRepositorySnapshotError> {
+    let Some(mut remote_url) = remote_url else {
+        return Ok(None);
+    };
+    let mut repository = workspace.to_path_buf();
+    let mut visited_paths = HashSet::new();
+
+    loop {
+        let Some(remote_path) = local_remote_path(&repository, &remote_url) else {
+            return Ok(Some(remote_url));
+        };
+        let remote_path = normalize_path(&remote_path);
+        if !remote_path.is_dir() || !visited_paths.insert(remote_path.clone()) {
+            return Ok(None);
+        }
+        remote_url = match query_optional(
+            &remote_path,
+            &["config", "--get", "remote.origin.url"],
+            cancelled,
+        )? {
+            Some(remote_url) => remote_url,
+            None => return Ok(None),
+        };
+        repository = remote_path;
+    }
+}
+
+fn local_remote_path(workspace: &Path, remote_url: &str) -> Option<PathBuf> {
+    let path = Path::new(remote_url);
+    if path.is_absolute() {
+        return Some(path.to_path_buf());
+    }
+    if matches!(
+        path.components().next(),
+        Some(std::path::Component::CurDir | std::path::Component::ParentDir)
+    ) {
+        return Some(workspace.join(path));
+    }
+    None
 }
 
 fn resolve_git_path(
@@ -812,6 +861,76 @@ mod tests {
         git_success(&root, &["commit", "--quiet", "-m", "initial"]);
         git_success(&root, &["remote", "add", "origin", remote_url]);
         root
+    }
+
+    #[test]
+    fn metadata_snapshot_resolves_local_remote_to_repository_origin() {
+        let mirror = create_git_repo(
+            "tendi-git-local-remote-mirror",
+            "https://example.test/mirror.git",
+            "mirror",
+        );
+        let checkout = create_git_repo(
+            "tendi-git-local-remote-checkout",
+            mirror.to_str().unwrap(),
+            "checkout",
+        );
+        let cache = GitRepositorySnapshotCache::new(Duration::ZERO);
+
+        let snapshot = cache
+            .metadata_snapshot(&checkout, &AtomicBool::new(false))
+            .unwrap();
+
+        assert_eq!(
+            snapshot.remote_url.as_deref(),
+            Some("https://example.test/mirror.git")
+        );
+
+        fs::remove_dir_all(checkout).unwrap();
+        fs::remove_dir_all(mirror).unwrap();
+    }
+
+    #[test]
+    fn metadata_snapshot_drops_local_remote_without_repository_origin() {
+        let local_remote = temp_dir("tendi-git-local-remote-without-origin");
+        fs::create_dir_all(&local_remote).unwrap();
+        git_success(&local_remote, &["init", "--quiet"]);
+        let checkout = create_git_repo(
+            "tendi-git-local-remote-no-origin-checkout",
+            local_remote.to_str().unwrap(),
+            "checkout",
+        );
+        let cache = GitRepositorySnapshotCache::new(Duration::ZERO);
+
+        let snapshot = cache
+            .metadata_snapshot(&checkout, &AtomicBool::new(false))
+            .unwrap();
+
+        assert_eq!(snapshot.remote_url, None);
+
+        fs::remove_dir_all(checkout).unwrap();
+        fs::remove_dir_all(local_remote).unwrap();
+    }
+
+    #[test]
+    fn metadata_snapshot_keeps_network_remote_unchanged() {
+        let root = create_git_repo(
+            "tendi-git-network-remote",
+            "https://example.test/network.git",
+            "content",
+        );
+        let cache = GitRepositorySnapshotCache::new(Duration::ZERO);
+
+        let snapshot = cache
+            .metadata_snapshot(&root, &AtomicBool::new(false))
+            .unwrap();
+
+        assert_eq!(
+            snapshot.remote_url.as_deref(),
+            Some("https://example.test/network.git")
+        );
+
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

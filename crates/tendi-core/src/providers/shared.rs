@@ -20,28 +20,32 @@ pub(crate) fn generic_tool_payloads(value: &Value) -> Vec<(&Value, Evidence)> {
     content
         .iter()
         .filter(|item| item.get("type").and_then(Value::as_str) == Some("tool_use"))
-        .map(|item| {
+        .filter_map(|item| {
             let name = item
                 .get("name")
                 .and_then(Value::as_str)
-                .unwrap_or("tool_use");
-            (
+                .filter(|name| !name.trim().is_empty())?;
+            Some((
                 item,
                 Evidence {
                     kind: name.to_string(),
-                    text: crate::session_skills::summarize_evidence(item, name),
+                    text: crate::session_skills::summarize_evidence(item),
                     time: value
                         .get("timestamp")
                         .and_then(Value::as_str)
                         .map(str::to_string),
                 },
-            )
+            ))
         })
         .collect()
 }
 impl super::AgentProvider for SharedProvider {
     fn kind(&self) -> AgentKind {
         AgentKind::Shared
+    }
+
+    fn mcp_status_after_toggle(&self, enabled: bool) -> &'static str {
+        if enabled { "configured" } else { "disabled" }
     }
 
     fn storage_key(&self) -> &'static str {

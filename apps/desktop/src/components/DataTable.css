@@ -361,6 +361,15 @@
   white-space: nowrap;
 }
 
+/* The scroll-side group slot keeps vertical stickiness but follows the
+   horizontally scrolling surface. It must cover the visible scroll pane;
+   the generic frozen heading geometry would otherwise pin it behind the
+   frozen pane and expose row content in the group-header band. */
+.dataTableShell--frozen .dataTableScrollPane .dataSplitGroupSpacer {
+  left: auto;
+  width: 100%;
+}
+
 .sectionHeaderLabel {
   min-width: 0;
 }
@@ -387,12 +396,15 @@
    provides the hidden state. `[data-state="open"]` is set by Radix on the
    context-menu trigger (the row); `:has([data-state="open"])` catches an open
    in-cell dropdown (e.g. the row actions menu). */
-.dataRow[data-row-selectable="true"]:hover .rowSelection,
-.dataRow[data-row-selectable="true"].rowSelected .rowSelection,
-.dataRow[data-row-selectable="true"].selectionActive .rowSelection,
-.dataRow[data-row-selectable="true"]:focus-within .rowSelection,
-.dataRow[data-row-selectable="true"][data-state="open"] .rowSelection,
-.dataRow[data-row-selectable="true"]:has([data-state="open"]) .rowSelection,
+.dataRow[data-row-selectable="true"]:is(
+  .rowHover,
+  .rowSelected,
+  .selectionActive,
+  :focus-within,
+  [data-state="open"],
+  :has([data-state="open"])
+) .rowSelection,
+.dataTableShell:not(.dataTableShell--frozen) .dataRow[data-row-selectable="true"]:hover .rowSelection,
 .dataRow .rowSelection:not(:disabled):focus-visible {
   opacity: 1;
 }
@@ -650,13 +662,13 @@
 }
 
 .rowFrame:is(
-  :hover,
   .rowHover,
   .rowSelected,
   .menuActive,
   [data-state="open"],
   :has([data-state="open"])
-)::after {
+)::after,
+.dataTableShell:not(.dataTableShell--frozen) .rowFrame:hover::after {
   background: var(--data-table-row-hover-bg, var(--row-frame-bg));
 }
 
@@ -667,21 +679,21 @@
 
 /* Hide the 1px separator above an active row and on the row directly below it. */
 .rowFrame:is(
-  :hover,
   .rowHover,
   .rowSelected,
   .menuActive,
   [data-state="open"],
   :has([data-state="open"])
 )::before,
+.dataTableShell:not(.dataTableShell--frozen) .rowFrame:hover::before,
 .dataTableRowSlot:has(.rowFrame:is(
-  :hover,
   .rowHover,
   .rowSelected,
   .menuActive,
   [data-state="open"],
   :has([data-state="open"])
 )) + .dataTableRowSlot .rowFrame::before,
+.dataTableShell:not(.dataTableShell--frozen) .dataTableRowSlot:has(.rowFrame:hover) + .dataTableRowSlot .rowFrame::before,
 .dataTableHeader + .dataTableBody > .dataTableRowSlot:first-child .rowFrame::before,
 .dataTableBody > .dataTableRowSlot:first-child .rowFrame::before,
 .dataTableGroups > .dataGroup:first-child > .dataTableRowSlot:first-child .rowFrame::before {
@@ -689,7 +701,6 @@
 }
 
 .dataTableShell--frozen .dataRow:is(
-  :hover,
   .rowHover,
   .rowSelected,
   .menuActive,
@@ -701,7 +712,6 @@
 }
 
 .dataTableShell--frozen .dataTableRowSlot:has(.rowFrame:is(
-  :hover,
   .rowHover,
   .rowSelected,
   .menuActive,
@@ -895,6 +905,5 @@
 
 .dataCell[data-column="source"] .dataCellSub {
   margin-top: 7px;
-  font-family: var(--font-mono);
   font-size: var(--text-sm);
 }

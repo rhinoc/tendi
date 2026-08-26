@@ -13,10 +13,6 @@ export const agentDefinitions: readonly AgentDefinition[] = [
   sharedAgent,
 ];
 
-export const fallbackAgents = agentDefinitions
-  .filter((definition) => definition.id !== "shared")
-  .map((definition) => ({ label: definition.displayName, count: 1 }));
-
 const definitionsByAlias = new Map(
   agentDefinitions.flatMap((definition) => definition.aliases.map((alias) => [alias, definition] as const)),
 );

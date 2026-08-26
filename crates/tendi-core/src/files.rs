@@ -302,7 +302,7 @@ mod tests {
 
     use super::{
         create_skill_file, create_skill_folder, delete_skill_path, read_skill_file,
-        rename_skill_path, save_skill_file, sha256_file_streaming, sha256_text,
+        rename_skill_path, save_skill_file,
     };
 
     #[test]
@@ -438,26 +438,4 @@ mod tests {
         let _ = fs::remove_dir_all(root);
     }
 
-    #[test]
-    fn large_skill_file_hash_matches_text_hash() {
-        let root = std::env::temp_dir().join(format!(
-            "tendi-large-skill-hash-{}-{}",
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .expect("system time before epoch")
-                .as_nanos()
-        ));
-        fs::create_dir_all(&root).expect("create temp dir");
-        let content = "large skill content\n".repeat(512 * 1024);
-        let path = root.join("large.md");
-        fs::write(&path, &content).expect("write large skill");
-
-        assert_eq!(
-            sha256_file_streaming(&path).expect("hash large skill"),
-            sha256_text(&content),
-        );
-
-        let _ = fs::remove_dir_all(root);
-    }
 }

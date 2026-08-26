@@ -8,15 +8,15 @@ use serde_json::Value;
 
 use crate::{
     analytics::{AnalyticsCapabilities, SessionAnalyticsRecord},
-    hooks::HookRecord,
-    mcp::McpServerRecord,
+    hooks::{HookDeleteRequest, HookRecord, HookSetEnabledRequest},
+    mcp::{McpServerRecord, McpSetEnabledRequest},
     rules::{self, RuleRecord},
     session_skills::Evidence,
     sessions::{
         self, SessionMetadata, SessionRecord, SessionScanCache, SessionTokenUsage,
         SessionWatchExpansion, SessionWatchTarget,
     },
-    skills::{AgentKind, FileChange, SkillRoot, SkillVisibility},
+    skills::{AgentKind, FileChange, SkillPath, SkillRoot, SkillVisibility},
     transcript::TranscriptItem,
 };
 
@@ -30,6 +30,20 @@ mod unknown;
 pub(crate) struct ProviderContext {
     pub home: Option<PathBuf>,
     project_dirs: Vec<PathBuf>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ProviderSkillTarget {
+    pub id: &'static str,
+    pub display_name: &'static str,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SessionPathRole {
+    Other,
+    Transcript,
+    Metadata,
+    Index,
 }
 
 impl ProviderContext {
@@ -94,6 +108,11 @@ pub(crate) trait AgentProvider: Sync {
         home.to_path_buf()
     }
 
+    #[cfg(test)]
+    fn config_home_for_test(&self, home: &Path, _override_home: &Path) -> PathBuf {
+        self.config_home(home)
+    }
+
     fn projection_directories(&self) -> &'static [&'static str] {
         &[]
     }
@@ -110,6 +129,21 @@ pub(crate) trait AgentProvider: Sync {
         None
     }
 
+    fn is_session_candidate_path(&self, _path: &Path) -> bool {
+        false
+    }
+
+    fn session_path_role(&self, path: &Path) -> SessionPathRole {
+        if path
+            .extension()
+            .is_some_and(|extension| extension == "jsonl")
+        {
+            SessionPathRole::Transcript
+        } else {
+            SessionPathRole::Other
+        }
+    }
+
     fn skill_visibility_metadata(
         &self,
         _skill_dir: &Path,
@@ -119,8 +153,33 @@ pub(crate) trait AgentProvider: Sync {
         Ok(SkillProviderMetadata::default())
     }
 
-    fn skill_frontmatter_policy(&self) -> Option<SkillFrontmatterPolicy> {
+    fn effective_skill_visibility(
+        &self,
+        tendi_visibility: Option<SkillVisibility>,
+        provider_visibility: SkillVisibility,
+        _root: &SkillRoot,
+    ) -> SkillVisibility {
+        crate::skills::combine_skill_visibility(tendi_visibility, provider_visibility)
+    }
+
+    fn skill_backup_exclusion_reason(&self, _path: &SkillPath) -> Option<&'static str> {
         None
+    }
+
+    fn skill_frontmatter_satisfies(
+        &self,
+        meta: &serde_yaml::Mapping,
+        visibility: SkillVisibility,
+    ) -> bool {
+        crate::skills::skill_frontmatter_satisfies_with_provider_key(meta, visibility, None)
+    }
+
+    fn render_skill_frontmatter(
+        &self,
+        before: &str,
+        visibility: SkillVisibility,
+    ) -> Result<String> {
+        crate::skills::render_skill_frontmatter_with_provider_key(before, visibility, None)
     }
 
     fn plan_skill_visibility(
@@ -141,6 +200,14 @@ pub(crate) trait AgentProvider: Sync {
     }
 
     fn global_skill_root(&self, _home: &Path) -> Option<PathBuf> {
+        None
+    }
+
+    fn project_skill_root(&self, _cwd: &Path) -> Option<PathBuf> {
+        None
+    }
+
+    fn skill_target(&self) -> Option<ProviderSkillTarget> {
         None
     }
 
@@ -241,10 +308,6 @@ pub(crate) trait AgentProvider: Sync {
         Ok(None)
     }
 
-    fn terminate_session_writer(&self, _session: &SessionRecord) -> Result<()> {
-        Ok(())
-    }
-
     fn validate_session_resume(&self, _session: &SessionRecord) -> Result<()> {
         Ok(())
     }
@@ -275,6 +338,10 @@ pub(crate) trait AgentProvider: Sync {
 
     fn config_profile_key(&self) -> Option<&'static str> {
         None
+    }
+
+    fn skill_target_aliases(&self) -> &'static [(&'static str, &'static str)] {
+        &[]
     }
 
     fn apply_config_profile(&self, _command: &mut SessionCommand, _profile: &str) -> Result<()> {
@@ -341,11 +408,10 @@ pub(crate) trait AgentProvider: Sync {
         None
     }
 
-    fn session_id_from_path(&self, path: &Path) -> String {
+    fn session_id_from_path(&self, path: &Path) -> Option<String> {
         path.file_stem()
             .and_then(|name| name.to_str())
-            .unwrap_or("session")
-            .to_string()
+            .map(str::to_string)
     }
 
     fn session_project_aliases(&self, _path: &str) -> Vec<String> {
@@ -389,6 +455,36 @@ pub(crate) trait AgentProvider: Sync {
         Ok(())
     }
 
+    fn set_mcp_enabled(&self, _request: &McpSetEnabledRequest) -> Result<()> {
+        bail!(
+            "MCP enable/disable is not supported for {}",
+            self.storage_key()
+        )
+    }
+
+    fn mcp_status_after_toggle(&self, enabled: bool) -> &'static str;
+
+    fn delete_hooks(
+        &self,
+        _requests: &[HookDeleteRequest],
+        _source: &str,
+    ) -> Result<String> {
+        bail!("hook deletion is not supported for {}", self.storage_key())
+    }
+
+    fn set_hook_enabled(
+        &self,
+        _request: &HookSetEnabledRequest,
+        _source: &str,
+    ) -> Result<String> {
+        bail!("hook enable/disable is not supported for {}", self.storage_key())
+    }
+
+    fn hook_read_only_reason(&self, path: &Path) -> Option<&'static str> {
+        self.managed_hook_path(path)
+            .then_some("this hook source is read-only")
+    }
+
     fn scan_hooks(
         &self,
         _ctx: &ProviderContext,
@@ -396,6 +492,15 @@ pub(crate) trait AgentProvider: Sync {
         _hooks: &mut Vec<HookRecord>,
         _warnings: &mut Vec<String>,
     ) {
+    }
+
+    fn scan_hook_source_for_review(
+        &self,
+        _path: &Path,
+        _hooks: &mut Vec<HookRecord>,
+        _warnings: &mut Vec<String>,
+    ) -> bool {
+        false
     }
 
     fn apply_hook_review_states(&self, _hooks: &mut [HookRecord], _ctx: &ProviderContext) {}
@@ -443,16 +548,23 @@ pub(crate) trait AgentProvider: Sync {
     }
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub(crate) struct SkillProviderMetadata {
     pub allow_implicit_invocation: Option<bool>,
     pub enabled: Option<bool>,
     pub disable_model_invocation: Option<bool>,
+    pub provider_visibility: SkillVisibility,
 }
 
-#[derive(Debug, Clone, Copy)]
-pub(crate) enum SkillFrontmatterPolicy {
-    DisableModelInvocation,
+impl Default for SkillProviderMetadata {
+    fn default() -> Self {
+        Self {
+            allow_implicit_invocation: None,
+            enabled: None,
+            disable_model_invocation: None,
+            provider_visibility: SkillVisibility::Auto,
+        }
+    }
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -473,7 +585,6 @@ pub struct SessionResumePlan {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionWriter {
     pub lock_path: PathBuf,
-    pub pids: Vec<u32>,
 }
 
 static SHARED: shared::SharedProvider = shared::SharedProvider;
@@ -558,10 +669,6 @@ pub fn active_session_writer(session: &SessionRecord) -> Result<Option<SessionWr
     agent_provider(session.agent).active_session_writer(session)
 }
 
-pub fn terminate_session_writer(session: &SessionRecord) -> Result<()> {
-    agent_provider(session.agent).terminate_session_writer(session)
-}
-
 pub fn accepts_session_app_url(url: &str) -> bool {
     agent_providers()
         .into_iter()
@@ -570,6 +677,15 @@ pub fn accepts_session_app_url(url: &str) -> bool {
 
 pub fn config_profile_key(agent: AgentKind) -> Option<&'static str> {
     agent_provider(agent).config_profile_key()
+}
+
+pub(crate) fn canonical_skill_target_alias(value: &str) -> Option<&'static str> {
+    agent_providers().into_iter().find_map(|provider| {
+        provider
+            .skill_target_aliases()
+            .iter()
+            .find_map(|(alias, target)| (*alias == value).then_some(*target))
+    })
 }
 
 pub fn apply_session_config_profile(
@@ -602,7 +718,7 @@ fn absolute_project(session: &SessionRecord) -> Option<PathBuf> {
 }
 
 fn agent_display_name(agent: AgentKind) -> &'static str {
-    agent_provider(agent).display_name().unwrap_or("Unknown")
+    agent_provider(agent).display_name().unwrap_or_default()
 }
 
 fn push_skill_root(roots: &mut Vec<SkillRoot>, path: PathBuf, scope: &str, agent: AgentKind) {
@@ -851,6 +967,11 @@ mod tests {
             .open(&lock_path)
             .unwrap();
         lock_file.try_lock().unwrap();
+
+        let writer = codex::active_session_writer(&session)
+            .unwrap()
+            .expect("the held lock should be reported as an active writer");
+        assert_eq!(writer.lock_path, lock_path);
 
         let error = plan_session_resume(&session).unwrap_err();
 

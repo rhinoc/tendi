@@ -76,7 +76,11 @@ export function SelectControl({
       <Tooltip content={triggerTooltipContent}>
         <SelectTrigger className={className} label={label} showChevron={showChevron} disabled={disabled}>
           <Select.Value>
-            {renderValue ? renderValue(selectedOption) : <span className="selectValueText">{selectedLabel}</span>}
+            {renderValue
+              ? renderValue(selectedOption)
+              : renderOption && selectedOption
+                ? renderOption(selectedOption)
+                : <span className="selectValueText">{selectedLabel}</span>}
           </Select.Value>
         </SelectTrigger>
       </Tooltip>

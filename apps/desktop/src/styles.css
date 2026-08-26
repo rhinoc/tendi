@@ -176,15 +176,6 @@ input:focus-visible {
   backdrop-filter: blur(12px);
 }
 
-.skillUpdateError {
-  max-width: 280px;
-  overflow: hidden;
-  color: var(--danger-text);
-  font-size: var(--text-sm);
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
 .nav {
   display: flex;
   flex-direction: column;
@@ -530,6 +521,10 @@ p {
   overflow: hidden;
   font-size: var(--text-ui);
   line-height: var(--leading-body);
+  transition: none;
+}
+
+.addSkillPanel.hasPlan {
   transition: width 160ms ease-out;
 }
 
@@ -538,9 +533,12 @@ p {
   transform: translateY(-50%);
 }
 
-.addSkillPanel.isReviewing.hasSkillPreview {
+.addSkillPanel.isReviewing {
   left: calc(50% - (var(--add-skill-main-width) / 2));
   transform: translateY(-50%);
+}
+
+.addSkillPanel.isReviewing.hasSkillPreview {
   width: min(calc(var(--add-skill-main-width) + var(--add-skill-preview-width)), calc(100vw - 48px));
 }
 
@@ -599,7 +597,7 @@ p {
 }
 
 .skillLocationDialog {
-  width: min(560px, calc(100vw - 48px));
+  width: min(380px, calc(100vw - 48px));
 }
 
 .skillLocationBody {
@@ -615,46 +613,101 @@ p {
   font-size: var(--text-ui);
 }
 
-.skillLocationPlans {
-  display: grid;
-  gap: 6px;
-  max-height: 180px;
-  overflow: auto;
+.skillLocationTrigger {
+  width: 100%;
 }
 
-.skillLocationPlan {
-  display: grid;
-  grid-template-columns: auto auto minmax(0, 1fr);
-  align-items: center;
-  gap: 8px;
-  padding: 10px;
-  border: 1px solid var(--line);
-  border-radius: var(--radius-md);
-  background: var(--inset-fill);
-  color: var(--muted);
-  font-size: var(--text-sm);
-}
-
-.skillLocationPlan strong {
-  color: var(--text);
-  font-size: var(--text-sm);
-}
-
-.skillLocationPlan code {
+.skillLocationTriggerText {
   min-width: 0;
   overflow: hidden;
-  color: var(--text);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.skillLocationPlan small {
-  grid-column: 1 / -1;
-  color: var(--muted);
+.skillLocationMenu {
+  min-width: min(360px, calc(100vw - 64px));
+  max-width: min(380px, calc(100vw - 48px));
+  max-height: min(420px, var(--radix-dropdown-menu-content-available-height));
+  overflow-y: auto;
+  overscroll-behavior: contain;
 }
 
-.skillLocationPlan.isConflict small {
-  color: var(--danger);
+.skillLocationMenuItem {
+  width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
+  height: var(--control-height);
+  min-height: var(--control-height);
+  align-items: center;
+  padding: 0 10px;
+}
+
+.skillLocationMenuItem[data-state="checked"],
+.skillLocationMenuItem[data-state="indeterminate"] {
+  background: var(--selection-fill);
+}
+
+.skillLocationMenuItem[data-state="checked"][data-highlighted],
+.skillLocationMenuItem[data-state="indeterminate"][data-highlighted] {
+  background: var(--hover-fill-strong);
+}
+
+.skillLocationMenuItem[data-disabled] {
+  cursor: default;
+}
+
+.skillLocationTargetDetails {
+  width: 100%;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: 1 1 auto;
+}
+
+.skillLocationTargetDetails > .agentOptionLabel {
+  width: auto;
+  flex: 0 1 auto;
+}
+
+.skillLocationTargetDetails > .agentOptionLabel > span:last-child {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.skillLocationTargetPath {
+  min-width: 0;
+  flex: 1 1 auto;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: var(--text-xs);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.skillLocationTargetCount {
+  flex: 0 0 auto;
+  color: var(--muted);
+  font-size: var(--text-xs);
+}
+
+.skillLocationMode .segmentedControl {
+  width: 100%;
+}
+
+.skillLocationHint {
+  color: var(--muted);
+  font-size: var(--text-xs);
+}
+
+.skillLocationApplyTooltipTarget {
+  display: inline-flex;
+}
+
+.skillLocationConfirmDialog {
+  width: min(360px, calc(100vw - 48px));
 }
 
 .wrapperDialogPanel {
@@ -722,6 +775,18 @@ p {
   min-height: 0;
   max-height: none;
   overflow-y: auto;
+  align-content: start;
+}
+
+.sourceStage .skillSourceField > .loadingStateProgress {
+  flex: 1 1 auto;
+  height: auto;
+  min-height: 112px;
+}
+
+.sourceStage .sourceSearchEmpty {
+  flex: 1 1 auto;
+  min-height: 0;
 }
 
 .skillSourceField {
@@ -767,7 +832,7 @@ p {
 
 .sourceCandidate {
   min-width: 0;
-  min-height: var(--data-table-table-row-height);
+  min-height: 48px;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -1030,7 +1095,8 @@ p {
 .addSkillSelectAll {
   flex: 1;
   min-height: var(--control-height);
-  padding: 0;
+  padding: 0 6px;
+  box-sizing: border-box;
   border-radius: 0;
   color: var(--muted);
   background: transparent;
@@ -1048,22 +1114,22 @@ p {
 
 .addSkillPreviewButton {
   flex: 0 0 auto;
-  min-width: 70px;
-  height: var(--control-height);
+  min-width: auto;
+  height: auto;
   display: inline-flex;
   align-items: center;
   justify-content: flex-end;
   gap: 3px;
-  padding: 0 4px;
+  padding: 0;
   border: 0;
-  border-radius: var(--radius-sm);
+  border-radius: 0;
   color: var(--muted);
   background: transparent;
   font-size: var(--text-xs);
   font-weight: 400;
   opacity: 0;
   pointer-events: none;
-  transition: opacity 120ms ease-out;
+  transition: opacity 120ms ease-out, color 120ms ease-out;
   cursor: pointer;
 }
 
@@ -1083,7 +1149,7 @@ p {
 
 .addSkillPreviewButton:hover:not(:disabled) {
   color: var(--text);
-  background: var(--hover-fill-strong);
+  background: transparent;
 }
 
 .addSkillPreviewButton:disabled {
@@ -1094,15 +1160,6 @@ p {
 .addSkillPreviewButton[aria-busy="true"] {
   opacity: 1;
   pointer-events: auto;
-}
-
-.skillPreviewError {
-  padding: 8px 10px;
-  color: var(--danger);
-  background: var(--danger-soft);
-  border: 1px solid var(--danger-soft-strong);
-  border-radius: var(--row-frame-radius);
-  font-size: var(--text-sm);
 }
 
 .skillMarkdownPreview {
@@ -1178,10 +1235,6 @@ p {
 .addSkillSelectAll:hover {
   background: transparent;
   color: var(--text);
-}
-
-.addSkillItem.selected {
-  background: var(--selection-fill);
 }
 
 .addSkillItem.searchMatch {
@@ -1900,6 +1953,12 @@ p {
   flex: 1 1 auto;
 }
 
+.skillInfoSourceSection .skillInfoValueLine code,
+.ruleInfoPath .skillInfoValueLine code,
+.sessionInfoPath code {
+  font-family: inherit;
+}
+
 .skillInfoSourceIcon {
   width: 22px;
   height: 22px;
@@ -1954,6 +2013,10 @@ button.skillInfoSourceIcon:hover {
   gap: 6px;
 }
 
+.skillInfoPathRow code {
+  font-family: inherit;
+}
+
 .skillInfoInstallAgent {
   width: 24px;
   height: 24px;
@@ -1982,10 +2045,6 @@ button.skillInfoSourceIcon:hover {
   background: var(--file-tree-bg);
   font-size: var(--text-ui);
   overflow: auto;
-}
-
-.fileTreeEmpty {
-  min-height: 96px;
 }
 
 .fileTreePanel.collapsed .fileTree {
@@ -3258,6 +3317,11 @@ button.skillInfoSourceIcon:hover {
 
   .addSkillPanel.isReviewing.hasSkillPreview {
     width: calc(100vw - 24px);
+  }
+
+  .addSkillPanel.isReviewing {
+    left: 50%;
+    transform: translate(-50%, -50%);
   }
 
   .addSkillReview {

@@ -13,8 +13,8 @@ export type SessionRecord = {
   repositoryUrl?: string;
   logicalProjectId?: string;
   logicalProjectName?: string;
-  path?: string;
-  agent?: string;
+  path: string;
+  agent: string;
   startedAt?: string;
   updatedAt?: string;
   time?: string;
@@ -37,18 +37,56 @@ export type SessionRecord = {
   [key: string]: unknown;
 };
 
-export type SessionResumeTarget = "auto" | "terminal" | "app";
-
-export type SessionResumeOptions = {
-  forceActiveWriter?: boolean;
+export type SessionSkillLinkRecord = {
+  session_path: string;
+  session_project?: string | null;
+  session_id: string;
+  agent: string;
+  session_title?: string | null;
+  session_started_at?: string | null;
+  session_updated_at?: string | null;
+  session_message_count?: number | null;
+  skill_name: string;
+  skill_path: string;
+  evidence_text: string;
+  evidence_time?: string | null;
 };
 
+export function normalizeSessionSkillLink(value: unknown): SessionSkillLinkRecord | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const link = value as Record<string, unknown>;
+  const sessionPath = typeof link.session_path === "string" ? link.session_path.trim() : "";
+  const sessionId = typeof link.session_id === "string" ? link.session_id.trim() : "";
+  const agent = typeof link.agent === "string" ? link.agent.trim() : "";
+  const skillName = typeof link.skill_name === "string" ? link.skill_name.trim() : "";
+  const skillPath = typeof link.skill_path === "string" ? link.skill_path.trim() : "";
+  if (!sessionPath || !sessionId || !agent || !skillName || !skillPath || typeof link.evidence_text !== "string") return undefined;
+  return {
+    session_path: sessionPath,
+    session_project: typeof link.session_project === "string" ? link.session_project : null,
+    session_id: sessionId,
+    agent,
+    session_title: typeof link.session_title === "string" ? link.session_title : null,
+    session_started_at: typeof link.session_started_at === "string" ? link.session_started_at : null,
+    session_updated_at: typeof link.session_updated_at === "string" ? link.session_updated_at : null,
+    session_message_count: typeof link.session_message_count === "number" && Number.isSafeInteger(link.session_message_count) && link.session_message_count >= 0
+      ? link.session_message_count
+      : null,
+    skill_name: skillName,
+    skill_path: skillPath,
+    evidence_text: link.evidence_text,
+    evidence_time: typeof link.evidence_time === "string" ? link.evidence_time : null,
+  };
+}
+
+export type SessionResumeTarget = "auto" | "terminal" | "app";
+
 export type SessionResumeOutcome =
-  | { status: "activeWriter"; lockPath: string; pids: number[] }
+  | { status: "activeWriter"; lockPath: string }
   | { status: "launched"; target: SessionResumeTarget; terminal?: string };
 
 export function normalizeSessionResumeTarget(value: unknown): SessionResumeTarget {
-  if (value === "app" || value === "codex") return "app";
+  if (value === "app") return "app";
   if (value === "terminal") return "terminal";
   return "auto";
 }
@@ -76,40 +114,49 @@ export type SortState = { key: string; direction: "asc" | "desc" };
 export type SessionKind = "main" | "child";
 
 function textValue(value: unknown): string {
-  return value === null || value === undefined ? "" : `${value}`.trim();
+  return typeof value === "string" ? value.trim() : "";
 }
 
 function optionalCount(value: unknown): number | undefined {
-  if (value === null || value === undefined || value === "") return undefined;
-  const count = Number(value);
-  return Number.isFinite(count) && count >= 0 ? count : undefined;
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : undefined;
 }
 
 function normalizeTokenUsage(value: unknown): SessionTokenUsage | undefined {
   if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
   const usage = value as Record<string, unknown>;
-  const inputTokens = Number(usage.input_tokens ?? usage.inputTokens);
-  const cachedInputTokens = Number(usage.cached_input_tokens ?? usage.cachedInputTokens);
-  const outputTokens = Number(usage.output_tokens ?? usage.outputTokens);
-  const reasoningOutputTokens = Number(usage.reasoning_output_tokens ?? usage.reasoningOutputTokens ?? 0);
-  const totalTokens = Number(usage.total_tokens ?? usage.totalTokens);
+  const inputTokens = usage.input_tokens;
+  const cachedInputTokens = usage.cached_input_tokens;
+  const outputTokens = usage.output_tokens;
+  const reasoningOutputTokens = usage.reasoning_output_tokens;
+  const totalTokens = usage.total_tokens;
+  if (
+    typeof inputTokens !== "number"
+    || typeof cachedInputTokens !== "number"
+    || typeof outputTokens !== "number"
+    || typeof reasoningOutputTokens !== "number"
+    || typeof totalTokens !== "number"
+  ) return undefined;
   const values = [inputTokens, cachedInputTokens, outputTokens, reasoningOutputTokens, totalTokens];
   if (values.some((tokenCount) => !Number.isFinite(tokenCount) || tokenCount < 0) || totalTokens <= 0) return undefined;
   return { inputTokens, cachedInputTokens, outputTokens, reasoningOutputTokens, totalTokens };
 }
 
-export function normalizeSession(session: Record<string, unknown>, index: number): SessionRecord {
-  const updatedAt = `${session.updated_at ?? session.updatedAt ?? session.time ?? ""}`;
-  const startedAt = `${session.started_at ?? session.startedAt ?? ""}`;
-  const projectPath = textValue(session.project ?? session.projectPath);
-  const repositoryPath = textValue(session.repository ?? session.repositoryPath);
-  const repositoryUrl = textValue(session.repository_url ?? session.repositoryUrl);
-  const logicalProjectId = textValue(session.logical_project_id ?? session.logicalProjectId);
-  const logicalProjectName = textValue(session.logical_project_name ?? session.logicalProjectName);
-  const isRunEverything = session.is_run_everything ?? session.isRunEverything;
+export function normalizeSession(session: Record<string, unknown>): SessionRecord | undefined {
+  const id = typeof session.id === "string" ? session.id.trim() : "";
+  const agent = typeof session.agent === "string" ? session.agent.trim() : "";
+  const path = typeof session.path === "string" ? session.path.trim() : "";
+  if (!id || !agent || !path) return undefined;
+  const updatedAt = textValue(session.updated_at);
+  const startedAt = textValue(session.started_at);
+  const projectPath = textValue(session.project);
+  const repositoryPath = textValue(session.repository);
+  const repositoryUrl = textValue(session.repository_url);
+  const logicalProjectId = textValue(session.logical_project_id);
+  const logicalProjectName = textValue(session.logical_project_name);
+  const isRunEverything = session.is_run_everything;
   return {
-    id: `${session.id ?? `session-${index}`}`,
-    title: `${session.title || session.id || `Session ${index + 1}`}`,
+    id,
+    title: textValue(session.title),
     project: projectPath,
     projectPath,
     repository: repositoryPath || undefined,
@@ -117,27 +164,29 @@ export function normalizeSession(session: Record<string, unknown>, index: number
     repositoryUrl: repositoryUrl || undefined,
     logicalProjectId: logicalProjectId || undefined,
     logicalProjectName: logicalProjectName || undefined,
-    path: session.path as string | undefined,
-    agent: friendlyAgent(session.agent),
+    path,
+    agent: friendlyAgent(agent),
     startedAt,
     updatedAt,
     time: updatedAt,
     startedLabel: compactDateTime(startedAt),
     updatedLabel: compactDateTime(updatedAt),
     updatedDetailLabel: compactDateTime(updatedAt, { year: true }),
-    messages: Number(session.message_count ?? session.messages ?? 0),
-    firstUserMessage: textValue(session.first_user_message ?? session.firstUserMessage) || undefined,
-    lastUserMessage: textValue(session.last_user_message ?? session.lastUserMessage) || undefined,
-    lastAssistantMessage: textValue(session.last_assistant_message ?? session.lastAssistantMessage) || undefined,
-    turnCount: optionalCount(session.turn_count ?? session.turnCount),
-    model: `${session.model ?? ""}`,
+    messages: optionalCount(session.message_count),
+    firstUserMessage: textValue(session.first_user_message) || undefined,
+    lastUserMessage: textValue(session.last_user_message) || undefined,
+    lastAssistantMessage: textValue(session.last_assistant_message) || undefined,
+    turnCount: optionalCount(session.turn_count),
+    model: textValue(session.model),
     mode: textValue(session.mode) || undefined,
-    approvalMode: textValue(session.approval_mode ?? session.approvalMode) || undefined,
+    approvalMode: textValue(session.approval_mode) || undefined,
     isRunEverything: typeof isRunEverything === "boolean" ? isRunEverything : undefined,
-    parentSessionId: textValue(session.parent_session_id ?? session.parentSessionId) || undefined,
-    searchScore: Number(session.search_score ?? session.searchScore) || undefined,
-    searchSnippet: textValue(session.search_snippet ?? session.searchSnippet) || undefined,
-    tokenUsage: normalizeTokenUsage(session.token_usage ?? session.tokenUsage),
+    parentSessionId: textValue(session.parent_session_id) || undefined,
+    searchScore: typeof session.search_score === "number" && Number.isFinite(session.search_score)
+      ? session.search_score
+      : undefined,
+    searchSnippet: textValue(session.search_snippet) || undefined,
+    tokenUsage: normalizeTokenUsage(session.token_usage),
   };
 }
 
@@ -147,39 +196,35 @@ export function isAbsolutePath(value: unknown): boolean {
 
 export function sessionWorkspacePath(session: Pick<SessionRecord, "project" | "projectPath">): string {
   const projectPath = textValue(session.projectPath);
-  if (isAbsolutePath(projectPath)) return projectPath;
-  const project = textValue(session.project);
-  return isAbsolutePath(project) ? project : "";
+  return isAbsolutePath(projectPath) ? projectPath : "";
 }
 
 export function sessionRepositoryPath(session: Pick<SessionRecord, "repository" | "repositoryPath">): string {
   const repositoryPath = textValue(session.repositoryPath);
-  if (isAbsolutePath(repositoryPath)) return repositoryPath;
-  const repository = textValue(session.repository);
-  return isAbsolutePath(repository) ? repository : "";
+  return isAbsolutePath(repositoryPath) ? repositoryPath : "";
 }
 
 export function sessionLaunchPayload(session: Pick<SessionRecord, "id" | "agent" | "title" | "project" | "projectPath" | "path">) {
   const projectPath = sessionWorkspacePath(session);
   return {
-    id: `${session.id ?? ""}`,
-    agent: `${session.agent ?? ""}`,
+    id: session.id,
+    agent: session.agent,
     title: session.title ?? null,
     project: projectPath || null,
-    path: `${session.path ?? ""}`,
+    path: session.path,
   };
 }
 
 export function sessionIdentity(session: Pick<SessionRecord, "agent" | "id" | "path">): string {
-  return `${session.agent ?? ""}\u0000${session.id ?? ""}\u0000${session.path ?? ""}`;
+  return `${session.agent}\u0000${session.id}\u0000${session.path}`;
 }
 
 export function sessionLogicalIdentity(session: Pick<SessionRecord, "agent" | "id">): string {
-  return `${session.agent ?? ""}\u0000${session.id ?? ""}`;
+  return `${session.agent}\u0000${session.id}`;
 }
 
 export function sessionWorkspace(session: Pick<SessionRecord, "project" | "projectPath">): string {
-  return sessionWorkspacePath(session) || textValue(session.projectPath) || textValue(session.project) || "Unknown";
+  return sessionWorkspacePath(session);
 }
 
 export function sessionProject(session: Pick<SessionRecord, "project" | "projectPath" | "repository" | "repositoryPath" | "logicalProjectName">): string {
@@ -210,13 +255,14 @@ export function sessionProjectOption(
 }
 
 export function sessionProjectGroupLabel(key: string): string {
+  if (!key || key === "__empty__") return "";
   if (key.startsWith('["logical-project",')) {
     try {
       const value = JSON.parse(key);
       if (Array.isArray(value) && typeof value[2] === "string") return value[2];
     } catch {
-      // Fall through to a path label for malformed external data.
     }
+    return "";
   }
   return basename(key);
 }
@@ -237,15 +283,11 @@ export function sessionSnapshot(session: SessionRecord): string {
 
 export function mergeSessionRows(currentRows: SessionRecord[], incomingRows: Array<Record<string, unknown>>): SessionRecord[] {
   const currentByKey = new Map(currentRows.map((row) => [sessionIdentity(row), row]));
-  const nextRows = incomingRows.map((row, index) => {
-    const nextRow = normalizeSession(row, index);
+  const nextRows = incomingRows.flatMap((row) => {
+    const nextRow = normalizeSession(row);
+    if (!nextRow) return [];
     const currentRow = currentByKey.get(sessionIdentity(nextRow));
-    if (currentRow?.projectPath && !nextRow.projectPath) nextRow.projectPath = currentRow.projectPath;
-    if (currentRow?.repositoryPath && !nextRow.repositoryPath) {
-      nextRow.repository = currentRow.repository;
-      nextRow.repositoryPath = currentRow.repositoryPath;
-    }
-    return currentRow && sessionSnapshot(currentRow) === sessionSnapshot(nextRow) ? currentRow : nextRow;
+    return [currentRow && sessionSnapshot(currentRow) === sessionSnapshot(nextRow) ? currentRow : nextRow];
   });
   if (nextRows.length !== currentRows.length) return nextRows;
   for (let index = 0; index < nextRows.length; index += 1) {
@@ -260,17 +302,27 @@ export type SessionIdentityRecord = {
   path?: unknown;
 };
 
+export function sessionIdentityRecordKey(record: SessionIdentityRecord): string | undefined {
+  const id = textValue(record.id);
+  const agent = textValue(record.agent);
+  const path = textValue(record.path);
+  if (!id || !agent || !path) return undefined;
+  return sessionIdentity({ id, agent, path });
+}
+
 export function applySessionDelta(
   currentRows: SessionRecord[],
   incomingRows: Array<Record<string, unknown>>,
   deletedRows: SessionIdentityRecord[] = [],
 ): SessionRecord[] {
-  const deletedKeys = new Set(deletedRows.map((row) => sessionIdentity({
-    id: `${row.id ?? ""}`,
-    agent: `${row.agent ?? ""}`,
-    path: `${row.path ?? ""}`,
-  })));
-  const incoming = incomingRows.map((row, index) => normalizeSession(row, index));
+  const deletedKeys = new Set(deletedRows.flatMap((row) => {
+    const key = sessionIdentityRecordKey(row);
+    return key ? [key] : [];
+  }));
+  const incoming = incomingRows.flatMap((row) => {
+    const normalized = normalizeSession(row);
+    return normalized ? [normalized] : [];
+  });
   const incomingByKey = new Map(incoming.map((row) => [sessionLogicalIdentity(row), row]));
   const emittedKeys = new Set<string>();
   const nextRows = currentRows.flatMap((row) => {
@@ -281,11 +333,6 @@ export function applySessionDelta(
     const nextRow = incomingByKey.get(key);
     if (!nextRow) return [row];
     incomingByKey.delete(key);
-    if (row.projectPath && !nextRow.projectPath) nextRow.projectPath = row.projectPath;
-    if (row.repositoryPath && !nextRow.repositoryPath) {
-      nextRow.repository = row.repository;
-      nextRow.repositoryPath = row.repositoryPath;
-    }
     return [sessionSnapshot(row) === sessionSnapshot(nextRow) ? row : nextRow];
   });
   nextRows.push(...incomingByKey.values());
@@ -294,8 +341,8 @@ export function applySessionDelta(
 }
 
 export function sortValue(session: SessionRecord, key: string): string | number {
-  if (key === "title") return `${session.title ?? ""}`.toLowerCase();
-  if (key === "agent") return `${session.agent ?? ""}`.toLowerCase();
+  if (key === "title") return session.title.toLowerCase();
+  if (key === "agent") return session.agent.toLowerCase();
   if (key === "project") return sessionProject(session).toLowerCase();
   if (key === "startedAt") return `${session.startedAt ?? ""}`;
   if (key === "updatedAt") return `${session.updatedAt ?? ""}`;

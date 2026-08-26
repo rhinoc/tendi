@@ -10,7 +10,6 @@ export type SkillSessionProjectItem = {
   skillKey: string;
   skillLabel: string;
   sessionLabel: string;
-  sessionTitle?: string;
   projectKey: string;
   projectLabel: string;
 };
@@ -94,8 +93,11 @@ export function SkillSessionProjectChart({
       <svg viewBox={`0 0 ${width} ${height}`} preserveAspectRatio="xMidYMid meet" aria-label={ariaLabel}>
         {items.map((item, index) => {
           const y = sessionY(index);
-          const sourceY = skillY(skillIndex.get(item.skillKey) ?? 0);
-          const targetY = projectY(projectIndex.get(item.projectKey) ?? 0);
+          const sourceIndex = skillIndex.get(item.skillKey);
+          const targetIndex = projectIndex.get(item.projectKey);
+          if (sourceIndex === undefined || targetIndex === undefined) return null;
+          const sourceY = skillY(sourceIndex);
+          const targetY = projectY(targetIndex);
           const isDirectlyConnected = activeNode === null
             || (activeNode.type === "skill" && activeNode.key === item.skillKey)
             || (activeNode.type === "session" && activeNode.key === item.key)
@@ -103,15 +105,14 @@ export function SkillSessionProjectChart({
           const isActive = activeNode?.type === "session" && activeNode.key === item.key;
           const connectionClass = activeNode === null ? "" : isDirectlyConnected ? " isActive" : " isDimmed";
           const activate = () => onSessionClick?.(item);
-          const sessionLabel = formatSessionTitle(item.sessionLabel) || "Untitled session";
-          const sessionTitle = formatSessionTitle(item.sessionTitle ?? item.sessionLabel) || sessionLabel;
+          const sessionLabel = formatSessionTitle(item.sessionLabel);
           return (
             <g
               key={item.key}
               className={`skillSessionProjectItem${connectionClass}`}
               role={onSessionClick ? "button" : undefined}
               tabIndex={onSessionClick ? 0 : undefined}
-              aria-label={onSessionClick ? `Open ${sessionTitle}` : undefined}
+              aria-label={onSessionClick ? `Open ${sessionLabel}` : undefined}
               onClick={onSessionClick ? activate : undefined}
               onKeyDown={onSessionClick ? (event) => activateOnKeyboard(event, activate) : undefined}
               onMouseEnter={() => setActiveNode({ type: "session", key: item.key })}

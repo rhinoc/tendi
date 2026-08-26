@@ -7,6 +7,10 @@ import { writeStderr, writeStdout } from "./stdio.mjs";
 const PACKAGE_ROOT = fileURLToPath(new URL("../", import.meta.url));
 const SOURCE_ROOT = join(PACKAGE_ROOT, "src");
 const SHARED_TOOLTIP_FILE = join(SOURCE_ROOT, "components/shared/Tooltip.tsx");
+const SHARED_MENU_CONTENT_FILES = new Set([
+  join(SOURCE_ROOT, "components/shared/MenuContent.tsx"),
+  join(SOURCE_ROOT, "components/shared/InfoDropdownMenu.tsx"),
+]);
 const JSX_EXTENSIONS = new Set([".jsx", ".tsx"]);
 const RADIX_TOOLTIP_MODULES = new Set(["radix-ui", "@radix-ui/react-tooltip"]);
 
@@ -73,15 +77,22 @@ function checkFile(fileName, sourceText) {
     }
   };
 
+  const checkRawMenuContent = (tagName) => {
+    if (SHARED_MENU_CONTENT_FILES.has(fileName) || tagName.getText(sourceFile) !== "DropdownMenu.Content") return;
+    report(tagName, "raw DropdownMenu.Content is not allowed; use MenuContent or DialogMenuContent");
+  };
+
   const visit = (node) => {
     if (ts.isImportDeclaration(node)) checkTooltipImport(node);
     if (ts.isJsxElement(node)) {
       checkIntrinsicAttributes(node.openingElement.tagName, node.openingElement.attributes);
+      checkRawMenuContent(node.openingElement.tagName);
       if (identifierText(node.openingElement.tagName) === "title") {
         report(node.openingElement.tagName, "native <title> element is not allowed in desktop JSX");
       }
     } else if (ts.isJsxSelfClosingElement(node)) {
       checkIntrinsicAttributes(node.tagName, node.attributes);
+      checkRawMenuContent(node.tagName);
     }
     ts.forEachChild(node, visit);
   };
@@ -100,5 +111,5 @@ if (violations.length > 0) {
   for (const violation of violations) writeStderr(`- ${violation}`);
   process.exitCode = 1;
 } else {
-  writeStdout("UI boundaries passed: no native title tooltips or out-of-bound Radix Tooltip imports.");
+  writeStdout("UI boundaries passed: no native title tooltips, out-of-bound Radix Tooltip imports, or raw business DropdownMenu.Content usage.");
 }

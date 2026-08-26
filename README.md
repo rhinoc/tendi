@@ -54,6 +54,10 @@ TENDI_CWD=/path/to/project npm run dev:tauri
 `TENDI_CWD` is optional. Without it, tendi uses the desktop process working directory when
 scanning project-level rules, hooks, MCP configuration, and skills.
 
+Tauri and the web daemon use separate Cargo target directories during development, so their
+hot-reload builds cannot overwrite each other's artifacts. Set `TENDI_DAEMON_TARGET_DIR` only
+when a custom daemon target directory is needed.
+
 ### Build a local macOS DMG
 
 Build the release `.app` and a local disk image from the repository root:

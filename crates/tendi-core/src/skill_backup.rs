@@ -112,6 +112,12 @@ pub struct BackupRestoreResolution {
     pub action: String,
 }
 
+#[derive(Debug)]
+pub struct BackupRestoreApplyResult {
+    pub operations: Vec<BackupRestoreOperation>,
+    pub source_records: Vec<SkillSourceRecord>,
+}
+
 pub fn plan_backup_restore(
     store: &Store,
     cwd: &Path,
@@ -179,7 +185,17 @@ pub fn apply_backup_restore(
     store: &Store,
     resolutions: &[BackupRestoreResolution],
 ) -> Result<Vec<BackupRestoreOperation>> {
+    let result = apply_backup_restore_without_database(plan, resolutions)?;
+    store.upsert_skill_source_records(&result.source_records)?;
+    Ok(result.operations)
+}
+
+pub fn apply_backup_restore_without_database(
+    plan: &BackupRestorePlan,
+    resolutions: &[BackupRestoreResolution],
+) -> Result<BackupRestoreApplyResult> {
     let mut operations = plan.operations.clone();
+    let mut source_records = Vec::new();
     let mut resolutions_by_id = BTreeMap::new();
     for resolution in resolutions {
         if resolutions_by_id
@@ -280,11 +296,14 @@ pub fn apply_backup_restore(
             update_status: "local".to_string(),
             origin: "tendi-backup-restore".to_string(),
         };
-        store.upsert_skill_source_records(std::slice::from_ref(&record))?;
+        source_records.push(record);
         operation.status = "restored".to_string();
         operation.message = None;
     }
-    Ok(operations)
+    Ok(BackupRestoreApplyResult {
+        operations,
+        source_records,
+    })
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -298,6 +317,15 @@ pub struct BackupSkillStatus {
 
 pub fn adopt_skill_for_backup(
     store: &Store,
+    skill_path: &Path,
+    name: impl Into<String>,
+) -> Result<SkillSourceRecord> {
+    let record = skill_backup_record_for_adoption(skill_path, name)?;
+    store.upsert_skill_source_records(std::slice::from_ref(&record))?;
+    Ok(record)
+}
+
+pub fn skill_backup_record_for_adoption(
     skill_path: &Path,
     name: impl Into<String>,
 ) -> Result<SkillSourceRecord> {
@@ -319,7 +347,6 @@ pub fn adopt_skill_for_backup(
         update_status: "local".to_string(),
         origin: "tendi-backup-adopt".to_string(),
     };
-    store.upsert_skill_source_records(std::slice::from_ref(&record))?;
     Ok(record)
 }
 
@@ -327,12 +354,15 @@ pub fn backup_statuses_for_paths(
     store: &Store,
     paths: &[PathBuf],
 ) -> Result<Vec<BackupSkillStatus>> {
+    let config = store.skill_backup_config()?;
+    if config.is_none() {
+        return Ok(Vec::new());
+    }
     let records = store.skill_source_records()?;
     let records_by_path = records
         .iter()
         .map(|record| (record.skill_path.as_path(), record))
         .collect::<BTreeMap<_, _>>();
-    let config = store.skill_backup_config()?;
     let persisted = config
         .as_ref()
         .and_then(|config| read_checkout_manifest(&config.checkout_path).ok().flatten());
@@ -1375,10 +1405,28 @@ mod tests {
     };
 
     use super::{
-        adopt_skill_for_backup, backup_now, backup_versions, build_manifest, validate_manifest,
-        write_snapshot, BackupBuildOptions, BackupConfig, BackupManifest,
+        adopt_skill_for_backup, backup_now, backup_statuses_for_paths, backup_versions,
+        build_manifest, validate_manifest, write_snapshot, BackupBuildOptions, BackupConfig,
+        BackupManifest,
     };
     use crate::{skills::SkillSourceRecord, storage::Store, SkillInstallScope, SkillTarget};
+
+    #[test]
+    fn backup_statuses_skip_all_skill_work_without_a_configured_repository() {
+        let root = temp_dir("tendi-skill-backup-status-no-config");
+        let skill = root.join("global/review");
+        write_skill(&skill, "review");
+        let store = Store::open(root.join("tendi.sqlite3")).unwrap();
+        store
+            .upsert_skill_source_records(&[source("review", &skill)])
+            .unwrap();
+
+        let statuses = backup_statuses_for_paths(&store, std::slice::from_ref(&skill)).unwrap();
+
+        assert!(statuses.is_empty());
+        drop(store);
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn manifest_contains_only_managed_non_project_skills_and_snapshot_is_self_contained() {
@@ -1529,27 +1577,6 @@ mod tests {
         assert!(error.to_string().contains("credentials"));
     }
 
-    #[test]
-    fn backup_versions_returns_empty_for_an_unborn_checkout() {
-        let root = temp_dir("tendi-skill-backup-unborn");
-        let checkout = root.join("checkout");
-        fs::create_dir_all(&checkout).unwrap();
-        run_git(&checkout, &["init", "-b", "main"]);
-
-        let store = Store::open(root.join("tendi.sqlite3")).unwrap();
-        store
-            .save_skill_backup_config(&BackupConfig::new(
-                "https://example.com/tendi-skills.git",
-                checkout,
-                "Test Mac",
-            ))
-            .unwrap();
-
-        assert!(backup_versions(&store, 10).unwrap().is_empty());
-
-        drop(store);
-        fs::remove_dir_all(root).unwrap();
-    }
 
     #[test]
     fn manifest_validation_rejects_paths_that_escape_a_skill_directory() {

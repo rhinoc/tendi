@@ -46,7 +46,7 @@ export type RowContextMenuContext<TRow> = {
 export type DataTableProps<TRow> = {
   rows: TRow[];
   columns: ColumnDef<TRow>[];
-  getRowId?: (row: TRow) => string;
+  getRowId: (row: TRow) => string;
   getRowLabel?: (row: TRow) => string | undefined;
   selectable?: boolean | ((row: TRow) => boolean);
   selectedIds?: string[];
@@ -69,6 +69,7 @@ export type DataTableProps<TRow> = {
   rowProps?: (row: TRow) => { className?: string };
   rowContextMenu?: (row: TRow, ctx: RowContextMenuContext<TRow>) => ReactNode | null;
   bottomBar?: (selectedRows: TRow[], ctx: { clear: () => void }) => ReactNode;
+  bottomBarActionsClassName?: string;
   bottomBarCheckboxLabel?: string;
   selectionLabel?: string;
   loading?: boolean;

@@ -193,29 +193,39 @@ pub fn scan_scope(
     let scanned_at = Local::now().to_rfc3339();
     let projects = roots
         .into_iter()
-        .map(|root| scan_project(&root, scope_id, &scanned_at))
+        .filter_map(|root| match scan_project(&root, scope_id, &scanned_at) {
+            Some(project) => Some(project),
+            None => {
+                warnings.push(format!(
+                    "Project repository has no usable directory name: {}",
+                    root.display()
+                ));
+                None
+            }
+        })
         .collect();
     (projects, warnings)
 }
 
-fn scan_project(root: &Path, scope_id: &str, scanned_at: &str) -> ProjectRecord {
+fn scan_project(root: &Path, scope_id: &str, scanned_at: &str) -> Option<ProjectRecord> {
+    let name = root
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())?
+        .to_string();
     let remote_url = git::local_repository_snapshot(root, git::never_cancelled())
         .ok()
         .and_then(|snapshot| snapshot.remote_url);
 
-    ProjectRecord {
+    Some(ProjectRecord {
         id: project_id(root),
-        name: root
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or("Project")
-            .to_string(),
+        name,
         root_path: root.to_path_buf(),
         remote_url,
         scope_id: scope_id.to_string(),
         status: "ready".to_string(),
         last_scanned_at: scanned_at.to_string(),
-    }
+    })
 }
 
 fn should_skip_directory(entry: &DirEntry) -> bool {
@@ -235,7 +245,9 @@ mod tests {
         time::{SystemTime, UNIX_EPOCH},
     };
 
-    use super::{ProjectScanScope, build_exclusion_matcher, normalize_scope_paths, scan_scope};
+    use super::{
+        ProjectScanScope, build_exclusion_matcher, normalize_scope_paths, scan_project, scan_scope,
+    };
 
     fn temp_root(name: &str) -> std::path::PathBuf {
         let suffix = SystemTime::now()
@@ -271,6 +283,11 @@ mod tests {
         assert_eq!(projects[0].scope_id, "scope-test");
 
         fs::remove_dir_all(root).expect("remove temp root");
+    }
+
+    #[test]
+    fn project_scan_drops_roots_without_a_directory_name() {
+        assert!(scan_project(std::path::Path::new("/"), "scope-test", "now").is_none());
     }
 
     #[test]

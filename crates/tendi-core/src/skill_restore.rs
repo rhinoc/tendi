@@ -34,6 +34,12 @@ pub struct SkillRestoreReport {
     pub operations: Vec<SkillRestoreOperation>,
 }
 
+#[derive(Debug, Clone)]
+pub struct SkillRestoreApplyResult {
+    pub report: SkillRestoreReport,
+    pub source_records: Vec<SkillSourceRecord>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct SkillRestoreOperation {
     pub name: String,
@@ -84,9 +90,11 @@ pub fn plan_project_skill_restore(cwd: &Path, store: &Store) -> Result<SkillRest
     }
 
     let target: SkillTarget = "universal".parse()?;
-    // `skills` uses the universal project database at `.agents/skills`, even
-    // when the Tendi target catalog can route other agents elsewhere.
-    let target_root = project_root.join(".agents/skills");
+    let target_root = crate::skill_targets::skill_target_root(
+        &project_root,
+        &target,
+        SkillInstallScope::Project,
+    )?;
     let mut operations = Vec::new();
     let mut executable = Vec::new();
 
@@ -172,7 +180,16 @@ pub fn apply_project_skill_restore(
     plan: &SkillRestorePlan,
     store: &Store,
 ) -> Result<SkillRestoreReport> {
+    let result = apply_project_skill_restore_without_database(plan)?;
+    store.upsert_skill_source_records(&result.source_records)?;
+    Ok(result.report)
+}
+
+pub fn apply_project_skill_restore_without_database(
+    plan: &SkillRestorePlan,
+) -> Result<SkillRestoreApplyResult> {
     let mut operations = plan.operations.clone();
+    let mut source_records = Vec::new();
     for executable in &plan.executable {
         let operation = &mut operations[executable.operation_index];
         match apply_skill_add_preview(&executable.add_plan, &executable.options) {
@@ -184,7 +201,7 @@ pub fn apply_project_skill_restore(
                 };
                 let mut source_record = executable.source_record.clone();
                 source_record.skill_path = result.target.clone();
-                store.upsert_skill_source_records(&[source_record])?;
+                source_records.push(source_record);
                 operation.status = "restored".to_string();
                 operation.message = None;
             }
@@ -194,11 +211,14 @@ pub fn apply_project_skill_restore(
             }
         }
     }
-    Ok(SkillRestoreReport {
-        lock_path: plan.lock_path.clone(),
-        project_root: plan.project_root.clone(),
-        target_root: plan.target_root.clone(),
-        operations,
+    Ok(SkillRestoreApplyResult {
+        report: SkillRestoreReport {
+            lock_path: plan.lock_path.clone(),
+            project_root: plan.project_root.clone(),
+            target_root: plan.target_root.clone(),
+            operations,
+        },
+        source_records,
     })
 }
 

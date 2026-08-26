@@ -1,6 +1,7 @@
 import { useLayoutEffect, useRef, useState } from "react";
 
 import { Badge } from "./Badge.tsx";
+import { Tooltip } from "./Tooltip.tsx";
 import "./BadgeList.css";
 
 export type BadgeListProps = {
@@ -66,12 +67,22 @@ export function BadgeList({ items, ariaLabel = "Selected items", active = true, 
   }, [active, itemsKey]);
 
   const hiddenItemCount = items.length - visibleItemCount;
+  const hiddenItems = items.slice(visibleItemCount);
   return (
     <span className={["badgeList", className].filter(Boolean).join(" ")} ref={listRef} aria-label={ariaLabel}>
       {items.slice(0, visibleItemCount).map((item, index) => (
         <Badge tone="accent" key={`${item}-${index}`}>{item}</Badge>
       ))}
-      {hiddenItemCount > 0 ? <Badge tone="neutral">{hiddenItemCount}+</Badge> : null}
+      {hiddenItemCount > 0 ? (
+        <Tooltip content={hiddenItems.join("\n")}>
+          <span
+            className="badgeListOverflow"
+            aria-label={`Hidden items: ${hiddenItems.join(", ")}`}
+          >
+            <Badge tone="neutral">{hiddenItemCount}+</Badge>
+          </span>
+        </Tooltip>
+      ) : null}
       <span className="badgeListMeasure" ref={measureRef} aria-hidden="true">
         {items.map((item, index) => (
           <Badge tone="accent" data-measure-item={index} key={`measure-item-${item}-${index}`}>

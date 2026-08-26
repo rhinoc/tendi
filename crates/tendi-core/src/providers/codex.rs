@@ -3,8 +3,6 @@ use std::{
     env,
     fs::{self, OpenOptions, TryLockError},
     path::{Path, PathBuf},
-    process::Command,
-    time::Duration,
 };
 
 use anyhow::{Context, Result, bail};
@@ -26,6 +24,94 @@ use crate::transcript::{
 use super::*;
 
 pub(super) struct CodexProvider;
+
+fn infer_mcp_transport(spec: &Value) -> Option<String> {
+    spec.get("transport")
+        .or_else(|| spec.get("type"))
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .or_else(|| spec.get("command").and_then(Value::as_str).map(|_| "stdio".to_string()))
+        .or_else(|| {
+            spec.get("url").and_then(Value::as_str).map(|url| {
+                if url.contains("/sse") { "sse" } else { "http" }.to_string()
+            })
+        })
+}
+
+fn infer_mcp_status(spec: &Value) -> String {
+    if infer_mcp_enabled(spec) {
+        "configured"
+    } else {
+        "disabled"
+    }
+    .to_string()
+}
+
+fn infer_mcp_enabled(spec: &Value) -> bool {
+    !spec
+        .get("disabled")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+        && spec.get("enabled").and_then(Value::as_bool).unwrap_or(true)
+}
+
+fn infer_mcp_toml_transport(spec: &TomlValue) -> Option<String> {
+    spec.get("transport")
+        .or_else(|| spec.get("type"))
+        .and_then(TomlValue::as_str)
+        .map(str::to_string)
+        .or_else(|| spec.get("command").and_then(TomlValue::as_str).map(|_| "stdio".to_string()))
+        .or_else(|| {
+            spec.get("url").and_then(TomlValue::as_str).map(|url| {
+                if url.contains("/sse") { "sse" } else { "http" }.to_string()
+            })
+        })
+}
+
+fn infer_mcp_toml_status(spec: &TomlValue) -> String {
+    if infer_mcp_toml_enabled(spec) {
+        "configured"
+    } else {
+        "disabled"
+    }
+    .to_string()
+}
+
+fn infer_mcp_toml_enabled(spec: &TomlValue) -> bool {
+    !spec
+        .get("disabled")
+        .and_then(TomlValue::as_bool)
+        .unwrap_or(false)
+        && spec
+            .get("enabled")
+            .and_then(TomlValue::as_bool)
+            .unwrap_or(true)
+}
+
+fn update_mcp_json_server(spec: &mut serde_json::Map<String, Value>, enabled: bool) -> bool {
+    let has_disabled = spec.contains_key("disabled");
+    let has_enabled = spec.contains_key("enabled");
+    if has_disabled || !has_enabled {
+        spec.insert("disabled".to_string(), Value::Bool(!enabled));
+    }
+    if has_enabled {
+        spec.insert("enabled".to_string(), Value::Bool(enabled));
+    }
+    true
+}
+
+fn update_mcp_toml_server(spec: &mut toml::map::Map<String, TomlValue>, enabled: bool) -> bool {
+    let has_disabled = spec.contains_key("disabled");
+    let has_enabled = spec.contains_key("enabled");
+    if has_disabled {
+        spec.insert("disabled".to_string(), TomlValue::Boolean(!enabled));
+    } else if has_enabled {
+        spec.insert("enabled".to_string(), TomlValue::Boolean(enabled));
+    } else {
+        spec.insert("enabled".to_string(), TomlValue::Boolean(enabled));
+    }
+    true
+}
 
 const CODEX_BUNDLED_SKILL_FILES: [(&str, &str); 1] = [(
     "agents/openai.yaml",
@@ -97,17 +183,28 @@ pub(crate) fn scan_session_index(
     Ok(())
 }
 
-pub(crate) fn session_id_from_path(path: &Path) -> String {
+#[cfg(test)]
+pub(crate) fn scan_jsonl_sessions_for_test(
+    root: &Path,
+    sessions: &mut Vec<SessionRecord>,
+    cache: Option<&SessionScanCache>,
+) {
+    crate::sessions::scan_jsonl_sessions(root, AgentKind::Codex, 6, sessions, cache);
+}
+
+pub(crate) fn session_id_from_path(path: &Path) -> Option<String> {
     let raw_id = path
         .file_stem()
         .and_then(|name| name.to_str())
-        .unwrap_or("codex-session")
-        .trim_start_matches("rollout-");
-    if raw_id.len() >= 36 {
+        .map(|name| name.trim_start_matches("rollout-"))?;
+    if raw_id.is_empty() {
+        return None;
+    }
+    Some(if raw_id.len() >= 36 {
         raw_id[raw_id.len() - 36..].to_string()
     } else {
         raw_id.to_string()
-    }
+    })
 }
 
 fn normalize_ephemeral_chat_root(path: PathBuf) -> PathBuf {
@@ -143,6 +240,38 @@ fn is_date_directory(value: &str) -> bool {
             4 | 7 => byte == b'-',
             _ => byte.is_ascii_digit(),
         })
+}
+
+fn normalize_tutti_session_root(path: PathBuf) -> PathBuf {
+    let Some(parent) = path.parent() else {
+        return path;
+    };
+    let Some(parent_name) = parent.file_name().and_then(|name| name.to_str()) else {
+        return path;
+    };
+    let Some(root) = parent.parent() else {
+        return path;
+    };
+    if parent_name == "tutti"
+        && root.file_name().and_then(|name| name.to_str()) == Some("Documents")
+        && path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.strip_prefix("session-").is_some_and(is_uuid))
+    {
+        return parent.to_path_buf();
+    }
+    path
+}
+
+fn is_uuid(value: &str) -> bool {
+    let lengths = [8, 4, 4, 4, 12];
+    let mut parts = value.split('-');
+    lengths.into_iter().all(|length| {
+        parts.next().is_some_and(|part| {
+            part.len() == length && part.bytes().all(|byte| byte.is_ascii_hexdigit())
+        })
+    }) && parts.next().is_none()
 }
 
 fn is_tutti_run_root(root: &Path) -> bool {
@@ -737,6 +866,77 @@ fn plan_codex_skill_config(
     }))
 }
 
+#[cfg(test)]
+pub(crate) fn plan_skill_policy_file(
+    path: PathBuf,
+    visibility: SkillVisibility,
+) -> Result<FileChange> {
+    let before = fs::read_to_string(&path).ok();
+    let after = render_codex_policy(before.as_deref(), visibility)
+        .with_context(|| format!("failed to parse {}", path.display()))?;
+    Ok(FileChange {
+        path,
+        before_sha256: before.as_deref().map(crate::fsutil::sha256_text),
+        before,
+        after,
+    })
+}
+
+#[cfg(test)]
+pub(crate) fn skill_policy_path(skill_dir: &Path) -> PathBuf {
+    skill_dir.join("agents/openai.yaml")
+}
+
+#[cfg(test)]
+pub(crate) fn collect_transcript_item(value: &Value, items: &mut Vec<TranscriptItem>) {
+    collect_codex_item(value, items);
+}
+
+#[cfg(test)]
+pub(crate) fn policy_matches_visibility_change(
+    baseline: Option<&str>,
+    current: Option<&str>,
+    visibility: SkillVisibility,
+) -> Result<bool> {
+    let expected = render_codex_policy(baseline, visibility)?;
+    let Some(current) = current else {
+        return Ok(expected.is_empty());
+    };
+    if expected.is_empty() || current.is_empty() {
+        return Ok(expected == current);
+    }
+    Ok(serde_yaml::from_str::<YamlValue>(&expected)?
+        == serde_yaml::from_str::<YamlValue>(current)?)
+}
+
+#[cfg(test)]
+pub(crate) fn plan_skill_config_at(
+    config_path: PathBuf,
+    skill_file: PathBuf,
+    visibility: SkillVisibility,
+) -> Result<Option<FileChange>> {
+    if visibility == SkillVisibility::Mixed {
+        bail!("mixed visibility is a scan summary and cannot be written to Codex config");
+    }
+    let desired_enabled = visibility != SkillVisibility::Off;
+    let before = fs::read_to_string(&config_path).ok();
+    if before.is_none() && desired_enabled {
+        return Ok(None);
+    }
+    let before_text = before.as_deref().unwrap_or("");
+    let after = render_codex_skill_config(before_text, &skill_file, desired_enabled)
+        .with_context(|| format!("failed to update {}", config_path.display()))?;
+    if before.as_deref() == Some(after.as_str()) {
+        return Ok(None);
+    }
+    Ok(Some(FileChange {
+        path: config_path,
+        before_sha256: before.as_deref().map(crate::fsutil::sha256_text),
+        before,
+        after,
+    }))
+}
+
 fn codex_usage(value: &Value) -> crate::analytics::AnalyticsTokenUsage {
     crate::analytics::AnalyticsTokenUsage {
         input_tokens: value
@@ -1177,15 +1377,7 @@ pub(super) fn active_session_writer(session: &SessionRecord) -> Result<Option<Se
             Ok(None)
         }
         Err(TryLockError::WouldBlock) => {
-            let pids = writer_pids(&lock_path)?;
-            if pids.is_empty() {
-                bail!(
-                    "Codex session {} has an active writer, but its process could not be identified ({})",
-                    session.id,
-                    lock_path.display()
-                );
-            }
-            Ok(Some(SessionWriter { lock_path, pids }))
+            Ok(Some(SessionWriter { lock_path }))
         }
         Err(TryLockError::Error(error)) => Err(error).with_context(|| {
             format!(
@@ -1199,147 +1391,12 @@ pub(super) fn active_session_writer(session: &SessionRecord) -> Result<Option<Se
 pub(super) fn validate_session_writer(session: &SessionRecord) -> Result<()> {
     if let Some(writer) = active_session_writer(session)? {
         bail!(
-            "Codex session {} already has an active writer (pid {}; {})",
+            "Codex session {} already has an active writer ({})",
             session.id,
-            writer
-                .pids
-                .iter()
-                .map(u32::to_string)
-                .collect::<Vec<_>>()
-                .join(", "),
             writer.lock_path.display()
         );
     }
     Ok(())
-}
-
-pub(super) fn terminate_session_writer(session: &SessionRecord) -> Result<()> {
-    let Some(writer) = active_session_writer(session)? else {
-        return Ok(());
-    };
-    terminate_writer_pids(&writer.pids, "-TERM")?;
-    if wait_for_writer_release(session)? {
-        return Ok(());
-    }
-
-    let Some(writer) = active_session_writer(session)? else {
-        return Ok(());
-    };
-    terminate_writer_pids(&writer.pids, "-KILL")?;
-    if wait_for_writer_release(session)? {
-        return Ok(());
-    }
-    bail!(
-        "failed to release Codex writer lock for session {} ({})",
-        session.id,
-        writer.lock_path.display()
-    )
-}
-
-fn writer_pids(lock_path: &Path) -> Result<Vec<u32>> {
-    #[cfg(unix)]
-    {
-        let program = if cfg!(target_os = "macos") {
-            "/usr/sbin/lsof"
-        } else {
-            "lsof"
-        };
-        let output = Command::new(program)
-            .args(["-nP", "-t"])
-            .arg(lock_path)
-            .output()
-            .with_context(|| {
-                format!(
-                    "failed to inspect Codex writer process for {}",
-                    lock_path.display()
-                )
-            })?;
-        if !output.status.success() && output.status.code() != Some(1) {
-            bail!(
-                "failed to inspect Codex writer process for {}: {}",
-                lock_path.display(),
-                String::from_utf8_lossy(&output.stderr).trim()
-            );
-        }
-        let mut pids = String::from_utf8_lossy(&output.stdout)
-            .lines()
-            .filter_map(|line| line.trim().parse::<u32>().ok())
-            .collect::<Vec<_>>();
-        pids.sort_unstable();
-        pids.dedup();
-        return Ok(pids);
-    }
-
-    #[cfg(not(unix))]
-    {
-        let _ = lock_path;
-        bail!("identifying Codex writer processes is unsupported on this platform");
-    }
-}
-
-fn terminate_writer_pids(pids: &[u32], signal: &str) -> Result<()> {
-    #[cfg(unix)]
-    {
-        for pid in pids {
-            Command::new("/bin/kill")
-                .args([signal, &pid.to_string()])
-                .status()
-                .with_context(|| format!("failed to terminate Codex writer process {pid}"))?;
-        }
-        return Ok(());
-    }
-
-    #[cfg(not(unix))]
-    {
-        let _ = (pids, signal);
-        bail!("terminating Codex writer processes is unsupported on this platform");
-    }
-}
-
-fn wait_for_writer_release(session: &SessionRecord) -> Result<bool> {
-    for _ in 0..40 {
-        if !writer_lock_is_held(session)? {
-            return Ok(true);
-        }
-        std::thread::sleep(Duration::from_millis(50));
-    }
-    Ok(false)
-}
-
-fn writer_lock_is_held(session: &SessionRecord) -> Result<bool> {
-    let Some(lock_path) = codex_thread_writer_lock_path(&session.path, &session.id) else {
-        return Ok(false);
-    };
-    let lock_file = match OpenOptions::new().read(true).write(true).open(&lock_path) {
-        Ok(file) => file,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-        Err(error) => {
-            return Err(error).with_context(|| {
-                format!(
-                    "failed to inspect Codex writer lock {}",
-                    lock_path.display()
-                )
-            });
-        }
-    };
-    match lock_file.try_lock() {
-        Ok(()) => {
-            lock_file.unlock().with_context(|| {
-                format!(
-                    "failed to release Codex writer lock {}",
-                    lock_path.display()
-                )
-            })?;
-            Ok(false)
-        }
-        Err(TryLockError::WouldBlock) => Ok(true),
-        Err(TryLockError::Error(error)) => Err(error).with_context(|| {
-            format!(
-                "failed to inspect Codex writer lock {}",
-                lock_path.display()
-            )
-        }),
-    }
 }
 
 pub(super) fn codex_skill_roots(
@@ -1489,16 +1546,19 @@ pub(super) fn tool_payloads(value: &Value) -> Vec<(&Value, Evidence)> {
     ) {
         return Vec::new();
     }
-    let name = payload
+    let Some(name) = payload
         .get("name")
         .or_else(|| payload.pointer("/action/type"))
         .and_then(Value::as_str)
-        .unwrap_or("tool_call");
+        .filter(|name| !name.trim().is_empty())
+    else {
+        return Vec::new();
+    };
     vec![(
         payload,
         Evidence {
             kind: name.to_string(),
-            text: crate::session_skills::summarize_evidence(payload, name),
+            text: crate::session_skills::summarize_evidence(payload),
             time: value
                 .get("timestamp")
                 .and_then(Value::as_str)
@@ -1590,11 +1650,7 @@ fn collect_codex_item(value: &Value, items: &mut Vec<TranscriptItem>) {
                 &CODEX_INTERNAL_CONTEXT_MARKERS,
             );
         }
-        Some("reasoning") | Some("thinking") => {
-            let kind = payload
-                .get("type")
-                .and_then(Value::as_str)
-                .unwrap_or("reasoning");
+        Some(kind @ ("reasoning" | "thinking")) => {
             if let Some(body) = extract_thinking_text(
                 payload
                     .get("summary")
@@ -1609,12 +1665,13 @@ fn collect_codex_item(value: &Value, items: &mut Vec<TranscriptItem>) {
                 .get("name")
                 .or_else(|| payload.pointer("/action/type"))
                 .and_then(Value::as_str)
-                .unwrap_or("tool_call");
+                .filter(|name| !name.trim().is_empty())
+                .map(str::to_string);
             push_tool_item(
                 items,
                 "tool",
-                summarize_tool_call(payload, name),
-                Some(name.to_string()),
+                summarize_tool_call(payload),
+                name,
                 time,
                 extract_tool_command(payload),
                 None,
@@ -1629,18 +1686,8 @@ fn collect_codex_item(value: &Value, items: &mut Vec<TranscriptItem>) {
             let duration_ms = extract_duration_ms(payload, result.as_deref());
             attach_tool_result(items, call_id.as_deref(), result, duration_ms, timestamp_ms);
         }
-        Some("web_search_call") | Some("image_generation_call") => {
-            let kind = payload
-                .get("type")
-                .and_then(Value::as_str)
-                .unwrap_or("tool_call");
-            push_item(
-                items,
-                "tool",
-                kind.replace('_', " "),
-                Some(kind.to_string()),
-                time,
-            );
+        Some(kind @ ("web_search_call" | "image_generation_call")) => {
+            push_item(items, "tool", String::new(), Some(kind.to_string()), time);
         }
         _ => {}
     }
@@ -1791,6 +1838,17 @@ impl super::AgentProvider for CodexProvider {
         )
     }
 
+    fn project_skill_root(&self, cwd: &Path) -> Option<PathBuf> {
+        Some(cwd.join(".codex/skills"))
+    }
+
+    fn skill_target(&self) -> Option<ProviderSkillTarget> {
+        Some(ProviderSkillTarget {
+            id: "codex",
+            display_name: "Codex",
+        })
+    }
+
     fn bundled_skill_files(&self) -> &'static [(&'static str, &'static str)] {
         &CODEX_BUNDLED_SKILL_FILES
     }
@@ -1885,6 +1943,11 @@ impl super::AgentProvider for CodexProvider {
         })
     }
 
+    #[cfg(test)]
+    fn config_home_for_test(&self, _home: &Path, override_home: &Path) -> PathBuf {
+        override_home.to_path_buf()
+    }
+
     fn projection_directories(&self) -> &'static [&'static str] {
         &[".codex"]
     }
@@ -1915,11 +1978,36 @@ impl super::AgentProvider for CodexProvider {
         let enabled = codex_home_from_system()
             .map(|home| codex_skill_enabled_for_path(&home.join("config.toml"), skill_file))
             .flatten();
+        let provider_visibility = if enabled == Some(false) {
+            SkillVisibility::Off
+        } else if allow_implicit_invocation == Some(false) {
+            SkillVisibility::Manual
+        } else {
+            SkillVisibility::Auto
+        };
         Ok(SkillProviderMetadata {
             allow_implicit_invocation,
             enabled,
             disable_model_invocation: None,
+            provider_visibility,
         })
+    }
+
+    fn effective_skill_visibility(
+        &self,
+        tendi_visibility: Option<SkillVisibility>,
+        provider_visibility: SkillVisibility,
+        root: &SkillRoot,
+    ) -> SkillVisibility {
+        if root.plugin_enabled == Some(false) {
+            SkillVisibility::Off
+        } else {
+            crate::skills::combine_skill_visibility(tendi_visibility, provider_visibility)
+        }
+    }
+
+    fn skill_backup_exclusion_reason(&self, path: &SkillPath) -> Option<&'static str> {
+        path.plugin_id.is_some().then_some("plugin-skill")
     }
 
     fn plan_skill_visibility(
@@ -1951,6 +2039,19 @@ impl super::AgentProvider for CodexProvider {
             Some(4)
         } else {
             None
+        }
+    }
+
+    fn session_path_role(&self, path: &Path) -> SessionPathRole {
+        if path.file_name().and_then(|name| name.to_str()) == Some("session_index.jsonl") {
+            SessionPathRole::Index
+        } else if path
+            .extension()
+            .is_some_and(|extension| extension == "jsonl")
+        {
+            SessionPathRole::Transcript
+        } else {
+            SessionPathRole::Other
         }
     }
 
@@ -2110,10 +2211,6 @@ impl super::AgentProvider for CodexProvider {
         active_session_writer(session)
     }
 
-    fn terminate_session_writer(&self, session: &SessionRecord) -> Result<()> {
-        terminate_session_writer(session)
-    }
-
     fn session_requires_rescan(&self, session: &SessionRecord) -> Option<bool> {
         if session.parent_session_id.is_none() {
             return None;
@@ -2239,10 +2336,10 @@ impl super::AgentProvider for CodexProvider {
     }
 
     fn normalize_session_project(&self, project: PathBuf) -> PathBuf {
-        normalize_ephemeral_chat_root(project)
+        normalize_ephemeral_chat_root(normalize_tutti_session_root(project))
     }
 
-    fn session_id_from_path(&self, path: &Path) -> String {
+    fn session_id_from_path(&self, path: &Path) -> Option<String> {
         session_id_from_path(path)
     }
 
@@ -2258,6 +2355,10 @@ impl super::AgentProvider for CodexProvider {
                 &root.join("config.toml"),
                 self.kind(),
                 "global",
+                "mcp_servers",
+                infer_mcp_toml_transport,
+                infer_mcp_toml_enabled,
+                infer_mcp_toml_status,
                 servers,
                 warnings,
             );
@@ -2269,6 +2370,10 @@ impl super::AgentProvider for CodexProvider {
                 &ancestor.join(".codex/mcp.json"),
                 self.kind(),
                 &scope,
+                &["mcpServers"],
+                infer_mcp_transport,
+                infer_mcp_enabled,
+                infer_mcp_status,
                 servers,
                 warnings,
             );
@@ -2276,11 +2381,59 @@ impl super::AgentProvider for CodexProvider {
                 &ancestor.join(".codex/config.toml"),
                 self.kind(),
                 &scope,
+                "mcp_servers",
+                infer_mcp_toml_transport,
+                infer_mcp_toml_enabled,
+                infer_mcp_toml_status,
                 servers,
                 warnings,
             );
         }
         Ok(())
+    }
+
+    fn set_mcp_enabled(&self, request: &McpSetEnabledRequest) -> Result<()> {
+        match request.path.extension().and_then(|value| value.to_str()) {
+            Some("toml") => crate::mcp::set_toml_server_enabled(
+                request,
+                "mcp_servers",
+                update_mcp_toml_server,
+            ),
+            Some("json") => crate::mcp::set_json_server_enabled(
+                request,
+                &["mcpServers"],
+                update_mcp_json_server,
+            ),
+            _ => bail!("Codex MCP source must be JSON or TOML"),
+        }
+    }
+
+    fn mcp_status_after_toggle(&self, enabled: bool) -> &'static str {
+        if enabled { "configured" } else { "disabled" }
+    }
+
+    fn delete_hooks(
+        &self,
+        requests: &[HookDeleteRequest],
+        source: &str,
+    ) -> Result<String> {
+        match requests[0].path.extension().and_then(|value| value.to_str()) {
+            Some("json") => crate::hooks::delete_json_hooks(requests, source),
+            Some("toml") => crate::hooks::delete_toml_hooks(requests, source),
+            _ => bail!("Codex hook source must be JSON or TOML"),
+        }
+    }
+
+    fn set_hook_enabled(
+        &self,
+        request: &HookSetEnabledRequest,
+        source: &str,
+    ) -> Result<String> {
+        match request.path.extension().and_then(|value| value.to_str()) {
+            Some("json") => crate::hooks::set_json_hook_enabled(request, source),
+            Some("toml") => crate::hooks::set_toml_hook_enabled(request, source),
+            _ => bail!("Codex hook source must be JSON or TOML"),
+        }
     }
 
     fn uses_tendi_hook_review_state(&self) -> bool {
@@ -2325,6 +2478,19 @@ impl super::AgentProvider for CodexProvider {
                 scan_codex_config_hooks,
             );
         }
+    }
+
+    fn scan_hook_source_for_review(
+        &self,
+        path: &Path,
+        hooks: &mut Vec<HookRecord>,
+        warnings: &mut Vec<String>,
+    ) -> bool {
+        if path.file_name().and_then(|name| name.to_str()) != Some("config.toml") {
+            return false;
+        }
+        scan_codex_config_hooks(path, hooks, warnings);
+        true
     }
 
     fn parse_hook_file(

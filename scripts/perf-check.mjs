@@ -57,6 +57,9 @@ const thresholds = {
   secondarySessionPageMs: envNumber("TENDI_PERF_SECONDARY_SESSION_PAGE_MS", 35),
   secondarySessionPageRssBytes: envNumber("TENDI_PERF_SECONDARY_SESSION_PAGE_RSS_MIB", 24) * mib,
   secondarySessionPagePayloadBytes: envNumber("TENDI_PERF_SECONDARY_SESSION_PAGE_PAYLOAD_MIB", 1) * mib,
+  secondarySessionSearchMs: envNumber("TENDI_PERF_SECONDARY_SESSION_SEARCH_MS", 100),
+  secondarySessionSearchRssBytes: envNumber("TENDI_PERF_SECONDARY_SESSION_SEARCH_RSS_MIB", 24) * mib,
+  secondarySessionSearchPayloadBytes: envNumber("TENDI_PERF_SECONDARY_SESSION_SEARCH_PAYLOAD_MIB", 0.25) * mib,
   secondaryLinkedSessionsMs: envNumber("TENDI_PERF_SECONDARY_LINKED_SESSIONS_MS", 25),
   secondaryLinkedSessionsRssBytes: envNumber("TENDI_PERF_SECONDARY_LINKED_SESSIONS_RSS_MIB", 24) * mib,
   secondaryLinkedSessionsPayloadBytes: envNumber("TENDI_PERF_SECONDARY_LINKED_SESSIONS_PAYLOAD_MIB", 0.75) * mib,
@@ -150,6 +153,11 @@ benchmarkCoreScenario("secondary-session-page", {
   maxOperationMs: thresholds.secondarySessionPageMs,
   maxRssBytes: thresholds.secondarySessionPageRssBytes,
   maxPayloadBytes: thresholds.secondarySessionPagePayloadBytes,
+});
+benchmarkCoreScenario("secondary-session-search", {
+  maxOperationMs: thresholds.secondarySessionSearchMs,
+  maxRssBytes: thresholds.secondarySessionSearchRssBytes,
+  maxPayloadBytes: thresholds.secondarySessionSearchPayloadBytes,
 });
 benchmarkCoreScenario("secondary-linked-sessions", {
   maxOperationMs: thresholds.secondaryLinkedSessionsMs,

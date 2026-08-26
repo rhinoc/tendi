@@ -1,4 +1,5 @@
 import { Tooltip } from "./Tooltip.tsx";
+import { Toast } from "./Toast.tsx";
 import { Badge } from "./Badge.tsx";
 import { lazy, Suspense, useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { Check, ChevronDown, ChevronUp, Code2, Eye, Save, Search, X } from "lucide-react";
@@ -200,7 +201,7 @@ export function MarkdownFilePane({
           {!readOnly && showDirtyIndicator && dirty && <Badge tone="warning">modified</Badge>}
           {!readOnly && saveState === "saving" && <Badge tone="info">saving</Badge>}
           {!readOnly && saveState === "saved" && <Badge tone="success">saved</Badge>}
-          {!readOnly && saveState === "error" && <Badge tone="danger" role="alert">{saveError || "save failed"}</Badge>}
+          {!readOnly && saveState === "error" && <Toast tone="error" message={saveError || "save failed"} />}
         </div>
         <div className="codeTabActions">
           <IconButton

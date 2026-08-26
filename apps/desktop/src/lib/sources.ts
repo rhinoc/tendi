@@ -35,18 +35,19 @@ export type RemoteSource = {
 };
 
 export function friendlySource(source: unknown): string {
-  const text = `${source ?? ""}`;
-  if (!text) return "Local";
+  const text = `${source ?? ""}`.trim();
+  if (!text) return "";
+  if (text.toLowerCase() === "unknown") return "";
   if (text.toLowerCase().includes("system")) return "System";
   return titleValue(text.split(":")[0]);
 }
 
 export function skillSourceDetails(skill: SkillLike): SourceDetails {
   const sourcePath = skill.paths?.find((path) => path.source) ?? skill.paths?.find((path) => path.source_kind);
-  const summary = `${skill.source_summary ?? skill.source ?? ""}`;
+  const summary = `${skill.source ?? ""}`;
   const [summaryKind, ...summaryRest] = summary.split(":");
   const summaryValue = summaryRest.length ? summaryRest.join(":") : "";
-  const kind = sourcePath?.source_kind ?? summaryKind ?? "local";
+  const kind = sourcePath?.source_kind ?? summaryKind ?? "";
   return {
     kind,
     label: friendlySource(kind),
@@ -184,7 +185,7 @@ export function sourceIconDetails(source: SourceDetails | null | undefined): { l
   }
   if (isGitSource(value, kind)) return { label: "Git", icon: createElement(GitBranch, { size: 13 }) };
   if (isWebSource(value)) return { label: "Web", icon: createElement(Globe, { size: 13 }) };
-  return { label: source?.label ?? "Local", icon: createElement(Folder, { size: 13 }) };
+  return { label: source?.label ?? "", icon: createElement(Folder, { size: 13 }) };
 }
 
 export function pathLooksLikePluginCache(path: unknown): boolean {

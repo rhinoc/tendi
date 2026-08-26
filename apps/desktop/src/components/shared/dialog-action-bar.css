@@ -11,3 +11,14 @@
   border-bottom-left-radius: inherit;
   border-bottom-right-radius: inherit;
 }
+
+.dialogActionsLeading,
+.dialogActionsMain {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.dialogActionsMain {
+  margin-left: auto;
+}

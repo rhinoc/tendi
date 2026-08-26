@@ -15,6 +15,10 @@ impl super::AgentProvider for UnknownProvider {
         "unknown"
     }
 
+    fn mcp_status_after_toggle(&self, enabled: bool) -> &'static str {
+        if enabled { "configured" } else { "disabled" }
+    }
+
     fn display_name(&self) -> Option<&'static str> {
         Some("Unknown")
     }

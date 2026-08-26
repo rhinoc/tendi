@@ -57,7 +57,7 @@ export function transcriptLinkLabel(url: string, providedLabel?: string) {
     const path = shortenLinkPart(segments.slice(-2).join("/") || host);
     return path === host ? host : `${host} · ${path}`;
   } catch {
-    return "链接";
+    return url;
   }
 }
 

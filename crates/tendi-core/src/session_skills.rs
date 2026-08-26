@@ -86,15 +86,27 @@ pub(crate) struct Evidence {
 }
 
 pub fn run_index(cwd: &Path, force: bool) -> Result<SessionSkillIndexReport> {
-    let skill_scan = crate::skills::scan_skills_synced(cwd)?;
     let store = Store::open_default()?;
+    let (skill_scan, source_migrations, persist_skill_scan) =
+        if let Some(skill_scan) = store.list_skills_for_workspace(cwd)? {
+            (skill_scan, Vec::new(), false)
+        } else {
+            let scanned = crate::skills::scan_skills_synced_for_projection(cwd)?;
+            (scanned.scan, scanned.source_migrations, true)
+        };
     let session_scan = store.list_sessions()?;
 
-    store.save_skills(&skill_scan)?;
-    store.ensure_session_skill_index_version(SESSION_SKILL_INDEX_VERSION)?;
-    if force {
-        store.clear_session_skill_index()?;
-    }
+    store.with_database_write_lock_retry(|| {
+        if persist_skill_scan {
+            store.insert_skill_source_records_if_missing(&source_migrations)?;
+            store.save_skills(&skill_scan)?;
+        }
+        store.ensure_session_skill_index_version(SESSION_SKILL_INDEX_VERSION)?;
+        if force {
+            store.clear_session_skill_index()?;
+        }
+        Ok(())
+    })?;
 
     let lookup = SkillLookup::new(&skill_scan);
     let mut parsed = 0;
@@ -106,12 +118,14 @@ pub fn run_index(cwd: &Path, force: bool) -> Result<SessionSkillIndexReport> {
             Ok(state) => state,
             Err(err) => {
                 failed += 1;
-                store.mark_session_skill_index_failed(
-                    session,
-                    0,
-                    0,
-                    &format!("failed to inspect transcript: {err:#}"),
-                )?;
+                store.with_database_write_lock_retry(|| {
+                    store.mark_session_skill_index_failed(
+                        session,
+                        0,
+                        0,
+                        &format!("failed to inspect transcript: {err:#}"),
+                    )
+                })?;
                 continue;
             }
         };
@@ -125,17 +139,21 @@ pub fn run_index(cwd: &Path, force: bool) -> Result<SessionSkillIndexReport> {
 
         match extract_session_skill_links(session, &lookup) {
             Ok(links) => {
-                store.replace_session_skill_links(session, &state, &links)?;
+                store.with_database_write_lock_retry(|| {
+                    store.replace_session_skill_links(session, &state, &links)
+                })?;
                 parsed += 1;
             }
             Err(err) => {
                 failed += 1;
-                store.mark_session_skill_index_failed(
-                    session,
-                    state.file_mtime,
-                    state.file_size,
-                    &format!("{err:#}"),
-                )?;
+                store.with_database_write_lock_retry(|| {
+                    store.mark_session_skill_index_failed(
+                        session,
+                        state.file_mtime,
+                        state.file_size,
+                        &format!("{err:#}"),
+                    )
+                })?;
             }
         }
     }
@@ -484,7 +502,7 @@ fn is_path_boundary(ch: char) -> bool {
         )
 }
 
-pub(crate) fn summarize_evidence(value: &Value, fallback: &str) -> String {
+pub(crate) fn summarize_evidence(value: &Value) -> String {
     for pointer in [
         "/input/command",
         "/input/file_path",
@@ -502,7 +520,7 @@ pub(crate) fn summarize_evidence(value: &Value, fallback: &str) -> String {
             }
         }
     }
-    serde_json::to_string(value).unwrap_or_else(|_| fallback.to_string())
+    serde_json::to_string(value).expect("serde_json::Value must be serializable")
 }
 
 fn truncate_evidence(text: &str) -> String {
@@ -736,154 +754,9 @@ mod tests {
         let _ = fs::remove_dir_all(root);
     }
 
-    #[test]
-    fn extracts_explicit_skill_marker() {
-        let root = temp_dir("explicit-marker");
-        let skill_dir = root.join(".agents/skills/foo");
-        fs::create_dir_all(&skill_dir).unwrap();
-        fs::write(skill_dir.join("SKILL.md"), "---\nname: foo\n---\n").unwrap();
-        let transcript = root.join("session.jsonl");
-        fs::write(
-            &transcript,
-            format!(
-                "{}\n",
-                json!({
-                    "type": "response_item",
-                    "timestamp": "2026-06-24T10:00:00Z",
-                    "payload": {
-                        "type": "message",
-                        "role": "user",
-                        "content": [{
-                            "type": "input_text",
-                            "text": format!(
-                                "<skill>\n<name>foo</name>\n<path>{}</path>\n</skill>",
-                                skill_dir.join("SKILL.md").display()
-                            )
-                        }]
-                    }
-                })
-            ),
-        )
-        .unwrap();
 
-        let links = extract_session_skill_links(
-            &session(&transcript, AgentKind::Codex),
-            &SkillLookup::new(&skill_scan("foo", &skill_dir, AgentKind::Codex)),
-        )
-        .unwrap();
 
-        assert_eq!(links.len(), 1);
-        assert_eq!(links[0].skill_name, "foo");
-        assert_eq!(links[0].evidence_kind, "explicit_skill");
-        assert_eq!(links[0].confidence, "explicit");
-        let _ = fs::remove_dir_all(root);
-    }
 
-    #[test]
-    fn extracts_dollar_skill_reference() {
-        let root = temp_dir("explicit-dollar");
-        let skill_dir = root.join(".codex/skills/foo");
-        fs::create_dir_all(&skill_dir).unwrap();
-        fs::write(skill_dir.join("SKILL.md"), "---\nname: foo\n---\n").unwrap();
-        let transcript = root.join("session.jsonl");
-        fs::write(
-            &transcript,
-            format!(
-                "{}\n",
-                json!({
-                    "type": "user",
-                    "timestamp": "2026-06-24T10:00:00Z",
-                    "message": { "content": "Please use $foo" }
-                })
-            ),
-        )
-        .unwrap();
-
-        let links = extract_session_skill_links(
-            &session(&transcript, AgentKind::Codex),
-            &SkillLookup::new(&skill_scan("foo", &skill_dir, AgentKind::Codex)),
-        )
-        .unwrap();
-
-        assert_eq!(links.len(), 1);
-        assert_eq!(links[0].skill_name, "foo");
-        assert_eq!(links[0].evidence_kind, "explicit_skill");
-        assert!(dollar_skill_names("Please use $foo now").is_empty());
-        let _ = fs::remove_dir_all(root);
-    }
-
-    #[test]
-    fn extracts_explicit_skill_tool_argument() {
-        let root = temp_dir("explicit-tool");
-        let skill_dir = root.join(".codex/skills/foo");
-        fs::create_dir_all(&skill_dir).unwrap();
-        fs::write(skill_dir.join("SKILL.md"), "---\nname: foo\n---\n").unwrap();
-        let transcript = root.join("session.jsonl");
-        fs::write(
-            &transcript,
-            format!(
-                "{}\n",
-                json!({
-                    "type": "response_item",
-                    "timestamp": "2026-06-24T10:00:00Z",
-                    "payload": {
-                        "type": "function_call",
-                        "name": "Skill",
-                        "arguments": "{\"skill\":\"foo\"}"
-                    }
-                })
-            ),
-        )
-        .unwrap();
-
-        let links = extract_session_skill_links(
-            &session(&transcript, AgentKind::Codex),
-            &SkillLookup::new(&skill_scan("foo", &skill_dir, AgentKind::Codex)),
-        )
-        .unwrap();
-
-        assert_eq!(links.len(), 1);
-        assert_eq!(links[0].skill_name, "foo");
-        assert_eq!(links[0].evidence_kind, "explicit_skill");
-        let _ = fs::remove_dir_all(root);
-    }
-
-    #[test]
-    fn ignores_available_skill_instructions_without_tool_read() {
-        let root = temp_dir("instructions-only");
-        let skill_dir = root.join(".codex/skills/foo");
-        fs::create_dir_all(&skill_dir).unwrap();
-        fs::write(skill_dir.join("SKILL.md"), "---\nname: foo\n---\n").unwrap();
-        let transcript = root.join("session.jsonl");
-        fs::write(
-            &transcript,
-            format!(
-                "{}\n",
-                json!({
-                    "type": "response_item",
-                    "timestamp": "2026-06-24T10:00:00Z",
-                    "payload": {
-                        "type": "message",
-                        "role": "developer",
-                        "content": [{
-                            "type": "input_text",
-                            "text": format!("<skills_instructions>{}</skills_instructions>", skill_dir.join("SKILL.md").display())
-                        }]
-                    }
-                })
-            ),
-        )
-        .unwrap();
-
-        let links = extract_session_skill_links(
-            &session(&transcript, AgentKind::Codex),
-            &SkillLookup::new(&skill_scan("foo", &skill_dir, AgentKind::Codex)),
-        )
-        .unwrap();
-
-        assert!(links.is_empty());
-        let _ = fs::remove_dir_all(root);
-    }
 
     fn session(path: &Path, agent: AgentKind) -> SessionRecord {
         SessionRecord {

@@ -19,6 +19,7 @@ export type DialogStatefulButtonProps = Omit<
   loadingLabel?: string;
   successLabel?: string;
   errorLabel?: string;
+  loadingContent?: ReactNode;
   successContent?: ReactNode;
   errorContent?: ReactNode;
   disabled?: boolean;
@@ -31,6 +32,7 @@ export function DialogStatefulButton({
   loadingLabel,
   successLabel,
   errorLabel,
+  loadingContent,
   successContent,
   errorContent,
   disabled = false,
@@ -47,7 +49,7 @@ export function DialogStatefulButton({
         : ariaLabel;
 
   const content = state === "loading"
-    ? <LoadingIcon size={14} />
+    ? loadingContent ?? <LoadingIcon size={14} />
     : state === "success"
       ? successContent ?? (successLabel ? <><Check size={14} aria-hidden="true" /><span>{successLabel}</span></> : <Check size={14} aria-hidden="true" />)
       : state === "error"

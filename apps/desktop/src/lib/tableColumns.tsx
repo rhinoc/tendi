@@ -2,6 +2,7 @@ import type { ColumnDef } from "../components/DataTable.types";
 import { AgentBadge } from "../components/shared/AgentBadge.tsx";
 import { AgentChips } from "../components/shared/AgentChips.tsx";
 import { basename, friendlyAgent, titleValue } from "./index.ts";
+import type { McpRecord, RuleRecord } from "./index.ts";
 
 type AgentRow = { agent?: string | null };
 
@@ -16,14 +17,7 @@ export const agentColumn: ColumnDef<AgentRow> = {
   render: (row) => <AgentBadge agent={friendlyAgent(row.agent)} />,
 };
 
-type RuleRow = {
-  agents?: string[] | null;
-  kind?: string | null;
-  scope?: string | null;
-  order?: number | null;
-  path?: string | null;
-  source?: string | null;
-};
+type RuleRow = RuleRecord;
 
 export const ruleColumns: ColumnDef<RuleRow>[] = [
   {
@@ -32,9 +26,9 @@ export const ruleColumns: ColumnDef<RuleRow>[] = [
     label: "Agents",
     type: "enum",
     width: "96px",
-    groupBy: (row) => (row.agents ?? []).join(", "),
-    sortValue: (row) => (row.agents ?? []).join(",").toLowerCase(),
-    render: (row) => <AgentChips agents={row.agents ?? undefined} />,
+    groupBy: (row) => row.agents.join(", "),
+    sortValue: (row) => row.agents.join(",").toLowerCase(),
+    render: (row) => <AgentChips agents={row.agents} />,
   },
   { key: "kind", header: "Kind", label: "Kind", type: "enum", width: "96px" },
   { key: "scope", header: "Scope", label: "Scope", type: "enum", width: "96px" },
@@ -44,7 +38,7 @@ export const ruleColumns: ColumnDef<RuleRow>[] = [
     label: "Order",
     type: "text",
     width: "72px",
-    sortValue: (row) => Number(row.order) || 0,
+    sortValue: (row) => row.order,
   },
   {
     key: "source",
@@ -52,19 +46,11 @@ export const ruleColumns: ColumnDef<RuleRow>[] = [
     label: "Source",
     type: "text",
     width: "minmax(120px, 1fr)",
-    value: (row) => basename(row.path ?? row.source),
+    value: (row) => basename(row.path),
   },
 ];
 
-type McpRow = {
-  agent?: string | null;
-  name?: string | null;
-  scope?: string | null;
-  transport?: string | null;
-  status?: string | null;
-  path?: string | null;
-  source?: string | null;
-};
+type McpRow = McpRecord;
 
 export const mcpColumns: ColumnDef<McpRow>[] = [
   { ...agentColumn, sticky: true, width: "var(--data-freeze-column-width, 96px)" },
@@ -74,7 +60,7 @@ export const mcpColumns: ColumnDef<McpRow>[] = [
     label: "Name",
     type: "text",
     width: "150px",
-    sortValue: (row) => `${row.name ?? ""}`.toLowerCase(),
+    sortValue: (row) => row.name.toLowerCase(),
   },
   {
     key: "scope",
@@ -82,7 +68,7 @@ export const mcpColumns: ColumnDef<McpRow>[] = [
     label: "Scope",
     type: "enum",
     width: "180px",
-    sortValue: (row) => `${row.scope ?? ""}`.toLowerCase(),
+    sortValue: (row) => row.scope.toLowerCase(),
   },
   {
     key: "transport",
@@ -90,7 +76,7 @@ export const mcpColumns: ColumnDef<McpRow>[] = [
     label: "Transport",
     type: "enum",
     width: "120px",
-    sortValue: (row) => `${row.transport ?? ""}`.toLowerCase(),
+    sortValue: (row) => row.transport.toLowerCase(),
   },
   {
     key: "status",
@@ -107,7 +93,7 @@ export const mcpColumns: ColumnDef<McpRow>[] = [
     label: "Source",
     type: "text",
     width: "minmax(0, 1fr)",
-    sortValue: (row) => basename(row.path ?? row.source).toLowerCase(),
-    value: (row) => basename(row.path ?? row.source),
+    sortValue: (row) => basename(row.path).toLowerCase(),
+    value: (row) => basename(row.path),
   },
 ];

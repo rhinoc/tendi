@@ -1,9 +1,9 @@
 export function basename(value: unknown): string {
-  return `${value ?? ""}`.split("/").filter(Boolean).pop() || `${value ?? ""}`;
+  return `${value ?? ""}`.split("/").filter(Boolean).pop() ?? "";
 }
 
 export function titleValue(value: unknown): string {
-  if (value === null || value === undefined || value === "") return "Unknown";
+  if (value === null || value === undefined || value === "") return "";
   return `${value}`.slice(0, 1).toUpperCase() + `${value}`.slice(1);
 }
 
@@ -73,7 +73,7 @@ export function dayGroupKey(value: unknown): string {
 }
 
 export function formatDayGroupLabel(key: unknown): string {
-  if (!key) return "Unknown";
+  if (!key) return "";
   const match = `${key}`.match(/^(\d{4})-(\d{2})-(\d{2})$/);
   if (!match) return `${key}`;
   const [, year, month, day] = match;

@@ -4,7 +4,9 @@ import { useRef, useState } from "react";
 
 import { IconButton } from "../../components/shared/IconButton.tsx";
 import { LoadingIcon } from "../../components/shared/LoadingIcon.tsx";
+import { MenuContent } from "../../components/shared/MenuContent.tsx";
 import { StatefulButton } from "../../components/shared/StatefulButton.tsx";
+import { Toast } from "../../components/shared/Toast.tsx";
 import { useElementSize } from "../../components/shared/useElementSize.ts";
 
 export type SettingsApplicationOption = {
@@ -122,8 +124,8 @@ export function SettingsApplicationPicker({
               </IconButton>
             </DropdownMenu.Trigger>
             <DropdownMenu.Portal>
-              <DropdownMenu.Content
-                className="skillMenuContent settingsSelectContent"
+              <MenuContent
+                className="settingsSelectContent"
                 style={{ minWidth: applicationInputSize.width || undefined }}
                 align="end"
                 sideOffset={6}
@@ -140,7 +142,7 @@ export function SettingsApplicationPicker({
                     {option.available === false ? `${option.label} (not found)` : option.label}
                   </DropdownMenu.Item>
                 ))}
-              </DropdownMenu.Content>
+              </MenuContent>
             </DropdownMenu.Portal>
           </DropdownMenu.Root>
         </div>
@@ -159,7 +161,7 @@ export function SettingsApplicationPicker({
           <Play size={14} aria-hidden="true" />
         </StatefulButton>
       </div>
-      {error ? <span className="settingsError" role="alert">{error}</span> : null}
+      {error ? <Toast tone="error" message={error} /> : null}
     </>
   );
 }

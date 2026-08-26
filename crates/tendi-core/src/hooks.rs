@@ -81,6 +81,7 @@ pub struct HookSourceMatch {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct HookDeleteRequest {
+    pub agent: AgentKind,
     pub path: PathBuf,
     pub expected_trust_hash: String,
     pub event: String,
@@ -95,6 +96,7 @@ pub struct HookDeleteRequest {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct HookSetEnabledRequest {
+    pub agent: AgentKind,
     pub path: PathBuf,
     pub expected_trust_hash: String,
     pub event: String,
@@ -110,6 +112,7 @@ pub struct HookSetEnabledRequest {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct HookReviewRequest {
+    pub agent: AgentKind,
     pub path: PathBuf,
     pub expected_trust_hash: String,
     pub event: String,
@@ -204,7 +207,11 @@ pub fn delete_hooks(requests: Vec<HookDeleteRequest>) -> Result<()> {
 
     let mut writes = Vec::new();
     for (path, requests) in requests_by_path {
-        ensure_deletable_hook_path(&path)?;
+        let agent = requests[0].agent;
+        if requests.iter().any(|request| request.agent != agent) {
+            bail!("hook delete requests disagree about the provider");
+        }
+        ensure_deletable_hook_path(agent, &path)?;
         let expected_hash = &requests[0].expected_trust_hash;
         if requests
             .iter()
@@ -217,27 +224,7 @@ pub fn delete_hooks(requests: Vec<HookDeleteRequest>) -> Result<()> {
             bail!("hook source changed");
         }
 
-        let after = match path.extension().and_then(|value| value.to_str()) {
-            Some("json") => {
-                let mut value = serde_json::from_str::<Value>(&text)?;
-                for request in &requests {
-                    if !remove_json_hook_from_value(&mut value, request) {
-                        bail!("matching hook was not found");
-                    }
-                }
-                format!("{}\n", serde_json::to_string_pretty(&value)?)
-            }
-            Some("toml") => {
-                let mut value = toml::from_str::<TomlValue>(&text)?;
-                for request in &requests {
-                    if !remove_toml_hook_from_value(&mut value, request) {
-                        bail!("matching hook was not found");
-                    }
-                }
-                toml::to_string_pretty(&value)?
-            }
-            _ => bail!("deleting hooks from this source type is not supported"),
-        };
+        let after = crate::providers::agent_provider(agent).delete_hooks(&requests, &text)?;
         writes.push((path, text, after));
     }
 
@@ -267,57 +254,150 @@ fn rollback_hook_writes(committed: &[(PathBuf, String)]) -> Result<()> {
 
 pub fn set_hook_enabled(request: HookSetEnabledRequest) -> Result<()> {
     let _mutation = lock_hook_mutation()?;
-    ensure_deletable_hook_path(&request.path)?;
+    ensure_deletable_hook_path(request.agent, &request.path)?;
     let text = fs::read_to_string(&request.path)?;
     if sha256_text(&text) != request.expected_trust_hash {
         bail!("hook source changed");
     }
 
-    let after = match request.path.extension().and_then(|value| value.to_str()) {
-        Some("json") => {
-            let mut value = serde_json::from_str::<Value>(&text)?;
-            if !set_json_hook_enabled_in_value(&mut value, &request) {
-                bail!("matching hook was not found");
-            }
-            format!("{}\n", serde_json::to_string_pretty(&value)?)
-        }
-        Some("toml") => {
-            let mut value = toml::from_str::<TomlValue>(&text)?;
-            if !set_toml_hook_enabled_in_value(&mut value, &request) {
-                bail!("matching hook was not found");
-            }
-            toml::to_string_pretty(&value)?
-        }
-        _ => bail!("updating hooks from this source type is not supported"),
-    };
+    let after =
+        crate::providers::agent_provider(request.agent).set_hook_enabled(&request, &text)?;
     atomic_write(&request.path, &after)
 }
 
-pub fn review_hook_and_scan(cwd: &Path, request: HookReviewRequest) -> Result<HookScan> {
+fn hook_matches_delete_request(hook: &HookRecord, request: &HookDeleteRequest) -> bool {
+    hook.path == request.path
+        && hook.trust_hash == request.expected_trust_hash
+        && hook.event == request.event
+        && hook.matcher == request.matcher
+        && hook.hook_type == request.hook_type
+        && hook.command == request.command
+        && hook.url == request.url
+        && hook.prompt == request.prompt
+        && hook.filter == request.filter
+        && hook.status_message == request.status_message
+}
+
+fn hook_matches_set_enabled_request(hook: &HookRecord, request: &HookSetEnabledRequest) -> bool {
+    hook.path == request.path
+        && hook.trust_hash == request.expected_trust_hash
+        && hook.event == request.event
+        && hook.matcher == request.matcher
+        && hook.hook_type == request.hook_type
+        && hook.command == request.command
+        && hook.url == request.url
+        && hook.prompt == request.prompt
+        && hook.filter == request.filter
+        && hook.status_message == request.status_message
+}
+
+fn hook_matches_review_request(hook: &HookRecord, request: &HookReviewRequest) -> bool {
+    hook.agent == request.agent
+        && crate::providers::agent_provider(request.agent).discoverable()
+        && hook.path == request.path
+        && hook.trust_hash == request.expected_trust_hash
+        && hook.event == request.event
+        && hook.matcher == request.matcher
+        && hook.hook_type == request.hook_type
+        && hook.command == request.command
+        && hook.url == request.url
+        && hook.prompt == request.prompt
+        && hook.filter == request.filter
+        && hook.status_message == request.status_message
+}
+
+fn scan_hook_source_for_review(path: &Path, agent: AgentKind) -> HookScan {
+    let mut hooks = Vec::new();
+    let mut warnings = Vec::new();
+    if !crate::providers::agent_provider(agent).scan_hook_source_for_review(
+        path,
+        &mut hooks,
+        &mut warnings,
+    ) {
+        scan_hook_file(path, agent, &mut hooks, &mut warnings);
+    }
+    HookScan { hooks, warnings }
+}
+
+fn refresh_hook_states(cwd: &Path, hooks: &mut [HookRecord]) {
+    let context = crate::providers::ProviderContext::new(cwd);
+    for provider in crate::providers::agent_providers() {
+        provider.apply_hook_review_states(hooks, &context);
+    }
+    let states = load_tendi_hook_review_states();
+    apply_tendi_hook_review_states(hooks, &states);
+}
+
+fn refresh_hook_hashes(cwd: &Path, hooks: &mut [HookRecord], paths: &[PathBuf]) -> Result<()> {
+    for hook in hooks.iter_mut().filter(|hook| paths.contains(&hook.path)) {
+        hook.trust_hash = sha256_file(&hook.path)?;
+    }
+    refresh_hook_states(cwd, hooks);
+    Ok(())
+}
+
+pub fn refresh_hook_scan_after_delete(
+    cwd: &Path,
+    mut scan: HookScan,
+    requests: &[HookDeleteRequest],
+) -> Result<HookScan> {
+    let paths = requests
+        .iter()
+        .map(|request| request.path.clone())
+        .collect::<HashSet<_>>();
+    scan.hooks.retain(|hook| {
+        !requests
+            .iter()
+            .any(|request| hook_matches_delete_request(hook, request))
+    });
+    refresh_hook_hashes(cwd, &mut scan.hooks, &paths.into_iter().collect::<Vec<_>>())?;
+    Ok(scan)
+}
+
+pub fn refresh_hook_scan_after_set_enabled(
+    cwd: &Path,
+    mut scan: HookScan,
+    request: &HookSetEnabledRequest,
+) -> Result<HookScan> {
+    let mut matched = false;
+    for hook in &mut scan.hooks {
+        if hook_matches_set_enabled_request(hook, request) {
+            hook.enabled = request.enabled;
+            matched = true;
+        }
+    }
+    if !matched {
+        bail!("matching hook was not found");
+    }
+    refresh_hook_hashes(cwd, &mut scan.hooks, std::slice::from_ref(&request.path))?;
+    Ok(scan)
+}
+
+/// Review one hook against an already-loaded projection.
+///
+/// The target source is re-read so the expected hash and provider-specific
+/// review metadata are current; other hook sources are not traversed.
+pub fn review_hook_from_scan(scan: HookScan, request: HookReviewRequest) -> Result<HookScan> {
     let _mutation = lock_hook_mutation()?;
-    let mut scan = scan_hooks(cwd)?;
+    review_hook_from_scan_inner(scan, request)
+}
+
+fn review_hook_from_scan_inner(mut scan: HookScan, request: HookReviewRequest) -> Result<HookScan> {
     let hook_index = scan
         .hooks
         .iter()
-        .position(|hook| {
-            crate::providers::agent_provider(hook.agent).discoverable()
-                && hook.path == request.path
-                && hook.trust_hash == request.expected_trust_hash
-                && hook.event == request.event
-                && hook.matcher == request.matcher
-                && hook.hook_type == request.hook_type
-                && hook.command == request.command
-                && hook.url == request.url
-                && hook.prompt == request.prompt
-                && hook.filter == request.filter
-                && hook.status_message == request.status_message
-        })
+        .position(|hook| hook_matches_review_request(hook, &request))
         .context("matching hook was not found")?;
-    let hook = &scan.hooks[hook_index];
+    let source_scan = scan_hook_source_for_review(&request.path, request.agent);
+    let hook = source_scan
+        .hooks
+        .iter()
+        .find(|hook| hook_matches_review_request(hook, &request))
+        .context("matching hook source was not found")?;
     if hook_source_is_managed(hook) {
         bail!("managed hook sources cannot be reviewed here");
     }
-    crate::providers::agent_provider(hook.agent).review_hook(hook)?;
+    crate::providers::agent_provider(request.agent).review_hook(hook)?;
     scan.hooks[hook_index].needs_review = false;
     Ok(scan)
 }
@@ -339,15 +419,16 @@ pub fn read_hook_source(
     hook_match: Option<&HookSourceMatch>,
 ) -> Result<HookSourceContent> {
     let scan = scan_hooks(cwd)?;
-    if !scan.hooks.iter().any(|hook| hook.path == path) {
+    let Some(hook) = scan.hooks.iter().find(|hook| hook.path == path) else {
         bail!("refusing to read unknown hook source {}", path.display());
-    }
+    };
 
-    read_hook_source_at_path(path, expected_trust_hash, hook_match)
+    read_hook_source_at_path(path, hook.agent, expected_trust_hash, hook_match)
 }
 
 pub fn read_hook_source_at_path(
     path: &Path,
+    agent: AgentKind,
     expected_trust_hash: Option<&str>,
     hook_match: Option<&HookSourceMatch>,
 ) -> Result<HookSourceContent> {
@@ -377,7 +458,9 @@ pub fn read_hook_source_at_path(
         };
         (content, "source".to_string(), truncated)
     };
-    let read_only_reason = hook_management_disabled_reason(path).map(str::to_string);
+    let read_only_reason = crate::providers::agent_provider(agent)
+        .hook_read_only_reason(path)
+        .map(str::to_string);
 
     Ok(HookSourceContent {
         path: path.to_path_buf(),
@@ -386,7 +469,7 @@ pub fn read_hook_source_at_path(
         source_type: path
             .extension()
             .and_then(|value| value.to_str())
-            .unwrap_or("unknown")
+            .unwrap_or_default()
             .to_string(),
         preview_scope,
         source_line,
@@ -621,27 +704,11 @@ fn hook_object_matches_source_request(
         && request.enabled.is_none_or(|expected| expected == enabled)
 }
 
-fn ensure_deletable_hook_path(path: &Path) -> Result<()> {
-    if let Some(reason) = hook_management_disabled_reason(path) {
+fn ensure_deletable_hook_path(agent: AgentKind, path: &Path) -> Result<()> {
+    if let Some(reason) = crate::providers::agent_provider(agent).hook_read_only_reason(path) {
         bail!("{reason}");
     }
     Ok(())
-}
-
-fn hook_management_disabled_reason(path: &Path) -> Option<&'static str> {
-    if crate::providers::all_providers()
-        .into_iter()
-        .any(|provider| provider.managed_hook_path(path))
-    {
-        return Some("this hook source is read-only");
-    }
-    if !matches!(
-        path.extension().and_then(|value| value.to_str()),
-        Some("json" | "toml")
-    ) {
-        return Some("managing hooks from this source type is not supported");
-    }
-    None
 }
 
 fn canonical_scan_key(path: &Path) -> PathBuf {
@@ -723,6 +790,48 @@ pub(crate) fn scan_hook_file(
     };
 
     collect_hooks_from_value(agent, path, &trust_hash, &value, hooks);
+}
+
+pub(crate) fn delete_json_hooks(requests: &[HookDeleteRequest], source: &str) -> Result<String> {
+    let mut value = serde_json::from_str::<Value>(source)?;
+    for request in requests {
+        if !remove_json_hook_from_value(&mut value, request) {
+            bail!("matching hook was not found");
+        }
+    }
+    Ok(format!("{}\n", serde_json::to_string_pretty(&value)?))
+}
+
+pub(crate) fn delete_toml_hooks(requests: &[HookDeleteRequest], source: &str) -> Result<String> {
+    let mut value = toml::from_str::<TomlValue>(source)?;
+    for request in requests {
+        if !remove_toml_hook_from_value(&mut value, request) {
+            bail!("matching hook was not found");
+        }
+    }
+    Ok(toml::to_string_pretty(&value)?)
+}
+
+pub(crate) fn set_json_hook_enabled(
+    request: &HookSetEnabledRequest,
+    source: &str,
+) -> Result<String> {
+    let mut value = serde_json::from_str::<Value>(source)?;
+    if !set_json_hook_enabled_in_value(&mut value, request) {
+        bail!("matching hook was not found");
+    }
+    Ok(format!("{}\n", serde_json::to_string_pretty(&value)?))
+}
+
+pub(crate) fn set_toml_hook_enabled(
+    request: &HookSetEnabledRequest,
+    source: &str,
+) -> Result<String> {
+    let mut value = toml::from_str::<TomlValue>(source)?;
+    if !set_toml_hook_enabled_in_value(&mut value, request) {
+        bail!("matching hook was not found");
+    }
+    Ok(toml::to_string_pretty(&value)?)
 }
 
 fn remove_json_hook_from_value(value: &mut Value, request: &HookDeleteRequest) -> bool {
@@ -1217,24 +1326,6 @@ pub(crate) fn collect_event_hooks(
     );
 }
 
-#[cfg(test)]
-pub(crate) fn scan_codex_config_hooks(
-    path: &Path,
-    hooks: &mut Vec<HookRecord>,
-    warnings: &mut Vec<String>,
-) {
-    crate::providers::codex::scan_codex_config_hooks(path, hooks, warnings);
-}
-
-#[cfg(test)]
-pub(crate) fn scan_claude_component_file(
-    path: &Path,
-    hooks: &mut Vec<HookRecord>,
-    warnings: &mut Vec<String>,
-) {
-    crate::providers::claude::scan_claude_component_file(path, hooks, warnings);
-}
-
 fn collect_group_hooks(
     agent: AgentKind,
     path: &Path,
@@ -1395,7 +1486,9 @@ fn push_hook_record(
         path: path.to_path_buf(),
         trust_hash: trust_hash.to_string(),
         needs_review: false,
-        read_only_reason: hook_management_disabled_reason(path).map(str::to_string),
+        read_only_reason: crate::providers::agent_provider(agent)
+            .hook_read_only_reason(path)
+            .map(str::to_string),
         provider_review_key,
         provider_current_hash,
     });
@@ -1406,34 +1499,19 @@ mod tests {
     use std::{
         collections::HashMap,
         fs,
-        path::{Path, PathBuf},
+        path::PathBuf,
         time::{SystemTime, UNIX_EPOCH},
     };
 
     use super::{
-        apply_tendi_hook_review_states, hook_management_disabled_reason, hook_review_identity,
+        HookReviewRequest, HookScan, apply_tendi_hook_review_states, hook_review_identity,
         scan_hook_file,
     };
-    use crate::skills::AgentKind;
+    use crate::{
+        providers::{claude::scan_claude_component_file, codex::scan_codex_config_hooks},
+        skills::AgentKind,
+    };
 
-    #[test]
-    fn matches_codex_current_hash_for_command_hook() {
-        assert_eq!(
-            crate::providers::codex::hook_current_hash(
-                "PreToolUse",
-                None,
-                "/Users/ryan/.codex/hooks/block-hook-bypass.py",
-                2,
-                false,
-                Some("Checking for git hook bypass flags"),
-                None,
-            ),
-            Some(
-                "sha256:1f8126ee873513665736cb61c26a9f33332a081eec75930d3fb928b862053520"
-                    .to_string()
-            )
-        );
-    }
 
     #[test]
     fn marks_codex_untrusted_and_modified_hooks_for_review() {
@@ -1566,9 +1644,9 @@ mod tests {
     #[test]
     fn treats_cursor_macos_managed_hooks_as_read_only() {
         assert_eq!(
-            hook_management_disabled_reason(Path::new(
-                "/Library/Application Support/Cursor/hooks.json"
-            )),
+            crate::providers::agent_provider(AgentKind::Cursor).hook_read_only_reason(
+                std::path::Path::new("/Library/Application Support/Cursor/hooks.json"),
+            ),
             Some("this hook source is read-only")
         );
     }
@@ -1638,6 +1716,64 @@ mod tests {
     }
 
     #[test]
+    fn review_projection_reads_only_the_requested_hook_source() {
+        let root = std::env::temp_dir().join(format!(
+            "tendi-hooks-targeted-review-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("system time before epoch")
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).expect("create temp root");
+        let path = root.join("hooks.json");
+        fs::write(
+            &path,
+            r#"{
+  "hooks": {
+    "SessionStart": [{
+      "hooks": [{ "type": "prompt", "prompt": "review this" }]
+    }]
+  }
+}"#,
+        )
+        .expect("write hooks");
+
+        let scan = super::scan_hook_source_for_review(&path, AgentKind::Codex);
+        assert!(scan.warnings.is_empty(), "{:?}", scan.warnings);
+        assert_eq!(scan.hooks.len(), 1);
+        assert_eq!(scan.hooks[0].path, path);
+        assert_eq!(scan.hooks[0].prompt.as_deref(), Some("review this"));
+        assert!(scan.hooks[0].provider_review_key.is_some());
+        assert!(scan.hooks[0].provider_current_hash.is_none());
+
+        let hook = scan.hooks[0].clone();
+        let error = super::review_hook_from_scan(
+            HookScan {
+                hooks: scan.hooks,
+                warnings: Vec::new(),
+            },
+            HookReviewRequest {
+                agent: AgentKind::Codex,
+                path: hook.path,
+                expected_trust_hash: hook.trust_hash,
+                event: hook.event,
+                matcher: hook.matcher,
+                hook_type: hook.hook_type,
+                command: hook.command,
+                url: hook.url,
+                prompt: hook.prompt,
+                filter: hook.filter,
+                status_message: hook.status_message,
+            },
+        )
+        .expect_err("prompt hooks must not be reviewed");
+        assert!(error.to_string().contains("this hook type does not support review"));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn scans_codex_inline_toml_hooks() {
         let root = std::env::temp_dir().join(format!(
             "tendi-hooks-toml-{}-{}",
@@ -1665,7 +1801,7 @@ statusMessage = "Checking"
         let mut hooks = Vec::new();
         let mut warnings = Vec::new();
 
-        super::scan_codex_config_hooks(&path, &mut hooks, &mut warnings);
+        scan_codex_config_hooks(&path, &mut hooks, &mut warnings);
 
         assert!(warnings.is_empty(), "{warnings:?}");
         assert_eq!(hooks.len(), 1);
@@ -1705,7 +1841,7 @@ command = "/bin/echo hello"
         let mut hooks = Vec::new();
         let mut warnings = Vec::new();
 
-        super::scan_codex_config_hooks(&path, &mut hooks, &mut warnings);
+        scan_codex_config_hooks(&path, &mut hooks, &mut warnings);
 
         assert!(warnings.is_empty(), "{warnings:?}");
         assert_eq!(hooks.len(), 1);
@@ -1750,61 +1886,6 @@ command = "/bin/echo stop"
         let _ = fs::remove_dir_all(root);
     }
 
-    #[test]
-    fn deletes_matching_json_hook() {
-        let root = std::env::temp_dir().join(format!(
-            "tendi-hooks-delete-json-{}-{}",
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .expect("system time before epoch")
-                .as_nanos()
-        ));
-        fs::create_dir_all(&root).expect("create temp root");
-        let path = root.join("hooks.json");
-        fs::write(
-            &path,
-            r#"{
-  "hooks": {
-    "PreToolUse": [
-      {
-        "matcher": "Bash",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "/bin/echo delete-me",
-            "statusMessage": "Checking"
-          }
-        ]
-      }
-    ]
-  }
-}"#,
-        )
-        .expect("write hooks");
-        let trust_hash = super::sha256_file(&path).expect("hash");
-
-        super::delete_hook(super::HookDeleteRequest {
-            path: path.clone(),
-            expected_trust_hash: trust_hash,
-            event: "PreToolUse".to_string(),
-            matcher: Some("Bash".to_string()),
-            hook_type: Some("command".to_string()),
-            command: Some("/bin/echo delete-me".to_string()),
-            url: None,
-            prompt: None,
-            filter: None,
-            status_message: Some("Checking".to_string()),
-        })
-        .expect("delete hook");
-
-        let mut hooks = Vec::new();
-        let mut warnings = Vec::new();
-        scan_hook_file(&path, AgentKind::Codex, &mut hooks, &mut warnings);
-        assert!(warnings.is_empty(), "{warnings:?}");
-        assert!(hooks.is_empty(), "{hooks:?}");
-        let _ = fs::remove_dir_all(root);
-    }
 
     #[test]
     fn deletes_multiple_hooks_from_one_json_source() {
@@ -1832,6 +1913,7 @@ command = "/bin/echo stop"
         .expect("write hooks");
         let trust_hash = super::sha256_file(&path).expect("hash");
         let request = |matcher: &str, command: &str| super::HookDeleteRequest {
+            agent: AgentKind::Codex,
             path: path.clone(),
             expected_trust_hash: trust_hash.clone(),
             event: "PreToolUse".to_string(),
@@ -1881,6 +1963,7 @@ command = "/bin/echo stop"
             std::thread::spawn(move || {
                 barrier.wait();
                 super::delete_hook(super::HookDeleteRequest {
+                    agent: AgentKind::Codex,
                     path,
                     expected_trust_hash: trust_hash,
                     event: "Stop".to_string(),
@@ -1932,6 +2015,7 @@ command = "/bin/echo stop"
         fs::write(&second_path, &second_before).unwrap();
         let request =
             |path: PathBuf, expected_trust_hash: String, command: &str| super::HookDeleteRequest {
+                agent: AgentKind::Codex,
                 path,
                 expected_trust_hash,
                 event: "Stop".to_string(),
@@ -1985,6 +2069,7 @@ command = "/bin/echo delete-me"
         let trust_hash = super::sha256_file(&path).expect("hash");
 
         super::delete_hook(super::HookDeleteRequest {
+            agent: AgentKind::Codex,
             path: path.clone(),
             expected_trust_hash: trust_hash,
             event: "PreToolUse".to_string(),
@@ -2000,7 +2085,7 @@ command = "/bin/echo delete-me"
 
         let mut hooks = Vec::new();
         let mut warnings = Vec::new();
-        super::scan_codex_config_hooks(&path, &mut hooks, &mut warnings);
+        scan_codex_config_hooks(&path, &mut hooks, &mut warnings);
         assert!(warnings.is_empty(), "{warnings:?}");
         assert!(hooks.is_empty(), "{hooks:?}");
         let _ = fs::remove_dir_all(root);
@@ -2035,6 +2120,7 @@ command = "/bin/echo delete-me"
         let trust_hash = super::sha256_file(&path).expect("hash");
 
         super::set_hook_enabled(super::HookSetEnabledRequest {
+            agent: AgentKind::Codex,
             path: path.clone(),
             expected_trust_hash: trust_hash,
             event: "PreToolUse".to_string(),
@@ -2086,6 +2172,7 @@ enabled = false
         let trust_hash = super::sha256_file(&path).expect("hash");
 
         super::set_hook_enabled(super::HookSetEnabledRequest {
+            agent: AgentKind::Codex,
             path: path.clone(),
             expected_trust_hash: trust_hash,
             event: "PreToolUse".to_string(),
@@ -2102,7 +2189,7 @@ enabled = false
 
         let mut hooks = Vec::new();
         let mut warnings = Vec::new();
-        super::scan_codex_config_hooks(&path, &mut hooks, &mut warnings);
+        scan_codex_config_hooks(&path, &mut hooks, &mut warnings);
         assert!(warnings.is_empty(), "{warnings:?}");
         assert_eq!(hooks.len(), 1);
         assert!(hooks[0].enabled);
@@ -2227,7 +2314,7 @@ hooks:
         let mut hooks = Vec::new();
         let mut warnings = Vec::new();
 
-        super::scan_claude_component_file(&path, &mut hooks, &mut warnings);
+        scan_claude_component_file(&path, &mut hooks, &mut warnings);
 
         assert!(warnings.is_empty(), "{warnings:?}");
         assert_eq!(hooks.len(), 1);

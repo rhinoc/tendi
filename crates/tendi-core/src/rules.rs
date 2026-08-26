@@ -15,7 +15,6 @@ use crate::{
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct RuleRecord {
-    #[serde(default)]
     pub agents: Vec<AgentKind>,
     pub kind: String,
     pub scope: String,

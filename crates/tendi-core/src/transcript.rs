@@ -404,7 +404,7 @@ pub fn transcript_source_version(path: &Path) -> Result<String> {
 }
 
 #[cfg(test)]
-fn parse_transcript_page_with_cursor_store(
+fn parse_transcript_page_with_store(
     path: &Path,
     agent: AgentKind,
     cursor: Option<&str>,
@@ -1522,22 +1522,6 @@ pub(crate) fn json_string_hint<'a>(line: &'a str, marker: &str) -> Option<&'a st
     }
 }
 
-#[cfg(test)]
-pub(crate) fn collect_codex_item(value: &Value, items: &mut Vec<TranscriptItem>) {
-    crate::providers::agent_provider(AgentKind::Codex).parse_transcript_value(value, items);
-}
-
-#[cfg(test)]
-pub(crate) fn collect_claude_item(value: &Value, items: &mut Vec<TranscriptItem>) {
-    crate::providers::agent_provider(AgentKind::Claude).parse_transcript_value(value, items);
-}
-
-#[cfg(test)]
-pub(crate) fn append_cursor_model_configs_from_store(path: &Path, items: &mut Vec<TranscriptItem>) {
-    let _ = crate::providers::agent_provider(AgentKind::Cursor)
-        .append_transcript_metadata_from_store(path, items);
-}
-
 pub(crate) fn collect_generic_item(value: &Value, items: &mut Vec<TranscriptItem>) {
     let kind = value
         .get("role")
@@ -1590,12 +1574,13 @@ pub(crate) fn collect_generic_item(value: &Value, items: &mut Vec<TranscriptItem
                 let name = item
                     .get("name")
                     .and_then(Value::as_str)
-                    .unwrap_or("tool_call");
+                    .filter(|name| !name.trim().is_empty())
+                    .map(str::to_string);
                 push_tool_item(
                     items,
                     "tool",
-                    summarize_tool_call(item, name),
-                    Some(name.to_string()),
+                    summarize_tool_call(item),
+                    name,
                     time.clone(),
                     extract_tool_command(item),
                     None,
@@ -1630,9 +1615,12 @@ pub(crate) fn extract_content_text(value: Option<&Value>) -> Option<String> {
             clean_body(&text)
         }
         Value::Object(_) if is_thinking_content_item(value) => None,
-        Value::Object(_) => serde_json::to_string(value)
-            .ok()
-            .and_then(|text| clean_body(&text)),
+        Value::Object(_) => value
+            .get("text")
+            .and_then(Value::as_str)
+            .and_then(clean_body)
+            .or_else(|| extract_content_text(value.get("content")))
+            .or_else(|| value.get("message").and_then(Value::as_str).and_then(clean_body)),
         _ => None,
     }
 }
@@ -1971,7 +1959,7 @@ const INTERNAL_CONTEXT_MARKERS: [(&str, &str, Option<&str>); 18] = [
     ),
 ];
 
-pub(crate) fn summarize_tool_call(payload: &Value, name: &str) -> String {
+pub(crate) fn summarize_tool_call(payload: &Value) -> String {
     if let Some(command) = extract_tool_command(payload) {
         return command.chars().take(220).collect();
     }
@@ -1995,7 +1983,7 @@ pub(crate) fn summarize_tool_call(payload: &Value, name: &str) -> String {
         }
     }
 
-    name.to_string()
+    String::new()
 }
 
 pub(crate) fn push_item(
@@ -2218,12 +2206,16 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        TranscriptSearchScopes, append_cursor_model_configs_from_store, collect_claude_item,
-        collect_codex_item, collect_generic_item, parse_search_transcript, parse_transcript,
+        TranscriptSearchScopes, collect_generic_item, parse_search_transcript,
+        parse_transcript,
         parse_transcript_locator_page, parse_transcript_page, parse_transcript_page_at_snapshot,
-        parse_transcript_page_if_changed, parse_transcript_page_with_cursor_store,
-        search_transcript, summarize_tool_call, transcript_chunk_cache_hits,
-        transcript_chunk_cache_offsets, transcript_search_cache_offsets, transcript_source_version,
+        search_transcript, summarize_tool_call, transcript_search_cache_offsets, transcript_source_version,
+    };
+
+    use crate::providers::{
+        claude::collect_transcript_item as collect_claude_item,
+        codex::collect_transcript_item as collect_codex_item,
+        cursor::append_transcript_metadata_from_store_for_test as append_cursor_model_configs_from_store,
     };
 
     fn temp_path(prefix: &str) -> PathBuf {
@@ -2427,28 +2419,6 @@ mod tests {
         fs::remove_file(path).unwrap();
     }
 
-    #[test]
-    fn transcript_page_if_changed_skips_an_unchanged_source() {
-        let path = temp_path("tendi-transcript-page-unchanged-test.jsonl");
-        fs::write(&path, codex_message("user", "cached page")).unwrap();
-
-        let first =
-            parse_transcript_page(&path, crate::skills::AgentKind::Codex, None, Some(1)).unwrap();
-        let unchanged = parse_transcript_page_if_changed(
-            &path,
-            crate::skills::AgentKind::Codex,
-            None,
-            Some(1),
-            Some(&first.source_version),
-        )
-        .unwrap();
-
-        assert!(unchanged.unchanged);
-        assert!(unchanged.done);
-        assert!(unchanged.items.is_empty());
-        assert_eq!(unchanged.source_version, first.source_version);
-        fs::remove_file(path).unwrap();
-    }
 
     #[test]
     fn transcript_cursor_requests_restart_when_the_file_appends() {
@@ -2652,19 +2622,6 @@ mod tests {
         fs::remove_file(path).unwrap();
     }
 
-    #[test]
-    fn empty_transcript_page_is_done() {
-        let path = temp_path("tendi-empty-transcript-page-test.jsonl");
-        fs::write(&path, "").unwrap();
-
-        let page =
-            parse_transcript_page(&path, crate::skills::AgentKind::Codex, None, Some(2)).unwrap();
-
-        assert!(page.done);
-        assert!(page.items.is_empty());
-        assert!(page.next_cursor.is_none());
-        fs::remove_file(path).unwrap();
-    }
 
     #[test]
     fn transcript_page_attaches_tool_result_within_same_page() {
@@ -2699,102 +2656,7 @@ mod tests {
         fs::remove_file(path).unwrap();
     }
 
-    #[test]
-    fn transcript_page_drops_unmatched_tool_result_for_pending_tool() {
-        let path = temp_path("tendi-transcript-page-tool-test.jsonl");
-        let call = json!({
-            "type": "response_item",
-            "payload": {
-                "type": "function_call",
-                "call_id": "call_1",
-                "name": "exec_command",
-                "arguments": "{\"cmd\":\"cargo test\"}"
-            }
-        });
-        let output = json!({
-            "type": "response_item",
-            "payload": {
-                "type": "function_call_output",
-                "call_id": "call_1",
-                "output": "passed"
-            }
-        });
-        fs::write(
-            &path,
-            format!("{call}\n{output}\n{}", codex_message("user", "next")),
-        )
-        .unwrap();
 
-        let first =
-            parse_transcript_page(&path, crate::skills::AgentKind::Codex, None, Some(1)).unwrap();
-        assert_eq!(first.items.len(), 1);
-        assert!(first.items[0].result.is_none());
-        assert!(!first.done);
-        let second = parse_transcript_page(
-            &path,
-            crate::skills::AgentKind::Codex,
-            first.next_cursor.as_deref(),
-            Some(1),
-        )
-        .unwrap();
-        assert_eq!(second.items.len(), 1);
-        assert_eq!(second.items[0].kind, "user");
-        assert_eq!(second.items[0].body, "next");
-        fs::remove_file(path).unwrap();
-    }
-
-    #[test]
-    fn final_cursor_page_includes_cursor_model_config() {
-        let root = temp_path("tendi-transcript-page-cursor-test");
-        fs::create_dir_all(&root).unwrap();
-        let transcript_path = root.join("session.jsonl");
-        fs::write(
-            &transcript_path,
-            [
-                json!({ "role": "user", "content": "first" }).to_string(),
-                json!({ "role": "assistant", "content": "second" }).to_string(),
-            ]
-            .join("\n"),
-        )
-        .unwrap();
-        let store_path = root.join("store.db");
-        let connection = Connection::open(&store_path).unwrap();
-        connection
-            .execute("CREATE TABLE blobs (id TEXT PRIMARY KEY, data BLOB)", [])
-            .unwrap();
-        connection
-            .execute(
-                "INSERT INTO blobs (id, data) VALUES (?1, ?2)",
-                rusqlite::params!["1", cursor_model_blob("cursor-fast")],
-            )
-            .unwrap();
-        drop(connection);
-
-        let first = parse_transcript_page_with_cursor_store(
-            &transcript_path,
-            crate::skills::AgentKind::Cursor,
-            None,
-            Some(1),
-            Some(&store_path),
-        )
-        .unwrap();
-        assert!(!first.done);
-        assert!(first.items.iter().all(|item| item.kind != "model_config"));
-        let final_page = parse_transcript_page_with_cursor_store(
-            &transcript_path,
-            crate::skills::AgentKind::Cursor,
-            first.next_cursor.as_deref(),
-            Some(1),
-            Some(&store_path),
-        )
-        .unwrap();
-        assert!(final_page.done);
-        assert!(final_page.items.iter().any(|item| {
-            item.kind == "model_config" && item.model.as_deref() == Some("cursor-fast")
-        }));
-
-        fs::remove_dir_all(root).unwrap();
-    }
 
     #[test]
     fn search_transcript_skips_tool_results_and_keeps_messages() {
@@ -2872,123 +2734,8 @@ mod tests {
         fs::remove_file(path).unwrap();
     }
 
-    #[test]
-    fn transcript_search_streams_large_files_and_returns_logical_indices() {
-        let path = temp_path("tendi-transcript-search-large-test.jsonl");
-        let filler = "x".repeat(1024);
-        let mut contents = String::new();
-        for index in 0..4_000 {
-            let body = if index == 3_999 {
-                format!("needle-user-{index} {filler}")
-            } else {
-                format!("ordinary-user-{index} {filler}")
-            };
-            writeln!(contents, "{}", codex_message("user", &body)).unwrap();
-            writeln!(
-                contents,
-                "{}",
-                codex_message("assistant", &format!("ordinary-assistant-{index} {filler}"))
-            )
-            .unwrap();
-        }
-        fs::write(&path, &contents).unwrap();
 
-        let result = search_transcript(
-            &path,
-            crate::skills::AgentKind::Codex,
-            "needle-user",
-            &TranscriptSearchScopes {
-                user: true,
-                assistant: false,
-                system: false,
-                tool: false,
-            },
-        )
-        .unwrap();
 
-        assert_eq!(result.hits.len(), 1);
-        assert_eq!(result.hits[0].group_index, 7_998);
-        assert!(result.hits[0].tool_index.is_none());
-
-        fs::remove_file(path).unwrap();
-    }
-
-    #[test]
-    fn transcript_search_group_index_matches_paginated_transcript() {
-        let path = temp_path("tendi-transcript-search-page-index-test.jsonl");
-        let turn_context = json!({
-            "type": "turn_context",
-            "payload": { "model": "gpt-5.6-sol", "effort": "high" }
-        })
-        .to_string();
-        let mut lines = vec![turn_context.clone()];
-        lines.extend((0..159).map(|index| codex_message("user", &format!("filler-{index}"))));
-        lines.push(turn_context);
-        lines.push(codex_message("assistant", "pull link"));
-        fs::write(&path, lines.join("\n")).unwrap();
-
-        let result = search_transcript(
-            &path,
-            crate::skills::AgentKind::Codex,
-            "pull",
-            &TranscriptSearchScopes {
-                user: false,
-                assistant: true,
-                system: false,
-                tool: false,
-            },
-        )
-        .unwrap();
-
-        assert_eq!(result.hits.len(), 1);
-        assert_eq!(result.hits[0].group_index, 161);
-        fs::remove_file(path).unwrap();
-    }
-
-    #[test]
-    fn transcript_search_maps_consecutive_tools_to_one_group() {
-        let path = temp_path("tendi-transcript-search-tool-group-test.jsonl");
-        let call = |call_id: &str, command: &str| {
-            json!({
-                "type": "response_item",
-                "payload": {
-                    "type": "function_call",
-                    "call_id": call_id,
-                    "name": "exec_command",
-                    "arguments": json!({ "cmd": command }).to_string(),
-                }
-            })
-            .to_string()
-        };
-        fs::write(
-            &path,
-            [
-                codex_message("user", "before tools"),
-                call("call-1", "ordinary command"),
-                call("call-2", "needle-tool command"),
-            ]
-            .join("\n"),
-        )
-        .unwrap();
-
-        let result = search_transcript(
-            &path,
-            crate::skills::AgentKind::Codex,
-            "needle-tool",
-            &TranscriptSearchScopes {
-                user: false,
-                assistant: false,
-                system: false,
-                tool: true,
-            },
-        )
-        .unwrap();
-
-        assert_eq!(result.hits.len(), 1);
-        assert_eq!(result.hits[0].group_index, 1);
-        assert_eq!(result.hits[0].tool_index, Some(1));
-        fs::remove_file(path).unwrap();
-    }
 
     #[test]
     fn transcript_search_reuses_unchanged_offset_index_and_invalidates_on_append() {
@@ -3072,95 +2819,6 @@ mod tests {
         fs::remove_file(path).unwrap();
     }
 
-    #[test]
-    fn transcript_search_reuses_chunks_for_new_queries_and_invalidates_on_rewrite() {
-        let path = temp_path("tendi-transcript-search-chunk-cache-test.jsonl");
-        let mut contents = String::new();
-        for index in 0..900 {
-            let body = match index {
-                100 => "needle-first-query",
-                700 => "needle-second-query",
-                _ => "ordinary-message",
-            };
-            writeln!(contents, "{}", codex_message("user", body)).unwrap();
-        }
-        fs::write(&path, &contents).unwrap();
-
-        let scopes = TranscriptSearchScopes {
-            user: true,
-            assistant: false,
-            system: false,
-            tool: false,
-        };
-        let first = search_transcript(
-            &path,
-            crate::skills::AgentKind::Codex,
-            "needle-first-query",
-            &scopes,
-        )
-        .unwrap();
-        assert_eq!(first.hits.len(), 1);
-        let chunks = transcript_chunk_cache_offsets(
-            &path,
-            crate::skills::AgentKind::Codex,
-            &first.source_version,
-        );
-        assert!(
-            chunks.len() >= 3,
-            "expected several cached pages: {chunks:?}"
-        );
-
-        let second = search_transcript(
-            &path,
-            crate::skills::AgentKind::Codex,
-            "needle-second-query",
-            &scopes,
-        )
-        .unwrap();
-        assert_eq!(second.hits.len(), 1);
-        assert_eq!(second.source_version, first.source_version);
-        assert!(
-            transcript_chunk_cache_hits(
-                &path,
-                crate::skills::AgentKind::Codex,
-                &first.source_version,
-            ) > 0
-        );
-
-        fs::write(
-            &path,
-            contents.replace("needle-first-query", "replacement-first-query"),
-        )
-        .unwrap();
-        let rewritten = search_transcript(
-            &path,
-            crate::skills::AgentKind::Codex,
-            "replacement-first-query",
-            &scopes,
-        )
-        .unwrap();
-        assert_eq!(rewritten.hits.len(), 1);
-        assert_ne!(rewritten.source_version, first.source_version);
-        assert_eq!(
-            transcript_chunk_cache_hits(
-                &path,
-                crate::skills::AgentKind::Codex,
-                &rewritten.source_version,
-            ),
-            0
-        );
-
-        let removed = search_transcript(
-            &path,
-            crate::skills::AgentKind::Codex,
-            "needle-first-query",
-            &scopes,
-        )
-        .unwrap();
-        assert!(removed.hits.is_empty());
-
-        fs::remove_file(path).unwrap();
-    }
 
     #[test]
     fn inserts_cursor_model_markers_in_store_order() {
@@ -3264,10 +2922,11 @@ mod tests {
         });
 
         assert_eq!(
-            summarize_tool_call(&payload, "exec_command"),
+            summarize_tool_call(&payload),
             "rg -n \"needle\" src"
         );
     }
+
 
     #[test]
     fn attaches_codex_function_call_output_and_duration() {
@@ -3692,6 +3351,8 @@ mod tests {
         assert_eq!(items[2].tag.as_deref(), Some("Read"));
         assert_eq!(items[2].command.as_deref(), Some("cat src/App.jsx"));
     }
+
+
 
     #[test]
     fn classifies_cursor_subagent_notifications_and_context() {

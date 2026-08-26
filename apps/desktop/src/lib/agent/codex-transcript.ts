@@ -75,7 +75,7 @@ function collectCodexItem(value: JsonObject, items: TranscriptParseContext["item
     const start = items.length;
     collectMessageContent(payload.content, items, time, role);
     for (let index = items.length - 1; index >= start; index -= 1) {
-      const body = stripCodexInternalContext(items[index]?.body ?? "");
+      const body = stripCodexInternalContext(items[index].body);
       if (body) items[index].body = body;
       else items.splice(index, 1);
     }
@@ -87,8 +87,8 @@ function collectCodexItem(value: JsonObject, items: TranscriptParseContext["item
     return;
   }
   if (payloadType === "function_call" || payloadType === "custom_tool_call" || payloadType === "local_shell_call") {
-    const tag = stringValue(payload.name) || stringAt(payload, ["action", "type"]) || "tool_call";
-    pushItem(items, "tool", summarizeToolCall(payload, tag), tag, time, extractToolCommand(payload), undefined, durationMs(payload), callId(payload), timestampMs(value.timestamp));
+    const tag = stringValue(payload.name) || stringAt(payload, ["action", "type"]) || undefined;
+    pushItem(items, "tool", summarizeToolCall(payload), tag, time, extractToolCommand(payload), undefined, durationMs(payload), callId(payload), timestampMs(value.timestamp));
     return;
   }
   if (payloadType === "function_call_output" || payloadType === "custom_tool_call_output") {
@@ -96,7 +96,7 @@ function collectCodexItem(value: JsonObject, items: TranscriptParseContext["item
     return;
   }
   if (payloadType === "web_search_call" || payloadType === "image_generation_call") {
-    pushItem(items, "tool", payloadType.replaceAll("_", " "), payloadType, time);
+    pushItem(items, "tool", "", payloadType, time);
   }
 }
 

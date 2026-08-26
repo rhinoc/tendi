@@ -1,7 +1,7 @@
 .appTooltip {
   z-index: 1200;
   max-width: min(320px, calc(100vw - 16px));
-  max-height: min(360px, calc(var(--radix-tooltip-content-available-height) - 12px));
+  max-height: min(360px, calc(var(--radix-tooltip-content-available-height, 100vh) - 12px));
   padding: 5px 8px;
   overflow-y: auto;
   overflow-wrap: anywhere;

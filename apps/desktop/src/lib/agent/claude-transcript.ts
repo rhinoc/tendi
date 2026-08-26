@@ -53,14 +53,14 @@ function collectClaudeItem(value: JsonObject, items: TranscriptParseContext["ite
     if (Array.isArray(content)) {
       for (const item of content) {
         if (!isJsonObject(item) || item.type !== "tool_use") continue;
-        const tag = stringValue(item.name) || "tool_call";
-        pushItem(items, "tool", summarizeToolCall(item, tag), tag, time, extractToolCommand(item), undefined, durationMs(item), stringValue(item.id), eventMs);
+        const tag = stringValue(item.name) || undefined;
+        pushItem(items, "tool", summarizeToolCall(item), tag, time, extractToolCommand(item), undefined, durationMs(item), stringValue(item.id), eventMs);
       }
     }
   }
 
   if (value.toolUseResult !== undefined) {
-    const result = extractContentText(value.toolUseResult) || "tool result";
+    const result = extractContentText(value.toolUseResult);
     attachToolResult(items, stringValue(value.toolUseID) || stringValue(value.tool_use_id) || stringValue(value.toolUseId), result, durationMs(value), eventMs);
   }
 }
@@ -70,7 +70,7 @@ function attachClaudeToolResults(content: unknown[], value: JsonObject, items: T
   for (const item of content) {
     if (!isJsonObject(item) || item.type !== "tool_result") continue;
     handled = true;
-    const result = extractContentText(item.content) || extractContentText(value.toolUseResult) || "tool result";
+    const result = extractContentText(item.content) || extractContentText(value.toolUseResult);
     const id = stringValue(item.tool_use_id) || stringValue(item.toolUseID) || stringValue(item.toolUseId);
     attachToolResult(items, id, result, durationMs(value, result), eventMs);
   }

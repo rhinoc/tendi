@@ -69,9 +69,9 @@ function chromiumExecutablePath() {
 // ----- fabricated report (matches the shapes each normalizer/column reads) ---
 function buildReport() {
   const skills = [
-    { id: "alpha-skill", name: "alpha-skill", description: "First local skill.", agents: ["Codex", "Cursor"], visibility: "Manual", source: "github", install_targets: ["shared"], update_status: "update-available" },
-    { id: "beta-skill", name: "beta-skill", description: "Second local skill.", agents: ["Codex"], visibility: "Auto", source: "local", install_targets: ["shared"], update_status: "local" },
-    { id: "system-skill", name: "system-skill", description: "Managed system skill.", agents: ["Codex"], visibility: "Auto", is_system: true, source: "system", install_targets: ["codex"], update_status: "local" },
+    { id: "alpha-skill", name: "alpha-skill", description: "First local skill.", agents: ["Codex", "Cursor"], visibility: "Manual", source: "github", install_targets: ["shared"], update_status: "update-available", paths: [{ path: "/Users/dev/.cursor/projects/project-1/.cursor/skills/alpha/SKILL.md", scope: "project", agent: "cursor" }] },
+    { id: "beta-skill", name: "beta-skill", description: "Second local skill.", agents: ["Codex"], visibility: "Auto", source: "local", install_targets: ["shared"], update_status: "local", paths: [{ path: "/Users/dev/.claude/skills/beta/SKILL.md", scope: "global", agent: "claude" }] },
+    { id: "system-skill", name: "system-skill", description: "Managed system skill.", agents: ["Codex"], visibility: "Auto", is_system: true, source: "system", install_targets: ["codex"], update_status: "local", paths: [{ path: "/Users/dev/.codex/skills/system/SKILL.md", scope: "global", agent: "codex" }] },
   ];
   const prompts = Array.from({ length: 12 }, (_, i) => ({
     id: `prompt-${i + 1}`,
@@ -93,7 +93,7 @@ function buildReport() {
   }));
   const rules = Array.from({ length: 12 }, (_, i) => ({
     path: `/Users/dev/.cursor/rules/rule-${i + 1}.mdc`,
-    agent: ["cursor", "codex", "claude"][i % 3],
+    agents: [["cursor", "codex", "claude"][i % 3]],
     kind: ["Always", "Auto", "Manual"][i % 3],
     scope: ["Project", "Global"][i % 2],
     order: i + 1,
@@ -104,16 +104,18 @@ function buildReport() {
     agent: ["cursor", "codex", "claude"][i % 3],
     matcher: "*",
     enabled: i % 2 === 0,
+    needs_review: false,
     command: `echo hook-${i + 1}`,
     path: `/Users/dev/.claude/hooks.json`,
     trust_hash: `hook-trust-${i + 1}`,
-    type: "command",
+    hook_type: "command",
   }));
   const mcp = Array.from({ length: 12 }, (_, i) => ({
     agent: i < 2 ? "cursor" : ["cursor", "codex", "claude"][i % 3],
     name: i < 2 ? "cursor-app-control" : `mcp-server-${i + 1}`,
     scope: i < 2 ? `project-${i + 1}` : "global",
     transport: i < 2 ? "cursor-plugin" : ["stdio", "http"][i % 2],
+    enabled: i < 2 || i % 2 === 0,
     status: i < 2 ? "configured" : ["running", "stopped"][i % 2],
     path: i < 2
       ? `/Users/dev/.cursor/projects/project-${i + 1}/mcps/cursor-app-control/SERVER_METADATA.json`
@@ -205,6 +207,29 @@ async function runPageHeaderChecks(page, tab, heading, expectedCompact) {
   }
 }
 
+async function runOverviewChecks(page) {
+  await page.locator(".overviewSessionGrid").waitFor({ state: "visible", timeout: 5000 });
+  const metrics = await page.evaluate(() => {
+    const header = document.querySelector(".overviewPaneHeader");
+    const rows = document.querySelectorAll(".overviewSessionRow");
+    const lastRow = rows.item(rows.length - 1);
+    if (!header || !lastRow) return { missing: true };
+    return {
+      missing: false,
+      headerRight: header.getBoundingClientRect().right,
+      rowRight: lastRow.getBoundingClientRect().right,
+    };
+  });
+  check(
+    "overview",
+    "recent-sessions-action-alignment",
+    metrics.missing !== true && Math.abs(metrics.headerRight - metrics.rowRight) <= TOLERANCE,
+    metrics.missing === true
+      ? "recent session header or row missing"
+      : `header right ${metrics.headerRight}px vs last row right ${metrics.rowRight}px`,
+  );
+}
+
 async function runReq8NonFrozenFixture(page) {
   await page.evaluate(() => {
     if (document.getElementById("align-req8-fixture")) return;
@@ -290,6 +315,123 @@ async function runReq8NonFrozenFixture(page) {
 
   await page.mouse.move(0, 0);
   await page.evaluate(() => document.getElementById("align-req8-fixture")?.remove());
+}
+
+async function runFrozenNativeHoverParityFixture(page) {
+  await page.evaluate(() => {
+    if (document.getElementById("align-frozen-hover-fixture")) return;
+    const fixture = document.createElement("div");
+    fixture.id = "align-frozen-hover-fixture";
+    fixture.className = "dataTableShell dataTableShell--frozen";
+    fixture.style.cssText = [
+      "position:fixed",
+      "top:4px",
+      "left:0",
+      "width:860px",
+      "height:58px",
+      "opacity:0.02",
+      "z-index:99999",
+      "pointer-events:auto",
+      "--data-freeze-column-width:320px",
+      "--data-table-text-rail-indent:0px",
+      "--data-table-freeze-pane-width:320px",
+      "--data-table-split-scroll-leading-gap:12px",
+      "--data-table-table-row-height:58px",
+      "--data-table-selection-col:24px",
+      "--data-table-row-track-gap:0px",
+      "--data-table-cell-gap:0px",
+      "--page-row-checkbox-offset:0px",
+      "--data-table-row-hover-bg:rgba(255, 0, 0, 0.2)",
+    ].join(";");
+    fixture.innerHTML = `
+      <div class="dataTableSplitSurface">
+        <div class="dataTableFrozenPane">
+          <div class="dataTableBody">
+            <div class="dataTableRowSlot">
+              <div class="dataRow rowFrame dataRow--frozenPane" data-row-id="frozen-hover">
+                <div class="dataCell" data-frozen><span class="dataCellText">Frozen</span></div>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="dataTableScrollPane">
+          <div class="dataTableBody">
+            <div class="dataTableRowSlot">
+              <div class="dataRow rowFrame dataRow--scrollPane" data-row-id="frozen-hover">
+                <div class="dataCell"><span class="dataCellText">Scroll</span></div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    `;
+    document.body.appendChild(fixture);
+  });
+
+  const frozenRow = page.locator("#align-frozen-hover-fixture .dataRow--frozenPane");
+  await frozenRow.hover({ force: true });
+  const nativeHoverMetrics = await page.evaluate(() => {
+    const transparent = (value) => !value
+      || value === "transparent"
+      || value === "rgba(0, 0, 0, 0)"
+      || /\/\s*0\)?$/.test(value);
+    const frozen = document.querySelector("#align-frozen-hover-fixture .dataRow--frozenPane");
+    const scroll = document.querySelector("#align-frozen-hover-fixture .dataRow--scrollPane");
+    if (!frozen || !scroll) return { missing: true };
+    return {
+      missing: false,
+      frozenHover: frozen.matches(":hover"),
+      scrollHover: scroll.matches(":hover"),
+      frozenBg: getComputedStyle(frozen, "::after").backgroundColor,
+      scrollBg: getComputedStyle(scroll, "::after").backgroundColor,
+      frozenTransparent: transparent(getComputedStyle(frozen, "::after").backgroundColor),
+      scrollTransparent: transparent(getComputedStyle(scroll, "::after").backgroundColor),
+    };
+  });
+  check(
+    "fixture",
+    "frozen-native-hover-parity",
+    nativeHoverMetrics.missing !== true
+      && nativeHoverMetrics.frozenHover === true
+      && nativeHoverMetrics.scrollHover === false
+      && nativeHoverMetrics.frozenTransparent === true
+      && nativeHoverMetrics.scrollTransparent === true,
+    nativeHoverMetrics.missing === true
+      ? "missing frozen/scroll hover fixture"
+      : `native hover ${nativeHoverMetrics.frozenHover}/${nativeHoverMetrics.scrollHover}, backgrounds ${nativeHoverMetrics.frozenBg}/${nativeHoverMetrics.scrollBg}`,
+  );
+
+  await page.evaluate(() => {
+    const frozen = document.querySelector("#align-frozen-hover-fixture .dataRow--frozenPane");
+    const scroll = document.querySelector("#align-frozen-hover-fixture .dataRow--scrollPane");
+    frozen?.classList.add("rowHover");
+    scroll?.classList.add("rowHover");
+  });
+  await page.waitForTimeout(150);
+  const syncedHoverMetrics = await page.evaluate(() => {
+    const frozen = document.querySelector("#align-frozen-hover-fixture .dataRow--frozenPane");
+    const scroll = document.querySelector("#align-frozen-hover-fixture .dataRow--scrollPane");
+    if (!frozen || !scroll) return { missing: true };
+    return {
+      missing: false,
+      frozenBg: getComputedStyle(frozen, "::after").backgroundColor,
+      scrollBg: getComputedStyle(scroll, "::after").backgroundColor,
+    };
+  });
+  check(
+    "fixture",
+    "frozen-rowHover-sync-still-active",
+    syncedHoverMetrics.missing !== true
+      && syncedHoverMetrics.frozenBg === syncedHoverMetrics.scrollBg
+      && syncedHoverMetrics.frozenBg !== "transparent"
+      && syncedHoverMetrics.frozenBg !== "rgba(0, 0, 0, 0)",
+    syncedHoverMetrics.missing === true
+      ? "missing frozen/scroll hover fixture"
+      : `rowHover backgrounds ${syncedHoverMetrics.frozenBg}/${syncedHoverMetrics.scrollBg}`,
+  );
+
+  await page.mouse.move(0, 0);
+  await page.evaluate(() => document.getElementById("align-frozen-hover-fixture")?.remove());
 }
 
 async function runReq8TabChecks(page, tab) {
@@ -845,6 +987,73 @@ async function runFrozenBugSmokeChecks(page, tab) {
     `after top ${b8Metrics.afterTop}, cell bg ${b8Metrics.cellBg}, overlay bg ${b8Metrics.overlayBg}`,
   );
 
+  const rowMenuButton = page.locator('.dataTableScrollPane .dataRow--scrollPane button[aria-label*="actions" i]').first();
+  if (await rowMenuButton.count()) {
+    await rowMenuButton.click({ force: true });
+    await page.waitForTimeout(150);
+    const openMenuMetrics = await page.evaluate(() => {
+      const button = document.querySelector('.dataTableScrollPane .dataRow--scrollPane button[aria-label*="actions" i]');
+      const scrollRow = button?.closest(".dataRow--scrollPane");
+      const id = scrollRow?.dataset.rowId;
+      const frozenRow = id
+        ? document.querySelector(`.dataTableFrozenPane .dataRow--frozenPane[data-row-id="${CSS.escape(id)}"]`)
+        : null;
+      if (!button || !scrollRow || !frozenRow) return { missing: true };
+      return {
+        missing: false,
+        triggerOpen: button.getAttribute("data-state") === "open",
+        frozenMenuActive: frozenRow.classList.contains("menuActive"),
+        scrollMenuActive: scrollRow.classList.contains("menuActive"),
+        frozenBg: getComputedStyle(frozenRow, "::after").backgroundColor,
+        scrollBg: getComputedStyle(scrollRow, "::after").backgroundColor,
+      };
+    });
+    check(
+      tab.id,
+      "bug20-row-menu-sync-open",
+      openMenuMetrics.missing !== true
+        && openMenuMetrics.triggerOpen === true
+        && openMenuMetrics.frozenMenuActive === true
+        && openMenuMetrics.scrollMenuActive === true
+        && openMenuMetrics.frozenBg === openMenuMetrics.scrollBg,
+      openMenuMetrics.missing === true
+        ? "missing paired row menu rows"
+        : `trigger open ${openMenuMetrics.triggerOpen}, menuActive frozen/scroll ${openMenuMetrics.frozenMenuActive}/${openMenuMetrics.scrollMenuActive}, bg ${openMenuMetrics.frozenBg}/${openMenuMetrics.scrollBg}`,
+    );
+    await page.keyboard.press("Escape");
+    await page.mouse.move(0, 0);
+    await page.waitForTimeout(150);
+    const closedMenuMetrics = await page.evaluate(() => {
+      const button = document.querySelector('.dataTableScrollPane .dataRow--scrollPane button[aria-label*="actions" i]');
+      const scrollRow = button?.closest(".dataRow--scrollPane");
+      const id = scrollRow?.dataset.rowId;
+      const frozenRow = id
+        ? document.querySelector(`.dataTableFrozenPane .dataRow--frozenPane[data-row-id="${CSS.escape(id)}"]`)
+        : null;
+      if (!button || !scrollRow || !frozenRow) return { missing: true };
+      return {
+        missing: false,
+        triggerOpen: button.getAttribute("data-state") === "open",
+        frozenMenuActive: frozenRow.classList.contains("menuActive"),
+        scrollMenuActive: scrollRow.classList.contains("menuActive"),
+        frozenBg: getComputedStyle(frozenRow, "::after").backgroundColor,
+        scrollBg: getComputedStyle(scrollRow, "::after").backgroundColor,
+      };
+    });
+    check(
+      tab.id,
+      "bug20-row-menu-sync-close",
+      closedMenuMetrics.missing !== true
+        && closedMenuMetrics.triggerOpen === false
+        && closedMenuMetrics.frozenMenuActive === false
+        && closedMenuMetrics.scrollMenuActive === false
+        && closedMenuMetrics.frozenBg === closedMenuMetrics.scrollBg,
+      closedMenuMetrics.missing === true
+        ? "missing paired row menu rows"
+        : `trigger open ${closedMenuMetrics.triggerOpen}, menuActive frozen/scroll ${closedMenuMetrics.frozenMenuActive}/${closedMenuMetrics.scrollMenuActive}, bg ${closedMenuMetrics.frozenBg}/${closedMenuMetrics.scrollBg}`,
+    );
+  }
+
   const b10Metrics = await page.evaluate(() => {
     const scroller = document.querySelector(".dataTableBodyScroll");
     const frozenHeader = document.querySelector(".dataTableHeader--frozen");
@@ -874,6 +1083,40 @@ async function runFrozenBugSmokeChecks(page, tab) {
       && b10Metrics.hitScrollHeader === false
       && b10Metrics.hitFrozenHeader === true,
     `maxScroll ${b10Metrics.maxScroll}, scrollLeft ${b10Metrics.scrollLeft}, hit frozen ${b10Metrics.hitFrozenHeader}, hit scroll ${b10Metrics.hitScrollHeader}, hit ${b10Metrics.hitClass}`,
+  );
+
+  const b21Metrics = await page.evaluate(() => {
+    const scroller = document.querySelector(".dataTableBodyScroll");
+    const track = document.querySelector(".dataTableScrollHeaderTrack");
+    if (!scroller || !track) return { missing: true };
+    const maxScroll = Math.max(0, scroller.scrollWidth - scroller.clientWidth);
+    const previousLeft = scroller.scrollLeft;
+    const targetLeft = Math.min(maxScroll, Math.max(24, maxScroll / 2));
+    if (targetLeft <= 0) return { missing: false, targetLeft, immediateError: Infinity };
+    scroller.scrollLeft = targetLeft;
+    scroller.dispatchEvent(new Event("scroll"));
+    const transform = getComputedStyle(track).transform;
+    const transformLeft = transform === "none" ? 0 : new DOMMatrixReadOnly(transform).m41;
+    const immediateError = Math.abs(transformLeft + scroller.scrollLeft);
+    scroller.scrollLeft = previousLeft;
+    scroller.dispatchEvent(new Event("scroll"));
+    return {
+      missing: false,
+      targetLeft,
+      scrollLeft: scroller.scrollLeft,
+      transformLeft,
+      immediateError,
+    };
+  });
+  check(
+    tab.id,
+    "bug21-scroll-header-syncs-same-event",
+    b21Metrics.missing !== true
+      && b21Metrics.targetLeft > TOLERANCE
+      && b21Metrics.immediateError <= TOLERANCE,
+    b21Metrics.missing === true
+      ? "missing scroll container or scroll header track"
+      : `target ${b21Metrics.targetLeft}, transform ${b21Metrics.transformLeft}, scroll ${b21Metrics.scrollLeft}, immediate error ${b21Metrics.immediateError}`,
   );
 
   const b11Metrics = await page.evaluate(() => {
@@ -1020,18 +1263,30 @@ async function runFrozenBugSmokeChecks(page, tab) {
       const scrollGroup = document.querySelector(".dataTableScrollPane .dataGroup");
       const frozenHeading = frozenGroup?.querySelector(".sectionHeading");
       const scrollSpacer = scrollGroup?.querySelector(".dataSplitGroupSpacer");
+      const scroller = document.querySelector(".dataTableBodyScroll");
+      const frozenPane = document.querySelector(".dataTableFrozenPane");
       const frozenRow = frozenGroup?.querySelector(".dataRow--frozenPane");
       const scrollRow = frozenRow?.dataset.rowId
         ? document.querySelector(`.dataTableScrollPane .dataRow--scrollPane[data-row-id="${CSS.escape(frozenRow.dataset.rowId)}"]`)
         : null;
-      if (!frozenGroup || !scrollGroup || !frozenHeading || !scrollSpacer || !frozenRow || !scrollRow) {
+      if (!frozenGroup || !scrollGroup || !frozenHeading || !scrollSpacer || !scroller || !frozenPane || !frozenRow || !scrollRow) {
         return { missing: true };
       }
+      const previousScrollLeft = scroller.scrollLeft;
+      scroller.scrollLeft = scroller.scrollWidth;
       const frozenHeadingRect = frozenHeading.getBoundingClientRect();
       const scrollSpacerRect = scrollSpacer.getBoundingClientRect();
       const frozenRowRect = frozenRow.getBoundingClientRect();
       const scrollRowRect = scrollRow.getBoundingClientRect();
+      const scrollViewportRect = scroller.getBoundingClientRect();
+      const frozenPaneRect = frozenPane.getBoundingClientRect();
       const isVisible = (backgroundColor) => backgroundColor !== "transparent" && backgroundColor !== "rgba(0, 0, 0, 0)";
+      const scrollSpacerBackground = getComputedStyle(scrollSpacer).backgroundColor;
+      const scrollRightInset = parseFloat(getComputedStyle(scroller).paddingRight) || 0;
+      const visibleScrollRight = scrollViewportRect.right - scrollRightInset;
+      const scrollHeaderCovered = scrollSpacerRect.left <= frozenPaneRect.right + 1.5
+        && scrollSpacerRect.right >= visibleScrollRight - 1.5;
+      scroller.scrollLeft = previousScrollLeft;
       return {
         missing: false,
         rowId: frozenRow.dataset.rowId,
@@ -1043,6 +1298,12 @@ async function runFrozenBugSmokeChecks(page, tab) {
         scrollRowTop: round(scrollRowRect.top),
         frozenSeparatorVisible: isVisible(getComputedStyle(frozenRow, "::before").backgroundColor),
         scrollSeparatorVisible: isVisible(getComputedStyle(scrollRow, "::before").backgroundColor),
+        scrollSpacerBackground,
+        scrollHeaderCovered,
+        scrollSpacerLeft: round(scrollSpacerRect.left),
+        scrollSpacerRight: round(scrollSpacerRect.right),
+        frozenPaneRight: round(frozenPaneRect.right),
+        viewportRight: round(visibleScrollRight),
       };
     });
     check(
@@ -1056,6 +1317,17 @@ async function runFrozenBugSmokeChecks(page, tab) {
       groupedMetrics.missing === true
         ? "missing grouped frozen/scroll rows"
         : `heading ${groupedMetrics.headingHeight}, spacer ${groupedMetrics.spacerHeight}, row ${groupedMetrics.rowId} top ${groupedMetrics.frozenRowTop}/${groupedMetrics.scrollRowTop} delta ${groupedMetrics.rowTopDelta}, height delta ${groupedMetrics.rowHeightDelta}`,
+    );
+    check(
+      tab.id,
+      "bug19-grouped-header-covers-scroll-pane",
+      groupedMetrics.missing !== true
+        && groupedMetrics.scrollHeaderCovered === true
+        && groupedMetrics.scrollSpacerBackground !== "transparent"
+        && groupedMetrics.scrollSpacerBackground !== "rgba(0, 0, 0, 0)",
+      groupedMetrics.missing === true
+        ? "missing grouped scroll spacer"
+        : `covered ${groupedMetrics.scrollHeaderCovered}, background ${groupedMetrics.scrollSpacerBackground}, spacer ${groupedMetrics.scrollSpacerLeft}/${groupedMetrics.scrollSpacerRight}, frozen right ${groupedMetrics.frozenPaneRight}, viewport right ${groupedMetrics.viewportRight}`,
     );
     check(
       tab.id,
@@ -1320,7 +1592,7 @@ try {
           sessionScanHandler?.(recent);
           sessionScanHandler?.(backfill);
         });
-        return 1;
+        return { generation: 1, started: true };
       }
       if (command === "session_transcript") {
         return {
@@ -1448,6 +1720,8 @@ try {
 
   writeStdout("\n== req8 non-frozen fixture ==");
   await runReq8NonFrozenFixture(page);
+  writeStdout("\n== frozen hover parity fixture ==");
+  await runFrozenNativeHoverParityFixture(page);
 
   for (const tab of tabs) {
     writeStdout(`\n== ${tab.heading} ==`);
@@ -1757,6 +2031,25 @@ try {
       );
     }
 
+    if (["skills", "rules", "hooks", "mcp"].includes(tab.id)) {
+      const scopes = await page.evaluate(() => [...new Set(
+        [...document.querySelectorAll(".dataTableScrollPane [data-column='scope']")]
+          .map((node) => node.textContent?.trim() ?? ""),
+      )].sort());
+      const expectedScopes = {
+        skills: ["Global", "project-1"],
+        rules: ["Global"],
+        hooks: ["Global"],
+        mcp: ["Global", "project-1", "project-2"],
+      }[tab.id];
+      check(
+        tab.id,
+        "scope-values-are-explicit",
+        JSON.stringify(scopes) === JSON.stringify(expectedScopes),
+        `scopes ${scopes.join(", ")} expected ${expectedScopes.join(", ")}`,
+      );
+    }
+
     // --- req5: scroll overscroll + pinned table header ----------------------
     const scrollMetrics = await page.evaluate(({ tableHeader, clampHeight }) => {
       const round = (value) => Math.round(value * 100) / 100;
@@ -2063,6 +2356,11 @@ try {
     // The next tab mounts a fresh view component, so selection does not carry
     // over; no explicit reset needed (overlays are dismissed via Escape above).
   }
+
+  writeStdout("\n== Overview alignment ==");
+  await navigateToPage(page, "Overview", "Overview");
+  await page.locator(".overviewPage").waitFor();
+  await runOverviewChecks(page);
 
   for (const pageSpec of [
     { id: "backup", nav: "Backup", heading: "Backup", compact: false, ready: ".backupPage" },

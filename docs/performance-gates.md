@@ -17,6 +17,10 @@ core APIs. The runner creates isolated temporary files and SQLite databases, the
 The only user-data secondary check is Config read: it reads and serializes one existing config but
 does not print or modify its content.
 
+CI runs the deterministic `--fast` profile, including the indexed Session batch-search gate. The
+full profile, local-data checks, and real-data WebView scenario remain local because they depend on
+the developer's Session database, browser, or running desktop app.
+
 The full gate additionally uses local Session data when available. It also creates a deterministic
 96 MiB transcript under `target/perf-fixtures`. Generated results are written to
 `target/perf/latest.json`.
@@ -81,6 +85,7 @@ excluded because they are too environment-dependent for every push.
 | Check | Fixture | Default gate |
 | --- | --- | --- |
 | Session first transcript page | 400 x 4 KiB messages; returns 160 | operation <= 35 ms, RSS <= 24 MiB, payload <= 1 MiB |
+| Session batch search | 512 indexed Sessions; searches 100 candidates | operation <= 100 ms, RSS <= 24 MiB, payload <= 0.25 MiB |
 | Skill Linked Sessions | 600 links | operation <= 25 ms, RSS <= 24 MiB, payload <= 0.75 MiB |
 | Skill file tree + file read | 300 x 4 KiB files | operation <= 10 ms, RSS <= 16 MiB, payload <= 0.125 MiB |
 | Rule detail | 128 KiB file | operation <= 15 ms, RSS <= 16 MiB, payload <= 0.25 MiB |
@@ -120,7 +125,7 @@ including fixture setup.
 | Overview | N/A: chart changes the same aggregate query | N/A |
 | Skills | File tree/read; Linked Sessions | File CRUD and targeted refresh |
 | Prompts | N/A: row body is already in the list payload | Save and batch delete |
-| Sessions | Transcript page | Project merge and split |
+| Sessions | Transcript page and indexed batch search | Project merge and split |
 | Rules | Rule read | Rule save |
 | Hooks | Source preview | Batch delete and rescan |
 | MCP | N/A: no row detail | N/A: no mutation UI |

@@ -23,27 +23,20 @@ import { DialogShell } from "../components/shared/DialogShell.tsx";
 import { DialogTextField } from "../components/shared/DialogTextField.tsx";
 import { EmptyState } from "../components/shared/EmptyState.tsx";
 import { IconButton } from "../components/shared/IconButton.tsx";
+import { LoadingInline } from "../components/shared/LoadingInline.tsx";
 import { LoadingState } from "../components/shared/LoadingState.tsx";
 import { LoadErrorState } from "../components/shared/LoadErrorState.tsx";
 import { PageHeader } from "../components/shared/PageHeader.tsx";
 import { RowActionsMenu } from "../components/shared/RowActionsMenu.tsx";
 import { SearchField } from "../components/shared/SearchField.tsx";
 import { Tooltip } from "../components/shared/Tooltip.tsx";
+import { Toast } from "../components/shared/Toast.tsx";
 import { DataTable } from "../components/DataTable.tsx";
 import type { ColumnDef } from "../components/DataTable.types";
 import type { DataTableMenuComponents } from "../components/shared/DataTableMenus.tsx";
-import { TauriCommand, compactDateTime, normalizePromptTags, promptPreview, promptTagsLabel, safeInvoke, suppressNextClick } from "../lib/index.ts";
+import { TauriCommand, compactDateTime, normalizePromptTags, promptPreview, promptTagsLabel, safeInvoke, suppressNextClick, type PromptRecord } from "../lib/index.ts";
 
 const PromptBodyEditor = lazy(() => import("../features/prompts/PromptBodyEditor.tsx").then(({ PromptBodyEditor: component }) => ({ default: component })));
-
-type PromptRecord = {
-  id: string;
-  title: string;
-  tags: string[];
-  body: string;
-  createdAt?: string;
-  updatedAt?: string;
-};
 
 function PromptActionsMenuItems({
   Menu,
@@ -193,12 +186,13 @@ export function PromptDialog({ open, prompt, busy, error, onOpenChange, onSave }
             <PromptBodyEditor value={body} onChange={setBody} />
           </Suspense>
         </div>
-        {error ? <div className="dialogError">{error}</div> : null}
+        {error ? <Toast tone="error" message={error} /> : null}
       </div>
       <DialogActionBar cancelDisabled={busy} onCancel={() => onOpenChange(false)}>
         <DialogStatefulButton
           state={busy ? "loading" : "idle"}
           loadingLabel="Saving prompt"
+          loadingContent={<LoadingInline size={16} gap={6} label="Save" />}
           variant="primary"
           className="dialogAdvanceButton"
           aria-label="Save prompt"
@@ -251,7 +245,7 @@ export function PromptsView({ prompts, loadingPrompts = false, loadError = "", h
   const visiblePrompts = useMemo(() => {
     if (!normalizedQuery) return prompts;
     return prompts.filter((prompt) => [prompt.title, promptTagsLabel(prompt), prompt.body]
-      .some((value) => `${value ?? ""}`.toLowerCase().includes(normalizedQuery)));
+      .some((value) => value.toLowerCase().includes(normalizedQuery)));
   }, [normalizedQuery, prompts]);
   useEffect(() => {
     setSelected((current) => current.filter((id) => prompts.some((prompt) => prompt.id === id)));
@@ -310,7 +304,7 @@ export function PromptsView({ prompts, loadingPrompts = false, loadError = "", h
       key: "title",
       header: "Prompt",
       type: "text",
-      sortValue: (prompt) => prompt.title?.toLowerCase() ?? "",
+      sortValue: (prompt) => prompt.title.toLowerCase(),
       width: "minmax(300px, 1fr)",
       render: (prompt) => (
         <>
@@ -330,9 +324,7 @@ export function PromptsView({ prompts, loadingPrompts = false, loadError = "", h
       width: "160px",
       render: (prompt) => (
         <span className="promptTags">
-          {prompt.tags.length
-            ? prompt.tags.map((tag) => <Badge tone="accent" key={tag}>{tag}</Badge>)
-            : <Badge tone="neutral">Untagged</Badge>}
+          {prompt.tags.map((tag) => <Badge tone="accent" key={tag}>{tag}</Badge>)}
         </span>
       ),
     },
@@ -340,7 +332,7 @@ export function PromptsView({ prompts, loadingPrompts = false, loadError = "", h
       key: "updatedAt",
       header: "Updated",
       type: "date",
-      sortValue: (prompt) => prompt.updatedAt ?? "",
+      sortValue: (prompt) => prompt.updatedAt,
       width: "116px",
       value: (prompt) => compactDateTime(prompt.updatedAt),
       empty: "",

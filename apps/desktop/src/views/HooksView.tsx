@@ -17,12 +17,14 @@ import { DialogShell } from "../components/shared/DialogShell.tsx";
 import { DialogStatefulButton } from "../components/shared/DialogStatefulButton.tsx";
 import { EmptyState } from "../components/shared/EmptyState.tsx";
 import { LoadingIcon } from "../components/shared/LoadingIcon.tsx";
+import { LoadingInline } from "../components/shared/LoadingInline.tsx";
 import { LoadingState } from "../components/shared/LoadingState.tsx";
 import { LoadErrorState } from "../components/shared/LoadErrorState.tsx";
 import { PageHeader } from "../components/shared/PageHeader.tsx";
 import { RowActionsMenu } from "../components/shared/RowActionsMenu.tsx";
 import { SearchField } from "../components/shared/SearchField.tsx";
 import { Switch } from "../components/shared/Switch.tsx";
+import { Toast } from "../components/shared/Toast.tsx";
 import "./HooksView.css";
 
 import {
@@ -38,7 +40,6 @@ import {
   hookItemsFromRows,
   hookSearchText,
   hookSourcePath,
-  hookSourceTitle,
   hookTrustHash,
   hookTypeLabel,
   invokeCommand,
@@ -142,11 +143,8 @@ function hookEnableDisabledReason(hook: HookRecord | null): string {
   if (!hook) return "Missing hook source path";
   const path = hookSourcePath(hook);
   if (!path) return "Missing hook source path";
-  const readOnlyReason = hook.read_only_reason ?? hook.readOnlyReason;
+  const readOnlyReason = hook.read_only_reason;
   if (readOnlyReason) return readOnlyReason;
-  if (!path.endsWith(".json") && !path.endsWith(".toml")) {
-    return "Hook source cannot be changed";
-  }
   return "";
 }
 
@@ -234,7 +232,7 @@ function HookActionsCell({
   const hook = item.hook;
   return (
     <RowActionsMenu
-      ariaLabel={`Hook actions for ${hook.event ?? "hook"}`}
+      ariaLabel={`Hook actions for ${hook.event}`}
       onOpenChange={(open) => { if (!open) suppressNextClick(); }}
     >
       <HookActionsMenuItems Menu={DropdownMenu} item={item} onDeleteHooks={onDeleteHooks} />
@@ -244,10 +242,10 @@ function HookActionsCell({
 
 function hookParameterRows(hook: HookRecord | null, enabledControl: ReactNode): HookParameterRow[] {
   if (!hook) return [];
-  const command = hook.command ?? hook.script;
+  const command = hook.command;
   const rows: HookParameterRow[] = [
     { label: "Type", value: hookTypeLabel(hook) },
-    { label: "Matcher", value: hook.matcher || "*" },
+    { label: "Matcher", value: hook.matcher ?? "" },
     { label: "Enabled", render: enabledControl },
   ];
   if (command) rows.push({ label: "Command", value: command, mono: true, copyable: true });
@@ -372,6 +370,7 @@ export function HooksView({ rows, loadingRows = false, loadError = "", hasRows =
     let latestRows = rows;
     for (const item of targets) {
       const identity = hookDeleteIdentity(item.hook);
+      if (!identity) continue;
       const hook = latestRows.find((row) => hookDeleteIdentity(row) === identity);
       if (!hook) continue;
       setDeletingKey(identity);
@@ -399,9 +398,9 @@ export function HooksView({ rows, loadingRows = false, loadError = "", hasRows =
       header: "Event",
       type: "enum",
       sticky: true,
-      groupBy: (item) => item.hook.event || "Unknown",
+      groupBy: (item) => item.hook.event,
       sortable: true,
-      sortValue: (item) => item.hook.event || "",
+      sortValue: (item) => item.hook.event,
       width: "var(--data-freeze-column-width, 330px)",
       render: (item) => {
         const hook = item.hook;
@@ -409,13 +408,13 @@ export function HooksView({ rows, loadingRows = false, loadError = "", hasRows =
         return (
           <>
             <span className="hookEventTitle">
-              <span className="dataCellTitle">{hook.event || "Hook"}</span>
+              <span className="dataCellTitle">{hook.event}</span>
               {hook.needs_review ? (
                 <Badge
                   as="button"
                   type="button"
                   tone="warning"
-                  aria-label={`Review ${hook.event || "hook"}`}
+                  aria-label={`Review ${hook.event}`}
                   onClick={(event) => {
                     event.stopPropagation();
                     requestReviewHook(item);
@@ -426,7 +425,7 @@ export function HooksView({ rows, loadingRows = false, loadError = "", hasRows =
               ) : null}
             </span>
             <span className="dataCellSubLine">
-              <Tooltip content={handler} onlyWhenTruncated><span className="dataCellSub">{compactCommand(handler) || hookSourceTitle(hook)}</span></Tooltip>
+              <Tooltip content={handler} onlyWhenTruncated><span className="dataCellSub">{compactCommand(handler)}</span></Tooltip>
             </span>
           </>
         );
@@ -481,7 +480,7 @@ export function HooksView({ rows, loadingRows = false, loadError = "", hasRows =
   const openHookSourceInEditor = useCallback(() => {
     const path = activeHook ? hookSourcePath(activeHook) : "";
     if (!path) return;
-    const line = sourceState.data?.source_line ?? undefined;
+    const line = sourceState.data?.source_line;
     void safeInvoke(TauriCommand.OpenInEditor, { path, line });
   }, [activeHook, sourceState.data?.source_line]);
   const rowContextMenu = useCallback((item: HookItem, { selectedRows, selected: isSelected }: { selectedRows: HookItem[]; selected: boolean }) => {
@@ -543,8 +542,7 @@ export function HooksView({ rows, loadingRows = false, loadError = "", hasRows =
           disabled={deletable.length === 0 || Boolean(deletingKey) || enabledUpdateInProgress}
           onClick={() => requestDeleteHooks(deletable)}
         >
-          {deletingKey ? <LoadingIcon size={15} /> : <Trash2 size={15} />}
-          {deletingKey ? null : "Delete"}
+          {deletingKey ? <LoadingInline size={15} gap={6} label="Delete" /> : <><Trash2 size={15} /><span>Delete</span></>}
         </Button>
       </>
     );
@@ -573,17 +571,18 @@ export function HooksView({ rows, loadingRows = false, loadError = "", hasRows =
     }, 180);
     setSourceState({ key: activeKey, loading: true, showLoading: false, data: null, error: "" });
     invokeCommand<HookSourceData>(TauriCommand.HookSourceRead, {
+      agent: activeHook.agent,
       path,
       expectedTrustHash: hookTrustHash(activeHook),
-      event: activeHook.event ?? null,
+      event: activeHook.event,
       matcher: activeHook.matcher ?? null,
-      hookType: activeHook.hook_type ?? activeHook.hookType ?? null,
-      command: activeHook.command ?? activeHook.script ?? null,
+      hookType: activeHook.hook_type ?? null,
+      command: activeHook.command ?? null,
       url: activeHook.url ?? null,
       prompt: activeHook.prompt ?? null,
       filter: activeHook.filter ?? null,
-      statusMessage: activeHook.status_message ?? activeHook.statusMessage ?? null,
-      enabled: activeHook.enabled ?? null,
+      statusMessage: activeHook.status_message ?? null,
+      enabled: activeHook.enabled,
     })
       .then((data) => {
         window.clearTimeout(loadingTimer);
@@ -624,7 +623,7 @@ export function HooksView({ rows, loadingRows = false, loadError = "", hasRows =
               rows={filteredHooks}
               columns={hookColumns}
               getRowId={(item) => item.key}
-              getRowLabel={(item) => item.hook.event || "Hook"}
+        getRowLabel={(item) => item.hook.event}
               freezeColumn={HOOK_FREEZE_COLUMN}
               defaultSort={defaultSort}
               selectable
@@ -657,7 +656,7 @@ export function HooksView({ rows, loadingRows = false, loadError = "", hasRows =
         collapsed={detailCollapsed}
         onExpand={() => setDetailCollapsed(false)}
         expandLabel="Expand hook detail"
-        railLabel={activeHook?.event ?? "Hook"}
+        railLabel={activeHook?.event ?? ""}
         hasSelection={Boolean(activeHook)}
         emptyState={loadingRows ? <LoadingState label="Loading hooks" /> : <EmptyState compact title="Select a hook to view its details." />}
         hostClassName="hookDetailPanelHost"
@@ -665,7 +664,7 @@ export function HooksView({ rows, loadingRows = false, loadError = "", hasRows =
         {activeHook ? (
           <DetailPanel
             className="ruleEditorPanel hookDetailPanel"
-            title={activeHook.event || "Hook"}
+            title={activeHook.event}
             meta={(
               <div className="threadMeta hookSourceMeta">
                 <Tooltip content={formatUserPath(hookSourcePath(activeHook))} onlyWhenTruncated><span>{formatUserPath(hookSourcePath(activeHook)) || "-"}</span></Tooltip>
@@ -675,7 +674,7 @@ export function HooksView({ rows, loadingRows = false, loadError = "", hasRows =
             onCollapse={() => setDetailCollapsed(true)}
           >
             <div className="hookDetailBody">
-              {deleteError ? <div className="hookDeleteError">{deleteError}</div> : null}
+              {deleteError ? <Toast tone="error" message={deleteError} onDismiss={() => setDeleteError("")} /> : null}
               {parameterRows.length ? (
                 <section className="hookDetailSection hookParametersSection">
                   <h3>Parameters</h3>
@@ -719,7 +718,11 @@ export function HooksView({ rows, loadingRows = false, loadError = "", hasRows =
                 {sourceState.loading && sourceState.showLoading ? (
                   <LoadingState className="hookSourceLoading" label="Loading source" />
                 ) : sourceState.loading ? null : sourceState.error ? (
-                  <div className="hookSourcePreviewError">{sourceState.error}</div>
+                  <Toast
+                    tone="error"
+                    message={sourceState.error}
+                    onDismiss={() => setSourceState((current) => ({ ...current, error: "" }))}
+                  />
                 ) : sourceState.data?.content ? (
                   <div className="hookSourcePreview">
                     <Suspense fallback={<LoadingState className="hookSourceLoading" label="Loading preview" />}>
@@ -762,12 +765,12 @@ export function HooksView({ rows, loadingRows = false, loadError = "", hasRows =
     >
           <Dialog.Title className="confirmDialogTitle">Approve hook?</Dialog.Title>
           <p id="hook-review-description" className="confirmDialogDescription">
-            Approve the current configuration for this {pendingReviewItem?.hook.agent ?? "agent"} hook?
+            Approve the current configuration for this {pendingReviewItem?.hook.agent ?? ""} hook?
           </p>
           <div className="hookReviewDialogDetails">
-            <strong>{pendingReviewItem?.hook.event ?? "Hook"}</strong>
+            <strong>{pendingReviewItem?.hook.event ?? ""}</strong>
             <span>{formatUserPath(hookSourcePath(pendingReviewItem?.hook))}</span>
-            <code>{compactCommand(hookHandlerText(pendingReviewItem?.hook)) || "No command"}</code>
+            <code>{compactCommand(hookHandlerText(pendingReviewItem?.hook))}</code>
           </div>
           <div className="confirmDialogActions">
             <DialogActionButton variant="secondary" onClick={() => setPendingReviewItem(null)}>Cancel</DialogActionButton>

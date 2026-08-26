@@ -4,6 +4,7 @@ import { createServer } from "node:http";
 import { Readable } from "node:stream";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { daemonNeedsBuild, resolveDaemonTargetDir } from "./daemon-build.mjs";
 import { spawnOwned, stopOwned } from "./process-lifecycle.mjs";
 import { writeStderr, writeStdout } from "./stdio.mjs";
 
@@ -13,13 +14,19 @@ const repoDir = resolve(desktopDir, "../..");
 const bridgePort = Number(process.env.TENDI_WEB_BRIDGE_PORT || 5188);
 const daemonPort = Number(process.env.TENDI_DAEMON_PORT || bridgePort + 1);
 const workspace = resolve(process.env.TENDI_CWD || desktopDir);
-const cargoTargetDir = resolve(repoDir, process.env.CARGO_TARGET_DIR || "target");
-const daemonBin = resolve(process.env.TENDI_DAEMON_BIN || join(cargoTargetDir, "debug/tendi-daemon"));
+// Tauri's beforeDevCommand inherits its CARGO_TARGET_DIR. Keep daemon builds
+// separate so they cannot rewrite artifacts while Tauri builds the desktop.
+const cargoTargetDir = resolveDaemonTargetDir(repoDir, process.env.TENDI_DAEMON_TARGET_DIR);
+const daemonBinOverride = process.env.TENDI_DAEMON_BIN;
+const daemonBin = resolve(daemonBinOverride || join(cargoTargetDir, "debug/tendi-daemon"));
 const token = process.env.TENDI_DAEMON_TOKEN || randomBytes(24).toString("hex");
 let buildProcess = null;
 let daemon = null;
 let server = null;
 let shuttingDown = false;
+let daemonRestarting = false;
+let daemonRefreshPromise = null;
+let lastDaemonFreshnessCheckAt = 0;
 
 function waitForProcess(child) {
   return new Promise((resolveProcess, reject) => {
@@ -28,12 +35,11 @@ function waitForProcess(child) {
   });
 }
 
-async function ensureDaemonBinary() {
-  if (existsSync(daemonBin)) return;
-
+async function buildDaemon() {
   writeStdout(`[tendi] building Rust daemon at ${daemonBin}`);
   buildProcess = spawnOwned("cargo", ["build", "-p", "tendi-daemon"], {
     cwd: repoDir,
+    env: { ...process.env, CARGO_TARGET_DIR: cargoTargetDir },
     stdio: "inherit",
   });
   try {
@@ -44,6 +50,16 @@ async function ensureDaemonBinary() {
   } finally {
     buildProcess = null;
   }
+}
+
+async function ensureDaemonBinary() {
+  if (daemonBinOverride) {
+    if (!existsSync(daemonBin)) {
+      throw new Error(`Tendi daemon binary not found at ${daemonBin}.`);
+    }
+    return;
+  }
+  if (daemonNeedsBuild(repoDir, daemonBin)) await buildDaemon();
 }
 
 function close(code = 0) {
@@ -63,7 +79,7 @@ for (const signal of ["SIGINT", "SIGTERM", "SIGHUP", ...(process.platform === "w
 
 async function startDaemon() {
   await ensureDaemonBinary();
-  daemon = spawnOwned(daemonBin, [
+  const child = spawnOwned(daemonBin, [
     "--port", `${daemonPort}`,
     "--workspace", workspace,
     "--token", token,
@@ -72,13 +88,50 @@ async function startDaemon() {
     env: { ...process.env, TENDI_CWD: workspace, TENDI_DAEMON_TOKEN: token },
     stdio: "inherit",
   });
+  daemon = child;
 
-  daemon.on("exit", (code, signal) => {
-    if (!shuttingDown) {
+  child.on("exit", (code, signal) => {
+    if (daemon === child) daemon = null;
+    if (!shuttingDown && !daemonRestarting) {
       writeStderr(`[tendi] Rust daemon exited (${code ?? signal})`);
       close(code || 1);
     }
   });
+}
+
+async function stopDaemon() {
+  const child = daemon;
+  if (!child) return;
+  daemon = null;
+  await stopOwned(child);
+}
+
+async function ensureDaemonFresh() {
+  if (daemonBinOverride || shuttingDown) return;
+  if (daemonRefreshPromise) return daemonRefreshPromise;
+  const now = Date.now();
+  if (now - lastDaemonFreshnessCheckAt < 500) return;
+  lastDaemonFreshnessCheckAt = now;
+
+  const refresh = (async () => {
+    if (!daemonNeedsBuild(repoDir, daemonBin)) return;
+    writeStdout("[tendi] Rust daemon sources changed; rebuilding and restarting daemon");
+    await buildDaemon();
+    daemonRestarting = true;
+    try {
+      await stopDaemon();
+      await startDaemon();
+      await waitForDaemon();
+    } finally {
+      daemonRestarting = false;
+    }
+  })();
+  daemonRefreshPromise = refresh;
+  try {
+    await refresh;
+  } finally {
+    if (daemonRefreshPromise === refresh) daemonRefreshPromise = null;
+  }
 }
 
 /* istanbul ignore next -- startup failures are covered by the lifecycle smoke test. */
@@ -144,6 +197,7 @@ server = createServer(async (request, response) => {
   }
   if (request.method === "GET" && request.url === "/health") {
     try {
+      await ensureDaemonFresh();
       const daemonResponse = await daemonFetch("/health");
       const body = await daemonResponse.text();
       response.writeHead(daemonResponse.status, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" });
@@ -160,6 +214,7 @@ server = createServer(async (request, response) => {
     response.once("close", abortUpstream);
     response.once("error", abortUpstream);
     try {
+      await ensureDaemonFresh();
       const daemonResponse = await daemonFetch("/v1/events", { signal: controller.signal });
       response.writeHead(daemonResponse.status, {
         "content-type": daemonResponse.headers.get("content-type") || "text/event-stream; charset=utf-8",
@@ -185,6 +240,7 @@ server = createServer(async (request, response) => {
   }
   if (request.method === "POST" && request.url === "/__tendi/log") {
     try {
+      await ensureDaemonFresh();
       const body = await readBody(request);
       const daemonResponse = await daemonFetch("/v1/log", {
         method: "POST",
@@ -208,6 +264,7 @@ server = createServer(async (request, response) => {
     return;
   }
   try {
+    await ensureDaemonFresh();
     const body = await readBody(request);
     const daemonResponse = await daemonFetch("/v1/rpc", {
       method: "POST",

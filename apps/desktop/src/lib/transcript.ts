@@ -1,7 +1,6 @@
 export type TranscriptItem = {
-  type?: string;
-  kind?: string;
-  body?: string;
+  type: string;
+  body: string;
   tag?: string;
   time?: string;
   command?: string;
@@ -121,19 +120,27 @@ export function createLatestRequestAuthority() {
 }
 
 export function normalizeTranscript(items: Array<Record<string, unknown>>): TranscriptItem[] {
-  return items.map((item) => ({
-    type: `${item.type ?? item.kind ?? ""}`,
-    body: `${item.body ?? item.text ?? item.content ?? ""}`,
-    tag: `${item.tag ?? item.name ?? item.tool ?? ""}`,
-    time: `${item.time ?? item.timestamp ?? ""}`,
-    command: `${item.command ?? item.cmd ?? ""}`,
-    result: `${item.result ?? item.output ?? item.return ?? ""}`,
-    durationMs: (item.duration_ms ?? item.durationMs ?? item.elapsed_ms ?? item.elapsedMs ?? "") as string | number,
-    linkedSessionId: stringValue(item.linked_session_id ?? item.linkedSessionId) || undefined,
-    model: stringValue(item.model) || undefined,
-    effort: stringValue(item.effort) || undefined,
-    callId: stringValue(item.call_id ?? item.callId) || undefined,
-  }));
+  return items.flatMap((item) => {
+    const type = typeof item.kind === "string" && item.kind.trim() ? item.kind : undefined;
+    const body = typeof item.body === "string" ? item.body : undefined;
+    if (!type || body === undefined) return [];
+    const durationMs = typeof item.duration_ms === "string" || typeof item.duration_ms === "number"
+      ? item.duration_ms
+      : undefined;
+    return [{
+      type,
+      body,
+      tag: typeof item.tag === "string" && item.tag.trim() ? item.tag : undefined,
+      time: typeof item.time === "string" && item.time.trim() ? item.time : undefined,
+      command: typeof item.command === "string" ? item.command : undefined,
+      result: typeof item.result === "string" ? item.result : undefined,
+      durationMs,
+      linkedSessionId: typeof item.linked_session_id === "string" && item.linked_session_id.trim() ? item.linked_session_id : undefined,
+      model: typeof item.model === "string" && item.model.trim() ? item.model : undefined,
+      effort: typeof item.effort === "string" && item.effort.trim() ? item.effort : undefined,
+      callId: typeof item.callId === "string" && item.callId.trim() ? item.callId : undefined,
+    } satisfies TranscriptItem];
+  });
 }
 
 export function mergeTranscriptItems(
@@ -155,9 +162,10 @@ export function mergeTranscriptItems(
         }
       }
       if (targetIndex >= 0) {
+        if (item.result === undefined) continue;
         merged[targetIndex] = {
           ...merged[targetIndex],
-          result: item.result || item.body,
+          result: item.result,
           ...(item.durationMs !== undefined ? { durationMs: item.durationMs } : {}),
         };
       }
@@ -166,6 +174,17 @@ export function mergeTranscriptItems(
     merged.push(item);
   }
   return merged;
+}
+
+function normalizeLocatorItems(value: unknown): TranscriptLocatorItem[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((entry) => {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) return [];
+    const item = entry as Record<string, unknown>;
+    if (typeof item.index !== "number" || !Number.isSafeInteger(item.index) || item.index < 0) return [];
+    if (typeof item.label !== "string" || typeof item.response !== "string") return [];
+    return [{ index: item.index, label: item.label, response: item.response }];
+  });
 }
 
 export function transcriptItemsSize(items: TranscriptItem[]): number {
@@ -186,32 +205,20 @@ export function normalizeTranscriptPage(value: unknown): TranscriptPage {
   const page = value && typeof value === "object" && !Array.isArray(value)
     ? value as Record<string, unknown>
     : {};
-  const locatorItems = Array.isArray(page.locatorItems)
-    ? page.locatorItems.flatMap((value) => {
-      if (!value || typeof value !== "object" || Array.isArray(value)) return [];
-      const item = value as Record<string, unknown>;
-      const index = Number(item.index);
-      if (!Number.isSafeInteger(index) || index < 0) return [];
-      return [{
-        index,
-        label: `${item.label ?? ""}`,
-        response: `${item.response ?? ""}`,
-      }];
-    })
-    : [];
+  const locatorItems = normalizeLocatorItems(page.locatorItems);
   return {
     items: Array.isArray(page.items)
       ? normalizeTranscript(page.items as Array<Record<string, unknown>>)
       : [],
     locatorItems,
     warnings: Array.isArray(page.warnings)
-      ? page.warnings.map((warning) => `${warning}`)
+      ? page.warnings.filter((warning): warning is string => typeof warning === "string")
       : [],
     nextCursor: typeof page.nextCursor === "string" && page.nextCursor
       ? page.nextCursor
       : undefined,
     done: page.done === true,
-    sourceVersion: `${page.sourceVersion ?? ""}`,
+    sourceVersion: typeof page.sourceVersion === "string" ? page.sourceVersion : "",
     restartRequired: page.restartRequired === true,
     unchanged: page.unchanged === true,
   };
@@ -221,25 +228,13 @@ export function normalizeTranscriptLocatorPage(value: unknown): TranscriptLocato
   const page = value && typeof value === "object" && !Array.isArray(value)
     ? value as Record<string, unknown>
     : {};
-  const locatorItems = Array.isArray(page.locatorItems)
-    ? page.locatorItems.flatMap((value) => {
-      if (!value || typeof value !== "object" || Array.isArray(value)) return [];
-      const item = value as Record<string, unknown>;
-      const index = Number(item.index);
-      if (!Number.isSafeInteger(index) || index < 0) return [];
-      return [{
-        index,
-        label: `${item.label ?? ""}`,
-        response: `${item.response ?? ""}`,
-      }];
-    })
-    : [];
+  const locatorItems = normalizeLocatorItems(page.locatorItems);
   return {
     locatorItems,
     warnings: Array.isArray(page.warnings)
-      ? page.warnings.map((warning) => `${warning}`)
+      ? page.warnings.filter((warning): warning is string => typeof warning === "string")
       : [],
-    sourceVersion: `${page.sourceVersion ?? ""}`,
+    sourceVersion: typeof page.sourceVersion === "string" ? page.sourceVersion : "",
   };
 }
 
@@ -251,14 +246,13 @@ export function normalizeTranscriptSearchResult(value: unknown): TranscriptSearc
     ? result.hits.flatMap((value) => {
       if (!value || typeof value !== "object" || Array.isArray(value)) return [];
       const hit = value as Record<string, unknown>;
-      const groupIndex = Number(hit.groupIndex);
-      if (!Number.isSafeInteger(groupIndex) || groupIndex < 0) return [];
-      const numericToolIndex = hit.toolIndex === undefined ? undefined : Number(hit.toolIndex);
-      const validToolIndex = numericToolIndex !== undefined
-        && Number.isSafeInteger(numericToolIndex)
-        && numericToolIndex >= 0
-        ? numericToolIndex
-        : undefined;
+      const groupIndex = hit.groupIndex;
+      if (typeof groupIndex !== "number" || !Number.isSafeInteger(groupIndex) || groupIndex < 0) return [];
+      const validToolIndex = hit.toolIndex;
+      if (
+        validToolIndex !== undefined
+        && (typeof validToolIndex !== "number" || !Number.isSafeInteger(validToolIndex) || validToolIndex < 0)
+      ) return [];
       return [{
         groupIndex,
         ...(validToolIndex === undefined ? {} : { toolIndex: validToolIndex }),
@@ -267,13 +261,15 @@ export function normalizeTranscriptSearchResult(value: unknown): TranscriptSearc
     : [];
   return {
     hits,
-    warnings: Array.isArray(result.warnings) ? result.warnings.map((warning) => `${warning}`) : [],
-    sourceVersion: `${result.sourceVersion ?? ""}`,
+    warnings: Array.isArray(result.warnings)
+      ? result.warnings.filter((warning): warning is string => typeof warning === "string")
+      : [],
+    sourceVersion: typeof result.sourceVersion === "string" ? result.sourceVersion : "",
   };
 }
 
-export function transcriptItemType(item: TranscriptItem): string | undefined {
-  return item.type ?? item.kind;
+export function transcriptItemType(item: TranscriptItem): string {
+  return item.type;
 }
 
 export function groupTranscriptItems(items: TranscriptItem[]): TranscriptGroup[] {
@@ -308,12 +304,6 @@ export function collectGenericItem(value: JsonObject, items: TranscriptItem[]) {
   }
   if (kind !== "user" && kind !== "assistant") return;
   collectMessageContent(content, items, time, kind);
-}
-
-function collectRawItem(value: JsonObject, items: TranscriptItem[]) {
-  const label = stringValue(value.type) || stringValue(value.kind) || stringValue(value.event) || "jsonl";
-  const body = extractContentText(value.message) || extractContentText(value.content) || JSON.stringify(value, null, 2);
-  if (body && !isInternalContext(body)) pushItem(items, "tool", truncateText(body, 12_000), label, compactTime(stringValue(value.timestamp)));
 }
 
 export function pushItem(
@@ -358,7 +348,7 @@ export function extractContentText(value: unknown): string {
   }
   if (isJsonObject(value)) {
     if (isThinkingContentItem(value)) return "";
-    return cleanBody(stringValue(value.text) || extractContentText(value.content) || stringValue(value.message) || JSON.stringify(value));
+    return cleanBody(stringValue(value.text) || extractContentText(value.content) || stringValue(value.message));
   }
   return "";
 }
@@ -500,7 +490,7 @@ function isThinkingContentItem(value: JsonObject) {
   return type === "thinking" || type === "reasoning" || type === "summary_text";
 }
 
-export function summarizeToolCall(value: JsonObject, fallback: string) {
+export function summarizeToolCall(value: JsonObject) {
   const command = extractToolCommand(value);
   if (command) return truncateText(command, 220);
   const args = value.arguments;
@@ -513,7 +503,7 @@ export function summarizeToolCall(value: JsonObject, fallback: string) {
     }
   }
   if (value.input !== undefined) return truncateText(JSON.stringify(value.input), 220);
-  return fallback;
+  return "";
 }
 
 export function extractToolCommand(value: JsonObject) {

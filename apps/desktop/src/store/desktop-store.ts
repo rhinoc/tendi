@@ -15,11 +15,15 @@ export type AgentTargetOption = {
   id: string;
   displayName: string;
   supportsGlobal: boolean;
+  globalPath?: string;
 };
 export type SkillIndexStatus = {
+  total?: number;
   indexed?: number;
+  pending?: number;
   failed?: number;
   running?: boolean;
+  last_indexed_at?: string | null;
 };
 
 export type DomainErrorState = Partial<Record<DesktopDomain, string>>;

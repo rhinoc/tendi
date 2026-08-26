@@ -65,12 +65,11 @@ type UpdateFile = {
   status: string;
 };
 
-function normalizeUpdateFile(value: unknown): UpdateFile | null {
+function normalizeUpdateFile(value: unknown, allowPathResolutionKey: boolean): UpdateFile | null {
   if (!value || typeof value !== "object") return null;
   const file = value as {
     path?: unknown;
     resolution_key?: unknown;
-    resolutionKey?: unknown;
     before?: unknown;
     base?: unknown;
     incoming?: unknown;
@@ -79,14 +78,18 @@ function normalizeUpdateFile(value: unknown): UpdateFile | null {
   };
   const path = `${file.path ?? ""}`;
   if (!path) return null;
+  const resolutionKey = typeof file.resolution_key === "string"
+    ? file.resolution_key
+    : allowPathResolutionKey ? path : "";
+  if (!resolutionKey) return null;
   return {
     path,
-    resolutionKey: `${file.resolution_key ?? file.resolutionKey ?? path}`,
+    resolutionKey,
     before: typeof file.before === "string" ? file.before : "",
     base: typeof file.base === "string" ? file.base : "",
     incoming: typeof file.incoming === "string" ? file.incoming : "",
     after: typeof file.after === "string" ? file.after : "",
-    status: `${file.status ?? "remote"}`,
+    status: `${file.status ?? ""}`,
   };
 }
 
@@ -110,11 +113,13 @@ function updateFiles(preview: Record<string, unknown> | null | undefined): Updat
     })
     : [];
   const mergeIssues = (plan?.merge_issues as unknown);
-  const files = [...gitFiles, ...(Array.isArray(fileChanges) ? fileChanges : [])]
-    .map(normalizeUpdateFile)
+  const files = [
+    ...gitFiles.map((file) => normalizeUpdateFile(file, false)),
+    ...(Array.isArray(fileChanges) ? fileChanges : []).map((file) => normalizeUpdateFile(file, true)),
+  ]
     .filter((file): file is UpdateFile => file !== null);
   const issues = (Array.isArray(mergeIssues) ? mergeIssues : [])
-    .map(normalizeUpdateFile)
+    .map((file) => normalizeUpdateFile(file, false))
     .filter((file): file is UpdateFile => file !== null);
   return [...new Map([...files, ...issues].map((file) => [file.resolutionKey, file])).values()];
 }

@@ -24,7 +24,7 @@ export function summarizeSessionUsage(sessions: SessionRecord[]): SessionUsageSu
   const sortedByUpdated = sessions
     .filter((session) => sessionKind(session) === "main")
     .sort(
-      (a, b) => sessionTimeMs(b.updatedAt ?? b.time) - sessionTimeMs(a.updatedAt ?? a.time),
+      (a, b) => sessionTimeMs(b.updatedAt) - sessionTimeMs(a.updatedAt),
     );
   const recentSessions = sortedByUpdated.slice(0, RECENT_SESSION_LIMIT);
 

@@ -1,14 +1,8 @@
 import {
   collectGenericItem,
-  compactTime,
-  extractContentText,
   extractTitle,
-  isInternalContext,
   isJsonObject,
-  pushItem,
   stringAt,
-  stringValue,
-  truncateText,
 } from "../transcript.ts";
 import type { JsonObject, JsonlTranscriptParseResult, TranscriptItem } from "../transcript.ts";
 import { agentDefinitions } from "./index.ts";
@@ -35,7 +29,6 @@ export function parseJsonlTranscript(
   text.split(/\r?\n/).forEach((line, index) => {
     if (!line.trim()) return;
     lineCount += 1;
-    const beforeCount = items.length;
     let value: unknown;
     try {
       value = JSON.parse(line);
@@ -48,7 +41,6 @@ export function parseJsonlTranscript(
     collectJsonlMeta(value, meta);
     if (parsers.some((parser) => parser(value, { items, meta, messageUsage }))) return;
     collectGenericItem(value, items);
-    if (items.length === beforeCount) collectRawItem(value, items);
   });
 
   if (!meta.tokenUsage && messageUsage.size > 0) {
@@ -84,12 +76,4 @@ function sumTokenUsage(usages: Iterable<ParsedTokenUsage>): ParsedTokenUsage {
     total.totalTokens += usage.totalTokens;
   }
   return total;
-}
-
-function collectRawItem(value: JsonObject, items: TranscriptItem[]) {
-  const label = stringValue(value.type) || stringValue(value.kind) || stringValue(value.event) || "jsonl";
-  const body = extractContentText(value.message) || extractContentText(value.content) || JSON.stringify(value, null, 2);
-  if (body && !isInternalContext(body)) {
-    pushItem(items, "tool", truncateText(body, 12_000), label, compactTime(stringValue(value.timestamp)));
-  }
 }

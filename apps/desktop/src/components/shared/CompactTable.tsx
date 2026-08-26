@@ -16,7 +16,7 @@ export type CompactTableColumn<TRow> = {
 export type CompactTableProps<TRow> = {
   rows: readonly TRow[];
   columns: readonly CompactTableColumn<TRow>[];
-  getRowId?: (row: TRow, index: number) => string;
+  getRowId: (row: TRow) => string;
   ariaLabel: string;
   emptyState?: ReactNode;
   className?: string;
@@ -37,7 +37,7 @@ function displayValue<TRow>(column: CompactTableColumn<TRow>, row: TRow) {
 export function CompactTable<TRow>({
   rows,
   columns,
-  getRowId = (_row, index) => `${index}`,
+  getRowId,
   ariaLabel,
   emptyState = "No items",
   className = "",
@@ -58,8 +58,8 @@ export function CompactTable<TRow>({
             <tr>
               <td className="compactTableEmpty" colSpan={columns.length}>{emptyState}</td>
             </tr>
-          ) : rows.map((row, index) => (
-            <tr key={getRowId(row, index)}>
+          ) : rows.map((row) => (
+            <tr key={getRowId(row)}>
               {columns.map((column) => {
                 const display = displayValue(column, row);
                 const title = column.title?.(row)

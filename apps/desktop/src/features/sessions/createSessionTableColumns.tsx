@@ -6,7 +6,6 @@ import { friendlyAgent, sessionCacheRate, sessionKind, sessionProject, sessionPr
 import { cacheRateTone } from "../../lib/token-style.ts";
 import { AgentBadge } from "../../components/shared/AgentBadge.tsx";
 import { Badge } from "../../components/shared/Badge.tsx";
-import { CopyableSessionId } from "./CopyableSessionId.tsx";
 import { LoadingIcon } from "../../components/shared/LoadingIcon.tsx";
 import { StatefulButton } from "../../components/shared/StatefulButton.tsx";
 import { SessionTitleText, TranscriptLinkText } from "../../components/shared/TranscriptLinkText.tsx";
@@ -82,7 +81,7 @@ export function createSessionTableColumns<T extends SessionTableRow = SessionTab
                   <TranscriptLinkText interactive={false} query={normalizedQuery} value={session.searchSnippet.replace(/[⟦⟧]/g, "")} />
                 </span></Tooltip>
               </span>
-            ) : preview ? (
+            ) : (
               <span className="dataCellSubLine sessionPreviewSubLine">
                 <span className="sessionPreviewMessage">
                   <ArrowRight size={13} aria-hidden="true" />
@@ -92,10 +91,6 @@ export function createSessionTableColumns<T extends SessionTableRow = SessionTab
                   <ArrowLeft size={13} aria-hidden="true" />
                   <span className="dataCellSub sessionPreviewText"><TranscriptLinkText interactive={false} value={preview.assistantLast} /></span>
                 </span>
-              </span>
-            ) : (
-              <span className="dataCellSubLine">
-                <CopyableSessionId sessionId={`${session.id ?? ""}`} className="dataCellSub inSessionTable" />
               </span>
             )}
           </>
@@ -114,7 +109,7 @@ export function createSessionTableColumns<T extends SessionTableRow = SessionTab
         if (!canResume) {
           return (
             <span className="sessionAgentCell">
-              <AgentBadge agent={friendlyAgent(session.agent ?? "")} />
+              <AgentBadge agent={friendlyAgent(session.agent)} />
             </span>
           );
         }
@@ -163,7 +158,6 @@ export function createSessionTableColumns<T extends SessionTableRow = SessionTab
       width: widths.project ?? "202px",
       value: (session) => sessionProject(session as SessionRecord),
       groupLabel: sessionProjectGroupLabel,
-      empty: "Unknown",
     },
     {
       key: "startedAt",

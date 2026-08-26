@@ -23,20 +23,9 @@ import { RowActionsMenu } from "../components/shared/RowActionsMenu.tsx";
 import { SearchField } from "../components/shared/SearchField.tsx";
 import type { SkillDependencyRecord } from "../features/skills/SkillDependencyGraph.tsx";
 import { ruleColumns as sharedRuleColumns } from "../lib/tableColumns.tsx";
-import { RULE_FREEZE_COLUMN, TauriCommand, diffPreview, formatUserPath, friendlyAgent, ruleAgents, ruleKey, ruleSearchText, ruleSortValue, ruleTitle, safeInvoke, scopeColumn, suppressNextClick, type ProjectSummary } from "../lib/index.ts";
+import { RULE_FREEZE_COLUMN, TauriCommand, diffPreview, formatUserPath, friendlyAgent, ruleAgents, ruleKey, ruleSearchText, ruleSortValue, ruleTitle, safeInvoke, scopeColumn, suppressNextClick, type ProjectSummary, type RuleRecord } from "../lib/index.ts";
 
 const MarkdownFilePane = lazy(() => import("../components/shared/MarkdownFilePane.tsx").then(({ MarkdownFilePane: component }) => ({ default: component })));
-
-type RuleRecord = {
-  agents?: string[] | null;
-  agent?: string | null;
-  kind?: string | null;
-  scope?: string | null;
-  order?: number | null;
-  path?: string | null;
-  source?: string | null;
-  sha256?: string | null;
-};
 
 type RuleItem = { key: string; rule: RuleRecord };
 type RuleTableRow = RuleItem & { id: string };
@@ -53,7 +42,7 @@ type RuleMenuComponents = {
 };
 
 function ruleSourcePath(rule: RuleRecord): string {
-  return `${rule.path ?? rule.source ?? ""}`.trim();
+  return rule.path;
 }
 
 function RuleActionsMenuItems({ Menu, rule }: { Menu: RuleMenuComponents; rule: RuleRecord }) {
@@ -134,7 +123,7 @@ function RuleInfoMenu({
               <InfoSection label="Order"><span className="ruleInfoValue">{order}</span></InfoSection>
             )}
             {path && (
-              <InfoSection label="Path">
+              <InfoSection label="Path" className="ruleInfoPath">
                   <Tooltip content={displayPath} onlyWhenTruncated><code>{displayPath}</code></Tooltip>
                   <button
                     aria-label="Reveal rule in Finder"
@@ -152,7 +141,7 @@ function RuleInfoMenu({
                   {referencedSkillNames.map((name) => {
                     const skill = skillsByName.get(name);
                     return (
-                      <Tooltip key={name} content={skill?.description || name}><button
+                      <Tooltip key={name} content={skill?.description}><button
                         key={name}
                         disabled={!onOpenSkill}
                         onClick={() => onOpenSkill?.(name)}
@@ -188,7 +177,7 @@ export function RulesView({
   projects?: ProjectSummary[];
 }) {
   const projectList = projects ?? [];
-  const ruleItems = useMemo(() => rows.map((rule, index) => ({ key: ruleKey(rule, index), rule })), [rows]);
+  const ruleItems = useMemo(() => rows.map((rule) => ({ key: ruleKey(rule), rule })), [rows]);
   const [activeKey, setActiveKey] = useState(ruleItems[0]?.key ?? "");
   const [selected, setSelected] = useState<string[]>([]);
   const [query, setQuery] = useState("");
@@ -238,7 +227,7 @@ export function RulesView({
       sortValue: (row) => ruleTitle(row.rule).toLowerCase(),
       width: "var(--data-freeze-column-width, 292px)",
       render: (row) => {
-        const path = `${row.rule.path ?? row.rule.source ?? ""}`;
+        const path = row.rule.path;
         const displayPath = formatUserPath(path);
         return (
           <>
@@ -261,12 +250,12 @@ export function RulesView({
         };
         if (column.key === "agents") {
           next.groupBy = (row) => ruleAgents(row.rule).join(", ");
-          next.render = (row) => column.render?.({ agents: ruleAgents(row.rule) });
+          next.render = (row) => column.render?.(row.rule);
         } else if (column.key === "kind") {
-          next.groupBy = (row) => `${row.rule.kind ?? ""}`;
+          next.groupBy = (row) => row.rule.kind;
           next.value = (row) => row.rule.kind;
         } else if (column.key === "scope") {
-          next.groupBy = (row) => `${row.rule.scope ?? ""}`;
+          next.groupBy = (row) => row.rule.scope;
           next.value = (row) => row.rule.scope;
         } else if (column.render) {
           next.render = (row) => column.render?.({ ...row.rule });
@@ -326,21 +315,20 @@ export function RulesView({
 
   useEffect(() => {
     let cancelled = false;
-    setDraft({ content: "", originalContent: "", sha256: activeRule?.sha256 ?? "" });
+    setDraft({ content: "", originalContent: "", sha256: "" });
     if (!activeRule?.path) {
       setLoading(false);
       return () => { cancelled = true; };
     }
     const rulePath = activeRule.path;
-    const ruleSha = activeRule.sha256 ?? "";
     setLoading(true);
     async function loadRule() {
       const result = await safeInvoke(TauriCommand.RuleFileRead, { path: rulePath }) as { content?: string; sha256?: string } | null;
       if (cancelled) return;
-      if (typeof result?.content === "string") {
-        setDraft({ content: result.content, originalContent: result.content, sha256: result.sha256 ?? "" });
+      if (typeof result?.content === "string" && typeof result.sha256 === "string") {
+        setDraft({ content: result.content, originalContent: result.content, sha256: result.sha256 });
       } else {
-        setDraft({ content: "", originalContent: "", sha256: ruleSha });
+        setDraft({ content: "", originalContent: "", sha256: "" });
       }
       setLoading(false);
     }
@@ -355,8 +343,8 @@ export function RulesView({
       expectedSha256: draft.sha256,
       content,
     }) as { sha256?: string; content?: string } | null;
-    if (result?.sha256) {
-      setDraft({ content: result.content ?? content, originalContent: result.content ?? content, sha256: result.sha256 });
+    if (typeof result?.content === "string" && typeof result.sha256 === "string") {
+      setDraft({ content: result.content, originalContent: result.content, sha256: result.sha256 });
     }
   }, [activeRule?.path, content, dirty, draft.sha256]);
 
@@ -460,7 +448,7 @@ export function RulesView({
             ) : (
               <Suspense fallback={<EditorStatePlaceholder className="ruleEditorLoading" label="Loading editor" />}>
                 <MarkdownFilePane
-                  activePath={activeRule.path ?? ruleTitle(activeRule)}
+                  activePath={ruleSourcePath(activeRule)}
                   dirty={dirty}
                   diffStats={diffStats}
                   content={content}
