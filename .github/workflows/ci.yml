@@ -16,6 +16,15 @@ permissions:
 jobs:
   build-test:
     runs-on: macos-14
+    env:
+      # macos-14 runners have higher filesystem and WebView startup variance than local runs.
+      # Keep RSS and payload limits unchanged; add headroom only to operation timings.
+      TENDI_PERF_TERTIARY_SKILL_SAVE_MS: 120
+      TENDI_PERF_TERTIARY_SETTINGS_SAVE_MS: 10
+      TENDI_PERF_CHART_SKILL_SESSION_PROJECT_MS: 30
+      TENDI_PERF_CHART_SKILL_SESSION_PROJECT_P95_MS: 60
+      TENDI_PERF_CHART_RELATIONSHIP_GRAPH_MS: 120
+      TENDI_PERF_CHART_RELATIONSHIP_GRAPH_P95_MS: 180
     steps:
       - uses: actions/checkout@v4
 

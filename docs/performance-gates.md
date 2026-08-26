@@ -21,6 +21,10 @@ CI runs the deterministic `--fast` profile, including the indexed Session batch-
 full profile, local-data checks, and real-data WebView scenario remain local because they depend on
 the developer's Session database, browser, or running desktop app.
 
+CI uses macOS-runner-specific headroom for operation timing in the skill-save, settings-save, and
+two chart gates. RSS, payload, and all other gate limits remain unchanged; local runs use the
+default thresholds below.
+
 The full gate additionally uses local Session data when available. It also creates a deterministic
 96 MiB transcript under `target/perf-fixtures`. Generated results are written to
 `target/perf/latest.json`.
