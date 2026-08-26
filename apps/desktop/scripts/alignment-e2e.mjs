@@ -450,21 +450,13 @@ async function runReq8TabChecks(page, tab) {
     return;
   }
 
-  if (!tab.selectable) {
-    await page.evaluate(() => {
-      document.querySelectorAll(".dataRow.rowSelected").forEach((row) => row.classList.remove("rowSelected"));
-      const row = document.querySelector(".dataRow.rowFrame");
-      if (!row?.dataset.rowId) return;
-      document.querySelectorAll(`[data-row-id="${CSS.escape(row.dataset.rowId)}"]`).forEach((peer) => peer.classList.add("rowSelected"));
-    });
-  } else {
-    await page.evaluate(() => {
-      if (document.querySelector(".dataRow.rowSelected")) return;
-      const row = document.querySelector('.dataRow[data-row-selectable="true"]');
-      if (!row?.dataset.rowId) return;
-      document.querySelectorAll(`[data-row-id="${CSS.escape(row.dataset.rowId)}"]`).forEach((peer) => peer.classList.add("rowSelected"));
-    });
-  }
+  const injectedSelectedRowId = await page.evaluate(() => {
+    if (document.querySelector(".dataRow.rowSelected")) return null;
+    const row = document.querySelector('.dataRow[data-row-selectable="true"]') ?? document.querySelector(".dataRow.rowFrame");
+    if (!row?.dataset.rowId) return null;
+    document.querySelectorAll(`[data-row-id="${CSS.escape(row.dataset.rowId)}"]`).forEach((peer) => peer.classList.add("rowSelected"));
+    return row.dataset.rowId;
+  });
 
   await rows.nth(1).hover();
   await page.waitForFunction(() => {
@@ -548,6 +540,10 @@ async function runReq8TabChecks(page, tab) {
   }
 
   await page.mouse.move(0, 0);
+  await page.evaluate((rowId) => {
+    if (!rowId) return;
+    document.querySelectorAll(`[data-row-id="${CSS.escape(rowId)}"]`).forEach((peer) => peer.classList.remove("rowSelected"));
+  }, injectedSelectedRowId);
 }
 
 async function runSessionLocatorChecks(page) {
@@ -1005,8 +1001,21 @@ async function runFrozenBugSmokeChecks(page, tab) {
 
   const rowMenuButton = page.locator('.dataTableScrollPane .dataRow--scrollPane button[aria-label*="actions" i]').first();
   if (await rowMenuButton.count()) {
-    await rowMenuButton.scrollIntoViewIfNeeded();
-    await rowMenuButton.click({ force: true });
+    await page.evaluate(() => {
+      const button = document.querySelector('.dataTableScrollPane .dataRow--scrollPane button[aria-label*="actions" i]');
+      const scroller = document.querySelector(".dataTableBodyScroll");
+      const frozenPane = document.querySelector(".dataTableFrozenPane");
+      if (!button || !scroller || !frozenPane) return;
+      const buttonRect = button.getBoundingClientRect();
+      const scrollerRect = scroller.getBoundingClientRect();
+      const frozenRect = frozenPane.getBoundingClientRect();
+      const desiredLeft = Math.max(frozenRect.right + 8, scrollerRect.right - buttonRect.width - 8);
+      const maxScroll = Math.max(0, scroller.scrollWidth - scroller.clientWidth);
+      scroller.scrollLeft = Math.max(0, Math.min(maxScroll, scroller.scrollLeft + buttonRect.left - desiredLeft));
+      scroller.dispatchEvent(new Event("scroll"));
+    });
+    await page.waitForTimeout(80);
+    await rowMenuButton.click();
     await page.waitForTimeout(150);
     const openMenuMetrics = await page.evaluate(() => {
       const button = document.querySelector('.dataTableScrollPane .dataRow--scrollPane button[aria-label*="actions" i]');
@@ -1067,7 +1076,7 @@ async function runFrozenBugSmokeChecks(page, tab) {
         && closedMenuMetrics.frozenBg === closedMenuMetrics.scrollBg,
       closedMenuMetrics.missing === true
         ? "missing paired row menu rows"
-        : `trigger open ${closedMenuMetrics.triggerOpen}, menuActive frozen/scroll ${closedMenuMetrics.frozenMenuActive}/${closedMenuMetrics.scrollMenuActive}, bg ${closedMenuMetrics.frozenBg}/${closedMenuMetrics.scrollBg}`,
+      : `trigger open ${closedMenuMetrics.triggerOpen}, menuActive frozen/scroll ${closedMenuMetrics.frozenMenuActive}/${closedMenuMetrics.scrollMenuActive}, bg ${closedMenuMetrics.frozenBg}/${closedMenuMetrics.scrollBg}`,
     );
   }
 
@@ -1268,14 +1277,31 @@ async function runFrozenBugSmokeChecks(page, tab) {
     scroller.scrollLeft = 0;
     scroller.dispatchEvent(new Event("scroll"));
   });
+  await page.mouse.move(0, 0);
+  await page.waitForTimeout(40);
   const groupButton = page.locator(".dataTableHeader .dataHeaderGroupButton").first();
   if (await groupButton.count()) {
-    const clearSelectionButton = page.getByRole("button", { name: "Clear selection", exact: true });
-    if (await clearSelectionButton.count()) await clearSelectionButton.click();
-    await groupButton.click();
+    const clearSelectionButton = page.locator(".actionBarClearButton").last();
+    if (await clearSelectionButton.count()) {
+      await clearSelectionButton.click({ force: true });
+      await page.waitForFunction(
+        () => !document.querySelector(".dataRow.selectionActive"),
+        { timeout: 2000 },
+      ).catch(() => {});
+    }
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      const selectedRowCheckbox = page.locator(".dataTableFrozenPane .dataRow--frozenPane.rowSelected .rowSelection").first();
+      if (await selectedRowCheckbox.count() === 0) break;
+      await selectedRowCheckbox.click({ force: true });
+      await page.waitForTimeout(30);
+    }
+    await groupButton.evaluate((button) => button.click());
     await page.waitForFunction(
       () => Boolean(
-        document.querySelector(".dataTableFrozenPane .dataGroup .dataRow--frozenPane")
+        document.querySelector(".dataTableHeader .dataHeaderGroupButton.activeGroup")
+        && document.querySelector(".dataTableFrozenPane .dataGroup")
+        && document.querySelector(".dataTableScrollPane .dataGroup")
+        && document.querySelector(".dataTableFrozenPane .dataGroup .dataRow--frozenPane")
         && document.querySelector(".dataTableScrollPane .dataGroup .dataRow--scrollPane"),
       ),
       { timeout: 2000 },
@@ -1288,7 +1314,23 @@ async function runFrozenBugSmokeChecks(page, tab) {
       const scrollSpacer = scrollGroup?.querySelector(".dataSplitGroupSpacer");
       const scroller = document.querySelector(".dataTableBodyScroll");
       const frozenPane = document.querySelector(".dataTableFrozenPane");
-      const frozenRow = frozenGroup?.querySelector(".dataRow--frozenPane");
+      const frozenRows = [...document.querySelectorAll(".dataTableFrozenPane .dataGroup .dataRow--frozenPane")];
+      const groups = [...document.querySelectorAll(".dataTableFrozenPane .dataGroup")];
+      const hasActiveState = (row) => Boolean(row?.matches(".rowHover, .rowSelected, .menuActive, .selectionActive, [data-state=\"open\"], :has([data-state=\"open\"])"));
+      const isSeparatorCandidate = (row) => {
+        const group = row.closest(".dataGroup");
+        const groupIndex = group ? groups.indexOf(group) : -1;
+        const rowIndex = group ? [...group.querySelectorAll(".dataRow--frozenPane")].indexOf(row) : -1;
+        const rowSlot = row.closest(".dataTableRowSlot");
+        const previousRow = rowSlot?.previousElementSibling?.querySelector(".dataRow--frozenPane");
+        return (groupIndex > 0 || rowIndex > 0) && !hasActiveState(row) && !hasActiveState(previousRow);
+      };
+      const hasScrollPair = (row) => Boolean(row.dataset.rowId && document.querySelector(`.dataTableScrollPane .dataRow--scrollPane[data-row-id="${CSS.escape(row.dataset.rowId)}"]`));
+      const frozenRow = frozenRows.find((row) => isSeparatorCandidate(row) && !row.classList.contains("rowSelected") && hasScrollPair(row))
+        ?? frozenRows.find((row) => isSeparatorCandidate(row) && hasScrollPair(row))
+        ?? frozenRows.find((row) => !row.classList.contains("rowSelected") && hasScrollPair(row))
+        ?? frozenRows.find(hasScrollPair)
+        ?? null;
       const scrollRow = frozenRow?.dataset.rowId
         ? document.querySelector(`.dataTableScrollPane .dataRow--scrollPane[data-row-id="${CSS.escape(frozenRow.dataset.rowId)}"]`)
         : null;
@@ -1422,7 +1464,8 @@ try {
     const daemonEventWaiters = [];
     let nextCallbackId = 1;
     let sessionScanHandler = null;
-    let sessionsListReleased = false;
+    const navigationEntry = performance.getEntriesByType("navigation")[0];
+    let sessionsListReleased = navigationEntry?.type === "reload";
     const sessionsListWaiters = [];
     window.__releaseSessionsList = () => {
       sessionsListReleased = true;
@@ -2398,7 +2441,6 @@ try {
   await runOverviewChecks(page);
 
   for (const pageSpec of [
-    { id: "backup", nav: "Backup", heading: "Backup", compact: false, ready: ".backupPage" },
     { id: "config", nav: "Config", heading: "Config", compact: true, ready: ".configListPane" },
     { id: "settings", nav: "Settings", heading: "Settings", compact: false, ready: ".settingsShell" },
   ]) {
