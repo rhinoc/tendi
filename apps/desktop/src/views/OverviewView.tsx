@@ -422,11 +422,11 @@ export function OverviewView({
                       </span>
                       <span className="overviewSessionMessage">
                         <span className="overviewSessionMessageLabel" role="img" aria-label="User message"><ArrowRight size={13} aria-hidden="true" /></span>
-                        <span className="overviewSessionMessageText"><TranscriptLinkText interactive={false} value={preview.userLast} /></span>
+                        <span className="overviewSessionMessageText"><TranscriptLinkText interactive={false} value={preview?.userLast ?? "—"} /></span>
                       </span>
                       <span className="overviewSessionMessage">
                         <span className="overviewSessionMessageLabel" role="img" aria-label="Agent reply"><ArrowLeft size={13} aria-hidden="true" /></span>
-                        <span className="overviewSessionMessageText"><TranscriptLinkText interactive={false} value={preview.assistantLast} /></span>
+                        <span className="overviewSessionMessageText"><TranscriptLinkText interactive={false} value={preview?.assistantLast ?? "—"} /></span>
                       </span>
                     </button>
                   );

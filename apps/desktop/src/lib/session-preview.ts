@@ -27,9 +27,11 @@ export function formatSessionTitle(value: string | null | undefined): string {
 
 export function summarizeSessionPreviewRecord(
   session: Pick<SessionRecord, "firstUserMessage" | "lastUserMessage" | "lastAssistantMessage">,
-): RecentSessionPreview {
+): RecentSessionPreview | null {
+  const firstUser = session.firstUserMessage ?? "";
   const lastUser = session.lastUserMessage ?? "";
   const lastAssistant = session.lastAssistantMessage ?? "";
+  if (!firstUser && !lastUser && !lastAssistant) return null;
   return {
     userLast: lastUser || "—",
     assistantLast: lastAssistant || "—",

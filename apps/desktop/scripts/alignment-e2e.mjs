@@ -69,15 +69,16 @@ function chromiumExecutablePath() {
 // ----- fabricated report (matches the shapes each normalizer/column reads) ---
 function buildReport() {
   const skills = [
-    { id: "alpha-skill", name: "alpha-skill", description: "First local skill.", agents: ["Codex", "Cursor"], visibility: "Manual", source: "github", install_targets: ["shared"], update_status: "update-available", paths: [{ path: "/Users/dev/.cursor/projects/project-1/.cursor/skills/alpha/SKILL.md", scope: "project", agent: "cursor" }] },
-    { id: "beta-skill", name: "beta-skill", description: "Second local skill.", agents: ["Codex"], visibility: "Auto", source: "local", install_targets: ["shared"], update_status: "local", paths: [{ path: "/Users/dev/.claude/skills/beta/SKILL.md", scope: "global", agent: "claude" }] },
-    { id: "system-skill", name: "system-skill", description: "Managed system skill.", agents: ["Codex"], visibility: "Auto", is_system: true, source: "system", install_targets: ["codex"], update_status: "local", paths: [{ path: "/Users/dev/.codex/skills/system/SKILL.md", scope: "global", agent: "codex" }] },
+    { id: "alpha-skill", name: "alpha-skill", description: "First local skill.", agents: ["Codex", "Cursor"], tags: [], dependencies: [], dependents: [], visibility: "Manual", source_summary: "github", install_targets: ["shared"], update_status: "update-available", is_system: false, paths: [{ path: "/Users/dev/.cursor/projects/project-1/.cursor/skills/alpha/SKILL.md", root: "/Users/dev/.cursor/projects/project-1/.cursor/skills", scope: "project", agent: "cursor", install_target: "cursor:project", source_kind: "github" }] },
+    { id: "beta-skill", name: "beta-skill", description: "Second local skill.", agents: ["Codex"], tags: [], dependencies: [], dependents: [], visibility: "Auto", source_summary: "local", install_targets: ["shared"], update_status: "local", is_system: false, paths: [{ path: "/Users/dev/.claude/skills/beta/SKILL.md", root: "/Users/dev/.claude/skills", scope: "global", agent: "claude", install_target: "claude:global", source_kind: "local" }] },
+    { id: "system-skill", name: "system-skill", description: "Managed system skill.", agents: ["Codex"], tags: [], dependencies: [], dependents: [], visibility: "Auto", source_summary: "system", install_targets: ["codex"], update_status: "local", is_system: true, paths: [{ path: "/Users/dev/.codex/skills/system/SKILL.md", root: "/Users/dev/.codex/skills", scope: "global", agent: "codex", install_target: "codex:global", source_kind: "system" }] },
   ];
   const prompts = Array.from({ length: 12 }, (_, i) => ({
     id: `prompt-${i + 1}`,
     title: `Prompt number ${i + 1}`,
     tags: ["smoke"],
     body: `Body for prompt ${i + 1}.`,
+    created_at: `2026-06-0${i + 1}T09:00:00`,
     updated_at: `2026-06-2${i}T10:00:00`,
   }));
   const sessions = Array.from({ length: 12 }, (_, i) => ({
@@ -120,6 +121,7 @@ function buildReport() {
     path: i < 2
       ? `/Users/dev/.cursor/projects/project-${i + 1}/mcps/cursor-app-control/SERVER_METADATA.json`
       : `/Users/dev/.cursor/mcp-${i + 1}.json`,
+    trust_hash: `mcp-trust-${i + 1}`,
   }));
   return {
     skills: { skills },
@@ -549,7 +551,21 @@ async function runReq8TabChecks(page, tab) {
 }
 
 async function runSessionLocatorChecks(page) {
+  await page.evaluate(() => {
+    const scroller = document.querySelector(".dataTableBodyScroll");
+    if (!scroller) return;
+    scroller.scrollTop = 0;
+    scroller.dispatchEvent(new Event("scroll"));
+    document.querySelectorAll(".dataRow.rowSelected").forEach((row) => row.classList.remove("rowSelected"));
+  });
+  await page.waitForTimeout(40);
   await page.locator(".dataRow--frozenPane .sessionTitleText").first().click();
+  await page.evaluate(() => {
+    const scroller = document.querySelector(".dataTableBodyScroll");
+    if (!scroller) return;
+    scroller.scrollTop = scroller.scrollHeight;
+    scroller.dispatchEvent(new Event("scroll"));
+  });
   const locatorRows = page.locator(".sessionLocatorRow");
   await locatorRows.first().waitFor();
   await page.waitForFunction(
@@ -1245,6 +1261,12 @@ async function runFrozenBugSmokeChecks(page, tab) {
     }
   }
 
+  await page.evaluate(() => {
+    const scroller = document.querySelector(".dataTableBodyScroll");
+    if (!scroller) return;
+    scroller.scrollLeft = 0;
+    scroller.dispatchEvent(new Event("scroll"));
+  });
   const groupButton = page.locator(".dataTableHeader .dataHeaderGroupButton").first();
   if (await groupButton.count()) {
     const clearSelectionButton = page.getByRole("button", { name: "Clear selection", exact: true });
@@ -1598,12 +1620,12 @@ try {
         return {
           items: Array.from({ length: 5 }, (_, index) => ([
             {
-              type: "user",
+              kind: "user",
               body: `Locator prompt ${index + 1}`,
               time: `10:0${index}`,
             },
             {
-              type: "assistant",
+              kind: "assistant",
               body: `Locator response ${index + 1}`,
               time: `10:0${index}`,
             },
@@ -1616,6 +1638,17 @@ try {
           warnings: [],
           nextCursor: null,
           done: true,
+        };
+      }
+      if (command === "session_transcript_locator") {
+        return {
+          locatorItems: Array.from({ length: 5 }, (_, index) => ({
+            index: index * 2,
+            label: `Locator prompt ${index + 1}`,
+            response: `Locator response ${index + 1}`,
+          })),
+          warnings: [],
+          sourceVersion: "",
         };
       }
       if (command === "sessions_search") {
@@ -1685,7 +1718,7 @@ try {
   check(
     "navigation",
     "all-pages-listed",
-    JSON.stringify(navLabels) === JSON.stringify(["Overview", "Skills", "Backup", "Sessions", "Rules", "MCP", "Hooks", "Prompts", "Config", "Settings"]),
+    JSON.stringify(navLabels) === JSON.stringify(["Overview", "Skills", "Sessions", "Rules", "MCP", "Hooks", "Prompts", "Config", "Settings"]),
     navLabels.join(", "),
   );
   await page.getByRole("button", { name: "Skills", exact: true }).click();
