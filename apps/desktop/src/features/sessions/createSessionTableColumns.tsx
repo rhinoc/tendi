@@ -114,7 +114,7 @@ export function createSessionTableColumns<T extends SessionTableRow = SessionTab
         if (!canResume) {
           return (
             <span className="sessionAgentCell">
-              <AgentBadge agent={friendlyAgent(session.agent ?? "")} />
+              <AgentBadge agent={friendlyAgent(session.agent)} />
             </span>
           );
         }
@@ -163,7 +163,6 @@ export function createSessionTableColumns<T extends SessionTableRow = SessionTab
       width: widths.project ?? "202px",
       value: (session) => sessionProject(session as SessionRecord),
       groupLabel: sessionProjectGroupLabel,
-      empty: "Unknown",
     },
     {
       key: "startedAt",

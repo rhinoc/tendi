@@ -17,6 +17,17 @@
   max-width: min(120px, 30%);
 }
 
+.badgeListOverflow {
+  min-width: 0;
+  flex: 0 1 auto;
+  display: inline-flex;
+  max-width: min(120px, 30%);
+}
+
+.badgeListOverflow > .badge {
+  width: 100%;
+}
+
 .badgeListMeasure {
   position: fixed;
   top: -10000px;

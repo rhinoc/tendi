@@ -1,5 +1,3 @@
-import { ChevronRight } from "lucide-react";
-
 import { DialogActionButton } from "./DialogActionButton.tsx";
 import { LoadingIcon } from "./LoadingIcon.tsx";
 
@@ -29,7 +27,7 @@ export function DialogAdvanceButton({
       onClick={onClick}
       disabled={disabled || busy}
     >
-      {busy ? <LoadingIcon size={16} /> : <><span>{label}</span><ChevronRight size={16} /></>}
+      {busy ? <LoadingIcon size={16} /> : <span>{label}</span>}
     </DialogActionButton>
   );
 }

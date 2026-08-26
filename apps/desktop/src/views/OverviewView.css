@@ -640,6 +640,7 @@
   align-items: flex-start;
   justify-content: space-between;
   gap: 12px;
+  margin-inline: 4px;
 }
 
 .overviewPaneTitle {

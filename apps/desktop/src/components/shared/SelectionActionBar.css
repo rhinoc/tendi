@@ -78,6 +78,49 @@
   margin-left: auto;
 }
 
+.actionBarActions.skillsSelectionActions {
+  min-width: 0;
+  flex: 1 1 auto;
+  overflow: hidden;
+}
+
+.skillsSelectionActionsContent {
+  position: relative;
+  min-width: 0;
+  width: 100%;
+  overflow: hidden;
+}
+
+.skillsSelectionActionsVisible {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 4px;
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+.skillsSelectionAction {
+  display: contents;
+}
+
+.skillsSelectionActionsMeasure {
+  position: absolute;
+  top: 0;
+  left: 0;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  visibility: hidden;
+  pointer-events: none;
+  white-space: nowrap;
+}
+
+.skillsSelectionActionsMeasure button {
+  flex: 0 0 auto;
+}
+
 .actionBar button {
   height: 27px;
   display: inline-flex;

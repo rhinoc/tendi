@@ -249,11 +249,11 @@ function sessionAgentSort(left: string, right: string): number {
 }
 
 function sessionAgentLabel(agent: string): string {
-  return normalizedAgentKey(agent) === "shared" ? "Shared" : friendlyAgent(agent) || "Unknown";
+  return normalizedAgentKey(agent) === "shared" ? "Shared" : friendlyAgent(agent);
 }
 
 function sessionAgentClass(agent: string): string {
-  return agentDefinition(normalizedAgentKey(agent))?.trendClass ?? "agentOther";
+  return agentDefinition(normalizedAgentKey(agent))?.trendClass ?? "";
 }
 
 function sessionSegments(period: AnalyticsPeriod): TrendSegment[] {

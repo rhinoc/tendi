@@ -81,7 +81,7 @@ mod tests {
             name: name.to_string(),
             description: None,
             source: source.to_string(),
-            url: String::new(),
+            url: None,
             version: None,
             metric: None,
             metric_label: None,

@@ -14,6 +14,7 @@ export type SelectionActionBarProps = {
   label?: string;
   checkboxLabel?: string;
   clearLabel?: string;
+  actionsClassName?: string;
   className?: string;
 };
 
@@ -27,6 +28,7 @@ export function SelectionActionBar({
   label = "selected",
   checkboxLabel = "Toggle visible selection",
   clearLabel = "Clear selection",
+  actionsClassName = "",
   className = "",
 }: SelectionActionBarProps) {
   if (selectedCount === 0) return null;
@@ -44,7 +46,7 @@ export function SelectionActionBar({
           <span>{selectedCount} {countLabel}</span>
         </div>
         {children || onClear ? (
-          <div className="actionBarActions">
+          <div className={`actionBarActions ${actionsClassName}`.trim()}>
             {children}
             {onClear ? (
               <button className="actionBarClearButton" type="button" aria-label={clearLabel} onClick={onClear}>

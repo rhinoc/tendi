@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { Monitor, Moon, Sun } from "lucide-react";
-import { Popover } from "radix-ui";
+import { CheckCircle2, Monitor, Moon, Sun, Trash2 } from "lucide-react";
+import { DropdownMenu, Popover } from "radix-ui";
 import { compactDateTime, formatUserPath, remoteRepositoryLabel, TauriCommand, invokeCommand, normalizeMissingSessionProjectPolicy, normalizeSessionResumeTarget, safeInvoke, type BundledSkillInstallReport, type BundledSkillStatus, type CliInstallStatus, type DesktopUpdateState, type MissingSessionProjectPolicy, type ProjectSummary, type SessionResumeTarget } from "../../lib/index.ts";
 import { normalizeAppearance, normalizeColorTheme, normalizeFontFamily, type Appearance, type ColorTheme, type FontFamily, type ResolvedAppearance, type ThemePreferences } from "../../lib/appearance.ts";
 import { appIconOptions, appIconPreviewDataUrl, normalizeAppIcon, type AppIcon } from "../../lib/app-icon.ts";
 import { Button } from "../../components/shared/Button.tsx";
+import { Badge } from "../../components/shared/Badge.tsx";
 import { ContentTopDragStrip } from "../../components/shared/ContentTopDragStrip.tsx";
 import { CompactTable, type CompactTableColumn } from "../../components/shared/CompactTable.tsx";
 import { LoadErrorState } from "../../components/shared/LoadErrorState.tsx";
@@ -13,8 +14,12 @@ import { PageHeader } from "../../components/shared/PageHeader.tsx";
 import { SegmentedControl, SegmentedControlItem } from "../../components/shared/SegmentedControl.tsx";
 import { SelectControl } from "../../components/shared/SelectControl.tsx";
 import { StatefulButton } from "../../components/shared/StatefulButton.tsx";
+import { Toast } from "../../components/shared/Toast.tsx";
 import { Switch } from "../../components/shared/Switch.tsx";
+import { RowActionsMenu } from "../../components/shared/RowActionsMenu.tsx";
 import { SettingsApplicationPicker, type SettingsApplicationOption } from "./SettingsApplicationPicker.tsx";
+import { SettingsSection } from "./SettingsSection.tsx";
+import { BackupSettings } from "../skills/BackupView.tsx";
 import { codingAgentsAction, isCodingAgentsInstalled } from "./settings-agent-status.ts";
 import "./SettingsView.css";
 
@@ -33,7 +38,7 @@ type ProjectScanScope = {
 };
 
 const projectTableColumns: CompactTableColumn<ProjectSummary>[] = [
-  { key: "name", header: "Project", width: "160px", cellClassName: "compactTableCell--title", empty: "Project" },
+  { key: "name", header: "Project", width: "160px", cellClassName: "compactTableCell--title", empty: "" },
   {
     key: "rootPath",
     header: "Path",
@@ -77,7 +82,13 @@ function ProjectsPopover({ projects }: { projects: ProjectSummary[] }) {
         </Button>
       </Popover.Trigger>
       <Popover.Portal>
-        <Popover.Content className="settingsProjectsPopover" side="bottom" align="start" sideOffset={8}>
+        <Popover.Content
+          className="settingsProjectsPopover"
+          side="bottom"
+          align="start"
+          sideOffset={8}
+          collisionPadding={8}
+        >
           <div className="settingsProjectsPopoverHeader">
             <strong>Scanned projects</strong>
             <span>{projects.length}</span>
@@ -87,7 +98,7 @@ function ProjectsPopover({ projects }: { projects: ProjectSummary[] }) {
             ariaLabel="Scanned projects"
             rows={projects}
             columns={projectTableColumns}
-            getRowId={(project) => project.id ?? project.rootPath ?? project.name ?? "project"}
+            getRowId={(project) => project.id}
             emptyState="No projects found"
           />
         </Popover.Content>
@@ -255,8 +266,8 @@ function normalizeSettings(settings: AppSettings): AppSettings {
     sessionResumeTarget: normalizeSessionResumeTarget(settings.sessionResumeTarget),
     missingSessionProjectPolicy: normalizeMissingSessionProjectPolicy(settings.missingSessionProjectPolicy),
     developerMode: settings.developerMode === true,
-    additionalSessionRoots: settings.additionalSessionRoots ?? [],
-    configProfiles: settings.configProfiles ?? {},
+    additionalSessionRoots: settings.additionalSessionRoots,
+    configProfiles: settings.configProfiles,
   };
 }
 
@@ -272,17 +283,6 @@ async function readSetting<T>(command: TauriCommand): Promise<{ value?: T; error
   } catch (error) {
     return { error: errorMessage(error) };
   }
-}
-
-function SettingsSection({ title, children, className = "" }: { title: string; children: ReactNode; className?: string }) {
-  return (
-    <section className={`settingsSection ${className}`.trim()}>
-      <div className="settingsSectionText">
-        <h2>{title}</h2>
-      </div>
-      <div className="settingsControlGroup">{children}</div>
-    </section>
-  );
 }
 
 function SettingsGroup({ title, children }: { title: string; children: ReactNode }) {
@@ -720,11 +720,9 @@ export function SettingsView({ appearance, themePreferences, fontFamily, develop
       ? "Unable to load status"
       : !cliStatus || !bundledSkillStatus
         ? "Status unavailable"
-        : setupReady
-          ? "Installed"
-          : setupNeedsAttention
-            ? "Needs attention"
-            : "";
+        : setupNeedsAttention
+          ? "Needs attention"
+          : "";
 
   const installBundledSkill = async () => {
     if (bundledSkillBusy || cliBusy) return;
@@ -802,7 +800,7 @@ export function SettingsView({ appearance, themePreferences, fontFamily, develop
                   );
                 })}
               </SegmentedControl>
-              {appearanceError ? <span className="settingsError" role="alert">{appearanceError}</span> : null}
+              {appearanceError ? <Toast tone="error" message={appearanceError} /> : null}
           </SettingsSection>
           <SettingsSection title="Theme" className="settingsThemeSection">
             <div className="settingsThemeControls">
@@ -817,10 +815,10 @@ export function SettingsView({ appearance, themePreferences, fontFamily, develop
               <div className="settingsThemePicker">
                 <span className="settingsThemePickerLabel">App icon</span>
                 <AppIconSelect value={settings.appIcon} onChange={(value) => { void saveAppIcon(value); }} />
-                {appIconError ? <span className="settingsError" role="alert">{appIconError}</span> : null}
+                {appIconError ? <Toast tone="error" message={appIconError} /> : null}
               </div>
             </div>
-            {themeError ? <span className="settingsError" role="alert">{themeError}</span> : null}
+            {themeError ? <Toast tone="error" message={themeError} /> : null}
           </SettingsSection>
           <SettingsSection title="Font">
             <SelectControl
@@ -833,7 +831,7 @@ export function SettingsView({ appearance, themePreferences, fontFamily, develop
               showOptionTooltip={false}
               renderOption={(option) => <span style={{ fontFamily: `"${option.label}"` }}>{option.label}</span>}
             />
-            {fontFamilyError ? <span className="settingsError" role="alert">{fontFamilyError}</span> : null}
+            {fontFamilyError ? <Toast tone="error" message={fontFamilyError} /> : null}
           </SettingsSection>
           </SettingsGroup>
           <SettingsGroup title="Workspace">
@@ -873,7 +871,7 @@ export function SettingsView({ appearance, themePreferences, fontFamily, develop
               <SegmentedControlItem value="terminal">Terminal</SegmentedControlItem>
               <SegmentedControlItem value="app">App</SegmentedControlItem>
             </SegmentedControl>
-            {sessionResumeError ? <span className="settingsError" role="alert">{sessionResumeError}</span> : null}
+            {sessionResumeError ? <Toast tone="error" message={sessionResumeError} /> : null}
           </SettingsSection>
           <SettingsSection title="Missing session projects">
             <SegmentedControl
@@ -886,7 +884,7 @@ export function SettingsView({ appearance, themePreferences, fontFamily, develop
               <SegmentedControlItem value="hide">Hide</SegmentedControlItem>
               <SegmentedControlItem value="merge-by-name">Merge by name</SegmentedControlItem>
             </SegmentedControl>
-            {missingSessionProjectError ? <span className="settingsError" role="alert">{missingSessionProjectError}</span> : null}
+            {missingSessionProjectError ? <Toast tone="error" message={missingSessionProjectError} /> : null}
           </SettingsSection>
           <SettingsSection title="Editor">
             <SettingsApplicationPicker
@@ -935,7 +933,7 @@ export function SettingsView({ appearance, themePreferences, fontFamily, develop
                   }
                 }}
               />
-              {sessionRootsError ? <span className="settingsError" role="alert">{sessionRootsError}</span> : null}
+              {sessionRootsError ? <Toast tone="error" message={sessionRootsError} /> : null}
           </SettingsSection>
           <SettingsSection title="Scan scopes">
             <textarea
@@ -972,16 +970,39 @@ export function SettingsView({ appearance, themePreferences, fontFamily, develop
                 Scan now
               </StatefulButton>
               {projects.length > 0 && projectScanState !== "error" ? <ProjectsPopover projects={projects} /> : null}
-              {projectScanSummary && (projects.length === 0 || projectScanState === "error") ? <span className="settingsScanSummary" role={projectScanState === "error" ? "alert" : "status"}>{projectScanSummary}</span> : null}
+              {projectScanSummary && projects.length === 0 && projectScanState !== "error" ? <span className="settingsScanSummary" role="status">{projectScanSummary}</span> : null}
+              {projectScanSummary && projectScanState === "error" ? <Toast tone="error" message={projectScanSummary} /> : null}
             </div>
-            {projectScanScopesError ? <span className="settingsError" role="alert">{projectScanScopesError}</span> : null}
+            {projectScanScopesError ? <Toast tone="error" message={projectScanScopesError} /> : null}
           </SettingsSection>
+          </SettingsGroup>
+          <SettingsGroup title="Backup">
+            <BackupSettings />
           </SettingsGroup>
           <SettingsGroup title="Developer">
           <SettingsSection title="Coding agents">
               <div className="settingsAgentRow">
                 <div className="settingsAgentStatus">
-                  {setupStatusLabel ? <strong>{setupStatusLabel}</strong> : null}
+                  {setupReady ? (
+                    <>
+                      <Badge className="settingsAgentInstalled" tone="success" aria-busy={bundledSkillBusy}>
+                        {bundledSkillBusy ? <LoadingIcon size={14} /> : <CheckCircle2 size={14} aria-hidden="true" />}
+                        <span>{bundledSkillBusy ? "Uninstalling" : "Installed"}</span>
+                      </Badge>
+                      {!bundledSkillBusy ? (
+                        <RowActionsMenu ariaLabel="Coding agents actions">
+                          <DropdownMenu.Item
+                            className="skillMenuItem danger"
+                            disabled={Boolean(cliBusy)}
+                            onSelect={() => { void removeCodingAgents(); }}
+                          >
+                            <Trash2 size={14} aria-hidden="true" />
+                            Uninstall
+                          </DropdownMenu.Item>
+                        </RowActionsMenu>
+                      ) : null}
+                    </>
+                  ) : setupStatusLabel ? <strong>{setupStatusLabel}</strong> : null}
                   <div className="settingsCliActions">
                     {canInstallBundledSkill ? (
                       <StatefulButton
@@ -1011,7 +1032,7 @@ export function SettingsView({ appearance, themePreferences, fontFamily, develop
                         {cliNeedsRepair ? "Repair" : "Install"}
                       </StatefulButton>
                     ) : null}
-                    {codingAgentsActionValue === "remove" ? (
+                    {!setupReady && codingAgentsActionValue === "remove" ? (
                       <StatefulButton
                         size="sm"
                         state={bundledSkillBusy ? "loading" : "idle"}
@@ -1026,8 +1047,8 @@ export function SettingsView({ appearance, themePreferences, fontFamily, develop
                       </StatefulButton>
                     ) : null}
                   </div>
-                  {cliError ? <span className="settingsError" role="alert">{cliError}</span> : null}
-                  {bundledSkillError ? <span className="settingsError" role="alert">{bundledSkillError}</span> : null}
+                  {cliError ? <Toast tone="error" message={cliError} /> : null}
+                  {bundledSkillError ? <Toast tone="error" message={bundledSkillError} /> : null}
                 </div>
               </div>
           </SettingsSection>
@@ -1039,7 +1060,7 @@ export function SettingsView({ appearance, themePreferences, fontFamily, develop
                 onCheckedChange={(checked) => { void saveDeveloperMode(checked); }}
               />
             </div>
-            {developerModeError ? <span className="settingsError" role="alert">{developerModeError}</span> : null}
+            {developerModeError ? <Toast tone="error" message={developerModeError} /> : null}
           </SettingsSection>
           <SettingsSection title="Logs">
             <StatefulButton
@@ -1055,7 +1076,7 @@ export function SettingsView({ appearance, themePreferences, fontFamily, develop
             >
               Export Logs
             </StatefulButton>
-            {logExportError ? <span className="settingsError" role="alert">{logExportError}</span> : null}
+            {logExportError ? <Toast tone="error" message={logExportError} /> : null}
           </SettingsSection>
           </SettingsGroup>
         </div>

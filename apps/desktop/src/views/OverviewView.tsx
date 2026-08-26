@@ -55,7 +55,7 @@ export type OverviewViewProps = {
   overviewCountErrors: ReadonlySet<OverviewNavId>;
   sessionListStatus: SessionListStatus;
   sessionListError: string;
-  skillUpdateCount?: number;
+  skillUpdateCount: number;
   onNavigate: (id: OverviewNavId) => void;
   onOpenSession: (session: SessionRecord) => void;
 };
@@ -257,7 +257,7 @@ export function OverviewView({
     void loadAnalytics(false, !cached && analyticsRef.current === null);
   }, [agentFilter, analyticsRange, analyticsRevision, analyticsRevisionReady, loadAnalytics]);
 
-  const updateSkillCount = skillUpdateCount ?? skills.filter((skill) => skill.updateStatus === "update-available").length;
+  const updateSkillCount = skillUpdateCount;
 
   const inventory: Array<{ id: OverviewNavId; label: string }> = [
     { id: "skills", label: "Skills" },
@@ -332,15 +332,18 @@ export function OverviewView({
           </div>
 
           {analyticsRevisionError && !analytics ? (
-            <div className="overviewAnalyticsEmpty" role="alert">
-              <strong>Analytics unavailable</strong>
-              <p>{analyticsRevisionError}</p>
-              {onRetryAnalyticsRevision ? (
-                <Button type="button" variant="ghost" size="sm" className="overviewRetryButton" onClick={() => void onRetryAnalyticsRevision()}>
-                  Retry analytics
-                </Button>
-              ) : null}
-            </div>
+            <>
+              <div className="overviewAnalyticsEmpty">
+                <strong>Analytics unavailable</strong>
+                <p>No transcript analytics are available yet.</p>
+                {onRetryAnalyticsRevision ? (
+                  <Button type="button" variant="ghost" size="sm" className="overviewRetryButton" onClick={() => void onRetryAnalyticsRevision()}>
+                    Retry analytics
+                  </Button>
+                ) : null}
+              </div>
+              <Toast tone="error" message={`Analytics refresh failed. ${analyticsRevisionError}`} />
+            </>
           ) : showAnalyticsLoading ? (
             <AnalyticsLoadingState
               progress={analyticsProgress}
@@ -365,19 +368,22 @@ export function OverviewView({
               ) : null}
             </>
           ) : analyticsRevisionError ? null : showAnalyticsLoading ? null : (
-            <div className="overviewAnalyticsEmpty">
-              <strong>Analytics unavailable</strong>
-              <p>{analyticsError || "No transcript analytics are available yet."}</p>
-              <Button type="button" variant="ghost" size="sm" className="overviewRetryButton" onClick={() => void loadAnalytics(true)}>
-                Retry analytics
-              </Button>
-            </div>
+            <>
+              <div className="overviewAnalyticsEmpty">
+                <strong>Analytics unavailable</strong>
+                <p>{analyticsError ? "Analytics could not be loaded." : "No transcript analytics are available yet."}</p>
+                <Button type="button" variant="ghost" size="sm" className="overviewRetryButton" onClick={() => void loadAnalytics(true)}>
+                  Retry analytics
+                </Button>
+              </div>
+              {analyticsError ? <Toast tone="error" message={`Analytics refresh failed. ${analyticsError}`} /> : null}
+            </>
           )}
           {analyticsError && analytics ? (
-            <p className="overviewAnalyticsWarning" role="alert">Refresh failed. Existing analytics are still shown. {analyticsError}</p>
+            <Toast tone="error" message={`Refresh failed. Existing analytics are still shown. ${analyticsError}`} />
           ) : null}
           {analyticsRevisionError && analytics ? (
-            <p className="overviewAnalyticsWarning" role="alert">Analytics revision refresh failed. Existing analytics are still shown. {analyticsRevisionError}</p>
+            <Toast tone="error" message={`Analytics revision refresh failed. Existing analytics are still shown. ${analyticsRevisionError}`} />
           ) : null}
         </section>
 
@@ -395,12 +401,9 @@ export function OverviewView({
             ) : usage.recentSessions.length > 0 ? (
               <div className="overviewSessionGrid" aria-label="Recent sessions">
                 {usage.recentSessions.map((session) => {
-                  const previewKey = `${session.agent ?? ""}:${session.id ?? ""}`;
-                  const preview = summarizeSessionPreviewRecord(session) ?? {
-                    userLast: "—",
-                    assistantLast: "—",
-                  };
-                  const displayTitle = session.title || session.id || "Untitled session";
+                  const previewKey = `${session.agent}:${session.id}`;
+                  const preview = summarizeSessionPreviewRecord(session);
+                  const displayTitle = session.title;
                   return (
                     <button
                       key={previewKey}
@@ -410,7 +413,7 @@ export function OverviewView({
                     >
                       <span className="overviewSessionRowHeader">
                         <span className="overviewSessionTitleLine">
-                          <AgentBadge agent={session.agent || "Unknown"} small />
+                          <AgentBadge agent={session.agent} small />
                           <Tooltip content={formatSessionTitle(displayTitle)} onlyWhenTruncated>
                             <span className="overviewSessionRowTitle"><SessionTitleText interactive={false} value={displayTitle} /></span>
                           </Tooltip>
@@ -419,11 +422,11 @@ export function OverviewView({
                       </span>
                       <span className="overviewSessionMessage">
                         <span className="overviewSessionMessageLabel" role="img" aria-label="User message"><ArrowRight size={13} aria-hidden="true" /></span>
-                        <span className="overviewSessionMessageText"><TranscriptLinkText interactive={false} value={preview.userLast} /></span>
+                        <span className="overviewSessionMessageText"><TranscriptLinkText interactive={false} value={preview?.userLast ?? "—"} /></span>
                       </span>
                       <span className="overviewSessionMessage">
                         <span className="overviewSessionMessageLabel" role="img" aria-label="Agent reply"><ArrowLeft size={13} aria-hidden="true" /></span>
-                        <span className="overviewSessionMessageText"><TranscriptLinkText interactive={false} value={preview.assistantLast} /></span>
+                        <span className="overviewSessionMessageText"><TranscriptLinkText interactive={false} value={preview?.assistantLast ?? "—"} /></span>
                       </span>
                     </button>
                   );

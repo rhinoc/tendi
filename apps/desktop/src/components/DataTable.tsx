@@ -30,6 +30,7 @@ import { FreezeColumnResizeHandle, useFreezeColumnResize } from "./shared/freeze
 import { LoadingState } from "./shared/LoadingState.tsx";
 import { SelectionActionBar } from "./shared/SelectionActionBar.tsx";
 import { SelectionCheckbox } from "./shared/SelectionCheckbox.tsx";
+import { RowMenuOpenChangeProvider } from "./shared/row-menu-context.tsx";
 import { useElementSize } from "./shared/useElementSize.ts";
 import {
   MARQUEE_DRAG_THRESHOLD,
@@ -120,8 +121,7 @@ function normalizeGroupKey(raw: unknown) {
 }
 
 function defaultGroupLabel(key: string) {
-  if (key === EMPTY_GROUP_KEY) return "Unknown";
-  return key;
+  return key === EMPTY_GROUP_KEY ? "" : key;
 }
 
 function columnGroupKey<TRow>(column: ColumnDef<TRow>) {
@@ -204,7 +204,7 @@ function metaFor<TRow>(column: { columnDef: { meta?: unknown } }) {
 export function DataTable<TRow extends Record<string, unknown>>({
   rows,
   columns,
-  getRowId = (row) => `${(row as { id?: string }).id ?? ""}`,
+  getRowId,
   getRowLabel = (row) => {
     const record = row as { selectionLabel?: string; name?: string; title?: string };
     return record.selectionLabel ?? record.name ?? record.title;
@@ -230,6 +230,7 @@ export function DataTable<TRow extends Record<string, unknown>>({
   rowProps,
   rowContextMenu,
   bottomBar,
+  bottomBarActionsClassName,
   bottomBarCheckboxLabel = "Select rows",
   selectionLabel = "selected",
   loading = false,
@@ -238,6 +239,7 @@ export function DataTable<TRow extends Record<string, unknown>>({
 }: DataTableProps<TRow>) {
   const shellRef = useRef<HTMLDivElement>(null);
   const scrollAnchorRef = useRef<{ id: string; offsetTop: number } | null>(null);
+  const scrollHeaderTrackRef = useRef<HTMLDivElement>(null);
   const { ref: scrollRef, size: scrollSize } = useElementSize<HTMLDivElement>(
     { width: 0, height: 720 },
     {
@@ -267,9 +269,10 @@ export function DataTable<TRow extends Record<string, unknown>>({
       const viewport = currentScroll.getBoundingClientRect();
       const row = [...currentScroll.querySelectorAll<HTMLElement>("[data-row-id]")]
         .find((candidate) => candidate.getBoundingClientRect().bottom > viewport.top);
-      if (row) {
+      const rowId = row?.dataset.rowId;
+      if (row && rowId) {
         scrollAnchorRef.current = {
-          id: row.dataset.rowId ?? "",
+          id: rowId,
           offsetTop: row.getBoundingClientRect().top - viewport.top,
         };
       }
@@ -280,7 +283,7 @@ export function DataTable<TRow extends Record<string, unknown>>({
   const [marquee, setMarquee] = useState<MarqueeRect | null>(null);
   const [hoveredRowId, setHoveredRowId] = useState<string | null>(null);
   const [menuRowId, setMenuRowId] = useState<string | null>(null);
-  const [scrollLeft, setScrollLeft] = useState(0);
+  const [rowActionsMenuId, setRowActionsMenuId] = useState<string | null>(null);
   const [scrollTop, setScrollTop] = useState(0);
   const scrollUpdateFrameRef = useRef<number | null>(null);
   const [expandedGroups, setExpandedGroups] = useState<string[]>([]);
@@ -345,7 +348,7 @@ export function DataTable<TRow extends Record<string, unknown>>({
     if (!activeGroupColumn) return groupLabel;
     if (typeof activeGroupColumn.groupLabel === "function") return activeGroupColumn.groupLabel;
     if (groupsByDay(activeGroupColumn)) {
-      return (key: string) => (key === EMPTY_GROUP_KEY ? "Unknown" : formatDayGroupLabel(key));
+      return (key: string) => (key === EMPTY_GROUP_KEY ? "" : formatDayGroupLabel(key));
     }
     return groupLabel;
   }, [activeGroupColumn, groupLabel]);
@@ -485,7 +488,8 @@ export function DataTable<TRow extends Record<string, unknown>>({
       const hits = new Set<string>();
       for (const node of (shellRef.current ?? scroll).querySelectorAll<HTMLElement>("[data-row-id]")) {
         if (node.dataset.rowSelectable === "false") continue;
-        if (rectsIntersect(contentRect, elementContentRect(node, scroll, bounds))) hits.add(node.dataset.rowId ?? "");
+        const rowId = node.dataset.rowId;
+        if (rowId && rectsIntersect(contentRect, elementContentRect(node, scroll, bounds))) hits.add(rowId);
       }
       const next = additive ? new Set(base) : new Set();
       for (const id of hits) next.add(id);
@@ -713,16 +717,21 @@ export function DataTable<TRow extends Record<string, unknown>>({
     selectionActive && "selectionActive",
     hoveredRowId === row.id && "rowHover",
     menuRowId === row.id && "menuActive",
+    rowActionsMenuId === row.id && "menuActive",
     extraClassName,
   ].filter(Boolean).join(" ");
 
+  const notifyRowActionsMenuOpenChange = useCallback((rowId: string, open: boolean) => {
+    setRowActionsMenuId((current) => open ? rowId : current === rowId ? null : current);
+  }, []);
+
   const renderSelectionCell = (row: Row<TRow>) => {
-    const id = row.id;
+    const rowLabel = getRowLabel(row.original);
     const rowSelectable = row.getCanSelect();
     return selectable && rowSelectable ? (
       <SelectionCheckbox
         checked={row.getIsSelected()}
-        label={`Select ${getRowLabel(row.original) ?? id}`}
+        label={rowLabel ? `Select ${rowLabel}` : "Select row"}
         className="rowSelection"
         onChange={() => row.toggleSelected()}
       />
@@ -783,8 +792,10 @@ export function DataTable<TRow extends Record<string, unknown>>({
           onRowClick(row.original);
         } : undefined}
       >
-        {renderSelectionCell(row)}
-        {row.getVisibleCells().map(renderDataCell)}
+        <RowMenuOpenChangeProvider onOpenChange={(open) => notifyRowActionsMenuOpenChange(id, open)}>
+          {renderSelectionCell(row)}
+          {row.getVisibleCells().map(renderDataCell)}
+        </RowMenuOpenChangeProvider>
       </div>
     );
 
@@ -815,8 +826,10 @@ export function DataTable<TRow extends Record<string, unknown>>({
           onRowClick(row.original);
         } : undefined}
       >
-        {pane === "frozen" ? renderSelectionCell(row) : null}
-        {cells.map(renderDataCell)}
+        <RowMenuOpenChangeProvider onOpenChange={(open) => notifyRowActionsMenuOpenChange(id, open)}>
+          {pane === "frozen" ? renderSelectionCell(row) : null}
+          {cells.map(renderDataCell)}
+        </RowMenuOpenChangeProvider>
       </div>
     );
 
@@ -1050,17 +1063,28 @@ export function DataTable<TRow extends Record<string, unknown>>({
     </div>
   );
 
+  const syncScrollHeader = useCallback((left: number) => {
+    const track = scrollHeaderTrackRef.current;
+    if (track) track.style.transform = `translateX(${-left}px)`;
+  }, []);
+
   const handleBodyScroll = useCallback(() => {
     const scroll = scrollRef.current;
     if (!scroll) return;
-    if (freezeColumn) setScrollLeft(scroll.scrollLeft);
+    if (freezeColumn) syncScrollHeader(scroll.scrollLeft);
     if (!virtualizedRows && !virtualizedGroups) return;
     if (scrollUpdateFrameRef.current !== null) return;
     scrollUpdateFrameRef.current = window.requestAnimationFrame(() => {
       scrollUpdateFrameRef.current = null;
       setScrollTop(scrollRef.current?.scrollTop ?? 0);
     });
-  }, [freezeColumn, virtualizedGroups, virtualizedRows]);
+  }, [freezeColumn, syncScrollHeader, virtualizedGroups, virtualizedRows]);
+
+  useLayoutEffect(() => {
+    if (!freezeColumn) return;
+    const scroll = scrollRef.current;
+    if (scroll) syncScrollHeader(scroll.scrollLeft);
+  });
 
   const renderFrozenTable = () => (
     <>
@@ -1070,7 +1094,7 @@ export function DataTable<TRow extends Record<string, unknown>>({
             <div className="dataTableFrozenSurface">{frozenHeaderRow}</div>
           </div>
           <div className="dataTableScrollHeaderPane">
-            <div className="dataTableScrollHeaderTrack" style={{ transform: `translateX(${-scrollLeft}px)` }}>
+            <div ref={scrollHeaderTrackRef} className="dataTableScrollHeaderTrack" style={{ transform: "translateX(0px)" }}>
               {scrollHeaderRow}
             </div>
           </div>
@@ -1186,6 +1210,7 @@ export function DataTable<TRow extends Record<string, unknown>>({
           onClear={clearSelection}
           checkboxLabel={bottomBarCheckboxLabel}
           label={selectionLabel}
+          actionsClassName={bottomBarActionsClassName}
         >
           {bottomBar(selectedRows, { clear: clearSelection })}
         </SelectionActionBar>

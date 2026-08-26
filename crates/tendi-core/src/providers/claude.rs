@@ -14,6 +14,48 @@ use super::*;
 
 pub(super) struct ClaudeProvider;
 
+fn infer_mcp_transport(spec: &Value) -> Option<String> {
+    spec.get("transport")
+        .or_else(|| spec.get("type"))
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .or_else(|| spec.get("command").and_then(Value::as_str).map(|_| "stdio".to_string()))
+        .or_else(|| {
+            spec.get("url").and_then(Value::as_str).map(|url| {
+                if url.contains("/sse") { "sse" } else { "http" }.to_string()
+            })
+        })
+}
+
+fn infer_mcp_status(spec: &Value) -> String {
+    if infer_mcp_enabled(spec) {
+        "configured"
+    } else {
+        "disabled"
+    }
+    .to_string()
+}
+
+fn infer_mcp_enabled(spec: &Value) -> bool {
+    !spec
+        .get("disabled")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+        && spec.get("enabled").and_then(Value::as_bool).unwrap_or(true)
+}
+
+fn update_mcp_server(spec: &mut serde_json::Map<String, Value>, enabled: bool) -> bool {
+    let has_disabled = spec.contains_key("disabled");
+    let has_enabled = spec.contains_key("enabled");
+    if has_disabled || !has_enabled {
+        spec.insert("disabled".to_string(), Value::Bool(!enabled));
+    }
+    if has_enabled {
+        spec.insert("enabled".to_string(), Value::Bool(enabled));
+    }
+    true
+}
+
 pub(super) fn matches_name(normalized: &str) -> bool {
     matches!(normalized, "claude" | "claudecode")
 }
@@ -214,22 +256,22 @@ pub(super) fn tool_payloads(value: &Value) -> Vec<(&Value, Evidence)> {
     content
         .iter()
         .filter(|item| item.get("type").and_then(Value::as_str) == Some("tool_use"))
-        .map(|item| {
+        .filter_map(|item| {
             let name = item
                 .get("name")
                 .and_then(Value::as_str)
-                .unwrap_or("tool_use");
-            (
+                .filter(|name| !name.trim().is_empty())?;
+            Some((
                 item,
                 Evidence {
                     kind: name.to_string(),
-                    text: crate::session_skills::summarize_evidence(item, name),
+                    text: crate::session_skills::summarize_evidence(item),
                     time: value
                         .get("timestamp")
                         .and_then(Value::as_str)
                         .map(str::to_string),
                 },
-            )
+            ))
         })
         .collect()
 }
@@ -275,12 +317,13 @@ fn collect_claude_item(value: &Value, items: &mut Vec<TranscriptItem>) {
                     let name = item
                         .get("name")
                         .and_then(Value::as_str)
-                        .unwrap_or("tool_call");
+                        .filter(|name| !name.trim().is_empty())
+                        .map(str::to_string);
                     push_tool_item(
                         items,
                         "tool",
-                        summarize_tool_call(item, name),
-                        Some(name.to_string()),
+                        summarize_tool_call(item),
+                        name,
                         time.clone(),
                         extract_tool_command(item),
                         None,
@@ -294,7 +337,9 @@ fn collect_claude_item(value: &Value, items: &mut Vec<TranscriptItem>) {
     }
 
     if let Some(result) = value.get("toolUseResult") {
-        let body = extract_content_text(Some(result)).unwrap_or_else(|| "tool result".to_string());
+        let Some(body) = extract_content_text(Some(result)) else {
+            return;
+        };
         let call_id = value
             .get("toolUseID")
             .or_else(|| value.get("tool_use_id"))
@@ -303,6 +348,11 @@ fn collect_claude_item(value: &Value, items: &mut Vec<TranscriptItem>) {
         let duration_ms = extract_duration_ms(value, None);
         attach_tool_result(items, call_id, Some(body), duration_ms, timestamp_ms);
     }
+}
+
+#[cfg(test)]
+pub(crate) fn collect_transcript_item(value: &Value, items: &mut Vec<TranscriptItem>) {
+    collect_claude_item(value, items);
 }
 
 fn attach_claude_tool_results(
@@ -320,13 +370,15 @@ fn attach_claude_tool_results(
             continue;
         }
         handled = true;
-        let body = extract_content_text(item.get("content"))
+        let Some(body) = extract_content_text(item.get("content"))
             .or_else(|| {
                 value
                     .get("toolUseResult")
                     .and_then(|result| extract_content_text(Some(result)))
             })
-            .unwrap_or_else(|| "tool result".to_string());
+        else {
+            continue;
+        };
         let call_id = item
             .get("tool_use_id")
             .or_else(|| item.get("toolUseID"))
@@ -352,6 +404,17 @@ impl super::AgentProvider for ClaudeProvider {
 
     fn global_skill_root(&self, home: &Path) -> Option<PathBuf> {
         Some(home.join(".claude/skills"))
+    }
+
+    fn project_skill_root(&self, cwd: &Path) -> Option<PathBuf> {
+        Some(cwd.join(".claude/skills"))
+    }
+
+    fn skill_target(&self) -> Option<ProviderSkillTarget> {
+        Some(ProviderSkillTarget {
+            id: "claude-code",
+            display_name: "Claude Code",
+        })
     }
 
     fn config_profile_path(&self, home: &Path, _agent_home: &Path, name: &str) -> Option<PathBuf> {
@@ -456,6 +519,7 @@ impl super::AgentProvider for ClaudeProvider {
                 ancestor.join(".claude/settings.json"),
                 ancestor.join(".claude/settings.local.json"),
             ],
+            "mcp" => vec![ancestor.join(".mcp.json")],
             "skills" => vec![ancestor.join(".claude/skills")],
             _ => Vec::new(),
         }
@@ -631,6 +695,10 @@ impl super::AgentProvider for ClaudeProvider {
         Some("claude")
     }
 
+    fn skill_target_aliases(&self) -> &'static [(&'static str, &'static str)] {
+        &[("claude", "claude-code")]
+    }
+
     fn apply_config_profile(&self, command: &mut SessionCommand, profile: &str) -> Result<()> {
         apply_config_profile(command, profile)
     }
@@ -670,6 +738,10 @@ impl super::AgentProvider for ClaudeProvider {
                 &home.join(".claude/settings.json"),
                 self.kind(),
                 "global",
+                &["mcpServers"],
+                infer_mcp_transport,
+                infer_mcp_enabled,
+                infer_mcp_status,
                 servers,
                 warnings,
             );
@@ -680,11 +752,48 @@ impl super::AgentProvider for ClaudeProvider {
                 &ancestor.join(".mcp.json"),
                 self.kind(),
                 &scope,
+                &["mcpServers"],
+                infer_mcp_transport,
+                infer_mcp_enabled,
+                infer_mcp_status,
                 servers,
                 warnings,
             );
         }
         Ok(())
+    }
+
+    fn set_mcp_enabled(&self, request: &McpSetEnabledRequest) -> Result<()> {
+        if request.path.extension().and_then(|value| value.to_str()) != Some("json") {
+            bail!("Claude Code MCP source must be JSON");
+        }
+        crate::mcp::set_json_server_enabled(request, &["mcpServers"], update_mcp_server)
+    }
+
+    fn mcp_status_after_toggle(&self, enabled: bool) -> &'static str {
+        if enabled { "configured" } else { "disabled" }
+    }
+
+    fn delete_hooks(
+        &self,
+        requests: &[HookDeleteRequest],
+        source: &str,
+    ) -> Result<String> {
+        if requests[0].path.extension().and_then(|value| value.to_str()) != Some("json") {
+            bail!("Claude Code hook source must be JSON");
+        }
+        crate::hooks::delete_json_hooks(requests, source)
+    }
+
+    fn set_hook_enabled(
+        &self,
+        request: &HookSetEnabledRequest,
+        source: &str,
+    ) -> Result<String> {
+        if request.path.extension().and_then(|value| value.to_str()) != Some("json") {
+            bail!("Claude Code hook source must be JSON");
+        }
+        crate::hooks::set_json_hook_enabled(request, source)
     }
 
     fn managed_hook_path(&self, path: &Path) -> bool {

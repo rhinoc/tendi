@@ -126,14 +126,10 @@ fn configs_for_roots(home: &Path) -> Vec<AgentConfigFile> {
 fn configs_for_roots_with_codex_home(home: &Path, codex_home: &Path) -> Vec<AgentConfigFile> {
     let mut configs = crate::providers::agent_providers()
         .into_iter()
-        .flat_map(|provider| {
-            let agent_home = if provider.kind() == AgentKind::Codex {
-                codex_home.to_path_buf()
-            } else {
-                provider.config_home(home)
-            };
-            provider.config_files(home, &agent_home)
-        })
+        .flat_map(|provider| provider.config_files(
+            home,
+            &provider.config_home_for_test(home, codex_home),
+        ))
         .collect::<Vec<_>>();
     for config in &mut configs {
         config.updated_at = file_updated_at(&config.path);
@@ -193,11 +189,7 @@ fn resolve_config_for_roots(
     crate::providers::agent_providers()
         .into_iter()
         .find_map(|provider| {
-            let agent_home = if provider.kind() == AgentKind::Codex {
-                codex_home.to_path_buf()
-            } else {
-                provider.config_home(home)
-            };
+            let agent_home = provider.config_home_for_test(home, codex_home);
             provider.config_file_for_path(home, &agent_home, path)
         })
         .ok_or_else(|| anyhow::anyhow!("unsupported agent config path: {}", path.display()))
@@ -332,32 +324,7 @@ mod tests {
         ))
     }
 
-    #[test]
-    fn lists_supported_agent_configs() {
-        let home = temp_home("list");
-        let configs = configs_for_home(&home);
-        assert_eq!(configs.len(), 3);
-        assert_eq!(configs[0].path, home.join(".codex/config.toml"));
-        assert_eq!(configs[1].path, home.join(".claude/settings.json"));
-        assert_eq!(configs[2].path, home.join(".cursor/cli-config.json"));
-    }
 
-    #[test]
-    fn lists_config_updated_at_for_existing_files() {
-        let home = temp_home("updated-at");
-        let path = home.join(".codex/config.toml");
-        fs::create_dir_all(path.parent().expect("config parent")).expect("create config home");
-        fs::write(&path, "model = \"one\"\n").expect("write config");
-
-        let configs = configs_for_home(&home);
-        let config = configs
-            .iter()
-            .find(|config| config.path == path)
-            .expect("config should be listed");
-        assert!(config.updated_at.is_some());
-
-        fs::remove_dir_all(home).expect("temporary home should be removable");
-    }
 
     #[test]
     fn accepts_a_custom_codex_home() {

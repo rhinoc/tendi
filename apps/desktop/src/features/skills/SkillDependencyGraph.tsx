@@ -1,8 +1,8 @@
 export type SkillDependencyRecord = {
   name: string;
-  description?: string;
-  dependencies?: string[];
-  dependents?: string[];
+  description: string;
+  dependencies: string[];
+  dependents: string[];
 };
 
 export type SkillDependencyGraphProps = {
@@ -15,7 +15,10 @@ export type SkillDependencyGraphProps = {
 
 function relationList(names: string[], skillsByName: Map<string, SkillDependencyRecord>) {
   return names
-    .map((name) => skillsByName.get(name) ?? { name })
+    .flatMap((name) => {
+      const skill = skillsByName.get(name);
+      return skill ? [skill] : [];
+    })
     .sort((left, right) => left.name.localeCompare(right.name));
 }
 
@@ -71,8 +74,8 @@ export function SkillDependencyGraph({
     );
   }
 
-  const dependencies = relationList(skill.dependencies ?? [], skillsByName);
-  const dependents = relationList(skill.dependents ?? [], skillsByName);
+  const dependencies = relationList(skill.dependencies, skillsByName);
+  const dependents = relationList(skill.dependents, skillsByName);
   const emptySide = dependencies.length === 0
     ? dependents.length === 0 ? "both" : "dependencies"
     : dependents.length === 0 ? "dependents" : "none";

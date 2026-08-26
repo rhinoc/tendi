@@ -3,6 +3,7 @@ import { Dialog } from "radix-ui";
 import { DialogActionButton } from "../../components/shared/DialogActionButton.tsx";
 import { DialogShell } from "../../components/shared/DialogShell.tsx";
 import { DialogStatefulButton } from "../../components/shared/DialogStatefulButton.tsx";
+import { Toast } from "../../components/shared/Toast.tsx";
 
 type BundledSkillInstallDialogProps = {
   open: boolean;
@@ -30,10 +31,10 @@ export function BundledSkillInstallDialog({
           <Dialog.Title className="confirmDialogTitle">Set up Tendi for coding agents?</Dialog.Title>
           <p id="bundled-skill-description" className="confirmDialogDescription">
             This registers the <code>tendi</code> command on your shell PATH, then installs the
-            Tendi skill into <code>{target}</code>. Coding agents can search local sessions and
+            Tendi skill into <span>{target}</span>. Coding agents can search local sessions and
             manage skills; no session data is uploaded.
           </p>
-          {error ? <p className="skillUpdatePreviewError" role="alert">{error}</p> : null}
+          {error ? <Toast tone="error" message={error} /> : null}
           <div className="confirmDialogActions">
             <DialogActionButton variant="secondary" disabled={busy} onClick={onDismiss}>Skip</DialogActionButton>
             <DialogStatefulButton

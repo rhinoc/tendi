@@ -10,7 +10,7 @@ export function canonicalSessionAgent(agent: unknown): string {
 }
 
 export function sessionExternalKey(session: SessionSelectionRecord): string {
-  return `${canonicalSessionAgent(session.agent)}:${session.id ?? ""}`;
+  return `${canonicalSessionAgent(session.agent)}:${session.id}`;
 }
 
 export function resolveInitialSessionId(
@@ -27,7 +27,7 @@ export function resolveInitialSession<T extends SessionSelectionRecord>(
   const requestedKey = `${activeSessionKey ?? ""}`.toLowerCase();
   if (requestedKey) {
     const requested = sessions.find((session) => sessionExternalKey(session) === requestedKey);
-    if (requested) return requested;
+    return requested;
   }
   return sessions[0];
 }

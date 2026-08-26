@@ -18,8 +18,8 @@ Project documentation is split between user-facing setup and focused implementat
   migration, source/update compatibility, and remaining feature gaps.
 - [MCP and Hooks tab audit](mcp-hooks-tab-audit.md): current data sources, UI capabilities,
   limitations, and follow-up design options.
-- [Performance gates](performance-gates.md): local performance thresholds, baselines, and the
-  pre-push hook.
+- [Performance gates](performance-gates.md): CI fast and local performance thresholds, baselines,
+  and the pre-push hook.
 - [Logging](logging.md): persistent desktop and Rust logs, rotation, environment overrides, and
   the frontend logging rule.
 - [Tauri updater](UPDATER.md): signing keys, release artifacts, `latest.json`, and update behavior.

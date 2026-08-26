@@ -5,57 +5,42 @@ import { Dialog } from "radix-ui";
 import { LoadingState } from "../../components/shared/LoadingState.tsx";
 import { LoadErrorState } from "../../components/shared/LoadErrorState.tsx";
 import { IconButton } from "../../components/shared/IconButton.tsx";
-import { formatSessionTitle, normalizeSession, sessionProject, sessionProjectGroupKey } from "../../lib/index.ts";
+import { formatSessionTitle, normalizeSession, sessionProject, sessionProjectGroupKey, type SessionSkillLinkRecord } from "../../lib/index.ts";
 import { SkillSessionProjectChart, type SkillSessionProjectItem } from "./SkillSessionProjectChart.tsx";
 import "../../components/shared/confirm-dialog.css";
 import "./linked-sessions.css";
 
-export type LinkedSessionLink = Record<string, unknown> & {
-  session_path?: string;
-  sessionPath?: string;
-  session_project?: string;
-  sessionProject?: string;
-  session_id?: string | number;
-  sessionId?: string | number;
-  agent?: string;
-  session_title?: string;
-  sessionTitle?: string;
-  session_started_at?: string;
-  sessionStartedAt?: string;
-  session_updated_at?: string;
-  sessionUpdatedAt?: string;
-  evidence_time?: string;
-  evidenceTime?: string;
-  session_message_count?: number;
-  sessionMessageCount?: number;
-  skill_name?: string;
-  skillName?: string;
-  skill_path?: string;
-  skillPath?: string;
-  evidence_text?: string;
-  evidenceText?: string;
-};
+export type LinkedSessionLink = SessionSkillLinkRecord;
 
-export type LinkedSessionRow = ReturnType<typeof linkedSessionToSession>;
+export type LinkedSessionRow = NonNullable<ReturnType<typeof linkedSessionToSession>>;
 
+function linkedSessionId(link: LinkedSessionLink): string | undefined {
+  const id = link.session_id.trim();
+  return id || undefined;
+}
 
-export function linkedSessionToSession(link: LinkedSessionLink, index: number) {
-  const sessionPath = link.session_path ?? link.sessionPath ?? "";
-  const project = link.session_project ?? link.sessionProject ?? "";
+export function linkedSessionToSession(link: LinkedSessionLink) {
+  const id = linkedSessionId(link);
+  if (!id) return undefined;
+  const sessionPath = link.session_path.trim();
+  const agent = link.agent.trim();
+  if (!sessionPath || !agent) return undefined;
+  const project = typeof link.session_project === "string" ? link.session_project.trim() : "";
   const normalized = normalizeSession({
-    id: link.session_id ?? link.sessionId,
-    agent: link.agent,
-    title: link.session_title ?? link.sessionTitle,
+    id,
+    agent,
+    title: link.session_title,
     project,
     path: sessionPath,
-    started_at: link.session_started_at ?? link.sessionStartedAt,
-    updated_at: link.session_updated_at ?? link.sessionUpdatedAt ?? link.evidence_time ?? link.evidenceTime,
-    message_count: link.session_message_count ?? link.sessionMessageCount,
-  }, index);
+    started_at: link.session_started_at,
+    updated_at: link.session_updated_at,
+    message_count: link.session_message_count,
+  });
+  if (!normalized) return undefined;
   return {
     ...normalized,
-    projectPath: project || normalized.projectPath,
-    path: sessionPath || normalized.path,
+    projectPath: project,
+    path: sessionPath,
     linkedSessionLink: link,
   };
 }
@@ -79,7 +64,6 @@ export type LinkedSessionsSummaryProps = {
 export type LinkedSessionsDrawerProps = {
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  skillName: string;
   links: LinkedSessionLink[];
   loading: boolean;
   error?: string;
@@ -110,31 +94,32 @@ export function LinkedSessionsSummary({ links, loading, status, onOpen }: Linked
   );
 }
 
-export function LinkedSessionsDrawer({ open, onOpenChange, skillName, links, loading, error = "", onRetry, onOpenSession }: LinkedSessionsDrawerProps) {
+export function LinkedSessionsDrawer({ open, onOpenChange, links, loading, error = "", onRetry, onOpenSession }: LinkedSessionsDrawerProps) {
   const visibleRows = useMemo(
     () => [...links]
+      .filter((link) => linkedSessionId(link))
       .sort((left, right) => linkedSessionUpdatedAt(right) - linkedSessionUpdatedAt(left))
       .slice(0, 50)
-      .map((link, index) => linkedSessionToSession(link, index)),
+      .map((link) => linkedSessionToSession(link))
+      .filter((session): session is LinkedSessionRow => Boolean(session)),
     [links],
   );
   const chartItems = useMemo<SkillSessionProjectItem[]>(
-    () => visibleRows.map((session, index) => {
+    () => visibleRows.map((session) => {
       const link = session.linkedSessionLink;
-      const displayedTitle = formatSessionTitle(session.title) || session.id || "Untitled session";
-      const project = sessionProject(session) || "Unknown";
-      const projectKey = sessionProjectGroupKey(session) || project;
+      const displayedTitle = formatSessionTitle(session.title);
+      const project = sessionProject(session);
+      const projectKey = sessionProjectGroupKey(session);
       return {
-        key: `${session.agent}-${session.id}-${session.path}-${index}`,
-        skillKey: link.skill_name ?? link.skillName ?? skillName,
-        skillLabel: link.skill_name ?? link.skillName ?? skillName,
+        key: `${session.agent}-${session.id}-${session.path}`,
+        skillKey: link.skill_name,
+        skillLabel: link.skill_name,
         sessionLabel: displayedTitle,
-        sessionTitle: `${displayedTitle} · ${session.id}`,
         projectKey,
         projectLabel: project,
       };
     }),
-    [skillName, visibleRows],
+    [visibleRows],
   );
   return (
     <Dialog.Root open={open} onOpenChange={onOpenChange} modal={false}>
@@ -169,7 +154,7 @@ export function LinkedSessionsDrawer({ open, onOpenChange, skillName, links, loa
                 onSessionClick={onOpenSession ? (item) => {
                   const index = chartItems.findIndex((candidate) => candidate.key === item.key);
                   const session = visibleRows[index];
-                  if (session) onOpenSession(session.linkedSessionLink ?? session);
+                  if (session) onOpenSession(session.linkedSessionLink);
                 } : undefined}
               />
             </div>
@@ -181,11 +166,5 @@ export function LinkedSessionsDrawer({ open, onOpenChange, skillName, links, loa
 }
 
 function linkedSessionUpdatedAt(link: LinkedSessionLink): number {
-  return Date.parse(
-    `${link.session_updated_at
-      ?? link.sessionUpdatedAt
-      ?? link.evidence_time
-      ?? link.evidenceTime
-      ?? ""}`,
-  ) || 0;
+  return Date.parse(`${link.session_updated_at ?? ""}`) || 0;
 }

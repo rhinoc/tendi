@@ -2,6 +2,7 @@ use std::{
     env, fmt,
     path::{Path, PathBuf},
     str::FromStr,
+    sync::LazyLock,
 };
 
 use anyhow::{Context, Result, bail};
@@ -41,15 +42,15 @@ impl SkillTarget {
         crate::providers::skill_target_uses_shared_layout(&self.0)
     }
 
-    pub fn agent_kind(&self) -> AgentKind {
+    pub fn agent_kind(&self) -> Result<AgentKind> {
         if matches!(self.0.as_str(), "shared" | "universal") {
-            return AgentKind::Shared;
+            return Ok(AgentKind::Shared);
         }
         crate::providers::all_providers()
             .into_iter()
             .find(|provider| provider.storage_key() == self.0)
             .map(|provider| provider.kind())
-            .unwrap_or(AgentKind::Unknown)
+            .with_context(|| format!("unknown skill target `{}`", self.0))
     }
 }
 
@@ -65,7 +66,7 @@ impl FromStr for SkillTarget {
     fn from_str(value: &str) -> Result<Self> {
         let value = value.trim().to_ascii_lowercase();
         if value == "shared"
-            || value == "claude"
+            || crate::providers::canonical_skill_target_alias(&value).is_some()
             || target_catalog().iter().any(|item| item.id == value)
         {
             Ok(Self(value))
@@ -105,11 +106,18 @@ pub struct SkillTargetConfig {
     pub project_skills_dir: &'static str,
     #[serde(skip)]
     global: GlobalRoot,
+    #[serde(skip)]
+    provider: Option<AgentKind>,
 }
 
 impl SkillTargetConfig {
     pub fn supports_global(self) -> bool {
         !matches!(self.global, GlobalRoot::Unsupported)
+    }
+
+    pub fn project_skills_root(self, cwd: &Path) -> Result<PathBuf> {
+        let target = SkillTarget(self.id.to_string());
+        skill_target_root(cwd, &target, SkillInstallScope::Project)
     }
 }
 
@@ -122,6 +130,7 @@ enum GlobalRoot {
         fallback: &'static str,
     },
     OpenClaw,
+    Provider(AgentKind),
     Unsupported,
 }
 
@@ -132,6 +141,7 @@ macro_rules! target {
             display_name: $display,
             project_skills_dir: $project,
             global: $global,
+            provider: None,
         }
     };
 }
@@ -188,15 +198,6 @@ static TARGETS: &[SkillTargetConfig] = &[
         ".bob/skills",
         GlobalRoot::Home(".bob/skills")
     ),
-    target!(
-        "claude-code",
-        "Claude Code",
-        ".claude/skills",
-        GlobalRoot::Env {
-            name: "CLAUDE_CONFIG_DIR",
-            fallback: ".claude"
-        }
-    ),
     target!("openclaw", "OpenClaw", "skills", GlobalRoot::OpenClaw),
     target!(
         "cline",
@@ -229,15 +230,6 @@ static TARGETS: &[SkillTargetConfig] = &[
         GlobalRoot::Home(".codestudio/skills")
     ),
     target!(
-        "codex",
-        "Codex",
-        ".agents/skills",
-        GlobalRoot::Env {
-            name: "CODEX_HOME",
-            fallback: ".codex"
-        }
-    ),
-    target!(
         "command-code",
         "Command Code",
         ".commandcode/skills",
@@ -260,12 +252,6 @@ static TARGETS: &[SkillTargetConfig] = &[
         "Crush",
         ".crush/skills",
         GlobalRoot::Home(".config/crush/skills")
-    ),
-    target!(
-        "cursor",
-        "Cursor",
-        ".agents/skills",
-        GlobalRoot::Home(".cursor/skills")
     ),
     target!(
         "deepagents",
@@ -600,17 +586,40 @@ static LEGACY_SHARED: SkillTargetConfig = target!(
     GlobalRoot::Home(".agents/skills")
 );
 
-pub fn target_catalog() -> &'static [SkillTargetConfig] {
+fn provider_target_configs() -> impl Iterator<Item = SkillTargetConfig> {
+    crate::providers::all_providers()
+        .into_iter()
+        .filter_map(|provider| {
+            let target = provider.skill_target()?;
+            Some(SkillTargetConfig {
+                id: target.id,
+                display_name: target.display_name,
+                project_skills_dir: "<provider-owned>",
+                global: GlobalRoot::Provider(provider.kind()),
+                provider: Some(provider.kind()),
+            })
+        })
+}
+
+static TARGET_CATALOG: LazyLock<Vec<SkillTargetConfig>> = LazyLock::new(|| {
     TARGETS
+        .iter()
+        .copied()
+        .chain(provider_target_configs())
+        .collect()
+});
+
+pub fn target_catalog() -> &'static [SkillTargetConfig] {
+    TARGET_CATALOG.as_slice()
 }
 
 pub fn target_config(target: &SkillTarget) -> Result<&'static SkillTargetConfig> {
-    let canonical = match target.id() {
-        "shared" => return Ok(&LEGACY_SHARED),
-        "claude" => "claude-code",
-        value => value,
-    };
-    TARGETS
+    if target.id() == "shared" {
+        return Ok(&LEGACY_SHARED);
+    }
+    let canonical =
+        crate::providers::canonical_skill_target_alias(target.id()).unwrap_or_else(|| target.id());
+    target_catalog()
         .iter()
         .find(|item| item.id == canonical)
         .with_context(|| format!("unknown skill target `{}`", target.id()))
@@ -622,6 +631,18 @@ pub fn skill_target_root(
     scope: SkillInstallScope,
 ) -> Result<PathBuf> {
     let config = target_config(target)?;
+    if let Some(agent) = config.provider {
+        let provider = crate::providers::agent_provider(agent);
+        if scope == SkillInstallScope::Project {
+            return provider
+                .project_skill_root(cwd)
+                .with_context(|| format!("{target} does not support project installation"));
+        }
+        let home = dirs::home_dir().context("could not resolve home directory")?;
+        return provider
+            .global_skill_root(&home)
+            .with_context(|| format!("{target} does not support global installation"));
+    }
     if scope == SkillInstallScope::Project {
         return Ok(cwd.join(config.project_skills_dir));
     }
@@ -646,6 +667,7 @@ pub fn skill_target_root(
             }
             Ok(home.join(".openclaw/skills"))
         }
+        GlobalRoot::Provider(_) => unreachable!("provider-backed targets are resolved above"),
         GlobalRoot::Unsupported => bail!(
             "skill target `{}` does not support global installation; use --scope project",
             target.id()
@@ -664,32 +686,6 @@ fn xdg_config_home(home: &Path) -> PathBuf {
 mod tests {
     use super::*;
 
-    #[test]
-    fn matches_skills_cli_1_5_22_catalog_size_and_key_paths() {
-        assert_eq!(target_catalog().len(), 76);
-        assert_eq!(
-            target_config(&"opencode".parse().unwrap())
-                .unwrap()
-                .project_skills_dir,
-            ".agents/skills"
-        );
-        assert_eq!(
-            target_config(&"windsurf".parse().unwrap())
-                .unwrap()
-                .project_skills_dir,
-            ".windsurf/skills"
-        );
-        assert!(
-            !target_config(&"eve".parse().unwrap())
-                .unwrap()
-                .supports_global()
-        );
-        assert!(
-            !target_config(&"promptscript".parse().unwrap())
-                .unwrap()
-                .supports_global()
-        );
-    }
 
     #[test]
     fn legacy_names_keep_their_serialized_values() {
@@ -706,6 +702,10 @@ mod tests {
             );
             assert!(target_config(&target).is_ok());
         }
+
+        let claude_alias: SkillTarget = "claude".parse().unwrap();
+        assert_eq!(claude_alias.id(), "claude");
+        assert_eq!(target_config(&claude_alias).unwrap().id, "claude-code");
     }
 
     #[test]
@@ -724,5 +724,11 @@ mod tests {
             .unwrap(),
             cwd.join(".claude/skills")
         );
+    }
+
+    #[test]
+    fn unknown_skill_target_does_not_become_an_unknown_agent() {
+        let target = SkillTarget("not-a-provider".to_string());
+        assert!(target.agent_kind().is_err());
     }
 }

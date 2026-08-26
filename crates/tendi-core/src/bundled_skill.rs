@@ -229,7 +229,7 @@ mod tests {
     };
 
     use super::{
-        GUIDE_MARKDOWN, SKILL_MARKDOWN, mark_prompt_handled_at, plan_install_at, remove_at,
+        SKILL_MARKDOWN, mark_prompt_handled_at, plan_install_at, remove_at,
         status_at,
     };
     use crate::skills::{AgentKind, apply_changes};
@@ -345,25 +345,4 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
-    #[test]
-    fn discovery_stub_matches_the_versioned_guide() {
-        fn frontmatter(text: &str) -> &str {
-            let rest = text.strip_prefix("---\n").unwrap();
-            let end = 4 + rest.find("\n---\n").unwrap() + 5;
-            &text[..end]
-        }
-
-        assert_eq!(frontmatter(SKILL_MARKDOWN), frontmatter(GUIDE_MARKDOWN));
-        assert!(SKILL_MARKDOWN.len() < GUIDE_MARKDOWN.len());
-        assert!(SKILL_MARKDOWN.contains("TENDI skills guide"));
-        for command in [
-            "tendi sessions search",
-            "tendi sessions transcript",
-            "tendi skills list",
-            "tendi skills add",
-            "tendi setup skills",
-        ] {
-            assert!(GUIDE_MARKDOWN.contains(command), "missing {command}");
-        }
-    }
 }

@@ -65,7 +65,7 @@ pub(super) fn search(query: &str) -> Result<Vec<MarketplaceSource>> {
                 name: display_name,
                 description: plugin.description,
                 source,
-                url: "https://claude.com/plugins".to_string(),
+                url: Some("https://claude.com/plugins".to_string()),
                 version: None,
                 metric: None,
                 metric_label: None,

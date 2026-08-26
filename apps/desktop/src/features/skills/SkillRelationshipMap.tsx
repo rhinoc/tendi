@@ -5,7 +5,6 @@ import { formatSessionTitle } from "../../lib/session-preview.ts";
 import { useTrackpadZoom } from "../../lib/zoom-gesture.ts";
 import { LoadErrorState } from "../../components/shared/LoadErrorState.tsx";
 import { LoadingState } from "../../components/shared/LoadingState.tsx";
-import type { SkillDependencyRecord } from "./SkillDependencyGraph.tsx";
 
 const VIEWBOX_WIDTH = 1200;
 const VIEWBOX_HEIGHT = 660;
@@ -121,8 +120,12 @@ function relationEdges(skills: RelationshipGraphNode[], explicitEdges?: Relation
   }
 
   for (const skill of skills) {
-    for (const dependency of skill.dependencies ?? []) addEdge(dependency, skill.name);
-    for (const dependent of skill.dependents ?? []) addEdge(skill.name, dependent);
+    if (skill.dependencies) {
+      for (const dependency of skill.dependencies) addEdge(dependency, skill.name);
+    }
+    if (skill.dependents) {
+      for (const dependent of skill.dependents) addEdge(skill.name, dependent);
+    }
   }
 
   return [...edges.values()];
@@ -174,9 +177,9 @@ function relationshipKindLabel(kind?: string) {
   return RELATIONSHIP_KIND_LABELS.find((item) => item.kind === kind)?.label;
 }
 
-function nodeLabel(node: RelationshipGraphNode) {
-  const label = node.label || node.name;
-  return isSessionNodeKind(node.kind) ? formatSessionTitle(label) || label : label;
+export function relationshipNodeLabel(node: RelationshipGraphNode) {
+  if (isSessionNodeKind(node.kind)) return formatSessionTitle(node.label ?? "");
+  return node.label ?? "";
 }
 
 function shortName(name: string) {
@@ -406,7 +409,6 @@ function zoomedViewBox(viewBox: string, zoom: number, pan: { x: number; y: numbe
 }
 
 export type SkillRelationshipMapProps = {
-  skills?: SkillDependencyRecord[];
   nodes?: RelationshipGraphNode[];
   edges?: RelationshipGraphEdge[];
   focusName?: string;
@@ -418,7 +420,6 @@ export type SkillRelationshipMapProps = {
 };
 
 export function SkillRelationshipMap({
-  skills,
   nodes,
   edges,
   focusName,
@@ -435,7 +436,7 @@ export function SkillRelationshipMap({
   const panInteractionRef = useRef<PanInteraction | null>(null);
   const pointerPositionsRef = useRef(new Map<number, PointerPosition>());
   const pinchInteractionRef = useRef<PinchInteraction | null>(null);
-  const graphNodes: RelationshipGraphNode[] = nodes ?? skills ?? EMPTY_GRAPH_NODES;
+  const graphNodes: RelationshipGraphNode[] = nodes ?? EMPTY_GRAPH_NODES;
   const graphInputKey = useMemo(() => JSON.stringify({
     compact,
     focusName: focusName ?? "",
@@ -443,8 +444,8 @@ export function SkillRelationshipMap({
       node.name,
       node.label ?? "",
       node.kind ?? "",
-      node.dependencies ?? [],
-      node.dependents ?? [],
+      node.dependencies,
+      node.dependents,
     ]),
     edges: edges?.map((edge) => [edge.from, edge.to, edge.key ?? ""]),
   }), [compact, edges, focusName, graphNodes]);
@@ -461,7 +462,7 @@ export function SkillRelationshipMap({
   }, [graph.edges, graph.nodes]);
   const renderedNodes = useMemo(() => graph.nodes.map((node) => ({
     ...node,
-    label: shortName(nodeLabel(node)),
+    label: shortName(relationshipNodeLabel(node)),
     labelOnRight: node.x < VIEWBOX_WIDTH / 2,
   })), [graph.nodes]);
   const connectedNames = useMemo(() => {
@@ -686,11 +687,11 @@ export function SkillRelationshipMap({
                 const labelOpacity = node.name === hoveredName ? 1 : active ? labelOpacityForNode(node, compact) : 0.16;
                 return (
                   <g
-                    aria-label={`${relationshipKindLabel(node.kind) ? `${relationshipKindLabel(node.kind)}: ` : ""}${nodeLabel(node)}, ${node.degree} relationships`}
+                    aria-label={`${relationshipKindLabel(node.kind) ? `${relationshipKindLabel(node.kind)}: ` : ""}${relationshipNodeLabel(node)}, ${node.degree} relationships`}
                     className="skillRelationshipNodeGroup"
                     data-active={active}
                     data-clickable={Boolean(onOpenSkill)}
-                    data-kind={node.kind ?? "default"}
+                    data-kind={node.kind}
                     data-node-name={node.name}
                     key={node.name}
                     onBlur={() => setHoveredName(null)}

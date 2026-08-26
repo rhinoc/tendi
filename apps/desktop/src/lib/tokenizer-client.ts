@@ -73,7 +73,7 @@ export function createTokenizerWorker(
 
 function compactTranscriptTokenItem(item: TranscriptTokenItem): TranscriptTokenItem {
   const compact: TranscriptTokenItem = {};
-  for (const key of ["type", "kind", "body", "tag", "command", "result"] as const) {
+  for (const key of ["type", "body", "tag", "command", "result"] as const) {
     const value = item[key];
     if (value !== undefined) compact[key] = value;
   }
@@ -86,8 +86,5 @@ export function compactTranscriptTokenItems(items: TranscriptTokenItem[]): Trans
 }
 
 export function compactTranscriptSkillLinks(links: TranscriptSkillLink[]): TranscriptSkillLink[] {
-  return links.map((link) => ({
-    skill_name: link.skill_name,
-    skillName: link.skillName,
-  }));
+  return links.map((link) => ({ skill_name: link.skill_name }));
 }

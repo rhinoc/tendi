@@ -1,7 +1,9 @@
 import type { ReactNode } from "react";
 import { DropdownMenu } from "radix-ui";
 
+import { MenuContent } from "./MenuContent.tsx";
 import { MoreActionsButton } from "./MoreActionsButton.tsx";
+import { useRowMenuOpenChange } from "./row-menu-context.tsx";
 
 export type RowActionsMenuProps = {
   ariaLabel: string;
@@ -10,15 +12,19 @@ export type RowActionsMenuProps = {
 };
 
 export function RowActionsMenu({ ariaLabel, children, onOpenChange }: RowActionsMenuProps) {
+  const notifyRowMenuOpenChange = useRowMenuOpenChange();
   return (
-    <DropdownMenu.Root onOpenChange={onOpenChange}>
+    <DropdownMenu.Root onOpenChange={(open) => {
+      onOpenChange?.(open);
+      notifyRowMenuOpenChange?.(open);
+    }}>
       <DropdownMenu.Trigger asChild>
         <MoreActionsButton aria-label={ariaLabel} />
       </DropdownMenu.Trigger>
       <DropdownMenu.Portal>
-        <DropdownMenu.Content className="skillMenuContent" align="end" sideOffset={6} data-no-drag>
+        <MenuContent align="end" sideOffset={6} data-no-drag>
           {children}
-        </DropdownMenu.Content>
+        </MenuContent>
       </DropdownMenu.Portal>
     </DropdownMenu.Root>
   );

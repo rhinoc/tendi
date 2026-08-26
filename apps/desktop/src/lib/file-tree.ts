@@ -67,17 +67,19 @@ export function buildFileTreeRows(files: SkillFileEntry[], collapsedFolders: Set
 
 export function normalizeSkillFileEntries(result: unknown): SkillFileEntry[] {
   if (!Array.isArray(result)) return [];
-  return result.map((file: Record<string, unknown>) => ({
-    name: `${file.relative_path ?? file.name}`,
-    kind: `${file.kind ?? "file"}`,
-    path: file.path as string | undefined,
-  }));
+  return result.flatMap((value) => {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return [];
+    const file = value as Record<string, unknown>;
+    if (typeof file.relative_path !== "string" || !file.relative_path.trim()) return [];
+    if (typeof file.kind !== "string" || !file.kind.trim()) return [];
+    if (typeof file.path !== "string" || !file.path.trim()) return [];
+    return [{ name: file.relative_path, kind: file.kind, path: file.path }];
+  });
 }
 
-export function preferredSkillFileName(files: SkillFileEntry[]): string {
+export function preferredSkillFileName(files: SkillFileEntry[]): string | undefined {
   return files.find((file) => file.kind === "file" && file.name === "SKILL.md")?.name
-    ?? files.find((file) => file.kind === "file")?.name
-    ?? "SKILL.md";
+    ?? files.find((file) => file.kind === "file")?.name;
 }
 
 export function uniqueChildPath(files: SkillFileEntry[], parent: string, kind: string): string {

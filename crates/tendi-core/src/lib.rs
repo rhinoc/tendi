@@ -33,7 +33,7 @@ pub use mcp::{McpScan, McpServerRecord};
 pub use providers::{
     SessionCommand, SessionResumePlan, SessionWriter, accepts_session_app_url,
     active_session_writer, apply_session_config_profile, config_profile_key, parse_agent,
-    plan_session_resume, session_root_priority, terminate_session_writer,
+    plan_session_resume, session_root_priority,
 };
 pub use rules::{RuleRecord, RuleScan};
 pub use sessions::{SessionRecord, SessionScan};
@@ -46,6 +46,8 @@ pub use transcript::{TranscriptItem, TranscriptScan};
 pub struct ScanReport {
     pub agents: AgentScan,
     pub skills: SkillScan,
+    #[serde(skip)]
+    pub skill_source_migrations: Vec<skills::SkillSourceRecord>,
     pub sessions: SessionScan,
     pub rules: RuleScan,
     pub hooks: HookScan,
@@ -64,7 +66,7 @@ pub fn scan(cwd: impl AsRef<Path>) -> Result<ScanReport> {
     let session_scan_cache = store.session_scan_cache()?;
     std::thread::scope(|scope| {
         let agents = scope.spawn(|| agents::scan_agents(&cwd));
-        let skills = scope.spawn(|| skills::scan_skills_synced(&cwd));
+        let skills = scope.spawn(|| skills::scan_skills_synced_for_projection(&cwd));
         let sessions = scope.spawn(|| {
             sessions::scan_sessions_with_additional_roots_cached(
                 &cwd,
@@ -75,10 +77,12 @@ pub fn scan(cwd: impl AsRef<Path>) -> Result<ScanReport> {
         let rules = scope.spawn(|| rules::scan_rules(&cwd));
         let hooks = scope.spawn(|| hooks::scan_hooks(&cwd));
         let mcp = scope.spawn(|| mcp::scan_mcp(&cwd));
+        let skills = skills.join().expect("skills scan thread panicked")?;
 
         Ok(ScanReport {
             agents: agents.join().expect("agents scan thread panicked")?,
-            skills: skills.join().expect("skills scan thread panicked")?,
+            skills: skills.scan,
+            skill_source_migrations: skills.source_migrations,
             sessions: sessions.join().expect("sessions scan thread panicked")?,
             rules: rules.join().expect("rules scan thread panicked")?,
             hooks: hooks.join().expect("hooks scan thread panicked")?,

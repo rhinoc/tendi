@@ -20,7 +20,7 @@ export function applySkillUpdateReportsToData(data: RuntimeData, updates: SkillU
       return {
         ...skill,
         updateStatus: update.status,
-        meta: update.status === "update-available" ? "update" : update.status,
+        meta: update.status,
         statusTone: update.status === "update-available" ? "warn" : skill.statusTone,
       };
     }),

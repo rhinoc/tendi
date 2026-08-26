@@ -64,12 +64,16 @@ pub(crate) fn scan_cursor_meta_file(
     agent: AgentKind,
     cache: Option<&SessionScanCache>,
 ) {
-    let id = path
+    let Some(id) = path
         .parent()
         .and_then(Path::file_name)
         .and_then(|name| name.to_str())
-        .unwrap_or("cursor-session")
-        .to_string();
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .map(str::to_string)
+    else {
+        return;
+    };
     if let Some(session) = cache.and_then(|cache| cache.session_if_current_id(agent, &id))
         && is_cursor_transcript_path(&session.path)
     {
@@ -107,9 +111,7 @@ pub(crate) fn scan_cursor_meta_file(
     sessions.push(SessionRecord {
         id,
         agent,
-        title: explicit_title.or_else(|| {
-            cursor_project_from_meta(value.as_ref()).and_then(|path| title_from_project_path(&path))
-        }),
+        title: explicit_title,
         project: cursor_project_from_meta(value.as_ref()),
         repository: None,
         repository_url: None,
@@ -125,11 +127,11 @@ pub(crate) fn scan_cursor_meta_file(
         updated_at: cursor_time_field(value.as_ref(), &["updatedAt", "updated_at"])
             .or(store_meta.updated_at)
             .or(file_updated_at),
-        message_count: store_meta.message_count.or(Some(0)),
+        message_count: store_meta.message_count,
         first_user_message: store_meta.first_user_message,
         last_user_message: store_meta.last_user_message,
         last_assistant_message: store_meta.last_assistant_message,
-        turn_count: store_meta.turn_count.or(Some(0)),
+        turn_count: store_meta.turn_count,
         model: store_meta.model.clone(),
         mode: store_meta.mode.clone(),
         approval_mode: store_meta.approval_mode.clone(),
@@ -145,12 +147,16 @@ pub(crate) fn scan_cursor_store_file(
     agent: AgentKind,
     cache: Option<&SessionScanCache>,
 ) {
-    let id = path
+    let Some(id) = path
         .parent()
         .and_then(Path::file_name)
         .and_then(|name| name.to_str())
-        .unwrap_or("cursor-session")
-        .to_string();
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .map(str::to_string)
+    else {
+        return;
+    };
     if let Some(session) = cache.and_then(|cache| cache.session_if_current_id(agent, &id)) {
         if is_cursor_transcript_path(&session.path) {
             sessions.push(session);
@@ -599,26 +605,4 @@ pub(crate) fn decode_cursor_project_dir(value: &str) -> Option<PathBuf> {
         return Some(PathBuf::from(format!("/{}", parts.join("/"))));
     }
     Some(PathBuf::from(parts.join("/")))
-}
-
-pub(crate) fn title_from_project_path(path: &Path) -> Option<String> {
-    let parts = path
-        .components()
-        .filter_map(|component| component.as_os_str().to_str())
-        .collect::<Vec<_>>();
-    for marker in ["installations", "workspaces"] {
-        if let Some(index) = parts.iter().position(|part| *part == marker) {
-            if let Some(name) = parts.get(index + 1) {
-                return Some((*name).to_string());
-            }
-        }
-    }
-    if let Some(index) = parts.iter().position(|part| *part == "apps") {
-        if index > 0 {
-            return Some(parts[index - 1].to_string());
-        }
-    }
-    path.file_name()
-        .and_then(|name| name.to_str())
-        .map(str::to_string)
 }

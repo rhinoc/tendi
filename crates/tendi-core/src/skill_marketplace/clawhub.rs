@@ -58,7 +58,7 @@ pub(super) fn search(query: &str) -> Result<Vec<MarketplaceSource>> {
                 name: skill.display_name,
                 description: skill.summary,
                 source,
-                url,
+                url: Some(url),
                 version: skill.version,
                 metric: None,
                 metric_label: None,

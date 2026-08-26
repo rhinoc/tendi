@@ -1,4 +1,4 @@
-use std::{fs, path::Path};
+use std::{fs, path::{Path, PathBuf}};
 
 use anyhow::Result;
 use anyhow::bail;
@@ -10,6 +10,58 @@ use crate::transcript::{TranscriptItem, collect_generic_item};
 use super::*;
 
 pub(super) struct CursorProvider;
+
+const CURSOR_SKILL_FRONTMATTER_KEY: &str = "disable-model-invocation";
+
+#[cfg(test)]
+pub(crate) fn plan_skill_frontmatter(
+    path: PathBuf,
+    visibility: SkillVisibility,
+) -> Result<FileChange> {
+    crate::skills::plan_skill_frontmatter_for_agent(path, AgentKind::Cursor, visibility)
+}
+
+fn infer_mcp_transport(spec: &Value) -> Option<String> {
+    spec.get("transport")
+        .or_else(|| spec.get("type"))
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .or_else(|| spec.get("command").and_then(Value::as_str).map(|_| "stdio".to_string()))
+        .or_else(|| {
+            spec.get("url").and_then(Value::as_str).map(|url| {
+                if url.contains("/sse") { "sse" } else { "http" }.to_string()
+            })
+        })
+}
+
+fn infer_mcp_status(spec: &Value) -> String {
+    if infer_mcp_enabled(spec) {
+        "configured"
+    } else {
+        "disabled"
+    }
+    .to_string()
+}
+
+fn infer_mcp_enabled(spec: &Value) -> bool {
+    !spec
+        .get("disabled")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+        && spec.get("enabled").and_then(Value::as_bool).unwrap_or(true)
+}
+
+fn update_mcp_server(spec: &mut serde_json::Map<String, Value>, enabled: bool) -> bool {
+    let has_disabled = spec.contains_key("disabled");
+    let has_enabled = spec.contains_key("enabled");
+    if has_disabled || !has_enabled {
+        spec.insert("disabled".to_string(), Value::Bool(!enabled));
+    }
+    if has_enabled {
+        spec.insert("enabled".to_string(), Value::Bool(enabled));
+    }
+    true
+}
 
 pub(super) fn matches_name(normalized: &str) -> bool {
     normalized == "cursor"
@@ -45,7 +97,18 @@ pub(crate) fn scan_project_mcp(
     servers: &mut Vec<McpServerRecord>,
     warnings: &mut Vec<String>,
 ) {
-    crate::mcp::scan_project_mcp(root, AgentKind::Cursor, servers, warnings);
+    crate::mcp::scan_project_mcp(
+        root,
+        AgentKind::Cursor,
+        &["mcp.json", ".mcp.json"],
+        &["mcp-auth.json"],
+        &["mcpServers"],
+        infer_mcp_transport,
+        infer_mcp_enabled,
+        infer_mcp_status,
+        servers,
+        warnings,
+    );
     if !root.is_dir() {
         return;
     }
@@ -57,18 +120,21 @@ pub(crate) fn scan_project_mcp(
         .filter(|entry| entry.file_type().is_file() && entry.file_name() == "SERVER_METADATA.json")
     {
         let path = entry.path();
-        let scope = entry_scope(root, &path);
-        scan_cursor_metadata_mcp(&path, &scope, servers, warnings);
+        let Some(scope) = entry_scope(root, path) else {
+            continue;
+        };
+        scan_cursor_metadata_mcp(path, &scope, servers, warnings);
     }
 }
 
-fn entry_scope(root: &Path, path: &Path) -> String {
+fn entry_scope(root: &Path, path: &Path) -> Option<String> {
     path.strip_prefix(root)
         .ok()
         .and_then(|path| path.components().next())
         .and_then(|component| component.as_os_str().to_str())
-        .unwrap_or("project")
-        .to_string()
+        .map(str::trim)
+        .filter(|scope| !scope.is_empty())
+        .map(str::to_string)
 }
 
 fn scan_cursor_metadata_mcp(
@@ -91,13 +157,21 @@ fn scan_cursor_metadata_mcp(
             return;
         }
     };
-    let Some(identifier) = value.get("serverIdentifier").and_then(Value::as_str) else {
+    if value
+        .get("serverIdentifier")
+        .and_then(Value::as_str)
+        .is_none()
+    {
         return;
-    };
-    let name = value
+    }
+    let Some(name) = value
         .get("serverName")
         .and_then(Value::as_str)
-        .unwrap_or(identifier);
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+    else {
+        return;
+    };
     let status_path = path.parent().map(|parent| parent.join("STATUS.md"));
     let status = status_path
         .as_ref()
@@ -109,14 +183,17 @@ fn scan_cursor_metadata_mcp(
                 "configured"
             }
         })
-        .unwrap_or("configured");
+        .unwrap_or_default();
     servers.push(McpServerRecord {
         agent: AgentKind::Cursor,
         name: name.to_string(),
         scope: scope.to_string(),
         transport: "cursor-plugin".to_string(),
+        enabled: true,
         status: status.to_string(),
         path: path.to_path_buf(),
+        trust_hash: crate::fsutil::sha256_text(&text),
+        read_only_reason: Some("Cursor plugin metadata cannot be changed".to_string()),
     });
 }
 
@@ -157,6 +234,14 @@ pub(super) fn append_transcript_metadata_from_store(
     let models = cursor_sessions::cursor_store_models_for_path(path);
     insert_cursor_model_configs(items, &models);
     Ok(())
+}
+
+#[cfg(test)]
+pub(crate) fn append_transcript_metadata_from_store_for_test(
+    path: &Path,
+    items: &mut Vec<TranscriptItem>,
+) {
+    let _ = append_transcript_metadata_from_store(path, items);
 }
 
 pub(super) fn may_contain_search_message(line: &str) -> bool {
@@ -262,6 +347,17 @@ impl super::AgentProvider for CursorProvider {
 
     fn global_skill_root(&self, home: &Path) -> Option<PathBuf> {
         Some(home.join(".cursor/skills"))
+    }
+
+    fn project_skill_root(&self, cwd: &Path) -> Option<PathBuf> {
+        Some(cwd.join(".cursor/skills"))
+    }
+
+    fn skill_target(&self) -> Option<ProviderSkillTarget> {
+        Some(ProviderSkillTarget {
+            id: "cursor",
+            display_name: "Cursor",
+        })
     }
 
     fn config_profile_path(&self, home: &Path, _agent_home: &Path, name: &str) -> Option<PathBuf> {
@@ -388,13 +484,42 @@ impl super::AgentProvider for CursorProvider {
             allow_implicit_invocation: None,
             enabled: None,
             disable_model_invocation: frontmatter
-                .and_then(|value| value.get("disable-model-invocation"))
+                .and_then(|value| value.get(CURSOR_SKILL_FRONTMATTER_KEY))
                 .and_then(serde_yaml::Value::as_bool),
+            provider_visibility: if frontmatter
+                .and_then(|value| value.get(CURSOR_SKILL_FRONTMATTER_KEY))
+                .and_then(serde_yaml::Value::as_bool)
+                == Some(true)
+            {
+                SkillVisibility::Manual
+            } else {
+                SkillVisibility::Auto
+            },
         })
     }
 
-    fn skill_frontmatter_policy(&self) -> Option<SkillFrontmatterPolicy> {
-        Some(SkillFrontmatterPolicy::DisableModelInvocation)
+    fn skill_frontmatter_satisfies(
+        &self,
+        meta: &serde_yaml::Mapping,
+        visibility: SkillVisibility,
+    ) -> bool {
+        crate::skills::skill_frontmatter_satisfies_with_provider_key(
+            meta,
+            visibility,
+            Some(CURSOR_SKILL_FRONTMATTER_KEY),
+        )
+    }
+
+    fn render_skill_frontmatter(
+        &self,
+        before: &str,
+        visibility: SkillVisibility,
+    ) -> Result<String> {
+        crate::skills::render_skill_frontmatter_with_provider_key(
+            before,
+            visibility,
+            Some(CURSOR_SKILL_FRONTMATTER_KEY),
+        )
     }
 
     fn session_scan_priority(&self, root: &Path) -> Option<u8> {
@@ -578,6 +703,26 @@ impl super::AgentProvider for CursorProvider {
         cursor_sessions::cursor_project_from_meta(Some(value))
     }
 
+    fn is_session_candidate_path(&self, path: &Path) -> bool {
+        matches!(
+            path.file_name().and_then(|name| name.to_str()),
+            Some("meta.json" | "store.db")
+        )
+    }
+
+    fn session_path_role(&self, path: &Path) -> SessionPathRole {
+        if path.file_name().and_then(|name| name.to_str()) == Some("meta.json") {
+            SessionPathRole::Metadata
+        } else if path
+            .extension()
+            .is_some_and(|extension| extension == "jsonl")
+        {
+            SessionPathRole::Transcript
+        } else {
+            SessionPathRole::Other
+        }
+    }
+
     fn session_project_aliases(&self, path: &str) -> Vec<String> {
         let home = dirs::home_dir().map(|home| home.to_string_lossy().into_owned());
         let Some(home) = home else {
@@ -618,6 +763,10 @@ impl super::AgentProvider for CursorProvider {
                 &home.join(".cursor/cli-config.json"),
                 self.kind(),
                 "global",
+                &["mcpServers"],
+                infer_mcp_transport,
+                infer_mcp_enabled,
+                infer_mcp_status,
                 servers,
                 warnings,
             );
@@ -629,11 +778,52 @@ impl super::AgentProvider for CursorProvider {
                 &ancestor.join(".cursor/mcp.json"),
                 self.kind(),
                 &scope,
+                &["mcpServers"],
+                infer_mcp_transport,
+                infer_mcp_enabled,
+                infer_mcp_status,
                 servers,
                 warnings,
             );
         }
         Ok(())
+    }
+
+    fn set_mcp_enabled(&self, request: &McpSetEnabledRequest) -> Result<()> {
+        if request.path.file_name().and_then(|value| value.to_str()) == Some("SERVER_METADATA.json")
+        {
+            bail!("Cursor plugin MCP metadata is read-only");
+        }
+        if request.path.extension().and_then(|value| value.to_str()) != Some("json") {
+            bail!("Cursor MCP source must be JSON");
+        }
+        crate::mcp::set_json_server_enabled(request, &["mcpServers"], update_mcp_server)
+    }
+
+    fn mcp_status_after_toggle(&self, enabled: bool) -> &'static str {
+        if enabled { "configured" } else { "disabled" }
+    }
+
+    fn delete_hooks(
+        &self,
+        requests: &[HookDeleteRequest],
+        source: &str,
+    ) -> Result<String> {
+        if requests[0].path.extension().and_then(|value| value.to_str()) != Some("json") {
+            bail!("Cursor hook source must be JSON");
+        }
+        crate::hooks::delete_json_hooks(requests, source)
+    }
+
+    fn set_hook_enabled(
+        &self,
+        request: &HookSetEnabledRequest,
+        source: &str,
+    ) -> Result<String> {
+        if request.path.extension().and_then(|value| value.to_str()) != Some("json") {
+            bail!("Cursor hook source must be JSON");
+        }
+        crate::hooks::set_json_hook_enabled(request, source)
     }
 
     fn managed_hook_path(&self, path: &Path) -> bool {

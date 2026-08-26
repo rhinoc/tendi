@@ -305,8 +305,25 @@
   box-shadow: inset 0 -1px 0 var(--accent);
 }
 
-.transcriptSearchScopeTrigger {
-  max-width: 108px;
+.transcriptSearch .transcriptSearchScopeTrigger {
+  width: max-content;
+  max-width: 100%;
+  flex: 0 0 auto;
+  gap: 4px;
+  padding-inline: 4px;
+  background: transparent;
+  color: var(--muted);
+}
+
+.transcriptSearch .transcriptSearchScopeTrigger:hover:not(:disabled),
+.transcriptSearch .transcriptSearchScopeTrigger[data-state="open"] {
+  background: var(--hover-fill-strong);
+  color: var(--text);
+}
+
+.transcriptSearchScopeTrigger > span:first-child {
+  flex: 0 0 auto;
+  white-space: nowrap;
 }
 
 .transcriptSearchScopeMenu {
@@ -601,7 +618,7 @@
 .bubbleFooter {
   min-height: var(--control-size-icon);
   width: 100%;
-  margin-top: var(--transcript-item-inset);
+  margin-top: 0;
   padding-inline: var(--transcript-inline-padding);
   box-sizing: border-box;
   display: flex;

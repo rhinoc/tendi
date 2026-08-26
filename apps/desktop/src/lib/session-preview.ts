@@ -17,7 +17,7 @@ function compactSessionText(value: string): string {
 export function formatTranscriptPreview(value: string | null | undefined): string {
   const raw = `${value ?? ""}`;
   const compact = compactSessionText(raw);
-  if (!compact) return /<\/?image/i.test(raw) || /!\[[^\]]*\]\([^)]*\)/i.test(raw) ? "Image" : "";
+  if (!compact) return "";
   return compact;
 }
 

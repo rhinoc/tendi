@@ -19,6 +19,13 @@
   font-size: var(--text-xs);
   font-weight: 600;
   line-height: var(--leading-micro);
+  white-space: nowrap;
+}
+
+.badgeText {
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }

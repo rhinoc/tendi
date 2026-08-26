@@ -1,6 +1,5 @@
 import {
   FileCode,
-  HardDriveDownload,
   LayoutDashboard,
   MessageSquareText,
   MessagesSquare,
@@ -18,7 +17,6 @@ export type NavItem = { id: string; label: string; icon: LucideIcon };
 export const navItems: NavItem[] = [
   { id: "overview", label: "Overview", icon: LayoutDashboard },
   { id: "skills", label: "Skills", icon: Sparkles },
-  { id: "backup", label: "Backup", icon: HardDriveDownload },
   { id: "sessions", label: "Sessions", icon: MessagesSquare },
   { id: "rules", label: "Rules", icon: ScrollText },
   { id: "mcp", label: "MCP", icon: Server },

@@ -6,11 +6,87 @@ on:
   pull_request:
     branches: [main]
 
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
 
 jobs:
-  build-test:
+  rust:
+    name: Rust tests and check
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-${{ runner.arch }}-rust-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-rust-
+
+      - name: Rust tests
+        run: cargo test --workspace
+
+      - name: Rust check
+        run: cargo check --workspace
+
+  performance:
+    name: Deterministic performance gate
+    runs-on: macos-14
+    env:
+      # macos-14 runners have higher filesystem and WebView startup variance than local runs.
+      # Keep RSS and payload limits unchanged; add headroom only to operation timings.
+      TENDI_PERF_SECONDARY_SESSION_PAGE_MS: 100
+      TENDI_PERF_SECONDARY_LINKED_SESSIONS_MS: 50
+      TENDI_PERF_SECONDARY_RULE_DETAIL_MS: 50
+      TENDI_PERF_TERTIARY_SKILL_SAVE_MS: 120
+      TENDI_PERF_TERTIARY_PROMPT_CRUD_MS: 80
+      TENDI_PERF_TERTIARY_SETTINGS_SAVE_MS: 10
+      TENDI_PERF_CHART_OVERVIEW_TREND_MS: 120
+      TENDI_PERF_CHART_OVERVIEW_TREND_P95_MS: 180
+      TENDI_PERF_CHART_SKILL_SESSION_PROJECT_MS: 30
+      TENDI_PERF_CHART_SKILL_SESSION_PROJECT_P95_MS: 60
+      TENDI_PERF_CHART_RELATIONSHIP_GRAPH_MS: 120
+      TENDI_PERF_CHART_RELATIONSHIP_GRAPH_P95_MS: 180
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-${{ runner.arch }}-rust-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-rust-
+
+      - name: Install frontend dependencies
+        run: npm ci --prefix apps/desktop
+
+      - name: Deterministic performance gate
+        run: |
+          cargo build --quiet -p tendi-cli --features perf-runner --bins
+          node scripts/perf-check.mjs --fast --no-build
+
+  frontend:
+    name: Frontend checks and E2E
     runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
@@ -21,22 +97,17 @@ jobs:
           cache: npm
           cache-dependency-path: apps/desktop/package-lock.json
 
-      - uses: dtolnay/rust-toolchain@stable
-
       - name: Install frontend dependencies
         run: npm ci --prefix apps/desktop
 
       - name: Check frontend UI boundaries
         run: npm run check:ui-boundaries --prefix apps/desktop
 
+      - name: Check provider boundaries
+        run: npm run test:provider-boundaries --prefix apps/desktop
+
       - name: Check frontend typography tokens
         run: npm run check:typography --prefix apps/desktop
-
-      - name: Rust tests
-        run: cargo test --workspace
-
-      - name: Rust check
-        run: cargo check --workspace
 
       - name: Frontend typecheck
         run: npm run typecheck --prefix apps/desktop
@@ -45,14 +116,47 @@ jobs:
         run: npm run e2e:align --prefix apps/desktop
 
       - name: Frontend build
+        if: github.event_name == 'pull_request'
         run: npm run build --prefix apps/desktop
 
+      - uses: dtolnay/rust-toolchain@stable
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+
+      - name: Cache Rust build
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-${{ runner.arch }}-rust-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-rust-
+
       - name: Tauri app and DMG build
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         run: npm run build:dmg --prefix apps/desktop
 
       - name: Upload DMG artifact
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         uses: actions/upload-artifact@v4
         with:
           name: tendi-dmg
           path: dist/*.dmg
           if-no-files-found: error
+
+  build-test:
+    if: ${{ always() }}
+    needs: [rust, performance, frontend]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require all validation jobs
+        env:
+          RUST_RESULT: ${{ needs.rust.result }}
+          PERFORMANCE_RESULT: ${{ needs.performance.result }}
+          FRONTEND_RESULT: ${{ needs.frontend.result }}
+        run: |
+          test "$RUST_RESULT" = success
+          test "$PERFORMANCE_RESULT" = success
+          test "$FRONTEND_RESULT" = success

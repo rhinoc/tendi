@@ -94,6 +94,7 @@ export enum TauriCommand {
   HookReview = "hook_review",
   HookSourceRead = "hook_source_read",
   McpList = "mcp_list",
+  McpSetEnabled = "mcp_set_enabled",
   PromptsList = "prompts_list",
   PromptSave = "prompt_save",
   PromptsDeleteMany = "prompts_delete_many",
@@ -114,6 +115,7 @@ export enum TauriCommand {
   SkillsAdd = "skills_add",
   SkillsAddPreviewRead = "skills_add_preview_read",
   SkillsDistribute = "skills_distribute",
+  SkillsRemoveLocations = "skills_remove_locations",
   SkillFiles = "skill_files",
   SkillFileRead = "skill_file_read",
   SkillFileSave = "skill_file_save",
@@ -195,6 +197,7 @@ const DAEMON_COMMANDS = new Set<string>([
   "skills_add",
   "skills_add_preview_read",
   "skills_distribute",
+  "skills_remove_locations",
   "skills_set",
   "skills_wrap",
   "skills_updates",
@@ -237,6 +240,7 @@ const DAEMON_COMMANDS = new Set<string>([
   "hook_review",
   "hook_source_read",
   "mcp_list",
+  "mcp_set_enabled",
   "prompts_list",
   "prompt_save",
   "prompts_delete_many",
@@ -385,15 +389,19 @@ export async function subscribeDaemonEvents(handler: DaemonEventHandler): Promis
 }
 
 function parseSseEvent(block: string): DaemonEvent | null {
-  let id = 0;
+  let id: number | undefined;
   let event = "message";
   const data: string[] = [];
   for (const line of block.split("\n")) {
-    if (line.startsWith("id:")) id = Number(line.slice(3).trim()) || 0;
+    if (line.startsWith("id:")) {
+      const parsedId = Number(line.slice(3).trim());
+      if (!Number.isSafeInteger(parsedId) || parsedId < 0) return null;
+      id = parsedId;
+    }
     else if (line.startsWith("event:")) event = line.slice(6).trim();
     else if (line.startsWith("data:")) data.push(line.slice(5).trimStart());
   }
-  if (data.length === 0) return null;
+  if (id === undefined || data.length === 0) return null;
   try {
     return { id, event, payload: JSON.parse(data.join("\n")) as unknown };
   } catch (error) {

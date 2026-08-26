@@ -329,8 +329,6 @@ struct SessionResumeRequest {
     title: Option<String>,
     project: Option<String>,
     path: String,
-    #[serde(default)]
-    force_active_writer: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -338,7 +336,6 @@ struct SessionResumeRequest {
 enum SessionResumeResponse {
     ActiveWriter {
         lock_path: String,
-        pids: Vec<u32>,
     },
     Launched {
         agent: AgentKind,
@@ -389,7 +386,6 @@ async fn session_resume_in_terminal(
     tauri::async_runtime::spawn_blocking(move || {
         let agent = parse_agent_result(&session.agent)?;
         let path = PathBuf::from(session.path);
-        let force_active_writer = session.force_active_writer;
         let project = absolute_project_path(session.project)?
             .or_else(|| tendi_core::sessions::infer_session_project(&path, agent));
         let record = tendi_core::SessionRecord {
@@ -416,14 +412,11 @@ async fn session_resume_in_terminal(
             parent_session_id: None,
             token_usage: None,
         };
-        if force_active_writer {
-            tendi_core::terminate_session_writer(&record).map_err(|error| format!("{error:#}"))?;
-        } else if let Some(writer) =
+        if let Some(writer) =
             tendi_core::active_session_writer(&record).map_err(|error| format!("{error:#}"))?
         {
             return serde_json::to_value(SessionResumeResponse::ActiveWriter {
                 lock_path: writer.lock_path.display().to_string(),
-                pids: writer.pids,
             })
             .map_err(|error| error.to_string());
         }

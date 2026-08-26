@@ -13,7 +13,7 @@ export {
 } from "./constants.ts";
 export type { NavItem, FreezeColumnConfig } from "./constants.ts";
 
-export { agentDefinition, agentDefinitions, fallbackAgents } from "./agent/index.ts";
+export { agentDefinition, agentDefinitions } from "./agent/index.ts";
 
 export {
   agentIcons,
@@ -86,7 +86,7 @@ export {
   clearSkillUpdateAvailability,
   applyVisibilityState,
 } from "./skills.ts";
-export type { NormalizedSkill } from "./skills.ts";
+export type { NormalizedSkill, NormalizedSkillPath } from "./skills.ts";
 
 export { suppressNextClick } from "./dom.ts";
 
@@ -98,6 +98,7 @@ export type { MissingSessionProjectPolicy, ProjectSummary, SessionProjectSummary
 
 export {
   normalizeSession,
+  normalizeSessionSkillLink,
   normalizeSessionResumeTarget,
   sessionResumeTargetForAgent,
   sessionAppDeepLink,
@@ -106,6 +107,7 @@ export {
   sessionRepositoryPath,
   sessionLaunchPayload,
   sessionIdentity,
+  sessionIdentityRecordKey,
   sessionLogicalIdentity,
   sessionWorkspace,
   sessionProject,
@@ -122,7 +124,7 @@ export {
   sessionTimeMs,
 } from "./sessions.ts";
 export { sessionExternalKey, resolveInitialSession, resolveInitialSessionId } from "./session-selection.ts";
-export type { SessionIdentityRecord, SessionResumeOptions, SessionResumeOutcome, SessionResumeTarget } from "./sessions.ts";
+export type { SessionIdentityRecord, SessionResumeOutcome, SessionResumeTarget, SessionSkillLinkRecord } from "./sessions.ts";
 export type { SessionKind, SessionRecord, SessionTokenUsage } from "./sessions.ts";
 
 export { summarizeSessionUsage } from "./overview.ts";
@@ -152,6 +154,7 @@ export {
 export type { PromptRecord } from "./prompt-model.ts";
 
 export {
+  normalizeRule,
   ruleAgents,
   ruleTitle,
   ruleKey,
@@ -162,18 +165,21 @@ export {
 export type { RuleRecord, RuleRow } from "./rules.ts";
 
 export {
+  normalizeHook,
   hookKey,
   hookDeleteIdentity,
   hookItemsFromRows,
   hookHandlerText,
   hookTypeLabel,
-  hookSourceTitle,
   hookTrustHash,
   hookSearchText,
   hookSourcePath,
   hookDeleteDisabledReason,
 } from "./hooks.ts";
 export type { HookRecord } from "./hooks.ts";
+
+export { mcpRowKey, mcpSourcePath, normalizeMcp } from "./mcp.ts";
+export type { McpRecord } from "./mcp.ts";
 
 export {
   createLatestRequestAuthority,
@@ -205,6 +211,7 @@ export {
   initialData,
   normalizeDomainRows,
   normalizeReport,
+  recomputeSources,
 } from "./data.ts";
 export type { RuntimeData, RuntimeDomainKey } from "./data.ts";
 

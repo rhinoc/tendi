@@ -12,6 +12,7 @@ use tendi_core::{
     hooks::{HookDeleteRequest, delete_hooks, read_hook_source_at_path, scan_hooks},
     rules::read_rule_file_at_path,
     session_skills::{SessionFileState, SessionSkillLink},
+    sessions::SessionIdentity,
     skills::{SkillPath, SkillRecord, SkillRoot, SkillScan, SkillVisibility, refresh_skill_scan},
     storage::{PromptWrite, Store},
     transcript::parse_transcript_page,
@@ -24,15 +25,20 @@ const SKILL_REFRESH_COUNT: usize = 240;
 const HOOK_COUNT: usize = 500;
 const HOOK_DELETE_COUNT: usize = 100;
 const PROMPT_COUNT: usize = 500;
+const SESSION_SEARCH_SESSIONS: usize = 512;
+const SESSION_SEARCH_CANDIDATES: usize = 100;
 
 fn main() -> Result<()> {
     let scenario = env::args().nth(1).context("usage: tendi-perf <scenario>")?;
     let result = match scenario.as_str() {
         "primary-overview" => primary_overview(),
+        "primary-overview-default" => primary_overview_default(),
+        "primary-overview-default-backfilled" => primary_overview_default_backfilled(),
         "primary-prompts" => primary_prompts(),
         "primary-config" => primary_config(),
         "primary-settings" => primary_settings(),
         "secondary-session-page" => secondary_session_page(),
+        "secondary-session-search" => secondary_session_search(),
         "secondary-linked-sessions" => secondary_linked_sessions(),
         "secondary-skill-files" => secondary_skill_files(),
         "secondary-rule-detail" => secondary_rule_detail(),
@@ -87,6 +93,37 @@ fn primary_overview() -> Result<Value> {
         let count = overview.days.len();
         Ok((overview, count))
     })
+}
+
+fn primary_overview_default() -> Result<Value> {
+    let store = performance_store()?;
+    measured(|| {
+        let overview = store.overview_analytics(None, 30, 30)?;
+        let count = overview.days.len();
+        Ok((overview, count))
+    })
+}
+
+fn primary_overview_default_backfilled() -> Result<Value> {
+    let store = performance_store()?;
+    loop {
+        let report = store.backfill_session_analytics_overview_batch(32)?;
+        if report.remaining == 0 || (report.processed == 0 && report.failed > 0) {
+            break;
+        }
+    }
+    measured(|| {
+        let overview = store.overview_analytics(None, 30, 30)?;
+        let count = overview.days.len();
+        Ok((overview, count))
+    })
+}
+
+fn performance_store() -> Result<Store> {
+    match env::var_os("TENDI_PERF_DB") {
+        Some(path) => Store::open(PathBuf::from(path)),
+        None => Store::open_default(),
+    }
 }
 
 fn primary_prompts() -> Result<Value> {
@@ -144,6 +181,53 @@ fn secondary_session_page() -> Result<Value> {
             );
         }
         Ok((page, count))
+    })
+}
+
+fn secondary_session_search() -> Result<Value> {
+    let scratch = Scratch::new("session-search")?;
+    let transcript_dir = scratch.path().join("transcripts");
+    fs::create_dir_all(&transcript_dir)?;
+    let mut sessions = Vec::with_capacity(SESSION_SEARCH_SESSIONS);
+    for index in 0..SESSION_SEARCH_SESSIONS {
+        let path = transcript_dir.join(format!("session-{index:04}.jsonl"));
+        let body = format!(
+            "session-search-needle fixture-{index:04} {}",
+            "x".repeat(4096)
+        );
+        let line = format!(
+            r#"{{"timestamp":"2026-08-14T01:00:00Z","type":"response_item","payload":{{"type":"message","role":"user","content":[{{"type":"input_text","text":{}}}]}}}}"#,
+            serde_json::to_string(&body)?
+        );
+        fs::write(&path, format!("{line}\n"))?;
+        sessions.push(session(index, path, index % 32));
+    }
+
+    let store = Store::open(scratch.path().join("session-search.sqlite3"))?;
+    store.save_sessions(&SessionScan {
+        sessions: sessions.clone(),
+        warnings: Vec::new(),
+    })?;
+    let candidates = sessions
+        .iter()
+        .take(SESSION_SEARCH_CANDIDATES)
+        .map(SessionIdentity::from)
+        .collect::<Vec<_>>();
+
+    measured(|| {
+        let hits = store.search_sessions_batch("needle", &candidates)?;
+        if hits.len() != SESSION_SEARCH_CANDIDATES {
+            bail!("unexpected session search hit count: {}", hits.len());
+        }
+        if hits
+            .iter()
+            .enumerate()
+            .any(|(index, hit)| hit.session.id != format!("perf-session-{index:04}"))
+        {
+            bail!("session search results changed candidate order");
+        }
+        let count = hits.len();
+        Ok((hits, count))
     })
 }
 
@@ -255,7 +339,7 @@ fn secondary_hook_detail() -> Result<Value> {
         format!("{{\"fixture\":\"{}\"}}", "h".repeat(192 * 1024)),
     )?;
     measured(|| {
-        let content = read_hook_source_at_path(&path, None, None)?;
+        let content = read_hook_source_at_path(&path, AgentKind::Claude, None, None)?;
         if !content.truncated {
             bail!("hook detail fixture should exercise truncation");
         }
@@ -388,6 +472,7 @@ fn tertiary_hook_delete() -> Result<Value> {
     let requests = source_hooks
         .into_iter()
         .map(|hook| HookDeleteRequest {
+            agent: hook.agent,
             path: hook.path.clone(),
             expected_trust_hash: hook.trust_hash.clone(),
             event: hook.event.clone(),

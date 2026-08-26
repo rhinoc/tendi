@@ -20,7 +20,6 @@ export type TranscriptTokenStats = {
 
 export type TranscriptTokenItem = {
   type?: string;
-  kind?: string;
   body?: string;
   tag?: string;
   command?: string;
@@ -29,10 +28,7 @@ export type TranscriptTokenItem = {
 };
 
 export type TranscriptSkillLink = {
-  skill_name?: string;
-  skillName?: string;
-  evidence_kind?: string;
-  evidenceKind?: string;
+  skill_name: string;
 };
 
 export type TokenBreakdownDetail = {

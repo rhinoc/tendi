@@ -322,6 +322,26 @@ where
     anyhow::bail!("timed out waiting for another projection refresh")
 }
 
+fn with_database_write_lock<T, F>(store: &tendi_core::storage::Store, mut write: F) -> Result<T>
+where
+    F: FnMut() -> Result<T>,
+{
+    for _ in 0..100 {
+        if let Some(value) = store.with_database_write_lock(&mut write)? {
+            return Ok(value);
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+    anyhow::bail!("timed out waiting for the database write lock")
+}
+
+fn invalidate_skills_projection(
+    store: &tendi_core::storage::Store,
+    cwd: &std::path::Path,
+) -> Result<()> {
+    with_database_write_lock(store, || store.invalidate_projection("skills", cwd))
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
     let cwd = env::current_dir()?;
@@ -336,7 +356,9 @@ fn main() -> Result<()> {
                 || Ok(None),
                 || {
                     let report = tendi_core::scan(&cwd)?;
-                    store.save_scan_for_workspace(&cwd, &report)?;
+                    with_database_write_lock(&store, || {
+                        store.save_scan_for_workspace(&cwd, &report)
+                    })?;
                     Ok(report)
                 },
             )?;
@@ -355,7 +377,9 @@ fn main() -> Result<()> {
                     || store.list_agents_for_workspace(&cwd),
                     || {
                         let report = tendi_core::agents::scan_agents(&cwd)?;
-                        store.save_agents_for_workspace(&cwd, &report)?;
+                        with_database_write_lock(&store, || {
+                            store.save_agents_for_workspace(&cwd, &report)
+                        })?;
                         Ok(report)
                     },
                 )?;
@@ -389,9 +413,19 @@ fn main() -> Result<()> {
                     "skills",
                     || store.list_skills_for_workspace(&cwd),
                     || {
-                        let report = tendi_core::skills::scan_skills_synced(&cwd)?;
-                        store.save_skills_for_workspace(&cwd, &report)?;
-                        Ok(report)
+                        let scanned = tendi_core::skills::scan_skills_synced_for_project_roots_with_store_for_projection(
+                            &cwd,
+                            &store,
+                            &[],
+                        )?;
+                        with_database_write_lock(&store, || {
+                            store.save_skills_for_workspace_with_source_migrations(
+                                &cwd,
+                                &scanned.scan,
+                                &scanned.source_migrations,
+                            )
+                        })?;
+                        Ok(scanned.scan)
                     },
                 )?;
                 if json {
@@ -406,11 +440,17 @@ fn main() -> Result<()> {
                     println!("{}", serde_json::to_string_pretty(targets)?);
                 } else {
                     for target in targets {
+                        let project_root = target.project_skills_root(&cwd)?;
+                        let project_label = project_root
+                            .strip_prefix(&cwd)
+                            .unwrap_or(project_root.as_path())
+                            .display()
+                            .to_string();
                         println!(
                             "{:<20} {:<24} project={} global={}",
                             target.id,
                             target.display_name,
-                            target.project_skills_dir,
+                            project_label,
                             if target.supports_global() {
                                 "yes"
                             } else {
@@ -430,7 +470,9 @@ fn main() -> Result<()> {
                         device.unwrap_or_else(|| "My device".to_string()),
                     );
                     let store = tendi_core::storage::Store::open_default()?;
-                    let config = store.save_skill_backup_config(&config)?;
+                    let config = with_database_write_lock(&store, || {
+                        store.save_skill_backup_config(&config)
+                    })?;
                     if json {
                         println!("{}", serde_json::to_string_pretty(&config)?);
                     } else {
@@ -530,7 +572,15 @@ fn main() -> Result<()> {
                                 .collect::<Vec<_>>()
                         })
                         .unwrap_or_default();
-                    let operations = tendi_core::skill_backup::apply_backup_restore(&plan, &store, &resolutions)?;
+                    let applied = tendi_core::skill_backup::apply_backup_restore_without_database(
+                        &plan,
+                        &resolutions,
+                    )?;
+                    let operations = applied.operations;
+                    with_database_write_lock(&store, || {
+                        store.upsert_skill_source_records(&applied.source_records)?;
+                        store.invalidate_projection("skills", &cwd)
+                    })?;
                     if json {
                         println!("{}", serde_json::to_string_pretty(&operations)?);
                     } else {
@@ -543,7 +593,15 @@ fn main() -> Result<()> {
                     let name = name.or_else(|| path.file_name().and_then(|name| name.to_str()).map(str::to_string))
                         .ok_or_else(|| anyhow::anyhow!("--name is required when the path has no file name"))?;
                     let store = tendi_core::storage::Store::open_default()?;
-                    let record = tendi_core::skill_backup::adopt_skill_for_backup(&store, &path, name)?;
+                    let record = tendi_core::skill_backup::skill_backup_record_for_adoption(
+                        &path,
+                        name,
+                    )?;
+                    let record = with_database_write_lock(&store, || {
+                        store.upsert_skill_source_records(std::slice::from_ref(&record))?;
+                        store.invalidate_projection("skills", &cwd)?;
+                        Ok(record.clone())
+                    })?;
                     if json {
                         println!("{}", serde_json::to_string_pretty(&record)?);
                     } else {
@@ -556,7 +614,7 @@ fn main() -> Result<()> {
                         return Ok(());
                     }
                     let store = tendi_core::storage::Store::open_default()?;
-                    if store.clear_skill_backup_config()? {
+                    if with_database_write_lock(&store, || store.clear_skill_backup_config())? {
                         println!("Disconnected this machine from skill backup");
                     } else {
                         println!("Backup was not configured");
@@ -613,10 +671,27 @@ fn main() -> Result<()> {
                 }
                 let report = tendi_core::skills::apply_skill_add(&cwd, &options)?;
                 let source_records = tendi_core::skills::skill_source_records_for_add(&report);
-                tendi_core::storage::Store::open_default()?
-                    .upsert_skill_source_records(&source_records)?;
+                let snapshots = tendi_core::skills::capture_skill_snapshots(&source_records)?;
+                let store = tendi_core::storage::Store::open_default()?;
+                with_database_write_lock(&store, || {
+                    store.upsert_skill_source_records(&source_records)?;
+                    store.replace_skill_snapshots(&snapshots)?;
+                    if json {
+                        Ok(())
+                    } else {
+                        store.invalidate_projection("skills", &cwd)
+                    }
+                })?;
                 if json {
-                    let scan = tendi_core::skills::scan_skills_synced(&cwd)?;
+                    let scanned = tendi_core::skills::scan_skills_synced_for_projection(&cwd)?;
+                    let scan = scanned.scan.clone();
+                    with_database_write_lock(&store, || {
+                        store.save_skills_for_workspace_with_source_migrations(
+                            &cwd,
+                            &scanned.scan,
+                            &scanned.source_migrations,
+                        )
+                    })?;
                     println!(
                         "{}",
                         serde_json::json!({
@@ -644,7 +719,12 @@ fn main() -> Result<()> {
                     println!("aborted");
                     return Ok(());
                 }
-                let report = tendi_core::skill_restore::apply_project_skill_restore(&plan, &store)?;
+                let applied = tendi_core::skill_restore::apply_project_skill_restore_without_database(&plan)?;
+                let report = applied.report;
+                with_database_write_lock(&store, || {
+                    store.upsert_skill_source_records(&applied.source_records)?;
+                    store.invalidate_projection("skills", &cwd)
+                })?;
                 print_skill_restore_operations(
                     &report.lock_path,
                     &report.target_root,
@@ -659,7 +739,7 @@ fn main() -> Result<()> {
             } => {
                 let changeset =
                     tendi_core::skills::plan_visibility(&cwd, &pattern, visibility.into())?;
-                run_changeset(changeset, dry_run, yes)?;
+                run_changeset(changeset, dry_run, yes, &cwd)?;
             }
             SkillCommand::Wrap {
                 name,
@@ -674,7 +754,7 @@ fn main() -> Result<()> {
                 } else {
                     tendi_core::skills::plan_wrapper(&cwd, &name, &pattern, manual_children)?
                 };
-                run_changeset(changeset, dry_run, yes)?;
+                run_changeset(changeset, dry_run, yes, &cwd)?;
             }
             SkillCommand::Updates { json, check } => {
                 if check {
@@ -687,7 +767,23 @@ fn main() -> Result<()> {
                     return Ok(());
                 }
 
-                let report = tendi_core::skills::scan_skills_synced(&cwd)?;
+                let store = tendi_core::storage::Store::open_default()?;
+                let report = ensure_projection(
+                    &store,
+                    "skills",
+                    || store.list_skills_for_workspace(&cwd),
+                    || {
+                        let scanned = tendi_core::skills::scan_skills_synced_for_projection(&cwd)?;
+                        with_database_write_lock(&store, || {
+                            store.save_skills_for_workspace_with_source_migrations(
+                                &cwd,
+                                &scanned.scan,
+                                &scanned.source_migrations,
+                            )
+                        })?;
+                        Ok(scanned.scan)
+                    },
+                )?;
                 if json {
                     println!("{}", serde_json::to_string_pretty(&report.skills)?);
                 } else {
@@ -708,7 +804,18 @@ fn main() -> Result<()> {
                     println!("aborted");
                     return Ok(());
                 }
-                tendi_core::skills::apply_skill_update_plan(&plan)?;
+                let store = tendi_core::storage::Store::open_default()?;
+                let prepared = tendi_core::skills::prepare_skill_update_plan_with_resolutions(
+                    &plan,
+                    &std::collections::BTreeMap::new(),
+                )?;
+                tendi_core::skills::apply_skill_update_plan_filesystem(&prepared)?;
+                let persistence =
+                    tendi_core::skills::prepare_skill_update_persistence(&store, &prepared)?;
+                with_database_write_lock(&store, || {
+                    tendi_core::skills::persist_skill_update_persistence(&store, &persistence)?;
+                    store.invalidate_projection("skills", &cwd)
+                })?;
                 println!("applied");
             }
             SkillCommand::Link {
@@ -753,6 +860,8 @@ fn main() -> Result<()> {
                     false,
                     false,
                 )?;
+                let store = tendi_core::storage::Store::open_default()?;
+                invalidate_skills_projection(&store, &cwd)?;
                 println!("{}: {}", result.mode, result.health);
             }
         },
@@ -819,7 +928,7 @@ fn main() -> Result<()> {
                 let mut report = store.list_sessions()?;
                 if report.sessions.is_empty() && store.last_scan_at()?.is_none() {
                     let scan = tendi_core::scan(&cwd)?;
-                    store.save_scan_for_workspace(&cwd, &scan)?;
+                    with_database_write_lock(&store, || store.save_scan_for_workspace(&cwd, &scan))?;
                     report = scan.sessions;
                 }
                 store.resolve_session_projects(&mut report.sessions)?;
@@ -869,7 +978,9 @@ fn main() -> Result<()> {
                     || store.list_rules_for_workspace(&cwd),
                     || {
                         let report = tendi_core::rules::scan_rules(&cwd)?;
-                        store.save_rules_for_workspace(&cwd, &report)?;
+                        with_database_write_lock(&store, || {
+                            store.save_rules_for_workspace(&cwd, &report)
+                        })?;
                         Ok(report)
                     },
                 )?;
@@ -889,7 +1000,9 @@ fn main() -> Result<()> {
                     || store.list_hooks_for_workspace(&cwd),
                     || {
                         let report = tendi_core::hooks::scan_hooks(&cwd)?;
-                        store.save_hooks_for_workspace(&cwd, &report)?;
+                        with_database_write_lock(&store, || {
+                            store.save_hooks_for_workspace(&cwd, &report)
+                        })?;
                         Ok(report)
                     },
                 )?;
@@ -909,7 +1022,9 @@ fn main() -> Result<()> {
                     || store.list_mcp_for_workspace(&cwd),
                     || {
                         let report = tendi_core::mcp::scan_mcp(&cwd)?;
-                        store.save_mcp_for_workspace(&cwd, &report)?;
+                        with_database_write_lock(&store, || {
+                            store.save_mcp_for_workspace(&cwd, &report)
+                        })?;
                         Ok(report)
                     },
                 )?;
@@ -1249,13 +1364,7 @@ fn print_mcp(servers: &[tendi_core::McpServerRecord]) -> Result<()> {
 }
 
 fn agent_label(agent: tendi_core::AgentKind) -> &'static str {
-    match agent {
-        tendi_core::AgentKind::Codex => "codex",
-        tendi_core::AgentKind::Cursor => "cursor",
-        tendi_core::AgentKind::Claude => "claude",
-        tendi_core::AgentKind::Shared => "shared",
-        tendi_core::AgentKind::Unknown => "unknown",
-    }
+    agent.label()
 }
 
 fn print_summary(report: &tendi_core::ScanReport) -> Result<()> {
@@ -1295,7 +1404,12 @@ fn print_summary(report: &tendi_core::ScanReport) -> Result<()> {
     Ok(())
 }
 
-fn run_changeset(changeset: tendi_core::skills::ChangeSet, dry_run: bool, yes: bool) -> Result<()> {
+fn run_changeset(
+    changeset: tendi_core::skills::ChangeSet,
+    dry_run: bool,
+    yes: bool,
+    cwd: &std::path::Path,
+) -> Result<()> {
     println!("{}", tendi_core::skills::format_changeset(&changeset));
     if dry_run {
         return Ok(());
@@ -1307,6 +1421,10 @@ fn run_changeset(changeset: tendi_core::skills::ChangeSet, dry_run: bool, yes: b
     }
 
     tendi_core::skills::apply_changes(&changeset)?;
+    if !changeset.changes.is_empty() {
+        let store = tendi_core::storage::Store::open_default()?;
+        invalidate_skills_projection(&store, cwd)?;
+    }
     println!("applied");
     Ok(())
 }

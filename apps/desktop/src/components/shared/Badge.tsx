@@ -27,6 +27,7 @@ export function Badge({
   ...props
 }: BadgeProps) {
   const Component = as;
+  const isTextOnly = typeof children === "string" || typeof children === "number";
   return (
     <Component
       {...props}
@@ -37,7 +38,7 @@ export function Badge({
       data-tone={tone}
       data-uppercase={uppercase ? "true" : undefined}
     >
-      {children}
+      {isTextOnly ? <span className="badgeText">{children}</span> : children}
     </Component>
   );
 }

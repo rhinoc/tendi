@@ -119,16 +119,17 @@ function addDetail(details: Map<string, number>, label: string, value: number): 
 function toolLabel(item: TranscriptTokenItem): string {
   const tag = `${item.tag ?? ""}`.trim();
   if (tag) return tag;
-  const command = `${item.command || item.body || ""}`.trim();
+  const command = `${item.command ?? ""}`.trim();
   const firstWord = command.split(/\s+/)[0];
-  return firstWord || "tool";
+  return firstWord;
 }
 
 function messageLabel(type: string, bucket: "input" | "output"): string {
   if (type === "user") return "User messages";
   if (type === "assistant" || type === "agent") return "Assistant messages";
   if (type === "thinking" || type === "reasoning") return "Reasoning / thinking";
-  return bucket === "output" ? `Other output: ${type || "unknown"}` : `Other input: ${type || "unknown"}`;
+  if (!type) return "";
+  return bucket === "output" ? `Other output: ${type}` : `Other input: ${type}`;
 }
 
 function cachedTokenCount(value: unknown, cache: Map<string, number>): number {
@@ -149,7 +150,7 @@ function isOutputType(type: string): boolean {
 function skillNotes(skillLinks: TranscriptSkillLink[] = []): string[] {
   const counts = new Map<string, number>();
   for (const link of skillLinks) {
-    const name = `${link.skill_name ?? link.skillName ?? ""}`.trim();
+    const name = link.skill_name.trim();
     if (!name) continue;
     counts.set(name, (counts.get(name) ?? 0) + 1);
   }
@@ -181,13 +182,13 @@ export function estimateTranscriptTokens(items: TranscriptTokenItem[]): Transcri
 
   for (let index = 0; index < items.length; index += 1) {
     const item = items[index];
-    const type = item.type ?? item.kind ?? "";
+    const type = item.type ?? "";
     if (type === "compaction" || type === "model_config") continue;
     if (type === "toolGroup") {
       const tools = item.tools ?? [];
       chargeVisibleContext();
       for (const tool of tools) {
-        const outputTokens = cachedTokenCount(tool.command || tool.body, cache);
+        const outputTokens = cachedTokenCount(tool.command, cache);
         stats.output += outputTokens;
         visibleContextTokens += outputTokens;
         addDetail(outputDetails, `Tool call: ${toolLabel(tool)}`, outputTokens);
@@ -201,9 +202,9 @@ export function estimateTranscriptTokens(items: TranscriptTokenItem[]): Transcri
     }
     if (type === "tool") {
       chargeVisibleContext();
-      while (index < items.length && (items[index].type ?? items[index].kind ?? "") === "tool") {
+      while (index < items.length && (items[index].type ?? "") === "tool") {
         const tool = items[index];
-        const outputTokens = cachedTokenCount(tool.command || tool.body, cache);
+        const outputTokens = cachedTokenCount(tool.command, cache);
         stats.output += outputTokens;
         visibleContextTokens += outputTokens;
         addDetail(outputDetails, `Tool call: ${toolLabel(tool)}`, outputTokens);
@@ -212,7 +213,7 @@ export function estimateTranscriptTokens(items: TranscriptTokenItem[]): Transcri
       const groupEnd = index;
       for (let toolIndex = groupEnd - 1; toolIndex >= 0; toolIndex -= 1) {
         const tool = items[toolIndex];
-        if ((tool.type ?? tool.kind ?? "") !== "tool") break;
+        if ((tool.type ?? "") !== "tool") break;
         const inputTokens = cachedTokenCount(tool.result, cache);
         visibleContextTokens += inputTokens;
         if (inputTokens > 0) requestPending = true;

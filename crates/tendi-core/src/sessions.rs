@@ -267,7 +267,7 @@ fn scan_sessions_with_additional_roots_with_cache(
     scan_additional_session_roots(additional_session_roots, &mut sessions, cache);
 
     let mut sessions = merge_sessions(sessions);
-    sessions.retain(|session| !is_index_path(&session.path));
+    sessions.retain(|session| !is_index_path(session.agent, &session.path));
     normalize_session_projects(&mut sessions);
     enrich_session_repositories(&mut sessions);
     sessions.sort_by(|a, b| {
@@ -402,10 +402,9 @@ fn sorted_recent_paths(candidates: BTreeMap<PathBuf, SystemTime>) -> Vec<PathBuf
 pub fn is_session_candidate_path(path: &Path) -> bool {
     path.extension()
         .is_some_and(|extension| extension == "jsonl")
-        || matches!(
-            path.file_name().and_then(|name| name.to_str()),
-            Some("meta.json" | "store.db")
-        )
+        || crate::providers::all_providers()
+            .into_iter()
+            .any(|provider| provider.is_session_candidate_path(path))
 }
 
 pub fn scan_session_paths(paths: &[PathBuf], cache: &SessionScanCache) -> SessionScan {
@@ -456,44 +455,11 @@ pub fn enrich_session_repositories(sessions: &mut [SessionRecord]) {
 pub fn normalize_session_projects(sessions: &mut [SessionRecord]) {
     for session in sessions {
         if let Some(project) = session.project.take() {
-            let project = normalize_shared_session_project(project);
             session.project = Some(
                 crate::providers::agent_provider(session.agent).normalize_session_project(project),
             );
         }
     }
-}
-
-fn normalize_shared_session_project(path: PathBuf) -> PathBuf {
-    let Some(parent) = path.parent() else {
-        return path;
-    };
-    let Some(parent_name) = parent.file_name().and_then(|name| name.to_str()) else {
-        return path;
-    };
-    let Some(root) = parent.parent() else {
-        return path;
-    };
-    if parent_name == "tutti"
-        && root.file_name().and_then(|name| name.to_str()) == Some("Documents")
-        && path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .is_some_and(|name| name.strip_prefix("session-").is_some_and(is_uuid))
-    {
-        return parent.to_path_buf();
-    }
-    path
-}
-
-fn is_uuid(value: &str) -> bool {
-    let lengths = [8, 4, 4, 4, 12];
-    let mut parts = value.split('-');
-    lengths.into_iter().all(|length| {
-        parts.next().is_some_and(|part| {
-            part.len() == length && part.bytes().all(|byte| byte.is_ascii_hexdigit())
-        })
-    }) && parts.next().is_none()
 }
 
 #[derive(Debug, Default)]
@@ -628,25 +594,27 @@ fn is_line_boundary(path: &Path, offset: u64) -> bool {
 }
 
 pub fn infer_session_project(path: &Path, agent: AgentKind) -> Option<PathBuf> {
-    let project = if path.extension().is_some_and(|ext| ext == "jsonl") {
-        let meta = scan_jsonl_meta_for_agent(path, Some(agent));
-        meta.project
-    } else if path.file_name().and_then(|name| name.to_str()) == Some("meta.json") {
-        fs::read_to_string(path)
-            .ok()
-            .and_then(|text| serde_json::from_str::<Value>(&text).ok())
-            .and_then(|value| crate::providers::agent_provider(agent).infer_meta_project(&value))
-    } else {
-        None
-    };
+    let provider = crate::providers::agent_provider(agent);
+    let project =
+        if provider.session_path_role(path) == crate::providers::SessionPathRole::Transcript {
+            let meta = scan_jsonl_meta_for_agent(path, Some(agent));
+            meta.project
+        } else if provider.session_path_role(path) == crate::providers::SessionPathRole::Metadata {
+            fs::read_to_string(path)
+                .ok()
+                .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+                .and_then(|value| provider.infer_meta_project(&value))
+        } else {
+            None
+        };
 
-    crate::providers::agent_provider(agent)
+    provider
         .infer_session_project(path, project)
         .filter(|path| path.is_absolute())
 }
 
 pub fn infer_session_resume_target(path: &Path, agent: AgentKind) -> Option<&'static str> {
-    if !is_transcript_path(path) {
+    if !is_transcript_path(agent, path) {
         return None;
     }
     let file = fs::File::open(path).ok()?;
@@ -686,7 +654,6 @@ pub(crate) fn scan_jsonl_sessions(
     {
         let path = entry.into_path();
         let provider = crate::providers::agent_provider(agent);
-        let id = provider.session_id_from_path(&path);
         if let Some(session) = cache
             .and_then(|cache| cache.session_if_current(agent, &path))
             .filter(session_is_known_non_empty)
@@ -706,6 +673,9 @@ pub(crate) fn scan_jsonl_sessions(
         if !meta.has_content {
             continue;
         }
+        let Some(id) = provider.session_id_from_path(&path) else {
+            continue;
+        };
         sessions.push(SessionRecord {
             id,
             agent,
@@ -733,24 +703,6 @@ pub(crate) fn scan_jsonl_sessions(
     }
 }
 
-#[cfg(test)]
-pub(crate) fn scan_codex_index(
-    path: &Path,
-    sessions: &mut Vec<SessionRecord>,
-    warnings: &mut Vec<String>,
-) -> Result<()> {
-    crate::providers::codex::scan_session_index(path, sessions, warnings)
-}
-
-#[cfg(test)]
-pub(crate) fn scan_codex_jsonl(
-    root: &Path,
-    sessions: &mut Vec<SessionRecord>,
-    cache: Option<&SessionScanCache>,
-) {
-    scan_jsonl_sessions(root, AgentKind::Codex, 6, sessions, cache);
-}
-
 pub(crate) fn scan_additional_session_roots(
     roots: &[PathBuf],
     sessions: &mut Vec<SessionRecord>,
@@ -773,14 +725,7 @@ pub(crate) fn scan_additional_session_roots(
             .max_depth(10)
             .into_iter()
             .filter_map(Result::ok)
-            .filter(|entry| {
-                entry.file_type().is_file()
-                    && (entry
-                        .path()
-                        .extension()
-                        .is_some_and(|extension| extension == "jsonl")
-                        || entry.file_name() == "meta.json")
-            })
+            .filter(|entry| entry.file_type().is_file() && is_session_candidate_path(entry.path()))
         {
             session_paths.insert(entry.into_path());
         }
@@ -835,8 +780,10 @@ fn scan_detected_jsonl_session(
     }
     let file_updated_at = file_modified_iso(path);
     let provider = crate::providers::agent_provider(agent);
+    let Some(id) = provider.session_id_from_path(path) else {
+        return;
+    };
     let project = provider.infer_session_project(path, meta.project);
-    let id = provider.session_id_from_path(path);
     sessions.push(SessionRecord {
         id,
         agent,
@@ -949,32 +896,34 @@ fn merge_session(existing: &mut SessionRecord, incoming: &SessionRecord) {
     if existing.token_usage.is_none() {
         existing.token_usage = incoming.token_usage.clone();
     }
-    if should_replace_session_path(&existing.path, &incoming.path) {
+    if should_replace_session_path(existing.agent, &existing.path, &incoming.path) {
         existing.path = incoming.path.clone();
     }
 }
 
-fn should_replace_session_path(existing: &Path, incoming: &Path) -> bool {
-    if is_transcript_path(incoming) && !is_transcript_path(existing) {
+fn should_replace_session_path(agent: AgentKind, existing: &Path, incoming: &Path) -> bool {
+    if is_transcript_path(agent, incoming) && !is_transcript_path(agent, existing) {
         return true;
     }
 
-    is_index_path(existing) && !is_metadata_path(incoming)
+    is_index_path(agent, existing) && !is_metadata_path(agent, incoming)
 }
 
-fn is_transcript_path(path: &Path) -> bool {
-    path.extension().is_some_and(|ext| ext == "jsonl") && !is_index_path(path)
+fn is_transcript_path(agent: AgentKind, path: &Path) -> bool {
+    crate::providers::agent_provider(agent).session_path_role(path)
+        == crate::providers::SessionPathRole::Transcript
 }
 
-fn is_metadata_path(path: &Path) -> bool {
+fn is_metadata_path(agent: AgentKind, path: &Path) -> bool {
     matches!(
-        path.file_name().and_then(|name| name.to_str()),
-        Some("meta.json" | "session_index.jsonl")
+        crate::providers::agent_provider(agent).session_path_role(path),
+        crate::providers::SessionPathRole::Metadata | crate::providers::SessionPathRole::Index
     )
 }
 
-fn is_index_path(path: &Path) -> bool {
-    path.file_name().and_then(|name| name.to_str()) == Some("session_index.jsonl")
+fn is_index_path(agent: AgentKind, path: &Path) -> bool {
+    crate::providers::agent_provider(agent).session_path_role(path)
+        == crate::providers::SessionPathRole::Index
 }
 
 #[derive(Default)]
@@ -1525,12 +1474,8 @@ fn clean_user_content_part(text: &str) -> Option<String> {
 
 pub(crate) fn clean_preview_text(text: &str) -> Option<String> {
     let text = clean_user_content_part(text)?;
-    let had_image = contains_image_marker(&text);
     let text = strip_image_markers(&text);
     let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
-    if text.is_empty() {
-        return had_image.then(|| "Image".to_string());
-    }
     bound_session_preview_text(&text)
 }
 
@@ -1581,17 +1526,12 @@ fn extract_text(value: Option<&Value>) -> Option<String> {
 
 pub(crate) fn clean_title(text: &str) -> Option<String> {
     let text = clean_user_content_part(text)?;
-    let had_image = contains_image_marker(&text);
     let text = strip_image_markers(&text);
     let title = text
         .lines()
         .map(str::trim)
         .find(|line| !line.is_empty() && !line.starts_with("---"));
-    match title {
-        Some(title) => Some(title.chars().take(96).collect()),
-        None if had_image => Some("Image".to_string()),
-        None => None,
-    }
+    title.map(|title| title.chars().take(96).collect())
 }
 
 pub(crate) fn clean_session_title(value: Option<String>) -> Option<String> {
@@ -1762,28 +1702,31 @@ mod tests {
         fs,
         path::{Path, PathBuf},
         process::Command,
-        time::{Duration, SystemTime, UNIX_EPOCH},
+        time::{SystemTime, UNIX_EPOCH},
     };
 
     use rusqlite::Connection;
     use serde_json::json;
 
-    use crate::{git, providers::cursor_sessions, skills::AgentKind};
+    use crate::{
+        git,
+        providers::{codex::scan_session_index as scan_codex_index, cursor_sessions},
+        skills::AgentKind,
+    };
+    use crate::providers::codex::scan_jsonl_sessions_for_test as scan_codex_jsonl;
 
     use super::{
         SESSION_PREVIEW_MAX_CHARS, SessionRecord, SessionRepositoryResolver, SessionScanCache,
         SessionScanCacheEntry, clean_preview_text, clean_title, extract_session_title, file_state,
-        infer_session_project, infer_session_resume_target, merge_sessions,
-        normalize_session_projects, recent_session_paths_in_root, repository_from_git_snapshot,
-        scan_additional_session_roots, scan_codex_index, scan_codex_jsonl,
-        scan_jsonl_meta_for_agent, scan_jsonl_sessions, session_requires_rescan,
-        session_watch_plan, should_replace_session_path, unix_ms_to_iso,
+        infer_session_project, infer_session_resume_target, is_session_candidate_path,
+        merge_sessions, normalize_session_projects,
+        repository_from_git_snapshot, scan_additional_session_roots, scan_jsonl_meta_for_agent,
+        scan_jsonl_sessions, session_requires_rescan,
+        session_watch_plan, should_replace_session_path,
     };
 
     use cursor_sessions::{
-        cursor_store_cache_full_scans, cursor_store_model, cursor_time_field,
-        decode_cursor_project_dir, extract_cursor_blob_model, scan_cursor_meta,
-        scan_cursor_store_db, title_from_project_path,
+        decode_cursor_project_dir, scan_cursor_meta,
     };
 
     fn temp_dir(prefix: &str) -> PathBuf {
@@ -2006,100 +1949,9 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
-    #[test]
-    fn cursor_millis_timestamps_are_formatted_as_iso() {
-        let value = json!({
-            "createdAtMs": 1781621545175_i64,
-            "updatedAtMs": 1781623096363_i64
-        });
 
-        assert_eq!(
-            cursor_time_field(Some(&value), &["createdAt", "created_at"]),
-            Some("2026-06-16T14:52:25.175Z".to_string())
-        );
-        assert_eq!(
-            cursor_time_field(Some(&value), &["updatedAt", "updated_at"]),
-            Some("2026-06-16T15:18:16.363Z".to_string())
-        );
-    }
 
-    #[test]
-    fn cursor_store_model_reads_last_used_model() {
-        let value = json!({ "lastUsedModel": "composer-2.5" });
 
-        assert_eq!(cursor_store_model(&value).as_deref(), Some("composer-2.5"));
-    }
-
-    #[test]
-    fn cursor_store_db_reuses_unchanged_cache_and_rechecks_file_changes() {
-        let root = temp_dir("tendi-cursor-store-cache-test");
-        fs::create_dir_all(&root).unwrap();
-        let path = root.join("store.db");
-        let connection = Connection::open(&path).unwrap();
-        connection
-            .execute_batch(
-                "CREATE TABLE blobs (id TEXT PRIMARY KEY, data BLOB);
-                 CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT);",
-            )
-            .unwrap();
-        connection
-            .execute(
-                "INSERT INTO blobs (id, data) VALUES ('first', ?1)",
-                [json!({
-                    "role": "user",
-                    "content": "first cached message"
-                })
-                .to_string()
-                .as_bytes()],
-            )
-            .unwrap();
-        drop(connection);
-
-        let first = scan_cursor_store_db(Some(path.clone()));
-        assert_eq!(first.message_count, Some(1));
-        assert_eq!(cursor_store_cache_full_scans(&path), Some(1));
-
-        let cached = scan_cursor_store_db(Some(path.clone()));
-        assert_eq!(cached, first);
-        assert_eq!(cursor_store_cache_full_scans(&path), Some(1));
-
-        std::thread::sleep(Duration::from_millis(2));
-        let connection = Connection::open(&path).unwrap();
-        connection
-            .execute(
-                "INSERT INTO blobs (id, data) VALUES ('second', ?1)",
-                [json!({
-                    "role": "assistant",
-                    "content": "second changed message"
-                })
-                .to_string()
-                .as_bytes()],
-            )
-            .unwrap();
-        drop(connection);
-
-        let changed = scan_cursor_store_db(Some(path.clone()));
-        assert_eq!(changed.message_count, Some(2));
-        assert_eq!(cursor_store_cache_full_scans(&path), Some(2));
-
-        fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn cursor_blob_model_reads_provider_message_metadata() {
-        let value = json!({
-            "content": [{
-                "providerOptions": {
-                    "cursor": { "modelName": "claude-fable-5-thinking-high" }
-                }
-            }]
-        });
-
-        assert_eq!(
-            extract_cursor_blob_model(&value).as_deref(),
-            Some("claude-fable-5-thinking-high")
-        );
-    }
 
     #[test]
     fn cursor_project_folder_decodes_to_workspace_path() {
@@ -2109,19 +1961,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn cursor_project_title_prefers_app_or_installation_name() {
-        assert_eq!(
-            title_from_project_path(Path::new("/Users/test/dev/example/group-chat/apps/server")),
-            Some("group-chat".to_string())
-        );
-        assert_eq!(
-            title_from_project_path(Path::new(
-                "/Users/test/.tutti-dev/apps/installations/group-chat/abc/runtime"
-            )),
-            Some("group-chat".to_string())
-        );
-    }
 
     #[test]
     fn scans_additional_roots_by_transcript_format() {
@@ -2131,7 +1970,7 @@ mod tests {
             .join("private-run/state")
             .join(format!("rollout-{id}.jsonl"));
         let claude_session = root.join("private-run/claude-session.jsonl");
-        let cursor_session = root.join("private-run/cursor-session.jsonl");
+        let cursor_session = root.join("private-run/cursor-fixture.jsonl");
         fs::create_dir_all(codex_session.parent().unwrap()).unwrap();
         fs::write(
             &codex_session,
@@ -2345,93 +2184,7 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
-    #[test]
-    fn cached_codex_session_without_title_is_rechecked() {
-        let root = temp_dir("tendi-titleless-session-scan-cache-test");
-        fs::create_dir_all(&root).unwrap();
-        let path = root.join("rollout-12345678-1234-1234-1234-123456789012.jsonl");
-        fs::write(
-            &path,
-            r#"{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Real request"}]}}"#,
-        )
-        .unwrap();
 
-        let mut first_scan = Vec::new();
-        scan_codex_jsonl(&root, &mut first_scan, None);
-        assert_eq!(first_scan[0].title.as_deref(), Some("Real request"));
-        assert!(first_scan[0].turn_count.is_some_and(|count| count > 0));
-
-        let (file_mtime, file_size) = file_state(&path).unwrap();
-        let mut cached_session = first_scan[0].clone();
-        cached_session.title = None;
-        let cache = SessionScanCache::from_entries([SessionScanCacheEntry {
-            session: cached_session,
-            file_mtime,
-            file_size,
-        }]);
-
-        let mut rescanned = Vec::new();
-        scan_codex_jsonl(&root, &mut rescanned, Some(&cache));
-
-        assert_eq!(rescanned[0].title.as_deref(), Some("Real request"));
-
-        fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn stale_session_scan_cache_rechecks_injected_preview_values() {
-        let root = temp_dir("tendi-session-scan-cache-injected-preview-test");
-        fs::create_dir_all(&root).unwrap();
-        let path = root.join("rollout-12345678-1234-1234-1234-123456789012.jsonl");
-        fs::write(
-            &path,
-            r#"{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"<recommended_plugins>hidden</recommended_plugins>"},{"type":"input_text","text":"Real request"}]}}"#,
-        )
-        .unwrap();
-
-        let (file_mtime, file_size) = file_state(&path).unwrap();
-        let cached_session = SessionRecord {
-            id: "12345678-1234-1234-1234-123456789012".to_string(),
-            agent: AgentKind::Codex,
-            title: Some("<recommended_plugins>".to_string()),
-            project: None,
-            repository: None,
-            repository_url: None,
-            logical_project_id: None,
-            logical_project_name: None,
-            path: path.clone(),
-            started_at: None,
-            updated_at: None,
-            message_count: Some(1),
-            first_user_message: Some("<recommended_plugins>hidden".to_string()),
-            last_user_message: Some("<recommended_plugins>hidden".to_string()),
-            last_assistant_message: None,
-            turn_count: Some(1),
-            model: None,
-            mode: None,
-            approval_mode: None,
-            is_run_everything: None,
-            parent_session_id: None,
-            token_usage: None,
-        };
-        let cache = SessionScanCache::from_entries([SessionScanCacheEntry {
-            session: cached_session,
-            file_mtime,
-            file_size,
-        }]);
-
-        let mut sessions = Vec::new();
-        scan_codex_jsonl(&root, &mut sessions, Some(&cache));
-
-        assert_eq!(sessions.len(), 1);
-        assert_eq!(
-            sessions[0].first_user_message.as_deref(),
-            Some("Real request")
-        );
-        assert_eq!(sessions[0].title.as_deref(), Some("Real request"));
-
-        fs::remove_dir_all(root).unwrap();
-    }
 
     #[cfg(unix)]
     #[test]
@@ -2483,19 +2236,17 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
+
     #[test]
-    fn recent_session_discovery_finds_nested_candidates() {
-        let root = temp_dir("tendi-recent-codex-sessions");
-        for day in ["04", "05", "06"] {
-            let dir = root.join("2026/08").join(day);
-            fs::create_dir_all(&dir).unwrap();
-            fs::write(dir.join(format!("rollout-{day}.jsonl")), "{}\n").unwrap();
-        }
-
-        let paths = recent_session_paths_in_root(&root, Some(0));
-        assert_eq!(paths.len(), 3);
-
-        fs::remove_dir_all(root).unwrap();
+    fn session_candidate_discovery_uses_provider_owned_files() {
+        assert!(is_session_candidate_path(Path::new("/tmp/session.jsonl")));
+        assert!(is_session_candidate_path(Path::new(
+            "/tmp/cursor/meta.json"
+        )));
+        assert!(is_session_candidate_path(Path::new("/tmp/cursor/store.db")));
+        assert!(!is_session_candidate_path(Path::new(
+            "/tmp/cursor/state.json"
+        )));
     }
 
     #[test]
@@ -2571,16 +2322,16 @@ mod tests {
         );
         assert_eq!(
             clean_preview_text("<image name=[Image #1] path=\"/tmp/image.png\">"),
-            Some("Image".to_string())
+            None
         );
         assert_eq!(clean_preview_text("<recommended_plugins>hidden"), None);
         assert_eq!(
             clean_title("<image name=[Image #1] path=\"/tmp/image.png\">"),
-            Some("Image".to_string())
+            None
         );
         assert_eq!(
             clean_title("<image name=[Image #1] path=\"/tmp/image.png\""),
-            Some("Image".to_string())
+            None
         );
         assert_eq!(
             clean_title("<image name=[Image #1] path=\"/tmp/image.png\">\nFollow-up request"),
@@ -2834,103 +2585,7 @@ mod tests {
         let _ = fs::remove_dir_all(root);
     }
 
-    #[test]
-    fn extracts_latest_session_model() {
-        let root = temp_dir("tendi-session-model-test");
-        fs::create_dir_all(&root).unwrap();
-        let codex_path = root.join("codex.jsonl");
-        fs::write(
-            &codex_path,
-            [
-                r#"{"type":"turn_context","payload":{"model":"gpt-5.5"}}"#,
-                r#"{"type":"event_msg","payload":{"type":"thread_settings_applied","thread_settings":{"model":"gpt-5.6-sol"}}}"#,
-            ]
-            .join("\n"),
-        )
-        .unwrap();
-        let claude_path = root.join("claude.jsonl");
-        fs::write(
-            &claude_path,
-            r#"{"type":"assistant","message":{"model":"claude-opus-4-1"}}"#,
-        )
-        .unwrap();
 
-        assert_eq!(
-            scan_jsonl_meta_for_agent(&codex_path, None)
-                .model
-                .as_deref(),
-            Some("gpt-5.6-sol")
-        );
-        assert_eq!(
-            scan_jsonl_meta_for_agent(&claude_path, None)
-                .model
-                .as_deref(),
-            Some("claude-opus-4-1")
-        );
-        let _ = fs::remove_dir_all(root);
-    }
-
-    #[test]
-    fn extracts_codex_parent_session_id() {
-        let direct = json!({
-            "type": "session_meta",
-            "payload": { "parent_thread_id": "parent-direct" }
-        });
-        let nested = json!({
-            "type": "session_meta",
-            "payload": {
-                "source": {
-                    "subagent": {
-                        "thread_spawn": { "parent_thread_id": "parent-nested" }
-                    }
-                }
-            }
-        });
-
-        assert_eq!(
-            crate::providers::codex::extract_parent_session_id(&direct).as_deref(),
-            Some("parent-direct")
-        );
-        assert_eq!(
-            crate::providers::codex::extract_parent_session_id(&nested).as_deref(),
-            Some("parent-nested")
-        );
-
-        let task_name = json!({
-            "type": "session_meta",
-            "payload": {
-                "source": {
-                    "subagent": {
-                        "thread_spawn": {
-                            "task_name": "explicit_task_name",
-                            "agent_path": "/root/legacy_name"
-                        }
-                    }
-                }
-            }
-        });
-        assert_eq!(
-            crate::providers::codex::extract_provider_title(&task_name).as_deref(),
-            Some("explicit_task_name")
-        );
-
-        let legacy_agent_path = json!({
-            "type": "session_meta",
-            "payload": {
-                "source": {
-                    "subagent": {
-                        "thread_spawn": {
-                            "agent_path": "/root/shared_appserver_final_audit"
-                        }
-                    }
-                }
-            }
-        });
-        assert_eq!(
-            crate::providers::codex::extract_provider_title(&legacy_agent_path).as_deref(),
-            Some("shared_appserver_final_audit")
-        );
-    }
 
     #[test]
     fn cursor_meta_skips_project_only_empty_sessions() {
@@ -2967,47 +2622,11 @@ mod tests {
 
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].title.as_deref(), Some("Pinned Cursor session"));
-        assert_eq!(sessions[0].message_count, Some(0));
-
-        let _ = fs::remove_dir_all(root);
-    }
-
-    #[test]
-    fn cursor_store_keeps_clean_explicit_title_without_messages() {
-        let root = temp_dir("tendi-cursor-store-titled-test");
-        let store_dir = root.join("session-id");
-        fs::create_dir_all(&store_dir).unwrap();
-        let connection = Connection::open(store_dir.join("store.db")).unwrap();
-        connection
-            .execute_batch("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT);")
-            .unwrap();
-        let metadata = json!({
-            "name": "<image name=[Image #1] path=\"/tmp/image.png\"> Pinned Cursor store session",
-            "cwd": "/Users/test/dev/tendi"
-        })
-        .to_string();
-        let encoded = metadata
-            .as_bytes()
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect::<String>();
-        connection
-            .execute("INSERT INTO meta (key, value) VALUES ('0', ?1)", [&encoded])
-            .unwrap();
-        drop(connection);
-
-        let mut sessions = Vec::new();
-        scan_cursor_meta(&root, &mut sessions, AgentKind::Cursor, None);
-
-        assert_eq!(sessions.len(), 1);
-        assert_eq!(
-            sessions[0].title.as_deref(),
-            Some("Pinned Cursor store session")
-        );
         assert_eq!(sessions[0].message_count, None);
 
         let _ = fs::remove_dir_all(root);
     }
+
 
     #[test]
     fn cursor_store_metadata_links_subagent_transcript_to_parent() {
@@ -3105,12 +2724,14 @@ mod tests {
     #[test]
     fn cursor_transcript_path_replaces_metadata_path() {
         assert!(should_replace_session_path(
+            AgentKind::Cursor,
             Path::new("/Users/test/.cursor/chats/session-id/meta.json"),
             Path::new(
                 "/Users/test/.cursor/projects/project/agent-transcripts/session-id/session-id.jsonl"
             )
         ));
         assert!(!should_replace_session_path(
+            AgentKind::Cursor,
             Path::new(
                 "/Users/test/.cursor/projects/project/agent-transcripts/session-id/session-id.jsonl"
             ),
@@ -3272,11 +2893,21 @@ mod tests {
         archive.project = Some(PathBuf::from("/Users/test/Documents/Codex/2026-08-09/c"));
         archive.path = PathBuf::from("/tmp/codex-archive.jsonl");
         sessions.push(archive);
+        let mut tutti = sessions[0].clone();
+        tutti.id = "codex-tutti".to_string();
+        tutti.agent = AgentKind::Codex;
+        tutti.project = Some(PathBuf::from(
+            "/Users/test/Documents/tutti/session-c98d1ced-5371-43cc-8173-9416c349a776",
+        ));
+        tutti.path = PathBuf::from("/tmp/codex-tutti.jsonl");
+        sessions.push(tutti);
         normalize_session_projects(&mut sessions);
 
         assert_eq!(
             sessions[0].project.as_deref(),
-            Some(Path::new("/Users/test/Documents/tutti"))
+            Some(Path::new(
+                "/Users/test/Documents/tutti/session-c98d1ced-5371-43cc-8173-9416c349a776",
+            ))
         );
         assert_eq!(
             sessions[1].project.as_deref(),
@@ -3285,6 +2916,10 @@ mod tests {
         assert_eq!(
             sessions[2].project.as_deref(),
             Some(Path::new("/Users/test/Documents/Codex"))
+        );
+        assert_eq!(
+            sessions[3].project.as_deref(),
+            Some(Path::new("/Users/test/Documents/tutti"))
         );
     }
 
@@ -3339,11 +2974,4 @@ mod tests {
         let _ = fs::remove_dir_all(root);
     }
 
-    #[test]
-    fn unix_millis_to_iso_handles_utc_dates() {
-        assert_eq!(
-            unix_ms_to_iso(0),
-            Some("1970-01-01T00:00:00.000Z".to_string())
-        );
-    }
 }

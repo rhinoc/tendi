@@ -189,6 +189,165 @@ impl SessionAnalytics {
     }
 }
 
+pub(crate) fn overview_record(record: &SessionAnalyticsRecord) -> SessionAnalyticsOverviewRecord {
+    let analytics = &record.analytics;
+    let mut first = None;
+    let mut last = None;
+    let mut days = BTreeMap::<String, SessionAnalyticsOverviewDayAccumulator>::new();
+
+    for response in &analytics.responses {
+        update_coverage(&response.timestamp, &mut first, &mut last);
+        let Some(date) = analytics_date(&response.timestamp).map(|date| date.to_string()) else {
+            continue;
+        };
+        let day = days.entry(date).or_default();
+        day.usage.add_assign(response.usage);
+        day.responses += 1;
+        day.has_response_or_run = true;
+        let model = response.model.clone();
+        let model_usage = day.models.entry(model).or_default();
+        if model_usage.model.is_empty() {
+            model_usage.model = response.model.clone();
+        }
+        model_usage.total_tokens = model_usage
+            .total_tokens
+            .saturating_add(response.usage.total_tokens);
+        model_usage.responses += 1;
+    }
+
+    for run in analytics.snapshot_runs(&record.state) {
+        update_coverage(&run.start, &mut first, &mut last);
+        let Some(date) = analytics_date(&run.start).map(|date| date.to_string()) else {
+            continue;
+        };
+        let day = days.entry(date).or_default();
+        day.runs.push(run);
+        day.has_response_or_run = true;
+    }
+
+    for timestamp in &analytics.aborts {
+        update_coverage(timestamp, &mut first, &mut last);
+        let Some(date) = analytics_date(timestamp).map(|date| date.to_string()) else {
+            continue;
+        };
+        days.entry(date).or_default().aborted += 1;
+    }
+
+    for timestamp in &analytics.compactions {
+        update_coverage(timestamp, &mut first, &mut last);
+        let Some(date) = analytics_date(timestamp).map(|date| date.to_string()) else {
+            continue;
+        };
+        days.entry(date).or_default().compacted += 1;
+    }
+
+    for sample in &analytics.limit_samples {
+        update_coverage(&sample.timestamp, &mut first, &mut last);
+        let Some(date) = analytics_date(&sample.timestamp).map(|date| date.to_string()) else {
+            continue;
+        };
+        let day = days.entry(date).or_default();
+        let previous = day
+            .rate_limits
+            .get(&sample.window_minutes)
+            .copied()
+            .unwrap_or(0.0);
+        day.rate_limits
+            .insert(sample.window_minutes, previous.max(sample.used_percent));
+    }
+
+    for call in &analytics.tools {
+        update_coverage(&call.timestamp, &mut first, &mut last);
+        let Some(date) = analytics_date(&call.timestamp).map(|date| date.to_string()) else {
+            continue;
+        };
+        if call.name.is_empty() {
+            continue;
+        }
+        let day = days.entry(date).or_default();
+        let key = (call.server.clone(), call.name.clone());
+        *day.tools.entry(key).or_default() += 1;
+    }
+
+    for call in &analytics.skills {
+        update_coverage(&call.timestamp, &mut first, &mut last);
+        let Some(date) = analytics_date(&call.timestamp).map(|date| date.to_string()) else {
+            continue;
+        };
+        if call.name.is_empty() {
+            continue;
+        }
+        let day = days.entry(date).or_default();
+        *day.skills.entry(call.name.clone()).or_default() += 1;
+    }
+
+    SessionAnalyticsOverviewRecord {
+        session_id: analytics.session_id.clone(),
+        agent: analytics.agent,
+        session_path: analytics.session_path.clone(),
+        capabilities: analytics.capabilities(),
+        first,
+        last,
+        has_activity: !analytics.responses.is_empty()
+            || !analytics.runs.is_empty()
+            || !analytics.tools.is_empty()
+            || !analytics.aborts.is_empty()
+            || !analytics.compactions.is_empty()
+            || record.state.open_run.is_some(),
+        days: days
+            .into_iter()
+            .map(|(date, day)| (date, day.finish()))
+            .collect(),
+    }
+}
+
+#[derive(Default)]
+struct SessionAnalyticsOverviewDayAccumulator {
+    usage: AnalyticsTokenUsage,
+    responses: u64,
+    runs: Vec<AnalyticsRun>,
+    aborted: u64,
+    compacted: u64,
+    models: BTreeMap<String, SessionAnalyticsOverviewModel>,
+    tools: BTreeMap<(String, String), u64>,
+    skills: BTreeMap<String, u64>,
+    rate_limits: BTreeMap<u32, f64>,
+    has_response_or_run: bool,
+}
+
+impl SessionAnalyticsOverviewDayAccumulator {
+    fn finish(self) -> SessionAnalyticsOverviewDay {
+        SessionAnalyticsOverviewDay {
+            usage: self.usage,
+            responses: self.responses,
+            runs: self.runs,
+            aborted: self.aborted,
+            compacted: self.compacted,
+            models: self.models.into_values().collect(),
+            tools: self
+                .tools
+                .into_iter()
+                .map(|((server, name), calls)| AnalyticsCallUsage {
+                    name,
+                    server,
+                    calls,
+                })
+                .collect(),
+            skills: self
+                .skills
+                .into_iter()
+                .map(|(name, calls)| AnalyticsCallUsage {
+                    name,
+                    server: String::new(),
+                    calls,
+                })
+                .collect(),
+            rate_limits: self.rate_limits,
+            has_response_or_run: self.has_response_or_run,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct AnalyticsOverviewIndex {
     pub first: Option<String>,
@@ -230,6 +389,39 @@ pub(crate) struct SessionAnalyticsRecord {
     pub state: AnalyticsParserState,
     pub file_mtime: i64,
     pub file_size: i64,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub(crate) struct SessionAnalyticsOverviewRecord {
+    pub session_id: String,
+    pub agent: AgentKind,
+    pub session_path: PathBuf,
+    pub capabilities: AnalyticsCapabilities,
+    pub first: Option<String>,
+    pub last: Option<String>,
+    pub has_activity: bool,
+    pub days: BTreeMap<String, SessionAnalyticsOverviewDay>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+pub(crate) struct SessionAnalyticsOverviewDay {
+    pub usage: AnalyticsTokenUsage,
+    pub responses: u64,
+    pub runs: Vec<AnalyticsRun>,
+    pub aborted: u64,
+    pub compacted: u64,
+    pub models: Vec<SessionAnalyticsOverviewModel>,
+    pub tools: Vec<AnalyticsCallUsage>,
+    pub skills: Vec<AnalyticsCallUsage>,
+    pub rate_limits: BTreeMap<u32, f64>,
+    pub has_response_or_run: bool,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+pub(crate) struct SessionAnalyticsOverviewModel {
+    pub model: String,
+    pub total_tokens: u64,
+    pub responses: u64,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -376,6 +568,7 @@ struct RankAccumulator {
     sessions: BTreeSet<String>,
 }
 
+#[cfg(test)]
 pub(crate) fn aggregate_overview(
     records: &[SessionAnalyticsRecord],
     days_requested: u32,
@@ -433,11 +626,7 @@ pub(crate) fn aggregate_overview(
             record_session(slot, analytics.agent, &identity);
             *slot
                 .models
-                .entry(if response.model.is_empty() {
-                    "Unknown model".to_string()
-                } else {
-                    response.model.clone()
-                })
+                .entry(response.model.clone())
                 .or_default() += response.usage.total_tokens;
         }
         for run in analytics.snapshot_runs(&record.state) {
@@ -616,6 +805,220 @@ pub(crate) fn aggregate_overview(
                 agent_key(record.analytics.agent),
                 record.analytics.session_id,
                 record.analytics.session_path.display()
+            ));
+        }
+    }
+    summary.sessions = summary_sessions.len();
+    summary.aborted_rate = if summary.runs.started > 0 {
+        summary.aborted as f64 / summary.runs.started as f64
+    } else {
+        0.0
+    };
+
+    OverviewAnalytics {
+        revision: 0,
+        generated_at: Local::now().to_rfc3339(),
+        days_requested,
+        rank_days,
+        coverage: AnalyticsCoverage {
+            first,
+            last,
+            total_sessions: records.len(),
+            analyzed_sessions,
+            indexing_sessions: 0,
+        },
+        capabilities: capabilities
+            .into_iter()
+            .map(|(agent, capabilities)| AnalyticsProviderCapability {
+                agent,
+                capabilities,
+            })
+            .collect(),
+        summary,
+        days,
+        tools: finalize_rank(tools),
+        skills: finalize_rank(skills),
+        warnings,
+    }
+}
+
+pub(crate) fn aggregate_overview_records(
+    records: &[SessionAnalyticsOverviewRecord],
+    days_requested: u32,
+    rank_days: u32,
+    warnings: Vec<String>,
+) -> OverviewAnalytics {
+    let days_requested = days_requested.clamp(1, 365);
+    let rank_days = rank_days.clamp(1, 730);
+    let today = Local::now().date_naive();
+    let since = today - Duration::days(i64::from(days_requested.saturating_sub(1)));
+    let rank_since = today - Duration::days(i64::from(rank_days.saturating_sub(1)));
+    let mut by_day = BTreeMap::<String, DayAccumulator>::new();
+    let mut tools = BTreeMap::<String, RankAccumulator>::new();
+    let mut skills = BTreeMap::<String, RankAccumulator>::new();
+    let mut capabilities = BTreeMap::<AgentKind, AnalyticsCapabilities>::new();
+    let mut compacted_sessions = BTreeSet::new();
+    let mut first = None;
+    let mut last = None;
+    let mut analyzed_sessions = 0;
+
+    for record in records {
+        if let Some(value) = record.first.as_ref()
+            && first.as_ref().is_none_or(|current| value < current)
+        {
+            first = Some(value.clone());
+        }
+        if let Some(value) = record.last.as_ref()
+            && last.as_ref().is_none_or(|current| value > current)
+        {
+            last = Some(value.clone());
+        }
+        capabilities
+            .entry(record.agent)
+            .or_insert(record.capabilities);
+        analyzed_sessions += usize::from(record.has_activity);
+        let identity = format!(
+            "{}\0{}\0{}",
+            agent_key(record.agent),
+            record.session_id,
+            record.session_path.display()
+        );
+
+        for (date, contribution) in &record.days {
+            let Ok(date_value) = date.parse::<NaiveDate>() else {
+                continue;
+            };
+            if date_value < since {
+                continue;
+            }
+            let slot = by_day.entry(date.clone()).or_default();
+            slot.usage.add_assign(contribution.usage);
+            slot.responses += contribution.responses;
+            if contribution.responses > 0
+                || !contribution.runs.is_empty()
+                || contribution.aborted > 0
+                || contribution.compacted > 0
+                || !contribution.tools.is_empty()
+                || !contribution.skills.is_empty()
+            {
+                record_session(slot, record.agent, &identity);
+            }
+            for model in &contribution.models {
+                *slot.models.entry(model.model.clone()).or_default() += model.total_tokens;
+            }
+            for run in &contribution.runs {
+                add_run(&mut slot.runs, run);
+            }
+            slot.aborted += contribution.aborted;
+            slot.compacted += contribution.compacted;
+            if contribution.compacted > 0 {
+                compacted_sessions.insert(identity.clone());
+            }
+            for (window, used_percent) in &contribution.rate_limits {
+                let previous = slot.rate_limits.get(window).copied().unwrap_or(0.0);
+                slot.rate_limits
+                    .insert(*window, previous.max(*used_percent));
+            }
+            for call in &contribution.tools {
+                *slot
+                    .tools
+                    .entry((call.server.clone(), call.name.clone()))
+                    .or_default() += call.calls;
+            }
+            for call in &contribution.skills {
+                *slot.skills.entry(call.name.clone()).or_default() += call.calls;
+            }
+
+            if date_value >= rank_since {
+                for call in &contribution.tools {
+                    let key = format!("{}\0{}", call.server, call.name);
+                    let rank = tools.entry(key).or_default();
+                    rank.name = call.name.clone();
+                    rank.server = call.server.clone();
+                    rank.calls += call.calls;
+                    rank.sessions.insert(identity.clone());
+                }
+                for call in &contribution.skills {
+                    let rank = skills.entry(call.name.clone()).or_default();
+                    rank.name = call.name.clone();
+                    rank.calls += call.calls;
+                    rank.sessions.insert(identity.clone());
+                }
+            }
+        }
+    }
+
+    let mut days = Vec::with_capacity(days_requested as usize);
+    let mut cursor = since;
+    while cursor <= today {
+        let key = cursor.to_string();
+        let slot = by_day.remove(&key).unwrap_or_default();
+        days.push(AnalyticsDay {
+            date: key,
+            usage: slot.usage,
+            responses: slot.responses,
+            sessions: slot.sessions.len(),
+            sessions_by_agent: slot
+                .sessions_by_agent
+                .into_iter()
+                .map(|(agent, sessions)| (agent, sessions.len()))
+                .collect(),
+            runs: slot.runs,
+            aborted: slot.aborted,
+            compacted: slot.compacted,
+            models: slot
+                .models
+                .into_iter()
+                .map(|(model, total_tokens)| AnalyticsModelUsage {
+                    model,
+                    total_tokens,
+                })
+                .collect(),
+            tools: slot
+                .tools
+                .into_iter()
+                .map(|((server, name), calls)| AnalyticsCallUsage {
+                    name,
+                    server,
+                    calls,
+                })
+                .collect(),
+            skills: slot
+                .skills
+                .into_iter()
+                .map(|(name, calls)| AnalyticsCallUsage {
+                    name,
+                    server: String::new(),
+                    calls,
+                })
+                .collect(),
+            rate_limits: slot.rate_limits,
+        });
+        cursor += Duration::days(1);
+    }
+
+    let mut summary = AnalyticsOverviewSummary {
+        compacted_sessions: compacted_sessions.len(),
+        ..AnalyticsOverviewSummary::default()
+    };
+    let mut summary_sessions = BTreeSet::new();
+    for day in &days {
+        summary.usage.add_assign(day.usage);
+        summary.responses += day.responses;
+        add_run_summary(&mut summary.runs, &day.runs);
+        summary.aborted += day.aborted;
+        summary.compacted += day.compacted;
+    }
+    for record in records {
+        if record.days.iter().any(|(date, contribution)| {
+            date.parse::<NaiveDate>()
+                .is_ok_and(|date| date >= since && contribution.has_response_or_run)
+        }) {
+            summary_sessions.insert(format!(
+                "{}\0{}\0{}",
+                agent_key(record.agent),
+                record.session_id,
+                record.session_path.display()
             ));
         }
     }
@@ -1087,7 +1490,7 @@ pub(crate) fn record_tool_call(
         .get("name")
         .and_then(Value::as_str)
         .or_else(|| payload.pointer("/action/type").and_then(Value::as_str))
-        .unwrap_or("tool_call");
+        .unwrap_or_default();
     let (name, server) = normalize_tool_name(raw_name);
     record.analytics.tools.push(AnalyticsToolCall {
         timestamp: timestamp.to_string(),
@@ -1113,7 +1516,7 @@ fn record_message_tool(block: &Value, timestamp: &str, record: &mut SessionAnaly
     let raw_name = block
         .get("name")
         .and_then(Value::as_str)
-        .unwrap_or("tool_use");
+        .unwrap_or_default();
     let (name, server) = normalize_tool_name(raw_name);
     record.analytics.tools.push(AnalyticsToolCall {
         timestamp: timestamp.to_string(),
@@ -1657,19 +2060,6 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
-    #[test]
-    fn skill_extraction_requires_a_path_boundary_and_normalizes_versions() {
-        assert_eq!(
-            extract_skill_names("cat /tmp/skills/foo-1.2.3/SKILL.md"),
-            vec!["foo"]
-        );
-        assert!(extract_skill_names("/tmp/skills/.system/SKILL.md").is_empty());
-        assert!(extract_skill_names("skill-https-github-com-openai-skills/output/file").is_empty());
-        assert_eq!(
-            extract_skill_names(r#"C:\Users\me\skills\frontend-design-3\SKILL.md"#),
-            vec!["frontend-design-3"]
-        );
-    }
 
     #[test]
     fn overview_keeps_model_attribution_and_mcp_servers_separate() {
@@ -1715,7 +2105,25 @@ mod tests {
             file_size: 0,
         };
 
-        let overview = aggregate_overview(&[record], 1, 1, Vec::new());
+        let projected_record = overview_record(&record);
+        let projected = aggregate_overview_records(&[projected_record], 1, 1, Vec::new());
+        let overview = aggregate_overview(std::slice::from_ref(&record), 1, 1, Vec::new());
+        assert_eq!(
+            serde_json::to_value(&overview.summary).unwrap(),
+            serde_json::to_value(&projected.summary).unwrap()
+        );
+        assert_eq!(
+            serde_json::to_value(&overview.days).unwrap(),
+            serde_json::to_value(&projected.days).unwrap()
+        );
+        assert_eq!(
+            serde_json::to_value(&overview.tools).unwrap(),
+            serde_json::to_value(&projected.tools).unwrap()
+        );
+        assert_eq!(
+            serde_json::to_value(&overview.skills).unwrap(),
+            serde_json::to_value(&projected.skills).unwrap()
+        );
         assert_eq!(overview.summary.usage.total_tokens, 10);
         assert_eq!(overview.days[0].models[0].model, "gpt-test");
         assert_eq!(overview.days[0].tools.len(), 2);

@@ -5,7 +5,6 @@ import {
   formatUserPath,
   openSource,
   safeInvoke,
-  SkillVisibility,
   skillSourceDetails,
   skillTargets,
   isWebSource,
@@ -25,22 +24,26 @@ import { Visibility } from "./Visibility.tsx";
 
 export type SkillInfoMenuSkill = SkillLike & {
   name: string;
-  visibility?: string;
-  agents?: string[];
-  dependencies?: string[];
-  dependents?: string[];
+  visibility: string;
+  agents: string[];
+  dependencies: string[];
+  dependents: string[];
+  description: string;
 };
 
 export type SkillInfoMenuProps = {
   skill: SkillInfoMenuSkill;
-  skills?: SkillDependencyRecord[];
+  skills: SkillDependencyRecord[];
   onOpenSkill?: (name: string) => void;
 };
 
 function relationList(names: string[], skills: SkillDependencyRecord[]) {
   const skillsByName = new Map(skills.map((item) => [item.name, item]));
   return names
-    .map((name) => skillsByName.get(name) ?? { name })
+    .flatMap((name) => {
+      const skill = skillsByName.get(name);
+      return skill ? [skill] : [];
+    })
     .sort((left, right) => left.name.localeCompare(right.name));
 }
 
@@ -60,7 +63,7 @@ function SkillInfoRelations({
             <td>
               <div className="skillInfoRelationList">
                 {row.skills.map((relatedSkill) => (
-                  <Tooltip key={relatedSkill.name} content={relatedSkill.description || relatedSkill.name}><button
+                  <Tooltip key={relatedSkill.name} content={relatedSkill.description}><button
                     className="skillInfoRelationChip"
                     key={relatedSkill.name}
                     disabled={!onOpenSkill}
@@ -78,15 +81,15 @@ function SkillInfoRelations({
   );
 }
 
-export function SkillInfoMenu({ skill, skills = [], onOpenSkill }: SkillInfoMenuProps) {
+export function SkillInfoMenu({ skill, skills, onOpenSkill }: SkillInfoMenuProps) {
   const sourceDetails = skillSourceDetails(skill);
   const sourceIcon = sourceIconDetails(sourceDetails);
   const sourceValue = sourceDetails.value;
   const displaySourceValue = isWebSource(sourceValue.trim()) ? sourceValue : formatUserPath(sourceValue);
   const sourceUrl = sourceOpenUrl(sourceValue, sourceDetails.kind, sourceDetails.relativePath);
   const installLocations = skillTargets(skill);
-  const dependencies = relationList(skill.dependencies ?? [], skills);
-  const dependents = relationList(skill.dependents ?? [], skills);
+  const dependencies = relationList(skill.dependencies, skills);
+  const dependents = relationList(skill.dependents, skills);
   const relationRows = [
     { label: "Depends on", skills: dependencies },
     { label: "Used by", skills: dependents },
@@ -101,7 +104,7 @@ export function SkillInfoMenu({ skill, skills = [], onOpenSkill }: SkillInfoMenu
       label="Skill info"
       title={skill.name}
     >
-            <InfoSection label="Source">
+            <InfoSection label="Source" className="skillInfoSourceSection">
                 {sourceValue ? (
                   <button
                     className="skillInfoSourceIcon"
@@ -132,10 +135,10 @@ export function SkillInfoMenu({ skill, skills = [], onOpenSkill }: SkillInfoMenu
                 )}
             </InfoSection>
             <InfoSection label="Visibility" valueLine={false}>
-              <Visibility value={skill.visibility ?? SkillVisibility.Auto} skill={skill} readOnly />
+              <Visibility value={skill.visibility} skill={skill} readOnly />
             </InfoSection>
             <InfoSection label="Agents" valueLine={false}>
-              <div className="skillInfoAgents"><AgentChips agents={skill.agents ?? []} /></div>
+              <div className="skillInfoAgents"><AgentChips agents={skill.agents} /></div>
             </InfoSection>
             {relationRows.length > 0 && (
               <InfoSection label="Relationships" valueLine={false}>

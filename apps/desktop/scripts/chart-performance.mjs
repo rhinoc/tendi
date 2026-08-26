@@ -153,7 +153,7 @@ function runOverviewTrend(groupAnalyticsDays, selectAnalyticsGranularity, buildT
 
 function runSkillSessionProject(groupItems, SkillSessionProjectChart) {
   const items = Array.from({ length: 2_000 }, (_, index) => ({
-    key: `session-${index}`,
+    key: `chart-row-${index}`,
     skillKey: `skill-${index % 80}`,
     skillLabel: `Skill ${index % 80}`,
     sessionLabel: `Session ${index}`,

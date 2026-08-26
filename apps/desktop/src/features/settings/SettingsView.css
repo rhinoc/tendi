@@ -50,12 +50,6 @@
   gap: 24px;
 }
 
-.settingsError {
-  color: var(--danger);
-  font-size: var(--text-sm);
-  line-height: var(--leading-tight);
-}
-
 .settingsThemeControls {
   width: 100%;
   display: grid;
@@ -213,7 +207,6 @@
   background: var(--control-fill);
   color: var(--text);
   font: inherit;
-  font-family: var(--font-mono);
   font-size: var(--text-sm);
   line-height: var(--leading-ui);
 }
@@ -311,6 +304,10 @@
   font-size: var(--text-sm);
 }
 
+.settingsAgentInstalled {
+  flex: 0 0 auto;
+}
+
 .settingsCliActions {
   min-height: var(--control-height);
   display: flex;
@@ -338,11 +335,13 @@
 }
 
 .settingsProjectsPopover {
+  --data-table-row-font-size: var(--text-sm);
   z-index: var(--z-popover);
   width: min(760px, calc(100vw - 32px));
-  max-height: min(480px, calc(100vh - 96px));
+  max-height: min(480px, var(--radix-popover-content-available-height));
   display: flex;
   flex-direction: column;
+  min-height: 0;
   padding: 10px;
   overflow: hidden;
   border: 0;
@@ -368,7 +367,8 @@
 
 .settingsProjectsTable {
   min-height: 0;
-  height: min(380px, calc(100vh - 180px));
+  flex: 1 1 auto;
+  height: auto;
 }
 
 .settingsControlGroup {

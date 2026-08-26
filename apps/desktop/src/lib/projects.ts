@@ -1,7 +1,8 @@
 import type { ColumnDef } from "../components/DataTable.types";
+import { logger } from "./logger.ts";
 
 export type ProjectSummary = {
-  id?: string;
+  id: string;
   name?: string;
   rootPath?: string;
   remoteUrl?: string | null;
@@ -12,7 +13,7 @@ export type ProjectSummary = {
 export type MissingSessionProjectPolicy = "show" | "hide" | "merge-by-name";
 
 export type SessionProjectSummary = {
-  id?: string;
+  id: string;
   name?: string;
   missing?: boolean;
   paths?: string[];
@@ -38,7 +39,7 @@ export function sessionProjectOptionForPaths(
   projects: readonly ProjectSummary[],
 ): { key: string; label: string; title: string } | null {
   const summary = sessionProjects.find((project) => (
-    session.logicalProjectId && `${project.id ?? ""}`.trim() === session.logicalProjectId.trim()
+    session.logicalProjectId && project.id.trim() === session.logicalProjectId.trim()
   ) || (session.workspacePath && (project.paths ?? []).some((path) => normalizedPath(path) === normalizedPath(session.workspacePath ?? ""))));
   if (summary?.missing && policy === "hide") return null;
   if (policy !== "merge-by-name") return { key: session.key, label: session.label, title: session.title };
@@ -54,9 +55,9 @@ export function sessionProjectOptionForPaths(
     ?? (summary?.missing && sameNameProjects.length === 1 ? sameNameProjects[0] : null);
   if (!scannedProject) return { key: session.key, label: session.label, title: session.title };
   return {
-    key: JSON.stringify(["scanned-project", scannedProject.id || scannedProject.rootPath || scannedProject.name || ""]),
-    label: `${scannedProject.name ?? ""}`.trim() || session.label,
-    title: `${scannedProject.remoteUrl ?? ""}`.trim() || `${scannedProject.rootPath ?? ""}`.trim() || session.title,
+    key: JSON.stringify(["scanned-project", scannedProject.id]),
+    label: `${scannedProject.name ?? ""}`.trim(),
+    title: `${scannedProject.remoteUrl ?? ""}`.trim() || `${scannedProject.rootPath ?? ""}`.trim(),
   };
 }
 
@@ -78,7 +79,29 @@ export function projectForPath(path: string | null | undefined, projects: readon
 }
 
 export function scopeNameForPath(path: string | null | undefined, projects: readonly ProjectSummary[]): string {
-  return projectForPath(path, projects)?.name?.trim() || "Global";
+  const normalized = normalizedPath(`${path ?? ""}`);
+  if (!normalized) {
+    return scopeInvariantFailure("scope source path is missing", {
+      path: path ?? null,
+      projectCount: projects.length,
+    });
+  }
+  const project = projectForPath(normalized, projects);
+  if (!project) return "Global";
+  const name = `${project.name ?? ""}`.trim();
+  if (!name) {
+    return scopeInvariantFailure("matched project is missing a name", {
+      path: normalized,
+      projectRoot: project.rootPath ?? null,
+    });
+  }
+  return name;
+}
+
+function scopeInvariantFailure(reason: string, fields: Record<string, unknown>): never {
+  const error = new Error(`Scope invariant violated: ${reason}`);
+  logger.error("scope invariant violated", { reason, ...fields, error });
+  throw error;
 }
 
 export function scopeColumn<TRow>(projects: readonly ProjectSummary[], getPath: (row: TRow) => string | null | undefined): ColumnDef<TRow> {
@@ -87,7 +110,7 @@ export function scopeColumn<TRow>(projects: readonly ProjectSummary[], getPath: 
     header: "Scope",
     label: "Scope",
     type: "enum",
-    width: "150px",
+    width: "128px",
     sortable: true,
     sortValue: (row) => scopeNameForPath(getPath(row), projects).toLowerCase(),
     groupBy: (row) => scopeNameForPath(getPath(row), projects),

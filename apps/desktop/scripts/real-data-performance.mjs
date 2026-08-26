@@ -91,10 +91,12 @@ function buildRealAnalytics(sessions) {
     ]) {
       day.usage[camelKey] += usageValue(camelKey, snakeKey);
     }
-    const model = String(session.model || "unknown");
-    const modelEntry = day.models.find((entry) => entry.model === model);
-    if (modelEntry) modelEntry.totalTokens += usageValue("totalTokens", "total_tokens");
-    else day.models.push({ model, totalTokens: usageValue("totalTokens", "total_tokens") });
+    const model = typeof session.model === "string" ? session.model.trim() : "";
+    if (model) {
+      const modelEntry = day.models.find((entry) => entry.model === model);
+      if (modelEntry) modelEntry.totalTokens += usageValue("totalTokens", "total_tokens");
+      else day.models.push({ model, totalTokens: usageValue("totalTokens", "total_tokens") });
+    }
     days.set(date, day);
   }
   const sortedDays = [...days.values()].sort((left, right) => left.date.localeCompare(right.date));
@@ -160,7 +162,8 @@ function loadSnapshot() {
     .sort((left, right) => right.size - left.size);
   const largest = existing[0];
   if (!largest) throw new Error("No readable real session transcript found");
-  const agent = String(largest.session.agent || "codex").toLowerCase();
+  const agent = typeof largest.session.agent === "string" ? largest.session.agent.trim().toLowerCase() : "";
+  if (!agent) throw new Error("Real session is missing its agent");
   const transcript = runJson(["sessions", "transcript", largest.session.path, "--agent", agent, "--json"]);
   const allItems = Array.isArray(transcript.value) ? transcript.value : [];
   const locatorItems = [];
@@ -275,23 +278,24 @@ try {
               }
             }
           });
-          return 1;
+          return { generation: 1, started: true };
         }
         if (command === "session_transcript") {
           const cursor = typeof args.cursor === "string" && args.cursor.startsWith("real:") ? Number(args.cursor.slice(5)) : 0;
-          return transcriptPages[cursor] || transcriptPages[0] || { items: [], warnings: [], nextCursor: null, done: true };
+          return transcriptPages[cursor] || { items: [], warnings: [], nextCursor: null, done: true };
         }
         if (command === "session_transcript_search") {
           const query = `${args.query || ""}`.trim().toLowerCase();
           const scopes = args.scopes || { user: true, assistant: true, system: false, tool: false };
           const hits = [];
           const items = transcriptPages.flatMap((page) => page.items || []);
-          const itemType = (item) => `${item.type || item.kind || "assistant"}`;
+          const itemType = (item) => `${item.type || item.kind || ""}`;
           const scopeFor = (type) => {
             if (["user", "notification"].includes(type)) return "user";
             if (["context", "compaction", "model_config"].includes(type)) return "system";
             if (["tool", "toolGroup"].includes(type)) return "tool";
-            return "assistant";
+            if (["assistant", "agent"].includes(type)) return "assistant";
+            return null;
           };
           const itemText = (item) => [item.body, item.tag, item.command, item.result, item.model, item.effort, item.callId]
             .map((value) => `${value || ""}`)
@@ -310,7 +314,8 @@ try {
               groupIndex += 1;
               continue;
             }
-            if (scopes[scopeFor(firstType)] && itemText(items[index]).includes(query)) hits.push({ groupIndex });
+            const scope = scopeFor(firstType);
+            if (scope && scopes[scope] && itemText(items[index]).includes(query)) hits.push({ groupIndex });
             index += 1;
             groupIndex += 1;
           }

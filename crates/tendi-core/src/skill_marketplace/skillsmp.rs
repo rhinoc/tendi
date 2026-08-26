@@ -55,7 +55,7 @@ pub(super) fn search(query: &str) -> Result<Vec<MarketplaceSource>> {
                 name: skill.name,
                 description: skill.description,
                 source,
-                url: skill.skill_url.unwrap_or_default(),
+                url: skill.skill_url,
                 version: None,
                 metric: skill.stars,
                 metric_label: Some("GitHub stars".to_string()),
