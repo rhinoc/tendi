@@ -77,6 +77,9 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-${{ runner.arch }}-rust-
 
+      - name: Install frontend dependencies
+        run: npm ci --prefix apps/desktop
+
       - name: Deterministic performance gate
         run: |
           cargo build --quiet -p tendi-cli --features perf-runner --bins

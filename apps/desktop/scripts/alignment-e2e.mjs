@@ -1423,6 +1423,12 @@ try {
     let nextCallbackId = 1;
     let sessionScanHandler = null;
     let sessionsListReleased = false;
+    const sessionsListWaiters = [];
+    window.__releaseSessionsList = () => {
+      sessionsListReleased = true;
+      const waiters = sessionsListWaiters.splice(0);
+      waiters.forEach((resolve) => resolve(report.sessions.sessions));
+    };
     let skillUpdateAttempts = 0;
     const unhandledCommands = [];
     const emitDaemonEvent = (event) => {
@@ -1599,12 +1605,7 @@ try {
       if (command === "prompts_list") return report.prompts.prompts;
       if (command === "sessions_list") {
         if (sessionsListReleased) return report.sessions.sessions;
-        return new Promise((resolve) => {
-          window.__releaseSessionsList = () => {
-            sessionsListReleased = true;
-            resolve(report.sessions.sessions);
-          };
-        });
+        return new Promise((resolve) => sessionsListWaiters.push(resolve));
       }
       if (command === "sessions_scan_start") {
         queueMicrotask(() => {
