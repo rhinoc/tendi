@@ -13,7 +13,6 @@
   max-width: 100%;
   color: var(--link);
   font-weight: 500;
-  line-height: inherit;
   text-decoration-line: underline;
   text-decoration-color: color-mix(in oklch, currentColor 45%, transparent);
   text-underline-offset: 2px;
