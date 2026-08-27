@@ -89,6 +89,7 @@ export function SelectControl({
       <Select.Portal>
         <Select.Content
           className={`skillMenuContent selectControlContent ${contentClassName}`.trim()}
+          data-no-drag
           position="popper"
           side={side}
           align={align}
