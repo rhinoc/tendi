@@ -469,6 +469,15 @@ fn main() -> Result<()> {
                         checkout_path,
                         device.unwrap_or_else(|| "My device".to_string()),
                     );
+                    config.validate()?;
+                    let working_directory = config
+                        .checkout_path
+                        .parent()
+                        .unwrap_or_else(|| cwd.as_path());
+                    tendi_core::skill_backup::validate_remote(
+                        &config.remote_url,
+                        working_directory,
+                    )?;
                     let store = tendi_core::storage::Store::open_default()?;
                     let config = with_database_write_lock(&store, || {
                         store.save_skill_backup_config(&config)
@@ -504,11 +513,15 @@ fn main() -> Result<()> {
                 }
                 BackupCommand::Run { json } => {
                     let store = tendi_core::storage::Store::open_default()?;
-                    let report = tendi_core::skill_backup::backup_now(&store)?;
+                    let report = tendi_core::skill_backup::backup_now(&store, &cwd)?;
                     if json {
                         println!("{}", serde_json::to_string_pretty(&report)?);
                     } else if let Some(commit) = report.commit {
-                        println!("Backed up {} skills ({commit})", report.manifest.skills.len());
+                        println!(
+                            "Backed up {} skills and {} configuration sources ({commit})",
+                            report.manifest.skills.len(),
+                            report.manifest.artifacts.len()
+                        );
                     } else {
                         println!("Backup is already current");
                     }

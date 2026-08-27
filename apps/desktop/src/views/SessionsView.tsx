@@ -13,7 +13,7 @@ import { Button } from "../components/shared/Button.tsx";
 import { CheckboxIndicator } from "../components/shared/CheckboxIndicator.tsx";
 import { CopyButton } from "../components/shared/CopyButton.tsx";
 import { CopyableSessionId } from "../features/sessions/CopyableSessionId.tsx";
-import { CopyPathMenuItem, CopyTextMenuItem, RevealInFinderMenuItem } from "../components/shared/DataTableMenus.tsx";
+import { CopyPathMenuItem, CopyTextMenuItem, OpenInEditorMenuItem, RevealInFinderMenuItem } from "../components/shared/DataTableMenus.tsx";
 import { DetailPanelHost } from "../components/shared/DetailPanelHost.tsx";
 import { DialogActionButton } from "../components/shared/DialogActionButton.tsx";
 import { DialogShell } from "../components/shared/DialogShell.tsx";
@@ -41,6 +41,10 @@ import { cacheRateTone } from "../lib/token-style.ts";
 import {
   SESSION_FREEZE_COLUMN,
   TauriCommand,
+  copiedPathLabel,
+  copiedValueLabel,
+  copyPathLabel,
+  copyValueLabel,
   compactDateTime,
   compareSessions,
   createLatestRequestAuthority,
@@ -62,7 +66,10 @@ import {
   sessionProject,
   sessionProjectGroupKey,
   sessionAppDeepLink,
+  sessionResumeErrorMessage,
+  sessionResumeLabel,
   sessionResumeTargetForAgent,
+  sessionResumeTargetForMenu,
   sessionProjectOption,
   sessionWorkspace,
   sessionWorkspacePath,
@@ -81,6 +88,7 @@ import type {
   ProjectSummary,
   SessionProjectSummary,
   SessionResumeOutcome,
+  SessionResumeState,
   SessionResumeTarget,
 } from "../lib/index.ts";
 
@@ -161,13 +169,6 @@ const IMPORTED_SESSION_AGENT = "Imported";
 const TRANSCRIPT_CACHE_ITEM_LIMIT = 1_200;
 const TRANSCRIPT_CACHE_CHARACTER_LIMIT = 8 * 1024 * 1024;
 
-function resumeTargetLabel(target: SessionResumeTarget): string {
-  if (target === "app") return "app";
-  if (target === "auto") return "auto";
-  return "terminal";
-}
-
-type SessionResumeState = "idle" | "loading" | "success" | "error";
 type ImportFeedbackState = "idle" | "loading" | "success" | "warning" | "error";
 type ResumeFeedbackState = Exclude<SessionResumeState, "idle">;
 type PendingResumeConflict = { session: SessionRecord };
@@ -632,6 +633,50 @@ function transcriptItemKey(prefix: string | undefined, index: string | number) {
   return prefix ? `${prefix}-${index}` : `${index}`;
 }
 
+const transcriptObjectIdentity = new WeakMap<object, string>();
+let nextTranscriptObjectIdentity = 0;
+
+function transcriptSemanticHash(values: string[]) {
+  let hash = 2166136261;
+  for (const value of values) {
+    for (let index = 0; index < value.length; index += 1) {
+      hash ^= value.charCodeAt(index);
+      hash = Math.imul(hash, 16777619);
+    }
+  }
+  return (hash >>> 0).toString(36);
+}
+
+function transcriptReactKey(item: TranscriptItemRecord, type = transcriptItemType(item)) {
+  const existing = transcriptObjectIdentity.get(item);
+  if (existing !== undefined) return existing;
+  if (item.callId?.trim()) {
+    const key = `${type}:call:${item.callId}`;
+    transcriptObjectIdentity.set(item, key);
+    return key;
+  }
+  const semanticIdentity = [
+    item.time ?? "",
+    item.tag ?? "",
+    item.command ?? "",
+    item.body,
+    item.model ?? "",
+    item.effort ?? "",
+  ];
+  if (semanticIdentity.some(Boolean)) {
+    const key = `${type}:content:${transcriptSemanticHash(semanticIdentity)}`;
+    transcriptObjectIdentity.set(item, key);
+    return key;
+  }
+  const key = `${type}:object:${nextTranscriptObjectIdentity++}`;
+  transcriptObjectIdentity.set(item, key);
+  return key;
+}
+
+function transcriptGroupReactKey(tools: TranscriptItemRecord[]) {
+  return `tool-group:${tools[0] ? transcriptReactKey(tools[0], "tool") : "empty"}`;
+}
+
 
 function transcriptItemText(item: TranscriptItemRecord) {
   return [item.body, item.command, item.result, item.tag, item.time]
@@ -812,6 +857,7 @@ export function TranscriptPanel({
   onCollapse,
   onResume,
   resumeTarget,
+  inferredResumeTarget,
   resumeState,
   onOpenSession,
   onOpenSkill,
@@ -842,6 +888,7 @@ export function TranscriptPanel({
   onCollapse: () => void;
   onResume: (session: SessionRecord) => void;
   resumeTarget: SessionResumeTarget;
+  inferredResumeTarget?: Exclude<SessionResumeTarget, "auto">;
   resumeState: SessionResumeState;
   onOpenSession: (session: SessionRecord) => void;
   onOpenSkill?: (skillName: string) => void;
@@ -857,7 +904,7 @@ export function TranscriptPanel({
 }) {
   const transcriptItems = useMemo(() => {
     return groupTranscriptItems(items) as TranscriptItemRecord[];
-  }, [items, session]);
+  }, [items]);
   const locatorItems = useMemo(() => locatorMetadata
     ? buildSessionLocatorItemsFromMetadata(locatorMetadata, 0)
     : buildSessionLocatorItems(transcriptItems), [locatorMetadata, transcriptItems]);
@@ -997,7 +1044,7 @@ export function TranscriptPanel({
     return () => {
       cancelled = true;
     };
-  }, [normalizedSearchQuery, onReportError, remoteSearchActive, searchScopes, searchTranscript, session]);
+  }, [normalizedSearchQuery, onReportError, remoteSearchActive, searchScopes, searchTranscript, transcriptNavigationSessionKey]);
   useEffect(() => {
     if (remoteSearchActive) return;
     if (!normalizedSearchQuery) {
@@ -1275,6 +1322,7 @@ export function TranscriptPanel({
     const target = searchTargets[searchIndex];
     if (target) focusTranscriptTarget(target, true);
   }, [ensureSearchHitLoaded, focusTranscriptTarget, remoteSearchActive, searchError, searchIndex, searchReady, searchResult, searchResultCount, searchLoading, searchTargets, transcriptItems]);
+  const transcriptReactKeyCounts = new Map<string, number>();
   const moveSearchResult = useCallback((offset: number) => {
     if (searchResultCount === 0) return;
     setSearchIndex((current) => (current + offset + searchResultCount) % searchResultCount);
@@ -1283,7 +1331,11 @@ export function TranscriptPanel({
     const linkedSession = childSessions.find((child) => child.id === sessionId);
     if (linkedSession) onOpenSession(linkedSession);
   }, [childSessions, onOpenSession]);
-  const targetLabel = resumeTargetLabel(sessionResumeTargetForAgent(resumeTarget, session.agent));
+  const configuredTarget = sessionResumeTargetForAgent(resumeTarget, session.agent);
+  const target = session.agent === IMPORTED_SESSION_AGENT
+    ? "terminal"
+    : sessionResumeTargetForMenu(configuredTarget, inferredResumeTarget);
+  const resumeLabel = sessionResumeLabel(resumeState, target);
   return (
     <aside
       className="transcriptPanel"
@@ -1306,13 +1358,7 @@ export function TranscriptPanel({
                 </IconButton>
               </AppTooltip>
             ) : null}
-            <AppTooltip content={resumeState === "loading"
-                ? `Opening session in ${targetLabel}`
-                : resumeState === "success"
-                  ? `Session opened in ${targetLabel}`
-                  : resumeState === "error"
-                    ? `Could not open session in ${targetLabel}`
-                    : `Resume session in ${targetLabel}`}>
+            <AppTooltip content={resumeLabel}>
               <StatefulButton
                 size="sm"
                 variant="ghost"
@@ -1321,23 +1367,19 @@ export function TranscriptPanel({
                 minWidth="30px"
                 style={{ height: "30px", padding: 0, display: "grid", placeItems: "center", gap: 0 }}
                 state={resumeState}
-                aria-label={resumeState === "loading"
-                  ? `Opening session in ${targetLabel}`
-                  : resumeState === "success"
-                    ? `Session opened in ${targetLabel}`
-                    : resumeState === "error"
-                      ? `Could not open session in ${targetLabel}`
-                      : `Resume session in ${targetLabel}`}
-                aria-busy={resumeState === "loading"}
+                aria-label={resumeLabel}
+                aria-busy={resumeState === "loading" || target === "auto"}
                 disabled={resumeState === "loading"}
                 onClick={() => onResume(session)}
                 loadingContent={<LoadingIcon size={15} />}
                 successContent={<Check size={15} aria-hidden="true" />}
                 errorContent={<AlertCircle size={15} aria-hidden="true" />}
               >
-                {sessionResumeTargetForAgent(resumeTarget, session.agent) === "app"
+                {target === "app"
                   ? <MessageSquareText size={15} aria-hidden="true" />
-                  : <TerminalSquare size={15} aria-hidden="true" />}
+                  : target === "terminal"
+                    ? <TerminalSquare size={15} aria-hidden="true" />
+                    : <LoadingIcon size={15} />}
               </StatefulButton>
             </AppTooltip>
             <SessionRelationsPopover
@@ -1451,13 +1493,18 @@ export function TranscriptPanel({
                 const type = transcriptItemType(item);
                 const previousType = index > 0 ? transcriptItemType(transcriptItems[index - 1]) : undefined;
                 const itemKey = transcriptItemKey(type === "toolGroup" ? "tool-group" : type, index);
+                const reactKeyBase = type === "toolGroup"
+                  ? transcriptGroupReactKey(item.tools ?? [])
+                  : transcriptReactKey(item, type);
+                const reactKeyOccurrence = transcriptReactKeyCounts.get(reactKeyBase) ?? 0;
+                transcriptReactKeyCounts.set(reactKeyBase, reactKeyOccurrence + 1);
                 const highlighted = transcriptItemIsHighlighted(item, itemKey, highlightedKey);
                 return (
                   <div
                     className={`transcriptItemShell${highlighted ? " isHighlighted" : ""}`}
                     data-transcript-index={index}
                     ref={(node) => measureTranscriptItem(index, node)}
-                    key={`${type}-${index}`}
+                    key={reactKeyOccurrence === 0 ? reactKeyBase : `${reactKeyBase}:${reactKeyOccurrence}`}
                   >
                     <TranscriptItem
                       item={item}
@@ -2045,7 +2092,7 @@ export function SessionInfoMenu({ session }: { session: SessionRecord }) {
                     <FolderOpen size={13} />
                   </button>
                 )}
-                <CopyButton className="appButton appButton-icon" value={workspace} copyLabel="Copy workspace" copiedLabel="Workspace copied" />
+                <CopyButton className="appButton appButton-icon" value={workspace} copyLabel={copyValueLabel("workspace")} copiedLabel={copiedValueLabel("workspace")} />
             </InfoSection>
             <InfoSection label="Timeline" valueLine={false}>
               <div className="sessionTimeline">
@@ -2080,7 +2127,7 @@ export function SessionInfoMenu({ session }: { session: SessionRecord }) {
                   >
                     <FolderOpen size={13} />
                   </button>
-                  <CopyButton className="appButton appButton-icon" value={transcriptPath} copyLabel="Copy transcript path" copiedLabel="Transcript path copied" />
+                  <CopyButton className="appButton appButton-icon" value={transcriptPath} copyLabel={copyPathLabel("transcript")} copiedLabel={copiedPathLabel("transcript")} />
               </InfoSection>
             )}
     </InfoDropdownMenu>
@@ -2205,8 +2252,8 @@ export const TranscriptItem = memo(function TranscriptItem({
               className="messageActionButton"
               value={body}
               iconSize={13}
-              copyLabel={isUser ? "Copy user message" : "Copy assistant message"}
-              copiedLabel="Message copied"
+              copyLabel={copyValueLabel(isUser ? "user message" : "assistant message")}
+              copiedLabel={copiedValueLabel("message")}
             />
           ) : null}
           {isUser && onSavePrompt ? <MessageSavePromptButton body={body} onSave={onSavePrompt} /> : null}
@@ -2265,9 +2312,9 @@ function ModelConfigMarker({
       data-transcript-key={itemKey}
       role="note"
     >
-      {item.model ? <span className="modelConfigField"><span>Model</span><code>{item.model}</code></span> : null}
-      {item.effort ? <span className="modelConfigField"><span>Effort</span><code>{item.effort}</code></span> : null}
-      {item.mode ? <span className="modelConfigField"><span>Mode</span><code>{item.mode}</code></span> : null}
+      {item.model ? <span className="modelConfigField"><span>Model</span><span className="modelConfigValue">{item.model}</span></span> : null}
+      {item.effort ? <span className="modelConfigField"><span>Effort</span><span className="modelConfigValue">{item.effort}</span></span> : null}
+      {item.mode ? <span className="modelConfigField"><span>Mode</span><span className="modelConfigValue">{item.mode}</span></span> : null}
       {item.time ? <time>{item.time}</time> : null}
     </div>
   );
@@ -2364,6 +2411,7 @@ export function ToolCallGroup({
     return Number.isFinite(value) ? total + value : total;
   }, 0);
   const duration = totalDuration > 0 ? formatDuration(totalDuration) : "";
+  const toolReactKeyCounts = new Map<string, number>();
   return (
     <details
       className="toolCallGroup"
@@ -2379,6 +2427,9 @@ export function ToolCallGroup({
         {tools.map((tool, index) => {
           const groupIndex = itemKey.split("-").pop();
           const toolKey = transcriptItemKey("tool", `${groupIndex}-${index}`);
+          const reactKeyBase = transcriptReactKey(tool, "tool");
+          const reactKeyOccurrence = toolReactKeyCounts.get(reactKeyBase) ?? 0;
+          toolReactKeyCounts.set(reactKeyBase, reactKeyOccurrence + 1);
           return (
             <ToolCall
               item={tool}
@@ -2386,7 +2437,7 @@ export function ToolCallGroup({
               highlighted={highlightedKey === toolKey}
               searchQuery={searchQuery}
               onOpenLinkedSession={onOpenLinkedSession}
-              key={`${itemKey}-${index}`}
+              key={reactKeyOccurrence === 0 ? reactKeyBase : `${reactKeyBase}:${reactKeyOccurrence}`}
               nested
             />
           );
@@ -2611,6 +2662,7 @@ export function SessionsView({
   sessionRefreshError = "",
   onRefreshSessions,
   onResumeSession,
+  resolveSessionResumeTarget,
   sessionResumeTarget,
   missingSessionProjectPolicy,
   projects = [],
@@ -2632,6 +2684,7 @@ export function SessionsView({
   sessionRefreshError?: string;
   onRefreshSessions?: () => Promise<unknown>;
   onResumeSession?: (session: SessionRecord) => Promise<SessionResumeOutcome | null | undefined>;
+  resolveSessionResumeTarget: (session: SessionRecord) => Promise<"terminal" | "app">;
   sessionResumeTarget: SessionResumeTarget;
   missingSessionProjectPolicy: MissingSessionProjectPolicy;
   projects?: ProjectSummary[];
@@ -3211,12 +3264,12 @@ export function SessionsView({
         finishResumeFeedback(session.id, "success");
       } else {
         finishResumeFeedback(session.id, "error");
-        showSessionError("Could not open session. Try again.");
+        showSessionError(sessionResumeErrorMessage());
       }
     } catch (error) {
       finishResumeFeedback(session.id, "error");
       logger.warn("sessions resume failed", { error });
-      showSessionError("Could not open session. Try again.");
+      showSessionError(sessionResumeErrorMessage());
     }
   }, [clearResumeFeedback, dismissSessionError, finishResumeFeedback, onResumeSession, showSessionError]);
   const cancelResumeConflict = useCallback(() => {
@@ -3230,6 +3283,38 @@ export function SessionsView({
     () => allSessionItems.find((session) => sessionTableRowId(session) === activeRowId),
     [activeRowId, allSessionItems],
   );
+  const [inferredResumeTargets, setInferredResumeTargets] = useState<Record<string, "terminal" | "app">>({});
+  useEffect(() => {
+    if (sessionResumeTarget !== "auto") {
+      setInferredResumeTargets({});
+      return;
+    }
+    let cancelled = false;
+    const resumableSessions = [...new Map(
+      [...tableSessions, ...(activeSession ? [activeSession] : [])]
+        .filter((session) => (
+          session.agent !== IMPORTED_SESSION_AGENT
+          && Boolean(session.id && session.agent && session.path.trim())
+        ))
+        .map((session) => [sessionTableRowId(session), session] as const),
+    ).values()];
+    void Promise.all(resumableSessions.map(async (session) => (
+      [sessionTableRowId(session), await resolveSessionResumeTarget(session)] as const
+    ))).then((entries) => {
+      if (cancelled) return;
+      const retainedKeys = new Set(resumableSessions.map(sessionTableRowId));
+      setInferredResumeTargets((current) => {
+        const next = Object.fromEntries(
+          Object.entries(current).filter(([key]) => retainedKeys.has(key)),
+        );
+        for (const [key, target] of entries) next[key] = target;
+        return next;
+      });
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [activeSession, resolveSessionResumeTarget, sessionResumeTarget, tableSessions]);
   const activeSessionVisibleInList = Boolean(
     activeSession && tableSessions.some((session) => sessionTableRowId(session) === sessionTableRowId(activeSession)),
   );
@@ -3397,15 +3482,19 @@ export function SessionsView({
       resumeSession,
       resumeState: getResumeState,
       resumeTarget: sessionResumeTarget,
-    } as { normalizedQuery: string; resumeSession: typeof resumeSession; resumeState: typeof getResumeState; resumeTarget: SessionResumeTarget }) as ColumnDef<SessionRecord>[],
-    [getResumeState, normalizedQuery, resumeSession, sessionResumeTarget],
+      resumeTargetForSession: (session) => inferredResumeTargets[sessionTableRowId(session as SessionRecord)],
+    } as { normalizedQuery: string; resumeSession: typeof resumeSession; resumeState: typeof getResumeState; resumeTarget: SessionResumeTarget; resumeTargetForSession: (session: SessionRecord) => "terminal" | "app" | undefined }) as ColumnDef<SessionRecord>[],
+    [getResumeState, inferredResumeTargets, normalizedQuery, resumeSession, sessionResumeTarget],
   );
   const rowContextMenu = useCallback((session: SessionRecord) => {
     const transcriptPath = session.path.trim();
     const workspacePath = sessionWorkspacePath(session);
     const deeplink = sessionAppDeepLink(session);
-    const target = sessionResumeTargetForAgent(sessionResumeTarget, session.agent);
-    const targetLabel = resumeTargetLabel(target);
+    const configuredTarget = sessionResumeTargetForAgent(sessionResumeTarget, session.agent);
+    const target = sessionResumeTargetForMenu(
+      configuredTarget,
+      inferredResumeTargets[sessionTableRowId(session)],
+    );
     const canResume = session.agent !== IMPORTED_SESSION_AGENT
       && Boolean(session.id && session.agent && transcriptPath);
     return (
@@ -3413,22 +3502,25 @@ export function SessionsView({
         <ContextMenu.Item
           className="skillMenuItem"
           disabled={!canResume}
+          aria-busy={target === "auto" || undefined}
           onSelect={() => { void resumeSession(session); }}
         >
-          {target === "app"
-            ? <MessageSquareText size={14} />
-            : <TerminalSquare size={14} />}
-          Resume in {targetLabel}
+          {target === "app" ? <MessageSquareText size={14} /> : target === "terminal" ? <TerminalSquare size={14} /> : <LoadingIcon size={14} />}
+          {sessionResumeLabel("idle", target)}
         </ContextMenu.Item>
+        <ContextMenu.Separator className="skillMenuSeparator" />
         <CopyTextMenuItem Menu={ContextMenu} text={session.id} label="Copy session ID" />
         {deeplink && <CopyTextMenuItem Menu={ContextMenu} text={deeplink} label="Copy deeplink" />}
+        <ContextMenu.Separator className="skillMenuSeparator" />
+        <OpenInEditorMenuItem Menu={ContextMenu} path={transcriptPath} />
         <CopyPathMenuItem Menu={ContextMenu} path={transcriptPath} label="Copy transcript path" />
         <RevealInFinderMenuItem Menu={ContextMenu} path={transcriptPath} label="Reveal transcript in Finder" />
+        <ContextMenu.Separator className="skillMenuSeparator" />
         <CopyPathMenuItem Menu={ContextMenu} path={workspacePath} label="Copy workspace path" />
         <RevealInFinderMenuItem Menu={ContextMenu} path={workspacePath} label="Reveal workspace in Finder" />
       </>
     );
-  }, [resumeSession]);
+  }, [inferredResumeTargets, resumeSession, sessionResumeTarget]);
   useEffect(() => {
     const transcriptSession = activeSessionForTranscriptRef.current;
     const requestRevision = transcriptRequestAuthorityRef.current.begin();
@@ -3916,6 +4008,7 @@ export function SessionsView({
             onLocateSession={locateActiveSession}
             onResume={resumeSession}
             resumeTarget={sessionResumeTarget}
+            inferredResumeTarget={inferredResumeTargets[sessionTableRowId(activeSession)]}
             resumeState={getResumeState(activeSession)}
             onOpenSession={openRelatedSession}
             onOpenSkill={onOpenSkill}

@@ -14,8 +14,8 @@ const repoDir = resolve(desktopDir, "../..");
 const bridgePort = Number(process.env.TENDI_WEB_BRIDGE_PORT || 5188);
 const daemonPort = Number(process.env.TENDI_DAEMON_PORT || bridgePort + 1);
 const workspace = resolve(process.env.TENDI_CWD || desktopDir);
-// Tauri's beforeDevCommand inherits its CARGO_TARGET_DIR. Keep daemon builds
-// separate so they cannot rewrite artifacts while Tauri builds the desktop.
+// Browser dev may run alongside a Tauri build. Keep daemon builds separate so
+// the web daemon cannot rewrite artifacts while Tauri builds the desktop.
 const cargoTargetDir = resolveDaemonTargetDir(repoDir, process.env.TENDI_DAEMON_TARGET_DIR);
 const daemonBinOverride = process.env.TENDI_DAEMON_BIN;
 const daemonBin = resolve(daemonBinOverride || join(cargoTargetDir, "debug/tendi-daemon"));

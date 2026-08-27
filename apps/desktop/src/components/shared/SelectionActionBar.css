@@ -78,20 +78,20 @@
   margin-left: auto;
 }
 
-.actionBarActions.skillsSelectionActions {
+.actionBarActions.selectionActions {
   min-width: 0;
   flex: 1 1 auto;
   overflow: hidden;
 }
 
-.skillsSelectionActionsContent {
+.selectionActionsContent {
   position: relative;
   min-width: 0;
   width: 100%;
   overflow: hidden;
 }
 
-.skillsSelectionActionsVisible {
+.selectionActionsVisible {
   min-width: 0;
   display: flex;
   align-items: center;
@@ -101,11 +101,11 @@
   white-space: nowrap;
 }
 
-.skillsSelectionAction {
+.selectionAction {
   display: contents;
 }
 
-.skillsSelectionActionsMeasure {
+.selectionActionsMeasure {
   position: absolute;
   top: 0;
   left: 0;
@@ -117,7 +117,7 @@
   white-space: nowrap;
 }
 
-.skillsSelectionActionsMeasure button {
+.selectionActionsMeasure button {
   flex: 0 0 auto;
 }
 

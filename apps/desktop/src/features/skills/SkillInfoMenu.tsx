@@ -2,6 +2,10 @@ import { Tooltip } from "../../components/shared/Tooltip.tsx";
 import { ExternalLink, FolderOpen, Info } from "lucide-react";
 
 import {
+  copiedPathLabel,
+  copiedValueLabel,
+  copyPathLabel,
+  copyValueLabel,
   formatUserPath,
   openSource,
   safeInvoke,
@@ -130,7 +134,7 @@ export function SkillInfoMenu({ skill, skills, onOpenSkill }: SkillInfoMenuProps
                     >
                       {sourceUrl ? <ExternalLink size={13} /> : <FolderOpen size={13} />}
                     </button>
-                    <CopyButton className="appButton appButton-icon" value={sourceValue} copyLabel="Copy source" copiedLabel="Source copied" />
+                    <CopyButton className="appButton appButton-icon" value={sourceValue} copyLabel={copyValueLabel("source")} copiedLabel={copiedValueLabel("source")} />
                   </>
                 )}
             </InfoSection>
@@ -163,8 +167,8 @@ export function SkillInfoMenu({ skill, skills, onOpenSkill }: SkillInfoMenuProps
                     <CopyButton
                       className="appButton appButton-icon"
                       value={target.path}
-                      copyLabel={`Copy ${target.label} path`}
-                      copiedLabel={`${target.label} path copied`}
+                      copyLabel={copyPathLabel(target.label)}
+                      copiedLabel={copiedPathLabel(target.label)}
                       disabled={!target.path}
                     />
                   </div>

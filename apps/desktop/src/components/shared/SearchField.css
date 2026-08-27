@@ -1,5 +1,7 @@
 .searchBox {
+  box-sizing: border-box;
   height: 28px;
+  min-height: 28px;
   width: 210px;
   display: flex;
   align-items: center;
@@ -21,12 +23,23 @@
 
 .searchBox input {
   min-width: 0;
-  width: 100%;
+  width: 0;
+  flex: 1 1 auto;
   background: transparent;
   border: 0;
   outline: 0;
   color: var(--text);
   font-size: var(--text-ui);
+}
+
+.searchBoxEndContent {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  line-height: 1;
+  white-space: nowrap;
+  color: var(--muted);
+  font-size: var(--text-sm);
 }
 
 .searchBox input:focus,

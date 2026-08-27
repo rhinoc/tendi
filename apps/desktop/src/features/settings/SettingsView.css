@@ -1,11 +1,14 @@
 .settingsShell {
   min-height: 0;
   flex: 1 1 auto;
-  width: 100%;
   display: grid;
   overflow-x: hidden;
   overflow-y: auto;
   scrollbar-gutter: stable;
+  margin-inline-start: calc(-1 * var(--page-left-inset));
+  margin-inline-end: calc(-1 * var(--page-right-inset));
+  padding-inline-start: var(--page-left-inset);
+  padding-inline-end: var(--page-right-inset);
 }
 
 .settingsPage {
@@ -33,11 +36,20 @@
 }
 
 .settingsGroup + .settingsGroup {
+  position: relative;
+}
+
+.settingsGroup + .settingsGroup::before {
+  position: absolute;
+  inset-block-start: 0;
+  inset-inline-start: calc(-1 * var(--page-left-inset));
+  width: calc(100% + var(--page-left-inset) + var(--page-right-inset));
   border-block-start: 1px solid var(--line);
+  content: "";
 }
 
 .settingsGroupTitle {
-  margin: 0 0 16px;
+  margin: 0 0 24px;
   color: var(--text);
   font-size: var(--text-ui);
   font-weight: 650;
@@ -48,6 +60,18 @@
   min-width: 0;
   display: grid;
   gap: 24px;
+  padding-inline: 16px;
+}
+
+.settingsApplicationPair {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 24px;
+}
+
+.settingsApplicationPair .settingsSection {
+  grid-template-columns: 1fr;
+  gap: 6px;
 }
 
 .settingsThemeControls {

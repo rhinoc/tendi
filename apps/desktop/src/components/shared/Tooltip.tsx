@@ -102,7 +102,7 @@ function TruncatedTooltip({
 export function Tooltip({
   children,
   content,
-  interactive = false,
+  interactive = true,
   onlyWhenTruncated = false,
   open,
   onOpenChange,

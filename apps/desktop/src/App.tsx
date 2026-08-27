@@ -65,7 +65,8 @@ import traeIcon from "@lobehub/icons-static-svg/icons/trae-color.svg";
 import type { ComponentProps } from "react";
 import { applyAppearance, applyFontFamily, listenForSystemAppearanceChange, normalizeAppearance, normalizeFontFamily, normalizeThemePreferences, readCachedAppearance, readCachedFontFamily, readCachedThemePreferences, type Appearance, type ColorTheme, type FontFamily, type ThemePreferences } from "./lib/appearance.ts";
 import { applyAppIcon, normalizeAppIcon, readCachedAppIcon, type AppIcon } from "./lib/app-icon.ts";
-import { COLLAPSED_SIDEBAR_SIZE, SIDEBAR_SIZE, SkillChangeCommand, SkillVisibility, TauriCommand, UPDATE_AVAILABLE_EVENT, agentIdentityKey, applySessionDelta, applyVisibilityState, clearSkillUpdateAvailability, hookSourcePath, hookTrustHash, invokeCommand, isConcreteAgent, isTauriRuntime, logger, mergeSessionRows, navItems, normalizeDomainRows, normalizePrompt, normalizeSession, normalizeSessionResumeTarget, normalizeSessionSkillLink, normalizeTranscriptLocatorPage, normalizeTranscriptPage, normalizeTranscriptSearchResult, promptTitleFromBody, recomputeSources, replaceSkillReportPreservingUpdates, ruleAgents, safeInvoke, sameAgent, sessionAppDeepLink, sessionIdentityRecordKey, sessionLaunchPayload, sessionLogicalIdentity, sessionResumeTargetForAgent, subscribeDaemonEvents } from "./lib/index.ts";
+import { loadOverviewCountWithRetry } from "./lib/overview-counts.ts";
+import { COLLAPSED_SIDEBAR_SIZE, SIDEBAR_SIZE, SkillChangeCommand, SkillVisibility, TauriCommand, UPDATE_AVAILABLE_EVENT, agentIdentityKey, applySessionDelta, applyVisibilityState, clearSkillUpdateAvailability, hookSourcePath, hookTrustHash, invokeCommand, isConcreteAgent, isTauriRuntime, logger, mergeSessionRows, navItems, normalizeDomainRows, normalizePrompt, normalizeSession, normalizeSessionResumeTarget, normalizeSessionSkillLink, normalizeTranscriptLocatorPage, normalizeTranscriptPage, normalizeTranscriptSearchResult, promptTitleFromBody, recomputeSources, replaceSkillReportPreservingUpdates, ruleAgents, safeInvoke, sameAgent, sessionAppDeepLink, sessionIdentity, sessionIdentityRecordKey, sessionLaunchPayload, sessionLogicalIdentity, sessionResumeTargetForAgent, skillChangeDescription, skillChangeTitle, subscribeDaemonEvents } from "./lib/index.ts";
 import type { BundledSkillStatus, CliInstallStatus, DaemonEvent, DesktopUpdateState, HookRecord, McpRecord, MissingSessionProjectPolicy, ProjectSummary, SessionIdentityRecord, SessionProjectSummary, SessionResumeOutcome, SessionResumeTarget, TranscriptLocatorPage, TranscriptPage, TranscriptSearchResult, TranscriptSearchScopes, UpdateCheckResult } from "./lib/index.ts";
 import { sortSidebarSources, type OrderedSidebarSource } from "./lib/sidebar-sources.ts";
 import { mcpColumns } from "./lib/tableColumns.tsx";
@@ -78,7 +79,7 @@ import { LoadingState } from "./components/shared/LoadingState.tsx";
 import { Sidebar } from "./components/shared/Sidebar.tsx";
 import { Toast } from "./components/shared/Toast.tsx";
 import type { SessionRecord, SkillLinkRecord } from "./views/SessionsView.tsx";
-import type { RawSkillRecord, SkillInstallResult } from "./views/SkillsView.tsx";
+import type { RawSkillRecord, SkillInstallResult, SkillRecord, WrapperArgs } from "./views/SkillsView.tsx";
 import { ConfigView } from "./views/ConfigView.tsx";
 import { DataListView } from "./views/McpView.tsx";
 import { HooksView } from "./views/HooksView.tsx";
@@ -132,11 +133,11 @@ function SkillChangeDialogFallback({
       contentProps={{ "data-update-preview": isUpdate }}
     >
       <div className="skillChangeDialogBody">
-        <Dialog.Title className="confirmDialogTitle">{isDelete ? "Delete selected skills?" : "Confirm skill changes"}</Dialog.Title>
+        <Dialog.Title className="confirmDialogTitle">{skillChangeTitle(command)}</Dialog.Title>
         {isDelete ? (
           <>
             <p id="skill-changes-loading-description" className="confirmDialogDescription">
-              Delete the selected skills from their installed locations.
+              {skillChangeDescription(command)}
             </p>
             <div className="skillDeleteNames" data-selectable-text>
               {names.map((name) => <span key={name}>{name}</span>)}
@@ -356,7 +357,9 @@ export function App() {
   const promptsRefreshInFlight = useRef<Promise<unknown[]> | null>(null);
   const sessionsRefreshInFlight = useRef<Promise<unknown> | null>(null);
   const skillIndexRunInFlight = useRef<Promise<SkillIndexStatus> | null>(null);
-  const overviewCountsInFlight = useRef(new Map<string, Promise<void>>());
+  const skillIndexStatusRefreshInFlight = useRef<Promise<SkillIndexStatus | null> | null>(null);
+  const overviewCountsInFlight = useRef(new Map<string, Promise<boolean>>());
+  const sessionResumeTargetRequests = useRef(new Map<string, Promise<"terminal" | "app">>());
   const sessionEventReady = useRef<Promise<void>>(Promise.resolve());
   const sessionEventFlushTimer = useRef<number | undefined>(undefined);
   const sessionScanGeneration = useRef(0);
@@ -822,6 +825,17 @@ export function App() {
     }));
   }, []);
 
+  const deleteRules = useCallback(async (paths: string[]) => {
+    try {
+      const rows = await invokeCommand(TauriCommand.RuleFileDeleteMany, { paths });
+      if (Array.isArray(rows)) setDomainRows("rules", rows);
+      return rows;
+    } catch (error) {
+      logger.warn("tendi command failed", { command: TauriCommand.RuleFileDeleteMany, error });
+      return { error: `${error}` };
+    }
+  }, []);
+
   const deleteHook = useCallback(async (hook: HookRecord) => {
     try {
       const rows = await invokeCommand(TauriCommand.HookDelete, hookDeleteArgs(hook));
@@ -1024,7 +1038,12 @@ export function App() {
       setSessionLoadError();
       finishSessionScanWaiters(event.generation);
     } else if (event.phase === "watch" && event.complete) {
-      setSessionRefreshError("");
+      if (event.error) {
+        setSessionRefreshError(SESSION_REFRESH_ERROR);
+        setSessionLoadError();
+      } else {
+        setSessionRefreshError("");
+      }
     }
   }, [finishSessionScanWaiters, flushSessionEventBuffer, scheduleSessionEventFlush, setSessionLoadError, setSessionRows]);
 
@@ -1152,9 +1171,23 @@ export function App() {
   }, [refreshSessionProjects, runSkillIndex]);
 
   const refreshSkillIndexStatus = useCallback(async (): Promise<SkillIndexStatus | null> => {
-    const status = await safeInvoke<SkillIndexStatus>(TauriCommand.SessionSkillIndexStatus);
-    if (status) setSkillIndexStatus(status);
-    return status;
+    const existing = skillIndexStatusRefreshInFlight.current;
+    if (existing) return existing;
+    const request = (async () => {
+      const status = await safeInvoke<SkillIndexStatus>(TauriCommand.SessionSkillIndexStatus);
+      if (status) setSkillIndexStatus(status);
+      return status;
+    })();
+    skillIndexStatusRefreshInFlight.current = request;
+    void request.then(
+      () => {
+        if (skillIndexStatusRefreshInFlight.current === request) skillIndexStatusRefreshInFlight.current = null;
+      },
+      () => {
+        if (skillIndexStatusRefreshInFlight.current === request) skillIndexStatusRefreshInFlight.current = null;
+      },
+    );
+    return request;
   }, []);
 
   const readSkillIndexStatus = useCallback(() => refreshSkillIndexStatus(), [refreshSkillIndexStatus]);
@@ -1176,6 +1209,10 @@ export function App() {
     desktopStore.actions.bumpDomainRetryRevision();
   }, [setSessionListError, setSessionListStatus, setSessionRefreshError]);
 
+  const retryOverviewCounts = useCallback(() => {
+    desktopStore.actions.bumpDomainRetryRevision();
+  }, []);
+
   const loadOverviewCount = useCallback(async (domain: DomainKey) => {
     const requestKey = `${agentFilter}\u0000${domain}`;
     const existing = overviewCountsInFlight.current.get(requestKey);
@@ -1190,12 +1227,13 @@ export function App() {
         if (!Number.isFinite(result.count) || !Number.isFinite(result.secondaryCount)) {
           throw new Error(`Invalid ${domain} count response`);
         }
-        if (result.ready === false) return;
-        if (agentFilterRef.current !== agentFilter) return;
+        if (result.ready === false) return false;
+        if (agentFilterRef.current !== agentFilter) return false;
         desktopStore.actions.setInventoryCount(domain, result.count, result.secondaryCount);
+        return true;
       } catch (error) {
         logger.warn("tendi overview count failed", { domain, error });
-        if (agentFilterRef.current === agentFilter) desktopStore.actions.setInventoryError(domain, true);
+        return false;
       }
     })();
     overviewCountsInFlight.current.set(requestKey, request);
@@ -1278,8 +1316,8 @@ export function App() {
   };
 
   useEffect(() => {
-    const loadOneDomain = async (domain: DomainKey) => {
-      if (desktopStore.getSnapshot().catalogs.loadedDomains.has(domain)) return;
+    const loadOneDomain = async (domain: DomainKey, force = false) => {
+      if (!force && desktopStore.getSnapshot().catalogs.loadedDomains.has(domain)) return;
       const existing = domainLoadInFlight.current.get(domain);
       if (existing) {
         await existing;
@@ -1353,12 +1391,28 @@ export function App() {
     };
 
     if (view === "overview") {
+      let cancelled = false;
       desktopStore.actions.resetInventory(agentFilter);
-      void (async () => {
-        await Promise.all(DOMAIN_KEYS.map((domain) => loadOneDomain(domain)));
-        await Promise.all(DOMAIN_KEYS.map((domain) => loadOverviewCount(domain)));
-      })();
-      return () => undefined;
+      const loadOverviewDomain = async (domain: DomainKey) => {
+        await loadOneDomain(domain);
+        const loaded = await loadOverviewCountWithRetry({
+          loadCount: () => loadOverviewCount(domain),
+          reloadDomain: async () => {
+            desktopStore.actions.markDomainLoaded(domain, false);
+            await loadOneDomain(domain, true);
+          },
+          shouldContinue: () => !cancelled && agentFilterRef.current === agentFilter,
+        });
+        if (!loaded && !cancelled && agentFilterRef.current === agentFilter) {
+          desktopStore.actions.setInventoryError(domain, true);
+        }
+      };
+      void Promise.all(DOMAIN_KEYS.map(loadOverviewDomain)).catch((error) => {
+        if (!cancelled) logger.error("overview inventory load failed", { error });
+      });
+      return () => {
+        cancelled = true;
+      };
     }
 
     const domain = view === "skillDetail" ? "skills" : view === "ruleDetail" ? "rules" : view;
@@ -1494,15 +1548,22 @@ export function App() {
   const resolveSessionResumeTarget = useCallback(async (session: SessionRecord): Promise<"terminal" | "app"> => {
     const configuredTarget = sessionResumeTargetForAgent(sessionResumeTarget, session.agent);
     if (configuredTarget !== "auto") return configuredTarget;
-    try {
-      const inferredTarget = await invokeCommand<"terminal" | "app">(TauriCommand.SessionResumeTarget, {
-        session: sessionLaunchPayload(session),
-      });
-      return inferredTarget === "app" ? "app" : "terminal";
-    } catch (error) {
-      logger.warn("session resume target inference failed; using terminal", { error });
-      return "terminal";
-    }
+    const requestKey = sessionIdentity(session);
+    const existingRequest = sessionResumeTargetRequests.current.get(requestKey);
+    if (existingRequest) return existingRequest;
+    const request = (async () => {
+      try {
+        const inferredTarget = await invokeCommand<"terminal" | "app">(TauriCommand.SessionResumeTarget, {
+          session: sessionLaunchPayload(session),
+        });
+        return inferredTarget === "app" ? "app" : "terminal";
+      } catch (error) {
+        logger.warn("session resume target inference failed; using terminal", { error });
+        return "terminal";
+      }
+    })();
+    sessionResumeTargetRequests.current.set(requestKey, request);
+    return request;
   }, [sessionResumeTarget]);
 
   const resumeSession = useCallback(async (session: SessionRecord): Promise<SessionResumeOutcome> => {
@@ -1527,7 +1588,7 @@ export function App() {
     return { status: "launched", target: "terminal", terminal: result.terminal };
   }, [resolveSessionResumeTarget]);
 
-  const previewAndApply = async (
+  const previewAndApply = useCallback(async (
     command: SkillChangeCommand,
     args: Record<string, unknown>,
     { onApplied }: { onApplied?: () => void } = {},
@@ -1569,9 +1630,9 @@ export function App() {
       if (isUpdate) setPendingSkillChange((current) => current?.command === command ? { ...current, previewError: message } : current);
       if (isDelete) setPendingSkillChange((current) => current?.command === command && current.args === args ? { ...current, previewError: message } : current);
     }
-  };
+  }, []);
 
-  const applySkillChange = async (command: SkillChangeCommand, args: Record<string, unknown>) => {
+  const applySkillChange = useCallback(async (command: SkillChangeCommand, args: Record<string, unknown>) => {
     const result = await invokeCommand<SkillPreview>(command, { ...args, dryRun: false });
     if (result.skills) {
       setData((current) => {
@@ -1580,7 +1641,7 @@ export function App() {
       });
     }
     return result;
-  };
+  }, []);
 
   const closeSkillChangeDialog = (open: boolean) => {
     if (!open && !applyingSkillChange) setPendingSkillChange(null);
@@ -1633,7 +1694,7 @@ export function App() {
     }
   };
 
-  const applyVisibility = async (names: string[], visibility: SkillVisibility) => {
+  const applyVisibility = useCallback(async (names: string[], visibility: SkillVisibility) => {
     setData((current) => applyVisibilityState(current, names, visibility));
     const result = await safeInvoke<SkillPreview>(SkillChangeCommand.Set, { names, visibility, dryRun: false });
     if (result?.skills) {
@@ -1643,7 +1704,24 @@ export function App() {
       });
     }
     if (!result) await refreshSkillList(true);
-  };
+  }, [refreshSkillList]);
+
+  const applyWrapperSkill = useCallback(
+    (args: WrapperArgs) => applySkillChange(SkillChangeCommand.Wrap, args),
+    [applySkillChange],
+  );
+  const applySkillUpdates = useCallback(
+    (names: string[], onApplied?: () => void) => previewAndApply(SkillChangeCommand.UpdateMany, { names }, { onApplied }),
+    [previewAndApply],
+  );
+  const deleteSkills = useCallback(
+    (names: string[], onApplied?: () => void) => previewAndApply(SkillChangeCommand.DeleteMany, { names }, { onApplied }),
+    [previewAndApply],
+  );
+  const openSkillFromList = useCallback((skill: SkillRecord) => {
+    setActiveSkill(skill as SkillEditorRecord);
+    navigateTo("skillDetail");
+  }, [navigateTo]);
 
   const forceSidebarResizeHover =
     typeof window !== "undefined" &&
@@ -1773,14 +1851,11 @@ export function App() {
               onRefresh={refreshSkills}
               onSkillsUpdated={applySkillRows}
               onSetVisibility={applyVisibility}
-              onApplyWrapper={(args) => applySkillChange(SkillChangeCommand.Wrap, args)}
-              onApplyUpdates={(names, onApplied) => previewAndApply(SkillChangeCommand.UpdateMany, { names }, { onApplied })}
-              onDeleteSkills={(names, onApplied) => previewAndApply(SkillChangeCommand.DeleteMany, { names }, { onApplied })}
+              onApplyWrapper={applyWrapperSkill}
+              onApplyUpdates={applySkillUpdates}
+              onDeleteSkills={deleteSkills}
               onAddInstalled={applyInstalledSkills}
-              openSkill={(skill) => {
-                setActiveSkill(skill as SkillEditorRecord);
-                navigateTo("skillDetail");
-              }}
+              openSkill={openSkillFromList}
             />
           ) : contentView === "sessions" ? (
             <SessionsView
@@ -1797,6 +1872,7 @@ export function App() {
               sessionRefreshError={sessionRefreshError}
               onRefreshSessions={refreshSessionsFromScan}
               onResumeSession={resumeSession}
+              resolveSessionResumeTarget={resolveSessionResumeTarget}
               sessionResumeTarget={sessionResumeTarget}
               missingSessionProjectPolicy={missingSessionProjectPolicy}
               projects={projects}
@@ -1816,7 +1892,7 @@ export function App() {
               onPromptsDeleted={removePrompts}
             />
           ) : contentView === "rules" ? (
-              <RulesView rows={filteredData.rules} skills={data.skills} projects={projects} loadingRows={loadingDomains.has("rules")} loadError={domainErrors.rules ?? ""} hasRows={data.rules.length > 0} onRetry={() => { void loadDomainForRetry("rules"); }} onOpenSkill={openSkillByName} />
+              <RulesView rows={filteredData.rules} skills={data.skills} projects={projects} loadingRows={loadingDomains.has("rules")} loadError={domainErrors.rules ?? ""} hasRows={data.rules.length > 0} onRetry={() => { void loadDomainForRetry("rules"); }} onOpenSkill={openSkillByName} onDeleteRules={deleteRules} />
             ) : contentView === "hooks" ? (
               <HooksView rows={filteredData.hooks} projects={projects} loadingRows={loadingDomains.has("hooks")} loadError={domainErrors.hooks ?? ""} hasRows={data.hooks.length > 0} onRetry={() => { void loadDomainForRetry("hooks"); }} onDeleteHook={deleteHook} onDeleteHooks={deleteHooks} onSetHookEnabled={setHookEnabled} onReviewHook={reviewHook} />
             ) : contentView === "mcp" ? (
@@ -1869,6 +1945,7 @@ export function App() {
               agentFilter={agentFilter}
               overviewCountsLoaded={overviewCountsLoaded}
               overviewCountErrors={overviewCountErrors}
+              onRetryCounts={retryOverviewCounts}
               sessionListStatus={sessionListStatus}
               sessionListError={sessionListError}
               onNavigate={(id: OverviewNavId) => navigate(id)}

@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useMemo, useState, type ComponentType, type ReactNode } from "react";
 import { ContextMenu, DropdownMenu } from "radix-ui";
-import { Power, PowerOff, Server } from "lucide-react";
+import { Code2, Copy, FolderOpen, Power, PowerOff, Server } from "lucide-react";
 
 import { DataTable } from "../components/DataTable.tsx";
 import type { ColumnDef } from "../components/DataTable.types";
 import { ContentTopDragStrip } from "../components/shared/ContentTopDragStrip.tsx";
-import { CopyPathMenuItem, RevealInFinderMenuItem } from "../components/shared/DataTableMenus.tsx";
+import { CopyPathMenuItem, OpenInEditorMenuItem, RevealInFinderMenuItem } from "../components/shared/DataTableMenus.tsx";
+import { DataTableSelectionActions, renderDataTableSelectionMenu, type DataTableSelectionActionDefinition } from "../components/shared/DataTableSelectionActions.tsx";
 import { CopyButton } from "../components/shared/CopyButton.tsx";
 import { Button } from "../components/shared/Button.tsx";
 import { EmptyState } from "../components/shared/EmptyState.tsx";
@@ -16,7 +17,7 @@ import { Switch } from "../components/shared/Switch.tsx";
 import { Toast } from "../components/shared/Toast.tsx";
 import { Tooltip } from "../components/shared/Tooltip.tsx";
 import { mcpColumns as defaultMcpColumns } from "../lib/tableColumns.tsx";
-import { MCP_FREEZE_COLUMN, TauriCommand, mcpRowKey, mcpSourcePath, safeInvoke, scopeColumn, type McpRecord, type ProjectSummary } from "../lib/index.ts";
+import { actionLabels, MCP_FREEZE_COLUMN, TauriCommand, mcpRowKey, mcpSelectionActionIds, mcpSourcePath, safeInvoke, scopeColumn, type McpRecord, type ProjectSummary } from "../lib/index.ts";
 
 export { mcpColumns } from "../lib/tableColumns.tsx";
 
@@ -82,28 +83,59 @@ function McpEnabledSwitch({
   );
 }
 
-function McpActionsMenuItems({
-  Menu,
-  row,
-}: {
-  Menu: McpMenuComponents;
-  row: McpRow;
-}) {
-  const path = mcpSourcePath(row);
+function McpActionsCell({ row, actions }: { row: McpRow; actions: ReactNode }) {
   return (
-    <>
-      <RevealInFinderMenuItem Menu={Menu} path={path} />
-      <CopyPathMenuItem Menu={Menu} path={path} />
-    </>
+    <RowActionsMenu ariaLabel={`MCP actions for ${row.name}`}>
+      {actions}
+    </RowActionsMenu>
   );
 }
 
-function McpActionsCell({ row }: { row: McpRow }) {
-  return (
-    <RowActionsMenu ariaLabel={`MCP actions for ${row.name}`}>
-      <McpActionsMenuItems Menu={DropdownMenu} row={row} />
-    </RowActionsMenu>
-  );
+function mcpSelectionActions(
+  selectedRows: McpRow[],
+  Menu: McpMenuComponents,
+  setMcpEnabled: (row: McpRow, enabled: boolean) => Promise<void>,
+  updating: boolean,
+): DataTableSelectionActionDefinition[] {
+  const enableTargets = selectedRows.filter((row) => !mcpEnableDisabledReason(row) && !mcpEnabled(row));
+  const disableTargets = selectedRows.filter((row) => !mcpEnableDisabledReason(row) && mcpEnabled(row));
+  const updateSelected = async (enabled: boolean) => {
+    const targets = enabled ? enableTargets : disableTargets;
+    for (const row of targets) await setMcpEnabled(row, enabled);
+  };
+  const actions: Record<string, DataTableSelectionActionDefinition> = {
+    enable: {
+      id: "enable",
+      direct: <Button size="sm" variant="ghost" aria-label="Enable selected MCP servers" disabled={enableTargets.length === 0 || updating} onClick={() => { void updateSelected(true); }}><Power size={15} /><span>{actionLabels.enable}</span></Button>,
+      menu: <Menu.Item className="skillMenuItem" disabled={enableTargets.length === 0 || updating} onSelect={() => { void updateSelected(true); }}><Power size={14} />{actionLabels.enable}</Menu.Item>,
+      measure: <><Power size={15} /><span>{actionLabels.enable}</span></>,
+    },
+    disable: {
+      id: "disable",
+      direct: <Button size="sm" variant="ghost" aria-label="Disable selected MCP servers" disabled={disableTargets.length === 0 || updating} onClick={() => { void updateSelected(false); }}><PowerOff size={15} /><span>{actionLabels.disable}</span></Button>,
+      menu: <Menu.Item className="skillMenuItem" disabled={disableTargets.length === 0 || updating} onSelect={() => { void updateSelected(false); }}><PowerOff size={14} />{actionLabels.disable}</Menu.Item>,
+      measure: <><PowerOff size={15} /><span>{actionLabels.disable}</span></>,
+    },
+    "open-editor": {
+      id: "open-editor",
+      direct: <button aria-label={actionLabels.openInEditor} disabled={selectedRows.length !== 1 || !mcpSourcePath(selectedRows[0])} onClick={() => { const path = mcpSourcePath(selectedRows[0]); if (path) void safeInvoke(TauriCommand.OpenInEditor, { path }); }}><Code2 size={15} /><span>{actionLabels.openInEditor}</span></button>,
+      menu: <OpenInEditorMenuItem Menu={Menu} path={mcpSourcePath(selectedRows[0])} />,
+      measure: <><Code2 size={15} /><span>{actionLabels.openInEditor}</span></>,
+    },
+    reveal: {
+      id: "reveal",
+      direct: <button aria-label={actionLabels.revealInFinder} disabled={selectedRows.length !== 1 || !mcpSourcePath(selectedRows[0])} onClick={() => { const path = mcpSourcePath(selectedRows[0]); if (path) void safeInvoke(TauriCommand.RevealInFinder, { path }); }}><FolderOpen size={15} /><span>{actionLabels.revealInFinder}</span></button>,
+      menu: <RevealInFinderMenuItem Menu={Menu} path={mcpSourcePath(selectedRows[0])} />,
+      measure: <><FolderOpen size={15} /><span>{actionLabels.revealInFinder}</span></>,
+    },
+    "copy-path": {
+      id: "copy-path",
+      direct: <CopyButton value={mcpSourcePath(selectedRows[0])} disabled={!mcpSourcePath(selectedRows[0])} copyLabel={actionLabels.copyPath} copiedLabel={actionLabels.pathCopied} iconSize={15}>{actionLabels.copyPath}</CopyButton>,
+      menu: <CopyPathMenuItem Menu={Menu} path={mcpSourcePath(selectedRows[0])} />,
+      measure: <><Copy size={15} /><span>{actionLabels.copyPath}</span></>,
+    },
+  };
+  return mcpSelectionActionIds(selectedRows.length).map((id) => actions[id]);
 }
 
 type DataListViewProps = {
@@ -173,63 +205,31 @@ export function DataListView({ title, rows, columns = defaultMcpColumns, loading
         key: "actions",
         header: "",
         width: "40px",
-        render: (row) => <McpActionsCell row={row} />,
+        render: (row) => (
+          <McpActionsCell
+            row={row}
+            actions={renderDataTableSelectionMenu(mcpSelectionActions(
+              [row],
+              DropdownMenu,
+              setMcpEnabled,
+              updatingKeys.size > 0,
+            ))}
+          />
+        ),
       },
     ];
   }, [columns, projects, setMcpEnabled, updatingKeys]);
   const rowContextMenu = useCallback((row: McpRow, { selectedRows, selected: isSelected }: { selectedRows: McpRow[]; selected: boolean }) => {
-    if (isSelected && selectedRows.length > 1) return null;
-    return <McpActionsMenuItems Menu={ContextMenu} row={row} />;
-  }, []);
-  const bottomBar = useCallback((selectedRows: McpRow[]) => {
-    const firstPath = mcpSourcePath(selectedRows[0]);
-    const enableTargets = selectedRows.filter((row) => !mcpEnableDisabledReason(row) && !mcpEnabled(row));
-    const disableTargets = selectedRows.filter((row) => !mcpEnableDisabledReason(row) && mcpEnabled(row));
-    const updateSelected = async (enabled: boolean) => {
-      const targets = enabled ? enableTargets : disableTargets;
-      for (const row of targets) await setMcpEnabled(row, enabled);
-    };
-    return (
-      <>
-        <Button
-          size="sm"
-          variant="ghost"
-          aria-label="Enable selected MCP servers"
-          disabled={enableTargets.length === 0 || updatingKeys.size > 0}
-          onClick={() => { void updateSelected(true); }}
-        >
-          <Power size={15} />
-          Enable
-        </Button>
-        <Button
-          size="sm"
-          variant="ghost"
-          aria-label="Disable selected MCP servers"
-          disabled={disableTargets.length === 0 || updatingKeys.size > 0}
-          onClick={() => { void updateSelected(false); }}
-        >
-          <PowerOff size={15} />
-          Disable
-        </Button>
-        <button
-          aria-label="Reveal selected MCP config in Finder"
-          disabled={!firstPath}
-          onClick={() => firstPath && safeInvoke(TauriCommand.RevealInFinder, { path: firstPath })}
-        >
-          Reveal in Finder
-        </button>
-        <CopyButton
-          value={firstPath}
-          copyLabel="Copy path"
-          copiedLabel="Path copied"
-          disabled={!firstPath}
-          iconSize={15}
-        >
-          Copy path
-        </CopyButton>
-      </>
-    );
+    const actionRows = isSelected ? selectedRows : [row];
+    const actions = mcpSelectionActions(actionRows, ContextMenu, setMcpEnabled, updatingKeys.size > 0);
+    return actions.length > 0 ? renderDataTableSelectionMenu(actions) : null;
   }, [setMcpEnabled, updatingKeys.size]);
+  const bottomBar = useCallback((selectedRows: McpRow[]) => (
+    <DataTableSelectionActions
+      actions={mcpSelectionActions(selectedRows, DropdownMenu, setMcpEnabled, updatingKeys.size > 0)}
+      ariaLabel="More selected MCP actions"
+    />
+  ), [setMcpEnabled, updatingKeys.size]);
 
   useEffect(() => {
     setSelected((current) => current.filter((id) => rowIds.includes(id)));
@@ -253,6 +253,7 @@ export function DataListView({ title, rows, columns = defaultMcpColumns, loading
         enableMarquee
         rowContextMenu={rowContextMenu}
         bottomBar={bottomBar}
+        bottomBarActionsClassName="selectionActions"
         bottomBarCheckboxLabel={`Select visible ${title.toLowerCase()}`}
         selectionLabel="servers"
         loading={loading && !hasRows}

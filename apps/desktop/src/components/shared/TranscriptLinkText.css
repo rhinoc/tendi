@@ -9,10 +9,11 @@
 
 .transcriptLink {
   display: inline-flex;
-  align-items: center;
+  align-items: baseline;
   max-width: 100%;
   color: var(--link);
   font-weight: 500;
+  line-height: inherit;
   text-decoration-line: underline;
   text-decoration-color: color-mix(in oklch, currentColor 45%, transparent);
   text-underline-offset: 2px;
@@ -38,13 +39,16 @@
 
 .transcriptLinkContent {
   display: inline-flex;
-  align-items: center;
+  align-items: baseline;
   gap: 4px;
   min-width: 0;
 }
 
 .transcriptLinkIcon {
+  display: block;
   flex: 0 0 auto;
+  /* Keep the glyph optically centered to the label without owning the flex baseline */
+  align-self: center;
 }
 
 .transcriptLinkLabel {

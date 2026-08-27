@@ -831,6 +831,10 @@ impl super::AgentProvider for CursorProvider {
         path.starts_with("/etc/cursor/") || path.starts_with("/Library/Application Support/Cursor/")
     }
 
+    fn is_global_hook_path(&self, path: &Path) -> bool {
+        dirs::home_dir().is_some_and(|home| path.starts_with(home.join(".cursor")))
+    }
+
     fn scan_hooks(
         &self,
         ctx: &ProviderContext,

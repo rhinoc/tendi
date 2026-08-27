@@ -3089,6 +3089,27 @@ mod tests {
     }
 
     #[test]
+    fn extracts_codex_custom_tool_call_string_input_as_command() {
+        let input = r#"const result = await tools.exec_command({cmd: "cargo test"});"#;
+        let call = json!({
+            "type": "response_item",
+            "payload": {
+                "type": "custom_tool_call",
+                "call_id": "call_1",
+                "name": "exec",
+                "input": input
+            }
+        });
+        let mut items = Vec::new();
+
+        collect_codex_item(&call, &mut items);
+
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].command.as_deref(), Some(input));
+        assert_eq!(items[0].body, input);
+    }
+
+    #[test]
     fn unmatched_tool_results_are_ignored() {
         let codex_output = json!({
             "type": "response_item",

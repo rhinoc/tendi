@@ -66,6 +66,27 @@
   white-space: nowrap;
 }
 
+.deleteConfirmationNames {
+  display: grid;
+  gap: 8px;
+  max-height: 180px;
+  margin: -8px 22px 18px;
+  padding: 10px;
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--inset-fill);
+}
+
+.deleteConfirmationNames span {
+  overflow: hidden;
+  color: var(--text);
+  font-size: var(--text-sm);
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .skillUpdateDiffFrame {
   height: min(62vh, 640px);
   margin: -4px 22px 20px;

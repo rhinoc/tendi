@@ -1,9 +1,10 @@
-import { Fragment, lazy, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ComponentType, ReactNode } from "react";
 import { ContextMenu, Dialog, DropdownMenu } from "radix-ui";
 import {
   ChevronLeft,
   ChevronRight,
+  Code2,
   CloudUpload,
   Copy,
   ArrowRightLeft,
@@ -25,6 +26,7 @@ import { AgentOptionLabel } from "../components/shared/AgentOptionLabel.tsx";
 import { Badge } from "../components/shared/Badge.tsx";
 import { BadgeList } from "../components/shared/BadgeList.tsx";
 import { ContentTopDragStrip } from "../components/shared/ContentTopDragStrip.tsx";
+import { OpenInEditorMenuItem } from "../components/shared/DataTableMenus.tsx";
 import { DialogActionButton } from "../components/shared/DialogActionButton.tsx";
 import { DialogActionBar } from "../components/shared/DialogActionBar.tsx";
 import { DialogAdvanceButton } from "../components/shared/DialogAdvanceButton.tsx";
@@ -36,7 +38,7 @@ import { LoadingIcon } from "../components/shared/LoadingIcon.tsx";
 import { LoadingInline } from "../components/shared/LoadingInline.tsx";
 import { LoadingState } from "../components/shared/LoadingState.tsx";
 import { LoadErrorState } from "../components/shared/LoadErrorState.tsx";
-import { MoreActionsButton } from "../components/shared/MoreActionsButton.tsx";
+import { DataTableSelectionActions, renderDataTableSelectionMenu, type DataTableSelectionActionDefinition } from "../components/shared/DataTableSelectionActions.tsx";
 import { MenuContent } from "../components/shared/MenuContent.tsx";
 import { PageHeader } from "../components/shared/PageHeader.tsx";
 import { RowActionsMenu } from "../components/shared/RowActionsMenu.tsx";
@@ -52,7 +54,9 @@ import { SKILL_BADGE_TONES } from "../features/skills/skill-badge-tones.ts";
 import { Visibility } from "../features/skills/Visibility.tsx";
 import { DataTable } from "../components/DataTable.tsx";
 import type { ColumnDef, SortState } from "../components/DataTable.types";
-import { SKILL_FREEZE_COLUMN, TauriCommand, SkillVisibility, agentIdentityKey, allSkillVisibilities, compactDateTime, copyText, editableSkillVisibilities, invokeCommand, isReadOnlySkillSource, isSkillRowSelectable, isSkillSelectable, isSkillVisibilityEditable, primarySkillPath, safeInvoke, scopeColumn, skillSourceAction, skillSourceDetails, skillTargets, sourceRemoteDetails, suppressNextClick, type NormalizedSkill, type ProjectSummary } from "../lib/index.ts";
+import { actionLabels, SKILL_FREEZE_COLUMN, selectionDeleteLabel, TauriCommand, SkillVisibility, agentIdentityKey, allSkillVisibilities, compactDateTime, copyText, editableSkillVisibilities, invokeCommand, isReadOnlySkillSource, isSkillRowSelectable, isSkillSelectable, isSkillVisibilityEditable, primarySkillPath, safeInvoke, scopeColumn, skillSourceAction, skillSourceDetails, skillTargets, sourceRemoteDetails, suppressNextClick, type NormalizedSkill, type ProjectSummary } from "../lib/index.ts";
+import { captureSkillSourcePage, isSkillSourceActionReady, resolveSkillInstallTarget, restoreSkillSourcePage, shouldShowSkillQuickSelect, skillSourceErrorMessage, type SkillSourcePageSnapshot } from "../lib/add-skill-dialog.ts";
+import { skillActionIds, type SkillActionId } from "../lib/skill-actions.ts";
 
 export type SkillsTableSort = SortState;
 
@@ -239,136 +243,211 @@ export function VisibilityMenuItems({ Menu, selectedSkills, onSetVisibility }: V
   );
 }
 
+type SkillActionDefinition = DataTableSelectionActionDefinition & { id: SkillActionId };
+
+type SkillActionDefinitionOptions = {
+  Menu: SkillMenuComponents;
+  selectedSkills: SkillRecord[];
+  applyUpdates: (names: string[]) => void;
+  deleteSkills: (names: string[]) => void;
+  manageLocations: (skills: SkillRecord[]) => void;
+  createWrapper: (skills: SkillRecord[]) => void;
+  setVisibility: (names: string[], visibility: SkillVisibility) => void | Promise<void>;
+  addToBackup: (skills: SkillRecord[]) => void;
+  getBackupStatus: (skill: SkillRecord) => BackupStatusRecord;
+  backupConfigured: boolean;
+  backupBusy: boolean;
+};
+
+type SkillPathActionId = "reveal" | "copy-path";
+
+function skillPathActionLabel(action: SkillPathActionId) {
+  return action === "reveal" ? actionLabels.revealInFinder : actionLabels.copyPath;
+}
+
+function skillPathActionIcon(action: SkillPathActionId) {
+  return action === "reveal" ? FolderOpen : Copy;
+}
+
+function runSkillPathAction(action: SkillPathActionId, path: string) {
+  if (action === "reveal") safeInvoke(TauriCommand.RevealInFinder, { path });
+  else copyText(path);
+}
+
+function renderSkillPathMenuItems(Menu: SkillMenuComponents, action: SkillPathActionId, targets: SkillTarget[], primaryPath: string | null) {
+  const label = skillPathActionLabel(action);
+  const Icon = skillPathActionIcon(action);
+  if (targets.length > 1) {
+    return (
+      <Menu.Sub>
+        <Menu.SubTrigger className="skillMenuItem skillMenuSubTrigger">
+          <Icon size={14} />
+          <span>{label}</span>
+          <ChevronRight className="skillMenuSubIcon" size={14} />
+        </Menu.SubTrigger>
+        <Menu.Portal>
+          <Menu.SubContent className="skillMenuContent" sideOffset={8} alignOffset={-6}>
+            {targets.map((target) => (
+              <Menu.Item className="skillMenuItem" key={`${action}-${target.id}`} onSelect={() => runSkillPathAction(action, target.path)}>
+                <AgentOptionLabel agent={target.agent} label={target.label} />
+              </Menu.Item>
+            ))}
+          </Menu.SubContent>
+        </Menu.Portal>
+      </Menu.Sub>
+    );
+  }
+  return (
+    <Menu.Item className="skillMenuItem" disabled={!primaryPath} onSelect={() => primaryPath && runSkillPathAction(action, primaryPath)}>
+      <Icon size={14} />
+      {label}
+    </Menu.Item>
+  );
+}
+
+function renderSkillPathDirectAction(action: SkillPathActionId, targets: SkillTarget[], primaryPath: string | null) {
+  const label = skillPathActionLabel(action);
+  const Icon = skillPathActionIcon(action);
+  if (targets.length > 1) {
+    return (
+      <DropdownMenu.Root>
+        <DropdownMenu.Trigger asChild>
+          <button aria-label={label}>
+            <Icon size={15} />
+            <span>{label}</span>
+          </button>
+        </DropdownMenu.Trigger>
+        <DropdownMenu.Portal>
+          <MenuContent align="start" sideOffset={6}>
+            {renderSkillPathMenuItems(DropdownMenu, action, targets, primaryPath)}
+          </MenuContent>
+        </DropdownMenu.Portal>
+      </DropdownMenu.Root>
+    );
+  }
+  return (
+    <button aria-label={label} disabled={!primaryPath} onClick={() => primaryPath && runSkillPathAction(action, primaryPath)}>
+      <Icon size={15} />
+      <span>{label}</span>
+    </button>
+  );
+}
+
+function skillActionDefinitions({ Menu, selectedSkills, applyUpdates, deleteSkills, manageLocations, createWrapper, setVisibility, addToBackup, getBackupStatus, backupConfigured, backupBusy }: SkillActionDefinitionOptions): SkillActionDefinition[] {
+  const singleSkill = selectedSkills.length === 1 ? selectedSkills[0] : undefined;
+  const primaryPath = singleSkill ? primarySkillPath(singleSkill) : null;
+  const targets: SkillTarget[] = singleSkill ? skillTargets(singleSkill) : [];
+  const updateNames = selectedSkills.filter((skill) => skill.updateStatus === "update-available").map((skill) => skill.name);
+  const deletableNames = selectedSkills.filter(isSkillSelectable).map((skill) => skill.name);
+  const movableSkills = selectedSkills.filter((skill) => !isReadOnlySkillSource(skill) && skillTargets(skill).length > 0);
+  const backupSkills = backupSkillsForSelection(selectedSkills, getBackupStatus, backupConfigured);
+  const updateLabel = selectedSkills.length === 1 ? "Apply update" : "Update";
+  const locationLabel = selectedSkills.length === 1 ? "Manage locations" : "Locations";
+  const backupLabel = selectedSkills.length === 1 ? "Add to backup" : `Add to backup${backupSkills.length > 1 ? ` (${backupSkills.length})` : ""}`;
+  const deleteLabel = selectionDeleteLabel("skill", selectedSkills.length);
+  const visibilityMenu = (
+    <Menu.Sub>
+      <Menu.SubTrigger className="skillMenuItem skillMenuSubTrigger">
+        <Eye size={14} />
+        <span>Visibility</span>
+        <ChevronRight className="skillMenuSubIcon" size={14} />
+      </Menu.SubTrigger>
+      <Menu.Portal>
+        <Menu.SubContent className="skillMenuContent" sideOffset={8} alignOffset={-6}>
+          <VisibilityMenuItems Menu={Menu} selectedSkills={selectedSkills} onSetVisibility={setVisibility} />
+        </Menu.SubContent>
+      </Menu.Portal>
+    </Menu.Sub>
+  );
+  const actions: Record<SkillActionId, SkillActionDefinition> = {
+    "open-editor": {
+      id: "open-editor",
+      direct: <button aria-label={actionLabels.openInEditor} disabled={!primaryPath} onClick={() => primaryPath && safeInvoke(TauriCommand.OpenInEditor, { path: primaryPath })}><Code2 size={15} /><span>{actionLabels.openInEditor}</span></button>,
+      menu: <OpenInEditorMenuItem Menu={Menu} path={primaryPath} />,
+      measure: <><Code2 size={15} /><span>{actionLabels.openInEditor}</span></>,
+    },
+    locations: {
+      id: "locations",
+      direct: <button aria-label={locationLabel} disabled={movableSkills.length === 0} onClick={() => movableSkills.length > 0 && manageLocations(movableSkills)}><ArrowRightLeft size={15} /><span>{locationLabel}</span></button>,
+      menu: <Menu.Item className="skillMenuItem" disabled={movableSkills.length === 0} onSelect={() => { if (movableSkills.length === 0) return; suppressNextClick(); manageLocations(movableSkills); }}><ArrowRightLeft size={14} />{locationLabel}</Menu.Item>,
+      measure: <><ArrowRightLeft size={15} /><span>{locationLabel}</span></>,
+    },
+    update: {
+      id: "update",
+      direct: <button className="skillApplyUpdatesButton" aria-label={updateLabel} disabled={updateNames.length === 0} onClick={() => updateNames.length > 0 && applyUpdates(updateNames)}><RefreshCw size={15} aria-hidden="true" /><span>{updateLabel}{selectedSkills.length > 1 && updateNames.length ? ` (${updateNames.length})` : ""}</span></button>,
+      menu: <Menu.Item className="skillMenuItem" disabled={updateNames.length === 0} onSelect={() => { if (updateNames.length === 0) return; suppressNextClick(); applyUpdates(updateNames); }}><RefreshCw size={14} />{updateLabel}{selectedSkills.length > 1 && updateNames.length ? ` (${updateNames.length})` : ""}</Menu.Item>,
+      measure: <><RefreshCw size={15} /><span>{updateLabel}{selectedSkills.length > 1 && updateNames.length ? ` (${updateNames.length})` : ""}</span></>,
+    },
+    reveal: {
+      id: "reveal",
+      direct: renderSkillPathDirectAction("reveal", targets, primaryPath),
+      menu: renderSkillPathMenuItems(Menu, "reveal", targets, primaryPath),
+      measure: <><FolderOpen size={15} /><span>{actionLabels.revealInFinder}</span></>,
+    },
+    "copy-path": {
+      id: "copy-path",
+      direct: renderSkillPathDirectAction("copy-path", targets, primaryPath),
+      menu: renderSkillPathMenuItems(Menu, "copy-path", targets, primaryPath),
+      measure: <><Copy size={15} /><span>{actionLabels.copyPath}</span></>,
+    },
+    visibility: {
+      id: "visibility",
+      direct: <DropdownMenu.Root><DropdownMenu.Trigger asChild><button aria-label="Visibility"><Eye size={15} /><span>Visibility</span></button></DropdownMenu.Trigger><DropdownMenu.Portal><MenuContent align="start" sideOffset={6}><VisibilityMenuItems Menu={DropdownMenu} selectedSkills={selectedSkills} onSetVisibility={setVisibility} /></MenuContent></DropdownMenu.Portal></DropdownMenu.Root>,
+      menu: visibilityMenu,
+      measure: <><Eye size={15} /><span>Visibility</span></>,
+    },
+    backup: {
+      id: "backup",
+      direct: <button aria-label={backupLabel} aria-busy={backupBusy} disabled={backupSkills.length === 0 || backupBusy} onClick={() => backupSkills.length > 0 && addToBackup(backupSkills)}>{backupBusy ? <LoadingIcon size={15} /> : <><CloudUpload size={15} /><span>{backupLabel}</span></>}</button>,
+      menu: <Menu.Item className="skillMenuItem" disabled={backupSkills.length === 0 || backupBusy} onSelect={() => { if (backupSkills.length === 0 || backupBusy) return; suppressNextClick(); addToBackup(backupSkills); }}><CloudUpload size={14} />{backupLabel}</Menu.Item>,
+      measure: <><CloudUpload size={15} /><span>{backupLabel}</span></>,
+    },
+    wrapper: {
+      id: "wrapper",
+      direct: <button aria-label="Create wrapper" onClick={() => createWrapper(selectedSkills)}><PackagePlus size={15} /><span>Create wrapper</span></button>,
+      menu: <Menu.Item className="skillMenuItem" onSelect={() => { suppressNextClick(); createWrapper(selectedSkills); }}><PackagePlus size={14} />Create wrapper</Menu.Item>,
+      measure: <><PackagePlus size={15} /><span>Create wrapper</span></>,
+    },
+    delete: {
+      id: "delete",
+      direct: <button className="danger" aria-label={deleteLabel} disabled={deletableNames.length === 0} onClick={() => deletableNames.length > 0 && deleteSkills(deletableNames)}><Trash2 size={15} /><span>{deleteLabel}</span></button>,
+      menu: <Menu.Item className="skillMenuItem danger" disabled={deletableNames.length === 0} onSelect={() => { if (deletableNames.length === 0) return; suppressNextClick(); deleteSkills(deletableNames); }}><Trash2 size={14} />{deleteLabel}</Menu.Item>,
+      measure: <><Trash2 size={15} /><span>{deleteLabel}</span></>,
+      separatorBefore: true,
+    },
+  };
+  return skillActionIds({ selectionCount: selectedSkills.length, backupConfigured }).map((id) => actions[id]);
+}
+
 export type SkillActionsMenuItemsProps = {
   Menu: SkillMenuComponents;
   skill: SkillRecord;
   onApplyUpdates: (names: string[]) => void;
   onDeleteSkills: (names: string[]) => void;
   onManageLocations: (skill: SkillRecord) => void;
+  onCreateWrapper: (skill: SkillRecord) => void;
+  onSetVisibility: (names: string[], visibility: SkillVisibility) => void | Promise<void>;
   onAddToBackup: (skills: SkillRecord[]) => void;
   getBackupStatus: (skill: SkillRecord) => BackupStatusRecord;
   backupConfigured: boolean;
   backupBusy: boolean;
 };
 
-export function SkillActionsMenuItems({ Menu, skill, onApplyUpdates, onDeleteSkills, onManageLocations, onAddToBackup, getBackupStatus, backupConfigured, backupBusy }: SkillActionsMenuItemsProps) {
-  const targets = skillTargets(skill);
-  const primaryPath = primarySkillPath(skill);
-  const hasMultipleTargets = targets.length > 1;
-  const readOnly = !isSkillSelectable(skill);
-  const locationReadOnly = isReadOnlySkillSource(skill);
-  const backupStatus = getBackupStatus(skill);
-  const canAddToBackup = backupConfigured && backupStatus.state === "unmanaged" && Boolean(backupStatus.skillPath) && !backupBusy;
-  return (
-    <>
-      <Menu.Item
-        className="skillMenuItem"
-        disabled={locationReadOnly || targets.length === 0}
-        onSelect={() => {
-          suppressNextClick();
-          onManageLocations(skill);
-        }}
-      >
-        <ArrowRightLeft size={14} />
-        Manage locations
-      </Menu.Item>
-      {skill.updateStatus === "update-available" && (
-        <>
-          <Menu.Item className="skillMenuItem" onSelect={() => {
-            suppressNextClick();
-            onApplyUpdates([skill.name]);
-          }}>
-            <RefreshCw size={14} />
-            Apply update
-          </Menu.Item>
-        </>
-      )}
-      {hasMultipleTargets ? (
-        <Menu.Sub>
-          <Menu.SubTrigger className="skillMenuItem skillMenuSubTrigger">
-            <FolderOpen size={14} />
-            <span>Reveal in Finder</span>
-            <ChevronRight className="skillMenuSubIcon" size={14} />
-          </Menu.SubTrigger>
-          <Menu.Portal>
-            <Menu.SubContent className="skillMenuContent" sideOffset={8} alignOffset={-6}>
-              {(targets as SkillTarget[]).map((target) => (
-                <Menu.Item
-                  className="skillMenuItem"
-                  key={`reveal-${target.id}`}
-                  onSelect={() => safeInvoke(TauriCommand.RevealInFinder, { path: target.path })}
-                >
-                  <AgentOptionLabel agent={target.agent} label={target.label} />
-                </Menu.Item>
-              ))}
-            </Menu.SubContent>
-          </Menu.Portal>
-        </Menu.Sub>
-      ) : (
-        <Menu.Item
-          className="skillMenuItem"
-          disabled={!primaryPath}
-          onSelect={() => {
-            if (primaryPath) safeInvoke(TauriCommand.RevealInFinder, { path: primaryPath });
-          }}
-        >
-          <FolderOpen size={14} />
-          Reveal in Finder
-        </Menu.Item>
-      )}
-      {hasMultipleTargets ? (
-        <Menu.Sub>
-          <Menu.SubTrigger className="skillMenuItem skillMenuSubTrigger">
-            <Copy size={14} />
-            <span>Copy path</span>
-            <ChevronRight className="skillMenuSubIcon" size={14} />
-          </Menu.SubTrigger>
-          <Menu.Portal>
-            <Menu.SubContent className="skillMenuContent" sideOffset={8} alignOffset={-6}>
-              {(targets as SkillTarget[]).map((target) => (
-                <Menu.Item className="skillMenuItem" key={`copy-${target.id}`} onSelect={() => copyText(target.path)}>
-                  <AgentOptionLabel agent={target.agent} label={target.label} />
-                </Menu.Item>
-              ))}
-            </Menu.SubContent>
-          </Menu.Portal>
-        </Menu.Sub>
-      ) : (
-        <Menu.Item className="skillMenuItem" disabled={!primaryPath} onSelect={() => copyText(primaryPath ?? "")}>
-          <Copy size={14} />
-          Copy path
-        </Menu.Item>
-      )}
-      {backupConfigured ? (
-        <Menu.Item
-          className="skillMenuItem"
-          disabled={!canAddToBackup}
-          onSelect={() => {
-            suppressNextClick();
-            onAddToBackup([skill]);
-          }}
-        >
-          <CloudUpload size={14} />
-          Add to backup
-        </Menu.Item>
-      ) : null}
-      {!readOnly && (
-        <>
-          <Menu.Separator className="skillMenuSeparator" />
-          <Menu.Item
-            className="skillMenuItem danger"
-            onSelect={() => {
-              suppressNextClick();
-              onDeleteSkills([skill.name]);
-            }}
-          >
-            <Trash2 size={14} />
-            Delete skill
-          </Menu.Item>
-        </>
-      )}
-    </>
-  );
+export function SkillActionsMenuItems({ Menu, skill, onApplyUpdates, onDeleteSkills, onManageLocations, onCreateWrapper, onSetVisibility, onAddToBackup, getBackupStatus, backupConfigured, backupBusy }: SkillActionsMenuItemsProps) {
+  const actions = skillActionDefinitions({
+    Menu,
+    selectedSkills: [skill],
+    applyUpdates: onApplyUpdates,
+    deleteSkills: onDeleteSkills,
+    manageLocations: (skills) => { if (skills[0]) onManageLocations(skills[0]); },
+    createWrapper: (skills) => { if (skills[0]) onCreateWrapper(skills[0]); },
+    setVisibility: onSetVisibility,
+    addToBackup: onAddToBackup,
+    getBackupStatus,
+    backupConfigured,
+    backupBusy,
+  });
+  return renderDataTableSelectionMenu(actions);
 }
 
 export type BulkSkillActionsMenuItemsProps = {
@@ -376,40 +455,30 @@ export type BulkSkillActionsMenuItemsProps = {
   selectedSkills: SkillRecord[];
   onApplyUpdates: (names: string[]) => void;
   onDeleteSkills: (names: string[]) => void;
+  onManageLocations: (skills: SkillRecord[]) => void;
+  createWrapper: () => void;
+  setVisibility: (names: string[], visibility: SkillVisibility) => void | Promise<void>;
+  onAddToBackup: (skills: SkillRecord[]) => void;
+  getBackupStatus: (skill: SkillRecord) => BackupStatusRecord;
+  backupConfigured: boolean;
+  backupBusy: boolean;
 };
 
-export function BulkSkillActionsMenuItems({ Menu, selectedSkills, onApplyUpdates, onDeleteSkills }: BulkSkillActionsMenuItemsProps) {
-  const updateNames = selectedSkills
-    .filter((skill) => skill.updateStatus === "update-available")
-    .map((skill) => skill.name);
-  const deletableNames = selectedSkills
-    .filter((skill) => skill.statusTone !== "muted")
-    .map((skill) => skill.name);
-  return (
-    <>
-      {updateNames.length > 0 && (
-        <Menu.Item className="skillMenuItem" onSelect={() => {
-          suppressNextClick();
-          onApplyUpdates(updateNames);
-        }}>
-          <RefreshCw size={14} />
-          Update
-        </Menu.Item>
-      )}
-      {updateNames.length > 0 && <Menu.Separator className="skillMenuSeparator" />}
-      <Menu.Item
-        className="skillMenuItem danger"
-        disabled={deletableNames.length === 0}
-        onSelect={() => {
-          suppressNextClick();
-          onDeleteSkills(deletableNames);
-        }}
-      >
-        <Trash2 size={14} />
-        Delete selected
-      </Menu.Item>
-    </>
-  );
+export function BulkSkillActionsMenuItems({ Menu, selectedSkills, onApplyUpdates, onDeleteSkills, onManageLocations, createWrapper, setVisibility, onAddToBackup, getBackupStatus, backupConfigured, backupBusy }: BulkSkillActionsMenuItemsProps) {
+  const actions = skillActionDefinitions({
+    Menu,
+    selectedSkills,
+    applyUpdates: onApplyUpdates,
+    deleteSkills: onDeleteSkills,
+    manageLocations: onManageLocations,
+    createWrapper: () => createWrapper(),
+    setVisibility,
+    addToBackup: onAddToBackup,
+    getBackupStatus,
+    backupConfigured,
+    backupBusy,
+  });
+  return renderDataTableSelectionMenu(actions);
 }
 
 export type SkillMainCellProps = {
@@ -479,29 +548,24 @@ export type SkillActionsCellProps = {
   onApplyUpdates: (names: string[]) => void;
   onDeleteSkills: (names: string[]) => void;
   onManageLocations: (skill: SkillRecord) => void;
+  onCreateWrapper: (skill: SkillRecord) => void;
+  onSetVisibility: (names: string[], visibility: SkillVisibility) => void | Promise<void>;
   onAddToBackup: (skills: SkillRecord[]) => void;
   getBackupStatus: (skill: SkillRecord) => BackupStatusRecord;
   backupConfigured: boolean;
   backupBusy: boolean;
 };
 
-export function SkillActionsCell({ skill, onApplyUpdates, onDeleteSkills, onManageLocations, onAddToBackup, getBackupStatus, backupConfigured, backupBusy }: SkillActionsCellProps) {
+export function SkillActionsCell({ skill, onApplyUpdates, onDeleteSkills, onManageLocations, onCreateWrapper, onSetVisibility, onAddToBackup, getBackupStatus, backupConfigured, backupBusy }: SkillActionsCellProps) {
   return (
     <RowActionsMenu
       ariaLabel={`Skill actions for ${skill.name}`}
       onOpenChange={(open) => { if (!open) suppressNextClick(); }}
     >
-      <SkillActionsMenuItems Menu={DropdownMenu} skill={skill} onApplyUpdates={onApplyUpdates} onDeleteSkills={onDeleteSkills} onManageLocations={onManageLocations} onAddToBackup={onAddToBackup} getBackupStatus={getBackupStatus} backupConfigured={backupConfigured} backupBusy={backupBusy} />
+      <SkillActionsMenuItems Menu={DropdownMenu} skill={skill} onApplyUpdates={onApplyUpdates} onDeleteSkills={onDeleteSkills} onManageLocations={onManageLocations} onCreateWrapper={onCreateWrapper} onSetVisibility={onSetVisibility} onAddToBackup={onAddToBackup} getBackupStatus={getBackupStatus} backupConfigured={backupConfigured} backupBusy={backupBusy} />
     </RowActionsMenu>
   );
 }
-
-type SkillSelectionAction = {
-  id: string;
-  direct: ReactNode;
-  menu: ReactNode;
-  measure: ReactNode;
-};
 
 function SkillSelectionActions({
   selectedSkills,
@@ -526,168 +590,23 @@ function SkillSelectionActions({
   backupConfigured: boolean;
   backupBusy: boolean;
 }) {
-  const containerRef = useRef<HTMLDivElement>(null);
-  const measureRef = useRef<HTMLDivElement>(null);
-  const [visibleCount, setVisibleCount] = useState(selectedSkills.length > 0 ? 1 : 0);
-  const updateNames = selectedSkills.filter((skill) => skill.updateStatus === "update-available").map((skill) => skill.name);
-  const deletableNames = selectedSkills.filter(isSkillSelectable).map((skill) => skill.name);
-  const backupSkills = backupSkillsForSelection(selectedSkills, getBackupStatus, backupConfigured);
-  const canManageLocations = selectedSkills.some((skill) => !isReadOnlySkillSource(skill) && skillTargets(skill).length > 0);
-  const backupLabel = `Backup${backupSkills.length > 1 ? ` (${backupSkills.length})` : ""}`;
-  const actions = useMemo<SkillSelectionAction[]>(() => {
-    const visibilityMenu = (
-      <DropdownMenu.Sub>
-        <DropdownMenu.SubTrigger className="skillMenuItem skillMenuSubTrigger">
-          <Eye size={14} />
-          <span>Visibility</span>
-          <ChevronRight className="skillMenuSubIcon" size={14} />
-        </DropdownMenu.SubTrigger>
-        <DropdownMenu.Portal>
-          <DropdownMenu.SubContent className="skillMenuContent" sideOffset={8} alignOffset={-6}>
-            <VisibilityMenuItems Menu={DropdownMenu} selectedSkills={selectedSkills} onSetVisibility={setVisibility} />
-          </DropdownMenu.SubContent>
-        </DropdownMenu.Portal>
-      </DropdownMenu.Sub>
-    );
-    const backupAction: SkillSelectionAction | null = backupConfigured ? {
-      id: "backup",
-      direct: (
-        <button aria-label={backupLabel} aria-busy={backupBusy} disabled={backupSkills.length === 0 || backupBusy} onClick={() => addToBackup(backupSkills)}>
-          {backupBusy ? <LoadingInline size={15} gap={6} label={backupLabel} /> : <><CloudUpload size={15} /><span>{backupLabel}</span></>}
-        </button>
-      ),
-      menu: (
-        <DropdownMenu.Item className="skillMenuItem" disabled={backupSkills.length === 0 || backupBusy} onSelect={() => addToBackup(backupSkills)}>
-          <CloudUpload size={14} />
-          {backupLabel}
-        </DropdownMenu.Item>
-      ),
-      measure: <><CloudUpload size={15} /><span>{backupLabel}</span></>,
-    } : null;
-    const updateMenu = (
-      <DropdownMenu.Item className="skillMenuItem" disabled={updateNames.length === 0} onSelect={() => applyUpdates(updateNames)}>
-        <RefreshCw size={14} />
-        Update{updateNames.length ? ` (${updateNames.length})` : ""}
-      </DropdownMenu.Item>
-    );
-    const manageMenu = (
-      <DropdownMenu.Item className="skillMenuItem" disabled={!canManageLocations} onSelect={manageLocations}>
-        <ArrowRightLeft size={14} />
-        Locations
-      </DropdownMenu.Item>
-    );
-    const wrapperMenu = (
-      <DropdownMenu.Item className="skillMenuItem" onSelect={createWrapper}>
-        <PackagePlus size={14} />
-        Wrapper
-      </DropdownMenu.Item>
-    );
-    const deleteMenu = (
-      <DropdownMenu.Item className="skillMenuItem danger" disabled={deletableNames.length === 0} onSelect={() => deleteSkills(deletableNames)}>
-        <Trash2 size={14} />
-        Delete
-      </DropdownMenu.Item>
-    );
-    return [
-      {
-        id: "visibility",
-        direct: (
-          <DropdownMenu.Root>
-            <DropdownMenu.Trigger asChild>
-              <button aria-label="Visibility"><Eye size={15} />Visibility</button>
-            </DropdownMenu.Trigger>
-            <DropdownMenu.Portal>
-              <MenuContent align="start" sideOffset={6}>
-                <VisibilityMenuItems Menu={DropdownMenu} selectedSkills={selectedSkills} onSetVisibility={setVisibility} />
-              </MenuContent>
-            </DropdownMenu.Portal>
-          </DropdownMenu.Root>
-        ),
-        menu: visibilityMenu,
-        measure: <><Eye size={15} /><span>Visibility</span></>,
-      },
-      ...(backupAction ? [backupAction] : []),
-      {
-        id: "update",
-        direct: (
-          <button className="skillApplyUpdatesButton" aria-label={`Update${updateNames.length ? ` (${updateNames.length})` : ""}`} disabled={updateNames.length === 0} onClick={() => applyUpdates(updateNames)}>
-            <RefreshCw size={15} aria-hidden="true" />
-            <span>Update{updateNames.length ? ` (${updateNames.length})` : ""}</span>
-          </button>
-        ),
-        menu: updateMenu,
-        measure: <><RefreshCw size={15} /><span>Update{updateNames.length ? ` (${updateNames.length})` : ""}</span></>,
-      },
-      {
-        id: "locations",
-        direct: (
-          <button aria-label="Manage selected skill locations" disabled={!canManageLocations} onClick={manageLocations}>
-            <ArrowRightLeft size={15} />
-            <span>Locations</span>
-          </button>
-        ),
-        menu: manageMenu,
-        measure: <><ArrowRightLeft size={15} /><span>Locations</span></>,
-      },
-      {
-        id: "wrapper",
-        direct: <button aria-label="Wrapper" onClick={createWrapper}><PackagePlus size={15} /><span>Wrapper</span></button>,
-        menu: wrapperMenu,
-        measure: <><PackagePlus size={15} /><span>Wrapper</span></>,
-      },
-      {
-        id: "delete",
-        direct: <button className="danger" aria-label="Delete selected skills" disabled={deletableNames.length === 0} onClick={() => deleteSkills(deletableNames)}><Trash2 size={15} /><span>Delete</span></button>,
-        menu: deleteMenu,
-        measure: <><Trash2 size={15} /><span>Delete</span></>,
-      },
-    ];
-  }, [addToBackup, backupBusy, backupConfigured, backupLabel, backupSkills, canManageLocations, createWrapper, deleteSkills, deletableNames, manageLocations, selectedSkills, setVisibility, updateNames, applyUpdates]);
-
-  useLayoutEffect(() => {
-    const container = containerRef.current;
-    const measure = measureRef.current;
-    if (!container || !measure) return undefined;
-    const updateVisibleCount = () => {
-      const availableWidth = container.clientWidth;
-      const gap = Number.parseFloat(getComputedStyle(measure).gap) || 4;
-      const widths = actions.map((action) => measure.querySelector<HTMLElement>(`[data-action-measure="${action.id}"]`)?.getBoundingClientRect().width ?? 0);
-      const overflowWidth = measure.querySelector<HTMLElement>("[data-overflow-measure]")?.getBoundingClientRect().width ?? 0;
-      let nextVisibleCount = actions.length;
-      while (nextVisibleCount > 0) {
-        const hiddenCount = actions.length - nextVisibleCount;
-        const actionsWidth = widths.slice(0, nextVisibleCount).reduce((sum, width) => sum + width, 0) + Math.max(0, nextVisibleCount - 1) * gap;
-        const totalWidth = actionsWidth + (hiddenCount > 0 ? gap + overflowWidth : 0);
-        if (totalWidth <= availableWidth + 1) break;
-        nextVisibleCount -= 1;
-      }
-      setVisibleCount((current) => current === nextVisibleCount ? current : nextVisibleCount);
-    };
-    if (typeof ResizeObserver === "undefined") {
-      updateVisibleCount();
-      return undefined;
-    }
-    const observer = new ResizeObserver(updateVisibleCount);
-    observer.observe(container);
-    observer.observe(measure);
-    updateVisibleCount();
-    return () => observer.disconnect();
-  }, [actions]);
-
-  const visibleActions = actions.slice(0, visibleCount);
-  const overflowActions = actions.slice(visibleCount);
-  return (
-    <div ref={containerRef} className="skillsSelectionActionsContent">
-      <div className="skillsSelectionActionsVisible">
-        {visibleActions.map((action) => <span className="skillsSelectionAction" key={action.id}>{action.direct}</span>)}
-        {overflowActions.length > 0 ? <RowActionsMenu ariaLabel="More selected skill actions">{overflowActions.map((action) => <Fragment key={action.id}>{action.menu}</Fragment>)}</RowActionsMenu> : null}
-      </div>
-      <div ref={measureRef} className="skillsSelectionActionsMeasure" aria-hidden="true">
-        {actions.map((action) => <button data-action-measure={action.id} key={action.id}>{action.measure}</button>)}
-        <MoreActionsButton data-overflow-measure aria-label="More selected skill actions" />
-      </div>
-    </div>
+  const actions = useMemo(
+    () => skillActionDefinitions({
+      Menu: DropdownMenu,
+      selectedSkills,
+      applyUpdates,
+      deleteSkills,
+      manageLocations: () => manageLocations(),
+      createWrapper,
+      setVisibility,
+      addToBackup,
+      getBackupStatus,
+      backupConfigured,
+      backupBusy,
+    }),
+    [addToBackup, applyUpdates, backupBusy, backupConfigured, createWrapper, deleteSkills, getBackupStatus, manageLocations, selectedSkills, setVisibility],
   );
+  return <DataTableSelectionActions actions={actions} ariaLabel="More selected skill actions" />;
 }
 
 export function suggestedWrapperName(selectedSkills: SkillWrapperSelection[]) {
@@ -727,6 +646,10 @@ export function WrapperDialog({ open, selectedSkills, onOpenChange, onApplyWrapp
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const selectedNames = useMemo(() => selectedSkills.map((skill) => skill.name), [selectedSkills]);
+  const selectedSkillIdentity = useMemo(
+    () => selectedSkills.map((skill) => skill.id).sort().join("\u0000"),
+    [selectedSkills],
+  );
   const canCreate = name.trim() && description.trim() && selectedNames.length > 0;
 
   useEffect(() => {
@@ -738,7 +661,7 @@ export function WrapperDialog({ open, selectedSkills, onOpenChange, onApplyWrapp
     setManualChildren(true);
     setError("");
     setBusy(false);
-  }, [open, selectedSkills]);
+  }, [open, selectedSkillIdentity]);
 
   useEffect(() => {
     setError("");
@@ -974,6 +897,7 @@ export type AddSkillDialogProps = {
   onOpenChange: (open: boolean) => void;
   trigger: ReactNode;
   onClose: () => void;
+  onPreviewError: (message: string) => void;
   onInstalled: (result: SkillInstallResult) => void;
   onRequestWrapper: (skills: SkillWrapperSelection[]) => void;
   installedAgentKeys: string[];
@@ -987,8 +911,9 @@ export type SkillTargetOption = {
   globalPath?: string;
 };
 
-export function AddSkillDialog({ open, onOpenChange, trigger, onClose, onInstalled, onRequestWrapper, installedAgentKeys, targetOptions }: AddSkillDialogProps) {
+export function AddSkillDialog({ open, onOpenChange, trigger, onClose, onPreviewError, onInstalled, onRequestWrapper, installedAgentKeys, targetOptions }: AddSkillDialogProps) {
   const [source, setSource] = useState("");
+  const [sourcePageBeforePreview, setSourcePageBeforePreview] = useState<SkillSourcePageSnapshot<MarketplaceSource> | null>(null);
   const [marketplaceQuery, setMarketplaceQuery] = useState("");
   const [marketplaceResults, setMarketplaceResults] = useState<MarketplaceSource[]>([]);
   const [marketplaceBusy, setMarketplaceBusy] = useState(false);
@@ -998,7 +923,6 @@ export function AddSkillDialog({ open, onOpenChange, trigger, onClose, onInstall
   const [skillPreviewBusy, setSkillPreviewBusy] = useState("");
   const [skillPreviewError, setSkillPreviewError] = useState("");
   const [target, setTarget] = useState("");
-  const [installTargets, setInstallTargets] = useState<SkillTargetOption[]>([]);
   const [copy, setCopy] = useState(false);
   const [visibility, setVisibility] = useState<SkillVisibility>(SkillVisibility.Auto);
   const [plan, setPlan] = useState<SkillAddPlan | null>(null);
@@ -1014,11 +938,12 @@ export function AddSkillDialog({ open, onOpenChange, trigger, onClose, onInstall
   const [error, setError] = useState("");
   const skillItemRefs = useRef(new Map<string, HTMLDivElement>());
   const busy = busyAction !== "";
+  const dialogBusy = busy || marketplaceBusy || Boolean(skillPreviewBusy);
   const installing = busyAction === "install";
   const visibleInstallTargets = useMemo(
     () => {
       const installed = new Set(installedAgentKeys);
-      return installTargets
+      return targetOptions
         .map((option, index) => ({
           option,
           index,
@@ -1033,8 +958,9 @@ export function AddSkillDialog({ open, onOpenChange, trigger, onClose, onInstall
         })
         .map(({ option }) => option);
     },
-    [installTargets, installedAgentKeys],
+    [targetOptions, installedAgentKeys],
   );
+  const resolvedTarget = resolveSkillInstallTarget(target, visibleInstallTargets);
   useEffect(() => {
     if (!visibleInstallTargets.some((option) => option.id === target)) {
       setTarget(visibleInstallTargets[0]?.id ?? "");
@@ -1100,12 +1026,17 @@ export function AddSkillDialog({ open, onOpenChange, trigger, onClose, onInstall
   const allSelected = selectableSkills.length > 0 && selectableSkills.every((skill) => selectedSet.has(skill.name));
   const mixedSelected = selected.length > 0 && !allSelected;
   const visibleAvailableSkills = useMemo(
-    () => skillFilter === "all"
-      ? available
-      : available.filter((skill) => skillFilter === "new"
-        ? isNewSkillOperationStatus(rawOperationByName.get(skill.name)?.status)
-        : isExistingSkillOperationStatus(rawOperationByName.get(skill.name)?.status)),
-    [available, rawOperationByName, skillFilter],
+    () => {
+      const statusFilteredSkills = skillFilter === "all"
+        ? available
+        : available.filter((skill) => skillFilter === "new"
+          ? isNewSkillOperationStatus(rawOperationByName.get(skill.name)?.status)
+          : isExistingSkillOperationStatus(rawOperationByName.get(skill.name)?.status));
+      return normalizedSkillSearch
+        ? statusFilteredSkills.filter((skill) => availableSkillSearchText(skill).includes(normalizedSkillSearch))
+        : statusFilteredSkills;
+    },
+    [available, normalizedSkillSearch, rawOperationByName, skillFilter],
   );
   const searchMatches = useMemo(() => {
     if (!normalizedSkillSearch) return [];
@@ -1116,6 +1047,7 @@ export function AddSkillDialog({ open, onOpenChange, trigger, onClose, onInstall
   const searchMatchSet = useMemo(() => new Set(searchMatches), [searchMatches]);
   const firstSearchMatch = searchMatches[0] ?? "";
   const canInstall = Boolean(target && source.trim() && plan && selected.length > 0 && (!selectedHasExisting || replaceExisting) && !busy);
+  const canGoBack = Boolean(plan) || sourcePageBeforePreview !== null;
   const advanceLabel = busy ? "Preparing installation" : "Install selected skills";
   const advanceText = busy ? "Installing" : `Install ${selected.length}`;
   const sourceCandidates = source.trim() ? marketplaceResults : recommendedSkillSources;
@@ -1124,6 +1056,7 @@ export function AddSkillDialog({ open, onOpenChange, trigger, onClose, onInstall
   const handleSourceChange = (value: string) => {
     if (marketplaceBusy) return;
     setSource(value);
+    setSourcePageBeforePreview(null);
     setMarketplaceQuery(value);
     setMarketplaceResults([]);
     setMarketplaceError("");
@@ -1168,7 +1101,9 @@ export function AddSkillDialog({ open, onOpenChange, trigger, onClose, onInstall
 
   const previewSource = async (nextSource = source) => {
     const normalizedSource = nextSource.trim();
-    if (!normalizedSource || !target || busyAction || marketplaceBusy) return;
+    if (!normalizedSource || !resolvedTarget || busyAction || marketplaceBusy) return;
+    const previousPage = captureSkillSourcePage(source, marketplaceResults);
+    setSourcePageBeforePreview(previousPage);
     setSource(normalizedSource);
     setMarketplaceError("");
     setMarketplaceNotice("");
@@ -1179,7 +1114,7 @@ export function AddSkillDialog({ open, onOpenChange, trigger, onClose, onInstall
     try {
       const response = await invokeCommand(TauriCommand.SkillsAdd, {
         source: normalizedSource,
-        target,
+        target: resolvedTarget,
         scope: "global",
         skills: [],
         copy,
@@ -1201,10 +1136,8 @@ export function AddSkillDialog({ open, onOpenChange, trigger, onClose, onInstall
       setSkillSearch("");
       setSelectedRoots(nextPlan.selected.map((skill) => skill.name));
     } catch (previewError) {
-      setPlan(null);
-      setPreviewId("");
-      setSelectedRoots([]);
-      setError(`${previewError}`);
+      restoreSourcePage(previousPage);
+      onPreviewError(skillSourceErrorMessage(previewError));
     } finally {
       setBusyAction("");
     }
@@ -1212,8 +1145,9 @@ export function AddSkillDialog({ open, onOpenChange, trigger, onClose, onInstall
 
   const resolveSourceInput = () => {
     const value = source.trim();
-    if (!value || busy || marketplaceBusy) return;
-    if (isDirectSkillSource(value)) {
+    const directSource = isDirectSkillSource(value);
+    if (!isSkillSourceActionReady(value, directSource, resolvedTarget) || busy || marketplaceBusy) return;
+    if (directSource) {
       void previewSource(value);
     } else {
       void searchMarketplace(value);
@@ -1249,31 +1183,69 @@ export function AddSkillDialog({ open, onOpenChange, trigger, onClose, onInstall
     setSkillPreviewError("");
   }, []);
 
-  const closeDialog = () => {
+  const resetDialogState = useCallback(() => {
+    setSource("");
+    setSourcePageBeforePreview(null);
+    setMarketplaceQuery("");
+    setMarketplaceResults([]);
+    setMarketplaceBusy(false);
+    setMarketplaceError("");
+    setMarketplaceNotice("");
+    setSkillPreview(null);
+    setSkillPreviewBusy("");
+    setSkillPreviewError("");
+    setTarget("");
+    setCopy(false);
+    setVisibility(SkillVisibility.Auto);
+    setPlan(null);
+    setPreviewId("");
+    setSelectedRoots([]);
+    setCreateWrapper(false);
+    setReplaceExisting(false);
+    setSkillFilter("all");
     setReviewingSkills(false);
     setAdvancedOpen(false);
-    clearTransientErrors();
+    setSkillSearch("");
+    setBusyAction("");
+    setError("");
+    skillItemRefs.current.clear();
+  }, []);
+
+  const closeDialog = () => {
+    if (dialogBusy) return;
+    resetDialogState();
     onClose();
   };
 
+  const restoreSourcePage = (previousPage: SkillSourcePageSnapshot<MarketplaceSource>) => {
+    const restoredPage = restoreSkillSourcePage(previousPage);
+    setPlan(null);
+    setPreviewId("");
+    setSelectedRoots([]);
+    setSkillPreview(null);
+    setSkillPreviewError("");
+    setSource(restoredPage.source);
+    setMarketplaceQuery(restoredPage.marketplaceQuery);
+    setMarketplaceResults(restoredPage.marketplaceResults);
+    setSourcePageBeforePreview(null);
+    clearTransientErrors();
+    setSkillFilter("all");
+    setSkillSearch("");
+    setReplaceExisting(false);
+    setCreateWrapper(false);
+    setReviewingSkills(false);
+    setAdvancedOpen(false);
+  };
+
   const goBack = () => {
-    if (busy) return;
+    if (dialogBusy) return;
+    if (!canGoBack) return;
     if (reviewingSkills) {
       setReviewingSkills(false);
       setSkillPreview(null);
       return;
     }
-    setPlan(null);
-    setPreviewId("");
-    setSkillPreview(null);
-    setSkillPreviewError("");
-    setSource(marketplaceQuery || source);
-    setError("");
-    setSkillFilter("all");
-    setSkillSearch("");
-    setReplaceExisting(false);
-    setCreateWrapper(false);
-    setAdvancedOpen(false);
+    restoreSourcePage(sourcePageBeforePreview ?? captureSkillSourcePage(marketplaceQuery || source, marketplaceResults));
   };
 
   const install = async () => {
@@ -1342,11 +1314,6 @@ export function AddSkillDialog({ open, onOpenChange, trigger, onClose, onInstall
   };
 
   useEffect(() => {
-    if (targetOptions.length === 0) return;
-    setInstallTargets(targetOptions);
-  }, [targetOptions]);
-
-  useEffect(() => {
     if (!firstSearchMatch) return;
     skillItemRefs.current.get(firstSearchMatch)?.scrollIntoView({
       block: "nearest",
@@ -1355,12 +1322,8 @@ export function AddSkillDialog({ open, onOpenChange, trigger, onClose, onInstall
   }, [firstSearchMatch]);
 
   useEffect(() => {
-    if (!open) {
-      setReviewingSkills(false);
-      setAdvancedOpen(false);
-      clearTransientErrors();
-    }
-  }, [clearTransientErrors, open]);
+    if (!open && !dialogBusy) resetDialogState();
+  }, [dialogBusy, open, resetDialogState]);
 
   const toggleSkill = (name: string) => {
     const status = operationByName.get(name)?.status;
@@ -1374,14 +1337,23 @@ export function AddSkillDialog({ open, onOpenChange, trigger, onClose, onInstall
     setSelectedRoots(allSelected ? [] : selectableSkills.map((skill) => skill.name));
   };
 
+  const selectSkillPreset = (preset: "all" | "new" | "existing") => {
+    const skills = preset === "all" ? selectableSkills : preset === "new" ? newSkills : existingSkills;
+    setSkillFilter(preset);
+    setSelectedRoots(
+      skills
+        .filter((skill) => selectableNameSet.has(skill.name))
+        .map((skill) => skill.name),
+    );
+  };
+
   return (
     <DialogShell
       open={open}
       onOpenChange={(nextOpen) => {
         if (!nextOpen) {
-          setReviewingSkills(false);
-          setAdvancedOpen(false);
-          clearTransientErrors();
+          if (dialogBusy) return;
+          resetDialogState();
         }
         onOpenChange(nextOpen);
       }}
@@ -1437,8 +1409,8 @@ export function AddSkillDialog({ open, onOpenChange, trigger, onClose, onInstall
             <EmptyState
               className="sourceSearchEmpty"
               compact
-              title="Search for a skill"
-              description="Click Search to find matching skills."
+              title={isDirectSkillSource(source) ? "Scan a repository" : "Search for a skill"}
+              description={isDirectSkillSource(source) ? "Click Scan to inspect available skills." : "Click Search to find matching skills."}
             />
           )}
           {sourceCandidates.length > 0 && !plan && !marketplaceBusy && (
@@ -1497,7 +1469,7 @@ export function AddSkillDialog({ open, onOpenChange, trigger, onClose, onInstall
             <div className="addSkillQuickField">
               <span className="addSkillQuickLabel">Install to</span>
               <SelectControl
-                value={target}
+                value={resolvedTarget}
                 onValueChange={(value) => {
                   if (busy) return;
                   setTarget(value);
@@ -1551,16 +1523,16 @@ export function AddSkillDialog({ open, onOpenChange, trigger, onClose, onInstall
                   disabled={selectableSkills.length === 0}
                   onChange={toggleAll}
                 />
-                <span>Select all</span>
+                <span>{allSelected ? "Select all" : `Select ${selected.length}/${selectableSkills.length}`}</span>
               </div>
-              {existingSkills.length > 0 && (
+              {shouldShowSkillQuickSelect(available.length, existingSkills.length) && (
                 <SegmentedControl
-                  className="addSkillFilterTabs"
+                  className="addSkillQuickSelect"
                   value={skillFilter}
                   onValueChange={(value) => {
-                    if (value === "all" || value === "new" || value === "existing") setSkillFilter(value);
+                    if (value === "all" || value === "new" || value === "existing") selectSkillPreset(value);
                   }}
-                  aria-label="Filter skills"
+                  aria-label="Quick select and filter skills"
                 >
                   {([
                     ["all", "All", available.length],
@@ -1571,7 +1543,7 @@ export function AddSkillDialog({ open, onOpenChange, trigger, onClose, onInstall
                       value={value}
                       key={value}
                     >
-                      {label} <span className="addSkillFilterCount">{count}</span>
+                      {label} <span className="addSkillQuickSelectCount">{count}</span>
                     </SegmentedControlItem>
                   ))}
                 </SegmentedControl>
@@ -1591,7 +1563,13 @@ export function AddSkillDialog({ open, onOpenChange, trigger, onClose, onInstall
             />
           )}
           <div className="addSkillList">
-            {visibleAvailableSkills.map((skill) => {
+            {normalizedSkillSearch && visibleAvailableSkills.length === 0 ? (
+              <EmptyState
+                compact
+                title="No matching skills"
+                description="Try a different filter."
+              />
+            ) : visibleAvailableSkills.map((skill) => {
               const operation = operationByName.get(skill.name);
               const blocked = !isSelectableOperationStatus(operation?.status);
               const requiredBy = dependencyReasonsByName.get(skill.name) ?? [];
@@ -1758,8 +1736,9 @@ export function AddSkillDialog({ open, onOpenChange, trigger, onClose, onInstall
       </div>
       <DialogActionBar
         onCancel={closeDialog}
-        leading={plan ? (
-          <DialogActionButton variant="secondary" disabled={busy} onClick={goBack}>Back</DialogActionButton>
+        cancelDisabled={dialogBusy}
+        leading={canGoBack ? (
+          <DialogActionButton variant="secondary" disabled={dialogBusy} onClick={goBack}>Back</DialogActionButton>
         ) : null}
       >
         {plan && reviewingSkills ? (
@@ -1775,7 +1754,7 @@ export function AddSkillDialog({ open, onOpenChange, trigger, onClose, onInstall
         ) : !busy && !marketplaceBusy ? (
           <DialogActionButton
             variant="primary"
-            disabled={!source.trim()}
+            disabled={!isSkillSourceActionReady(source, isDirectSkillSource(source), resolvedTarget)}
             aria-label={isDirectSkillSource(source) ? "Scan repository" : "Search marketplaces"}
             onClick={resolveSourceInput}
           >
@@ -1831,6 +1810,7 @@ export function SkillsView({
   const [viewMode, setViewMode] = useState<SkillsViewMode>("list");
   const [showWrapper, setShowWrapper] = useState(false);
   const [showAddSkill, setShowAddSkill] = useState(false);
+  const [skillAddError, setSkillAddError] = useState("");
   const [installedWrapperSkills, setInstalledWrapperSkills] = useState<SkillWrapperSelection[]>([]);
   const [skillLocatorRequest, setSkillLocatorRequest] = useState("");
   const [locationSkills, setLocationSkills] = useState<SkillRecord[]>([]);
@@ -1897,6 +1877,10 @@ export function SkillsView({
     setShowWrapper(false);
     setInstalledWrapperSkills([]);
   }, []);
+  const openWrapper = useCallback((skill: SkillRecord) => {
+    setSelected([skill.id]);
+    setShowWrapper(true);
+  }, []);
   const setVisibilityAndClear = useCallback(async (names: string[], visibility: SkillVisibility) => {
     await onSetVisibility(names, visibility);
     clearSelection();
@@ -1957,6 +1941,10 @@ export function SkillsView({
     setViewMode("list");
     setSkillLocatorRequest(name);
   }, [onAddInstalled]);
+  const handleAddSkillOpenChange = useCallback((open: boolean) => {
+    setShowAddSkill(open);
+    if (open) setSkillAddError("");
+  }, []);
   const completeSkillLocator = useCallback((rowId: string) => {
     setSkillLocatorRequest((current) => current === rowId ? "" : current);
   }, []);
@@ -2021,9 +2009,9 @@ export function SkillsView({
       key: "actions",
       header: "",
       width: "40px",
-      render: (skill) => <SkillActionsCell skill={skill} onApplyUpdates={applyUpdatesAndClear} onDeleteSkills={deleteSkillsAndClear} onManageLocations={openManageLocations} onAddToBackup={adoptSkillsForBackup} getBackupStatus={getBackupStatus} backupConfigured={backupConfigured} backupBusy={backupBusy} />,
+      render: (skill) => <SkillActionsCell skill={skill} onApplyUpdates={applyUpdatesAndClear} onDeleteSkills={deleteSkillsAndClear} onManageLocations={openManageLocations} onCreateWrapper={openWrapper} onSetVisibility={setVisibilityAndClear} onAddToBackup={adoptSkillsForBackup} getBackupStatus={getBackupStatus} backupConfigured={backupConfigured} backupBusy={backupBusy} />,
     },
-  ], [adoptSkillsForBackup, applyUpdatesAndClear, backupBusy, backupConfigured, deleteSkillsAndClear, getBackupStatus, openManageLocations, openSkill, projects, setVisibilityAndClear]);
+  ], [adoptSkillsForBackup, applyUpdatesAndClear, backupBusy, backupConfigured, deleteSkillsAndClear, getBackupStatus, openManageLocations, openSkill, openWrapper, projects, setVisibilityAndClear]);
 
   const rowContextMenu = useCallback((skill: SkillTableRow, { selectedRows, selected: isSelected }: { selectedRows: SkillTableRow[]; selected: boolean }) => {
     const showBulk = isSelected && selectedRows.length > 1;
@@ -2033,11 +2021,18 @@ export function SkillsView({
         selectedSkills={selectedRows}
         onApplyUpdates={applyUpdatesAndClear}
         onDeleteSkills={deleteSkillsAndClear}
+        onManageLocations={openManageLocationsBatch}
+        createWrapper={() => setShowWrapper(true)}
+        setVisibility={setVisibilityAndClear}
+        onAddToBackup={adoptSkillsForBackup}
+        getBackupStatus={getBackupStatus}
+        backupConfigured={backupConfigured}
+        backupBusy={backupBusy}
       />
     ) : (
-      <SkillActionsMenuItems Menu={ContextMenu} skill={skill} onApplyUpdates={applyUpdatesAndClear} onDeleteSkills={deleteSkillsAndClear} onManageLocations={openManageLocations} onAddToBackup={adoptSkillsForBackup} getBackupStatus={getBackupStatus} backupConfigured={backupConfigured} backupBusy={backupBusy} />
+      <SkillActionsMenuItems Menu={ContextMenu} skill={skill} onApplyUpdates={applyUpdatesAndClear} onDeleteSkills={deleteSkillsAndClear} onManageLocations={openManageLocations} onCreateWrapper={openWrapper} onSetVisibility={setVisibilityAndClear} onAddToBackup={adoptSkillsForBackup} getBackupStatus={getBackupStatus} backupConfigured={backupConfigured} backupBusy={backupBusy} />
     );
-  }, [adoptSkillsForBackup, applyUpdatesAndClear, backupBusy, backupConfigured, deleteSkillsAndClear, getBackupStatus, openManageLocations]);
+  }, [adoptSkillsForBackup, applyUpdatesAndClear, backupBusy, backupConfigured, deleteSkillsAndClear, getBackupStatus, openManageLocations, openManageLocationsBatch, openWrapper, setVisibilityAndClear]);
 
   const bottomBar = useCallback((selectedRows: SkillTableRow[]) => (
     <SkillSelectionActions
@@ -2055,7 +2050,9 @@ export function SkillsView({
   ), [adoptSkillsForBackup, applyUpdatesAndClear, backupBusy, backupConfigured, deleteSkillsAndClear, getBackupStatus, openManageLocationsBatch, setVisibilityAndClear]);
 
   return (
-    <section className="content skillsPage">
+    <>
+      {skillAddError ? <Toast tone="error" message={skillAddError} onDismiss={() => setSkillAddError("")} /> : null}
+      <section className="content skillsPage">
       <ContentTopDragStrip />
       <PageHeader title="Skills">
         <SegmentedControl
@@ -2085,13 +2082,14 @@ export function SkillsView({
         {updateError ? <Toast tone="error" message={updateError} /> : null}
         <AddSkillDialog
           open={showAddSkill}
-          onOpenChange={setShowAddSkill}
+          onOpenChange={handleAddSkillOpenChange}
           trigger={(
             <Dialog.Trigger asChild>
               <IconButton className="filled" aria-label="Add skill"><Plus size={16} /></IconButton>
             </Dialog.Trigger>
           )}
           onClose={() => setShowAddSkill(false)}
+          onPreviewError={setSkillAddError}
           onInstalled={handleInstalled}
           installedAgentKeys={installedAgentKeys}
           targetOptions={targetOptions}
@@ -2132,7 +2130,7 @@ export function SkillsView({
             onRowClick={openSkill}
             rowContextMenu={rowContextMenu}
             bottomBar={bottomBar}
-            bottomBarActionsClassName="skillsSelectionActions"
+            bottomBarActionsClassName="selectionActions"
             bottomBarCheckboxLabel="Select visible skills from toolbar"
             selectionLabel="skills"
             loading={loadingSkills && !hasRows}
@@ -2171,6 +2169,7 @@ export function SkillsView({
         }}
         onApplied={applyLocationsAndClear}
       />
-    </section>
+      </section>
+    </>
   );
 }

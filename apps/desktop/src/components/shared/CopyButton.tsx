@@ -1,7 +1,7 @@
 import { useEffect, useState, type ButtonHTMLAttributes, type MouseEvent, type ReactNode } from "react";
 import { AlertCircle } from "lucide-react";
 
-import { copyText } from "../../lib/index.ts";
+import { actionLabels, copyText } from "../../lib/index.ts";
 import { CopyFeedbackIcon, useCopyFeedback } from "./useCopyFeedback.tsx";
 
 export type CopyButtonProps = Omit<ButtonHTMLAttributes<HTMLButtonElement>, "onClick" | "children" | "title"> & {
@@ -19,7 +19,7 @@ export function CopyButton({
   value,
   onCopy,
   copyLabel,
-  copiedLabel = "Copied",
+  copiedLabel = actionLabels.copied,
   iconSize = 13,
   stopPropagation = false,
   className = "",
@@ -55,7 +55,7 @@ export function CopyButton({
     }
   };
 
-  const label = copyError ? "Copy failed" : copied ? copiedLabel : copyLabel;
+  const label = copyError ? actionLabels.copyFailed : copied ? copiedLabel : copyLabel;
   const resolvedClassName = `${className}${copied ? " isCopied" : ""}${copyError ? " isCopyError" : ""}`.trim();
   const hasCustomChildren = children != null || copiedChildren != null;
 

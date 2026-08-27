@@ -4,36 +4,52 @@
   gap: 24px;
 }
 
-.settingsBackup .settingsSection {
-  min-width: 0;
+.settingsBackupSection {
+  align-items: center;
 }
 
-.settingsBackup .settingsControlGroup {
-  gap: 8px;
-}
-
-.settingsBackupRepository,
-.settingsBackupActions,
-.settingsBackupDisconnect {
+.settingsBackupSummary {
   min-width: 0;
+  width: max-content;
+  max-width: 100%;
   display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
+  align-items: center;
+  justify-content: flex-start;
   gap: 12px;
 }
 
-.settingsBackupRepositoryInfo strong {
-  color: var(--text);
-  font-size: var(--text-sm);
-  font-weight: 600;
-  line-height: var(--leading-ui);
+.settingsBackupSummaryActions {
+  width: max-content;
+  display: flex;
+  align-items: flex-start;
+  justify-content: flex-start;
+  gap: 8px;
 }
 
-.settingsBackupDescription {
-  margin: 4px 0 0;
+.settingsBackupActionStack {
+  display: grid;
+  justify-items: start;
+  gap: 3px;
+}
+
+.settingsBackupNotConfigured,
+.settingsBackupLastSync {
   color: var(--muted);
   font-size: var(--text-sm);
   line-height: var(--leading-ui);
+}
+
+.settingsBackupLastSync {
+  font-size: var(--text-xs);
+  white-space: nowrap;
+}
+
+.settingsBackupSummaryActions {
+  flex: 0 0 auto;
+}
+
+.settingsBackupSummaryActions.isNotConfigured {
+  align-items: center;
 }
 
 .settingsBackupFormGrid {
@@ -74,79 +90,11 @@
   box-shadow: 0 0 0 2px var(--focus-ring);
 }
 
-.settingsBackupActions {
-  align-items: center;
-  justify-content: flex-start;
-}
-
-.settingsBackupRepositoryInfo > span,
-.settingsBackupCheckout,
 .settingsBackupVersionCopy > span,
 .settingsBackupEmpty,
 .backupDialogHint {
   color: var(--muted);
   font-size: var(--text-sm);
-  line-height: var(--leading-ui);
-}
-
-.settingsBackupRepositoryInfo {
-  min-width: 0;
-  display: grid;
-  gap: 3px;
-}
-
-.settingsBackupRepositoryInfo strong {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.settingsBackupCheckout {
-  min-width: 0;
-  display: flex;
-  align-items: baseline;
-  gap: 10px;
-  padding-top: 10px;
-  border-top: 1px solid var(--line);
-}
-
-.settingsBackupCheckout span {
-  flex: 0 0 auto;
-}
-
-.settingsBackupCheckout code {
-  min-width: 0;
-  overflow: hidden;
-  color: var(--text);
-  font-family: inherit;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.settingsBackupStats {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 16px;
-}
-
-.settingsBackupStats > div {
-  min-width: 0;
-  display: grid;
-  gap: 2px;
-  padding-top: 8px;
-  border-top: 1px solid var(--line);
-}
-
-.settingsBackupStats strong {
-  color: var(--text);
-  font-size: var(--text-stat);
-  font-weight: 650;
-  line-height: var(--leading-tight);
-}
-
-.settingsBackupStats span {
-  color: var(--muted);
-  font-size: var(--text-xs);
   line-height: var(--leading-ui);
 }
 
@@ -192,14 +140,117 @@
   padding-top: 8px;
 }
 
-.settingsBackupDisconnect {
-  align-items: center;
-  margin-top: 12px;
-  padding-top: 12px;
+.backupDetailsDialog {
+  width: min(620px, calc(100vw - 32px));
+}
+
+.backupDetailsBody {
+  box-sizing: border-box;
+  height: min(560px, calc(100vh - 160px));
+  overflow: auto;
+  padding: 0 22px 20px;
+}
+
+.backupDetailsSection {
+  display: grid;
+  gap: 12px;
+  padding-top: 18px;
+}
+
+.backupDetailsSection + .backupDetailsSection {
+  margin-top: 18px;
   border-top: 1px solid var(--line);
-  color: var(--muted);
+}
+
+.backupDetailsSection h3 {
+  margin: 0;
+  color: var(--text);
   font-size: var(--text-sm);
+  font-weight: 650;
   line-height: var(--leading-ui);
+}
+
+.backupCategoryList,
+.backupContentItems {
+  display: grid;
+  gap: 2px;
+}
+
+.backupCategoryRow,
+.backupContentItemRow {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 42px;
+}
+
+.backupCategoryDetail {
+  min-width: 0;
+  flex: 1 1 auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 6px 0;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+}
+
+.backupCategoryDetail:hover {
+  color: var(--accent);
+}
+
+.backupCategoryDetail > span,
+.backupContentItemRow > div {
+  min-width: 0;
+  display: grid;
+  gap: 3px;
+}
+
+.backupCategoryDetail strong,
+.backupContentItemRow strong {
+  overflow: hidden;
+  color: var(--text);
+  font-size: var(--text-sm);
+  font-weight: 600;
+  line-height: var(--leading-ui);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.backupCategoryDetail span span,
+.backupContentItemRow span {
+  overflow: hidden;
+  color: var(--muted);
+  font-size: var(--text-xs);
+  line-height: var(--leading-ui);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.backupDetailsBack {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  font-size: var(--text-sm);
+  cursor: pointer;
+}
+
+.backupDetailsBack:hover {
+  color: var(--text);
+}
+
+.backupContentDetailSection {
+  padding-top: 12px;
 }
 
 .backupRestoreDialog {
@@ -216,10 +267,6 @@
 .backupRestoreEmpty {
   display: grid;
   gap: 12px;
-}
-
-.backupRestoreEmpty .backupDialogHint {
-  margin: 0;
 }
 
 .backupRestorePlan {
@@ -250,22 +297,20 @@
     grid-template-columns: 1fr;
   }
 
-  .settingsBackupStats {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
 }
 
 @media (max-width: 560px) {
-  .settingsBackupRepository,
-  .settingsBackupDisconnect,
-  .settingsBackupActions {
+  .settingsBackupSummary {
     align-items: stretch;
     flex-direction: column;
   }
 
-  .settingsBackupRepository .statefulButton,
-  .settingsBackupDisconnect .statefulButton,
-  .settingsBackupActions .statefulButton {
+  .settingsBackupSummaryActions {
+    justify-content: flex-start;
+  }
+
+  .settingsBackupSummaryActions .statefulButton,
+  .settingsBackupSummaryActions .dialogActionButton {
     align-self: flex-start;
   }
 }

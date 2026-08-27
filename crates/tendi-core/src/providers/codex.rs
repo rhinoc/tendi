@@ -1667,13 +1667,18 @@ fn collect_codex_item(value: &Value, items: &mut Vec<TranscriptItem>) {
                 .and_then(Value::as_str)
                 .filter(|name| !name.trim().is_empty())
                 .map(str::to_string);
+            let command = extract_codex_tool_command(payload);
+            let summary = command
+                .as_deref()
+                .map(|command| command.chars().take(220).collect())
+                .unwrap_or_else(|| summarize_tool_call(payload));
             push_tool_item(
                 items,
                 "tool",
-                summarize_tool_call(payload),
+                summary,
                 name,
                 time,
-                extract_tool_command(payload),
+                command,
                 None,
                 extract_duration_ms(payload, None),
                 extract_call_id(payload),
@@ -1691,6 +1696,18 @@ fn collect_codex_item(value: &Value, items: &mut Vec<TranscriptItem>) {
         }
         _ => {}
     }
+}
+
+fn extract_codex_tool_command(payload: &Value) -> Option<String> {
+    if let Some(command) = extract_tool_command(payload) {
+        return Some(command);
+    }
+    payload
+        .get("input")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|command| !command.is_empty())
+        .map(|command| command.chars().take(4_000).collect())
 }
 
 fn push_codex_compaction(items: &mut Vec<TranscriptItem>, value: &Value) {
@@ -2438,6 +2455,10 @@ impl super::AgentProvider for CodexProvider {
 
     fn uses_tendi_hook_review_state(&self) -> bool {
         false
+    }
+
+    fn is_global_hook_path(&self, path: &Path) -> bool {
+        codex_home_from_system().is_some_and(|root| path.starts_with(root))
     }
 
     fn scan_hooks(

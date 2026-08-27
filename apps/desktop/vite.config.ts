@@ -1,7 +1,7 @@
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 
-const viteCacheDir = `node_modules/.vite-tendi-${process.pid}`;
+const viteCacheDir = "node_modules/.vite-tendi";
 
 export default defineConfig({
   optimizeDeps: {

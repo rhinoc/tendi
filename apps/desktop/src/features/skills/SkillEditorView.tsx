@@ -33,6 +33,7 @@ import {
 } from "../../lib/index.ts";
 import { EditorHeader } from "../../components/shared/EditorHeader.tsx";
 import { DialogLoadingFallback } from "../../components/shared/DialogLoadingFallback.tsx";
+import { DeleteConfirmationDialog } from "../../components/shared/DeleteConfirmationDialog.tsx";
 import { EditorStatePlaceholder } from "../../components/shared/EditorStatePlaceholder.tsx";
 import { FileTreeContextMenuItems } from "./FileTreeContextMenuItems.tsx";
 import { IconButton } from "../../components/shared/IconButton.tsx";
@@ -128,6 +129,8 @@ export function SkillEditorView({ skill, skills, back, onReadSkillIndexStatus, s
   const [fileTreeCollapsed, setFileTreeCollapsed] = useState(false);
   const [collapsedFolders, setCollapsedFolders] = useState(() => new Set<string>());
   const [showDiscardDialog, setShowDiscardDialog] = useState(false);
+  const [pendingDeleteEntry, setPendingDeleteEntry] = useState<SkillFileEntry | null>(null);
+  const [deletingEntry, setDeletingEntry] = useState(false);
   const [renamingPath, setRenamingPath] = useState("");
   const [renameValue, setRenameValue] = useState("");
   const [loadingFiles, setLoadingFiles] = useState(true);
@@ -430,7 +433,7 @@ export function SkillEditorView({ skill, skills, back, onReadSkillIndexStatus, s
     await reloadFiles(relativePath);
     beginRename({ name: relativePath, kind: kind as SkillFileEntry["kind"] });
   };
-  const deleteEntry = async (entry: SkillFileEntry | null = selectedEntry) => {
+  const performDeleteEntry = async (entry: SkillFileEntry) => {
     if (readOnly || !entry || entry.name === "SKILL.md") return;
     await safeInvoke(TauriCommand.SkillPathDelete, { name: currentSkill.name, relativePath: entry.name });
     const next = await reloadFiles(activePath === entry.name ? "" : activePath);
@@ -449,6 +452,21 @@ export function SkillEditorView({ skill, skills, back, onReadSkillIndexStatus, s
       return nextCreated;
     });
   };
+  const requestDeleteEntry = (entry: SkillFileEntry | null = selectedEntry) => {
+    if (readOnly || !entry || entry.name === "SKILL.md") return;
+    setPendingDeleteEntry(entry);
+  };
+  const confirmDeleteEntry = async () => {
+    const entry = pendingDeleteEntry;
+    if (!entry || deletingEntry) return;
+    setDeletingEntry(true);
+    try {
+      await performDeleteEntry(entry);
+      setPendingDeleteEntry(null);
+    } finally {
+      setDeletingEntry(false);
+    }
+  };
   const handleFileTreeKeyDown = (event: React.KeyboardEvent<HTMLElement>) => {
     if (renamingPath) return;
     if ((event.target as HTMLElement | null)?.closest(".fileTreeActions, .fileTreeToggle")) return;
@@ -459,7 +477,7 @@ export function SkillEditorView({ skill, skills, back, onReadSkillIndexStatus, s
     } else if (event.key === "Delete" || event.key === "Backspace") {
       if (readOnly) return;
       event.preventDefault();
-      deleteEntry();
+      requestDeleteEntry();
     } else if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "r") {
       event.preventDefault();
       revealSelected();
@@ -568,6 +586,15 @@ export function SkillEditorView({ skill, skills, back, onReadSkillIndexStatus, s
           <DiscardChangesDialog open onOpenChange={setShowDiscardDialog} onDiscard={back} />
         </Suspense>
       ) : null}
+      <DeleteConfirmationDialog
+        open={Boolean(pendingDeleteEntry)}
+        items={pendingDeleteEntry ? [pendingDeleteEntry.name] : []}
+        itemLabel={pendingDeleteEntry?.kind === "folder" ? "folder" : "file"}
+        description="Delete this skill file? This action cannot be undone."
+        busy={deletingEntry}
+        onOpenChange={(open) => { if (!open) setPendingDeleteEntry(null); }}
+        onConfirm={() => { void confirmDeleteEntry(); }}
+      />
       {showLinkedSessions ? (
         <Suspense fallback={<LinkedSessionsDrawerFallback onClose={() => setShowLinkedSessions(false)} />}>
           <LinkedSessionsDrawer
@@ -684,7 +711,7 @@ export function SkillEditorView({ skill, skills, back, onReadSkillIndexStatus, s
                             if (file.path) safeInvoke(TauriCommand.RevealInFinder, { path: file.path });
                           }}
                           onRename={() => beginRename(file)}
-                          onDelete={() => deleteEntry(file)}
+                          onDelete={() => requestDeleteEntry(file)}
                         />
                       </ContextMenu.Content>
                     </ContextMenu.Portal>
@@ -703,7 +730,7 @@ export function SkillEditorView({ skill, skills, back, onReadSkillIndexStatus, s
                     onNewFolder={() => createEntry("folder", null)}
                     onReveal={revealSelected}
                     onRename={() => beginRename()}
-                    onDelete={() => deleteEntry()}
+                    onDelete={() => requestDeleteEntry()}
                   />
                 </ContextMenu.Content>
               </ContextMenu.Portal>}

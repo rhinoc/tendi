@@ -5,7 +5,7 @@
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  padding: 14px 24px;
+  padding: 14px 22px;
   border-top: 1px solid var(--line);
   background: var(--surface-2);
   border-bottom-left-radius: inherit;

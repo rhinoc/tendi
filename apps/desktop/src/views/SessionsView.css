@@ -623,7 +623,7 @@
   box-sizing: border-box;
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 0;
 }
 
 .bubbleFooter > span {
@@ -652,10 +652,6 @@
   opacity: 1;
 }
 
-.chatLine.fromUser .bubbleFooter time {
-  text-align: right;
-}
-
 .messageActionButton {
   width: var(--control-size-icon);
   height: var(--control-size-icon);
@@ -670,7 +666,7 @@
   color: var(--muted);
   cursor: pointer;
   opacity: 0;
-  transition: opacity 140ms ease-out, background-color 140ms ease-out, color 140ms ease-out;
+  transition: opacity 140ms ease-out, color 140ms ease-out;
 }
 
 .chatMessage:hover .messageActionButton,
@@ -680,34 +676,50 @@
 }
 
 .messageActionButton:hover {
-  background: var(--hover-fill-strong);
+  background: transparent;
   color: var(--text);
 }
 
-.messageActionButton.isCopied,
+.messageActionButton.isCopied {
+  background: var(--green-soft);
+  color: var(--green);
+}
+
 .messageActionButton.isCopied:hover {
-  background: var(--green-soft);
+  background: transparent;
   color: var(--green);
 }
 
-.messageActionButton.isCopyError,
+.messageActionButton.isCopyError {
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+
 .messageActionButton.isCopyError:hover {
-  background: var(--danger-soft);
+  background: transparent;
   color: var(--danger);
 }
 
-.messageSavePromptButton[data-state="success"],
-.messageSavePromptButton[data-state="success"]:hover {
+.messageSavePromptButton[data-state="success"] {
   background: var(--green-soft);
   color: var(--green);
   box-shadow: none;
 }
 
-.messageSavePromptButton[data-state="error"],
-.messageSavePromptButton[data-state="error"]:hover {
+.messageSavePromptButton[data-state="success"]:hover {
+  background: transparent;
+  color: var(--green);
+}
+
+.messageSavePromptButton[data-state="error"] {
   background: var(--danger-soft);
   color: var(--danger);
   box-shadow: none;
+}
+
+.messageSavePromptButton[data-state="error"]:hover {
+  background: transparent;
+  color: var(--danger);
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -778,7 +790,7 @@
   font-weight: 600;
 }
 
-.modelConfigMarker code {
+.modelConfigValue {
   min-width: 0;
   max-width: 100%;
   overflow-wrap: anywhere;
@@ -842,6 +854,11 @@
   list-style: none;
 }
 
+.thinkingSummary {
+  height: auto;
+  padding: 8px;
+}
+
 .toolCallSummary {
   cursor: default;
 }
@@ -901,7 +918,7 @@
   white-space: nowrap;
   color: var(--muted);
   font-size: var(--text-sm);
-  font-weight: 650;
+  font-weight: 400;
 }
 
 .toolCall code {
@@ -913,7 +930,7 @@
   color: var(--text);
   font-family: var(--font-mono);
   font-size: var(--text-sm);
-  font-weight: 500;
+  font-weight: 400;
 }
 
 .toolCallSessionLink {
@@ -994,7 +1011,7 @@
   margin-bottom: 4px;
   color: var(--faint);
   font-size: var(--text-sm);
-  font-weight: 650;
+  font-weight: 400;
   text-transform: uppercase;
   letter-spacing: 0.04em;
 }

@@ -1,7 +1,7 @@
 import type { ComponentType, ReactNode } from "react";
-import { Copy, FolderOpen, Trash2 } from "lucide-react";
+import { Code2, Copy, FolderOpen, Trash2 } from "lucide-react";
 
-import { TauriCommand, copyText, safeInvoke } from "../../lib/index.ts";
+import { actionLabels, TauriCommand, copyText, safeInvoke } from "../../lib/index.ts";
 
 export type DataTableMenuComponents = {
   Item: ComponentType<{
@@ -14,10 +14,34 @@ export type DataTableMenuComponents = {
   Separator: ComponentType<{ className?: string }>;
 };
 
+export function OpenInEditorMenuItem({
+  Menu,
+  path,
+  line,
+  label = actionLabels.openInEditor,
+}: {
+  Menu: DataTableMenuComponents;
+  path?: string | null;
+  line?: number | null;
+  label?: string;
+}) {
+  const resolved = `${path ?? ""}`.trim();
+  return (
+    <Menu.Item
+      className="skillMenuItem"
+      disabled={!resolved}
+      onSelect={() => resolved && safeInvoke(TauriCommand.OpenInEditor, { path: resolved, line })}
+    >
+      <Code2 size={14} />
+      {label}
+    </Menu.Item>
+  );
+}
+
 export function RevealInFinderMenuItem({
   Menu,
   path,
-  label = "Reveal in Finder",
+  label = actionLabels.revealInFinder,
 }: {
   Menu: DataTableMenuComponents;
   path?: string | null;
@@ -39,7 +63,7 @@ export function RevealInFinderMenuItem({
 export function CopyPathMenuItem({
   Menu,
   path,
-  label = "Copy path",
+  label = actionLabels.copyPath,
 }: {
   Menu: DataTableMenuComponents;
   path?: string | null;
@@ -94,7 +118,7 @@ export function DeleteMenuItem({
 
 export function BulkDeleteMenuItem({
   Menu,
-  label = "Delete selected",
+  label = actionLabels.deleteSelected,
   onSelect,
   disabled = false,
 }: {

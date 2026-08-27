@@ -1,4 +1,4 @@
-import { lazy, Suspense, useCallback, useEffect, useMemo, useState, type KeyboardEvent } from "react";
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
 import { ContextMenu, Dialog, DropdownMenu } from "radix-ui";
 import {
   Copy,
@@ -6,7 +6,6 @@ import {
   Pencil,
   Plus,
   RefreshCw,
-  Save,
   SearchX,
   Trash2,
   X,
@@ -16,7 +15,9 @@ import { Button } from "../components/shared/Button.tsx";
 import { Badge } from "../components/shared/Badge.tsx";
 import { ContentTopDragStrip } from "../components/shared/ContentTopDragStrip.tsx";
 import { CopyButton } from "../components/shared/CopyButton.tsx";
-import { CopyTextMenuItem, DeleteMenuItem } from "../components/shared/DataTableMenus.tsx";
+import { DeleteMenuItem } from "../components/shared/DataTableMenus.tsx";
+import { DataTableSelectionActions, renderDataTableSelectionMenu, type DataTableSelectionActionDefinition } from "../components/shared/DataTableSelectionActions.tsx";
+import { DeleteConfirmationDialog } from "../components/shared/DeleteConfirmationDialog.tsx";
 import { DialogActionBar } from "../components/shared/DialogActionBar.tsx";
 import { DialogStatefulButton } from "../components/shared/DialogStatefulButton.tsx";
 import { DialogShell } from "../components/shared/DialogShell.tsx";
@@ -34,39 +35,9 @@ import { Toast } from "../components/shared/Toast.tsx";
 import { DataTable } from "../components/DataTable.tsx";
 import type { ColumnDef } from "../components/DataTable.types";
 import type { DataTableMenuComponents } from "../components/shared/DataTableMenus.tsx";
-import { TauriCommand, compactDateTime, normalizePromptTags, promptPreview, promptTagsLabel, safeInvoke, suppressNextClick, type PromptRecord } from "../lib/index.ts";
+import { actionLabels, copiedValueLabel, copyValueLabel, selectionCopiedLabel, selectionCopyLabel, selectionDeleteLabel, TauriCommand, compactDateTime, normalizePromptTags, promptPreview, promptSelectionActionIds, promptTagsLabel, safeInvoke, suppressNextClick, type PromptRecord } from "../lib/index.ts";
 
 const PromptBodyEditor = lazy(() => import("../features/prompts/PromptBodyEditor.tsx").then(({ PromptBodyEditor: component }) => ({ default: component })));
-
-function PromptActionsMenuItems({
-  Menu,
-  prompt,
-  isDeleting,
-  onEdit,
-  onDelete,
-}: {
-  Menu: DataTableMenuComponents;
-  prompt: PromptRecord;
-  isDeleting: boolean;
-  onEdit: (prompt: PromptRecord) => void;
-  onDelete: (id: string) => void;
-}) {
-  return (
-    <>
-      <Menu.Item className="skillMenuItem" onSelect={() => onEdit(prompt)}>
-        <Pencil size={14} />
-        Edit prompt
-      </Menu.Item>
-      <Menu.Separator className="skillMenuSeparator" />
-      <DeleteMenuItem
-        Menu={Menu}
-        label="Delete prompt"
-        disabled={isDeleting}
-        onSelect={() => onDelete(prompt.id)}
-      />
-    </>
-  );
-}
 
 type PromptDraft = {
   id?: string;
@@ -157,13 +128,20 @@ export function PromptDialog({ open, prompt, busy, error, onOpenChange, onSave }
   const [tags, setTags] = useState<string[]>([]);
   const [body, setBody] = useState("");
   const editing = Boolean(prompt?.id);
+  const promptIdentity = prompt?.id ? `prompt:${prompt.id}` : "new";
+  const initializedPromptIdentity = useRef<string | null>(null);
 
   useEffect(() => {
-    if (!open) return;
+    if (!open) {
+      initializedPromptIdentity.current = null;
+      return;
+    }
+    if (initializedPromptIdentity.current === promptIdentity) return;
+    initializedPromptIdentity.current = promptIdentity;
     setTitle(prompt?.title ?? "");
     setTags(prompt?.tags ?? []);
     setBody(prompt?.body ?? "");
-  }, [open, prompt]);
+  }, [open, promptIdentity]);
 
   const canSave = title.trim() && body.trim();
   return (
@@ -199,7 +177,7 @@ export function PromptDialog({ open, prompt, busy, error, onOpenChange, onSave }
           disabled={!canSave}
           onClick={() => onSave({ id: prompt?.id, title, tags, body })}
         >
-          <><span>Save</span><Save size={16} /></>
+          Save
         </DialogStatefulButton>
       </DialogActionBar>
     </DialogShell>
@@ -241,6 +219,7 @@ export function PromptsView({ prompts, loadingPrompts = false, loadError = "", h
   const [saving, setSaving] = useState(false);
   const [dialogError, setDialogError] = useState("");
   const [deletingPromptIds, setDeletingPromptIds] = useState<string[]>([]);
+  const [pendingDeleteIds, setPendingDeleteIds] = useState<string[]>([]);
   const normalizedQuery = query.trim().toLowerCase();
   const visiblePrompts = useMemo(() => {
     if (!normalizedQuery) return prompts;
@@ -299,6 +278,48 @@ export function PromptsView({ prompts, loadingPrompts = false, loadError = "", h
       setDeletingPromptIds((current) => current.filter((id) => !pendingIds.includes(id)));
     }
   }, [deletingPromptIds, onPromptsDeleted]);
+  const requestDeletePrompts = useCallback((items: PromptRecord[]) => {
+    const ids = items
+      .map((prompt) => prompt.id)
+      .filter((id) => !deletingPromptIds.includes(id));
+    if (ids.length > 0) setPendingDeleteIds(ids);
+  }, [deletingPromptIds]);
+  const confirmDeletePrompts = useCallback(async () => {
+    const ids = pendingDeleteIds;
+    if (ids.length === 0) return;
+    setPendingDeleteIds([]);
+    await deleteSelected(ids);
+  }, [deleteSelected, pendingDeleteIds]);
+  const selectionActions = useCallback((selectedRows: PromptRecord[], Menu: DataTableMenuComponents): DataTableSelectionActionDefinition[] => {
+    const prompt = selectedRows.length === 1 ? selectedRows[0] : undefined;
+    if (selectedRows.length === 0) return [];
+    const isDeleting = selectedRows.some((item) => deletingPromptIds.includes(item.id));
+    const deleteLabel = selectionDeleteLabel("prompt", selectedRows.length);
+    const copyLabel = selectionCopyLabel("prompt", selectedRows.length);
+    const copiedLabel = selectionCopiedLabel("prompt", selectedRows.length);
+    const actions: Record<string, DataTableSelectionActionDefinition> = {
+      copy: {
+        id: "copy",
+        direct: <CopyButton copyLabel={copyLabel} copiedLabel={copiedLabel} iconSize={15} onCopy={() => copyPrompts(selectedRows)}>{actionLabels.copy}</CopyButton>,
+        menu: <Menu.Item className="skillMenuItem" onSelect={() => { void copyPrompts(selectedRows); }}><Copy size={14} />{copyLabel}</Menu.Item>,
+        measure: <><Copy size={15} /><span>{actionLabels.copy}</span></>,
+      },
+      edit: {
+        id: "edit",
+        direct: <Button size="sm" variant="ghost" aria-label="Edit prompt" onClick={() => prompt && openEditPrompt(prompt)}><Pencil size={15} /><span>Edit</span></Button>,
+        menu: <Menu.Item className="skillMenuItem" disabled={!prompt} onSelect={() => prompt && openEditPrompt(prompt)}><Pencil size={14} />Edit prompt</Menu.Item>,
+        measure: <><Pencil size={15} /><span>Edit</span></>,
+      },
+      delete: {
+        id: "delete",
+        direct: <button type="button" className="danger" aria-label={deleteLabel} disabled={isDeleting} onClick={() => requestDeletePrompts(selectedRows)}><Trash2 size={15} /><span>{deleteLabel}</span></button>,
+        menu: <DeleteMenuItem Menu={Menu} label={deleteLabel} disabled={isDeleting} onSelect={() => requestDeletePrompts(selectedRows)} />,
+        measure: <><Trash2 size={15} /><span>{deleteLabel}</span></>,
+        separatorBefore: true,
+      },
+    };
+    return promptSelectionActionIds(selectedRows.length).map((id) => actions[id]);
+  }, [copyPrompts, deletingPromptIds, openEditPrompt, requestDeletePrompts]);
   const columns = useMemo((): ColumnDef<PromptRecord>[] => [
     {
       key: "title",
@@ -342,13 +363,12 @@ export function PromptsView({ prompts, loadingPrompts = false, loadError = "", h
       header: "",
       width: "72px",
       render: (prompt) => {
-        const isDeleting = deletingPromptIds.includes(prompt.id);
         return (
           <div className="rowActions">
             <CopyButton
               className="appButton appButton-icon"
-              copyLabel={`Copy ${prompt.title}`}
-              copiedLabel="Prompt copied"
+              copyLabel={copyValueLabel(prompt.title)}
+              copiedLabel={copiedValueLabel("prompt")}
               iconSize={15}
               stopPropagation
               onCopy={() => copyPrompts([prompt])}
@@ -357,76 +377,34 @@ export function PromptsView({ prompts, loadingPrompts = false, loadError = "", h
               ariaLabel={`Prompt actions for ${prompt.title}`}
               onOpenChange={(open) => { if (!open) suppressNextClick(); }}
             >
-              <PromptActionsMenuItems
-                Menu={DropdownMenu}
-                prompt={prompt}
-                isDeleting={isDeleting}
-                onEdit={openEditPrompt}
-                onDelete={(id) => { void deleteSelected([id]); }}
-              />
+              {renderDataTableSelectionMenu(selectionActions([prompt], DropdownMenu))}
             </RowActionsMenu>
           </div>
         );
       },
     },
-  ], [copyPrompts, deleteSelected, deletingPromptIds, openEditPrompt]);
+  ], [copyPrompts, deleteSelected, deletingPromptIds, openEditPrompt, selectionActions]);
 
-  const bottomBar = useCallback((selectedRows: PromptRecord[]) => {
-    const isDeleting = selectedRows.some((prompt) => deletingPromptIds.includes(prompt.id));
-    return (
-      <>
-        <CopyButton
-          copyLabel="Copy selected prompts"
-          copiedLabel="Selected prompts copied"
-          iconSize={15}
-          onCopy={() => copyPrompts(selectedRows)}
-        >
-          Copy
-        </CopyButton>
-        <button
-          className="danger promptsDeleteSelectedButton"
-          aria-label="Delete selected prompts"
-          disabled={isDeleting}
-          onClick={() => deleteSelected(selectedRows.map((prompt) => prompt.id))}
-        >
-          <Trash2 size={15} />
-          <span>Delete</span>
-        </button>
-      </>
-    );
-  }, [copyPrompts, deleteSelected, deletingPromptIds]);
+  const bottomBar = useCallback((selectedRows: PromptRecord[]) => (
+    <DataTableSelectionActions actions={selectionActions(selectedRows, DropdownMenu)} ariaLabel="More selected prompt actions" />
+  ), [selectionActions]);
   const rowContextMenu = useCallback((prompt: PromptRecord, { selectedRows, selected: isSelected }: { selectedRows: PromptRecord[]; selected: boolean }) => {
-    const showBulk = isSelected && selectedRows.length > 1;
-    return showBulk ? (
-      <>
-        <ContextMenu.Item className="skillMenuItem" onSelect={() => copyPrompts(selectedRows)}>
-          <Copy size={14} />
-          Copy selected
-        </ContextMenu.Item>
-        <ContextMenu.Separator className="skillMenuSeparator" />
-        <DeleteMenuItem
-          Menu={ContextMenu}
-          label="Delete selected"
-          disabled={selectedRows.some((item) => deletingPromptIds.includes(item.id))}
-          onSelect={() => deleteSelected(selectedRows.map((item) => item.id))}
-        />
-      </>
-    ) : (
-      <>
-        <CopyTextMenuItem Menu={ContextMenu} text={prompt.body} label="Copy prompt" />
-        <PromptActionsMenuItems
-          Menu={ContextMenu}
-          prompt={prompt}
-          isDeleting={deletingPromptIds.includes(prompt.id)}
-          onEdit={openEditPrompt}
-          onDelete={(id) => { void deleteSelected([id]); }}
-        />
-      </>
-    );
-  }, [copyPrompts, deleteSelected, deletingPromptIds, openEditPrompt]);
+    const actionRows = isSelected ? selectedRows : [prompt];
+    const actions = selectionActions(actionRows, ContextMenu);
+    return actions.length > 0 ? renderDataTableSelectionMenu(actions) : null;
+  }, [selectionActions]);
 
   return (
     <section className="content dataPage promptsPage">
+      <DeleteConfirmationDialog
+        open={pendingDeleteIds.length > 0}
+        items={pendingDeleteIds.map((id) => prompts.find((prompt) => prompt.id === id)?.title ?? id)}
+        itemLabel="prompt"
+        description="Delete the selected prompts? This action cannot be undone."
+        busy={deletingPromptIds.length > 0}
+        onOpenChange={(open) => { if (!open) setPendingDeleteIds([]); }}
+        onConfirm={() => { void confirmDeletePrompts(); }}
+      />
       <ContentTopDragStrip />
       <PageHeader title="Prompts">
         <SearchField pageSearch placeholder="Search prompts" value={query} onChange={(event) => setQuery(event.target.value)} onClear={() => setQuery("")} />
@@ -446,6 +424,7 @@ export function PromptsView({ prompts, loadingPrompts = false, loadError = "", h
         onRowClick={openEditPrompt}
         rowContextMenu={rowContextMenu}
         bottomBar={bottomBar}
+        bottomBarActionsClassName="selectionActions"
         bottomBarCheckboxLabel="Select visible prompts from toolbar"
         selectionLabel="prompts"
         loading={loadingPrompts && !hasRows}

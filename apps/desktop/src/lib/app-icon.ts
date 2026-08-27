@@ -1,4 +1,5 @@
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { Image as TauriImage } from "@tauri-apps/api/image";
 import baseIconSvg from "../../src-tauri/icons/tendi-icon.svg?raw";
 import { normalizeColorTheme, type ColorTheme } from "./appearance.ts";
 import { logger } from "./logger.ts";
@@ -82,6 +83,7 @@ const iconPalettes: Record<AppIcon, IconPalette> = {
 };
 
 let latestApplyRequest = 0;
+const WINDOW_ICON_SIZE = 512;
 
 export function normalizeAppIcon(value: unknown): AppIcon {
   return normalizeColorTheme(value);
@@ -129,6 +131,22 @@ export function appIconPreviewDataUrl(value: unknown): string {
   return appIconDataUrl(value, { compact: true });
 }
 
+async function appIconWindowImage(value: unknown): Promise<TauriImage> {
+  const source = new window.Image();
+  source.src = appIconDataUrl(value);
+  await source.decode();
+
+  const canvas = document.createElement("canvas");
+  canvas.width = WINDOW_ICON_SIZE;
+  canvas.height = WINDOW_ICON_SIZE;
+  const context = canvas.getContext("2d");
+  if (!context) throw new Error("window icon canvas is unavailable");
+
+  context.drawImage(source, 0, 0, WINDOW_ICON_SIZE, WINDOW_ICON_SIZE);
+  const rgba = context.getImageData(0, 0, WINDOW_ICON_SIZE, WINDOW_ICON_SIZE).data;
+  return TauriImage.new(new Uint8Array(rgba), WINDOW_ICON_SIZE, WINDOW_ICON_SIZE);
+}
+
 export async function applyAppIcon(value: unknown): Promise<void> {
   const appIcon = normalizeAppIcon(value);
   try {
@@ -148,7 +166,13 @@ export async function applyAppIcon(value: unknown): Promise<void> {
       logger.warn("native app icon update failed", { appIcon, error });
     }
     try {
-      await getCurrentWindow().setIcon(appIconDataUrl(appIcon));
+      const windowIcon = await appIconWindowImage(appIcon);
+      try {
+        if (requestId !== latestApplyRequest) return;
+        await getCurrentWindow().setIcon(windowIcon);
+      } finally {
+        await windowIcon.close();
+      }
     } catch (error) {
       logger.warn("window icon update failed", { appIcon, error });
     }

@@ -6,6 +6,7 @@ import {
   useState,
 } from "react";
 import { ArrowLeft, ArrowRight, ArrowUpRight, RefreshCw } from "lucide-react";
+import { ContextMenu } from "radix-ui";
 
 import { AgentBadge } from "../components/shared/AgentBadge.tsx";
 import { Badge } from "../components/shared/Badge.tsx";
@@ -34,6 +35,7 @@ import {
   selectAnalyticsGranularity,
 } from "../lib/analytics.ts";
 import { TauriCommand, safeInvoke } from "../lib/tauri.ts";
+import { OpenInEditorMenuItem } from "../components/shared/DataTableMenus.tsx";
 import { OverviewTrendChart, type OverviewOlderLoadReason, type OverviewUsageMetric } from "./OverviewTrendChart.tsx";
 import type { SkillRecord } from "./SkillsView.tsx";
 import "./OverviewView.css";
@@ -53,6 +55,7 @@ export type OverviewViewProps = {
   agentFilter: string;
   overviewCountsLoaded: ReadonlySet<OverviewNavId>;
   overviewCountErrors: ReadonlySet<OverviewNavId>;
+  onRetryCounts?: () => void;
   sessionListStatus: SessionListStatus;
   sessionListError: string;
   skillUpdateCount: number;
@@ -131,6 +134,7 @@ export function OverviewView({
   agentFilter,
   overviewCountsLoaded,
   overviewCountErrors,
+  onRetryCounts,
   sessionListStatus,
   sessionListError,
   skillUpdateCount,
@@ -267,6 +271,9 @@ export function OverviewView({
     { id: "hooks", label: "Hooks" },
     { id: "mcp", label: "MCP" },
   ];
+  const overviewCountErrorLabels = inventory
+    .filter((item) => overviewCountErrors.has(item.id))
+    .map((item) => item.label);
 
   return (
     <section className="content overviewPage">
@@ -305,6 +312,13 @@ export function OverviewView({
             </button>
           ))}
         </nav>
+        {overviewCountErrorLabels.length > 0 ? (
+          <Toast
+            tone="error"
+            message={`Could not load ${overviewCountErrorLabels.join(", ")} counts.`}
+            action={onRetryCounts ? { label: "Retry", onClick: onRetryCounts } : undefined}
+          />
+        ) : null}
 
         <section className="overviewAnalytics" aria-labelledby="overview-analytics-title">
           <div className="overviewAnalyticsHeader">
@@ -405,30 +419,38 @@ export function OverviewView({
                   const preview = summarizeSessionPreviewRecord(session);
                   const displayTitle = session.title;
                   return (
-                    <button
-                      key={previewKey}
-                      type="button"
-                      className="overviewSessionRow"
-                      onClick={() => onOpenSession(session)}
-                    >
-                      <span className="overviewSessionRowHeader">
-                        <span className="overviewSessionTitleLine">
-                          <AgentBadge agent={session.agent} small />
-                          <Tooltip content={formatSessionTitle(displayTitle)} onlyWhenTruncated>
-                            <span className="overviewSessionRowTitle"><SessionTitleText interactive={false} value={displayTitle} /></span>
-                          </Tooltip>
-                        </span>
-                        <span className="overviewSessionProject">{sessionProject(session)}</span>
-                      </span>
-                      <span className="overviewSessionMessage">
-                        <span className="overviewSessionMessageLabel" role="img" aria-label="User message"><ArrowRight size={13} aria-hidden="true" /></span>
-                        <span className="overviewSessionMessageText"><TranscriptLinkText interactive={false} value={preview?.userLast ?? "—"} /></span>
-                      </span>
-                      <span className="overviewSessionMessage">
-                        <span className="overviewSessionMessageLabel" role="img" aria-label="Agent reply"><ArrowLeft size={13} aria-hidden="true" /></span>
-                        <span className="overviewSessionMessageText"><TranscriptLinkText interactive={false} value={preview?.assistantLast ?? "—"} /></span>
-                      </span>
-                    </button>
+                    <ContextMenu.Root key={previewKey}>
+                      <ContextMenu.Trigger asChild>
+                        <button
+                          type="button"
+                          className="overviewSessionRow"
+                          onClick={() => onOpenSession(session)}
+                        >
+                          <span className="overviewSessionRowHeader">
+                            <span className="overviewSessionTitleLine">
+                              <AgentBadge agent={session.agent} small />
+                              <Tooltip content={formatSessionTitle(displayTitle)} onlyWhenTruncated>
+                                <span className="overviewSessionRowTitle"><SessionTitleText interactive={false} value={displayTitle} /></span>
+                              </Tooltip>
+                            </span>
+                            <span className="overviewSessionProject">{sessionProject(session)}</span>
+                          </span>
+                          <span className="overviewSessionMessage">
+                            <span className="overviewSessionMessageLabel" role="img" aria-label="User message"><ArrowRight size={13} aria-hidden="true" /></span>
+                            <span className="overviewSessionMessageText"><TranscriptLinkText interactive={false} value={preview?.userLast ?? "—"} /></span>
+                          </span>
+                          <span className="overviewSessionMessage">
+                            <span className="overviewSessionMessageLabel" role="img" aria-label="Agent reply"><ArrowLeft size={13} aria-hidden="true" /></span>
+                            <span className="overviewSessionMessageText"><TranscriptLinkText interactive={false} value={preview?.assistantLast ?? "—"} /></span>
+                          </span>
+                        </button>
+                      </ContextMenu.Trigger>
+                      <ContextMenu.Portal>
+                        <ContextMenu.Content className="skillMenuContent" data-no-drag>
+                          <OpenInEditorMenuItem Menu={ContextMenu} path={session.path} />
+                        </ContextMenu.Content>
+                      </ContextMenu.Portal>
+                    </ContextMenu.Root>
                   );
                 })}
               </div>
