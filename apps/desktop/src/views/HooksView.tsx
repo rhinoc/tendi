@@ -2,7 +2,7 @@ import { Tooltip } from "../components/shared/Tooltip.tsx";
 import { lazy, Suspense, useCallback, useEffect, useMemo, useState, type ComponentType, type ReactNode } from "react";
 import { Group as PanelGroup, Panel } from "react-resizable-panels";
 import { ContextMenu, Dialog, DropdownMenu } from "radix-ui";
-import { Copy, Crosshair, FolderOpen, Power, PowerOff, SearchX, Trash2, Webhook } from "lucide-react";
+import { Code2, Copy, Crosshair, FolderOpen, Power, PowerOff, SearchX, Trash2, Webhook } from "lucide-react";
 
 import { DataTable } from "../components/DataTable.tsx";
 import type { ColumnDef, SortState } from "../components/DataTable.types";
@@ -10,6 +10,8 @@ import { AgentBadge } from "../components/shared/AgentBadge.tsx";
 import { Badge } from "../components/shared/Badge.tsx";
 import { Button } from "../components/shared/Button.tsx";
 import { CopyButton } from "../components/shared/CopyButton.tsx";
+import { DataTableSelectionActions, renderDataTableSelectionMenu, type DataTableSelectionActionDefinition } from "../components/shared/DataTableSelectionActions.tsx";
+import { OpenInEditorMenuItem } from "../components/shared/DataTableMenus.tsx";
 import { DetailPanel } from "../components/shared/DetailPanel.tsx";
 import { DetailPanelHost } from "../components/shared/DetailPanelHost.tsx";
 import { DialogActionButton } from "../components/shared/DialogActionButton.tsx";
@@ -28,7 +30,11 @@ import { Toast } from "../components/shared/Toast.tsx";
 import "./HooksView.css";
 
 import {
+  actionLabels,
+  copiedValueLabel,
+  copyValueLabel,
   HOOK_FREEZE_COLUMN,
+  selectionDeleteLabel,
   TauriCommand,
   compactCommand,
   copyText,
@@ -39,6 +45,7 @@ import {
   hookHandlerText,
   hookItemsFromRows,
   hookSearchText,
+  hookSelectionActionIds,
   hookSourcePath,
   hookTrustHash,
   hookTypeLabel,
@@ -127,7 +134,7 @@ export function HookDetailRow({ label, value, mono = false, copyable = false }: 
     <div className={`hookDetailValue ${mono ? "mono" : ""}`}>
       <span>{text || "-"}</span>
       {copyable && text ? (
-        <CopyButton className="hookCopyButton" value={text} copyLabel={`Copy ${label}`} copiedLabel={`${label} copied`} />
+        <CopyButton className="hookCopyButton" value={text} copyLabel={copyValueLabel(label)} copiedLabel={copiedValueLabel(label)} />
       ) : null}
     </div>
   );
@@ -183,51 +190,12 @@ function HookEnabledSwitch({ checked, disabledReason = "", updating = false, onT
   );
 }
 
-function HookActionsMenuItems({
-  Menu,
-  item,
-  onDeleteHooks,
-}: {
-  Menu: HookMenuComponents;
-  item: HookItem;
-  onDeleteHooks: (items: HookItem[]) => void;
-}) {
-  const hook = item.hook;
-  const path = hookSourcePath(hook);
-  const deleteDisabledReason = hookDeleteDisabledReason(hook);
-  return (
-    <>
-      <Menu.Item
-        className="skillMenuItem"
-        disabled={!path}
-        onSelect={() => path && safeInvoke(TauriCommand.RevealInFinder, { path })}
-      >
-        <FolderOpen size={14} />
-        Reveal in Finder
-      </Menu.Item>
-      <Menu.Item className="skillMenuItem" disabled={!path} onSelect={() => path && copyText(path)}>
-        <Copy size={14} />
-        Copy path
-      </Menu.Item>
-      <Menu.Separator className="skillMenuSeparator" />
-      <Menu.Item
-        className="skillMenuItem danger"
-        disabled={Boolean(deleteDisabledReason)}
-        onSelect={() => onDeleteHooks([item])}
-      >
-        <Trash2 size={14} />
-        Delete hook
-      </Menu.Item>
-    </>
-  );
-}
-
 function HookActionsCell({
   item,
-  onDeleteHooks,
+  actions,
 }: {
   item: HookItem;
-  onDeleteHooks: (items: HookItem[]) => void;
+  actions: ReactNode;
 }) {
   const hook = item.hook;
   return (
@@ -235,9 +203,65 @@ function HookActionsCell({
       ariaLabel={`Hook actions for ${hook.event}`}
       onOpenChange={(open) => { if (!open) suppressNextClick(); }}
     >
-      <HookActionsMenuItems Menu={DropdownMenu} item={item} onDeleteHooks={onDeleteHooks} />
+      {actions}
     </RowActionsMenu>
   );
+}
+
+function hookSelectionActions(
+  selectedRows: HookItem[],
+  Menu: HookMenuComponents,
+  setSelectedHooksEnabled: (items: HookItem[], enabled: boolean) => void | Promise<void>,
+  requestDeleteHooks: (items: HookItem[]) => void,
+  busy: boolean,
+  deleting: boolean,
+): DataTableSelectionActionDefinition[] {
+  const singleItem = selectedRows.length === 1 ? selectedRows[0] : undefined;
+  const path = singleItem ? hookSourcePath(singleItem.hook) : "";
+  const deletable = selectedRows.filter((item) => !hookDeleteDisabledReason(item.hook));
+  const enableTargets = selectedRows.filter((item) => !hookEnableDisabledReason(item.hook) && !item.hook.enabled);
+  const disableTargets = selectedRows.filter((item) => !hookEnableDisabledReason(item.hook) && Boolean(item.hook.enabled));
+  const deleteLabel = selectionDeleteLabel("hook", selectedRows.length);
+  const actions: Record<string, DataTableSelectionActionDefinition> = {
+    "open-editor": {
+      id: "open-editor",
+      direct: <button aria-label={actionLabels.openInEditor} disabled={!path} onClick={() => path && void safeInvoke(TauriCommand.OpenInEditor, { path })}><Code2 size={15} /><span>{actionLabels.openInEditor}</span></button>,
+      menu: <OpenInEditorMenuItem Menu={Menu} path={path} />,
+      measure: <><Code2 size={15} /><span>{actionLabels.openInEditor}</span></>,
+    },
+    reveal: {
+      id: "reveal",
+      direct: <button aria-label={actionLabels.revealInFinder} disabled={!path} onClick={() => path && void safeInvoke(TauriCommand.RevealInFinder, { path })}><FolderOpen size={15} /><span>{actionLabels.revealInFinder}</span></button>,
+      menu: <Menu.Item className="skillMenuItem" disabled={!path} onSelect={() => path && void safeInvoke(TauriCommand.RevealInFinder, { path })}><FolderOpen size={14} />{actionLabels.revealInFinder}</Menu.Item>,
+      measure: <><FolderOpen size={15} /><span>{actionLabels.revealInFinder}</span></>,
+    },
+    "copy-path": {
+      id: "copy-path",
+      direct: <CopyButton value={path} disabled={!path} copyLabel={actionLabels.copyPath} copiedLabel={actionLabels.pathCopied} iconSize={15}>{actionLabels.copyPath}</CopyButton>,
+      menu: <Menu.Item className="skillMenuItem" disabled={!path} onSelect={() => path && copyText(path)}><Copy size={14} />{actionLabels.copyPath}</Menu.Item>,
+      measure: <><Copy size={15} /><span>{actionLabels.copyPath}</span></>,
+    },
+    enable: {
+      id: "enable",
+      direct: <Button size="sm" variant="ghost" aria-label="Enable selected hooks" disabled={enableTargets.length === 0 || busy} onClick={() => { void setSelectedHooksEnabled(enableTargets, true); }}><Power size={15} /><span>{actionLabels.enable}</span></Button>,
+      menu: <Menu.Item className="skillMenuItem" disabled={enableTargets.length === 0 || busy} onSelect={() => { void setSelectedHooksEnabled(enableTargets, true); }}><Power size={14} />{actionLabels.enable}</Menu.Item>,
+      measure: <><Power size={15} /><span>{actionLabels.enable}</span></>,
+    },
+    disable: {
+      id: "disable",
+      direct: <Button size="sm" variant="ghost" aria-label="Disable selected hooks" disabled={disableTargets.length === 0 || busy} onClick={() => { void setSelectedHooksEnabled(disableTargets, false); }}><PowerOff size={15} /><span>{actionLabels.disable}</span></Button>,
+      menu: <Menu.Item className="skillMenuItem" disabled={disableTargets.length === 0 || busy} onSelect={() => { void setSelectedHooksEnabled(disableTargets, false); }}><PowerOff size={14} />{actionLabels.disable}</Menu.Item>,
+      measure: <><PowerOff size={15} /><span>{actionLabels.disable}</span></>,
+    },
+    delete: {
+      id: "delete",
+      direct: <Button size="sm" variant="ghost" className="danger" aria-label={deleteLabel} aria-busy={deleting || undefined} disabled={deletable.length === 0 || busy} onClick={() => requestDeleteHooks(deletable)}>{deleting ? <LoadingIcon size={15} /> : <Trash2 size={15} />}<span>{deleteLabel}</span></Button>,
+      menu: <Menu.Item className="skillMenuItem danger" disabled={deletable.length === 0 || busy} onSelect={() => requestDeleteHooks(deletable)}><Trash2 size={14} />{deleteLabel}</Menu.Item>,
+      measure: <><Trash2 size={15} /><span>{deleteLabel}</span></>,
+      separatorBefore: true,
+    },
+  };
+  return hookSelectionActionIds(selectedRows.length).map((id) => actions[id]);
 }
 
 function hookParameterRows(hook: HookRecord | null, enabledControl: ReactNode): HookParameterRow[] {
@@ -463,9 +487,21 @@ export function HooksView({ rows, loadingRows = false, loadError = "", hasRows =
       key: "actions",
       header: "",
       width: "40px",
-      render: (item) => <HookActionsCell item={item} onDeleteHooks={requestDeleteHooks} />,
+      render: (item) => (
+        <HookActionsCell
+          item={item}
+          actions={renderDataTableSelectionMenu(hookSelectionActions(
+            [item],
+            DropdownMenu,
+            setSelectedHooksEnabled,
+            requestDeleteHooks,
+            updatingEnabledKeys.size > 0 || Boolean(deletingKey),
+            Boolean(deletingKey),
+          ))}
+        />
+      ),
     },
-  ], [projects, requestDeleteHooks, requestReviewHook, reviewingKey, setHookEnabled, updatingEnabledKeys]);
+  ], [deletingKey, projects, requestDeleteHooks, requestReviewHook, reviewingKey, setHookEnabled, setSelectedHooksEnabled, updatingEnabledKeys]);
   const activeItem = useMemo(() => hookItems.find((item) => item.key === activeKey), [activeKey, hookItems]);
   const activeHook = activeItem?.hook ?? null;
   const activeEnableControl = useMemo(() => activeItem ? (
@@ -484,69 +520,30 @@ export function HooksView({ rows, loadingRows = false, loadError = "", hasRows =
     void safeInvoke(TauriCommand.OpenInEditor, { path, line });
   }, [activeHook, sourceState.data?.source_line]);
   const rowContextMenu = useCallback((item: HookItem, { selectedRows, selected: isSelected }: { selectedRows: HookItem[]; selected: boolean }) => {
-    const showBulk = isSelected && selectedRows.length > 1;
-    return showBulk ? (
-      <>
-        <ContextMenu.Item
-          className="skillMenuItem danger"
-          disabled={selectedRows.every((row) => hookDeleteDisabledReason(row.hook))}
-          onSelect={() => requestDeleteHooks(selectedRows)}
-        >
-          <Trash2 size={14} />
-          Delete selected
-        </ContextMenu.Item>
-      </>
-    ) : (
-      <HookActionsMenuItems Menu={ContextMenu} item={item} onDeleteHooks={requestDeleteHooks} />
+    const actionRows = isSelected ? selectedRows : [item];
+    const actions = hookSelectionActions(
+      actionRows,
+      ContextMenu,
+      setSelectedHooksEnabled,
+      requestDeleteHooks,
+      updatingEnabledKeys.size > 0 || Boolean(deletingKey),
+      Boolean(deletingKey),
     );
-  }, [requestDeleteHooks]);
-  const bottomBar = useCallback((selectedRows: HookItem[]) => {
-    const deletable = selectedRows.filter((item) => !hookDeleteDisabledReason(item.hook));
-    const enableTargets = selectedRows.filter((item) => (
-      !hookEnableDisabledReason(item.hook) && !item.hook.enabled
-    ));
-    const disableTargets = selectedRows.filter((item) => (
-      !hookEnableDisabledReason(item.hook) && Boolean(item.hook.enabled)
-    ));
-    const enabledUpdateInProgress = updatingEnabledKeys.size > 0;
-    return (
-      <>
-        <Button
-          size="sm"
-          variant="ghost"
-          className="hookBatchActionButton"
-          aria-label="Enable selected hooks"
-          disabled={enableTargets.length === 0 || enabledUpdateInProgress || Boolean(deletingKey)}
-          onClick={() => void setSelectedHooksEnabled(selectedRows, true)}
-        >
-          <Power size={15} />
-          Enable
-        </Button>
-        <Button
-          size="sm"
-          variant="ghost"
-          className="hookBatchActionButton"
-          aria-label="Disable selected hooks"
-          disabled={disableTargets.length === 0 || enabledUpdateInProgress || Boolean(deletingKey)}
-          onClick={() => void setSelectedHooksEnabled(selectedRows, false)}
-        >
-          <PowerOff size={15} />
-          Disable
-        </Button>
-        <Button
-          size="sm"
-          variant="ghost"
-          className="hookBatchActionButton danger"
-          aria-label="Delete selected hooks"
-          aria-busy={Boolean(deletingKey)}
-          disabled={deletable.length === 0 || Boolean(deletingKey) || enabledUpdateInProgress}
-          onClick={() => requestDeleteHooks(deletable)}
-        >
-          {deletingKey ? <LoadingInline size={15} gap={6} label="Delete" /> : <><Trash2 size={15} /><span>Delete</span></>}
-        </Button>
-      </>
-    );
+    return actions.length > 0 ? renderDataTableSelectionMenu(actions) : null;
   }, [deletingKey, requestDeleteHooks, setSelectedHooksEnabled, updatingEnabledKeys.size]);
+  const bottomBar = useCallback((selectedRows: HookItem[]) => (
+    <DataTableSelectionActions
+      actions={hookSelectionActions(
+        selectedRows,
+        DropdownMenu,
+        setSelectedHooksEnabled,
+        requestDeleteHooks,
+        updatingEnabledKeys.size > 0 || Boolean(deletingKey),
+        Boolean(deletingKey),
+      )}
+      ariaLabel="More selected hook actions"
+    />
+  ), [deletingKey, requestDeleteHooks, setSelectedHooksEnabled, updatingEnabledKeys.size]);
 
   useEffect(() => {
     setDeleteError("");
@@ -596,7 +593,21 @@ export function HooksView({ rows, loadingRows = false, loadError = "", hasRows =
       cancelled = true;
       window.clearTimeout(loadingTimer);
     };
-  }, [activeHook, activeKey]);
+  }, [
+    activeHook?.agent,
+    activeHook?.command,
+    activeHook?.enabled,
+    activeHook?.event,
+    activeHook?.filter,
+    activeHook?.hook_type,
+    activeHook?.matcher,
+    activeHook?.path,
+    activeHook?.prompt,
+    activeHook?.status_message,
+    activeHook?.trust_hash,
+    activeHook?.url,
+    activeKey,
+  ]);
 
   useEffect(() => {
     if (!activeKey && hookItems[0]) setActiveKey(hookItems[0].key);
@@ -632,6 +643,7 @@ export function HooksView({ rows, loadingRows = false, loadError = "", hasRows =
               enableMarquee
               rowContextMenu={rowContextMenu}
               bottomBar={bottomBar}
+              bottomBarActionsClassName="selectionActions"
               bottomBarCheckboxLabel="Select visible hooks from toolbar"
               selectionLabel="hooks"
               onRowClick={(item) => {
@@ -709,8 +721,8 @@ export function HooksView({ rows, loadingRows = false, loadError = "", hasRows =
                       <CopyButton
                         className="hookCopyButton hookSourceCopyButton"
                         value={sourceState.data?.content ?? ""}
-                        copyLabel="Copy config preview"
-                        copiedLabel="Config preview copied"
+                        copyLabel={copyValueLabel("config preview")}
+                        copiedLabel={copiedValueLabel("config preview")}
                       />
                     ) : null}
                   </div>

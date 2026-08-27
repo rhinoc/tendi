@@ -1,11 +1,12 @@
 import { useCallback, useDeferredValue, useEffect, useMemo, useState } from "react";
 import { FolderOpen } from "lucide-react";
 
-import { TauriCommand, diffPreview, ruleTitle, safeInvoke } from "../../lib/index.ts";
+import { TauriCommand, diffPreview, invokeCommand, readRuleFile, ruleTitle, safeInvoke, type RuleFileResult } from "../../lib/index.ts";
 import { DiscardChangesDialog } from "../../components/shared/DiscardChangesDialog.tsx";
 import { EditorStatePlaceholder } from "../../components/shared/EditorStatePlaceholder.tsx";
 import { EditorHeader } from "../../components/shared/EditorHeader.tsx";
 import { IconButton } from "../../components/shared/IconButton.tsx";
+import { LoadErrorState } from "../../components/shared/LoadErrorState.tsx";
 import { MarkdownFilePane, type DiffStats } from "../../components/shared/MarkdownFilePane.tsx";
 
 export type RuleEditorRecord = {
@@ -21,16 +22,13 @@ export type RuleEditorViewProps = {
   back: () => void;
 };
 
-type RuleFileResult = {
-  content?: string;
-  sha256?: string;
-};
-
 export function RuleEditorView({ rule, back }: RuleEditorViewProps) {
   const currentRule = rule ?? {};
   const [draft, setDraft] = useState({ content: "", originalContent: "", sha256: currentRule.sha256 ?? "" });
   const [showDiscardDialog, setShowDiscardDialog] = useState(false);
   const [loadingRule, setLoadingRule] = useState(Boolean(currentRule.path));
+  const [ruleLoadError, setRuleLoadError] = useState("");
+  const [ruleLoadAttempt, setRuleLoadAttempt] = useState(0);
   const content = draft.content;
   const deferredContent = useDeferredValue(content);
   const contentReady = !loadingRule && (!currentRule.path || Boolean(draft.sha256));
@@ -57,16 +55,23 @@ export function RuleEditorView({ rule, back }: RuleEditorViewProps) {
     async function loadRule() {
       if (!currentRule.path) {
         setLoadingRule(false);
+        setRuleLoadError("");
         return;
       }
       setLoadingRule(true);
+      setRuleLoadError("");
       setDraft({ content: "", originalContent: "", sha256: currentRule.sha256 ?? "" });
-      const result = await safeInvoke(TauriCommand.RuleFileRead, { path: currentRule.path }) as RuleFileResult | null;
-      if (cancelled) return;
-      if (typeof result?.content === "string" && typeof result.sha256 === "string") {
+      try {
+        const result = await readRuleFile(() => invokeCommand(TauriCommand.RuleFileRead, { path: currentRule.path }));
+        if (cancelled) return;
         setDraft({ content: result.content, originalContent: result.content, sha256: result.sha256 });
+        setRuleLoadError("");
+      } catch {
+        if (cancelled) return;
+        setRuleLoadError("Could not load rule. Try again.");
+      } finally {
+        if (!cancelled) setLoadingRule(false);
       }
-      setLoadingRule(false);
     }
     frame = window.requestAnimationFrame(() => {
       timer = window.setTimeout(loadRule, 0);
@@ -77,7 +82,7 @@ export function RuleEditorView({ rule, back }: RuleEditorViewProps) {
       window.clearTimeout(timer);
       setLoadingRule(false);
     };
-  }, [currentRule.path, currentRule.sha256]);
+  }, [currentRule.path, currentRule.sha256, ruleLoadAttempt]);
 
   const save = useCallback(async () => {
     if (!dirty || !draft.sha256 || !currentRule.path) return;
@@ -128,7 +133,11 @@ export function RuleEditorView({ rule, back }: RuleEditorViewProps) {
       />
       <DiscardChangesDialog open={showDiscardDialog} onOpenChange={setShowDiscardDialog} onDiscard={back} />
       <section className="editorShell singlePaneEditor">
-        {contentReady ? (
+        {ruleLoadError ? (
+          <div className="ruleEditorLoading">
+            <LoadErrorState message={ruleLoadError} onRetry={() => setRuleLoadAttempt((attempt) => attempt + 1)} />
+          </div>
+        ) : contentReady ? (
           <MarkdownFilePane
             activePath={currentRule.path ?? ""}
             dirty={dirty}

@@ -17,6 +17,7 @@
     "test:backup-action": "node --test scripts/backup-action.test.ts",
     "test:daemon-build": "node --test scripts/daemon-build.test.mjs",
     "test:provider-boundaries": "node --test scripts/provider-boundaries.test.mjs",
+    "test:session-resume-menu": "node --test scripts/session-resume-menu.test.ts",
     "build": "vite build",
     "e2e:align": "node scripts/alignment-e2e.mjs",
     "test:codemirror-highlighting": "node --test scripts/codemirror-markdown.test.mjs",

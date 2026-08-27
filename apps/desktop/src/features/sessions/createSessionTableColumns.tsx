@@ -2,7 +2,7 @@ import { Tooltip } from "../../components/shared/Tooltip.tsx";
 import { AlertCircle, ArrowLeft, ArrowRight, Check } from "lucide-react";
 
 import type { ColumnDef } from "../../components/DataTable.types";
-import { friendlyAgent, sessionCacheRate, sessionKind, sessionProject, sessionProjectGroupKey, sessionProjectGroupLabel, sessionResumeTargetForAgent, sortValue, summarizeSessionPreviewRecord, type SessionRecord, type SessionResumeTarget } from "../../lib/index.ts";
+import { friendlyAgent, sessionCacheRate, sessionKind, sessionProject, sessionProjectGroupKey, sessionProjectGroupLabel, sessionResumeLabel, sessionResumeTargetForAgent, sessionResumeTargetForMenu, sortValue, summarizeSessionPreviewRecord, type SessionRecord, type SessionResumeTarget, type SessionResumeState } from "../../lib/index.ts";
 import { cacheRateTone } from "../../lib/token-style.ts";
 import { AgentBadge } from "../../components/shared/AgentBadge.tsx";
 import { Badge } from "../../components/shared/Badge.tsx";
@@ -40,8 +40,9 @@ export type SessionTableRow = {
 export type CreateSessionTableColumnsOptions<T extends SessionTableRow = SessionTableRow> = {
   normalizedQuery?: string;
   resumeSession?: (session: T) => void | Promise<void>;
-  resumeState?: (session: T) => "idle" | "loading" | "success" | "error";
+  resumeState?: (session: T) => SessionResumeState;
   resumeTarget?: SessionResumeTarget;
+  resumeTargetForSession?: (session: T) => Exclude<SessionResumeTarget, "auto"> | undefined;
   keys?: string[];
   widths?: Partial<Record<string, string>>;
 };
@@ -51,6 +52,7 @@ export function createSessionTableColumns<T extends SessionTableRow = SessionTab
   resumeSession,
   resumeState,
   resumeTarget = "auto",
+  resumeTargetForSession,
   keys,
   widths = {},
 }: CreateSessionTableColumnsOptions<T> = {}): ColumnDef<T>[] {
@@ -119,15 +121,9 @@ export function createSessionTableColumns<T extends SessionTableRow = SessionTab
           );
         }
         const state = resumeState?.(session as T) ?? "idle";
-        const resolvedTarget = sessionResumeTargetForAgent(resumeTarget, session.agent);
-        const targetLabel = resolvedTarget === "app" ? "app" : resolvedTarget === "auto" ? "auto" : "terminal";
-        const label = state === "loading"
-          ? `Opening ${session.agent} session in ${targetLabel}`
-          : state === "success"
-            ? `Session opened in ${targetLabel}`
-            : state === "error"
-              ? `Could not open session in ${targetLabel}`
-              : `Resume ${session.agent} session in ${targetLabel}`;
+        const configuredTarget = sessionResumeTargetForAgent(resumeTarget, session.agent);
+        const resolvedTarget = sessionResumeTargetForMenu(configuredTarget, resumeTargetForSession?.(session as T));
+        const label = sessionResumeLabel(state, resolvedTarget);
         return (
           <Tooltip content={label}><StatefulButton
             size="sm"

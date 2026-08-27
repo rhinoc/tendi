@@ -34,7 +34,7 @@ export function SearchField({
       <Search size={18} />
       <input aria-label={ariaLabel} placeholder={placeholder} value={value} onChange={onChange} onKeyDown={onKeyDown} />
       <SearchClearButton value={value} onClear={onClear} ariaLabel={clearLabel} />
-      {endContent}
+      {endContent ? <span className="searchBoxEndContent">{endContent}</span> : null}
     </div>
   );
 }

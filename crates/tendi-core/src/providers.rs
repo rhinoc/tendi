@@ -203,6 +203,31 @@ pub(crate) trait AgentProvider: Sync {
         None
     }
 
+    fn global_backup_root(&self, home: &Path) -> Option<PathBuf> {
+        self.global_skill_root(home)
+            .and_then(|path| path.parent().map(Path::to_path_buf))
+    }
+
+    fn backup_global_source_key(&self, path: &Path) -> Option<String> {
+        self.global_backup_root(&dirs::home_dir()?)
+            .and_then(|root| path.strip_prefix(root).ok())
+            .and_then(|relative| relative.to_str())
+            .map(str::to_string)
+    }
+
+    fn restore_global_source_path(&self, relative: &str) -> Option<PathBuf> {
+        let relative = Path::new(relative);
+        if relative.as_os_str().is_empty()
+            || relative.is_absolute()
+            || relative
+                .components()
+                .any(|component| !matches!(component, std::path::Component::Normal(_)))
+        {
+            return None;
+        }
+        Some(self.global_backup_root(&dirs::home_dir()?)?.join(relative))
+    }
+
     fn project_skill_root(&self, _cwd: &Path) -> Option<PathBuf> {
         None
     }
@@ -506,6 +531,10 @@ pub(crate) trait AgentProvider: Sync {
     fn apply_hook_review_states(&self, _hooks: &mut [HookRecord], _ctx: &ProviderContext) {}
 
     fn managed_hook_path(&self, _path: &Path) -> bool {
+        false
+    }
+
+    fn is_global_hook_path(&self, _path: &Path) -> bool {
         false
     }
 

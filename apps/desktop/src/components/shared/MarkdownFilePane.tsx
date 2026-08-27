@@ -4,7 +4,7 @@ import { Badge } from "./Badge.tsx";
 import { lazy, Suspense, useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { Check, ChevronDown, ChevronUp, Code2, Eye, Save, Search, X } from "lucide-react";
 
-import { formatUserPath, isJsonPath, isMarkdownPath, isYamlPath } from "../../lib/index.ts";
+import { actionLabels, formatUserPath, isJsonPath, isMarkdownPath, isYamlPath } from "../../lib/index.ts";
 import { loadCodeMirrorFileEditor } from "./code-mirror-loader.ts";
 import type { CodeMirrorLanguage } from "./CodeMirrorFileEditor.tsx";
 import { EditorStatePlaceholder } from "./EditorStatePlaceholder.tsx";
@@ -192,8 +192,8 @@ export function MarkdownFilePane({
             <CopyButton
               className="codeTabCopyButton"
               value={activePath}
-              copyLabel="Copy path"
-              copiedLabel="Path copied"
+              copyLabel={actionLabels.copyPath}
+              copiedLabel={actionLabels.pathCopied}
               iconSize={13}
               stopPropagation
             />
@@ -201,7 +201,7 @@ export function MarkdownFilePane({
           {!readOnly && showDirtyIndicator && dirty && <Badge tone="warning">modified</Badge>}
           {!readOnly && saveState === "saving" && <Badge tone="info">saving</Badge>}
           {!readOnly && saveState === "saved" && <Badge tone="success">saved</Badge>}
-          {!readOnly && saveState === "error" && <Toast tone="error" message={saveError || "save failed"} />}
+          {!readOnly && saveState === "error" && <Toast tone="error" message={saveError || actionLabels.saveFailed} />}
         </div>
         <div className="codeTabActions">
           <IconButton

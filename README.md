@@ -16,6 +16,14 @@
 > Status: early development. The current desktop workflow targets macOS and is not yet a
 > signed or notarized public release.
 
+## Screenshots
+
+<p align="center">
+  <img src="./docs/screenshots/sessions-desktop.png" alt="Tendi desktop sessions view" width="960" />
+</p>
+
+> Screenshot captured from the Tendi desktop app.
+
 ## Features
 
 - 🔎 **One searchable surface** — Scan local agent configuration and activity into one snapshot-backed CLI and desktop app.

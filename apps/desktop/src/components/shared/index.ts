@@ -82,6 +82,8 @@ export { InfoSection } from "./InfoSection.tsx";
 export type { InfoSectionProps } from "./InfoSection.tsx";
 export { MoreActionsButton } from "./MoreActionsButton.tsx";
 export type { MoreActionsButtonProps } from "./MoreActionsButton.tsx";
+export { DataTableSelectionActions, renderDataTableSelectionMenu } from "./DataTableSelectionActions.tsx";
+export type { DataTableSelectionActionDefinition } from "./DataTableSelectionActions.tsx";
 export { RowActionsMenu } from "./RowActionsMenu.tsx";
 export type { RowActionsMenuProps } from "./RowActionsMenu.tsx";
 export { SearchField } from "./SearchField.tsx";
@@ -100,11 +102,13 @@ export type { SwitchProps } from "./Switch.tsx";
 
 export { SelectionActionBar } from "./SelectionActionBar.tsx";
 export type { SelectionActionBarProps } from "./SelectionActionBar.tsx";
+export { DeleteConfirmationDialog } from "./DeleteConfirmationDialog.tsx";
 export {
   BulkDeleteMenuItem,
   CopyPathMenuItem,
   CopyTextMenuItem,
   DeleteMenuItem,
+  OpenInEditorMenuItem,
   RevealInFinderMenuItem,
 } from "./DataTableMenus.tsx";
 export type { DataTableMenuComponents } from "./DataTableMenus.tsx";

@@ -82,7 +82,6 @@ export function SkillLocationDialog({
     [skill, skills],
   );
   const [mode, setMode] = useState<DistributionMode>("move");
-  const [targets, setTargets] = useState<SkillTargetOption[]>(() => targetOptionsForDialog(targetOptions));
   const [targetOverrides, setTargetOverrides] = useState<Record<string, boolean>>({});
   const [busy, setBusy] = useState<"apply" | "">("");
   const [confirmRemoval, setConfirmRemoval] = useState(false);
@@ -90,7 +89,7 @@ export function SkillLocationDialog({
 
   const visibleTargets = useMemo(() => {
     const installed = new Set(installedAgentKeys);
-    return targets
+    return targetOptionsForDialog(targetOptions)
       .filter((option) => option.supportsGlobal && option.id !== "universal")
       .map((option, index) => ({
         option,
@@ -104,7 +103,7 @@ export function SkillLocationDialog({
         return left.index - right.index;
       })
       .map(({ option }) => option);
-  }, [installedAgentKeys, targets]);
+  }, [installedAgentKeys, targetOptions]);
   const currentTargetCounts = useMemo(
     () => new Map(visibleTargets.map((option) => [
       option.id,
@@ -136,7 +135,7 @@ export function SkillLocationDialog({
     [initialAgent, selectedSkills],
   );
   const sourcePaths = sourcePathsBySkill.filter(Boolean);
-  const selectedSkillsKey = useMemo(() => selectedSkills.map((item) => item.id).join("\u0000"), [selectedSkills]);
+  const selectedSkillsKey = useMemo(() => selectedSkills.map((item) => item.id).sort().join("\u0000"), [selectedSkills]);
   const selectedSkillNames = useMemo(() => selectedSkills.map((item) => item.name), [selectedSkills]);
   const locationChanges = useMemo(() => {
     const addedTargetIds = new Set<string>();
@@ -163,10 +162,6 @@ export function SkillLocationDialog({
     setConfirmRemoval(false);
     setError("");
   }, [initialAgent, open, selectedSkillsKey]);
-
-  useEffect(() => {
-    if (targetOptions.length > 0) setTargets(targetOptionsForDialog(targetOptions));
-  }, [targetOptions]);
 
   const moveHasMultipleAdds = mode === "move" && locationChanges.addedTargetIds.length > 1;
   const missingSource = locationChanges.addedTargetIds.length > 0 && sourcePaths.length !== selectedSkills.length;

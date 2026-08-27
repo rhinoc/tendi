@@ -6,9 +6,11 @@ import {
   useRef,
   useState,
   useLayoutEffect,
+  memo,
   type CSSProperties,
   type MouseEvent as ReactMouseEvent,
   type ReactNode,
+  type WheelEvent as ReactWheelEvent,
 } from "react";
 import {
   flexRender,
@@ -77,6 +79,7 @@ const EMPTY_GROUP_KEY = "__empty__";
 const DATA_TABLE_ROW_HEIGHT = 58;
 const DATA_TABLE_VIRTUAL_THRESHOLD = 40;
 const DATA_TABLE_VIRTUAL_OVERSCAN = 4;
+const DATA_TABLE_GROUP_VIRTUAL_OVERSCAN = 4;
 const DATA_TABLE_GROUP_HEADER_HEIGHT = 34;
 const DATA_TABLE_GROUP_GAP = 18;
 const DATA_TABLE_INTERACTIVE_SELECTOR = "button, a, input, textarea, select, [role='button'], [role='menuitem'], [role='menuitemcheckbox'], [role='menuitemradio'], [data-no-row-click]";
@@ -176,6 +179,117 @@ function renderCell<TRow>(column: ColumnDef<TRow>, row: TRow): ReactNode {
   return renderTextCell(column, row);
 }
 
+type DataTableCellContext<TRow> = {
+  column: { columnDef: { meta?: unknown } };
+  row: { original: TRow };
+};
+
+type DataTableCell<TRow> = ReturnType<Row<TRow>["getVisibleCells"]>[number];
+
+type DataTableRowProps<TRow extends Record<string, unknown>> = {
+  row: Row<TRow>;
+  pane: "full" | "frozen" | "scroll";
+  className: string;
+  rowSelectable: boolean;
+  selectable: boolean;
+  getRowLabel?: (row: TRow) => string | undefined;
+  selectedRows: TRow[];
+  rowContextMenu?: DataTableProps<TRow>["rowContextMenu"];
+  onRowClick?: (row: TRow) => void;
+  onHoveredRowChange?: (rowId: string | null) => void;
+  onContextMenuOpenChange: (rowId: string, open: boolean) => void;
+  renderDataCell: (cell: DataTableCell<TRow>) => ReactNode;
+};
+
+function DataTableRowComponent<TRow extends Record<string, unknown>>({
+  row,
+  pane,
+  className,
+  rowSelectable,
+  selectable,
+  getRowLabel,
+  selectedRows,
+  rowContextMenu,
+  onRowClick,
+  onHoveredRowChange,
+  onContextMenuOpenChange,
+  renderDataCell,
+}: DataTableRowProps<TRow>) {
+  const id = row.id;
+  const cells = row.getVisibleCells().filter((cell) => (
+    pane === "full" || (pane === "frozen" ? cell.column.getIsPinned() : !cell.column.getIsPinned())
+  ));
+  const rowLabel = getRowLabel?.(row.original);
+  const contextMenuContent = rowContextMenu?.(row.original, { selectedRows, selected: row.getIsSelected() }) ?? null;
+  const body = (
+    <div
+      className={className}
+      data-row-id={id}
+      data-row-selectable={rowSelectable ? "true" : "false"}
+      onMouseEnter={onHoveredRowChange ? () => onHoveredRowChange(id) : undefined}
+      onMouseLeave={onHoveredRowChange ? () => onHoveredRowChange(null) : undefined}
+      onClick={onRowClick ? (event) => {
+        const target = event.target;
+        if (target instanceof Element && target.closest(DATA_TABLE_INTERACTIVE_SELECTOR)) return;
+        onRowClick(row.original);
+      } : undefined}
+    >
+      <RowMenuOpenChangeProvider onOpenChange={(open) => onContextMenuOpenChange(id, open)}>
+        {pane !== "scroll" ? (
+          selectable && rowSelectable ? (
+            <SelectionCheckbox
+              checked={row.getIsSelected()}
+              label={rowLabel ? `Select ${rowLabel}` : "Select row"}
+              className="rowSelection"
+              onChange={() => row.toggleSelected()}
+            />
+          ) : (
+            <span className="rowSelectionPlaceholder" aria-hidden="true" />
+          )
+        ) : null}
+        {cells.map(renderDataCell)}
+      </RowMenuOpenChangeProvider>
+    </div>
+  );
+
+  return (
+    <div className="dataTableRowSlot">
+      {contextMenuContent == null ? body : (
+        <ContextMenu.Root
+          onOpenChange={(open) => onContextMenuOpenChange(id, open)}
+        >
+          <ContextMenu.Trigger asChild>{body}</ContextMenu.Trigger>
+          <ContextMenu.Portal>
+            <ContextMenu.Content className="skillMenuContent" alignOffset={6} data-no-drag>
+              {contextMenuContent}
+            </ContextMenu.Content>
+          </ContextMenu.Portal>
+        </ContextMenu.Root>
+      )}
+    </div>
+  );
+}
+
+const DataTableRow = memo(DataTableRowComponent, (previous, next) => (
+  previous.row === next.row
+  && previous.pane === next.pane
+  && previous.className === next.className
+  && previous.rowSelectable === next.rowSelectable
+  && previous.selectable === next.selectable
+  && previous.getRowLabel === next.getRowLabel
+  && previous.selectedRows === next.selectedRows
+  && previous.rowContextMenu === next.rowContextMenu
+  && previous.onRowClick === next.onRowClick
+  && previous.onHoveredRowChange === next.onHoveredRowChange
+  && previous.onContextMenuOpenChange === next.onContextMenuOpenChange
+  && previous.renderDataCell === next.renderDataCell
+)) as typeof DataTableRowComponent;
+
+function renderDataTableCell<TRow extends Record<string, unknown>>({ column, row }: DataTableCellContext<TRow>): ReactNode {
+  const source = metaFor<TRow>(column).source;
+  return renderCell(source, row.original);
+}
+
 function sortStateToTable(sort: SortState | null): SortingState {
   return sort ? [{ id: sort.key, desc: sort.direction === "desc" }] : [];
 }
@@ -199,6 +313,99 @@ function sameStringArray(left: readonly string[], right: readonly string[]) {
 
 function metaFor<TRow>(column: { columnDef: { meta?: unknown } }) {
   return column.columnDef.meta as DataTableColumnMeta<TRow>;
+}
+
+function virtualSeekGap(viewportTop: number, viewportHeight: number, renderedTop: number, renderedBottom: number) {
+  const viewportBottom = viewportTop + viewportHeight;
+  if (viewportTop < renderedTop) {
+    return {
+      top: viewportTop,
+      height: Math.min(viewportBottom, renderedTop) - viewportTop,
+    };
+  }
+  if (viewportBottom > renderedBottom) {
+    return {
+      top: Math.max(viewportTop, renderedBottom),
+      height: viewportBottom - Math.max(viewportTop, renderedBottom),
+    };
+  }
+  return null;
+}
+
+function groupVirtualRange(
+  layout: DataTableGroupLayout,
+  count: number,
+  scrollTop: number,
+  viewportHeight: number,
+  rowHeight: number,
+  overscan: number,
+) {
+  const bodyBottom = layout.bodyTop + layout.bodyHeight;
+  const bufferedTop = Math.max(0, scrollTop - overscan * rowHeight);
+  const bufferedBottom = scrollTop + viewportHeight + overscan * rowHeight;
+  if (bufferedBottom > layout.bodyTop && bufferedTop < bodyBottom) {
+    return {
+      start: Math.max(0, Math.floor((bufferedTop - layout.bodyTop) / rowHeight)),
+      end: Math.min(count, Math.ceil((bufferedBottom - layout.bodyTop) / rowHeight)),
+    };
+  }
+  if (scrollTop >= bodyBottom) return { start: count, end: count };
+  return { start: 0, end: 0 };
+}
+
+function groupVirtualSeekGap(
+  layouts: readonly DataTableGroupLayout[],
+  groups: ReadonlyArray<{ subRows: readonly unknown[] }>,
+  renderedScrollTop: number,
+  targetScrollTop: number,
+  viewportHeight: number,
+  rowHeight: number,
+  overscan: number,
+) {
+  const viewportBottom = targetScrollTop + viewportHeight;
+  const covered: Array<{ top: number; bottom: number }> = [];
+  const headerTops = layouts.map((layout) => layout.bodyTop - DATA_TABLE_GROUP_HEADER_HEIGHT);
+  layouts.forEach((layout, index) => {
+    const group = groups[index];
+    if (!group) return;
+    const headerTop = layout.bodyTop - DATA_TABLE_GROUP_HEADER_HEIGHT;
+    const nextHeaderTop = headerTops[index + 1] ?? Number.POSITIVE_INFINITY;
+    if (targetScrollTop >= headerTop && targetScrollTop < nextHeaderTop) {
+      covered.push({ top: targetScrollTop, bottom: Math.min(viewportBottom, targetScrollTop + DATA_TABLE_GROUP_HEADER_HEIGHT) });
+    } else if (headerTop < viewportBottom && layout.bodyTop > targetScrollTop) {
+      covered.push({ top: Math.max(targetScrollTop, headerTop), bottom: Math.min(viewportBottom, layout.bodyTop) });
+    }
+    if (!layout.expanded) return;
+    const rendered = groupVirtualRange(layout, group.subRows.length, renderedScrollTop, viewportHeight, rowHeight, overscan);
+    if (rendered.start >= rendered.end) return;
+    const rowsTop = layout.bodyTop + rendered.start * rowHeight;
+    const rowsBottom = layout.bodyTop + rendered.end * rowHeight;
+    if (rowsTop < viewportBottom && rowsBottom > targetScrollTop) {
+      covered.push({ top: Math.max(targetScrollTop, rowsTop), bottom: Math.min(viewportBottom, rowsBottom) });
+    }
+  });
+
+  covered.sort((left, right) => left.top - right.top);
+  const merged = covered.reduce<Array<{ top: number; bottom: number }>>((ranges, current) => {
+    const previous = ranges[ranges.length - 1];
+    if (previous && current.top <= previous.bottom) {
+      previous.bottom = Math.max(previous.bottom, current.bottom);
+    } else {
+      ranges.push({ ...current });
+    }
+    return ranges;
+  }, []);
+
+  let cursor = targetScrollTop;
+  let largestGap: { top: number; height: number } | null = null;
+  for (const range of [...merged, { top: viewportBottom, bottom: viewportBottom }]) {
+    if (range.top > cursor) {
+      const gap = { top: cursor, height: range.top - cursor };
+      if (!largestGap || gap.height > largestGap.height) largestGap = gap;
+    }
+    cursor = Math.max(cursor, range.bottom);
+  }
+  return largestGap;
 }
 
 export function DataTable<TRow extends Record<string, unknown>>({
@@ -285,7 +492,9 @@ export function DataTable<TRow extends Record<string, unknown>>({
   const [menuRowId, setMenuRowId] = useState<string | null>(null);
   const [rowActionsMenuId, setRowActionsMenuId] = useState<string | null>(null);
   const [scrollTop, setScrollTop] = useState(0);
+  const pendingScrollTopRef = useRef(0);
   const scrollUpdateFrameRef = useRef<number | null>(null);
+  const virtualSeekRef = useRef<HTMLDivElement>(null);
   const [expandedGroups, setExpandedGroups] = useState<string[]>([]);
   const previousGroupStateRef = useRef<{ groupingKey: string; groupKeys: string[] } | null>(null);
   const groupingControlled = controlledGroupBy !== undefined;
@@ -363,7 +572,7 @@ export function DataTable<TRow extends Record<string, unknown>>({
       id: column.key,
       header: columnLabel(column),
       accessorFn: (row) => primitiveColumnValue(column, row),
-      cell: ({ row }) => renderCell(column, row.original),
+      cell: renderDataTableCell,
       enableSorting: isSortableColumn(column),
       enableGrouping: canGroupColumn(column),
       getGroupingValue: (row) => groupColumnValue(column, row),
@@ -435,7 +644,7 @@ export function DataTable<TRow extends Record<string, unknown>>({
   const virtualizedRows = !grouping[0] && modelRows.length > DATA_TABLE_VIRTUAL_THRESHOLD;
   const visibleRows = useMemo(() => {
     if (!virtualizedRows) {
-      return { rows: modelRows, top: 0, bottom: 0 };
+      return { rows: modelRows, top: 0, bottom: 0, start: 0, end: modelRows.length };
     }
     const start = Math.max(0, Math.floor(scrollTop / rowHeight) - DATA_TABLE_VIRTUAL_OVERSCAN);
     const end = Math.min(
@@ -446,6 +655,8 @@ export function DataTable<TRow extends Record<string, unknown>>({
       rows: modelRows.slice(start, end),
       top: start * rowHeight,
       bottom: Math.max(0, (modelRows.length - end) * rowHeight),
+      start,
+      end,
     };
   }, [modelRows, rowHeight, scrollSize.height, scrollTop, virtualizedRows]);
   const selectableRows = useMemo(() => leafRows.filter((row) => row.getCanSelect()), [leafRows]);
@@ -621,10 +832,6 @@ export function DataTable<TRow extends Record<string, unknown>>({
   }, []);
   useEffect(() => () => marqueeDragRef.current?.cleanup?.(), []);
 
-  useEffect(() => () => {
-    if (scrollUpdateFrameRef.current !== null) window.cancelAnimationFrame(scrollUpdateFrameRef.current);
-  }, []);
-
   const nonFrozenColumns = useMemo(
     () => (freezeColumn && frozenColumnKey ? columns.filter((column) => column.key !== frozenColumnKey) : columns),
     [columns, freezeColumn, frozenColumnKey],
@@ -724,23 +931,11 @@ export function DataTable<TRow extends Record<string, unknown>>({
   const notifyRowActionsMenuOpenChange = useCallback((rowId: string, open: boolean) => {
     setRowActionsMenuId((current) => open ? rowId : current === rowId ? null : current);
   }, []);
+  const handleRowHover = useCallback((rowId: string | null) => {
+    setHoveredRowId(rowId);
+  }, []);
 
-  const renderSelectionCell = (row: Row<TRow>) => {
-    const rowLabel = getRowLabel(row.original);
-    const rowSelectable = row.getCanSelect();
-    return selectable && rowSelectable ? (
-      <SelectionCheckbox
-        checked={row.getIsSelected()}
-        label={rowLabel ? `Select ${rowLabel}` : "Select row"}
-        className="rowSelection"
-        onChange={() => row.toggleSelected()}
-      />
-    ) : (
-      <span className="rowSelectionPlaceholder" aria-hidden="true" />
-    );
-  };
-
-  const renderDataCell = (cell: Row<TRow>["getVisibleCells"] extends () => (infer TCell)[] ? TCell : never) => {
+  const renderDataCell = useCallback((cell: DataTableCell<TRow>) => {
     const column = metaFor<TRow>(cell.column).source;
     return (
       <div
@@ -752,91 +947,48 @@ export function DataTable<TRow extends Record<string, unknown>>({
         {flexRender(cell.column.columnDef.cell, cell.getContext())}
       </div>
     );
-  };
-
-  const withRowContextMenu = (row: Row<TRow>, segment: ReactNode, key: string) => {
-    const contextMenuContent = rowContextMenu?.(row.original, { selectedRows, selected: row.getIsSelected() }) ?? null;
-    if (contextMenuContent == null) return segment;
-    return (
-      <ContextMenu.Root
-        key={key}
-        onOpenChange={(open) => {
-          setMenuRowId((current) => (open ? row.id : current === row.id ? null : current));
-          if (!open) suppressNextClick();
-        }}
-      >
-        <ContextMenu.Trigger asChild>{segment}</ContextMenu.Trigger>
-        <ContextMenu.Portal>
-          <ContextMenu.Content className="skillMenuContent" alignOffset={6} data-no-drag>
-            {contextMenuContent}
-          </ContextMenu.Content>
-        </ContextMenu.Portal>
-      </ContextMenu.Root>
-    );
-  };
+  }, []);
 
   const renderDataRow = (row: Row<TRow>) => {
     const id = row.id;
     const rowSelectable = row.getCanSelect();
-    const extraClassName = rowProps?.(row.original)?.className;
-    const body = (
-      <div
-        className={rowClassName(row, extraClassName)}
-        data-row-id={id}
-        data-row-selectable={rowSelectable ? "true" : "false"}
-        onMouseEnter={freezeColumn ? () => setHoveredRowId(id) : undefined}
-        onMouseLeave={freezeColumn ? () => setHoveredRowId((current) => (current === id ? null : current)) : undefined}
-        onClick={onRowClick ? (event) => {
-          const target = event.target;
-          if (target instanceof Element && target.closest(DATA_TABLE_INTERACTIVE_SELECTOR)) return;
-          onRowClick(row.original);
-        } : undefined}
-      >
-        <RowMenuOpenChangeProvider onOpenChange={(open) => notifyRowActionsMenuOpenChange(id, open)}>
-          {renderSelectionCell(row)}
-          {row.getVisibleCells().map(renderDataCell)}
-        </RowMenuOpenChangeProvider>
-      </div>
-    );
-
     return (
-      <div className="dataTableRowSlot" key={id}>
-        {withRowContextMenu(row, body, `full-${id}`)}
-      </div>
+      <DataTableRow
+        key={id}
+        row={row}
+        pane="full"
+        className={rowClassName(row, rowProps?.(row.original)?.className)}
+        rowSelectable={rowSelectable}
+        selectable={Boolean(selectable)}
+        getRowLabel={getRowLabel}
+        selectedRows={selectedRows}
+        rowContextMenu={rowContextMenu}
+        onRowClick={onRowClick}
+        onContextMenuOpenChange={notifyRowActionsMenuOpenChange}
+        renderDataCell={renderDataCell}
+      />
     );
   };
 
   const renderSplitDataRow = (row: Row<TRow>, pane: "frozen" | "scroll") => {
     const id = row.id;
     const rowSelectable = row.getCanSelect();
-    const extraClassName = rowProps?.(row.original)?.className;
-    const cells = row.getVisibleCells().filter((cell) => (
-      pane === "frozen" ? cell.column.getIsPinned() : !cell.column.getIsPinned()
-    ));
-    const body = (
-      <div
-        className={`${rowClassName(row, extraClassName)} dataRow--${pane}Pane`}
-        data-row-id={id}
-        data-row-selectable={rowSelectable ? "true" : "false"}
-        onMouseEnter={freezeColumn ? () => setHoveredRowId(id) : undefined}
-        onMouseLeave={freezeColumn ? () => setHoveredRowId((current) => (current === id ? null : current)) : undefined}
-        onClick={onRowClick ? (event) => {
-          const target = event.target;
-          if (target instanceof Element && target.closest(DATA_TABLE_INTERACTIVE_SELECTOR)) return;
-          onRowClick(row.original);
-        } : undefined}
-      >
-        <RowMenuOpenChangeProvider onOpenChange={(open) => notifyRowActionsMenuOpenChange(id, open)}>
-          {pane === "frozen" ? renderSelectionCell(row) : null}
-          {cells.map(renderDataCell)}
-        </RowMenuOpenChangeProvider>
-      </div>
-    );
-
     return (
-      <div className="dataTableRowSlot" key={`${pane}-${id}`}>
-        {withRowContextMenu(row, body, `${pane}-${id}`)}
-      </div>
+      <DataTableRow
+        key={`${pane}-${id}`}
+        row={row}
+        pane={pane}
+        className={`${rowClassName(row, rowProps?.(row.original)?.className)} dataRow--${pane}Pane`}
+        rowSelectable={rowSelectable}
+        selectable={Boolean(selectable)}
+        getRowLabel={getRowLabel}
+        selectedRows={selectedRows}
+        rowContextMenu={rowContextMenu}
+        onRowClick={onRowClick}
+        onHoveredRowChange={freezeColumn ? handleRowHover : undefined}
+        onContextMenuOpenChange={notifyRowActionsMenuOpenChange}
+        renderDataCell={renderDataCell}
+      />
     );
   };
 
@@ -948,20 +1100,14 @@ export function DataTable<TRow extends Record<string, unknown>>({
     if (!virtualizedGroups) return group.subRows.map(renderRow);
 
     const count = group.subRows.length;
-    const bodyBottom = layout.bodyTop + layout.bodyHeight;
-    const viewportBottom = scrollTop + scrollSize.height;
-    let start = 0;
-    let end = 0;
-    if (viewportBottom > layout.bodyTop && scrollTop < bodyBottom) {
-      start = Math.max(0, Math.floor((scrollTop - layout.bodyTop) / rowHeight) - DATA_TABLE_VIRTUAL_OVERSCAN);
-      end = Math.min(
-        count,
-        Math.ceil((viewportBottom - layout.bodyTop) / rowHeight) + DATA_TABLE_VIRTUAL_OVERSCAN,
-      );
-    } else if (scrollTop >= bodyBottom) {
-      start = count;
-      end = count;
-    }
+    const { start, end } = groupVirtualRange(
+      layout,
+      count,
+      scrollTop,
+      scrollSize.height,
+      rowHeight,
+      DATA_TABLE_GROUP_VIRTUAL_OVERSCAN,
+    );
 
     return (
       <>
@@ -1068,17 +1214,101 @@ export function DataTable<TRow extends Record<string, unknown>>({
     if (track) track.style.transform = `translateX(${-left}px)`;
   }, []);
 
+  const positionVirtualSeek = useCallback((top: number, height: number) => {
+    const scroll = scrollRef.current;
+    const seek = virtualSeekRef.current;
+    if (!scroll || !seek) return;
+    seek.style.top = `${top}px`;
+    seek.style.left = `${scroll.scrollLeft}px`;
+    seek.style.width = `${scroll.clientWidth}px`;
+    seek.style.height = `${height}px`;
+  }, [scrollRef]);
+
+  const setVirtualSeekVisible = useCallback((visible: boolean, top?: number, height?: number) => {
+    if (visible) {
+      const scroll = scrollRef.current;
+      positionVirtualSeek(top ?? scroll?.scrollTop ?? 0, height ?? scroll?.clientHeight ?? 0);
+    }
+    virtualSeekRef.current?.classList.toggle("dataTableVirtualSeek--visible", visible);
+  }, [positionVirtualSeek, scrollRef]);
+
+  const groupedWindowMissedAt = useCallback((targetTop: number, viewportHeight: number) => {
+    if (!virtualizedGroups) return false;
+    return groupRows.some((group, index) => {
+      const layout = groupLayouts[index];
+      if (!layout?.expanded) return false;
+      const target = groupVirtualRange(layout, group.subRows.length, targetTop, viewportHeight, rowHeight, 0);
+      if (target.start === target.end) return false;
+      const rendered = groupVirtualRange(layout, group.subRows.length, scrollTop, viewportHeight, rowHeight, DATA_TABLE_GROUP_VIRTUAL_OVERSCAN);
+      return rendered.start > target.start || rendered.end < target.end;
+    });
+  }, [groupLayouts, groupRows, rowHeight, scrollTop, virtualizedGroups]);
+
   const handleBodyScroll = useCallback(() => {
     const scroll = scrollRef.current;
     if (!scroll) return;
     if (freezeColumn) syncScrollHeader(scroll.scrollLeft);
     if (!virtualizedRows && !virtualizedGroups) return;
-    if (scrollUpdateFrameRef.current !== null) return;
-    scrollUpdateFrameRef.current = window.requestAnimationFrame(() => {
-      scrollUpdateFrameRef.current = null;
-      setScrollTop(scrollRef.current?.scrollTop ?? 0);
-    });
-  }, [freezeColumn, syncScrollHeader, virtualizedGroups, virtualizedRows]);
+    const headerHeight = showColumnHeader && !freezeColumn ? DATA_TABLE_GROUP_HEADER_HEIGHT : 0;
+    const renderedTop = headerHeight + visibleRows.top;
+    const renderedBottom = renderedTop + visibleRows.rows.length * rowHeight;
+    const viewportTop = scroll.scrollTop;
+    const seekGap = virtualizedRows
+      ? virtualSeekGap(viewportTop, scroll.clientHeight, renderedTop, renderedBottom)
+      : null;
+    const groupedWindowMissed = groupedWindowMissedAt(viewportTop, scroll.clientHeight);
+    const groupedSeekGap = groupedWindowMissed
+      ? groupVirtualSeekGap(groupLayouts, groupRows, scrollTop, viewportTop, scroll.clientHeight, rowHeight, DATA_TABLE_GROUP_VIRTUAL_OVERSCAN)
+      : null;
+    if (seekGap) setVirtualSeekVisible(true, seekGap.top, seekGap.height);
+    else if (groupedSeekGap) setVirtualSeekVisible(true, groupedSeekGap.top, groupedSeekGap.height);
+    pendingScrollTopRef.current = viewportTop;
+    if (scrollUpdateFrameRef.current === null) {
+      scrollUpdateFrameRef.current = window.requestAnimationFrame(() => {
+        scrollUpdateFrameRef.current = null;
+        const nextScrollTop = pendingScrollTopRef.current;
+        if (virtualizedRows) {
+          const nextStart = Math.max(0, Math.floor(nextScrollTop / rowHeight) - DATA_TABLE_VIRTUAL_OVERSCAN);
+          const nextEnd = Math.min(
+            modelRows.length,
+            Math.ceil((nextScrollTop + scrollSize.height) / rowHeight) + DATA_TABLE_VIRTUAL_OVERSCAN,
+          );
+          if (visibleRows.start === nextStart && visibleRows.end === nextEnd) return;
+        }
+        if (virtualizedGroups && !groupedWindowMissedAt(nextScrollTop, scrollSize.height)) return;
+        setScrollTop((current) => current === nextScrollTop ? current : nextScrollTop);
+      });
+    }
+  }, [freezeColumn, groupLayouts, groupRows, groupedWindowMissedAt, modelRows.length, rowHeight, scrollRef, scrollSize.height, scrollTop, setVirtualSeekVisible, showColumnHeader, syncScrollHeader, virtualizedGroups, virtualizedRows, visibleRows]);
+
+  const handleBodyWheel = useCallback((event: ReactWheelEvent<HTMLDivElement>) => {
+    if (event.deltaY === 0 || (!virtualizedRows && !virtualizedGroups)) return;
+    const scroll = scrollRef.current;
+    if (!scroll) return;
+    const maxScrollTop = Math.max(0, scroll.scrollHeight - scroll.clientHeight);
+    const nextScrollTop = Math.min(maxScrollTop, Math.max(0, scroll.scrollTop + event.deltaY));
+    if (Math.abs(scroll.scrollTop - nextScrollTop) <= 1) return;
+    const flatWindowMissed = virtualizedRows && (() => {
+      const nextStart = Math.max(0, Math.floor(nextScrollTop / rowHeight) - DATA_TABLE_VIRTUAL_OVERSCAN);
+      const nextEnd = Math.min(
+        modelRows.length,
+        Math.ceil((nextScrollTop + scroll.clientHeight) / rowHeight) + DATA_TABLE_VIRTUAL_OVERSCAN,
+      );
+      return visibleRows.start !== nextStart || visibleRows.end !== nextEnd;
+    })();
+    const groupedWindowMissed = groupedWindowMissedAt(nextScrollTop, scroll.clientHeight);
+    if (flatWindowMissed || groupedWindowMissed) {
+      setScrollTop((current) => current === nextScrollTop ? current : nextScrollTop);
+    }
+  }, [groupedWindowMissedAt, modelRows.length, rowHeight, scrollRef, virtualizedGroups, virtualizedRows, visibleRows]);
+
+  useLayoutEffect(() => {
+    setVirtualSeekVisible(false);
+  }, [groupLayouts, modelRows, scrollTop, setVirtualSeekVisible, virtualizedGroups, virtualizedRows, visibleRows]);
+
+  useEffect(() => () => {
+    if (scrollUpdateFrameRef.current !== null) window.cancelAnimationFrame(scrollUpdateFrameRef.current);
+  }, []);
 
   useLayoutEffect(() => {
     if (!freezeColumn) return;
@@ -1105,9 +1335,11 @@ export function DataTable<TRow extends Record<string, unknown>>({
         ref={scrollRef}
         style={{ "--data-table-sticky-header-offset": "0px" } as CSSProperties}
         onScroll={handleBodyScroll}
+        onWheelCapture={handleBodyWheel}
         onMouseDownCapture={enableMarquee ? beginMarquee : undefined}
         onClickCapture={enableMarquee ? suppressClickAfterMarquee : undefined}
       >
+        <div ref={virtualSeekRef} className="dataTableVirtualSeek" aria-hidden="true" />
         <div className="dataTableSplitSurface">
           <div className="dataTableFrozenPane">
             <div className="dataTableBody">
@@ -1150,6 +1382,7 @@ export function DataTable<TRow extends Record<string, unknown>>({
               ref={scrollRef}
               style={{ "--data-table-sticky-header-offset": "0px" } as CSSProperties}
               onScroll={handleBodyScroll}
+              onWheelCapture={handleBodyWheel}
               onMouseDownCapture={enableMarquee ? beginMarquee : undefined}
               onClickCapture={enableMarquee ? suppressClickAfterMarquee : undefined}
             >
@@ -1195,6 +1428,7 @@ export function DataTable<TRow extends Record<string, unknown>>({
 
                 </div>
               </div>
+              <div ref={virtualSeekRef} className="dataTableVirtualSeek" aria-hidden="true" />
               {renderEmptyState(showColumnHeader)}
             </div>
           </>

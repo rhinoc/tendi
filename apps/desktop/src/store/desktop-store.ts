@@ -26,6 +26,17 @@ export type SkillIndexStatus = {
   last_indexed_at?: string | null;
 };
 
+function sameSkillIndexStatus(left: SkillIndexStatus | null, right: SkillIndexStatus | null) {
+  if (left === right) return true;
+  if (!left || !right) return false;
+  return left.total === right.total
+    && left.indexed === right.indexed
+    && left.pending === right.pending
+    && left.failed === right.failed
+    && left.running === right.running
+    && left.last_indexed_at === right.last_indexed_at;
+}
+
 export type DomainErrorState = Partial<Record<DesktopDomain, string>>;
 
 export type DesktopStoreState = {
@@ -289,7 +300,7 @@ class DesktopStore {
         : { ...current, skillUpdates: { ...current.skillUpdates, error: message } });
     },
     setSkillIndexStatus: (indexStatus) => {
-      this.update((current) => current.skillUpdates.indexStatus === indexStatus
+      this.update((current) => sameSkillIndexStatus(current.skillUpdates.indexStatus, indexStatus)
         ? current
         : { ...current, skillUpdates: { ...current.skillUpdates, indexStatus } });
     },

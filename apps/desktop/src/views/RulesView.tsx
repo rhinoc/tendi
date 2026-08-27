@@ -1,16 +1,18 @@
 import { Tooltip } from "../components/shared/Tooltip.tsx";
-import { lazy, Suspense, useCallback, useDeferredValue, useEffect, useMemo, useState, type ComponentType, type ReactNode } from "react";
+import { lazy, Suspense, useCallback, useDeferredValue, useEffect, useMemo, useRef, useState, type ComponentType, type ReactNode } from "react";
 import { ContextMenu, DropdownMenu } from "radix-ui";
-import { FolderOpen, Info, ScrollText, SearchX } from "lucide-react";
+import { Code2, Copy, FolderOpen, Info, ScrollText, SearchX, Trash2 } from "lucide-react";
 import { Group as PanelGroup, Panel } from "react-resizable-panels";
 
 import { DataTable } from "../components/DataTable.tsx";
 import type { ColumnDef, SortState } from "../components/DataTable.types";
 import { AgentChips } from "../components/shared/AgentChips.tsx";
 import { CopyButton } from "../components/shared/CopyButton.tsx";
-import { CopyPathMenuItem, RevealInFinderMenuItem } from "../components/shared/DataTableMenus.tsx";
+import { CopyPathMenuItem, DeleteMenuItem, OpenInEditorMenuItem, RevealInFinderMenuItem } from "../components/shared/DataTableMenus.tsx";
+import { DataTableSelectionActions, renderDataTableSelectionMenu, type DataTableSelectionActionDefinition } from "../components/shared/DataTableSelectionActions.tsx";
 import { DetailPanel } from "../components/shared/DetailPanel.tsx";
 import { DetailPanelHost } from "../components/shared/DetailPanelHost.tsx";
+import { DeleteConfirmationDialog } from "../components/shared/DeleteConfirmationDialog.tsx";
 import { DiscardChangesDialog } from "../components/shared/DiscardChangesDialog.tsx";
 import { EmptyState } from "../components/shared/EmptyState.tsx";
 import { EditorStatePlaceholder } from "../components/shared/EditorStatePlaceholder.tsx";
@@ -21,9 +23,10 @@ import { LoadErrorState } from "../components/shared/LoadErrorState.tsx";
 import { PageHeader } from "../components/shared/PageHeader.tsx";
 import { RowActionsMenu } from "../components/shared/RowActionsMenu.tsx";
 import { SearchField } from "../components/shared/SearchField.tsx";
+import { Toast } from "../components/shared/Toast.tsx";
 import type { SkillDependencyRecord } from "../features/skills/SkillDependencyGraph.tsx";
 import { ruleColumns as sharedRuleColumns } from "../lib/tableColumns.tsx";
-import { RULE_FREEZE_COLUMN, TauriCommand, diffPreview, formatUserPath, friendlyAgent, ruleAgents, ruleKey, ruleSearchText, ruleSortValue, ruleTitle, safeInvoke, scopeColumn, suppressNextClick, type ProjectSummary, type RuleRecord } from "../lib/index.ts";
+import { actionLabels, copiedPathLabel, copyPathLabel, RULE_FREEZE_COLUMN, selectionDeleteLabel, TauriCommand, diffPreview, formatUserPath, friendlyAgent, invokeCommand, readRuleFile, ruleAgents, ruleKey, ruleSearchText, ruleSelectionActionIds, ruleSortValue, ruleTitle, safeInvoke, scopeColumn, suppressNextClick, type ProjectSummary, type RuleRecord } from "../lib/index.ts";
 
 const MarkdownFilePane = lazy(() => import("../components/shared/MarkdownFilePane.tsx").then(({ MarkdownFilePane: component }) => ({ default: component })));
 
@@ -45,23 +48,61 @@ function ruleSourcePath(rule: RuleRecord): string {
   return rule.path;
 }
 
-function RuleActionsMenuItems({ Menu, rule }: { Menu: RuleMenuComponents; rule: RuleRecord }) {
-  const path = ruleSourcePath(rule);
-  return (
-    <>
-      <RevealInFinderMenuItem Menu={Menu} path={path} />
-      <CopyPathMenuItem Menu={Menu} path={path} />
-    </>
-  );
+function operationError(value: unknown): string | null {
+  if (!value || typeof value !== "object") return null;
+  const error = (value as { error?: unknown }).error;
+  return typeof error === "string" ? error : null;
 }
 
-function RuleActionsCell({ rule }: { rule: RuleRecord }) {
+function ruleSelectionActions(
+  selectedRows: RuleTableRow[],
+  Menu: RuleMenuComponents,
+  requestDeleteRules: (rows: RuleTableRow[]) => void,
+  deleting: boolean,
+): DataTableSelectionActionDefinition[] {
+  const row = selectedRows.length === 1 ? selectedRows[0] : undefined;
+  if (selectedRows.length === 0 || ruleSelectionActionIds(selectedRows.length).length === 0) return [];
+  const path = row ? ruleSourcePath(row.rule) : "";
+  const deletable = selectedRows.filter((item) => Boolean(item.rule.path));
+  const deleteLabel = selectionDeleteLabel("rule", selectedRows.length);
+  const actions: Record<string, DataTableSelectionActionDefinition> = {
+    "open-editor": {
+      id: "open-editor",
+      direct: <button aria-label={actionLabels.openInEditor} disabled={!path} onClick={() => path && safeInvoke(TauriCommand.OpenInEditor, { path })}><Code2 size={15} /><span>{actionLabels.openInEditor}</span></button>,
+      menu: <OpenInEditorMenuItem Menu={Menu} path={path} />,
+      measure: <><Code2 size={15} /><span>{actionLabels.openInEditor}</span></>,
+    },
+    reveal: {
+      id: "reveal",
+      direct: <button aria-label={actionLabels.revealInFinder} disabled={!path} onClick={() => path && safeInvoke(TauriCommand.RevealInFinder, { path })}><FolderOpen size={15} /><span>{actionLabels.revealInFinder}</span></button>,
+      menu: <RevealInFinderMenuItem Menu={Menu} path={path} />,
+      measure: <><FolderOpen size={15} /><span>{actionLabels.revealInFinder}</span></>,
+      separatorBefore: true,
+    },
+    "copy-path": {
+      id: "copy-path",
+      direct: <CopyButton value={path} disabled={!path} copyLabel={actionLabels.copyPath} copiedLabel={actionLabels.pathCopied} iconSize={15}>{actionLabels.copyPath}</CopyButton>,
+      menu: <CopyPathMenuItem Menu={Menu} path={path} />,
+      measure: <><Copy size={15} /><span>{actionLabels.copyPath}</span></>,
+    },
+    delete: {
+      id: "delete",
+      direct: <button type="button" className="danger" aria-label={deleteLabel} disabled={deletable.length === 0 || deleting} onClick={() => requestDeleteRules(deletable)}><Trash2 size={15} /><span>{deleteLabel}</span></button>,
+      menu: <DeleteMenuItem Menu={Menu} label={deleteLabel} disabled={deletable.length === 0 || deleting} onSelect={() => requestDeleteRules(deletable)} />,
+      measure: <><Trash2 size={15} /><span>{deleteLabel}</span></>,
+      separatorBefore: true,
+    },
+  };
+  return ruleSelectionActionIds(selectedRows.length).map((id) => actions[id]);
+}
+
+function RuleActionsCell({ rule, requestDeleteRules, deleting }: { rule: RuleRecord; requestDeleteRules: (rows: RuleTableRow[]) => void; deleting: boolean }) {
   return (
     <RowActionsMenu
       ariaLabel={`Rule actions for ${ruleTitle(rule)}`}
       onOpenChange={(open) => { if (!open) suppressNextClick(); }}
     >
-      <RuleActionsMenuItems Menu={DropdownMenu} rule={rule} />
+      {renderDataTableSelectionMenu(ruleSelectionActions([{ key: ruleKey(rule), id: ruleKey(rule), rule }], DropdownMenu, requestDeleteRules, deleting))}
     </RowActionsMenu>
   );
 }
@@ -132,7 +173,7 @@ function RuleInfoMenu({
                   >
                     <FolderOpen size={13} />
                   </button>
-                  <CopyButton className="appButton appButton-icon" value={path} copyLabel="Copy rule path" copiedLabel="Rule path copied" />
+                  <CopyButton className="appButton appButton-icon" value={path} copyLabel={copyPathLabel("rule")} copiedLabel={copiedPathLabel("rule")} />
               </InfoSection>
             )}
             {referencedSkillNames.length > 0 && (
@@ -165,6 +206,7 @@ export function RulesView({
   hasRows = false,
   onRetry,
   onOpenSkill,
+  onDeleteRules,
   projects,
 }: {
   rows: RuleRecord[];
@@ -174,6 +216,7 @@ export function RulesView({
   hasRows?: boolean;
   onRetry?: () => void;
   onOpenSkill?: (name: string) => void;
+  onDeleteRules?: (paths: string[]) => Promise<unknown>;
   projects?: ProjectSummary[];
 }) {
   const projectList = projects ?? [];
@@ -187,6 +230,13 @@ export function RulesView({
   const [detailCollapsed, setDetailCollapsed] = useState(false);
   const [showDiscardDialog, setShowDiscardDialog] = useState(false);
   const [pendingKey, setPendingKey] = useState("");
+  const [pendingDeleteRows, setPendingDeleteRows] = useState<RuleTableRow[]>([]);
+  const [pendingDeleteConfirmRows, setPendingDeleteConfirmRows] = useState<RuleTableRow[]>([]);
+  const [deleting, setDeleting] = useState(false);
+  const [deleteError, setDeleteError] = useState("");
+  const loadedRulePathRef = useRef("");
+  const [ruleLoadError, setRuleLoadError] = useState("");
+  const [ruleLoadAttempt, setRuleLoadAttempt] = useState(0);
   const normalizedQuery = query.trim().toLowerCase();
   const activeItem = useMemo(() => ruleItems.find((item) => item.key === activeKey), [activeKey, ruleItems]);
   const activeRule = activeItem?.rule ?? null;
@@ -195,6 +245,8 @@ export function RulesView({
   const deferredContent = useDeferredValue(content);
   const referencedSkillNames = useMemo(() => ruleSkillRefs(content, skills), [content, skills]);
   const dirty = content !== draft.originalContent;
+  const dirtyRef = useRef(dirty);
+  dirtyRef.current = dirty;
   const diffLines = useMemo(
     () => loading || !dirty ? [] : diffPreview(draft.originalContent, deferredContent),
     [deferredContent, dirty, draft.originalContent, loading],
@@ -217,6 +269,42 @@ export function RulesView({
     () => filteredRules.map((item) => ({ ...item, id: item.key })),
     [filteredRules],
   );
+  const requestDeleteRules = useCallback((items: RuleTableRow[]) => {
+    const deletable = items.filter((item) => Boolean(item.rule.path));
+    if (deletable.length === 0) return;
+    if (dirty && deletable.some((item) => item.rule.path === activeRule?.path)) {
+      setPendingKey("");
+      setPendingDeleteRows(deletable);
+      setPendingDeleteConfirmRows([]);
+      setShowDiscardDialog(true);
+      return;
+    }
+    setPendingDeleteConfirmRows(deletable);
+  }, [activeRule?.path, dirty]);
+  const confirmDeleteRules = useCallback(async () => {
+    const targets = pendingDeleteConfirmRows;
+    if (targets.length === 0 || deleting) return;
+    setDeleting(true);
+    setDeleteError("");
+    try {
+      const result = await onDeleteRules?.(targets.map((item) => item.rule.path));
+      const error = operationError(result);
+      if (error) {
+        setDeleteError(error);
+        return;
+      }
+      if (!result) {
+        setDeleteError("Could not delete rules.");
+        return;
+      }
+      setPendingDeleteConfirmRows([]);
+      setSelected([]);
+    } catch (error) {
+      setDeleteError(`${error}`);
+    } finally {
+      setDeleting(false);
+    }
+  }, [deleting, onDeleteRules, pendingDeleteConfirmRows]);
   const columns = useMemo((): ColumnDef<RuleTableRow>[] => [
     {
       key: "source",
@@ -271,36 +359,17 @@ export function RulesView({
       key: "actions",
       header: "",
       width: "40px",
-      render: (row) => <RuleActionsCell rule={row.rule} />,
+      render: (row) => <RuleActionsCell rule={row.rule} requestDeleteRules={requestDeleteRules} deleting={deleting} />,
     },
-  ], [projectList]);
+  ], [deleting, projectList, requestDeleteRules]);
   const rowContextMenu = useCallback((row: RuleTableRow, { selectedRows, selected: isSelected }: { selectedRows: RuleTableRow[]; selected: boolean }) => {
-    if (isSelected && selectedRows.length > 1) return null;
-    return <RuleActionsMenuItems Menu={ContextMenu} rule={row.rule} />;
-  }, []);
-  const bottomBar = useCallback((selectedRows: RuleTableRow[]) => {
-    const firstPath = ruleSourcePath(selectedRows[0].rule);
-    return (
-      <>
-        <button
-          aria-label="Reveal selected rule in Finder"
-          disabled={!firstPath}
-          onClick={() => firstPath && safeInvoke(TauriCommand.RevealInFinder, { path: firstPath })}
-        >
-          Reveal in Finder
-        </button>
-        <CopyButton
-          value={firstPath}
-          copyLabel="Copy path"
-          copiedLabel="Path copied"
-          disabled={!firstPath}
-          iconSize={15}
-        >
-          Copy path
-        </CopyButton>
-      </>
-    );
-  }, []);
+    const actionRows = isSelected ? selectedRows : [row];
+    const actions = ruleSelectionActions(actionRows, ContextMenu, requestDeleteRules, deleting);
+    return actions.length > 0 ? renderDataTableSelectionMenu(actions) : null;
+  }, [deleting, requestDeleteRules]);
+  const bottomBar = useCallback((selectedRows: RuleTableRow[]) => (
+    <DataTableSelectionActions actions={ruleSelectionActions(selectedRows, DropdownMenu, requestDeleteRules, deleting)} ariaLabel="More selected rule actions" />
+  ), [deleting, requestDeleteRules]);
 
   useEffect(() => {
     if (!activeKey && ruleItems[0]) setActiveKey(ruleItems[0].key);
@@ -315,26 +384,38 @@ export function RulesView({
 
   useEffect(() => {
     let cancelled = false;
-    setDraft({ content: "", originalContent: "", sha256: "" });
-    if (!activeRule?.path) {
+    const rulePath = activeRule?.path ?? "";
+    if (!rulePath) {
+      loadedRulePathRef.current = "";
+      setDraft({ content: "", originalContent: "", sha256: "" });
+      setRuleLoadError("");
       setLoading(false);
       return () => { cancelled = true; };
     }
-    const rulePath = activeRule.path;
+    if (dirtyRef.current && loadedRulePathRef.current === rulePath) {
+      return () => { cancelled = true; };
+    }
+    loadedRulePathRef.current = rulePath;
+    setDraft({ content: "", originalContent: "", sha256: "" });
     setLoading(true);
+    setRuleLoadError("");
     async function loadRule() {
-      const result = await safeInvoke(TauriCommand.RuleFileRead, { path: rulePath }) as { content?: string; sha256?: string } | null;
-      if (cancelled) return;
-      if (typeof result?.content === "string" && typeof result.sha256 === "string") {
+      try {
+        const result = await readRuleFile(() => invokeCommand(TauriCommand.RuleFileRead, { path: rulePath }));
+        if (cancelled) return;
         setDraft({ content: result.content, originalContent: result.content, sha256: result.sha256 });
-      } else {
+        setRuleLoadError("");
+      } catch {
+        if (cancelled) return;
         setDraft({ content: "", originalContent: "", sha256: "" });
+        setRuleLoadError("Could not load rule. Try again.");
+      } finally {
+        if (!cancelled) setLoading(false);
       }
-      setLoading(false);
     }
     loadRule();
     return () => { cancelled = true; };
-  }, [activeRule?.path, activeRule?.sha256]);
+  }, [activeRule?.path, activeRule?.sha256, ruleLoadAttempt]);
 
   const save = useCallback(async () => {
     if (!dirty || !draft.sha256 || !activeRule?.path) return;
@@ -371,6 +452,13 @@ export function RulesView({
   };
 
   const discardAndOpenPending = () => {
+    const deleteTargets = pendingDeleteRows;
+    setPendingDeleteRows([]);
+    if (deleteTargets.length > 0) {
+      setDraft((current) => ({ ...current, content: current.originalContent }));
+      setPendingDeleteConfirmRows(deleteTargets);
+      return;
+    }
     if (pendingKey) {
       setActiveKey(pendingKey);
       setDetailCollapsed(false);
@@ -380,13 +468,33 @@ export function RulesView({
 
   return (
     <PanelGroup className="sessionsLayout rulesLayout" orientation="horizontal">
-      <DiscardChangesDialog open={showDiscardDialog} onOpenChange={setShowDiscardDialog} onDiscard={discardAndOpenPending} />
+      <DiscardChangesDialog
+        open={showDiscardDialog}
+        onOpenChange={(open) => {
+          setShowDiscardDialog(open);
+          if (!open) {
+            setPendingDeleteRows([]);
+            setPendingKey("");
+          }
+        }}
+        onDiscard={discardAndOpenPending}
+      />
+      <DeleteConfirmationDialog
+        open={pendingDeleteConfirmRows.length > 0}
+        items={pendingDeleteConfirmRows.map((item) => formatUserPath(item.rule.path))}
+        itemLabel="rule"
+        description="Delete the selected rule files? This action cannot be undone."
+        busy={deleting}
+        onOpenChange={(open) => { if (!open) setPendingDeleteConfirmRows([]); }}
+        onConfirm={() => { void confirmDeleteRules(); }}
+      />
       <Panel className="sessionListPanel ruleListPanel" defaultSize="54%" minSize="360px">
         <div className="sessionListPane ruleListPane">
           <PageHeader title="Rules" compact>
             <SearchField pageSearch placeholder="Search rules" value={query} onChange={(event) => setQuery(event.target.value)} onClear={() => setQuery("")} />
           </PageHeader>
           {loadError && hasRows ? <LoadErrorState message={loadError} onRetry={onRetry} /> : null}
+          {deleteError ? <Toast tone="error" message={deleteError} onDismiss={() => setDeleteError("")} /> : null}
           <div className="sessionListBody">
             <DataTable
               rows={tableRows}
@@ -404,6 +512,7 @@ export function RulesView({
               onRowClick={(row) => openRule(row.key)}
               rowContextMenu={rowContextMenu}
               bottomBar={bottomBar}
+              bottomBarActionsClassName="selectionActions"
               bottomBarCheckboxLabel="Select visible rules from toolbar"
               selectionLabel="rules"
               loading={loadingRows && !hasRows}
@@ -445,6 +554,10 @@ export function RulesView({
           >
             {loading ? (
               <EditorStatePlaceholder className="ruleEditorLoading" label="Loading rule" />
+            ) : ruleLoadError ? (
+              <div className="ruleEditorLoading">
+                <LoadErrorState message={ruleLoadError} onRetry={() => setRuleLoadAttempt((attempt) => attempt + 1)} />
+              </div>
             ) : (
               <Suspense fallback={<EditorStatePlaceholder className="ruleEditorLoading" label="Loading editor" />}>
                 <MarkdownFilePane

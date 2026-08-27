@@ -1636,6 +1636,8 @@ try {
       if (command === "session_projects_list") return [];
       if (command === "project_scan_scopes_list") return [];
       if (command === "app_icon_set") return null;
+      if (command === "plugin:image|new") return 1;
+      if (command === "plugin:resources|close") return null;
       if (command === "plugin:window|set_icon") return null;
       if (command === "check_for_updates") return { status: "up-to-date" };
       if (command === "skills_targets") {

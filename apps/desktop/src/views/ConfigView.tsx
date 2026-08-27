@@ -1,7 +1,7 @@
 import { Tooltip } from "../components/shared/Tooltip.tsx";
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Dialog } from "radix-ui";
-import { ArrowRightLeft, Files, Plus, RefreshCw, Save } from "lucide-react";
+import { ContextMenu, Dialog, DropdownMenu } from "radix-ui";
+import { ArrowRightLeft, Code2, Copy, Files, FolderOpen, Plus, RefreshCw, Trash2 } from "lucide-react";
 import { Group as PanelGroup, Panel } from "react-resizable-panels";
 
 import { DataTable } from "../components/DataTable.tsx";
@@ -15,6 +15,10 @@ import { DiscardChangesDialog } from "../components/shared/DiscardChangesDialog.
 import { DialogTextField } from "../components/shared/DialogTextField.tsx";
 import { EmptyState } from "../components/shared/EmptyState.tsx";
 import { DialogStatefulButton } from "../components/shared/DialogStatefulButton.tsx";
+import { CopyPathMenuItem, DeleteMenuItem, OpenInEditorMenuItem, RevealInFinderMenuItem, type DataTableMenuComponents } from "../components/shared/DataTableMenus.tsx";
+import { CopyButton } from "../components/shared/CopyButton.tsx";
+import { DataTableSelectionActions, renderDataTableSelectionMenu, type DataTableSelectionActionDefinition } from "../components/shared/DataTableSelectionActions.tsx";
+import { DeleteConfirmationDialog } from "../components/shared/DeleteConfirmationDialog.tsx";
 import { IconButton } from "../components/shared/IconButton.tsx";
 import { LoadingIcon } from "../components/shared/LoadingIcon.tsx";
 import { LoadingInline } from "../components/shared/LoadingInline.tsx";
@@ -25,7 +29,8 @@ import { ResizeSeparator } from "../components/shared/ResizeSeparator.tsx";
 import { SelectControl } from "../components/shared/SelectControl.tsx";
 import { StatefulButton } from "../components/shared/StatefulButton.tsx";
 import { Toast } from "../components/shared/Toast.tsx";
-import { DaemonCommandError, TauriCommand, compactDateTime, formatUserPath, friendlyAgent, invokeCommand, logger, mergeThreeWay, subscribeDaemonEvents } from "../lib/index.ts";
+import { actionLabels, DaemonCommandError, selectionDeleteLabel, TauriCommand, compactDateTime, configSelectionActionIds, formatUserPath, friendlyAgent, invokeCommand, logger, mergeThreeWay, safeInvoke, subscribeDaemonEvents } from "../lib/index.ts";
+import { resolveSelectValue } from "../lib/select-options.ts";
 import type { DaemonEvent } from "../lib/index.ts";
 import "./ConfigView.css";
 
@@ -87,10 +92,52 @@ function isConflictMarkerContent(value: string) {
   return /^(?:<{7} |\|{7} |={7}$|>{7} )/m.test(value);
 }
 
+function configSelectionActions(
+  selectedRows: AgentConfigFile[],
+  Menu: DataTableMenuComponents,
+  requestDeleteConfigs: (configs: AgentConfigFile[]) => void,
+  deleting: boolean,
+): DataTableSelectionActionDefinition[] {
+  const config = selectedRows.length === 1 ? selectedRows[0] : undefined;
+  const path = config?.path ?? "";
+  const deletable = selectedRows.filter((item) => item.exists);
+  const deleteLabel = selectionDeleteLabel("config file", selectedRows.length);
+  const actions: Record<string, DataTableSelectionActionDefinition> = {
+    "open-editor": {
+      id: "open-editor",
+      direct: <button type="button" aria-label={actionLabels.openInEditor} disabled={!path} onClick={() => path && void safeInvoke(TauriCommand.OpenInEditor, { path })}><Code2 size={15} /><span>{actionLabels.openInEditor}</span></button>,
+      menu: <OpenInEditorMenuItem Menu={Menu} path={path} />,
+      measure: <><Code2 size={15} /><span>{actionLabels.openInEditor}</span></>,
+    },
+    reveal: {
+      id: "reveal",
+      direct: <button type="button" aria-label={actionLabels.revealInFinder} disabled={!path} onClick={() => path && void safeInvoke(TauriCommand.RevealInFinder, { path })}><FolderOpen size={15} /><span>{actionLabels.revealInFinder}</span></button>,
+      menu: <RevealInFinderMenuItem Menu={Menu} path={path} />,
+      measure: <><FolderOpen size={15} /><span>{actionLabels.revealInFinder}</span></>,
+      separatorBefore: true,
+    },
+    "copy-path": {
+      id: "copy-path",
+      direct: <CopyButton value={path} disabled={!path} copyLabel={actionLabels.copyPath} copiedLabel={actionLabels.pathCopied} iconSize={15}>{actionLabels.copyPath}</CopyButton>,
+      menu: <CopyPathMenuItem Menu={Menu} path={path} />,
+      measure: <><Copy size={15} /><span>{actionLabels.copyPath}</span></>,
+    },
+    delete: {
+      id: "delete",
+      direct: <button type="button" className="danger" aria-label={deleteLabel} disabled={deletable.length === 0 || deleting} onClick={() => requestDeleteConfigs(deletable)}><Trash2 size={15} /><span>{deleteLabel}</span></button>,
+      menu: <DeleteMenuItem Menu={Menu} label={deleteLabel} disabled={deletable.length === 0 || deleting} onSelect={() => requestDeleteConfigs(deletable)} />,
+      measure: <><Trash2 size={15} /><span>{deleteLabel}</span></>,
+      separatorBefore: true,
+    },
+  };
+  return configSelectionActionIds(selectedRows.length).map((id) => actions[id]);
+}
+
 export function ConfigView() {
   const [configs, setConfigs] = useState<AgentConfigFile[]>([]);
   const [activePath, setActivePath] = useState("");
   const [selectedPath, setSelectedPath] = useState("");
+  const [selected, setSelected] = useState<string[]>([]);
   const [content, setContent] = useState("");
   const [originalContent, setOriginalContent] = useState("");
   const [sha256, setSha256] = useState("");
@@ -102,6 +149,10 @@ export function ConfigView() {
   const [pendingPath, setPendingPath] = useState("");
   const [pendingReload, setPendingReload] = useState(false);
   const [showDiscardDialog, setShowDiscardDialog] = useState(false);
+  const [pendingDeleteConfigs, setPendingDeleteConfigs] = useState<AgentConfigFile[]>([]);
+  const [pendingDeleteConfirmConfigs, setPendingDeleteConfirmConfigs] = useState<AgentConfigFile[]>([]);
+  const [deleting, setDeleting] = useState(false);
+  const [deleteError, setDeleteError] = useState("");
   const [activeProfiles, setActiveProfiles] = useState<Record<string, string>>({});
   const [selectedProfileValue, setSelectedProfileValue] = useState(BASE_PROFILE_VALUE);
   const [profileDialogOpen, setProfileDialogOpen] = useState(false);
@@ -145,7 +196,8 @@ export function ConfigView() {
   const activeProfileValue = activeProfile && profileConfigs.some((config) => config.profile === activeProfile)
     ? `profile:${activeProfile}`
     : BASE_PROFILE_VALUE;
-  const profileSelectionChanged = selectedProfileValue !== activeProfileValue;
+  const resolvedSelectedProfileValue = resolveSelectValue(selectedProfileValue, profileOptions);
+  const profileSelectionChanged = resolvedSelectedProfileValue !== activeProfileValue;
   const columns = useMemo<ColumnDef<AgentConfigFile>[]>(() => [
     {
       key: "agent",
@@ -244,8 +296,18 @@ export function ConfigView() {
       if (selected) {
         setSelectedProfileValue(profileValueForConfig(selected));
         await readConfig(selected.path, selected);
+      } else {
+        readRequestRef.current += 1;
+        setActivePath("");
+        setSelectedPath("");
+        setContent("");
+        setOriginalContent("");
+        setSha256("");
+        setConflict(null);
+        setSaveError("");
+        setContentError("");
+        setLoadingConfig(false);
       }
-      else setLoadingConfig(false);
     } catch (error) {
       setLoadError(errorMessage(error));
       setLoadingConfig(false);
@@ -296,6 +358,10 @@ export function ConfigView() {
     };
   }, [activePath, applyExternalSnapshot]);
 
+  useEffect(() => {
+    setSelected((current) => current.filter((path) => configs.some((config) => config.path === path)));
+  }, [configs]);
+
   const chooseConfig = (path: string) => {
     if (path === activePath) {
       if (selectedPath !== path) {
@@ -332,16 +398,68 @@ export function ConfigView() {
   };
 
   const discardPendingChanges = () => {
+    const deleteTargets = pendingDeleteConfigs;
     const nextPath = pendingPath;
     const shouldReload = pendingReload;
+    setPendingDeleteConfigs([]);
     setPendingPath("");
     setPendingReload(false);
+    if (deleteTargets.length > 0) {
+      setContent(originalContent);
+      setSha256(sha256);
+      setConflict(null);
+      setSaveError("");
+      setPendingDeleteConfirmConfigs(deleteTargets);
+      return;
+    }
     if (nextPath) {
       setSelectedProfileValue(profileValueForConfig(configs.find((config) => config.path === nextPath)));
       void readConfig(nextPath, configs.find((config) => config.path === nextPath));
     }
     else if (shouldReload) void loadConfigs();
   };
+
+  const requestDeleteConfigs = useCallback((items: AgentConfigFile[]) => {
+    const deletable = items.filter((config) => config.exists);
+    if (deletable.length === 0) return;
+    if (dirty && deletable.some((config) => config.path === activePath)) {
+      setPendingDeleteConfigs(deletable);
+      setPendingDeleteConfirmConfigs([]);
+      setShowDiscardDialog(true);
+      return;
+    }
+    setPendingDeleteConfirmConfigs(deletable);
+  }, [activePath, dirty]);
+
+  const confirmDeleteConfigs = useCallback(async () => {
+    const targets = pendingDeleteConfirmConfigs;
+    if (targets.length === 0 || deleting) return;
+    setDeleting(true);
+    setDeleteError("");
+    try {
+      await invokeCommand<AgentConfigFile[]>(TauriCommand.AgentConfigsDeleteMany, {
+        paths: targets.map((config) => config.path),
+      });
+      setPendingDeleteConfirmConfigs([]);
+      setSelected([]);
+      await loadConfigs();
+      await loadSettings();
+    } catch (error) {
+      setDeleteError(errorMessage(error));
+    } finally {
+      setDeleting(false);
+    }
+  }, [deleting, loadConfigs, loadSettings, pendingDeleteConfirmConfigs]);
+
+  const rowContextMenu = useCallback((config: AgentConfigFile, { selectedRows, selected: isSelected }: { selectedRows: AgentConfigFile[]; selected: boolean }) => {
+    const actionRows = isSelected ? selectedRows : [config];
+    const actions = configSelectionActions(actionRows, ContextMenu, requestDeleteConfigs, deleting);
+    return actions.length > 0 ? renderDataTableSelectionMenu(actions) : null;
+  }, [deleting, requestDeleteConfigs]);
+
+  const bottomBar = useCallback((selectedRows: AgentConfigFile[]) => (
+    <DataTableSelectionActions actions={configSelectionActions(selectedRows, DropdownMenu, requestDeleteConfigs, deleting)} ariaLabel="More selected config actions" />
+  ), [deleting, requestDeleteConfigs]);
 
   const activateProfile = useCallback(async (agent: string, value: string) => {
     if (profileSwitching) return;
@@ -478,8 +596,24 @@ export function ConfigView() {
     <PanelGroup className="sessionsLayout configLayout" orientation="horizontal">
       <DiscardChangesDialog
         open={showDiscardDialog}
-        onOpenChange={setShowDiscardDialog}
+        onOpenChange={(open) => {
+          setShowDiscardDialog(open);
+          if (!open) {
+            setPendingDeleteConfigs([]);
+            setPendingPath("");
+            setPendingReload(false);
+          }
+        }}
         onDiscard={discardPendingChanges}
+      />
+      <DeleteConfirmationDialog
+        open={pendingDeleteConfirmConfigs.length > 0}
+        items={pendingDeleteConfirmConfigs.map((config) => formatUserPath(config.path))}
+        itemLabel="config file"
+        description="Delete the selected config files? This action cannot be undone."
+        busy={deleting}
+        onOpenChange={(open) => { if (!open) setPendingDeleteConfirmConfigs([]); }}
+        onConfirm={() => { void confirmDeleteConfigs(); }}
       />
       <DialogShell
         open={profileDialogOpen}
@@ -514,7 +648,7 @@ export function ConfigView() {
             disabled={!profileName.trim()}
             onClick={() => { void createProfile(); }}
           >
-            <><span>Create</span><Save size={16} /></>
+            Create
           </DialogStatefulButton>
         </DialogActionBar>
       </DialogShell>
@@ -530,17 +664,27 @@ export function ConfigView() {
               {loadingConfigs ? <LoadingIcon size={14} /> : <RefreshCw size={14} />}
             </IconButton>
           </PageHeader>
+          {deleteError ? <Toast tone="error" message={deleteError} onDismiss={() => setDeleteError("")} /> : null}
           <div className="sessionListBody">
             <DataTable
               rows={configs}
               columns={columns}
               getRowId={(config) => config.path}
               getRowLabel={(config) => config.label}
+              selectable
+              selectedIds={selected}
+              onSelectionChange={setSelected}
+              enableMarquee
               onRowClick={(config) => chooseConfig(config.path)}
               rowProps={(config) => ({
                 className: config.path === selectedPath ? "configRowActive" : "",
                 "aria-current": config.path === selectedPath ? "true" : undefined,
               })}
+              rowContextMenu={rowContextMenu}
+              bottomBar={bottomBar}
+              bottomBarActionsClassName="selectionActions"
+              bottomBarCheckboxLabel="Select visible configs from toolbar"
+              selectionLabel="configs"
               loading={loadingConfigs && configs.length === 0}
               loadingLabel="Loading configs"
               emptyState={loadError ? <LoadErrorState message={loadError} onRetry={() => { void loadConfigs(); }} /> : (
@@ -576,7 +720,7 @@ export function ConfigView() {
                 <SelectControl
                   contentClassName="configProfileSelectContent"
                   label={`Active ${friendlyAgent(profileAgent)} profile`}
-                  value={selectedProfileValue}
+                  value={resolvedSelectedProfileValue}
                   onValueChange={setSelectedProfileValue}
                   options={profileOptions}
                   indicatorPosition="left"
@@ -596,7 +740,7 @@ export function ConfigView() {
                   loadingContent={<LoadingInline size={14} gap={6} label="Switch" />}
                   aria-label={dirty ? "Save or discard changes before switching a config profile" : profileSwitching ? "Switching config profile" : profileSelectionChanged ? "Switch selected config profile" : "Active config profile"}
                   disabled={!profileSelectionChanged || dirty || profileSwitching || profileSaving}
-                  onClick={() => { void activateProfile(profileAgent, selectedProfileValue); }}
+                  onClick={() => { void activateProfile(profileAgent, resolvedSelectedProfileValue); }}
                 >
                   <><ArrowRightLeft size={14} /><span>Switch</span></>
                 </StatefulButton></Tooltip>

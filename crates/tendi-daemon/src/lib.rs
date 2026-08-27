@@ -28,6 +28,8 @@ const CONFIG_WATCH_DEBOUNCE: Duration = Duration::from_millis(150);
 const BACKUP_SYNC_INTERVAL: Duration = Duration::from_secs(10 * 60);
 const DATABASE_WRITE_LOCK_ATTEMPTS: usize = 100;
 const DATABASE_WRITE_LOCK_RETRY: Duration = Duration::from_millis(50);
+const SESSION_WATCH_DATABASE_RETRY_ATTEMPTS: usize = 4;
+const SESSION_WATCH_DATABASE_RETRY: Duration = Duration::from_millis(100);
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct DaemonRequest {
@@ -453,11 +455,13 @@ impl Daemon {
             "agent_config_watch" => self.agent_config_watch(args),
             "agent_config_read" => self.agent_config_read(args),
             "agent_config_save" => self.agent_config_save(args),
+            "agent_configs_delete_many" => self.agent_configs_delete_many(args),
             "config_profile_create" => self.config_profile_create(args),
             "config_profile_set" => self.config_profile_set(args),
             "rules_list" => self.rules_list(),
             "rule_file_read" => self.rule_file_read(args),
             "rule_file_save" => self.rule_file_save(args),
+            "rule_file_delete_many" => self.rule_file_delete_many(args),
             "hooks_list" => self.hooks_list(),
             "hook_delete" => self.hook_delete(args),
             "hook_delete_many" => self.hook_delete_many(args),
@@ -990,6 +994,37 @@ impl Daemon {
         }
     }
 
+    fn agent_configs_delete_many(&self, args: &Value) -> Result<Value, DaemonError> {
+        let paths = string_vec_arg(args, "paths")?
+            .into_iter()
+            .map(PathBuf::from)
+            .collect::<Vec<_>>();
+        let _authority = self.control_authority()?;
+        let configs = tendi_core::config::list_agent_configs().map_err(core_error)?;
+        tendi_core::config::delete_agent_configs(&paths).map_err(core_error)?;
+
+        let store = tendi_core::storage::Store::open_default().map_err(core_error)?;
+        let mut settings = store.app_settings().map_err(core_error)?;
+        let mut settings_changed = false;
+        for config in configs.iter().filter(|config| paths.contains(&config.path)) {
+            let Some(profile) = config.profile.as_deref() else {
+                continue;
+            };
+            let Some(key) = tendi_core::config_profile_key(config.agent) else {
+                continue;
+            };
+            if settings.config_profiles.get(key).map(String::as_str) == Some(profile) {
+                settings.config_profiles.remove(key);
+                settings_changed = true;
+            }
+        }
+        if settings_changed {
+            with_database_write_lock(&store, || store.save_app_settings(settings.clone()))?;
+        }
+        serde_json::to_value(tendi_core::config::list_agent_configs().map_err(core_error)?)
+            .map_err(internal_error)
+    }
+
     fn config_profile_create(&self, args: &Value) -> Result<Value, DaemonError> {
         let agent = parse_agent(&string_arg(args, "agent")?)?;
         let name = string_arg(args, "name")?;
@@ -1063,6 +1098,24 @@ impl Daemon {
         let cwd = self.state.cwd.clone();
         with_database_write_lock(&store, || store.save_rules_for_workspace(&cwd, &after))?;
         serde_json::to_value(result).map_err(internal_error)
+    }
+
+    fn rule_file_delete_many(&self, args: &Value) -> Result<Value, DaemonError> {
+        let paths = string_vec_arg(args, "paths")?
+            .into_iter()
+            .map(PathBuf::from)
+            .collect::<Vec<_>>();
+        let _authority = self.control_authority()?;
+        let store = tendi_core::storage::Store::open_default().map_err(core_error)?;
+        let project_roots = Self::registered_project_roots(&store).map_err(core_error)?;
+        tendi_core::rules::delete_rule_files_for_project_roots(
+            &self.state.cwd,
+            &paths,
+            &project_roots,
+        )
+        .map_err(core_error)?;
+        let report = self.rules_projection()?;
+        serde_json::to_value(report.rules).map_err(internal_error)
     }
 
     fn rules_projection(&self) -> Result<tendi_core::rules::RuleScan, DaemonError> {
@@ -1489,10 +1542,13 @@ impl Daemon {
     }
 
     fn skills_backup_status(&self) -> Result<Value, DaemonError> {
+        self.refresh_backup_projections()?;
         let store = tendi_core::storage::Store::open_default().map_err(core_error)?;
         let config = store.skill_backup_config().map_err(core_error)?;
+        let catalog = tendi_core::skill_backup::backup_catalog(&store, &self.state.cwd)
+            .map_err(core_error)?;
         if config.is_none() {
-            return Ok(json!({ "config": config, "statuses": [], "versions": [] }));
+            return Ok(json!({ "config": config, "statuses": [], "versions": [], "catalog": catalog }));
         }
         let cached_scan = store
             .list_skills_cached_for_workspace(&self.state.cwd)
@@ -1537,7 +1593,7 @@ impl Daemon {
         } else {
             Vec::new()
         };
-        Ok(json!({ "config": config, "statuses": statuses, "versions": versions }))
+        Ok(json!({ "config": config, "statuses": statuses, "versions": versions, "catalog": catalog }))
     }
 
     fn skills_backup_configure(&self, args: &Value) -> Result<Value, DaemonError> {
@@ -1549,8 +1605,23 @@ impl Daemon {
         let device_label = optional_string_arg(args, "deviceLabel")
             .filter(|label| !label.trim().is_empty())
             .unwrap_or_else(|| "My device".to_string());
-        let config =
+        let contents = args
+            .get("contents")
+            .cloned()
+            .map(serde_json::from_value::<tendi_core::skill_backup::BackupContents>)
+            .transpose()
+            .map_err(|error| invalid_argument(format!("invalid backup contents: {error}")))?
+            .unwrap_or_default();
+        let mut config =
             tendi_core::skill_backup::BackupConfig::new(remote_url, checkout_path, device_label);
+        config.contents = contents;
+        config.validate().map_err(core_error)?;
+        let working_directory = config
+            .checkout_path
+            .parent()
+            .unwrap_or_else(|| Path::new("."));
+        tendi_core::skill_backup::validate_remote(&config.remote_url, working_directory)
+            .map_err(core_error)?;
         let store = tendi_core::storage::Store::open_default().map_err(core_error)?;
         let config = with_database_write_lock(&store, || store.save_skill_backup_config(&config))?;
         self.schedule_skill_backup();
@@ -1563,8 +1634,9 @@ impl Daemon {
             return Err(invalid_argument("a skill backup sync is already running"));
         }
         let report = (|| -> Result<_, DaemonError> {
+            self.refresh_backup_projections()?;
             let store = tendi_core::storage::Store::open_default().map_err(core_error)?;
-            tendi_core::skill_backup::backup_now(&store).map_err(core_error)
+            tendi_core::skill_backup::backup_now(&store, &self.state.cwd).map_err(core_error)
         })();
         self.state
             .backup_sync_running
@@ -2630,7 +2702,10 @@ impl Daemon {
                 if store.skill_backup_config()?.is_none() {
                     return Ok(());
                 }
-                tendi_core::skill_backup::backup_now(&store)?;
+                daemon
+                    .refresh_backup_projections()
+                    .map_err(|error| anyhow::anyhow!(error.message))?;
+                tendi_core::skill_backup::backup_now(&store, &daemon.state.cwd)?;
                 Ok(())
             })();
             if let Err(error) = result {
@@ -2644,6 +2719,14 @@ impl Daemon {
                 .backup_sync_running
                 .store(false, Ordering::Release);
         });
+    }
+
+    fn refresh_backup_projections(&self) -> Result<(), DaemonError> {
+        self.skill_projection()?;
+        self.mcp_projection()?;
+        self.rules_projection()?;
+        self.hooks_projection()?;
+        Ok(())
     }
 
     fn lock_authority(&self) -> Result<std::sync::MutexGuard<'_, ()>, DaemonError> {
@@ -2993,7 +3076,7 @@ fn session_watch_loop(daemon: Daemon, receiver: Receiver<notify::Result<Event>>)
                     SESSION_SCAN_EVENT,
                     json!({
                         "generation": generation,
-                        "phase": "error",
+                        "phase": "watch",
                         "upserts": [],
                         "deleted": [],
                         "scanned": 0,
@@ -3018,46 +3101,7 @@ fn session_watch_loop(daemon: Daemon, receiver: Receiver<notify::Result<Event>>)
 }
 
 fn process_session_watch_paths(daemon: &Daemon, paths: &[PathBuf]) {
-    let result = (|| -> Result<
-        (
-            Vec<tendi_core::SessionRecord>,
-            Vec<tendi_core::sessions::SessionIdentity>,
-            Vec<tendi_core::SessionRecord>,
-        ),
-        DaemonError,
-    > {
-        let store = tendi_core::storage::Store::open_default().map_err(core_error)?;
-        let cache = store.session_scan_cache().map_err(core_error)?;
-        let existing_paths = paths
-            .iter()
-            .filter(|path| path.is_file())
-            .cloned()
-            .collect::<Vec<_>>();
-        let deleted_paths = paths
-            .iter()
-            .filter(|path| !path.exists())
-            .cloned()
-            .collect::<Vec<_>>();
-        let report = tendi_core::sessions::scan_session_paths(&existing_paths, &cache);
-        let analytics_sessions = report.sessions.clone();
-        let empty_paths = existing_paths
-            .iter()
-            .filter(|path| tendi_core::sessions::is_session_candidate_path(path))
-            .filter(|path| !report.sessions.iter().any(|session| session.path == **path))
-            .cloned()
-            .collect::<Vec<_>>();
-        let changed = cache.changed_sessions(&report.sessions);
-        let (upserts, deleted) = with_session_database_write_lock(&store, || {
-            let mut upserts = store.apply_session_delta(&changed)?;
-            store.resolve_session_projects(&mut upserts)?;
-            let mut deleted = store.remove_sessions_for_paths(&deleted_paths)?;
-            deleted.extend(
-                store.remove_sessions_for_paths(&empty_paths)?,
-            );
-            Ok((upserts, deleted))
-        })?;
-        Ok((upserts, deleted, analytics_sessions))
-    })();
+    let result = retry_session_watch_update(|| process_session_watch_paths_once(paths));
 
     match result {
         Ok((upserts, deleted, analytics_sessions))
@@ -3100,7 +3144,7 @@ fn process_session_watch_paths(daemon: &Daemon, paths: &[PathBuf]) {
                 SESSION_SCAN_EVENT,
                 json!({
                     "generation": daemon.state.session_runtime.generation.load(Ordering::SeqCst),
-                    "phase": "error",
+                    "phase": "watch",
                     "upserts": [],
                     "deleted": [],
                     "scanned": paths.len(),
@@ -3110,6 +3154,82 @@ fn process_session_watch_paths(daemon: &Daemon, paths: &[PathBuf]) {
             );
         }
     }
+}
+
+fn retry_session_watch_update<T, F>(mut update: F) -> Result<T, DaemonError>
+where
+    F: FnMut() -> Result<T, DaemonError>,
+{
+    for attempt in 0..SESSION_WATCH_DATABASE_RETRY_ATTEMPTS {
+        match update() {
+            Ok(value) => return Ok(value),
+            Err(error)
+                if is_database_lock_error(&error)
+                    && attempt + 1 < SESSION_WATCH_DATABASE_RETRY_ATTEMPTS =>
+            {
+                tendi_core::logging::global().warn(
+                    "session watcher update deferred",
+                    json!({
+                        "attempt": attempt + 1,
+                        "retry_in_ms": SESSION_WATCH_DATABASE_RETRY.as_millis(),
+                        "error": &error.message,
+                    }),
+                );
+                thread::sleep(SESSION_WATCH_DATABASE_RETRY);
+            }
+            result => return result,
+        }
+    }
+    unreachable!("session watcher retry loop must return from every attempt")
+}
+
+fn is_database_lock_error(error: &DaemonError) -> bool {
+    let message = error.message.to_ascii_lowercase();
+    message.contains("database is locked")
+        || message.contains("database table is locked")
+        || message.contains("database schema is locked")
+        || message.contains("timed out waiting for the database write lock")
+}
+
+fn process_session_watch_paths_once(
+    paths: &[PathBuf],
+) -> Result<
+    (
+        Vec<tendi_core::SessionRecord>,
+        Vec<tendi_core::sessions::SessionIdentity>,
+        Vec<tendi_core::SessionRecord>,
+    ),
+    DaemonError,
+> {
+    let store = tendi_core::storage::Store::open_default().map_err(core_error)?;
+    let cache = store.session_scan_cache().map_err(core_error)?;
+    let existing_paths = paths
+        .iter()
+        .filter(|path| path.is_file())
+        .cloned()
+        .collect::<Vec<_>>();
+    let deleted_paths = paths
+        .iter()
+        .filter(|path| !path.exists())
+        .cloned()
+        .collect::<Vec<_>>();
+    let report = tendi_core::sessions::scan_session_paths(&existing_paths, &cache);
+    let analytics_sessions = report.sessions.clone();
+    let empty_paths = existing_paths
+        .iter()
+        .filter(|path| tendi_core::sessions::is_session_candidate_path(path))
+        .filter(|path| !report.sessions.iter().any(|session| session.path == **path))
+        .cloned()
+        .collect::<Vec<_>>();
+    let changed = cache.changed_sessions(&report.sessions);
+    let (upserts, deleted) = with_session_database_write_lock(&store, || {
+        let mut upserts = store.apply_session_delta(&changed)?;
+        store.resolve_session_projects(&mut upserts)?;
+        let mut deleted = store.remove_sessions_for_paths(&deleted_paths)?;
+        deleted.extend(store.remove_sessions_for_paths(&empty_paths)?);
+        Ok((upserts, deleted))
+    })?;
+    Ok((upserts, deleted, analytics_sessions))
 }
 
 fn advance_session_watcher(runtime: &Arc<SessionRuntime>, event_path: &Path) -> Option<PathBuf> {
@@ -3924,6 +4044,32 @@ mod tests {
     }
 
     #[test]
+    fn rule_file_delete_many_refreshes_the_projection() {
+        let _test_lock = TEST_LOCK.lock().unwrap();
+        let root = temp_workspace();
+        let rule_path = root.join("AGENTS.md");
+        fs::write(&rule_path, "delete me").expect("write rule");
+        let daemon = Daemon::new(root.clone());
+
+        let listed = daemon.handle_json(json!({ "command": "rules_list", "args": {} }));
+        assert_eq!(listed["ok"], true, "list response: {listed}");
+        let response = daemon.handle_json(json!({
+            "command": "rule_file_delete_many",
+            "args": { "paths": [rule_path] }
+        }));
+
+        assert_eq!(response["ok"], true, "delete response: {response}");
+        assert!(!rule_path.exists());
+        let rule_path_text = rule_path.to_string_lossy();
+        assert!(!response["result"]
+            .as_array()
+            .expect("rules response should be an array")
+            .iter()
+            .any(|rule| rule["path"].as_str() == Some(rule_path_text.as_ref())));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn skill_distribution_moves_multiple_skills_in_one_preview() {
         let _test_lock = TEST_LOCK.lock().unwrap();
         let root = temp_workspace();
@@ -4289,6 +4435,31 @@ mod tests {
         assert_eq!(event.id, 1);
         assert_eq!(event.event, "analytics://revision");
         assert_eq!(event.payload["revision"], 42);
+    }
+
+    #[test]
+    fn session_watch_retries_database_lock_but_not_other_errors() {
+        let mut attempts = 0;
+        let result = retry_session_watch_update(|| {
+            attempts += 1;
+            if attempts < 3 {
+                Err(DaemonError::new("CORE_ERROR", "database is locked"))
+            } else {
+                Ok(42)
+            }
+        })
+        .unwrap();
+        assert_eq!(result, 42);
+        assert_eq!(attempts, 3);
+
+        let mut non_lock_attempts = 0;
+        let error = retry_session_watch_update(|| {
+            non_lock_attempts += 1;
+            Err::<(), _>(DaemonError::new("CORE_ERROR", "invalid session data"))
+        })
+        .expect_err("non-lock errors should fail immediately");
+        assert_eq!(error.message, "invalid session data");
+        assert_eq!(non_lock_attempts, 1);
     }
 
     #[test]

@@ -1,3 +1,5 @@
+export { actionLabels, copiedPathLabel, copiedValueLabel, copyPathLabel, copyValueLabel, selectionCopiedLabel, selectionCopyLabel, selectionDeleteLabel } from "./action-labels.ts";
+
 export {
   navItems,
   SIDEBAR_SIZE,
@@ -90,6 +92,8 @@ export type { NormalizedSkill, NormalizedSkillPath } from "./skills.ts";
 
 export { suppressNextClick } from "./dom.ts";
 
+export { skillChangeDescription, skillChangeTitle } from "./skill-change-copy.ts";
+
 export { logger } from "./logger.ts";
 export type { LogFields, LogLevel } from "./logger.ts";
 
@@ -123,6 +127,8 @@ export {
   compareSessions,
   sessionTimeMs,
 } from "./sessions.ts";
+export { sessionResumeErrorMessage, sessionResumeLabel, sessionResumeTargetForMenu } from "./session-resume.ts";
+export type { SessionResumeState } from "./session-resume.ts";
 export { sessionExternalKey, resolveInitialSession, resolveInitialSessionId } from "./session-selection.ts";
 export type { SessionIdentityRecord, SessionResumeOutcome, SessionResumeTarget, SessionSkillLinkRecord } from "./sessions.ts";
 export type { SessionKind, SessionRecord, SessionTokenUsage } from "./sessions.ts";
@@ -163,6 +169,19 @@ export {
   compareRules,
 } from "./rules.ts";
 export type { RuleRecord, RuleRow } from "./rules.ts";
+
+export { readRuleFile } from "./rule-file.ts";
+export type { RuleFileResult } from "./rule-file.ts";
+
+export {
+  configSelectionActionIds,
+  hookSelectionActionIds,
+  mcpSelectionActionIds,
+  promptSelectionActionIds,
+  ruleSelectionActionIds,
+  visibleSelectionActionCount,
+} from "./table-selection-actions.ts";
+export type { TableSelectionActionId } from "./table-selection-actions.ts";
 
 export {
   normalizeHook,

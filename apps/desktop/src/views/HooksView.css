@@ -174,15 +174,6 @@
   opacity: 0.72;
 }
 
-.hookBatchActionButton {
-  min-width: 72px;
-  justify-content: center;
-}
-
-.hookBatchActionButton.danger {
-  min-width: 64px;
-}
-
 .hookSectionHeaderActions {
   display: inline-flex;
   align-items: center;

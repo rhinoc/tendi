@@ -181,8 +181,34 @@
 }
 
 .dataTableBodyScroll {
+  overflow-anchor: none;
   overscroll-behavior-x: none;
   overscroll-behavior-y: auto;
+}
+
+/* During a large scroll jump React may need more than one frame to replace the
+   virtual row window. Keep the viewport covered with a lightweight seek layer
+   until the target rows have committed. */
+.dataTableVirtualSeek {
+  display: none;
+  position: absolute;
+  top: 0;
+  left: 0;
+  z-index: var(--z-content);
+  box-sizing: border-box;
+  pointer-events: none;
+  background-color: var(--surface-3, var(--surface-2, var(--content-bg)));
+  background-image: repeating-linear-gradient(
+    to bottom,
+    transparent 0,
+    transparent 57px,
+    var(--row-frame-line) 57px,
+    var(--row-frame-line) 58px
+  );
+}
+
+.dataTableVirtualSeek--visible {
+  display: block;
 }
 
 .pageScrollArea {

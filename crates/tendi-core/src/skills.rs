@@ -481,7 +481,7 @@ fn scan_skills_with_source_store_for_projects_for_projection(
     project_roots: &[PathBuf],
 ) -> Result<SkillScanWithSourceMigrations> {
     let source_records = store.skill_source_records()?;
-    let mut provenance_resolver = ProvenanceResolver::managed(cwd, source_records);
+    let mut provenance_resolver = ProvenanceResolver::managed(cwd, source_records, project_roots);
     let scan =
         scan_skills_with_resolver_for_projects(cwd, &mut provenance_resolver, project_roots)?;
     Ok(SkillScanWithSourceMigrations {
@@ -3573,6 +3573,7 @@ struct SkillsCliLockDatabase {
 #[derive(Debug, Default)]
 struct ProvenanceResolver {
     repositories: BTreeMap<PathBuf, Option<GitRepositoryProvenance>>,
+    project_repositories: BTreeSet<PathBuf>,
     source_records: BTreeMap<PathBuf, SkillSourceRecord>,
     lock_cwd: Option<PathBuf>,
     skills_cli_locks: Option<SkillsCliLockDatabase>,
@@ -3581,8 +3582,21 @@ struct ProvenanceResolver {
 }
 
 impl ProvenanceResolver {
-    fn managed(cwd: &Path, records: Vec<SkillSourceRecord>) -> Self {
+    fn managed(
+        cwd: &Path,
+        records: Vec<SkillSourceRecord>,
+        additional_project_dirs: &[PathBuf],
+    ) -> Self {
+        let project_repositories = crate::providers::ProviderContext::with_additional_project_dirs(
+            cwd,
+            additional_project_dirs,
+        )
+        .project_dirs()
+        .iter()
+        .filter_map(|directory| git_repository_boundary(directory))
+        .collect();
         Self {
+            project_repositories,
             source_records: records
                 .into_iter()
                 .map(|record| (record.skill_path.clone(), record))
@@ -3669,6 +3683,15 @@ impl ProvenanceResolver {
                 "skills-cli-lock",
             ));
             return provenance;
+        }
+
+        let is_project_repository = scope == "project"
+            && repository
+                .as_ref()
+                .is_some_and(|repository| self.project_repositories.contains(&repository.root));
+        // A Git remote on the project identifies the project, not an external skill source.
+        if scope == "project" && (is_materialized_inside_root || is_project_repository) {
+            return local_provenance(provenance_dir);
         }
 
         repository
@@ -8263,6 +8286,67 @@ Keep this handmade intro.
     }
 
     #[test]
+    fn project_repository_skill_is_local_without_external_provenance() {
+        let cwd = temp_dir("tendi-skills-scan-repository-cwd");
+        let project = temp_dir("tendi-skills-scan-repository-project");
+        let skill_dir = project.join(".agents/skills/project-skill");
+        fs::create_dir_all(&skill_dir).unwrap();
+        fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: project-skill\ndescription: Project skill\n---\n",
+        )
+        .unwrap();
+        run_test_git(&project, &["init", "--quiet"]);
+        run_test_git(
+            &project,
+            &[
+                "remote",
+                "add",
+                "origin",
+                "https://github.com/example/project-skills.git",
+            ],
+        );
+        let canonical_skill_dir = skill_dir.canonicalize().unwrap();
+
+        let store = crate::storage::Store::open(cwd.join("tendi.sqlite3")).unwrap();
+        let scan = super::scan_skills_with_source_store_for_projects(
+            &cwd,
+            &store,
+            std::slice::from_ref(&project),
+        )
+        .unwrap();
+        let skill = scan
+            .skills
+            .iter()
+            .find(|skill| skill.name == "project-skill")
+            .unwrap();
+        let path = skill
+            .paths
+            .iter()
+            .find(|path| path.path == canonical_skill_dir)
+            .unwrap();
+
+        assert_eq!(path.source_kind, "local");
+        assert_eq!(path.update_status, "local");
+        assert_eq!(
+            path.source.as_deref(),
+            Some(canonical_skill_dir.to_str().unwrap())
+        );
+        assert_eq!(skill.update_status, "local");
+
+        let update = super::check_skill_update(
+            skill,
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            super::git::never_cancelled(),
+        );
+        assert_eq!(update.status, "local");
+
+        let _ = fs::remove_dir_all(cwd);
+        let _ = fs::remove_dir_all(project);
+    }
+
+    #[test]
     fn global_skills_cli_v3_lock_uses_source_url_and_tree_hash() {
         let root = temp_dir("tendi-global-skills-cli-lock-test");
         let lock_path = root.join(".skill-lock.json");
@@ -8325,7 +8409,7 @@ Keep this handmade intro.
             update_status: "tracked".to_string(),
             origin: "skills-cli-lock".to_string(),
         };
-        let mut resolver = super::ProvenanceResolver::managed(&root, vec![record]);
+        let mut resolver = super::ProvenanceResolver::managed(&root, vec![record], &[]);
 
         let provenance = resolver.infer_installed(
             &skill_dir,

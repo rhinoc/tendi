@@ -15,6 +15,59 @@ const BACKUP_MANIFEST_VERSION: u32 = 1;
 const MAX_SKILL_BYTES: u64 = 100 * 1024 * 1024;
 const MAX_SKILL_FILES: usize = 1_000;
 
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BackupCategorySelection {
+    pub enabled: bool,
+    #[serde(default)]
+    pub excluded: Vec<String>,
+}
+
+impl Default for BackupCategorySelection {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            excluded: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BackupContents {
+    #[serde(default)]
+    pub skills: BackupCategorySelection,
+    #[serde(default)]
+    pub mcp: BackupCategorySelection,
+    #[serde(default)]
+    pub rules: BackupCategorySelection,
+    #[serde(default)]
+    pub hooks: BackupCategorySelection,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BackupCatalogItem {
+    pub id: String,
+    pub label: String,
+    pub detail: String,
+    #[serde(skip)]
+    pub(crate) source_path: Option<PathBuf>,
+    #[serde(skip)]
+    pub(crate) agent: Option<crate::skills::AgentKind>,
+    #[serde(skip)]
+    pub(crate) source_key: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BackupCatalog {
+    pub skills: Vec<BackupCatalogItem>,
+    pub mcp: Vec<BackupCatalogItem>,
+    pub rules: Vec<BackupCatalogItem>,
+    pub hooks: Vec<BackupCatalogItem>,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct BackupBuildOptions {
     pub device_label: String,
@@ -26,6 +79,8 @@ pub struct BackupConfig {
     pub remote_url: String,
     pub checkout_path: PathBuf,
     pub device_label: String,
+    #[serde(default)]
+    pub contents: BackupContents,
 }
 
 impl BackupConfig {
@@ -35,9 +90,10 @@ impl BackupConfig {
         device_label: impl Into<String>,
     ) -> Self {
         Self {
-            remote_url: remote_url.into().trim().to_string(),
+            remote_url: normalize_remote_url(&remote_url.into()),
             checkout_path,
             device_label: device_label.into().trim().to_string(),
+            contents: BackupContents::default(),
         }
     }
 
@@ -56,6 +112,67 @@ impl BackupConfig {
         }
         Ok(())
     }
+}
+
+pub fn validate_remote(remote_url: &str, working_directory: &Path) -> Result<()> {
+    let remote_url = normalize_remote_url(remote_url);
+    if remote_url.is_empty() {
+        bail!("a backup remote URL is required");
+    }
+    if has_embedded_credentials(&remote_url) {
+        bail!("backup remote URLs must not contain credentials");
+    }
+    let output = git::run_git(
+        working_directory,
+        ["ls-remote", &remote_url],
+        git::NETWORK_COMMAND_TIMEOUT,
+        git::never_cancelled(),
+    )
+    .context("failed to check the backup Git remote")?;
+    if !output.status.success() {
+        bail!("Git remote is not reachable or is not a Git repository");
+    }
+    Ok(())
+}
+
+/// Expand the GitHub shorthand accepted by the Backup UI into a Git remote URL.
+/// Other Git remote forms keep their existing behavior.
+fn normalize_remote_url(remote_url: &str) -> String {
+    let remote_url = remote_url.trim();
+    let github_path = remote_url
+        .strip_prefix("github.com/")
+        .or_else(|| is_github_repository_path(remote_url).then_some(remote_url));
+
+    match github_path.filter(|path| is_github_repository_path(path)) {
+        Some(path) => {
+            let path = path.trim_end_matches('/');
+            let path = path.strip_suffix(".git").unwrap_or(path);
+            format!("https://github.com/{path}.git")
+        }
+        None => remote_url.to_string(),
+    }
+}
+
+fn is_github_repository_path(value: &str) -> bool {
+    let value = value.trim_end_matches('/');
+    let mut segments = value.split('/');
+    let Some(owner) = segments.next() else {
+        return false;
+    };
+    let Some(repository) = segments.next() else {
+        return false;
+    };
+    segments.next().is_none()
+        && is_github_name(owner)
+        && is_github_name(repository.trim_end_matches(".git"))
+}
+
+fn is_github_name(value: &str) -> bool {
+    !value.is_empty()
+        && !matches!(value, "." | "..")
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
 }
 
 pub fn default_checkout_path() -> Result<PathBuf> {
@@ -92,6 +209,8 @@ pub struct BackupRestorePlan {
     checkout: PathBuf,
     #[serde(skip)]
     skills: BTreeMap<String, BackupSkill>,
+    #[serde(skip)]
+    artifacts: BTreeMap<String, BackupArtifact>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -99,6 +218,7 @@ pub struct BackupRestorePlan {
 pub struct BackupRestoreOperation {
     pub id: String,
     pub name: String,
+    pub category: String,
     pub target: PathBuf,
     pub status: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -135,19 +255,27 @@ pub fn plan_backup_restore(
     let manifest = manifest_at_revision(&config.checkout_path, revision)?;
     let target_root = crate::skill_targets::skill_target_root(cwd, target, scope)?;
     let requested = skill_ids.iter().cloned().collect::<BTreeSet<_>>();
-    let selected = manifest
+    let selected_skills = manifest
         .skills
         .iter()
         .filter(|skill| requested.is_empty() || requested.contains(&skill.id))
         .cloned()
         .collect::<Vec<_>>();
-    if !requested.is_empty() && selected.len() != requested.len() {
-        bail!("one or more requested skills are not in backup version {revision}");
+    let selected_artifacts = manifest
+        .artifacts
+        .iter()
+        .filter(|artifact| requested.is_empty() || requested.contains(&artifact.id))
+        .cloned()
+        .collect::<Vec<_>>();
+    if !requested.is_empty() && selected_skills.len() + selected_artifacts.len() != requested.len()
+    {
+        bail!("one or more requested backup contents are not in backup version {revision}");
     }
     let mut reserved_targets = BTreeSet::new();
     let mut operations = Vec::new();
     let mut skills = BTreeMap::new();
-    for skill in selected {
+    let mut artifacts = BTreeMap::new();
+    for skill in selected_skills {
         let folder = restore_folder_name(&skill, &reserved_targets);
         reserved_targets.insert(folder.clone());
         let destination = target_root.join(&folder);
@@ -165,11 +293,35 @@ pub fn plan_backup_restore(
         operations.push(BackupRestoreOperation {
             id: skill.id.clone(),
             name: skill.name.clone(),
+            category: "skills".to_string(),
             target: destination,
             status,
             message,
         });
         skills.insert(skill.id.clone(), skill);
+    }
+    for artifact in selected_artifacts {
+        let destination = restore_artifact_target(&artifact)?;
+        let (status, message) = if destination.exists() {
+            (
+                "conflict".to_string(),
+                Some(
+                    "target already exists; choose a restore resolution before applying"
+                        .to_string(),
+                ),
+            )
+        } else {
+            ("planned".to_string(), None)
+        };
+        operations.push(BackupRestoreOperation {
+            id: artifact.id.clone(),
+            name: artifact.name.clone(),
+            category: artifact.category.clone(),
+            target: destination,
+            status,
+            message,
+        });
+        artifacts.insert(artifact.id.clone(), artifact);
     }
     Ok(BackupRestorePlan {
         revision: revision.to_string(),
@@ -177,7 +329,21 @@ pub fn plan_backup_restore(
         operations,
         checkout: config.checkout_path,
         skills,
+        artifacts,
     })
+}
+
+fn restore_artifact_target(artifact: &BackupArtifact) -> Result<PathBuf> {
+    let agent = crate::providers::parse_agent(&artifact.agent)
+        .with_context(|| format!("backup artifact {} has an unknown provider", artifact.name))?;
+    crate::providers::agent_provider(agent)
+        .restore_global_source_path(&artifact.source_relative_path)
+        .with_context(|| {
+            format!(
+                "backup artifact {} has no valid global target",
+                artifact.name
+            )
+        })
 }
 
 pub fn apply_backup_restore(
@@ -207,7 +373,7 @@ pub fn apply_backup_restore_without_database(
     }
     for id in resolutions_by_id.keys() {
         if !operations.iter().any(|operation| operation.id == *id) {
-            bail!("backup restore resolution references an unknown skill {id}");
+            bail!("backup restore resolution references unknown content {id}");
         }
     }
     let mut reserved_targets = operations
@@ -232,7 +398,11 @@ pub fn apply_backup_restore_without_database(
             }
             "keep-both" => {
                 reserved_targets.remove(&operation.target);
-                operation.target = unique_restore_target(&operation.target, &reserved_targets)?;
+                operation.target = if operation.category == "skills" {
+                    unique_restore_target(&operation.target, &reserved_targets)?
+                } else {
+                    unique_restore_file_target(&operation.target, &reserved_targets)?
+                };
                 reserved_targets.insert(operation.target.clone());
                 operation.status = "planned".to_string();
                 operation.message = None;
@@ -244,8 +414,13 @@ pub fn apply_backup_restore_without_database(
         if operation.status != "planned" && operation.status != "replace" {
             continue;
         }
-        if operation.status == "replace" {
+        let replacing = operation.status == "replace";
+        if replacing && operation.category == "skills" {
             remove_restore_target(&plan.target_root, &operation.target)?;
+            operation.status = "planned".to_string();
+        } else if replacing && operation.target.exists() {
+            fs::remove_file(&operation.target)
+                .with_context(|| format!("failed to replace {}", operation.target.display()))?;
             operation.status = "planned".to_string();
         }
         if operation.target.exists() {
@@ -254,19 +429,70 @@ pub fn apply_backup_restore_without_database(
                 operation.target.display()
             );
         }
-        let skill = plan
-            .skills
-            .get(&operation.id)
-            .context("backup restore plan lost its selected skill")?;
-        fs::create_dir_all(&operation.target)
-            .with_context(|| format!("failed to create {}", operation.target.display()))?;
-        for file in &skill.files {
-            let relative = safe_relative_path(&file.path)?;
+        if operation.category == "skills" {
+            let skill = plan
+                .skills
+                .get(&operation.id)
+                .context("backup restore plan lost its selected skill")?;
+            fs::create_dir_all(&operation.target)
+                .with_context(|| format!("failed to create {}", operation.target.display()))?;
+            for file in &skill.files {
+                let relative = safe_relative_path(&file.path)?;
+                let output = run_git_success(
+                    &plan.checkout,
+                    [
+                        "show",
+                        &format!("{}:skills/{}/{}", plan.revision, skill.id, file.path),
+                    ],
+                    false,
+                )?;
+                let content = output.stdout;
+                if sha256_hex(&content) != file.sha256 || content.len() as u64 != file.size {
+                    bail!(
+                        "backup version {} failed integrity verification for {}",
+                        plan.revision,
+                        file.path
+                    );
+                }
+                let target = operation.target.join(relative);
+                if let Some(parent) = target.parent() {
+                    fs::create_dir_all(parent)?;
+                }
+                fs::write(&target, content)
+                    .with_context(|| format!("failed to restore {}", target.display()))?;
+            }
+            let record = SkillSourceRecord {
+                skill_name: skill.name.clone(),
+                skill_path: operation.target.clone(),
+                source_kind: "tendi-backup".to_string(),
+                source: None,
+                source_ref: Some(plan.revision.clone()),
+                source_version: skill.source.source_version.clone(),
+                source_relative_path: Some(format!("skills/{}", skill.id)),
+                update_status: "local".to_string(),
+                origin: "tendi-backup-restore".to_string(),
+            };
+            source_records.push(record);
+        } else {
+            let artifact = plan
+                .artifacts
+                .get(&operation.id)
+                .context("backup restore plan lost its selected artifact")?;
+            if artifact.files.len() != 1 {
+                bail!(
+                    "backup artifact {} has unsupported file layout",
+                    artifact.name
+                );
+            }
+            let file = &artifact.files[0];
             let output = run_git_success(
                 &plan.checkout,
                 [
                     "show",
-                    &format!("{}:skills/{}/{}", plan.revision, skill.id, file.path),
+                    &format!(
+                        "{}:{}/{}/{}",
+                        plan.revision, artifact.category, artifact.id, file.path
+                    ),
                 ],
                 false,
             )?;
@@ -278,25 +504,12 @@ pub fn apply_backup_restore_without_database(
                     file.path
                 );
             }
-            let target = operation.target.join(relative);
-            if let Some(parent) = target.parent() {
+            if let Some(parent) = operation.target.parent() {
                 fs::create_dir_all(parent)?;
             }
-            fs::write(&target, content)
-                .with_context(|| format!("failed to restore {}", target.display()))?;
+            fs::write(&operation.target, content)
+                .with_context(|| format!("failed to restore {}", operation.target.display()))?;
         }
-        let record = SkillSourceRecord {
-            skill_name: skill.name.clone(),
-            skill_path: operation.target.clone(),
-            source_kind: "tendi-backup".to_string(),
-            source: None,
-            source_ref: Some(plan.revision.clone()),
-            source_version: skill.source.source_version.clone(),
-            source_relative_path: Some(format!("skills/{}", skill.id)),
-            update_status: "local".to_string(),
-            origin: "tendi-backup-restore".to_string(),
-        };
-        source_records.push(record);
         operation.status = "restored".to_string();
         operation.message = None;
     }
@@ -440,19 +653,113 @@ pub fn backup_statuses_for_paths(
     Ok(statuses)
 }
 
+pub fn backup_catalog(store: &Store, cwd: &Path) -> Result<BackupCatalog> {
+    let mut catalog = BackupCatalog::default();
+    if let Some(scan) = store.list_skills_cached_for_workspace(cwd)? {
+        let mut skills = BTreeMap::<String, BTreeSet<String>>::new();
+        for skill in scan.skills {
+            let global_paths = skill
+                .paths
+                .iter()
+                .filter(|path| path.scope == "global")
+                .map(|path| path.path.display().to_string())
+                .collect::<BTreeSet<_>>();
+            if !global_paths.is_empty() && !skill.is_system {
+                skills.insert(skill.name, global_paths);
+            }
+        }
+        catalog.skills = skills
+            .into_iter()
+            .map(|(name, paths)| BackupCatalogItem {
+                id: format!("skill:{name}"),
+                label: name,
+                detail: format!(
+                    "{} global location{}",
+                    paths.len(),
+                    if paths.len() == 1 { "" } else { "s" }
+                ),
+                source_path: None,
+                agent: None,
+                source_key: None,
+            })
+            .collect();
+    }
+
+    catalog.mcp = catalog_source_files(
+        store
+            .list_mcp()?
+            .servers
+            .into_iter()
+            .filter(|server| server.scope == "global")
+            .map(|server| (server.agent, server.path))
+            .collect(),
+        "mcp",
+    );
+    catalog.rules = catalog_source_files(
+        store
+            .list_rules()?
+            .rules
+            .into_iter()
+            .filter(|rule| rule.scope == "global")
+            .flat_map(|rule| {
+                rule.agents
+                    .into_iter()
+                    .map(move |agent| (agent, rule.path.clone()))
+            })
+            .collect(),
+        "rules",
+    );
+    catalog.hooks = catalog_source_files(
+        store
+            .list_hooks()?
+            .hooks
+            .into_iter()
+            .filter(|hook| {
+                crate::providers::agent_provider(hook.agent).is_global_hook_path(&hook.path)
+            })
+            .map(|hook| (hook.agent, hook.path))
+            .collect(),
+        "hooks",
+    );
+    Ok(catalog)
+}
+
+fn catalog_source_files(
+    sources: Vec<(crate::skills::AgentKind, PathBuf)>,
+    category: &str,
+) -> Vec<BackupCatalogItem> {
+    let sources = sources
+        .into_iter()
+        .collect::<BTreeSet<(crate::skills::AgentKind, PathBuf)>>();
+    sources
+        .into_iter()
+        .map(|(agent, path)| {
+            let provider = crate::providers::agent_provider(agent);
+            let path_label = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("configuration")
+                .to_string();
+            BackupCatalogItem {
+                id: format!("{category}:{}:{}", agent.label(), path.display()),
+                label: format!("{} · {path_label}", agent.label()),
+                detail: "Global source".to_string(),
+                source_key: provider.backup_global_source_key(&path),
+                source_path: Some(path),
+                agent: Some(agent),
+            }
+        })
+        .collect()
+}
+
 /// Materialize the current managed skills into the app-managed checkout and push one
 /// atomic Git commit. Credential resolution is intentionally delegated to the system
 /// Git client, so tokens never enter Tendi's database or a remote URL in a manifest.
-pub fn backup_now(store: &Store) -> Result<BackupSyncReport> {
+pub fn backup_now(store: &Store, cwd: &Path) -> Result<BackupSyncReport> {
     let config = store
         .skill_backup_config()?
         .context("skill backup is not configured")?;
-    let local_manifest = build_manifest(
-        &store.skill_source_records()?,
-        &BackupBuildOptions {
-            device_label: config.device_label.clone(),
-        },
-    )?;
+    let local_manifest = build_backup_manifest(store, cwd, &config)?;
     ensure_checkout(&config)?;
     let (existing_manifest, preserved_checkout) = synchronize_remote_checkout(&config)?;
     let temporary_root = preserved_checkout.as_ref().map(|(_, root)| root.clone());
@@ -460,7 +767,10 @@ pub fn backup_now(store: &Store) -> Result<BackupSyncReport> {
         Some((preserved, _)) => Some(merge_manifests(existing_manifest, preserved)?),
         None => existing_manifest,
     };
-    let result = if local_manifest.skills.is_empty() && existing_manifest.is_some() {
+    let result = if local_manifest.skills.is_empty()
+        && local_manifest.artifacts.is_empty()
+        && existing_manifest.is_some()
+    {
         // A newly connected device has no managed skills until the user chooses
         // restore targets. Never turn that empty local state into a destructive
         // remote commit.
@@ -546,10 +856,15 @@ pub struct BackupManifest {
     pub version: u32,
     pub device_label: String,
     pub skills: Vec<BackupSkill>,
+    #[serde(default)]
+    pub artifacts: Vec<BackupArtifact>,
     pub excluded: Vec<BackupExcludedSkill>,
     #[serde(skip)]
     #[serde(default)]
     source_paths: BTreeMap<String, PathBuf>,
+    #[serde(skip)]
+    #[serde(default)]
+    artifact_source_paths: BTreeMap<String, PathBuf>,
 }
 
 #[derive(Debug, Clone, Default, serde::Deserialize, serde::Serialize)]
@@ -585,6 +900,19 @@ pub struct BackupFile {
     pub path: String,
     pub sha256: String,
     pub size: u64,
+}
+
+#[derive(Debug, Clone, Default, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BackupArtifact {
+    pub id: String,
+    pub category: String,
+    pub name: String,
+    #[serde(default)]
+    pub agent: String,
+    #[serde(default)]
+    pub source_relative_path: String,
+    pub files: Vec<BackupFile>,
 }
 
 pub fn build_manifest(
@@ -661,11 +989,103 @@ pub fn build_manifest(
         version: BACKUP_MANIFEST_VERSION,
         device_label: options.device_label.trim().to_string(),
         skills,
+        artifacts: Vec::new(),
         excluded,
         source_paths,
+        artifact_source_paths: BTreeMap::new(),
     };
     validate_manifest(&manifest)?;
     Ok(manifest)
+}
+
+pub fn build_backup_manifest(
+    store: &Store,
+    cwd: &Path,
+    config: &BackupConfig,
+) -> Result<BackupManifest> {
+    let catalog = backup_catalog(store, cwd)?;
+    let skill_ids = catalog
+        .skills
+        .iter()
+        .filter(|item| category_item_selected(&config.contents.skills, &item.id))
+        .map(|item| item.id.as_str())
+        .collect::<BTreeSet<_>>();
+    let records = store
+        .skill_source_records()?
+        .into_iter()
+        .filter(|record| {
+            config.contents.skills.enabled
+                && (catalog.skills.is_empty()
+                    || skill_ids.contains(format!("skill:{}", record.skill_name).as_str()))
+        })
+        .collect::<Vec<_>>();
+    let mut manifest = build_manifest(
+        &records,
+        &BackupBuildOptions {
+            device_label: config.device_label.clone(),
+        },
+    )?;
+    let mut artifact_source_paths = BTreeMap::new();
+    for (category, selection, items) in [
+        ("mcp", &config.contents.mcp, &catalog.mcp),
+        ("rules", &config.contents.rules, &catalog.rules),
+        ("hooks", &config.contents.hooks, &catalog.hooks),
+    ] {
+        if !selection.enabled {
+            continue;
+        }
+        for item in items {
+            if !category_item_selected(selection, &item.id) {
+                continue;
+            }
+            let Some(source_path) = item.source_path.as_ref() else {
+                continue;
+            };
+            let Some(agent) = item.agent else {
+                continue;
+            };
+            let Some(source_key) = item.source_key.as_ref() else {
+                continue;
+            };
+            let content = fs::read(source_path)
+                .with_context(|| format!("failed to read {}", source_path.display()))?;
+            let file_name = source_path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("source")
+                .to_string();
+            let identity = format!("{category}:{}:{source_key}", agent.label());
+            let id = format!("{category}-{}", &sha256_hex(identity.as_bytes())[..16]);
+            let artifact = BackupArtifact {
+                id: id.clone(),
+                category: category.to_string(),
+                name: item.label.clone(),
+                agent: agent.label().to_string(),
+                source_relative_path: source_key.clone(),
+                files: vec![BackupFile {
+                    path: file_name,
+                    sha256: sha256_hex(&content),
+                    size: content.len() as u64,
+                }],
+            };
+            artifact_source_paths.insert(artifact_key(category, &id), source_path.clone());
+            manifest.artifacts.push(artifact);
+        }
+    }
+    manifest.artifact_source_paths = artifact_source_paths;
+    manifest
+        .artifacts
+        .sort_by(|left, right| left.id.cmp(&right.id));
+    validate_manifest(&manifest)?;
+    Ok(manifest)
+}
+
+fn category_item_selected(selection: &BackupCategorySelection, id: &str) -> bool {
+    selection.enabled && !selection.excluded.iter().any(|excluded| excluded == id)
+}
+
+fn artifact_key(category: &str, id: &str) -> String {
+    format!("{category}:{id}")
 }
 
 pub fn write_snapshot(manifest: &BackupManifest, destination: &Path) -> Result<()> {
@@ -690,6 +1110,21 @@ pub fn write_snapshot(manifest: &BackupManifest, destination: &Path) -> Result<(
                 skill.name
             )
         })?;
+    }
+    for artifact in &manifest.artifacts {
+        let target = destination.join(&artifact.category).join(&artifact.id);
+        let Some(source) = manifest
+            .artifact_source_paths
+            .get(&artifact_key(&artifact.category, &artifact.id))
+        else {
+            verify_snapshot_artifact(artifact, &target)?;
+            continue;
+        };
+        if target.exists() {
+            fs::remove_dir_all(&target)
+                .with_context(|| format!("failed to replace {}", target.display()))?;
+        }
+        copy_artifact_files(artifact, source, &target)?;
     }
     fs::write(
         destination.join("manifest.json"),
@@ -740,6 +1175,43 @@ fn merge_manifests(
         }
         merged.skills.push(skill);
     }
+    for mut artifact in local.artifacts.drain(..) {
+        let original_id = artifact.id.clone();
+        let original_key = artifact_key(&artifact.category, &original_id);
+        if merged.artifacts.iter().any(|existing| {
+            existing.category == artifact.category && existing.files == artifact.files
+        }) {
+            continue;
+        }
+        if merged
+            .artifacts
+            .iter()
+            .any(|existing| existing.id == artifact.id)
+        {
+            let content_id = sha256_hex(
+                serde_json::to_string(&artifact.files)
+                    .expect("backup artifact metadata serializes")
+                    .as_bytes(),
+            );
+            let base = artifact.id.clone();
+            artifact.id = format!("{base}-{}", &content_id[..8]);
+            let mut suffix = 2usize;
+            while merged
+                .artifacts
+                .iter()
+                .any(|existing| existing.id == artifact.id)
+            {
+                artifact.id = format!("{base}-{}-{suffix}", &content_id[..8]);
+                suffix += 1;
+            }
+        }
+        if let Some(source_path) = local.artifact_source_paths.remove(&original_key) {
+            merged
+                .artifact_source_paths
+                .insert(artifact_key(&artifact.category, &artifact.id), source_path);
+        }
+        merged.artifacts.push(artifact);
+    }
     let mut excluded = merged
         .excluded
         .into_iter()
@@ -756,6 +1228,9 @@ fn merge_manifests(
         .map(|(name, reason)| BackupExcludedSkill { name, reason })
         .collect();
     merged.skills.sort_by(|left, right| left.id.cmp(&right.id));
+    merged
+        .artifacts
+        .sort_by(|left, right| left.id.cmp(&right.id));
     validate_manifest(&merged)?;
     Ok(merged)
 }
@@ -797,6 +1272,43 @@ fn copy_skill_files(skill: &BackupSkill, source: &Path, target: &Path) -> Result
     Ok(())
 }
 
+fn verify_snapshot_artifact(artifact: &BackupArtifact, target: &Path) -> Result<()> {
+    if !target.is_dir() {
+        bail!("backup snapshot is missing files for {}", artifact.name);
+    }
+    for file in &artifact.files {
+        let path = target.join(safe_relative_path(&file.path)?);
+        let content = fs::read(&path)
+            .with_context(|| format!("backup snapshot is missing {}", path.display()))?;
+        if sha256_hex(&content) != file.sha256 || content.len() as u64 != file.size {
+            bail!(
+                "backup snapshot integrity check failed for {}",
+                path.display()
+            );
+        }
+    }
+    Ok(())
+}
+
+fn copy_artifact_files(artifact: &BackupArtifact, source: &Path, target: &Path) -> Result<()> {
+    fs::create_dir_all(target)?;
+    for file in &artifact.files {
+        let source_file = source;
+        let content = fs::read(source_file)
+            .with_context(|| format!("failed to read {}", source_file.display()))?;
+        if sha256_hex(&content) != file.sha256 || content.len() as u64 != file.size {
+            bail!("backup artifact content did not match its manifest");
+        }
+        let target_file = target.join(safe_relative_path(&file.path)?);
+        if let Some(parent) = target_file.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(&target_file, content)
+            .with_context(|| format!("failed to write {}", target_file.display()))?;
+    }
+    Ok(())
+}
+
 pub fn validate_manifest(manifest: &BackupManifest) -> Result<()> {
     if manifest.version != BACKUP_MANIFEST_VERSION {
         bail!("unsupported backup manifest version {}", manifest.version);
@@ -826,6 +1338,50 @@ pub fn validate_manifest(manifest: &BackupManifest) -> Result<()> {
                 bail!(
                     "backup manifest skill {} contains an invalid file hash",
                     skill.name
+                );
+            }
+        }
+    }
+    let mut artifact_ids = BTreeSet::new();
+    for artifact in &manifest.artifacts {
+        if artifact.id.trim().is_empty()
+            || artifact.id.contains('/')
+            || artifact.id.contains('\\')
+            || artifact.category.trim().is_empty()
+            || artifact.category.contains('/')
+            || artifact.category.contains('\\')
+        {
+            bail!("backup manifest contains an invalid artifact id");
+        }
+        if !artifact_ids.insert(&artifact.id) {
+            bail!(
+                "backup manifest contains duplicate artifact id {}",
+                artifact.id
+            );
+        }
+        if artifact.files.is_empty() {
+            bail!(
+                "backup manifest artifact {} is missing files",
+                artifact.name
+            );
+        }
+        if !artifact.source_relative_path.is_empty() {
+            safe_relative_path(&artifact.source_relative_path)?;
+        }
+        let mut paths = BTreeSet::new();
+        for file in &artifact.files {
+            safe_relative_path(&file.path)?;
+            if !paths.insert(&file.path) {
+                bail!(
+                    "backup manifest artifact {} contains duplicate file paths",
+                    artifact.name
+                );
+            }
+            if file.sha256.len() != 64 || !file.sha256.bytes().all(|byte| byte.is_ascii_hexdigit())
+            {
+                bail!(
+                    "backup manifest artifact {} contains an invalid file hash",
+                    artifact.name
                 );
             }
         }
@@ -1072,6 +1628,7 @@ fn sha256_hex(content: &[u8]) -> String {
 
 fn ensure_checkout(config: &BackupConfig) -> Result<()> {
     config.validate()?;
+    let remote_url = normalize_remote_url(&config.remote_url);
     if !config.checkout_path.join(".git").is_dir() {
         fs::create_dir_all(&config.checkout_path)
             .with_context(|| format!("failed to create {}", config.checkout_path.display()))?;
@@ -1096,7 +1653,7 @@ fn ensure_checkout(config: &BackupConfig) -> Result<()> {
         )?;
         run_git_success(
             &config.checkout_path,
-            ["remote", "add", "origin", &config.remote_url],
+            ["remote", "add", "origin", &remote_url],
             false,
         )?;
         return Ok(());
@@ -1108,17 +1665,17 @@ fn ensure_checkout(config: &BackupConfig) -> Result<()> {
     )?;
     if remote.status.success() {
         let current = String::from_utf8_lossy(&remote.stdout).trim().to_string();
-        if current != config.remote_url {
+        if current != remote_url {
             run_git_success(
                 &config.checkout_path,
-                ["remote", "set-url", "origin", &config.remote_url],
+                ["remote", "set-url", "origin", &remote_url],
                 false,
             )?;
         }
     } else {
         run_git_success(
             &config.checkout_path,
-            ["remote", "add", "origin", &config.remote_url],
+            ["remote", "add", "origin", &remote_url],
             false,
         )?;
     }
@@ -1252,9 +1809,15 @@ fn commit_checkout(config: &BackupConfig, manifest: &BackupManifest) -> Result<b
         bail!("failed to determine whether the backup checkout changed");
     }
     let message = format!(
-        "backup: {} skill{} from {}",
+        "backup: {} skill{} and {} configuration source{} from {}",
         manifest.skills.len(),
         if manifest.skills.len() == 1 { "" } else { "s" },
+        manifest.artifacts.len(),
+        if manifest.artifacts.len() == 1 {
+            ""
+        } else {
+            "s"
+        },
         config.device_label,
     );
     run_git_success(&config.checkout_path, ["commit", "-m", &message], false)?;
@@ -1344,6 +1907,23 @@ fn unique_restore_target(target: &Path, reserved: &BTreeSet<PathBuf>) -> Result<
     unreachable!("unbounded restore target suffix iterator always yields a candidate")
 }
 
+fn unique_restore_file_target(target: &Path, reserved: &BTreeSet<PathBuf>) -> Result<PathBuf> {
+    let parent = target
+        .parent()
+        .context("restore target has no parent directory")?;
+    let name = target
+        .file_name()
+        .and_then(|name| name.to_str())
+        .context("restore target name is not valid UTF-8")?;
+    for suffix in std::iter::once(String::new()).chain((2..).map(|index| format!("-{index}"))) {
+        let candidate = parent.join(format!("{name}.restored{suffix}"));
+        if !candidate.exists() && !reserved.contains(&candidate) {
+            return Ok(candidate);
+        }
+    }
+    unreachable!("unbounded restore file suffix iterator always yields a candidate")
+}
+
 fn remove_restore_target(target_root: &Path, target: &Path) -> Result<()> {
     if target.parent() != Some(target_root) {
         bail!("backup restore refused to replace a target outside the selected skills directory");
@@ -1406,8 +1986,8 @@ mod tests {
 
     use super::{
         adopt_skill_for_backup, backup_now, backup_statuses_for_paths, backup_versions,
-        build_manifest, validate_manifest, write_snapshot, BackupBuildOptions, BackupConfig,
-        BackupManifest,
+        build_manifest, ensure_checkout, normalize_remote_url, validate_manifest, write_snapshot,
+        BackupBuildOptions, BackupConfig, BackupManifest,
     };
     use crate::{skills::SkillSourceRecord, storage::Store, SkillInstallScope, SkillTarget};
 
@@ -1577,6 +2157,195 @@ mod tests {
         assert!(error.to_string().contains("credentials"));
     }
 
+    #[test]
+    fn backup_remote_validation_rejects_an_unreachable_repository() {
+        let root = temp_dir("tendi-backup-remote-validation");
+        fs::create_dir_all(&root).unwrap();
+
+        let error = super::validate_remote(&root.join("missing.git").display().to_string(), &root)
+            .unwrap_err();
+
+        assert!(error.to_string().contains("not reachable"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn backup_config_normalizes_github_remote_shorthands() {
+        for remote in [
+            "rhinoc/skills",
+            "github.com/rhinoc/skills",
+            "rhinoc/skills.git",
+        ] {
+            let config =
+                BackupConfig::new(remote, PathBuf::from("/tmp/tendi-skill-backup"), "Test Mac");
+
+            assert_eq!(config.remote_url, "https://github.com/rhinoc/skills.git");
+        }
+
+        assert_eq!(
+            normalize_remote_url("https://github.com/rhinoc/skills.git"),
+            "https://github.com/rhinoc/skills.git"
+        );
+        assert_eq!(
+            normalize_remote_url("git@github.com:rhinoc/skills.git"),
+            "git@github.com:rhinoc/skills.git"
+        );
+        assert_eq!(normalize_remote_url("../skills"), "../skills");
+    }
+
+    #[test]
+    fn existing_backup_checkout_updates_a_github_shorthand_origin() {
+        let root = temp_dir("tendi-backup-normalized-origin");
+        let checkout = root.join("checkout");
+        let config = BackupConfig {
+            remote_url: "rhinoc/skills".to_string(),
+            checkout_path: checkout.clone(),
+            device_label: "Test Mac".to_string(),
+            contents: Default::default(),
+        };
+
+        ensure_checkout(&config).unwrap();
+
+        let remote = Command::new("git")
+            .args([
+                "-C",
+                checkout.to_str().unwrap(),
+                "remote",
+                "get-url",
+                "origin",
+            ])
+            .output()
+            .unwrap();
+        assert!(remote.status.success());
+        assert_eq!(
+            String::from_utf8_lossy(&remote.stdout).trim(),
+            "https://github.com/rhinoc/skills.git"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn backup_config_includes_all_global_categories_by_default() {
+        let config = BackupConfig::new(
+            "git@github.com:you/tendi-backup.git",
+            PathBuf::from("/tmp/tendi-backup"),
+            "Test Mac",
+        );
+
+        assert!(config.contents.skills.enabled);
+        assert!(config.contents.mcp.enabled);
+        assert!(config.contents.rules.enabled);
+        assert!(config.contents.hooks.enabled);
+        assert!(config.contents.skills.excluded.is_empty());
+    }
+
+    #[test]
+    fn snapshot_writes_configuration_sources_under_category_roots() {
+        let root = temp_dir("tendi-backup-category-roots");
+        let source = root.join("settings.json");
+        let content = br#"{"mcpServers":{"demo":{"command":"demo"}}}"#;
+        fs::create_dir_all(&root).unwrap();
+        fs::write(&source, content).unwrap();
+        let artifact_id = "mcp-demo".to_string();
+        let mut artifact_source_paths = std::collections::BTreeMap::new();
+        artifact_source_paths.insert(format!("mcp:{artifact_id}"), source);
+        let manifest = BackupManifest {
+            version: 1,
+            device_label: "Test Mac".to_string(),
+            skills: Vec::new(),
+            artifacts: vec![super::BackupArtifact {
+                id: artifact_id.clone(),
+                category: "mcp".to_string(),
+                name: "Codex · settings.json".to_string(),
+                agent: "codex".to_string(),
+                source_relative_path: "config.toml".to_string(),
+                files: vec![super::BackupFile {
+                    path: "settings.json".to_string(),
+                    sha256: super::sha256_hex(content),
+                    size: content.len() as u64,
+                }],
+            }],
+            excluded: Vec::new(),
+            source_paths: Default::default(),
+            artifact_source_paths,
+        };
+        let snapshot = root.join("snapshot");
+
+        write_snapshot(&manifest, &snapshot).unwrap();
+
+        assert!(snapshot
+            .join("mcp")
+            .join(&artifact_id)
+            .join("settings.json")
+            .is_file());
+        assert!(!snapshot.join("global").exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn restore_plan_applies_a_configuration_artifact() {
+        let root = temp_dir("tendi-backup-artifact-restore");
+        fs::create_dir_all(&root).unwrap();
+        let checkout = root.join("checkout");
+        run_git(&root, &["init", "checkout"]);
+        run_git(&checkout, &["config", "user.email", "test@example.com"]);
+        run_git(&checkout, &["config", "user.name", "Tendi test"]);
+        let source = root.join("config.toml");
+        let content = br#"[mcp_servers.demo]
+command = "demo"
+"#;
+        fs::write(&source, content).unwrap();
+        let artifact_id = "mcp-demo".to_string();
+        let mut artifact_source_paths = std::collections::BTreeMap::new();
+        artifact_source_paths.insert(format!("mcp:{artifact_id}"), source);
+        let artifact = super::BackupArtifact {
+            id: artifact_id.clone(),
+            category: "mcp".to_string(),
+            name: "Codex · config.toml".to_string(),
+            agent: "codex".to_string(),
+            source_relative_path: "config.toml".to_string(),
+            files: vec![super::BackupFile {
+                path: "config.toml".to_string(),
+                sha256: super::sha256_hex(content),
+                size: content.len() as u64,
+            }],
+        };
+        let manifest = BackupManifest {
+            version: 1,
+            device_label: "Test Mac".to_string(),
+            skills: Vec::new(),
+            artifacts: vec![artifact.clone()],
+            excluded: Vec::new(),
+            source_paths: Default::default(),
+            artifact_source_paths,
+        };
+        write_snapshot(&manifest, &checkout).unwrap();
+        run_git(&checkout, &["add", "."]);
+        run_git(&checkout, &["commit", "-m", "backup"]);
+        let revision = super::current_commit(&checkout).unwrap();
+        let target = root.join("restore/config.toml");
+        let plan = super::BackupRestorePlan {
+            revision,
+            target_root: root.join("restore"),
+            operations: vec![super::BackupRestoreOperation {
+                id: artifact_id.clone(),
+                name: artifact.name.clone(),
+                category: artifact.category.clone(),
+                target: target.clone(),
+                status: "planned".to_string(),
+                message: None,
+            }],
+            checkout,
+            skills: Default::default(),
+            artifacts: std::collections::BTreeMap::from([(artifact_id, artifact)]),
+        };
+
+        let result = super::apply_backup_restore_without_database(&plan, &[]).unwrap();
+
+        assert_eq!(result.operations[0].status, "restored");
+        assert_eq!(fs::read(target).unwrap(), content);
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn manifest_validation_rejects_paths_that_escape_a_skill_directory() {
@@ -1593,8 +2362,10 @@ mod tests {
                     size: 0,
                 }],
             }],
+            artifacts: Vec::new(),
             excluded: Vec::new(),
             source_paths: Default::default(),
+            artifact_source_paths: Default::default(),
         };
 
         let error = validate_manifest(&manifest).unwrap_err();
@@ -1622,7 +2393,7 @@ mod tests {
             ))
             .unwrap();
 
-        let report = backup_now(&store).unwrap();
+        let report = backup_now(&store, &root).unwrap();
 
         assert!(report.pushed);
         assert_eq!(report.manifest.skills.len(), 1);
@@ -1666,7 +2437,7 @@ mod tests {
                 "First Mac",
             ))
             .unwrap();
-        backup_now(&first_store).unwrap();
+        backup_now(&first_store, &root).unwrap();
 
         let second_store = Store::open(root.join("second.sqlite3")).unwrap();
         second_store
@@ -1679,7 +2450,7 @@ mod tests {
                 "Second Mac",
             ))
             .unwrap();
-        let report = backup_now(&second_store).unwrap();
+        let report = backup_now(&second_store, &root).unwrap();
 
         assert_eq!(report.manifest.skills.len(), 2);
         assert!(report
@@ -1738,7 +2509,7 @@ mod tests {
             .upsert_skill_source_records(&[source("review", &first_skill)])
             .unwrap();
         first_store.save_skill_backup_config(&first_config).unwrap();
-        backup_now(&first_store).unwrap();
+        backup_now(&first_store, &root).unwrap();
 
         let second_store = Store::open(root.join("second.sqlite3")).unwrap();
         second_store
@@ -1751,7 +2522,7 @@ mod tests {
                 "Second Mac",
             ))
             .unwrap();
-        backup_now(&second_store).unwrap();
+        backup_now(&second_store, &root).unwrap();
 
         fs::write(
             first_skill.join("SKILL.md"),
@@ -1768,7 +2539,7 @@ mod tests {
         write_snapshot(&local_only, &first_checkout).unwrap();
         assert!(super::commit_checkout(&first_config, &local_only).unwrap());
 
-        let report = backup_now(&first_store).unwrap();
+        let report = backup_now(&first_store, &root).unwrap();
 
         assert!(report.pushed);
         assert_eq!(report.manifest.skills.len(), 3);
@@ -1817,7 +2588,7 @@ mod tests {
                 "Test Mac",
             ))
             .unwrap();
-        backup_now(&store).unwrap();
+        backup_now(&store, &root).unwrap();
         let mut versions = backup_versions(&store, 1).unwrap();
         let revision = versions.remove(0).id;
 
@@ -1859,7 +2630,7 @@ mod tests {
                 "Test Mac",
             ))
             .unwrap();
-        backup_now(&store).unwrap();
+        backup_now(&store, &root).unwrap();
         let revision = backup_versions(&store, 1).unwrap().remove(0).id;
 
         let target: SkillTarget = "shared".parse().unwrap();

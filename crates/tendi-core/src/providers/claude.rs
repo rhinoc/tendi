@@ -803,6 +803,10 @@ impl super::AgentProvider for ClaudeProvider {
             || path.contains("/.claude/plugins/")
     }
 
+    fn is_global_hook_path(&self, path: &Path) -> bool {
+        dirs::home_dir().is_some_and(|home| path.starts_with(home.join(".claude")))
+    }
+
     fn disables_hooks_from_config(&self, value: &Value) -> bool {
         value
             .get("disableAllHooks")

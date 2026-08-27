@@ -139,6 +139,23 @@ pub fn save_rule_file_at_path(
     })
 }
 
+pub fn delete_rule_files_for_project_roots(
+    cwd: &Path,
+    paths: &[PathBuf],
+    project_roots: &[PathBuf],
+) -> Result<()> {
+    let scan = scan_rules_for_project_roots(cwd, project_roots)?;
+    for path in paths {
+        if !scan.rules.iter().any(|rule| rule.path == *path) {
+            bail!("refusing to delete unknown rule {}", path.display());
+        }
+    }
+    for path in paths {
+        fs::remove_file(path).with_context(|| format!("failed to delete {}", path.display()))?;
+    }
+    Ok(())
+}
+
 fn ensure_known_rule_for_project_roots(
     cwd: &Path,
     path: &Path,
@@ -428,6 +445,36 @@ mod tests {
             project_rules[0].agents,
             vec![AgentKind::Codex, AgentKind::Cursor]
         );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn deletes_only_scanned_rules() {
+        let root = std::env::temp_dir().join(format!(
+            "tendi-rules-delete-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("system time before epoch")
+                .as_nanos()
+        ));
+        let project = root.join("repo");
+        fs::create_dir_all(project.join(".git")).expect("create git root");
+        let rule_path = project.join("AGENTS.md");
+        fs::write(&rule_path, "delete me").expect("write rule");
+
+        let scan = scan_rules(&project).expect("scan rules");
+        let rule_path = scan
+            .rules
+            .iter()
+            .find(|rule| rule.path == rule_path)
+            .map(|rule| rule.path.clone())
+            .expect("rule should be scanned");
+        super::delete_rule_files_for_project_roots(&project, std::slice::from_ref(&rule_path), &[])
+            .expect("known rule should be deleted");
+        assert!(!rule_path.exists());
+        assert!(super::delete_rule_files_for_project_roots(&project, &[project.join("other.md")], &[]).is_err());
 
         let _ = fs::remove_dir_all(root);
     }

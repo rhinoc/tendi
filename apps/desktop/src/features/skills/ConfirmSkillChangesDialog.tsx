@@ -4,7 +4,7 @@ import { ChevronDown, ChevronRight, FileText, Folder } from "lucide-react";
 import { Group as PanelGroup, Panel } from "react-resizable-panels";
 import { Dialog } from "radix-ui";
 
-import { buildFileTreeRows, displayFileName, formatUserPath, isJsonPath, isYamlPath, SkillChangeCommand } from "../../lib/index.ts";
+import { buildFileTreeRows, displayFileName, formatUserPath, isJsonPath, isYamlPath, skillChangeDescription, skillChangeTitle, SkillChangeCommand } from "../../lib/index.ts";
 import { CodeMirrorFileEditor } from "../../components/shared/CodeMirrorFileEditor.tsx";
 import { DialogActionButton } from "../../components/shared/DialogActionButton.tsx";
 import { DialogShell } from "../../components/shared/DialogShell.tsx";
@@ -28,17 +28,6 @@ export type ConfirmSkillChangesDialogProps = {
   onOpenChange: (open: boolean) => void;
   onConfirm: (resolutions?: Record<string, string>) => void;
 };
-
-function skillChangeDescription(command: SkillChangeCommand | null) {
-  if (command === SkillChangeCommand.DeleteMany) return "Delete the selected skills from their installed locations.";
-  if (command === SkillChangeCommand.UpdateMany) return "Apply available updates for the selected skills.";
-  if (command === SkillChangeCommand.Set) return "Apply the selected visibility change.";
-  return "Apply the selected skill change.";
-}
-
-function skillChangeTitle(command: SkillChangeCommand | null) {
-  return command === SkillChangeCommand.DeleteMany ? "Delete selected skills?" : "Confirm skill changes";
-}
 
 function skillConfirmActionLabel(command: SkillChangeCommand | null) {
   if (command === SkillChangeCommand.DeleteMany) return "Delete skills";
@@ -283,7 +272,8 @@ export function ConfirmSkillChangesDialog({
     [command, preview],
   );
   const [resolutions, setResolutions] = useState<Record<string, string>>({});
-  useEffect(() => setResolutions({}), [preview]);
+  const previewIdentity = typeof preview?.previewId === "string" ? preview.previewId : "";
+  useEffect(() => setResolutions({}), [command, previewIdentity]);
   const unresolvedFiles = files.filter((file) => {
     if (!isMergeResolutionStatus(file.status)) return false;
     const content = resolvedUpdateContent(file, resolutions);

@@ -1,6 +1,8 @@
 import { FilePlus, FileText, FolderOpen, FolderPlus, Pencil, Trash2 } from "lucide-react";
 import type { ComponentType, ReactNode } from "react";
 
+import { actionLabels } from "../../lib/action-labels.ts";
+
 export type FileTreeEntry = {
   name: string;
   kind: "file" | "folder" | string;
@@ -56,7 +58,7 @@ export function FileTreeContextMenuItems({
         <>
           <Menu.Item className="skillMenuItem" disabled={!entry?.path} onSelect={onReveal}>
             <FolderOpen size={14} />
-            Reveal in Finder
+            {actionLabels.revealInFinder}
           </Menu.Item>
           {showWriteActions && (
             <>

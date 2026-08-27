@@ -71,6 +71,11 @@ pub fn save_agent_config(
     save_config(&config, expected_sha256, content)
 }
 
+pub fn delete_agent_configs(paths: &[PathBuf]) -> Result<()> {
+    let home = dirs::home_dir().context("home directory is unavailable")?;
+    delete_configs_for_home(&home, paths)
+}
+
 pub fn create_config_profile(
     agent: AgentKind,
     name: &str,
@@ -259,6 +264,23 @@ fn save_config(
         exists: true,
         updated_at,
     })
+}
+
+fn delete_configs_for_home(home: &Path, paths: &[PathBuf]) -> Result<()> {
+    let configs = paths
+        .iter()
+        .map(|path| resolve_config_for_path(home, path))
+        .collect::<Result<Vec<_>>>()?;
+    for config in &configs {
+        if !config.path.is_file() {
+            bail!("config file not found: {}", config.path.display());
+        }
+    }
+    for config in configs {
+        fs::remove_file(&config.path)
+            .with_context(|| format!("failed to delete {}", config.path.display()))?;
+    }
+    Ok(())
 }
 
 fn create_profile_for_roots(
@@ -503,6 +525,18 @@ mod tests {
             fs::read_to_string(&created.path).expect("profile should be readable"),
             content
         );
+        fs::remove_dir_all(home).expect("temporary home should be removable");
+    }
+
+    #[test]
+    fn deletes_only_resolved_config_files() {
+        let home = temp_home("delete-config");
+        let created = create_profile_for_roots(AgentKind::Claude, &home, "safe-mode", "{}\n")
+            .expect("profile should be created");
+        delete_configs_for_home(&home, std::slice::from_ref(&created.path))
+            .expect("profile should be deleted");
+        assert!(!created.path.exists());
+        assert!(delete_configs_for_home(&home, &[home.join(".claude/other.json")]).is_err());
         fs::remove_dir_all(home).expect("temporary home should be removable");
     }
 
