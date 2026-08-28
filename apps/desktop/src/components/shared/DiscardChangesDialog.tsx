@@ -2,6 +2,7 @@ import { Dialog } from "radix-ui";
 
 import { DialogActionButton } from "./DialogActionButton.tsx";
 import { DialogShell } from "./DialogShell.tsx";
+import { dialogCopy } from "../../lib/index.ts";
 
 export type DiscardChangesDialogProps = {
   open: boolean;
@@ -12,7 +13,7 @@ export type DiscardChangesDialogProps = {
 export function DiscardChangesDialog({ open, onOpenChange, onDiscard }: DiscardChangesDialogProps) {
   return (
     <DialogShell open={open} onOpenChange={onOpenChange} descriptionId="discard-changes-description">
-          <Dialog.Title className="confirmDialogTitle">Discard unsaved changes?</Dialog.Title>
+          <Dialog.Title className="confirmDialogTitle">{dialogCopy.discardChangesTitle}</Dialog.Title>
           <p id="discard-changes-description" className="confirmDialogDescription">
             This file has edits that have not been saved.
           </p>

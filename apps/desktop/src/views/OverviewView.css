@@ -132,6 +132,7 @@
 .overviewAnalytics {
   display: flex;
   flex-direction: column;
+  min-width: 0;
   gap: 24px;
   width: calc(100% + var(--page-left-inset) + var(--page-right-inset));
   box-sizing: border-box;
@@ -186,7 +187,7 @@
 .overviewAnalyticsLoadingDots {
   box-sizing: border-box;
   width: 100%;
-  height: 100%;
+  height: 228px;
   min-height: 228px;
   color: var(--chart-track);
 }

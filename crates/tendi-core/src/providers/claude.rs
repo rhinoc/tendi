@@ -9,10 +9,17 @@ use crate::transcript::{
     extract_content_text, extract_duration_ms, extract_thinking_text, extract_tool_command,
     parse_timestamp_ms, push_item, push_tool_item, summarize_tool_call,
 };
+use crate::{
+    analytics::AnalyticsCapabilities,
+    skills::SkillVisibility,
+};
 
 use super::*;
 
 pub(super) struct ClaudeProvider;
+
+const CLAUDE_USER_MCP_SOURCE_KEY: &str = "__claude_user_mcp__.json";
+const CLAUDE_SKILL_FRONTMATTER_KEY: &str = "disable-model-invocation";
 
 fn infer_mcp_transport(spec: &Value) -> Option<String> {
     spec.get("transport")
@@ -42,6 +49,39 @@ fn infer_mcp_enabled(spec: &Value) -> bool {
         .and_then(Value::as_bool)
         .unwrap_or(false)
         && spec.get("enabled").and_then(Value::as_bool).unwrap_or(true)
+}
+
+fn scan_claude_project_mcp(
+    path: &Path,
+    servers: &mut Vec<McpServerRecord>,
+    warnings: &mut Vec<String>,
+) {
+    let Ok(text) = fs::read_to_string(path) else {
+        return;
+    };
+    let Ok(value) = serde_json::from_str::<Value>(&text) else {
+        return;
+    };
+    let Some(projects) = value.get("projects").and_then(Value::as_object) else {
+        return;
+    };
+    for project in projects.keys() {
+        crate::mcp::scan_json_mcp_at_path(
+            path,
+            AgentKind::Claude,
+            project,
+            &[
+                "projects".to_string(),
+                project.clone(),
+                "mcpServers".to_string(),
+            ],
+            infer_mcp_transport,
+            infer_mcp_enabled,
+            infer_mcp_status,
+            servers,
+            warnings,
+        );
+    }
 }
 
 fn update_mcp_server(spec: &mut serde_json::Map<String, Value>, enabled: bool) -> bool {
@@ -406,6 +446,34 @@ impl super::AgentProvider for ClaudeProvider {
         Some(home.join(".claude/skills"))
     }
 
+    fn backup_global_source_key(&self, path: &Path) -> Option<String> {
+        let home = dirs::home_dir()?;
+        if path == home.join(".claude.json") {
+            return Some(CLAUDE_USER_MCP_SOURCE_KEY.to_string());
+        }
+        self.global_backup_root(&home)
+            .and_then(|root| path.strip_prefix(root).ok())
+            .and_then(|relative| relative.to_str())
+            .map(str::to_string)
+    }
+
+    fn restore_global_source_path(&self, relative: &str) -> Option<PathBuf> {
+        let home = dirs::home_dir()?;
+        if relative == CLAUDE_USER_MCP_SOURCE_KEY {
+            return Some(home.join(".claude.json"));
+        }
+        let relative = Path::new(relative);
+        if relative.as_os_str().is_empty()
+            || relative.is_absolute()
+            || relative
+                .components()
+                .any(|component| !matches!(component, std::path::Component::Normal(_)))
+        {
+            return None;
+        }
+        Some(self.global_backup_root(&home)?.join(relative))
+    }
+
     fn project_skill_root(&self, cwd: &Path) -> Option<PathBuf> {
         Some(cwd.join(".claude/skills"))
     }
@@ -492,6 +560,51 @@ impl super::AgentProvider for ClaudeProvider {
         Some("Claude Code")
     }
 
+    fn skill_visibility_metadata(
+        &self,
+        _skill_dir: &Path,
+        _skill_file: &Path,
+        frontmatter: Option<&serde_yaml::Value>,
+    ) -> Result<SkillProviderMetadata> {
+        let disable_model_invocation = frontmatter
+            .and_then(|value| value.get(CLAUDE_SKILL_FRONTMATTER_KEY))
+            .and_then(serde_yaml::Value::as_bool);
+        Ok(SkillProviderMetadata {
+            allow_implicit_invocation: None,
+            enabled: None,
+            disable_model_invocation,
+            provider_visibility: if disable_model_invocation == Some(true) {
+                SkillVisibility::Manual
+            } else {
+                SkillVisibility::Auto
+            },
+        })
+    }
+
+    fn skill_frontmatter_satisfies(
+        &self,
+        meta: &serde_yaml::Mapping,
+        visibility: SkillVisibility,
+    ) -> bool {
+        crate::skills::skill_frontmatter_satisfies_with_provider_key(
+            meta,
+            visibility,
+            Some(CLAUDE_SKILL_FRONTMATTER_KEY),
+        )
+    }
+
+    fn render_skill_frontmatter(
+        &self,
+        before: &str,
+        visibility: SkillVisibility,
+    ) -> Result<String> {
+        crate::skills::render_skill_frontmatter_with_provider_key(
+            before,
+            visibility,
+            Some(CLAUDE_SKILL_FRONTMATTER_KEY),
+        )
+    }
+
     fn app_bundle_path(&self) -> Option<&'static str> {
         Some("/Applications/Claude.app")
     }
@@ -519,7 +632,7 @@ impl super::AgentProvider for ClaudeProvider {
                 ancestor.join(".claude/settings.json"),
                 ancestor.join(".claude/settings.local.json"),
             ],
-            "mcp" => vec![ancestor.join(".mcp.json")],
+            "mcp" => vec![ancestor.join(".mcp.json"), ancestor.join(".claude.json")],
             "skills" => vec![ancestor.join(".claude/skills")],
             _ => Vec::new(),
         }
@@ -715,6 +828,15 @@ impl super::AgentProvider for ClaudeProvider {
                 && value.get("message").is_some())
     }
 
+    fn analytics_capabilities(&self) -> AnalyticsCapabilities {
+        AnalyticsCapabilities {
+            token_usage: true,
+            reasoning_tokens: false,
+            explicit_runs: false,
+            rate_limit_history: false,
+        }
+    }
+
     fn parse_analytics_line(&self, line: &str, record: &mut SessionAnalyticsRecord) {
         crate::analytics::parse_message_line(line, record);
     }
@@ -734,6 +856,18 @@ impl super::AgentProvider for ClaudeProvider {
         warnings: &mut Vec<String>,
     ) -> Result<()> {
         if let Some(home) = &ctx.home {
+            crate::mcp::scan_json_mcp(
+                &home.join(".claude.json"),
+                self.kind(),
+                "global",
+                &["mcpServers"],
+                infer_mcp_transport,
+                infer_mcp_enabled,
+                infer_mcp_status,
+                servers,
+                warnings,
+            );
+            scan_claude_project_mcp(&home.join(".claude.json"), servers, warnings);
             crate::mcp::scan_json_mcp(
                 &home.join(".claude/settings.json"),
                 self.kind(),
@@ -770,6 +904,31 @@ impl super::AgentProvider for ClaudeProvider {
         crate::mcp::set_json_server_enabled(request, &["mcpServers"], update_mcp_server)
     }
 
+    fn backup_mcp_entry(
+        &self,
+        path: &Path,
+        server_path: &[String],
+        name: &str,
+    ) -> Result<Value> {
+        if path.extension().and_then(|value| value.to_str()) != Some("json") {
+            bail!("Claude Code MCP source must be JSON");
+        }
+        crate::mcp::read_json_server_entry_at_path(path, server_path, name)
+    }
+
+    fn restore_mcp_entry(
+        &self,
+        path: &Path,
+        server_path: &[String],
+        name: &str,
+        entry: &Value,
+    ) -> Result<String> {
+        if path.extension().and_then(|value| value.to_str()) != Some("json") {
+            bail!("Claude Code MCP source must be JSON");
+        }
+        crate::mcp::merge_json_server_entry_at_path(path, server_path, name, entry)
+    }
+
     fn mcp_status_after_toggle(&self, enabled: bool) -> &'static str {
         if enabled { "configured" } else { "disabled" }
     }
@@ -794,6 +953,19 @@ impl super::AgentProvider for ClaudeProvider {
             bail!("Claude Code hook source must be JSON");
         }
         crate::hooks::set_json_hook_enabled(request, source)
+    }
+
+    fn backup_hook_entry(&self, path: &Path, identity: &HookSourceMatch) -> Result<Value> {
+        crate::hooks::read_hook_entry(path, identity)
+    }
+
+    fn restore_hook_entry(
+        &self,
+        path: &Path,
+        identity: &HookSourceMatch,
+        entry: &Value,
+    ) -> Result<String> {
+        crate::hooks::merge_hook_entry(path, identity, entry)
     }
 
     fn managed_hook_path(&self, path: &Path) -> bool {
@@ -867,4 +1039,148 @@ impl super::AgentProvider for ClaudeProvider {
     fn review_hook(&self, hook: &HookRecord) -> Result<()> {
         crate::hooks::review_hook_with_tendi_state(hook)
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        fs,
+        path::PathBuf,
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
+    use super::{AgentProvider, ClaudeProvider, ProviderContext};
+    use crate::{
+        analytics::AnalyticsCapabilities,
+        skills::SkillVisibility,
+    };
+
+    fn temp_dir() -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "tendi-claude-mcp-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("system time before epoch")
+                .as_nanos()
+        ))
+    }
+
+    #[test]
+    fn scans_personal_claude_json_mcp_file() {
+        let root = temp_dir();
+        let home = root.join("home");
+        let path = home.join(".claude.json");
+        fs::create_dir_all(&home).expect("create home");
+        fs::write(
+            &path,
+            r#"{"mcpServers":{"personal-server":{"command":"demo"}}}"#,
+        )
+        .expect("write personal MCP");
+
+        let context = ProviderContext {
+            home: Some(home),
+            project_dirs: Vec::new(),
+        };
+        let mut servers = Vec::new();
+        let mut warnings = Vec::new();
+        ClaudeProvider
+            .scan_mcp(&context, &mut servers, &mut warnings)
+            .expect("scan Claude MCP");
+
+        assert!(warnings.is_empty(), "warnings: {warnings:#?}");
+        assert_eq!(servers.len(), 1);
+        assert_eq!(servers[0].name, "personal-server");
+        assert_eq!(servers[0].scope, "global");
+        assert_eq!(servers[0].path, path);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn scans_project_mcp_servers_nested_in_personal_claude_json() {
+        let root = temp_dir();
+        let home = root.join("home");
+        let path = home.join(".claude.json");
+        fs::create_dir_all(&home).expect("create home");
+        fs::write(
+            &path,
+            r#"{
+  "mcpServers": {"personal": {"command": "demo"}},
+  "projects": {
+    "/work/demo": {"mcpServers": {"project-server": {"command": "project"}}}
+  }
+}"#,
+        )
+        .expect("write Claude state");
+
+        let context = ProviderContext {
+            home: Some(home),
+            project_dirs: Vec::new(),
+        };
+        let mut servers = Vec::new();
+        let mut warnings = Vec::new();
+        ClaudeProvider
+            .scan_mcp(&context, &mut servers, &mut warnings)
+            .expect("scan Claude MCP");
+
+        assert!(warnings.is_empty(), "warnings: {warnings:#?}");
+        assert_eq!(servers.len(), 2);
+        let project_server = servers
+            .iter()
+            .find(|server| server.name == "project-server")
+            .expect("nested project server");
+        assert_eq!(project_server.scope, "/work/demo");
+        assert_eq!(
+            project_server.server_path,
+            vec!["projects", "/work/demo", "mcpServers"]
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn maps_claude_skill_invocation_frontmatter_to_visibility() {
+        let frontmatter: serde_yaml::Value = serde_yaml::from_str(
+            "name: demo\ndisable-model-invocation: true\n",
+        )
+        .expect("parse skill frontmatter");
+        let metadata = ClaudeProvider
+            .skill_visibility_metadata(
+                PathBuf::from(".claude/skills/demo").as_path(),
+                PathBuf::from(".claude/skills/demo/SKILL.md").as_path(),
+                Some(&frontmatter),
+            )
+            .expect("read Claude skill metadata");
+
+        assert_eq!(metadata.disable_model_invocation, Some(true));
+        assert_eq!(metadata.provider_visibility, SkillVisibility::Manual);
+
+        let meta = frontmatter.as_mapping().expect("mapping frontmatter");
+        assert!(!ClaudeProvider.skill_frontmatter_satisfies(meta, SkillVisibility::Auto));
+        assert!(ClaudeProvider.skill_frontmatter_satisfies(meta, SkillVisibility::Manual));
+
+        let rendered = ClaudeProvider
+            .render_skill_frontmatter(
+                "---\nname: demo\n---\n\n# Demo\n",
+                SkillVisibility::Manual,
+            )
+            .expect("render Claude skill frontmatter");
+        assert!(rendered.contains("disable-model-invocation: true"));
+        assert!(rendered.contains("visibility: manual"));
+    }
+
+    #[test]
+    fn exposes_claude_token_usage_analytics_capability() {
+        assert_eq!(
+            ClaudeProvider.analytics_capabilities(),
+            AnalyticsCapabilities {
+                token_usage: true,
+                reasoning_tokens: false,
+                explicit_runs: false,
+                rate_limit_history: false,
+            }
+        );
+    }
+
 }

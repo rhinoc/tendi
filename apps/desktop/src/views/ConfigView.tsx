@@ -65,8 +65,14 @@ type ConfigConflict = {
   merged: boolean;
 };
 
-type AppSettings = {
+type ConfigProfileCommandResult = {
   configProfiles: Record<string, string>;
+};
+
+type ConfigViewProps = {
+  /** App-owned persisted profile state. ConfigView only presents and mutates this slice. */
+  activeProfiles: Record<string, string>;
+  onActiveProfilesChange: (profiles: Record<string, string>) => void;
 };
 
 function errorMessage(error: unknown): string {
@@ -133,7 +139,7 @@ function configSelectionActions(
   return configSelectionActionIds(selectedRows.length).map((id) => actions[id]);
 }
 
-export function ConfigView() {
+export function ConfigView({ activeProfiles: activeProfilesProp, onActiveProfilesChange }: ConfigViewProps) {
   const [configs, setConfigs] = useState<AgentConfigFile[]>([]);
   const [activePath, setActivePath] = useState("");
   const [selectedPath, setSelectedPath] = useState("");
@@ -153,7 +159,6 @@ export function ConfigView() {
   const [pendingDeleteConfirmConfigs, setPendingDeleteConfirmConfigs] = useState<AgentConfigFile[]>([]);
   const [deleting, setDeleting] = useState(false);
   const [deleteError, setDeleteError] = useState("");
-  const [activeProfiles, setActiveProfiles] = useState<Record<string, string>>({});
   const [selectedProfileValue, setSelectedProfileValue] = useState(BASE_PROFILE_VALUE);
   const [profileDialogOpen, setProfileDialogOpen] = useState(false);
   const [profileName, setProfileName] = useState("");
@@ -185,6 +190,7 @@ export function ConfigView() {
     () => profileAgent ? configs.filter((config) => config.agent === profileAgent && config.profile) : [],
     [configs, profileAgent],
   );
+  const activeProfiles = activeProfilesProp;
   const activeProfile = profileAgent ? activeProfiles[profileAgent] ?? "" : "";
   const profileOptions = useMemo(() => [
     { value: BASE_PROFILE_VALUE, label: "Base config" },
@@ -198,6 +204,9 @@ export function ConfigView() {
     : BASE_PROFILE_VALUE;
   const resolvedSelectedProfileValue = resolveSelectValue(selectedProfileValue, profileOptions);
   const profileSelectionChanged = resolvedSelectedProfileValue !== activeProfileValue;
+  const updateActiveProfiles = useCallback((next: Record<string, string>) => {
+    onActiveProfilesChange(next);
+  }, [onActiveProfilesChange]);
   const columns = useMemo<ColumnDef<AgentConfigFile>[]>(() => [
     {
       key: "agent",
@@ -316,18 +325,8 @@ export function ConfigView() {
     }
   }, [activePath, readConfig]);
 
-  const loadSettings = useCallback(async () => {
-    try {
-      const next = await invokeCommand<AppSettings>(TauriCommand.SettingsGet);
-      setActiveProfiles(next.configProfiles);
-    } catch (error) {
-      logger.error("failed to load config settings", { error: errorMessage(error) });
-    }
-  }, []);
-
   useEffect(() => {
     void loadConfigs();
-    void loadSettings();
     // The initial catalog load must not repeat after activePath is populated.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -442,14 +441,18 @@ export function ConfigView() {
       });
       setPendingDeleteConfirmConfigs([]);
       setSelected([]);
+      const nextProfiles = { ...activeProfiles };
+      for (const config of targets) {
+        if (config.profile && nextProfiles[config.agent] === config.profile) delete nextProfiles[config.agent];
+      }
+      updateActiveProfiles(nextProfiles);
       await loadConfigs();
-      await loadSettings();
     } catch (error) {
       setDeleteError(errorMessage(error));
     } finally {
       setDeleting(false);
     }
-  }, [deleting, loadConfigs, loadSettings, pendingDeleteConfirmConfigs]);
+  }, [activeProfiles, deleting, loadConfigs, pendingDeleteConfirmConfigs, updateActiveProfiles]);
 
   const rowContextMenu = useCallback((config: AgentConfigFile, { selectedRows, selected: isSelected }: { selectedRows: AgentConfigFile[]; selected: boolean }) => {
     const actionRows = isSelected ? selectedRows : [config];
@@ -476,15 +479,15 @@ export function ConfigView() {
     }
     setProfileSwitching(true);
     try {
-      const next = await invokeCommand<AppSettings>(TauriCommand.ConfigProfileSet, { agent, profile });
-      setActiveProfiles(next.configProfiles);
+      const next = await invokeCommand<ConfigProfileCommandResult>(TauriCommand.ConfigProfileSet, { agent, profile });
+      updateActiveProfiles(next.configProfiles);
       if (target.path !== activePath) await readConfig(target.path, target);
     } catch (error) {
       logger.error("failed to activate config profile", { error: errorMessage(error), agent });
     } finally {
       setProfileSwitching(false);
     }
-  }, [activePath, configs, dirty, profileSwitching, readConfig]);
+  }, [activePath, configs, dirty, profileSwitching, readConfig, updateActiveProfiles]);
 
   const openProfileDialog = () => {
     if (!profileAgent) return;
@@ -610,7 +613,6 @@ export function ConfigView() {
         open={pendingDeleteConfirmConfigs.length > 0}
         items={pendingDeleteConfirmConfigs.map((config) => formatUserPath(config.path))}
         itemLabel="config file"
-        description="Delete the selected config files? This action cannot be undone."
         busy={deleting}
         onOpenChange={(open) => { if (!open) setPendingDeleteConfirmConfigs([]); }}
         onConfirm={() => { void confirmDeleteConfigs(); }}

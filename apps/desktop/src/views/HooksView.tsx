@@ -51,9 +51,11 @@ import {
   hookTypeLabel,
   invokeCommand,
   isWebSource,
+  selectionDeleteErrorLabel,
   type HookRecord,
   safeInvoke,
   scopeColumn,
+  selectionDeleteLoadingLabel,
   suppressNextClick,
   type ProjectSummary,
 } from "../lib/index.ts";
@@ -386,7 +388,7 @@ export function HooksView({ rows, loadingRows = false, loadError = "", hasRows =
       const result = await onDeleteHooks(targets.map((item) => item.hook));
       const deleteResultError = hookOperationError(result);
       if (deleteResultError) setDeleteError(deleteResultError);
-      else if (!result) setDeleteError("Could not delete hooks.");
+      else if (!result) setDeleteError(selectionDeleteErrorLabel("hook", targets.length));
       setDeletingKey("");
       setSelected([]);
       return;
@@ -405,7 +407,7 @@ export function HooksView({ rows, loadingRows = false, loadError = "", hasRows =
         break;
       }
       if (!result) {
-        setDeleteError("Could not delete hook.");
+        setDeleteError(selectionDeleteErrorLabel("hook", 1));
         break;
       }
       if (Array.isArray(result)) latestRows = result as HookRecord[];
@@ -413,6 +415,7 @@ export function HooksView({ rows, loadingRows = false, loadError = "", hasRows =
     setDeletingKey("");
     setSelected([]);
   }, [deletingKey, onDeleteHook, onDeleteHooks, pendingDeleteItems, rows]);
+  const pendingDeleteLoadingLabel = selectionDeleteLoadingLabel("hook", pendingDeleteItems.length);
   const pendingDeleteMessage = pendingDeleteItems.length === 1
     ? `Delete this hook from ${formatUserPath(hookSourcePath(pendingDeleteItems[0]?.hook))}?`
     : `Delete ${pendingDeleteItems.length} selected hooks?`;
@@ -761,7 +764,7 @@ export function HooksView({ rows, loadingRows = false, loadError = "", hasRows =
             <DialogActionButton variant="secondary" onClick={() => setPendingDeleteItems([])}>Cancel</DialogActionButton>
             <DialogStatefulButton
               state={deletingKey ? "loading" : "idle"}
-              loadingLabel="Deleting hooks"
+              loadingLabel={pendingDeleteLoadingLabel}
               variant="danger"
               aria-label={pendingDeleteItems.length === 1 ? "Delete hook" : "Delete hooks"}
               onClick={() => void confirmDeleteHooks()}

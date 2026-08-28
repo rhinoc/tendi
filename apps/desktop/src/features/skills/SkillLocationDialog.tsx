@@ -14,7 +14,7 @@ import { SegmentedControl, SegmentedControlItem } from "../../components/shared/
 import { Toast } from "../../components/shared/Toast.tsx";
 import { Tooltip } from "../../components/shared/Tooltip.tsx";
 import { agentIdentityKey, formatUserPath, invokeCommand, TauriCommand } from "../../lib/index.ts";
-import type { RawSkillRecord, SkillRecord } from "../../views/SkillsView.tsx";
+import type { NormalizedSkill, RawSkillRecord } from "../../lib/index.ts";
 
 type SkillTargetOption = {
   id: string;
@@ -31,8 +31,8 @@ type DistributionResponse = {
 
 export type SkillLocationDialogProps = {
   open: boolean;
-  skill?: SkillRecord | null;
-  skills?: SkillRecord[];
+  skill?: NormalizedSkill | null;
+  skills?: NormalizedSkill[];
   initialAgent?: string;
   installedAgentKeys: string[];
   targetOptions?: SkillTargetOption[];
@@ -46,7 +46,7 @@ const modeOptions: Array<{ value: DistributionMode; label: string; icon: typeof 
   { value: "symlink", label: "Link", icon: Link2 },
 ];
 
-function sourcePathForSkill(skill: SkillRecord, initialAgent: string | undefined, singleSkill: boolean): string {
+function sourcePathForSkill(skill: NormalizedSkill, initialAgent: string | undefined, singleSkill: boolean): string {
   const sourceOptions = skill.paths.filter((path) => path.path);
   const preferred = initialAgent && singleSkill
     ? sourceOptions.find((path) => path.install_target.split(":")[0].toLowerCase() === initialAgent.toLowerCase())
@@ -58,7 +58,7 @@ function targetOptionsForDialog(options: SkillTargetOption[]): SkillTargetOption
   return options.filter((option) => option.id !== "universal");
 }
 
-function skillHasTarget(skill: SkillRecord, target: SkillTargetOption): boolean {
+function skillHasTarget(skill: NormalizedSkill, target: SkillTargetOption): boolean {
   return skill.paths.some((path) => {
     const scope = `${path.scope ?? ""}`.toLowerCase();
     if (scope && scope !== "global") return false;

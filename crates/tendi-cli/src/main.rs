@@ -65,7 +65,7 @@ enum SkillCommand {
         #[arg(long)]
         json: bool,
     },
-    Backup {
+    Sync {
         #[command(subcommand)]
         command: BackupCommand,
     },
@@ -155,8 +155,6 @@ enum BackupCommand {
         #[arg(long)]
         checkout: Option<std::path::PathBuf>,
         #[arg(long)]
-        device: Option<String>,
-        #[arg(long)]
         json: bool,
     },
     Status {
@@ -186,7 +184,7 @@ enum BackupCommand {
         #[arg(long)]
         yes: bool,
         #[arg(long, value_enum)]
-        conflict: Option<BackupRestoreConflictArg>,
+            conflict: Option<BackupRestoreConflictArg>,
         #[arg(long)]
         json: bool,
     },
@@ -460,15 +458,12 @@ fn main() -> Result<()> {
                     }
                 }
             }
-            SkillCommand::Backup { command } => match command {
-                BackupCommand::Configure { remote_url, checkout, device, json } => {
+            SkillCommand::Sync { command } => match command {
+                BackupCommand::Configure { remote_url, checkout, json } => {
                     let checkout_path = checkout
                         .unwrap_or(tendi_core::skill_backup::default_checkout_path()?);
-                    let config = tendi_core::skill_backup::BackupConfig::new(
-                        remote_url,
-                        checkout_path,
-                        device.unwrap_or_else(|| "My device".to_string()),
-                    );
+                    let config =
+                        tendi_core::skill_backup::BackupConfig::new(remote_url, checkout_path);
                     config.validate()?;
                     let working_directory = config
                         .checkout_path
@@ -485,7 +480,7 @@ fn main() -> Result<()> {
                     if json {
                         println!("{}", serde_json::to_string_pretty(&config)?);
                     } else {
-                        println!("Backup configured for {}", config.remote_url);
+                        println!("Sync configured for {}", config.remote_url);
                     }
                 }
                 BackupCommand::Status { json } => {
@@ -501,14 +496,13 @@ fn main() -> Result<()> {
                     } else if let Some(config) = config {
                         println!("remote: {}", config.remote_url);
                         println!("checkout: {}", config.checkout_path.display());
-                        println!("device: {}", config.device_label);
                         if let Some(version) = versions.first() {
                             println!("latest: {} {}", version.id, version.summary);
                         } else {
                             println!("latest: none");
                         }
                     } else {
-                        println!("Backup is not configured");
+                        println!("Sync is not configured");
                     }
                 }
                 BackupCommand::Run { json } => {
@@ -518,12 +512,12 @@ fn main() -> Result<()> {
                         println!("{}", serde_json::to_string_pretty(&report)?);
                     } else if let Some(commit) = report.commit {
                         println!(
-                            "Backed up {} skills and {} configuration sources ({commit})",
+                            "Synced {} skills and {} configuration sources ({commit})",
                             report.manifest.skills.len(),
                             report.manifest.artifacts.len()
                         );
                     } else {
-                        println!("Backup is already current");
+                        println!("Sync is already current");
                     }
                 }
                 BackupCommand::Versions { limit, json } => {
@@ -569,7 +563,7 @@ fn main() -> Result<()> {
                     if !has_planned && !has_conflicts {
                         return Ok(());
                     }
-                    if !yes && !confirm("Restore these backup skills? [y/N] ")? {
+                    if !yes && !confirm("Restore these sync skills? [y/N] ")? {
                         println!("aborted");
                         return Ok(());
                     }
@@ -618,19 +612,19 @@ fn main() -> Result<()> {
                     if json {
                         println!("{}", serde_json::to_string_pretty(&record)?);
                     } else {
-                        println!("Added {} to backup", record.skill_name);
+                        println!("Added {} to sync", record.skill_name);
                     }
                 }
                 BackupCommand::Disconnect { yes } => {
-                    if !yes && !confirm("Disconnect this machine from skill backup? [y/N] ")? {
+                    if !yes && !confirm("Disconnect this machine from skill sync? [y/N] ")? {
                         println!("aborted");
                         return Ok(());
                     }
                     let store = tendi_core::storage::Store::open_default()?;
                     if with_database_write_lock(&store, || store.clear_skill_backup_config())? {
-                        println!("Disconnected this machine from skill backup");
+                        println!("Disconnected this machine from skill sync");
                     } else {
-                        println!("Backup was not configured");
+                        println!("Sync was not configured");
                     }
                 }
             },
@@ -1161,7 +1155,7 @@ fn print_skill_restore_operations(
 
 fn print_backup_restore_operations(plan: &tendi_core::skill_backup::BackupRestorePlan) -> Result<()> {
     let mut stdout = std::io::stdout().lock();
-    writeln!(stdout, "backup version: {}", plan.revision)?;
+    writeln!(stdout, "sync version: {}", plan.revision)?;
     writeln!(stdout, "target: {}", plan.target_root.display())?;
     for operation in &plan.operations {
         writeln!(
@@ -1557,26 +1551,23 @@ mod tests {
     }
 
     #[test]
-    fn skill_backup_configure_accepts_remote_and_device_label() {
+    fn skill_backup_configure_accepts_a_remote_without_a_device_label() {
         let cli = Cli::try_parse_from([
             "tendi",
             "skills",
-            "backup",
+            "sync",
             "configure",
             "git@github.com:example/skills.git",
-            "--device",
-            "Work Mac",
         ])
         .unwrap();
         let Command::Skills {
-            command: SkillCommand::Backup {
-                command: BackupCommand::Configure { remote_url, device, .. },
+            command: SkillCommand::Sync {
+                command: BackupCommand::Configure { remote_url, .. },
             },
         } = cli.command
         else {
             panic!("unexpected command");
         };
         assert_eq!(remote_url, "git@github.com:example/skills.git");
-        assert_eq!(device.as_deref(), Some("Work Mac"));
     }
 }

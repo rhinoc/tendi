@@ -65,9 +65,8 @@ import traeIcon from "@lobehub/icons-static-svg/icons/trae-color.svg";
 import type { ComponentProps } from "react";
 import { applyAppearance, applyFontFamily, listenForSystemAppearanceChange, normalizeAppearance, normalizeFontFamily, normalizeThemePreferences, readCachedAppearance, readCachedFontFamily, readCachedThemePreferences, type Appearance, type ColorTheme, type FontFamily, type ThemePreferences } from "./lib/appearance.ts";
 import { applyAppIcon, normalizeAppIcon, readCachedAppIcon, type AppIcon } from "./lib/app-icon.ts";
-import { loadOverviewCountWithRetry } from "./lib/overview-counts.ts";
-import { COLLAPSED_SIDEBAR_SIZE, SIDEBAR_SIZE, SkillChangeCommand, SkillVisibility, TauriCommand, UPDATE_AVAILABLE_EVENT, agentIdentityKey, applySessionDelta, applyVisibilityState, clearSkillUpdateAvailability, hookSourcePath, hookTrustHash, invokeCommand, isConcreteAgent, isTauriRuntime, logger, mergeSessionRows, navItems, normalizeDomainRows, normalizePrompt, normalizeSession, normalizeSessionResumeTarget, normalizeSessionSkillLink, normalizeTranscriptLocatorPage, normalizeTranscriptPage, normalizeTranscriptSearchResult, promptTitleFromBody, recomputeSources, replaceSkillReportPreservingUpdates, ruleAgents, safeInvoke, sameAgent, sessionAppDeepLink, sessionIdentity, sessionIdentityRecordKey, sessionLaunchPayload, sessionLogicalIdentity, sessionResumeTargetForAgent, skillChangeDescription, skillChangeTitle, subscribeDaemonEvents } from "./lib/index.ts";
-import type { BundledSkillStatus, CliInstallStatus, DaemonEvent, DesktopUpdateState, HookRecord, McpRecord, MissingSessionProjectPolicy, ProjectSummary, SessionIdentityRecord, SessionProjectSummary, SessionResumeOutcome, SessionResumeTarget, TranscriptLocatorPage, TranscriptPage, TranscriptSearchResult, TranscriptSearchScopes, UpdateCheckResult } from "./lib/index.ts";
+import { COLLAPSED_SIDEBAR_SIZE, DOMAIN_KEYS, SIDEBAR_SIZE, SkillChangeCommand, SkillVisibility, TauriCommand, UPDATE_AVAILABLE_EVENT, agentIdentityKey, applySessionDelta, applyVisibilityState, clearSkillUpdateAvailability, dialogCopy, hookSourcePath, hookTrustHash, invokeCommand, isConcreteAgent, isTauriRuntime, logger, mergeSessionRows, navItems, normalizeConfigProfiles, normalizeDomainRows, normalizeMissingSessionProjectPolicy, normalizePrompt, normalizeSession, normalizeSessionResumeTarget, normalizeSessionSkillLink, normalizeTranscriptLocatorPage, normalizeTranscriptPage, normalizeTranscriptSearchResult, promptTitleFromBody, recomputeSources, replaceSkillReportPreservingUpdates, ruleAgents, safeInvoke, sameAgent, sessionAppDeepLink, sessionIdentity, sessionIdentityRecordKey, sessionLaunchPayload, sessionLogicalIdentity, sessionResumeTargetForAgent, skillChangeActionLabel, skillChangeDescription, skillChangeBusyLabel, skillChangeLoadingCopy, skillChangeTitle, subscribeDaemonEvents } from "./lib/index.ts";
+import type { BundledSkillStatus, CliInstallStatus, DaemonEvent, DesktopUpdateState, DomainKey, HookRecord, McpRecord, MissingSessionProjectPolicy, NormalizedSkill, ProjectSummary, SessionIdentityRecord, SessionProjectSummary, SessionRecord, SessionResumeOutcome, SessionResumeTarget, SessionSkillLinkRecord, SettingsPayload, TranscriptLocatorPage, TranscriptPage, TranscriptSearchResult, TranscriptSearchScopes, UpdateCheckResult } from "./lib/index.ts";
 import { sortSidebarSources, type OrderedSidebarSource } from "./lib/sidebar-sources.ts";
 import { mcpColumns } from "./lib/tableColumns.tsx";
 import { PlaceholderView } from "./components/shared/PlaceholderView.tsx";
@@ -78,8 +77,7 @@ import { DialogStatefulButton } from "./components/shared/DialogStatefulButton.t
 import { LoadingState } from "./components/shared/LoadingState.tsx";
 import { Sidebar } from "./components/shared/Sidebar.tsx";
 import { Toast } from "./components/shared/Toast.tsx";
-import type { SessionRecord, SkillLinkRecord } from "./views/SessionsView.tsx";
-import type { RawSkillRecord, SkillInstallResult, SkillRecord, WrapperArgs } from "./views/SkillsView.tsx";
+import type { RawSkillRecord, SkillInstallResult, WrapperArgs } from "./lib/index.ts";
 import { ConfigView } from "./views/ConfigView.tsx";
 import { DataListView } from "./views/McpView.tsx";
 import { HooksView } from "./views/HooksView.tsx";
@@ -87,11 +85,10 @@ import { PromptsView } from "./views/PromptsView.tsx";
 import { RulesView } from "./views/RulesView.tsx";
 import { SessionsView } from "./views/SessionsView.tsx";
 import { SkillsView } from "./views/SkillsView.tsx";
-import { RuleEditorView } from "./features/rules/RuleEditorView.tsx";
 import { SettingsView } from "./features/settings/SettingsView.tsx";
-import { SkillEditorView, type SkillEditorRecord } from "./features/skills/SkillEditorView.tsx";
-import { OverviewView, type OverviewNavId } from "./views/OverviewView.tsx";
-import { desktopStore, useDesktopStore, type AgentTargetOption, type SkillIndexStatus, type SkillUpdateReport } from "./store/desktop-store.ts";
+import { SkillEditorView } from "./features/skills/SkillEditorView.tsx";
+import { OverviewView } from "./views/OverviewView.tsx";
+import { desktopStore, selectCatalogCountErrors, selectCatalogCountLoadedDomains, selectCatalogCounts, selectHookReviewCount, selectSessionListStatus, selectSkillUpdateCount, useDesktopStore, type AgentTargetOption, type SkillIndexStatus, type SkillUpdateReport } from "./store/desktop-store.ts";
 
 type ViewId =
   | "overview"
@@ -103,8 +100,7 @@ type ViewId =
   | "mcp"
   | "config"
   | "settings"
-  | "skillDetail"
-  | "ruleDetail";
+  | "skillDetail";
 
 const loadConfirmSkillChangesDialog = () => import("./features/skills/ConfirmSkillChangesDialog.tsx");
 const loadBundledSkillInstallDialog = () => import("./features/skills/BundledSkillInstallDialog.tsx");
@@ -125,6 +121,7 @@ function SkillChangeDialogFallback({
 }) {
   const isUpdate = command === SkillChangeCommand.UpdateMany;
   const isDelete = command === SkillChangeCommand.DeleteMany;
+  const actionLabel = skillChangeActionLabel(command);
   return (
     <DialogShell
       open
@@ -146,17 +143,17 @@ function SkillChangeDialogFallback({
         ) : (
           <>
             <p id="skill-changes-loading-description" className="dialogVisuallyHidden">
-              Preparing skill change preview.
+              {skillChangeLoadingCopy.description}
             </p>
-            <LoadingState className="skillUpdatePreviewLoading" label="Preparing update preview" />
+            <LoadingState className="skillUpdatePreviewLoading" label={skillChangeLoadingCopy.previewLabel} />
           </>
         )}
       </div>
       {isDelete ? (
         <div className="confirmDialogActions">
           <DialogActionButton variant="secondary" onClick={() => onOpenChange(false)}>Cancel</DialogActionButton>
-          <DialogStatefulButton state="idle" variant="danger" aria-label="Delete skills" onClick={onConfirm}>
-            Delete skills
+          <DialogStatefulButton state="idle" variant="danger" aria-label={actionLabel} onClick={onConfirm}>
+            {actionLabel}
           </DialogStatefulButton>
         </div>
       ) : null}
@@ -211,17 +208,8 @@ type PendingSkillChange = {
 
 type DomainRow = Record<string, unknown>;
 
-type DomainKey = "skills" | "prompts" | "sessions" | "rules" | "hooks" | "mcp";
-
-const DOMAIN_KEYS: DomainKey[] = ["skills", "prompts", "sessions", "rules", "hooks", "mcp"];
 const SESSION_LOAD_ERROR = "Could not load sessions. Try again.";
 const SESSION_REFRESH_ERROR = "Could not refresh sessions. Try again.";
-
-type OverviewDomainCount = {
-  count: number;
-  secondaryCount: number;
-  ready?: boolean;
-};
 
 function errorMessage(error: unknown): string {
   if (typeof error === "string") return error;
@@ -296,39 +284,37 @@ function isDomainKey(value: string): value is DomainKey {
   return value in domainListCommands;
 }
 
-function isDetailView(value: ViewId): value is "skillDetail" | "ruleDetail" {
-  return value === "skillDetail" || value === "ruleDetail";
+function isDetailView(value: ViewId): value is "skillDetail" {
+  return value === "skillDetail";
 }
 
 export function App() {
   const storeState = useDesktopStore((state) => state);
-  const { catalogs, inventory, skillUpdates, sessions, analytics } = storeState;
+  const { catalogs, skillUpdates, sessions, analytics } = storeState;
   const data = catalogs.data;
   const agentTargets = catalogs.agentTargets;
   const loadingDomains = catalogs.loadingDomains;
   const domainErrors = catalogs.errors;
   const domainRetryRevision = catalogs.retryRevision;
-  const overviewCounts = inventory.counts;
-  const overviewCountsLoaded = inventory.loaded;
-  const overviewCountErrors = inventory.errors;
-  const overviewHookReviewCount = inventory.hookReviewCount;
-  const overviewSkillUpdateCount = inventory.skillUpdateCount;
   const checkingSkillUpdates = skillUpdates.checking;
   const skillUpdateError = skillUpdates.error;
   const skillIndexStatus = skillUpdates.indexStatus;
   const analyticsRevision = analytics.revision;
   const analyticsRevisionReady = analytics.ready;
   const analyticsRevisionError = analytics.error;
-  const sessionListStatus = sessions.listStatus;
-  const sessionListError = sessions.listError;
+  const sessionListStatus = selectSessionListStatus(storeState);
+  const sessionListError = sessionListStatus === "error" ? SESSION_LOAD_ERROR : "";
   const sessionRefreshError = sessions.refreshError;
   const [view, setView] = useState<ViewId>("overview");
   const deferredView = useDeferredValue(view);
   const contentView = isDetailView(view)
     ? view
     : isDetailView(deferredView) ? view : deferredView;
-  const [activeSkill, setActiveSkill] = useState<SkillEditorRecord | null>(null);
-  const [activeRule, setActiveRule] = useState<DomainRow | null>(null);
+  const [activeSkillName, setActiveSkillName] = useState<string | null>(null);
+  const activeSkill = useMemo(() => {
+    if (!activeSkillName) return null;
+    return data.skills.find((item) => item.name === activeSkillName) ?? null;
+  }, [activeSkillName, data.skills]);
   const [activeSessionKey, setActiveSessionKey] = useState("");
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [agentFilter, setAgentFilter] = useState("All");
@@ -341,13 +327,19 @@ export function App() {
   const [themePreferences, setThemePreferences] = useState<ThemePreferences>(() => readCachedThemePreferences());
   const [fontFamily, setFontFamily] = useState<FontFamily>(() => readCachedFontFamily());
   const [appIcon, setAppIcon] = useState<AppIcon>(() => readCachedAppIcon());
+  const [terminal, setTerminal] = useState("auto");
+  const [editor, setEditor] = useState("vscode");
+  const [additionalSessionRoots, setAdditionalSessionRoots] = useState<string[]>([]);
   const [developerMode, setDeveloperMode] = useState(false);
   const [projects, setProjects] = useState<ProjectSummary[]>([]);
   const [sessionProjects, setSessionProjects] = useState<SessionProjectSummary[]>([]);
+  const [configProfiles, setConfigProfiles] = useState<Record<string, string>>({});
   const [missingSessionProjectPolicy, setMissingSessionProjectPolicy] = useState<MissingSessionProjectPolicy>("show");
   const [desktopUpdate, setDesktopUpdate] = useState<DesktopUpdateState>({ status: "idle" });
   const [updateNoticeDismissed, setUpdateNoticeDismissed] = useState(false);
   const [sessionResumeTarget, setSessionResumeTarget] = useState<SessionResumeTarget>("auto");
+  const [settingsLoading, setSettingsLoading] = useState(true);
+  const [settingsLoadError, setSettingsLoadError] = useState("");
   const changeAppIcon = useCallback((nextAppIcon: AppIcon) => {
     setAppIcon(nextAppIcon);
     void applyAppIcon(nextAppIcon);
@@ -358,7 +350,6 @@ export function App() {
   const sessionsRefreshInFlight = useRef<Promise<unknown> | null>(null);
   const skillIndexRunInFlight = useRef<Promise<SkillIndexStatus> | null>(null);
   const skillIndexStatusRefreshInFlight = useRef<Promise<SkillIndexStatus | null> | null>(null);
-  const overviewCountsInFlight = useRef(new Map<string, Promise<boolean>>());
   const sessionResumeTargetRequests = useRef(new Map<string, Promise<"terminal" | "app">>());
   const sessionEventReady = useRef<Promise<void>>(Promise.resolve());
   const sessionEventFlushTimer = useRef<number | undefined>(undefined);
@@ -369,6 +360,7 @@ export function App() {
   const pendingWatchSessions = useRef(new Map<string, SessionRecord>());
   const pendingDeletedSessions = useRef(new Map<string, SessionIdentityRecord>());
   const updateOperationInFlight = useRef(false);
+  const settingsLoadRequest = useRef(0);
   const sidebarPanelRef = usePanelRef();
   const skillListRevision = useRef(0);
   const skillListInFlight = useRef<Promise<RawSkillRecord[] | null> | null>(null);
@@ -377,8 +369,6 @@ export function App() {
   const skillUpdateCheckRevision = useRef(0);
   const skillUpdateCheckInFlight = useRef<Promise<void> | null>(null);
   const skillUpdateCheckActive = useRef(false);
-  const agentFilterRef = useRef(agentFilter);
-  agentFilterRef.current = agentFilter;
   const refreshSessionProjects = useCallback(async () => {
     const result = await safeInvoke<unknown[]>(TauriCommand.SessionProjectsList);
     if (Array.isArray(result)) setSessionProjects(result as SessionProjectSummary[]);
@@ -528,6 +518,18 @@ export function App() {
     };
   }, [agentFilter, data]);
 
+  const overviewCounts = useMemo(() => selectCatalogCounts(filteredData), [filteredData]);
+  const overviewCountsLoaded = useMemo(
+    () => selectCatalogCountLoadedDomains(storeState),
+    [catalogs.data, catalogs.loadedDomains],
+  );
+  const overviewCountErrors = useMemo(
+    () => selectCatalogCountErrors(storeState),
+    [catalogs.errors],
+  );
+  const overviewHookReviewCount = selectHookReviewCount(filteredData);
+  const overviewSkillUpdateCount = selectSkillUpdateCount(data, agentFilter);
+
   const setData = desktopStore.actions.updateData;
   const setSkillUpdateError = desktopStore.actions.setSkillUpdateError;
   const setCheckingSkillUpdates = desktopStore.actions.setSkillUpdatesChecking;
@@ -536,14 +538,8 @@ export function App() {
   const setAnalyticsRevision = desktopStore.actions.setAnalyticsRevision;
   const setAnalyticsRevisionReady = desktopStore.actions.setAnalyticsReady;
   const setAnalyticsRevisionError = desktopStore.actions.setAnalyticsError;
-  const setSessionListStatus = useCallback((status: typeof sessions.listStatus) => {
-    desktopStore.actions.setSessionListState({ listStatus: status });
-  }, []);
-  const setSessionListError = useCallback((message: string) => {
-    desktopStore.actions.setSessionListState({ listError: message });
-  }, []);
   const setSessionRefreshError = useCallback((message: string) => {
-    desktopStore.actions.setSessionListState({ refreshError: message });
+    desktopStore.actions.setSessionRefreshError(message);
   }, []);
 
   const setDomainError = useCallback((domain: DomainKey, message: string) => {
@@ -589,23 +585,42 @@ export function App() {
     setAppearance(nextAppearance);
   }, []);
 
-  useEffect(() => {
-    let cancelled = false;
-    const revision = appearanceChangeRevision.current;
-    safeInvoke<{ appearance?: unknown; lightTheme?: unknown; darkTheme?: unknown; appIcon?: unknown; fontFamily?: unknown; developerMode?: unknown; sessionResumeTarget?: unknown }>(TauriCommand.SettingsGet).then((settings) => {
-      if (!cancelled && settings && revision === appearanceChangeRevision.current) {
+  const loadSettings = useCallback(async () => {
+    const requestId = ++settingsLoadRequest.current;
+    const appearanceRevision = appearanceChangeRevision.current;
+    setSettingsLoading(true);
+    setSettingsLoadError("");
+    try {
+      const settings = await invokeCommand<SettingsPayload>(TauriCommand.SettingsGet);
+      if (requestId !== settingsLoadRequest.current) return;
+      if (appearanceRevision === appearanceChangeRevision.current) {
         setAppearance(normalizeAppearance(settings.appearance));
-        setThemePreferences(normalizeThemePreferences({ light: settings.lightTheme as ColorTheme, dark: settings.darkTheme as ColorTheme }));
-        const normalizedAppIcon = normalizeAppIcon(settings.appIcon);
-        setAppIcon(normalizedAppIcon);
-        void applyAppIcon(normalizedAppIcon);
-        setFontFamily(normalizeFontFamily(settings.fontFamily));
-        setDeveloperMode(settings.developerMode === true);
-        setSessionResumeTarget(normalizeSessionResumeTarget(settings.sessionResumeTarget));
       }
-    });
-    return () => { cancelled = true; };
+      setThemePreferences(normalizeThemePreferences({ light: settings.lightTheme as ColorTheme, dark: settings.darkTheme as ColorTheme }));
+      const normalizedAppIcon = normalizeAppIcon(settings.appIcon);
+      setAppIcon(normalizedAppIcon);
+      void applyAppIcon(normalizedAppIcon);
+      setFontFamily(normalizeFontFamily(settings.fontFamily));
+      setTerminal(typeof settings.terminal === "string" && settings.terminal.trim() ? settings.terminal : "auto");
+      setEditor(typeof settings.editor === "string" && settings.editor.trim() ? settings.editor.trim() : "vscode");
+      setAdditionalSessionRoots(Array.isArray(settings.additionalSessionRoots)
+        ? settings.additionalSessionRoots.filter((root): root is string => typeof root === "string")
+        : []);
+      setDeveloperMode(settings.developerMode === true);
+      setSessionResumeTarget(normalizeSessionResumeTarget(settings.sessionResumeTarget));
+      setMissingSessionProjectPolicy(normalizeMissingSessionProjectPolicy(settings.missingSessionProjectPolicy));
+      setConfigProfiles(normalizeConfigProfiles(settings.configProfiles));
+      setSettingsLoadError("");
+    } catch (error) {
+      if (requestId === settingsLoadRequest.current) setSettingsLoadError(errorMessage(error));
+    } finally {
+      if (requestId === settingsLoadRequest.current) setSettingsLoading(false);
+    }
   }, []);
+
+  useEffect(() => {
+    void loadSettings();
+  }, [loadSettings]);
 
   const refreshSkillList = useCallback((force = false): Promise<RawSkillRecord[] | null> => {
     if (!force && skillListInFlight.current) return skillListInFlight.current;
@@ -670,7 +685,7 @@ export function App() {
           const next = normalizeDomainRows(current, "skills", result.skills);
           return replaceSkillReportPreservingUpdates(current, next);
         });
-        if (result.updates) desktopStore.actions.setSkillUpdateReports(result.updates, agentFilterRef.current);
+        if (result.updates) desktopStore.actions.setSkillUpdateReports(result.updates);
         desktopStore.actions.markDomainLoaded("skills");
         setDomainError("skills", "");
         const updateCheckRunning = result.updateCheck === "started" || result.updateCheck === "already-running";
@@ -892,6 +907,7 @@ export function App() {
         expectedTrustHash: server.trust_hash,
         name: server.name,
         enabled,
+        serverPath: server.server_path ?? [],
       });
       if (Array.isArray(rows)) setDomainRows("mcp", rows);
       return rows;
@@ -924,30 +940,22 @@ export function App() {
     }
   }, []);
 
-  const setSessionRows = useCallback((rows: unknown[], { markLoaded = true, markReady = true } = {}) => {
-    if (markReady) {
-      setSessionListStatus("loaded");
-      setSessionListError("");
-    }
+  const setSessionRows = useCallback((rows: unknown[], { markLoaded = true } = {}) => {
     setData((current) => {
       const nextSessions = mergeSessionRows(current.sessions, rows as Array<Record<string, unknown>>);
       if (nextSessions === current.sessions) return current;
-      return { ...current, sessions: nextSessions };
+      return recomputeSources({ ...current, sessions: nextSessions });
     });
     if (markLoaded) desktopStore.actions.markDomainLoaded("sessions");
-    if (rows.length > 0) desktopStore.actions.setSessionListState({ rowsAvailable: true });
-    if (markReady) desktopStore.actions.setSessionListState({ listLoaded: true });
-  }, []);
+    desktopStore.actions.setDomainError("sessions", "");
+    setSessionRefreshError("");
+  }, [setSessionRefreshError]);
 
   const setSessionLoadError = useCallback(() => {
-    if (desktopStore.getSnapshot().sessions.rowsAvailable) {
-      setSessionListStatus("loaded");
-      setSessionListError("");
-      return;
-    }
-    setSessionListStatus("error");
-    setSessionListError(SESSION_LOAD_ERROR);
-  }, []);
+    const hasRows = desktopStore.getSnapshot().catalogs.data.sessions.length > 0;
+    desktopStore.actions.setDomainError("sessions", hasRows ? "" : SESSION_LOAD_ERROR);
+    setSessionRefreshError(SESSION_REFRESH_ERROR);
+  }, [setSessionRefreshError]);
 
   const flushSessionEventBuffer = useCallback(() => {
     const recent = [...pendingRecentSessions.current.values()];
@@ -967,7 +975,7 @@ export function App() {
         [...upserts.values()] as unknown as Array<Record<string, unknown>>,
         deleted,
       );
-      return sessions === current.sessions ? current : { ...current, sessions };
+      return sessions === current.sessions ? current : recomputeSources({ ...current, sessions });
     });
   }, []);
 
@@ -1073,7 +1081,7 @@ export function App() {
             desktopStore.actions.markDomainLoaded("skills");
             desktopStore.actions.setDomainError("skills", "");
           }
-          desktopStore.actions.setSkillUpdateReports(payload.updates, agentFilter);
+          desktopStore.actions.setSkillUpdateReports(payload.updates);
           setSkillUpdateError("");
         } else {
           setSkillUpdateError(payload.error || "Update check failed");
@@ -1095,7 +1103,7 @@ export function App() {
         sessionEventFlushTimer.current = undefined;
       }
     };
-  }, [agentFilter, handleSessionScanEvent]);
+  }, [handleSessionScanEvent]);
 
   useEffect(() => {
     void refreshSkillListAndUpdates();
@@ -1135,12 +1143,9 @@ export function App() {
     return request;
   }, []);
 
-  const refreshSessionsFromScan = useCallback((showLoading = true) => {
+  const refreshSessionsFromScan = useCallback(() => {
     setSessionRefreshError("");
-    if (showLoading) {
-      setSessionListStatus("loading");
-      setSessionListError("");
-    }
+    desktopStore.actions.setDomainLoading("sessions", true);
     if (!sessionsRefreshInFlight.current) {
       sessionsRefreshInFlight.current = sessionEventReady.current
         .then(() => invokeCommand<SessionScanStartResult>(TauriCommand.SessionsScanStart))
@@ -1164,11 +1169,12 @@ export function App() {
           return null;
         })
         .finally(() => {
+          desktopStore.actions.setDomainLoading("sessions", false);
           sessionsRefreshInFlight.current = null;
         });
     }
     return sessionsRefreshInFlight.current;
-  }, [refreshSessionProjects, runSkillIndex]);
+  }, [refreshSessionProjects, runSkillIndex, setSessionRefreshError]);
 
   const refreshSkillIndexStatus = useCallback(async (): Promise<SkillIndexStatus | null> => {
     const existing = skillIndexStatusRefreshInFlight.current;
@@ -1199,54 +1205,23 @@ export function App() {
 
   const loadDomainForRetry = useCallback((domain: DomainKey) => {
     desktopStore.actions.markDomainLoaded(domain, false);
+    desktopStore.actions.setDomainError(domain, "");
     if (domain === "sessions") {
-      desktopStore.actions.setSessionListState({ listLoaded: false });
-      setSessionListStatus("loading");
-      setSessionListError("");
       setSessionRefreshError("");
     }
     setDomainLoading(domain, true);
     desktopStore.actions.bumpDomainRetryRevision();
-  }, [setSessionListError, setSessionListStatus, setSessionRefreshError]);
+  }, [setSessionRefreshError]);
 
-  const retryOverviewCounts = useCallback(() => {
+  const retryCatalogCounts = useCallback(() => {
+    for (const domain of DOMAIN_KEYS) {
+      desktopStore.actions.markDomainLoaded(domain, false);
+      desktopStore.actions.setDomainError(domain, "");
+      desktopStore.actions.setDomainLoading(domain, true);
+    }
+    setSessionRefreshError("");
     desktopStore.actions.bumpDomainRetryRevision();
-  }, []);
-
-  const loadOverviewCount = useCallback(async (domain: DomainKey) => {
-    const requestKey = `${agentFilter}\u0000${domain}`;
-    const existing = overviewCountsInFlight.current.get(requestKey);
-    if (existing) return existing;
-    desktopStore.actions.setInventoryError(domain, false);
-    const request = (async () => {
-      try {
-        const result = await invokeCommand<OverviewDomainCount>(TauriCommand.OverviewCount, {
-          domain,
-          agent: agentFilter === "All" ? null : agentFilter,
-        });
-        if (!Number.isFinite(result.count) || !Number.isFinite(result.secondaryCount)) {
-          throw new Error(`Invalid ${domain} count response`);
-        }
-        if (result.ready === false) return false;
-        if (agentFilterRef.current !== agentFilter) return false;
-        desktopStore.actions.setInventoryCount(domain, result.count, result.secondaryCount);
-        return true;
-      } catch (error) {
-        logger.warn("tendi overview count failed", { domain, error });
-        return false;
-      }
-    })();
-    overviewCountsInFlight.current.set(requestKey, request);
-    void request.then(
-      () => {
-        if (overviewCountsInFlight.current.get(requestKey) === request) overviewCountsInFlight.current.delete(requestKey);
-      },
-      () => {
-        if (overviewCountsInFlight.current.get(requestKey) === request) overviewCountsInFlight.current.delete(requestKey);
-      },
-    );
-    return request;
-  }, [agentFilter]);
+  }, [setSessionRefreshError]);
 
   useEffect(() => {
     let cancelled = false;
@@ -1340,24 +1315,16 @@ export function App() {
             return;
           }
           if (domain === "sessions") {
-            if (!desktopStore.getSnapshot().sessions.listLoaded) {
-              setSessionListStatus("loading");
-              setSessionListError("");
+            if (desktopStore.getSnapshot().catalogs.data.sessions.length === 0) {
               try {
                 const cachedRows = await invokeCommand<unknown[]>(TauriCommand.SessionsList);
                 setSessionRows(cachedRows, {
                   markLoaded: view !== "overview",
-                  markReady: view !== "overview" || cachedRows.length > 0,
                 });
               } catch (error) {
                 logger.error("sessions cached list load failed", { view, error });
-                setSessionRefreshError(SESSION_REFRESH_ERROR);
                 setSessionLoadError();
               }
-            }
-            if (view === "overview") {
-              void refreshSessionsFromScan(false);
-              return;
             }
             await refreshSessionsFromScan();
             return;
@@ -1392,20 +1359,8 @@ export function App() {
 
     if (view === "overview") {
       let cancelled = false;
-      desktopStore.actions.resetInventory(agentFilter);
       const loadOverviewDomain = async (domain: DomainKey) => {
         await loadOneDomain(domain);
-        const loaded = await loadOverviewCountWithRetry({
-          loadCount: () => loadOverviewCount(domain),
-          reloadDomain: async () => {
-            desktopStore.actions.markDomainLoaded(domain, false);
-            await loadOneDomain(domain, true);
-          },
-          shouldContinue: () => !cancelled && agentFilterRef.current === agentFilter,
-        });
-        if (!loaded && !cancelled && agentFilterRef.current === agentFilter) {
-          desktopStore.actions.setInventoryError(domain, true);
-        }
       };
       void Promise.all(DOMAIN_KEYS.map(loadOverviewDomain)).catch((error) => {
         if (!cancelled) logger.error("overview inventory load failed", { error });
@@ -1415,7 +1370,7 @@ export function App() {
       };
     }
 
-    const domain = view === "skillDetail" ? "skills" : view === "ruleDetail" ? "rules" : view;
+    const domain = view === "skillDetail" ? "skills" : view;
     if (!isDomainKey(domain)) return;
     let timer = 0;
     let frame = 0;
@@ -1428,19 +1383,7 @@ export function App() {
       window.cancelAnimationFrame(frame);
       window.clearTimeout(timer);
     };
-  }, [agentFilter, domainRetryRevision, ensureSkillUpdates, loadOverviewCount, refreshPrompts, refreshSessionsFromScan, refreshSkillList, refreshSkillListAndUpdates, setDomainError, setSessionLoadError, setSessionRows, view]);
-
-  useEffect(() => {
-    if (view !== "overview" || sessionListStatus === "loading") return;
-    const count = data.sessions.filter((session) => (
-      agentFilter === "All" || sameAgent(session.agent, agentFilter)
-    )).length;
-    desktopStore.actions.setInventoryCount("sessions", count);
-  }, [agentFilter, data.sessions, sessionListStatus, view]);
-
-  useEffect(() => {
-    desktopStore.actions.refreshSkillUpdateCount(agentFilter);
-  }, [agentFilter, data.skills]);
+  }, [domainRetryRevision, ensureSkillUpdates, refreshPrompts, refreshSessionsFromScan, refreshSkillList, refreshSkillListAndUpdates, setDomainError, setSessionLoadError, setSessionRows, view]);
 
   useEffect(() => {
     if (typeof window === "undefined") return undefined;
@@ -1466,8 +1409,7 @@ export function App() {
 
   const navigate = useCallback((next: ViewId) => {
     navigateTo(next);
-    setActiveSkill(null);
-    setActiveRule(null);
+    setActiveSkillName(null);
   }, [navigateTo]);
 
   const loadTranscript = useCallback(async (session: SessionRecord, cursor?: string, knownSourceVersion?: string): Promise<TranscriptPage> => {
@@ -1528,12 +1470,12 @@ export function App() {
     return links.flatMap((link) => {
       const normalized = normalizeSessionSkillLink(link);
       return normalized ? [normalized] : [];
-    }) as SkillLinkRecord[];
+    });
   }, [readSkillIndexStatus]);
 
   const openSkillByName = useCallback((skillName: string) => {
-    const skill = data.skills.find((item) => item.name === skillName) as SkillEditorRecord | undefined;
-    if (skill) setActiveSkill(skill);
+    const skill = data.skills.find((item) => item.name === skillName);
+    if (skill) setActiveSkillName(skill.name);
     navigateTo(skill ? "skillDetail" : "skills");
   }, [data.skills, navigateTo]);
 
@@ -1676,9 +1618,6 @@ export function App() {
       } else if (command === SkillChangeCommand.UpdateMany) {
         setData((current) => clearSkillUpdateAvailability(current, names));
       }
-      if (command === SkillChangeCommand.UpdateMany) {
-        desktopStore.actions.clearSkillUpdateReports(names, agentFilter);
-      }
       setPendingSkillChange(null);
       onApplied?.();
       if (!result.skills && (command !== SkillChangeCommand.DeleteMany || result?.refreshRequired)) {
@@ -1718,8 +1657,8 @@ export function App() {
     (names: string[], onApplied?: () => void) => previewAndApply(SkillChangeCommand.DeleteMany, { names }, { onApplied }),
     [previewAndApply],
   );
-  const openSkillFromList = useCallback((skill: SkillRecord) => {
-    setActiveSkill(skill as SkillEditorRecord);
+  const openSkillFromList = useCallback((skill: NormalizedSkill) => {
+    setActiveSkillName(skill.name);
     navigateTo("skillDetail");
   }, [navigateTo]);
 
@@ -1751,7 +1690,7 @@ export function App() {
       {bundledSkillPrompt ? (
         <Suspense fallback={(
           <DialogLoadingFallback
-            title="Set up Tendi for coding agents?"
+            title={dialogCopy.bundledSkillSetupTitle}
             label="Loading setup dialog"
             descriptionId="bundled-skill-loading-description"
             onOpenChange={(open) => { if (!open && !bundledSkillBusy) void dismissBundledSkillPrompt(); }}
@@ -1805,7 +1744,7 @@ export function App() {
           {...({ order: 1 } as Record<string, unknown>)}
         >
           <Sidebar
-            view={view === "skillDetail" ? "skills" : view === "ruleDetail" ? "rules" : view}
+            view={view === "skillDetail" ? "skills" : view}
             setView={navigate}
             sources={availableSidebarSources}
             collapsed={sidebarCollapsed}
@@ -1835,9 +1774,7 @@ export function App() {
             />
           ) : (
             <PlaceholderView title="Skill unavailable" />
-          )) : contentView === "ruleDetail" ? (
-            <RuleEditorView rule={activeRule} back={() => navigate("rules")} />
-          ) : contentView === "skills" ? (
+          )) : contentView === "skills" ? (
             <SkillsView
               skills={filteredData.skills}
               projects={projects}
@@ -1898,18 +1835,25 @@ export function App() {
             ) : contentView === "mcp" ? (
             <DataListView title="MCP" rows={filteredData.mcp} columns={mcpColumns} projects={projects} loading={loadingDomains.has("mcp")} loadError={domainErrors.mcp ?? ""} hasRows={data.mcp.length > 0} onRetry={() => { void loadDomainForRetry("mcp"); }} onSetMcpEnabled={setMcpEnabled} />
           ) : contentView === "config" ? (
-            <ConfigView />
+            <ConfigView activeProfiles={configProfiles} onActiveProfilesChange={setConfigProfiles} />
           ) : contentView === "settings" ? (
             <SettingsView
               appearance={appearance}
               themePreferences={themePreferences}
               fontFamily={fontFamily}
+              terminal={terminal}
+              editor={editor}
+              additionalSessionRoots={additionalSessionRoots}
               appIcon={appIcon}
+              configProfiles={configProfiles}
               developerMode={developerMode}
               sessionResumeTarget={sessionResumeTarget}
               missingSessionProjectPolicy={missingSessionProjectPolicy}
               onAppearanceChange={changeAppearance}
               onFontFamilyChange={setFontFamily}
+              onTerminalChange={setTerminal}
+              onEditorChange={setEditor}
+              onAdditionalSessionRootsChange={setAdditionalSessionRoots}
               onDeveloperModeChange={setDeveloperMode}
               onSessionResumeTargetChange={setSessionResumeTarget}
               onMissingSessionProjectPolicyChange={setMissingSessionProjectPolicy}
@@ -1922,6 +1866,9 @@ export function App() {
                 loadDomainForRetry("rules");
                 loadDomainForRetry("mcp");
               }}
+              appSettingsLoading={settingsLoading}
+              appSettingsLoadError={settingsLoadError}
+              onRetryAppSettings={() => { void loadSettings(); }}
               update={desktopUpdate}
               onCheckForUpdates={() => { void checkForUpdates(true); }}
               onInstallUpdate={() => { void installUpdate(); }}
@@ -1945,10 +1892,10 @@ export function App() {
               agentFilter={agentFilter}
               overviewCountsLoaded={overviewCountsLoaded}
               overviewCountErrors={overviewCountErrors}
-              onRetryCounts={retryOverviewCounts}
+              onRetryCounts={retryCatalogCounts}
               sessionListStatus={sessionListStatus}
               sessionListError={sessionListError}
-              onNavigate={(id: OverviewNavId) => navigate(id)}
+              onNavigate={(id: DomainKey) => navigate(id)}
               onOpenSession={(session) => {
                 setActiveSessionKey(`${session.agent}:${session.id}`);
                 navigate("sessions");

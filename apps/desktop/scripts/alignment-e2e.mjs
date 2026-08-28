@@ -232,6 +232,74 @@ async function runOverviewChecks(page) {
   );
 }
 
+async function runOverviewUsageChecks(page) {
+  const loadingChart = page.locator('section.chartFrame[aria-label="Loading usage chart"]');
+  await loadingChart.waitFor({ state: "visible", timeout: 5000 });
+  const loadingMetrics = await loadingChart.evaluate((node) => {
+    const legend = node.querySelector(".chartLegend");
+    const plot = node.querySelector(".overviewAnalyticsLoadingDots");
+    return {
+      frameHeight: node.getBoundingClientRect().height,
+      legendHeight: legend?.getBoundingClientRect().height ?? 0,
+      plotHeight: plot?.getBoundingClientRect().height ?? 0,
+    };
+  });
+
+  await page.evaluate(() => window.__releaseAnalyticsOverview?.());
+  const loadedChart = page.locator('section.chartFrame[aria-label="tokens trend"]');
+  await loadedChart.waitFor({ state: "visible", timeout: 5000 });
+  const loadedMetrics = await loadedChart.evaluate((node) => {
+    const legend = node.querySelector(".chartLegend");
+    const plot = node.querySelector(".overviewTrendPlotLayout");
+    return {
+      frameHeight: node.getBoundingClientRect().height,
+      legendHeight: legend?.getBoundingClientRect().height ?? 0,
+      plotHeight: plot?.getBoundingClientRect().height ?? 0,
+    };
+  });
+  check(
+    "overview",
+    "usage-loading-height",
+    Math.abs(loadingMetrics.frameHeight - loadedMetrics.frameHeight) <= TOLERANCE
+      && Math.abs(loadingMetrics.legendHeight - loadedMetrics.legendHeight) <= TOLERANCE
+      && Math.abs(loadingMetrics.plotHeight - loadedMetrics.plotHeight) <= TOLERANCE,
+    `loading frame/legend/plot ${loadingMetrics.frameHeight}/${loadingMetrics.legendHeight}/${loadingMetrics.plotHeight}px vs loaded ${loadedMetrics.frameHeight}/${loadedMetrics.legendHeight}/${loadedMetrics.plotHeight}px`,
+  );
+
+  await page.setViewportSize({ width: 720, height: 1024 });
+  await page.waitForFunction(() => {
+    const legend = document.querySelector(".overviewAnalytics .chartLegend:not(.chartLegendEmpty)");
+    return Boolean(legend && legend.getBoundingClientRect().width > 0);
+  }, { timeout: 2000 });
+  const overflowMetrics = await page.locator(".overviewAnalytics .chartLegend:not(.chartLegendEmpty)").evaluate((node) => {
+    const style = getComputedStyle(node);
+    const items = [...node.querySelectorAll(".chartLegendItem")];
+    const tops = items.map((item) => item.getBoundingClientRect().top);
+    return {
+      flexWrap: style.flexWrap,
+      overflowX: style.overflowX,
+      whiteSpace: style.whiteSpace,
+      clientWidth: node.clientWidth,
+      scrollWidth: node.scrollWidth,
+      clientHeight: node.clientHeight,
+      scrollHeight: node.scrollHeight,
+      itemTopDelta: tops.length ? Math.max(...tops) - Math.min(...tops) : 0,
+    };
+  });
+  check(
+    "overview",
+    "usage-legend-single-line-scroll",
+    overflowMetrics.flexWrap === "nowrap"
+      && overflowMetrics.whiteSpace === "nowrap"
+      && ["auto", "scroll"].includes(overflowMetrics.overflowX)
+      && overflowMetrics.scrollWidth > overflowMetrics.clientWidth
+      && overflowMetrics.itemTopDelta <= TOLERANCE
+      && overflowMetrics.scrollHeight <= overflowMetrics.clientHeight,
+    `wrap ${overflowMetrics.flexWrap}, white-space ${overflowMetrics.whiteSpace}, overflow-x ${overflowMetrics.overflowX}, width ${overflowMetrics.clientWidth}/${overflowMetrics.scrollWidth}, height ${overflowMetrics.clientHeight}/${overflowMetrics.scrollHeight}, item top delta ${overflowMetrics.itemTopDelta}px`,
+  );
+  await page.setViewportSize({ width: 1440, height: 1024 });
+}
+
 async function runReq8NonFrozenFixture(page) {
   await page.evaluate(() => {
     if (document.getElementById("align-req8-fixture")) return;
@@ -1080,6 +1148,78 @@ async function runFrozenBugSmokeChecks(page, tab) {
     );
   }
 
+  if (tab.id === "skills") {
+    const visibilityTrigger = page.locator('.dataTableScrollPane .dataRow--scrollPane .selectControlTrigger.visibility').first();
+    if (await visibilityTrigger.count()) {
+      await visibilityTrigger.click();
+      await page.mouse.move(0, 0);
+      await page.waitForTimeout(150);
+      const openSelectMetrics = await page.evaluate(() => {
+        const trigger = document.querySelector('.dataTableScrollPane .dataRow--scrollPane .selectControlTrigger.visibility');
+        const scrollRow = trigger?.closest(".dataRow--scrollPane");
+        const id = scrollRow?.dataset.rowId;
+        const frozenRow = id
+          ? document.querySelector(`.dataTableFrozenPane .dataRow--frozenPane[data-row-id="${CSS.escape(id)}"]`)
+          : null;
+        if (!trigger || !scrollRow || !frozenRow) return { missing: true };
+        return {
+          missing: false,
+          triggerOpen: trigger.getAttribute("data-state") === "open",
+          frozenMenuActive: frozenRow.classList.contains("menuActive"),
+          scrollMenuActive: scrollRow.classList.contains("menuActive"),
+          frozenBg: getComputedStyle(frozenRow, "::after").backgroundColor,
+          scrollBg: getComputedStyle(scrollRow, "::after").backgroundColor,
+        };
+      });
+      check(
+        tab.id,
+        "bug22-select-menu-sync-open",
+        openSelectMetrics.missing !== true
+          && openSelectMetrics.triggerOpen === true
+          && openSelectMetrics.frozenMenuActive === true
+          && openSelectMetrics.scrollMenuActive === true
+          && openSelectMetrics.frozenBg === openSelectMetrics.scrollBg,
+        openSelectMetrics.missing === true
+          ? "missing paired row select rows"
+          : `trigger open ${openSelectMetrics.triggerOpen}, menuActive frozen/scroll ${openSelectMetrics.frozenMenuActive}/${openSelectMetrics.scrollMenuActive}, bg ${openSelectMetrics.frozenBg}/${openSelectMetrics.scrollBg}`,
+      );
+      await page.keyboard.press("Escape");
+      await page.waitForTimeout(150);
+      const closedSelectMetrics = await page.evaluate(() => {
+        const trigger = document.querySelector('.dataTableScrollPane .dataRow--scrollPane .selectControlTrigger.visibility');
+        const scrollRow = trigger?.closest(".dataRow--scrollPane");
+        const id = scrollRow?.dataset.rowId;
+        const frozenRow = id
+          ? document.querySelector(`.dataTableFrozenPane .dataRow--frozenPane[data-row-id="${CSS.escape(id)}"]`)
+          : null;
+        if (!trigger || !scrollRow || !frozenRow) return { missing: true };
+        return {
+          missing: false,
+          triggerOpen: trigger.getAttribute("data-state") === "open",
+          frozenMenuActive: frozenRow.classList.contains("menuActive"),
+          scrollMenuActive: scrollRow.classList.contains("menuActive"),
+          frozenBg: getComputedStyle(frozenRow, "::after").backgroundColor,
+          scrollBg: getComputedStyle(scrollRow, "::after").backgroundColor,
+        };
+      });
+      check(
+        tab.id,
+        "bug22-select-menu-sync-close",
+        closedSelectMetrics.missing !== true
+          && closedSelectMetrics.triggerOpen === false
+          && closedSelectMetrics.frozenMenuActive === false
+          && closedSelectMetrics.scrollMenuActive === false
+          && closedSelectMetrics.frozenBg === closedSelectMetrics.scrollBg,
+        closedSelectMetrics.missing === true
+          ? "missing paired row select rows"
+          : `trigger open ${closedSelectMetrics.triggerOpen}, menuActive frozen/scroll ${closedSelectMetrics.frozenMenuActive}/${closedSelectMetrics.scrollMenuActive}, bg ${closedSelectMetrics.frozenBg}/${closedSelectMetrics.scrollBg}`,
+      );
+    } else {
+      check(tab.id, "bug22-select-menu-sync-open", false, "Visibility select trigger missing");
+      check(tab.id, "bug22-select-menu-sync-close", false, "Visibility select trigger missing");
+    }
+  }
+
   const b10Metrics = await page.evaluate(() => {
     const scroller = document.querySelector(".dataTableBodyScroll");
     const frozenHeader = document.querySelector(".dataTableHeader--frozen");
@@ -1218,57 +1358,22 @@ async function runFrozenBugSmokeChecks(page, tab) {
   );
 
   if (tab.id === "sessions") {
-    const b12ButtonMetrics = await page.evaluate(() => {
-      const round = (value) => Math.round(value * 100) / 100;
-      const button = document.querySelector(".copyableSessionId.inSessionTable .copyableSessionIdButton");
-      const row = button?.closest(".dataRow--frozenPane");
-      const paired = row?.dataset.rowId
-        ? document.querySelector(`.dataRow--scrollPane[data-row-id="${CSS.escape(row.dataset.rowId)}"]`)
-        : null;
-      if (!button || !row || !paired) return { missing: true };
-      const buttonRect = button.getBoundingClientRect();
-      const rowRect = row.getBoundingClientRect();
-      const pairedRect = paired.getBoundingClientRect();
-      return {
-        missing: false,
-        buttonHeight: round(buttonRect.height),
-        buttonWidth: round(buttonRect.width),
-        frozenHeight: round(rowRect.height),
-        scrollHeight: round(pairedRect.height),
-      };
-    });
+    const sessionTitleCells = page.locator('.dataRow--frozenPane .dataCell[data-column="title"]');
+    const sessionIdFallbackCount = await page.locator(".copyableSessionId.inSessionTable").count();
+    const sessionPreviewRows = await sessionTitleCells.evaluateAll((cells) => ({
+      count: cells.length,
+      complete: cells.length > 0 && cells.every((cell) => {
+        const messages = [...cell.querySelectorAll(".sessionPreviewMessage")];
+        return messages.length === 2 && messages.every((message) => message.textContent?.includes("—"));
+      }),
+    }));
     check(
       tab.id,
-      "bug12-session-copy-button-compact",
-      b12ButtonMetrics.missing !== true
-        && b12ButtonMetrics.buttonHeight <= 16 + TOLERANCE
-        && b12ButtonMetrics.buttonWidth <= 16 + TOLERANCE
-        && Math.abs(b12ButtonMetrics.frozenHeight - b12ButtonMetrics.scrollHeight) <= TOLERANCE,
-      `button ${b12ButtonMetrics.buttonWidth}x${b12ButtonMetrics.buttonHeight}, row heights ${b12ButtonMetrics.frozenHeight}/${b12ButtonMetrics.scrollHeight}`,
+      "session-list-no-id-fallback",
+      sessionIdFallbackCount === 0
+        && sessionPreviewRows.complete,
+      `session ID fallback count ${sessionIdFallbackCount}, placeholder rows ${sessionPreviewRows.count}`,
     );
-
-    const copyButton = page.locator(".dataRow--frozenPane .copyableSessionIdButton").first();
-    if (await copyButton.count()) {
-      const sessionId = copyButton.locator("xpath=..");
-      const sessionTitle = copyButton.locator("xpath=ancestor::*[contains(concat(' ', normalize-space(@class), ' '), ' dataRow--frozenPane ')]").locator(".sessionTitleText");
-
-      await sessionTitle.hover();
-      await page.waitForTimeout(180);
-      const rowHoverOpacity = await copyButton.evaluate((node) => getComputedStyle(node).opacity);
-
-      await sessionId.locator("code").hover();
-      await page.waitForTimeout(180);
-      const idHoverOpacity = await copyButton.evaluate((node) => getComputedStyle(node).opacity);
-
-      check(
-        tab.id,
-        "bug14-session-copy-button-hover-scope",
-        rowHoverOpacity === "0" && idHoverOpacity === "1",
-        `title hover opacity ${rowHoverOpacity}, session ID hover opacity ${idHoverOpacity}`,
-      );
-    } else {
-      check(tab.id, "bug14-session-copy-button-hover-scope", false, "copy button missing");
-    }
   }
 
   await page.evaluate(() => {
@@ -1464,6 +1569,8 @@ try {
     const daemonEventWaiters = [];
     let nextCallbackId = 1;
     let sessionScanHandler = null;
+    let analyticsOverviewReleased = false;
+    const analyticsOverviewWaiters = [];
     const navigationEntry = performance.getEntriesByType("navigation")[0];
     let sessionsListReleased = navigationEntry?.type === "reload";
     const sessionsListWaiters = [];
@@ -1471,6 +1578,11 @@ try {
       sessionsListReleased = true;
       const waiters = sessionsListWaiters.splice(0);
       waiters.forEach((resolve) => resolve(report.sessions.sessions));
+    };
+    window.__releaseAnalyticsOverview = () => {
+      analyticsOverviewReleased = true;
+      const waiters = analyticsOverviewWaiters.splice(0);
+      waiters.forEach((resolve) => resolve());
     };
     let skillUpdateAttempts = 0;
     const unhandledCommands = [];
@@ -1499,6 +1611,8 @@ try {
           configProfiles: {},
         };
       }
+      if (command === "device_name") return "Mock Device";
+      if (command === "session_resume_target") return "terminal";
       if (command === "analytics_revision") return 1;
       if (command === "bundled_skill_status") {
         return {
@@ -1515,20 +1629,6 @@ try {
       }
       if (command === "session_skill_index_run") return { started: true };
       if (command === "session_skill_links") return [];
-      if (command === "overview_count") {
-        const counts = {
-          skills: report.skills.skills.length,
-          prompts: report.prompts.prompts.length,
-          sessions: report.sessions.sessions.length,
-          rules: report.rules.rules.length,
-          hooks: report.hooks.hooks.length,
-          mcp: report.mcp.servers.length,
-        };
-        return {
-          count: counts[args?.domain] ?? 0,
-          secondaryCount: args?.domain === "skills" || args?.domain === "hooks" ? 1 : 0,
-        };
-      }
       if (command === "analytics_overview") {
         const usage = {
           inputTokens: 10,
@@ -1539,7 +1639,7 @@ try {
           totalTokens: 19,
         };
         const runs = { started: 1, completed: 1, unclosed: 0, totalMs: 100, maxMs: 100 };
-        return {
+        const analytics = {
           revision: 1,
           generatedAt: "2026-06-29T19:00:00Z",
           daysRequested: args?.days ?? 30,
@@ -1577,7 +1677,12 @@ try {
             runs,
             aborted: 0,
             compacted: 0,
-            models: [{ model: "mock-model", totalTokens: 19 }],
+            models: [
+              { model: "mock-model-alpha-with-a-deliberately-long-name-for-horizontal-overflow", totalTokens: 8 },
+              { model: "mock-model-beta-with-a-deliberately-long-name-for-horizontal-overflow", totalTokens: 5 },
+              { model: "mock-model-gamma-with-a-deliberately-long-name-for-horizontal-overflow", totalTokens: 4 },
+              { model: "mock-model-delta-with-a-deliberately-long-name-for-horizontal-overflow", totalTokens: 2 },
+            ],
             tools: [],
             skills: [],
             rateLimits: {},
@@ -1586,6 +1691,8 @@ try {
           skills: [],
           warnings: [],
         };
+        if (analyticsOverviewReleased) return analytics;
+        return new Promise((resolve) => analyticsOverviewWaiters.push(() => resolve(analytics)));
       }
       if (command === "agent_configs_list") {
         return [{
@@ -1625,7 +1732,13 @@ try {
           detail: "",
         };
       }
-      if (command === "skills_refresh") return { skills: report.skills.skills, updateCheck: "completed" };
+      if (command === "skills_refresh") {
+        return {
+          skills: report.skills.skills,
+          updateCheck: "completed",
+          updates: [{ name: "alpha-skill", status: "update-available" }],
+        };
+      }
       if (command === "skills_list") return report.skills.skills;
       if (command === "skills_backup_status") return { config: null, statuses: [], versions: [] };
       if (command === "skills_backup_sync") return null;
@@ -1761,6 +1874,7 @@ try {
   await page.getByRole("heading", { name: "Overview", exact: true }).waitFor();
   await page.locator(".overviewPage").waitFor();
   await runPageHeaderChecks(page, "overview", "Overview", false);
+  await runOverviewUsageChecks(page);
   const navLabels = await page.locator(".navItem").evaluateAll((buttons) => buttons.map((button) => button.textContent?.trim() ?? ""));
   check(
     "navigation",
@@ -1886,7 +2000,6 @@ try {
         `rest opacity ${groupOpacityAtRest}, hover opacity ${groupOpacityOnHover}`,
       );
       await searchInput.fill("");
-      await page.locator(".copyableSessionId.inSessionTable").first().waitFor();
     }
 
     if (tab.id === "skills") {

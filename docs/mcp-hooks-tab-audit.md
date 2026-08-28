@@ -27,10 +27,11 @@
 ### 后端数据
 
 - Tauri 命令包括 `mcp_list` 和 `mcp_set_enabled`；列表返回 `tendi_core::mcp::scan_mcp(&cwd).servers`，启用命令写回配置后重新扫描。
-- `McpServerRecord` 包含 `agent`、`name`、`scope`、`transport`、`status`、`path`、`trust_hash`、`read_only_reason`。
+- `McpServerRecord` 包含 `agent`、`name`、`scope`、`transport`、`status`、`path`、`server_path`、`trust_hash`、`read_only_reason`；`server_path` 用于定位 Claude `~/.claude.json` 中按项目嵌套的 `mcpServers`。
 - 扫描来源包括：
   - `~/.codex/config.toml`
   - `~/.claude/settings.json`
+  - `~/.claude.json` 顶层个人 MCP，以及其中 `projects[项目路径].mcpServers`
   - `~/.cursor/cli-config.json`
   - `~/.cursor/projects`
   - 当前工作目录 ancestors 下的 `.mcp.json`、`.cursor/mcp.json`、`.codex/mcp.json`、`.codex/config.toml`

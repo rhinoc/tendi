@@ -5,7 +5,7 @@ import { Dialog } from "radix-ui";
 import { LoadingState } from "../../components/shared/LoadingState.tsx";
 import { LoadErrorState } from "../../components/shared/LoadErrorState.tsx";
 import { IconButton } from "../../components/shared/IconButton.tsx";
-import { formatSessionTitle, normalizeSession, sessionProject, sessionProjectGroupKey, type SessionSkillLinkRecord } from "../../lib/index.ts";
+import { dialogCopy, formatSessionTitle, normalizeSession, sessionProject, sessionProjectGroupKey, type SessionSkillLinkRecord } from "../../lib/index.ts";
 import { SkillSessionProjectChart, type SkillSessionProjectItem } from "./SkillSessionProjectChart.tsx";
 import "../../components/shared/confirm-dialog.css";
 import "./linked-sessions.css";
@@ -79,7 +79,7 @@ export function LinkedSessionsSummary({ links, loading, status, onOpen }: Linked
   return (
     <section className="linkedSessionsSummary">
       <div>
-        <span>Recent sessions</span>
+        <span>{dialogCopy.recentSessionsLabel}</span>
         <strong>{loading ? "..." : links.length}</strong>
       </div>
       <div className="linkedSessionsMeta">
@@ -132,18 +132,18 @@ export function LinkedSessionsDrawer({ open, onOpenChange, links, loading, error
           onMouseDown={(event) => event.stopPropagation()}
         >
           <div className="linkedSessionsDrawerHeader">
-            <Dialog.Title className="linkedSessionsDrawerTitle">Recent Sessions</Dialog.Title>
+            <Dialog.Title className="linkedSessionsDrawerTitle">{dialogCopy.recentSessionsLabel}</Dialog.Title>
             <Dialog.Description id="linked-sessions-drawer-description" className="dialogVisuallyHidden">
               View recent sessions linked to this skill.
             </Dialog.Description>
             <div className="linkedSessionsDrawerActions">
               <Dialog.Close asChild>
-                <IconButton aria-label="Close recent sessions"><X size={15} /></IconButton>
+                <IconButton aria-label={dialogCopy.linkedSessionsCloseLabel}><X size={15} /></IconButton>
               </Dialog.Close>
             </div>
           </div>
           {loading ? (
-            <LoadingState className="linkedSessionsDrawerEmpty" label="Loading recent sessions" />
+            <LoadingState className="linkedSessionsDrawerEmpty" label={dialogCopy.linkedSessionsLoadingLabel} />
           ) : error ? (
             <LoadErrorState message={error} onRetry={onRetry} />
           ) : chartItems.length > 0 ? (

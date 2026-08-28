@@ -53,7 +53,6 @@ export enum TauriCommand {
   CliInstall = "cli_install",
   CliRemove = "cli_remove",
   AgentsList = "agents_list",
-  OverviewCount = "overview_count",
   AgentConfigsList = "agent_configs_list",
   AgentConfigWatch = "agent_config_watch",
   AgentConfigRead = "agent_config_read",
@@ -174,7 +173,6 @@ type DaemonEventHandler = (event: DaemonEvent) => void;
 
 const DAEMON_COMMANDS = new Set<string>([
   "agents_list",
-  "overview_count",
   "bundled_skill_status",
   "bundled_skill_install",
   "bundled_skill_remove",

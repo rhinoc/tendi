@@ -4,7 +4,7 @@ import { ChevronDown, ChevronRight, FileText, Folder } from "lucide-react";
 import { Group as PanelGroup, Panel } from "react-resizable-panels";
 import { Dialog } from "radix-ui";
 
-import { buildFileTreeRows, displayFileName, formatUserPath, isJsonPath, isYamlPath, skillChangeDescription, skillChangeTitle, SkillChangeCommand } from "../../lib/index.ts";
+import { buildFileTreeRows, displayFileName, formatUserPath, isJsonPath, isYamlPath, skillChangeActionLabel, skillChangeBusyLabel, skillChangeDescription, skillChangeLoadingCopy, skillChangeTitle, SkillChangeCommand } from "../../lib/index.ts";
 import { CodeMirrorFileEditor } from "../../components/shared/CodeMirrorFileEditor.tsx";
 import { DialogActionButton } from "../../components/shared/DialogActionButton.tsx";
 import { DialogShell } from "../../components/shared/DialogShell.tsx";
@@ -28,21 +28,6 @@ export type ConfirmSkillChangesDialogProps = {
   onOpenChange: (open: boolean) => void;
   onConfirm: (resolutions?: Record<string, string>) => void;
 };
-
-function skillConfirmActionLabel(command: SkillChangeCommand | null) {
-  if (command === SkillChangeCommand.DeleteMany) return "Delete skills";
-  if (command === SkillChangeCommand.UpdateMany) return "Apply updates";
-  if (command === SkillChangeCommand.Set) return "Apply visibility";
-  if (command === SkillChangeCommand.Wrap) return "Create skill";
-  return "Apply changes";
-}
-
-function skillConfirmBusyLabel(command: SkillChangeCommand | null) {
-  if (command === SkillChangeCommand.DeleteMany) return "Deleting…";
-  if (command === SkillChangeCommand.UpdateMany) return "Updating…";
-  if (command === SkillChangeCommand.Wrap) return "Creating…";
-  return "Applying…";
-}
 
 type UpdateFile = {
   path: string;
@@ -264,8 +249,8 @@ export function ConfirmSkillChangesDialog({
   onConfirm,
 }: ConfirmSkillChangesDialogProps) {
   const previewLoading = command === SkillChangeCommand.UpdateMany && !preview && !previewError;
-  const actionLabel = skillConfirmActionLabel(command);
-  const busyLabel = skillConfirmBusyLabel(command);
+  const actionLabel = skillChangeActionLabel(command);
+  const busyLabel = skillChangeBusyLabel(command);
   const dialogError = applyError ?? previewError;
   const files = useMemo(
     () => command === SkillChangeCommand.UpdateMany ? updateFiles(preview) : [],
@@ -293,7 +278,7 @@ export function ConfirmSkillChangesDialog({
         <p id="skill-changes-description" className="confirmDialogDescription">
           {skillChangeDescription(command)}
         </p>
-        {previewLoading && <LoadingState className="skillUpdatePreviewLoading" label="Preparing update preview" />}
+        {previewLoading && <LoadingState className="skillUpdatePreviewLoading" label={skillChangeLoadingCopy.previewLabel} />}
         {command === SkillChangeCommand.DeleteMany && names.length > 0 && (
           <div className="skillDeleteNames" data-selectable-text>
             {names.map((name) => <span key={name}>{name}</span>)}

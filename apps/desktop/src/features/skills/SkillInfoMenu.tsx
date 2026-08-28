@@ -14,7 +14,9 @@ import {
   isWebSource,
   sourceIconDetails,
   sourceOpenUrl,
+  skillSourceActionLabels,
   TauriCommand,
+  revealPathLabel,
   type SkillLike,
 } from "../../lib/index.ts";
 import { AgentBadge } from "../../components/shared/AgentBadge.tsx";
@@ -91,6 +93,7 @@ export function SkillInfoMenu({ skill, skills, onOpenSkill }: SkillInfoMenuProps
   const sourceValue = sourceDetails.value;
   const displaySourceValue = isWebSource(sourceValue.trim()) ? sourceValue : formatUserPath(sourceValue);
   const sourceUrl = sourceOpenUrl(sourceValue, sourceDetails.kind, sourceDetails.relativePath);
+  const sourceActionLabels = skillSourceActionLabels(sourceDetails);
   const installLocations = skillTargets(skill);
   const dependencies = relationList(skill.dependencies, skills);
   const dependents = relationList(skill.dependents, skills);
@@ -112,7 +115,7 @@ export function SkillInfoMenu({ skill, skills, onOpenSkill }: SkillInfoMenuProps
                 {sourceValue ? (
                   <button
                     className="skillInfoSourceIcon"
-                    aria-label={sourceUrl ? `Open ${sourceIcon.label} source` : `Reveal ${sourceIcon.label} source in Finder`}
+                    aria-label={sourceActionLabels.ariaLabel}
                     onClick={() => openSource(sourceValue, sourceDetails.kind, sourceDetails.relativePath)}
                   >
                     {sourceIcon.icon}
@@ -128,7 +131,7 @@ export function SkillInfoMenu({ skill, skills, onOpenSkill }: SkillInfoMenuProps
                 {sourceValue && (
                   <>
                     <button
-                      aria-label={sourceUrl ? "Open source link" : "Reveal source in Finder"}
+                      aria-label={sourceActionLabels.ariaLabel}
                       className="appButton appButton-icon"
                       onClick={() => openSource(sourceValue, sourceDetails.kind, sourceDetails.relativePath)}
                     >
@@ -158,7 +161,7 @@ export function SkillInfoMenu({ skill, skills, onOpenSkill }: SkillInfoMenuProps
                     </span>
                     <Tooltip content={formatUserPath(target.path)} onlyWhenTruncated><code>{formatUserPath(target.path)}</code></Tooltip>
                     <button
-                      aria-label={`Reveal ${target.label} in Finder`}
+                      aria-label={revealPathLabel(target.label)}
                       className="appButton appButton-icon"
                       onClick={() => target.path && safeInvoke(TauriCommand.RevealInFinder, { path: target.path })}
                     >

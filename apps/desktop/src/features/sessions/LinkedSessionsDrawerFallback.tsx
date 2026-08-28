@@ -2,6 +2,7 @@ import { X } from "lucide-react";
 
 import { LoadingState } from "../../components/shared/LoadingState.tsx";
 import { IconButton } from "../../components/shared/IconButton.tsx";
+import { dialogCopy } from "../../lib/index.ts";
 import "./linked-sessions.css";
 
 export type LinkedSessionsDrawerFallbackProps = {
@@ -12,14 +13,14 @@ export function LinkedSessionsDrawerFallback({ onClose }: LinkedSessionsDrawerFa
   return (
     <div className="linkedSessionsDrawer" aria-busy="true" data-no-drag>
       <div className="linkedSessionsDrawerHeader">
-        <strong className="linkedSessionsDrawerTitle">Recent Sessions</strong>
+        <strong className="linkedSessionsDrawerTitle">{dialogCopy.recentSessionsLabel}</strong>
         <div className="linkedSessionsDrawerActions">
-          <IconButton aria-label="Close recent sessions" onClick={onClose}>
+          <IconButton aria-label={dialogCopy.linkedSessionsCloseLabel} onClick={onClose}>
             <X size={15} />
           </IconButton>
         </div>
       </div>
-      <LoadingState className="linkedSessionsDrawerEmpty" label="Loading recent sessions" />
+      <LoadingState className="linkedSessionsDrawerEmpty" label={dialogCopy.linkedSessionsLoadingLabel} />
     </div>
   );
 }

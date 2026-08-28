@@ -17,6 +17,11 @@ const requestedTargetDir = process.env.CARGO_TARGET_DIR;
 const targetDir = requestedTargetDir
   ? resolve(process.cwd(), requestedTargetDir)
   : resolve(repoDir, "target", "tauri-dev");
+const devEnv = {
+  ...process.env,
+  CARGO_TARGET_DIR: targetDir,
+  CARGO_INCREMENTAL: "0",
+};
 const lockDir = resolve(targetDir, ".tendi-tauri-dev.lock");
 const lockPidFile = resolve(lockDir, "pid");
 
@@ -78,7 +83,7 @@ writeStdout(`[tendi] CARGO_TARGET_DIR=${targetDir}`);
 
 const cliBuild = spawnSync("cargo", ["build", "-p", "tendi-cli"], {
   cwd: repoDir,
-  env: { ...process.env, CARGO_TARGET_DIR: targetDir },
+  env: devEnv,
   stdio: "inherit",
 });
 if (cliBuild.error || cliBuild.status !== 0) {
@@ -91,8 +96,7 @@ const tauriCommand = process.platform === "win32" ? "tauri.cmd" : "tauri";
 const child = spawnOwned(tauriCommand, ["dev", ...process.argv.slice(2)], {
   cwd: desktopDir,
   env: {
-    ...process.env,
-    CARGO_TARGET_DIR: targetDir,
+    ...devEnv,
     TENDI_CWD: process.env.TENDI_CWD || desktopDir,
   },
   stdio: "inherit",

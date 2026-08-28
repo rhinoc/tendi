@@ -4,6 +4,7 @@ import { DialogActionButton } from "../../components/shared/DialogActionButton.t
 import { DialogShell } from "../../components/shared/DialogShell.tsx";
 import { DialogStatefulButton } from "../../components/shared/DialogStatefulButton.tsx";
 import { Toast } from "../../components/shared/Toast.tsx";
+import { dialogCopy } from "../../lib/index.ts";
 
 type BundledSkillInstallDialogProps = {
   open: boolean;
@@ -28,7 +29,7 @@ export function BundledSkillInstallDialog({
       onOpenChange={(nextOpen) => !nextOpen && !busy && onDismiss()}
       descriptionId="bundled-skill-description"
     >
-          <Dialog.Title className="confirmDialogTitle">Set up Tendi for coding agents?</Dialog.Title>
+          <Dialog.Title className="confirmDialogTitle">{dialogCopy.bundledSkillSetupTitle}</Dialog.Title>
           <p id="bundled-skill-description" className="confirmDialogDescription">
             This registers the <code>tendi</code> command on your shell PATH, then installs the
             Tendi skill into <span>{target}</span>. Coding agents can search local sessions and

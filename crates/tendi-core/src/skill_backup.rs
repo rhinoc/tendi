@@ -2,7 +2,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
     path::{Component, Path, PathBuf},
-    process::Output,
+    process::{Command, Output},
 };
 
 use anyhow::{bail, Context, Result};
@@ -57,6 +57,10 @@ pub struct BackupCatalogItem {
     pub(crate) agent: Option<crate::skills::AgentKind>,
     #[serde(skip)]
     pub(crate) source_key: Option<String>,
+    #[serde(skip)]
+    pub(crate) entry_key: Option<String>,
+    #[serde(skip)]
+    pub(crate) entry_selector: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, serde::Serialize)]
@@ -78,49 +82,58 @@ pub struct BackupBuildOptions {
 pub struct BackupConfig {
     pub remote_url: String,
     pub checkout_path: PathBuf,
-    pub device_label: String,
     #[serde(default)]
     pub contents: BackupContents,
 }
 
 impl BackupConfig {
-    pub fn new(
-        remote_url: impl Into<String>,
-        checkout_path: PathBuf,
-        device_label: impl Into<String>,
-    ) -> Self {
+    pub fn new(remote_url: impl Into<String>, checkout_path: PathBuf) -> Self {
         Self {
             remote_url: normalize_remote_url(&remote_url.into()),
             checkout_path,
-            device_label: device_label.into().trim().to_string(),
             contents: BackupContents::default(),
         }
     }
 
     pub fn validate(&self) -> Result<()> {
-        if self.remote_url.is_empty() {
-            bail!("a backup remote URL is required");
-        }
-        if has_embedded_credentials(&self.remote_url) {
-            bail!("backup remote URLs must not contain credentials");
+        if !self.remote_url.is_empty() && has_embedded_credentials(&self.remote_url) {
+            bail!("sync remote URLs must not contain credentials");
         }
         if !self.checkout_path.is_absolute() {
-            bail!("backup checkout path must be absolute");
-        }
-        if self.device_label.is_empty() {
-            bail!("a backup device label is required");
+            bail!("sync checkout path must be absolute");
         }
         Ok(())
     }
 }
 
+pub fn current_machine_name() -> Result<String> {
+    #[cfg(target_os = "macos")]
+    let output = Command::new("/usr/sbin/scutil")
+        .args(["--get", "ComputerName"])
+        .output()
+        .context("failed to read machine name")?;
+    #[cfg(not(target_os = "macos"))]
+    let output = Command::new("hostname")
+        .output()
+        .context("failed to read machine name")?;
+
+    if !output.status.success() {
+        bail!("machine name command exited with {}", output.status);
+    }
+    let name = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if name.is_empty() {
+        bail!("machine name is empty");
+    }
+    Ok(name)
+}
+
 pub fn validate_remote(remote_url: &str, working_directory: &Path) -> Result<()> {
     let remote_url = normalize_remote_url(remote_url);
     if remote_url.is_empty() {
-        bail!("a backup remote URL is required");
+        bail!("a sync remote URL is required");
     }
     if has_embedded_credentials(&remote_url) {
-        bail!("backup remote URLs must not contain credentials");
+        bail!("sync remote URLs must not contain credentials");
     }
     let output = git::run_git(
         working_directory,
@@ -128,11 +141,39 @@ pub fn validate_remote(remote_url: &str, working_directory: &Path) -> Result<()>
         git::NETWORK_COMMAND_TIMEOUT,
         git::never_cancelled(),
     )
-    .context("failed to check the backup Git remote")?;
+    .context("failed to check the sync Git remote")?;
     if !output.status.success() {
         bail!("Git remote is not reachable or is not a Git repository");
     }
     Ok(())
+}
+
+pub fn is_remote_repository(value: &str) -> bool {
+    let value = value.trim();
+    value.contains("://")
+        || value.starts_with("git@")
+        || (value
+            .find(':')
+            .is_some_and(|index| value[..index].contains('@')))
+        || value
+            .strip_prefix("github.com/")
+            .is_some_and(is_github_repository_path)
+        || is_github_repository_path(value)
+}
+
+pub fn discover_git_repository_root(path: &Path) -> Result<Option<PathBuf>> {
+    if !path.exists() {
+        return Ok(None);
+    }
+    let output = git_output(path, ["rev-parse", "--show-toplevel"], false)?;
+    if !output.status.success() {
+        return Ok(None);
+    }
+    let root = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if root.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(PathBuf::from(root)))
 }
 
 /// Expand the GitHub shorthand accepted by the Backup UI into a Git remote URL.
@@ -247,7 +288,7 @@ pub fn plan_backup_restore(
     scope: SkillInstallScope,
 ) -> Result<BackupRestorePlan> {
     if !is_commit_id(revision) {
-        bail!("backup restore requires a Git commit id");
+        bail!("sync restore requires a Git commit id");
     }
     let config = store
         .skill_backup_config()?
@@ -269,7 +310,7 @@ pub fn plan_backup_restore(
         .collect::<Vec<_>>();
     if !requested.is_empty() && selected_skills.len() + selected_artifacts.len() != requested.len()
     {
-        bail!("one or more requested backup contents are not in backup version {revision}");
+        bail!("one or more requested sync contents are not in sync version {revision}");
     }
     let mut reserved_targets = BTreeSet::new();
     let mut operations = Vec::new();
@@ -302,7 +343,11 @@ pub fn plan_backup_restore(
     }
     for artifact in selected_artifacts {
         let destination = restore_artifact_target(&artifact)?;
-        let (status, message) = if destination.exists() {
+        let (status, message) = if !artifact.entry_key.is_empty() {
+            // Entry artifacts merge into an existing provider config; the file's
+            // presence is not itself a restore conflict.
+            ("planned".to_string(), None)
+        } else if destination.exists() {
             (
                 "conflict".to_string(),
                 Some(
@@ -368,12 +413,12 @@ pub fn apply_backup_restore_without_database(
             .insert(resolution.id.as_str(), resolution.action.as_str())
             .is_some()
         {
-            bail!("backup restore contains duplicate conflict resolutions");
+            bail!("sync restore contains duplicate conflict resolutions");
         }
     }
     for id in resolutions_by_id.keys() {
         if !operations.iter().any(|operation| operation.id == *id) {
-            bail!("backup restore resolution references unknown content {id}");
+            bail!("sync restore resolution references unknown content {id}");
         }
     }
     let mut reserved_targets = operations
@@ -407,7 +452,7 @@ pub fn apply_backup_restore_without_database(
                 operation.status = "planned".to_string();
                 operation.message = None;
             }
-            _ => bail!("unknown backup restore resolution {action}"),
+            _ => bail!("unknown sync restore resolution {action}"),
         }
     }
     for operation in &mut operations {
@@ -423,7 +468,14 @@ pub fn apply_backup_restore_without_database(
                 .with_context(|| format!("failed to replace {}", operation.target.display()))?;
             operation.status = "planned".to_string();
         }
-        if operation.target.exists() {
+        let is_entry_artifact = if operation.category == "skills" {
+            false
+        } else {
+            plan.artifacts
+                .get(&operation.id)
+                .is_some_and(|artifact| !artifact.entry_key.is_empty())
+        };
+        if !is_entry_artifact && operation.target.exists() {
             bail!(
                 "restore target {} changed after the preview; create a new restore plan",
                 operation.target.display()
@@ -507,8 +559,33 @@ pub fn apply_backup_restore_without_database(
             if let Some(parent) = operation.target.parent() {
                 fs::create_dir_all(parent)?;
             }
-            fs::write(&operation.target, content)
-                .with_context(|| format!("failed to restore {}", operation.target.display()))?;
+            if artifact.entry_key.is_empty() {
+                fs::write(&operation.target, content).with_context(|| {
+                    format!("failed to restore {}", operation.target.display())
+                })?;
+            } else {
+                let entry = serde_json::from_slice::<serde_json::Value>(&content)
+                    .with_context(|| format!("invalid sync entry {}", artifact.name))?;
+                let agent = crate::providers::parse_agent(&artifact.agent)
+                    .with_context(|| format!("unknown provider {}", artifact.agent))?;
+                let provider = crate::providers::agent_provider(agent);
+                let merged = match artifact.category.as_str() {
+                    "mcp" => provider.restore_mcp_entry(
+                        &operation.target,
+                        &artifact.entry_selector,
+                        &artifact.entry_key,
+                        &entry,
+                    )?,
+                    "hooks" => {
+                        let identity = crate::hooks::hook_source_match_from_key(&artifact.entry_key)?;
+                        provider.restore_hook_entry(&operation.target, &identity, &entry)?
+                    }
+                    _ => bail!("unsupported entry sync category {}", artifact.category),
+                };
+                crate::fsutil::atomic_write(&operation.target, &merged).with_context(|| {
+                    format!("failed to restore {}", operation.target.display())
+                })?;
+            }
         }
         operation.status = "restored".to_string();
         operation.message = None;
@@ -656,7 +733,7 @@ pub fn backup_statuses_for_paths(
 pub fn backup_catalog(store: &Store, cwd: &Path) -> Result<BackupCatalog> {
     let mut catalog = BackupCatalog::default();
     if let Some(scan) = store.list_skills_cached_for_workspace(cwd)? {
-        let mut skills = BTreeMap::<String, BTreeSet<String>>::new();
+        let mut skills = BTreeMap::<String, (BTreeSet<String>, String)>::new();
         for skill in scan.skills {
             let global_paths = skill
                 .paths
@@ -665,33 +742,45 @@ pub fn backup_catalog(store: &Store, cwd: &Path) -> Result<BackupCatalog> {
                 .map(|path| path.path.display().to_string())
                 .collect::<BTreeSet<_>>();
             if !global_paths.is_empty() && !skill.is_system {
-                skills.insert(skill.name, global_paths);
+                skills.insert(
+                    skill.name,
+                    (global_paths, skill.description.unwrap_or_default()),
+                );
             }
         }
         catalog.skills = skills
             .into_iter()
-            .map(|(name, paths)| BackupCatalogItem {
+            .map(|(name, (_paths, detail))| BackupCatalogItem {
                 id: format!("skill:{name}"),
                 label: name,
-                detail: format!(
-                    "{} global location{}",
-                    paths.len(),
-                    if paths.len() == 1 { "" } else { "s" }
-                ),
+                detail,
                 source_path: None,
                 agent: None,
                 source_key: None,
+                entry_key: None,
+                entry_selector: Vec::new(),
             })
             .collect();
     }
 
-    catalog.mcp = catalog_source_files(
+    catalog.mcp = catalog_entry_items(
         store
             .list_mcp()?
             .servers
             .into_iter()
-            .filter(|server| server.scope == "global")
-            .map(|server| (server.agent, server.path))
+            .filter(|server| server.scope == "global" && server.read_only_reason.is_none())
+            .map(|server| {
+                let detail = String::new();
+                let entry_key = server.name.clone();
+                (
+                    server.agent,
+                    server.path,
+                    server.name,
+                    detail,
+                    entry_key,
+                    server.server_path,
+                )
+            })
             .collect(),
         "mcp",
     );
@@ -701,67 +790,155 @@ pub fn backup_catalog(store: &Store, cwd: &Path) -> Result<BackupCatalog> {
             .rules
             .into_iter()
             .filter(|rule| rule.scope == "global")
-            .flat_map(|rule| {
+            .filter_map(|rule| {
+                let path = rule.path;
+                let title = source_file_label(&path);
+                let subtitle = path.display().to_string();
                 rule.agents
                     .into_iter()
-                    .map(move |agent| (agent, rule.path.clone()))
+                    .next()
+                    .map(|agent| (agent, path, title, subtitle))
             })
             .collect(),
         "rules",
     );
-    catalog.hooks = catalog_source_files(
+    catalog.hooks = catalog_entry_items(
         store
             .list_hooks()?
             .hooks
             .into_iter()
             .filter(|hook| {
                 crate::providers::agent_provider(hook.agent).is_global_hook_path(&hook.path)
+                    && hook.read_only_reason.is_none()
             })
-            .map(|hook| (hook.agent, hook.path))
-            .collect(),
+        .map(|hook| {
+            let entry_key = crate::hooks::hook_source_match_key(&hook);
+            let detail = hook
+                .command
+                .clone()
+                .or_else(|| hook.url.clone())
+                .or_else(|| hook.prompt.clone())
+                .unwrap_or_default();
+            let label = hook.event;
+            (hook.agent, hook.path, label, detail, entry_key, Vec::new())
+        })
+            .collect::<Vec<_>>(),
         "hooks",
     );
     Ok(catalog)
 }
 
-fn catalog_source_files(
-    sources: Vec<(crate::skills::AgentKind, PathBuf)>,
+fn catalog_entry_items(
+    sources: Vec<(
+        crate::skills::AgentKind,
+        PathBuf,
+        String,
+        String,
+        String,
+        Vec<String>,
+    )>,
     category: &str,
 ) -> Vec<BackupCatalogItem> {
-    let sources = sources
-        .into_iter()
-        .collect::<BTreeSet<(crate::skills::AgentKind, PathBuf)>>();
     sources
         .into_iter()
-        .map(|(agent, path)| {
+        .map(|(agent, path, label, detail, entry_key, entry_selector)| {
             let provider = crate::providers::agent_provider(agent);
-            let path_label = path
-                .file_name()
-                .and_then(|name| name.to_str())
-                .unwrap_or("configuration")
-                .to_string();
             BackupCatalogItem {
-                id: format!("{category}:{}:{}", agent.label(), path.display()),
-                label: format!("{} · {path_label}", agent.label()),
-                detail: "Global source".to_string(),
+                id: format!(
+                    "{category}:{}:{}:{}",
+                    agent.label(),
+                    path.display(),
+                    entry_key
+                ),
+                label,
+                detail,
                 source_key: provider.backup_global_source_key(&path),
                 source_path: Some(path),
                 agent: Some(agent),
+                entry_key: Some(entry_key),
+                entry_selector,
             }
         })
         .collect()
 }
 
-/// Materialize the current managed skills into the app-managed checkout and push one
-/// atomic Git commit. Credential resolution is intentionally delegated to the system
-/// Git client, so tokens never enter Tendi's database or a remote URL in a manifest.
+fn catalog_source_files(
+    sources: Vec<(crate::skills::AgentKind, PathBuf, String, String)>,
+    category: &str,
+) -> Vec<BackupCatalogItem> {
+    let mut grouped = BTreeMap::<
+        (crate::skills::AgentKind, PathBuf),
+        BTreeMap<String, BTreeSet<String>>,
+    >::new();
+    for (agent, path, title, subtitle) in sources {
+        grouped
+            .entry((agent, path))
+            .or_default()
+            .entry(title)
+            .or_default()
+            .insert(subtitle);
+    }
+    grouped
+        .into_iter()
+        .map(|((agent, path), title_details)| {
+            let provider = crate::providers::agent_provider(agent);
+            let path_label = source_file_label(&path);
+            let titles = title_details
+                .keys()
+                .filter(|title| !title.trim().is_empty())
+                .cloned()
+                .collect::<Vec<_>>();
+            let subtitles = title_details
+                .values()
+                .flat_map(|values| values.iter())
+                .filter(|subtitle| !subtitle.trim().is_empty())
+                .cloned()
+                .collect::<BTreeSet<_>>();
+            BackupCatalogItem {
+                id: format!("{category}:{}:{}", agent.label(), path.display()),
+                label: if titles.is_empty() {
+                    path_label.clone()
+                } else {
+                    titles.join(", ")
+                },
+                detail: if subtitles.len() == 1 {
+                    subtitles.into_iter().next().unwrap_or_default()
+                } else {
+                    String::new()
+                },
+                source_key: provider.backup_global_source_key(&path),
+                source_path: Some(path),
+                agent: Some(agent),
+                entry_key: None,
+                entry_selector: Vec::new(),
+            }
+        })
+        .collect()
+}
+
+fn source_file_label(path: &Path) -> String {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("configuration")
+        .to_string()
+}
+
+/// Materialize the current managed skills into the configured checkout and create one
+/// atomic Git commit, pushing it when the checkout has an origin remote. Credential
+/// resolution is intentionally delegated to the system Git client, so tokens never
+/// enter Tendi's database or a remote URL in a manifest.
 pub fn backup_now(store: &Store, cwd: &Path) -> Result<BackupSyncReport> {
     let config = store
         .skill_backup_config()?
         .context("skill backup is not configured")?;
-    let local_manifest = build_backup_manifest(store, cwd, &config)?;
-    ensure_checkout(&config)?;
-    let (existing_manifest, preserved_checkout) = synchronize_remote_checkout(&config)?;
+    let machine_name = current_machine_name()?;
+    let local_manifest = build_backup_manifest(store, cwd, &config, &machine_name)?;
+    let has_remote = ensure_checkout(&config)?;
+    let (existing_manifest, preserved_checkout) = if has_remote {
+        synchronize_remote_checkout(&config)?
+    } else {
+        (read_checkout_manifest(&config.checkout_path)?, None)
+    };
     let temporary_root = preserved_checkout.as_ref().map(|(_, root)| root.clone());
     let existing_manifest = match preserved_checkout {
         Some((preserved, _)) => Some(merge_manifests(existing_manifest, preserved)?),
@@ -783,8 +960,8 @@ pub fn backup_now(store: &Store, cwd: &Path) -> Result<BackupSyncReport> {
         (|| {
             let manifest = merge_manifests(existing_manifest, local_manifest)?;
             write_snapshot(&manifest, &config.checkout_path)?;
-            let changed = commit_checkout(&config, &manifest)?;
-            let needs_push = changed || checkout_needs_push(&config.checkout_path)?;
+            let changed = commit_checkout(&config, &manifest, &machine_name)?;
+            let needs_push = has_remote && (changed || checkout_needs_push(&config.checkout_path)?);
             if needs_push {
                 run_git_success(
                     &config.checkout_path,
@@ -794,7 +971,7 @@ pub fn backup_now(store: &Store, cwd: &Path) -> Result<BackupSyncReport> {
             }
             Ok(BackupSyncReport {
                 manifest,
-                commit: if needs_push {
+                commit: if changed || needs_push {
                     Some(current_commit(&config.checkout_path)?)
                 } else {
                     None
@@ -809,11 +986,27 @@ pub fn backup_now(store: &Store, cwd: &Path) -> Result<BackupSyncReport> {
     result
 }
 
+/// Prepare a configured checkout so a new device can inspect and restore remote
+/// versions immediately after entering the repository.
+pub fn sync_checkout_for_restore(config: &BackupConfig) -> Result<Option<BackupManifest>> {
+    let has_remote = ensure_checkout(config)?;
+    if !has_remote {
+        return read_checkout_manifest(&config.checkout_path);
+    }
+    let (manifest, preserved_checkout) = synchronize_remote_checkout(config)?;
+    if let Some((_, temporary_root)) = preserved_checkout {
+        let _ = fs::remove_dir_all(temporary_root);
+    }
+    Ok(manifest)
+}
+
 pub fn backup_versions(store: &Store, limit: usize) -> Result<Vec<BackupVersion>> {
     let config = store
         .skill_backup_config()?
         .context("skill backup is not configured")?;
-    if !config.checkout_path.join(".git").is_dir() {
+    if !config.checkout_path.exists()
+        || discover_git_repository_root(&config.checkout_path)?.is_none()
+    {
         return Ok(Vec::new());
     }
     // A newly initialized checkout can exist briefly while the first backup
@@ -865,6 +1058,9 @@ pub struct BackupManifest {
     #[serde(skip)]
     #[serde(default)]
     artifact_source_paths: BTreeMap<String, PathBuf>,
+    #[serde(skip)]
+    #[serde(default)]
+    artifact_contents: BTreeMap<String, Vec<u8>>,
 }
 
 #[derive(Debug, Clone, Default, serde::Deserialize, serde::Serialize)]
@@ -912,6 +1108,10 @@ pub struct BackupArtifact {
     pub agent: String,
     #[serde(default)]
     pub source_relative_path: String,
+    #[serde(default)]
+    pub entry_key: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub entry_selector: Vec<String>,
     pub files: Vec<BackupFile>,
 }
 
@@ -993,6 +1193,7 @@ pub fn build_manifest(
         excluded,
         source_paths,
         artifact_source_paths: BTreeMap::new(),
+        artifact_contents: BTreeMap::new(),
     };
     validate_manifest(&manifest)?;
     Ok(manifest)
@@ -1002,6 +1203,7 @@ pub fn build_backup_manifest(
     store: &Store,
     cwd: &Path,
     config: &BackupConfig,
+    machine_name: &str,
 ) -> Result<BackupManifest> {
     let catalog = backup_catalog(store, cwd)?;
     let skill_ids = catalog
@@ -1022,10 +1224,11 @@ pub fn build_backup_manifest(
     let mut manifest = build_manifest(
         &records,
         &BackupBuildOptions {
-            device_label: config.device_label.clone(),
+            device_label: machine_name.to_string(),
         },
     )?;
     let mut artifact_source_paths = BTreeMap::new();
+    let mut artifact_contents = BTreeMap::new();
     for (category, selection, items) in [
         ("mcp", &config.contents.mcp, &catalog.mcp),
         ("rules", &config.contents.rules, &catalog.rules),
@@ -1047,14 +1250,40 @@ pub fn build_backup_manifest(
             let Some(source_key) = item.source_key.as_ref() else {
                 continue;
             };
-            let content = fs::read(source_path)
-                .with_context(|| format!("failed to read {}", source_path.display()))?;
-            let file_name = source_path
-                .file_name()
-                .and_then(|name| name.to_str())
-                .unwrap_or("source")
-                .to_string();
-            let identity = format!("{category}:{}:{source_key}", agent.label());
+            let (file_name, content) = if let Some(entry_key) = item.entry_key.as_deref() {
+                let entry = match category {
+                    "mcp" => crate::providers::agent_provider(agent).backup_mcp_entry(
+                        source_path,
+                        &item.entry_selector,
+                        entry_key,
+                    )?,
+                    "hooks" => {
+                        let identity = crate::hooks::hook_source_match_from_key(entry_key)?;
+                        crate::providers::agent_provider(agent)
+                            .backup_hook_entry(source_path, &identity)?
+                    }
+                    _ => bail!("unsupported entry sync category {category}"),
+                };
+                let mut content = serde_json::to_vec_pretty(&entry)?;
+                content.push(b'\n');
+                ("entry.json".to_string(), content)
+            } else {
+                let content = fs::read(source_path)
+                    .with_context(|| format!("failed to read {}", source_path.display()))?;
+                let file_name = source_path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or("source")
+                    .to_string();
+                (file_name, content)
+            };
+            let entry_key = item.entry_key.clone().unwrap_or_default();
+            let selector = serde_json::to_string(&item.entry_selector)
+                .expect("MCP server path serializes");
+            let identity = format!(
+                "{category}:{}:{source_key}:{selector}:{entry_key}",
+                agent.label()
+            );
             let id = format!("{category}-{}", &sha256_hex(identity.as_bytes())[..16]);
             let artifact = BackupArtifact {
                 id: id.clone(),
@@ -1062,17 +1291,25 @@ pub fn build_backup_manifest(
                 name: item.label.clone(),
                 agent: agent.label().to_string(),
                 source_relative_path: source_key.clone(),
+                entry_key,
+                entry_selector: item.entry_selector.clone(),
                 files: vec![BackupFile {
                     path: file_name,
                     sha256: sha256_hex(&content),
                     size: content.len() as u64,
                 }],
             };
-            artifact_source_paths.insert(artifact_key(category, &id), source_path.clone());
+            let key = artifact_key(category, &id);
+            if item.entry_key.is_some() {
+                artifact_contents.insert(key, content);
+            } else {
+                artifact_source_paths.insert(key, source_path.clone());
+            }
             manifest.artifacts.push(artifact);
         }
     }
     manifest.artifact_source_paths = artifact_source_paths;
+    manifest.artifact_contents = artifact_contents;
     manifest
         .artifacts
         .sort_by(|left, right| left.id.cmp(&right.id));
@@ -1113,18 +1350,27 @@ pub fn write_snapshot(manifest: &BackupManifest, destination: &Path) -> Result<(
     }
     for artifact in &manifest.artifacts {
         let target = destination.join(&artifact.category).join(&artifact.id);
-        let Some(source) = manifest
+        if let Some(content) = manifest
+            .artifact_contents
+            .get(&artifact_key(&artifact.category, &artifact.id))
+        {
+            if target.exists() {
+                fs::remove_dir_all(&target)
+                    .with_context(|| format!("failed to replace {}", target.display()))?;
+            }
+            write_artifact_files(artifact, content, &target)?;
+        } else if let Some(source) = manifest
             .artifact_source_paths
             .get(&artifact_key(&artifact.category, &artifact.id))
-        else {
+        {
+            if target.exists() {
+                fs::remove_dir_all(&target)
+                    .with_context(|| format!("failed to replace {}", target.display()))?;
+            }
+            copy_artifact_files(artifact, source, &target)?;
+        } else {
             verify_snapshot_artifact(artifact, &target)?;
-            continue;
-        };
-        if target.exists() {
-            fs::remove_dir_all(&target)
-                .with_context(|| format!("failed to replace {}", target.display()))?;
         }
-        copy_artifact_files(artifact, source, &target)?;
     }
     fs::write(
         destination.join("manifest.json"),
@@ -1179,7 +1425,12 @@ fn merge_manifests(
         let original_id = artifact.id.clone();
         let original_key = artifact_key(&artifact.category, &original_id);
         if merged.artifacts.iter().any(|existing| {
-            existing.category == artifact.category && existing.files == artifact.files
+            existing.category == artifact.category
+                && existing.agent == artifact.agent
+                && existing.source_relative_path == artifact.source_relative_path
+                && existing.entry_key == artifact.entry_key
+                && existing.entry_selector == artifact.entry_selector
+                && existing.files == artifact.files
         }) {
             continue;
         }
@@ -1209,6 +1460,11 @@ fn merge_manifests(
             merged
                 .artifact_source_paths
                 .insert(artifact_key(&artifact.category, &artifact.id), source_path);
+        }
+        if let Some(content) = local.artifact_contents.remove(&original_key) {
+            merged
+                .artifact_contents
+                .insert(artifact_key(&artifact.category, &artifact.id), content);
         }
         merged.artifacts.push(artifact);
     }
@@ -1291,12 +1547,15 @@ fn verify_snapshot_artifact(artifact: &BackupArtifact, target: &Path) -> Result<
 }
 
 fn copy_artifact_files(artifact: &BackupArtifact, source: &Path, target: &Path) -> Result<()> {
+    let content = fs::read(source)
+        .with_context(|| format!("failed to read {}", source.display()))?;
+    write_artifact_files(artifact, &content, target)
+}
+
+fn write_artifact_files(artifact: &BackupArtifact, content: &[u8], target: &Path) -> Result<()> {
     fs::create_dir_all(target)?;
     for file in &artifact.files {
-        let source_file = source;
-        let content = fs::read(source_file)
-            .with_context(|| format!("failed to read {}", source_file.display()))?;
-        if sha256_hex(&content) != file.sha256 || content.len() as u64 != file.size {
+        if sha256_hex(content) != file.sha256 || content.len() as u64 != file.size {
             bail!("backup artifact content did not match its manifest");
         }
         let target_file = target.join(safe_relative_path(&file.path)?);
@@ -1367,6 +1626,22 @@ pub fn validate_manifest(manifest: &BackupManifest) -> Result<()> {
         }
         if !artifact.source_relative_path.is_empty() {
             safe_relative_path(&artifact.source_relative_path)?;
+        }
+        if !artifact.entry_key.is_empty()
+            && artifact.category != "mcp"
+            && artifact.category != "hooks"
+        {
+            bail!(
+                "backup manifest artifact {} has an entry key for unsupported category {}",
+                artifact.name,
+                artifact.category
+            );
+        }
+        if artifact.entry_selector.iter().any(|component| component.is_empty()) {
+            bail!(
+                "backup manifest artifact {} contains an invalid MCP server path",
+                artifact.name
+            );
         }
         let mut paths = BTreeSet::new();
         for file in &artifact.files {
@@ -1626,10 +1901,12 @@ fn sha256_hex(content: &[u8]) -> String {
     format!("{:x}", Sha256::digest(content))
 }
 
-fn ensure_checkout(config: &BackupConfig) -> Result<()> {
+fn ensure_checkout(config: &BackupConfig) -> Result<bool> {
     config.validate()?;
     let remote_url = normalize_remote_url(&config.remote_url);
-    if !config.checkout_path.join(".git").is_dir() {
+    let is_git_checkout = config.checkout_path.exists()
+        && discover_git_repository_root(&config.checkout_path)?.is_some();
+    if !is_git_checkout {
         fs::create_dir_all(&config.checkout_path)
             .with_context(|| format!("failed to create {}", config.checkout_path.display()))?;
         run_git_success(
@@ -1642,44 +1919,44 @@ fn ensure_checkout(config: &BackupConfig) -> Result<()> {
             ["config", "user.email", "backup@tendi.local"],
             false,
         )?;
-        run_git_success(
-            &config.checkout_path,
-            [
-                "config",
-                "user.name",
-                &format!("Tendi Backup ({})", config.device_label),
-            ],
-            false,
-        )?;
-        run_git_success(
-            &config.checkout_path,
-            ["remote", "add", "origin", &remote_url],
-            false,
-        )?;
-        return Ok(());
-    }
-    let remote = git_output(
-        &config.checkout_path,
-        ["remote", "get-url", "origin"],
-        false,
-    )?;
-    if remote.status.success() {
-        let current = String::from_utf8_lossy(&remote.stdout).trim().to_string();
-        if current != remote_url {
+        if !remote_url.is_empty() {
             run_git_success(
                 &config.checkout_path,
-                ["remote", "set-url", "origin", &remote_url],
+                ["remote", "add", "origin", &remote_url],
                 false,
             )?;
         }
-    } else {
-        run_git_success(
+        return checkout_has_remote(&config.checkout_path);
+    }
+    if !remote_url.is_empty() {
+        let remote = git_output(
             &config.checkout_path,
-            ["remote", "add", "origin", &remote_url],
+            ["remote", "get-url", "origin"],
             false,
         )?;
+        if remote.status.success() {
+            let current = String::from_utf8_lossy(&remote.stdout).trim().to_string();
+            if current != remote_url {
+                run_git_success(
+                    &config.checkout_path,
+                    ["remote", "set-url", "origin", &remote_url],
+                    false,
+                )?;
+            }
+        } else {
+            run_git_success(
+                &config.checkout_path,
+                ["remote", "add", "origin", &remote_url],
+                false,
+            )?;
+        }
     }
-    Ok(())
+    checkout_has_remote(&config.checkout_path)
+}
+
+fn checkout_has_remote(checkout: &Path) -> Result<bool> {
+    let remote = git_output(checkout, ["remote", "get-url", "origin"], false)?;
+    Ok(remote.status.success() && !String::from_utf8_lossy(&remote.stdout).trim().is_empty())
 }
 
 fn synchronize_remote_checkout(
@@ -1792,10 +2069,32 @@ fn capture_checkout_manifest(
         }
         preserved.source_paths.insert(skill.id.clone(), target);
     }
+    for artifact in &manifest.artifacts {
+        let Some(file) = artifact.files.first() else {
+            continue;
+        };
+        let source = checkout
+            .join(&artifact.category)
+            .join(&artifact.id)
+            .join(safe_relative_path(&file.path)?);
+        let content = fs::read(&source)
+            .with_context(|| format!("failed to read {}", source.display()))?;
+        if sha256_hex(&content) != file.sha256 || content.len() as u64 != file.size {
+            let _ = fs::remove_dir_all(&temporary_root);
+            bail!("backup artifact content did not match its manifest");
+        }
+        preserved
+            .artifact_contents
+            .insert(artifact_key(&artifact.category, &artifact.id), content);
+    }
     Ok((preserved, temporary_root))
 }
 
-fn commit_checkout(config: &BackupConfig, manifest: &BackupManifest) -> Result<bool> {
+fn commit_checkout(
+    config: &BackupConfig,
+    manifest: &BackupManifest,
+    machine_name: &str,
+) -> Result<bool> {
     run_git_success(&config.checkout_path, ["add", "--all"], false)?;
     let diff = git_output(
         &config.checkout_path,
@@ -1808,6 +2107,15 @@ fn commit_checkout(config: &BackupConfig, manifest: &BackupManifest) -> Result<b
     if diff.status.code() != Some(1) {
         bail!("failed to determine whether the backup checkout changed");
     }
+    run_git_success(
+        &config.checkout_path,
+        [
+            "config",
+            "user.name",
+            &format!("Tendi Backup ({machine_name})"),
+        ],
+        false,
+    )?;
     let message = format!(
         "backup: {} skill{} and {} configuration source{} from {}",
         manifest.skills.len(),
@@ -1818,7 +2126,7 @@ fn commit_checkout(config: &BackupConfig, manifest: &BackupManifest) -> Result<b
         } else {
             "s"
         },
-        config.device_label,
+        machine_name,
     );
     run_git_success(&config.checkout_path, ["commit", "-m", &message], false)?;
     Ok(true)
@@ -1986,10 +2294,18 @@ mod tests {
 
     use super::{
         adopt_skill_for_backup, backup_now, backup_statuses_for_paths, backup_versions,
-        build_manifest, ensure_checkout, normalize_remote_url, validate_manifest, write_snapshot,
+        build_manifest, catalog_source_files, current_machine_name, discover_git_repository_root,
+        ensure_checkout,
+        is_remote_repository, normalize_remote_url, sync_checkout_for_restore,
+        validate_manifest, write_snapshot,
         BackupBuildOptions, BackupConfig, BackupManifest,
     };
-    use crate::{skills::SkillSourceRecord, storage::Store, SkillInstallScope, SkillTarget};
+    use crate::{
+        skills::{AgentKind, SkillSourceRecord},
+        storage::Store,
+        SkillInstallScope,
+        SkillTarget,
+    };
 
     #[test]
     fn backup_statuses_skip_all_skill_work_without_a_configured_repository() {
@@ -2006,6 +2322,23 @@ mod tests {
         assert!(statuses.is_empty());
         drop(store);
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn catalog_source_items_use_file_titles_for_rules() {
+        let items = catalog_source_files(
+            vec![(
+                AgentKind::Codex,
+                PathBuf::from("/tmp/AGENTS.md"),
+                "AGENTS.md".to_string(),
+                String::new(),
+            )],
+            "rules",
+        );
+
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].label, "AGENTS.md");
+        assert_eq!(items[0].detail, "");
     }
 
     #[test]
@@ -2149,12 +2482,77 @@ mod tests {
         let error = BackupConfig::new(
             "https://token@example.com/tendi-skills.git",
             PathBuf::from("/tmp/tendi-skill-backup"),
-            "Test Mac",
         )
         .validate()
         .unwrap_err();
 
         assert!(error.to_string().contains("credentials"));
+    }
+
+    #[test]
+    fn repository_input_distinguishes_remote_urls_from_local_paths() {
+        assert!(is_remote_repository("git@github.com:rhinoc/skills.git"));
+        assert!(is_remote_repository("rhinoc/skills"));
+        assert!(is_remote_repository("github.com/rhinoc/skills"));
+        assert!(is_remote_repository("https://github.com/rhinoc/skills.git"));
+        assert!(!is_remote_repository("/tmp/tendi-skill-backup"));
+        assert!(!is_remote_repository("./tendi-skill-backup"));
+    }
+
+    #[test]
+    fn local_checkout_is_created_and_keeps_commits_local_without_an_origin() {
+        let root = temp_dir("tendi-backup-local-checkout");
+        let checkout = root.join("nested/checkout");
+        let config = BackupConfig::new("", checkout.clone());
+
+        assert_eq!(discover_git_repository_root(&checkout).unwrap(), None);
+        assert!(!ensure_checkout(&config).unwrap());
+        assert!(checkout.join(".git").exists());
+
+        let remote = Command::new("git")
+            .args(["-C", checkout.to_str().unwrap(), "remote"])
+            .output()
+            .unwrap();
+        assert!(remote.status.success());
+        assert!(String::from_utf8_lossy(&remote.stdout).trim().is_empty());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn local_backup_creates_a_commit_without_pushing() {
+        let root = temp_dir("tendi-backup-local-only");
+        let skill = root.join("global/review");
+        let checkout = root.join("backup");
+        write_skill(&skill, "review");
+        let store = Store::open(root.join("tendi.sqlite3")).unwrap();
+        store
+            .upsert_skill_source_records(&[source("review", &skill)])
+            .unwrap();
+        store
+            .save_skill_backup_config(&BackupConfig::new("", checkout.clone()))
+            .unwrap();
+
+        let report = backup_now(&store, &root).unwrap();
+
+        assert!(report.commit.is_some());
+        assert!(!report.pushed);
+        let machine_name = current_machine_name().unwrap();
+        let commit = Command::new("git")
+            .args([
+                "-C",
+                checkout.to_str().unwrap(),
+                "log",
+                "-1",
+                "--format=%an|%s",
+            ])
+            .output()
+            .unwrap();
+        let commit_text = String::from_utf8_lossy(&commit.stdout);
+        assert!(commit_text.contains(&format!("Tendi Backup ({machine_name})")));
+        assert!(commit_text.contains(&format!("from {machine_name}")));
+        assert_eq!(backup_versions(&store, 1).unwrap().len(), 1);
+        drop(store);
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -2176,8 +2574,7 @@ mod tests {
             "github.com/rhinoc/skills",
             "rhinoc/skills.git",
         ] {
-            let config =
-                BackupConfig::new(remote, PathBuf::from("/tmp/tendi-skill-backup"), "Test Mac");
+            let config = BackupConfig::new(remote, PathBuf::from("/tmp/tendi-skill-backup"));
 
             assert_eq!(config.remote_url, "https://github.com/rhinoc/skills.git");
         }
@@ -2200,7 +2597,6 @@ mod tests {
         let config = BackupConfig {
             remote_url: "rhinoc/skills".to_string(),
             checkout_path: checkout.clone(),
-            device_label: "Test Mac".to_string(),
             contents: Default::default(),
         };
 
@@ -2229,7 +2625,6 @@ mod tests {
         let config = BackupConfig::new(
             "git@github.com:you/tendi-backup.git",
             PathBuf::from("/tmp/tendi-backup"),
-            "Test Mac",
         );
 
         assert!(config.contents.skills.enabled);
@@ -2240,27 +2635,29 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_writes_configuration_sources_under_category_roots() {
+    fn snapshot_writes_rules_files_under_category_roots() {
         let root = temp_dir("tendi-backup-category-roots");
-        let source = root.join("settings.json");
-        let content = br#"{"mcpServers":{"demo":{"command":"demo"}}}"#;
+        let source = root.join("AGENTS.md");
+        let content = b"# Team rules\n";
         fs::create_dir_all(&root).unwrap();
         fs::write(&source, content).unwrap();
-        let artifact_id = "mcp-demo".to_string();
+        let artifact_id = "rules-agents".to_string();
         let mut artifact_source_paths = std::collections::BTreeMap::new();
-        artifact_source_paths.insert(format!("mcp:{artifact_id}"), source);
+        artifact_source_paths.insert(format!("rules:{artifact_id}"), source);
         let manifest = BackupManifest {
             version: 1,
             device_label: "Test Mac".to_string(),
             skills: Vec::new(),
             artifacts: vec![super::BackupArtifact {
                 id: artifact_id.clone(),
-                category: "mcp".to_string(),
-                name: "Codex · settings.json".to_string(),
+                category: "rules".to_string(),
+                name: "AGENTS.md".to_string(),
                 agent: "codex".to_string(),
-                source_relative_path: "config.toml".to_string(),
+                source_relative_path: "AGENTS.md".to_string(),
+                entry_key: String::new(),
+                entry_selector: Vec::new(),
                 files: vec![super::BackupFile {
-                    path: "settings.json".to_string(),
+                    path: "AGENTS.md".to_string(),
                     sha256: super::sha256_hex(content),
                     size: content.len() as u64,
                 }],
@@ -2268,44 +2665,78 @@ mod tests {
             excluded: Vec::new(),
             source_paths: Default::default(),
             artifact_source_paths,
+            artifact_contents: Default::default(),
         };
         let snapshot = root.join("snapshot");
 
         write_snapshot(&manifest, &snapshot).unwrap();
 
         assert!(snapshot
-            .join("mcp")
+            .join("rules")
             .join(&artifact_id)
-            .join("settings.json")
+            .join("AGENTS.md")
             .is_file());
         assert!(!snapshot.join("global").exists());
         fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
-    fn restore_plan_applies_a_configuration_artifact() {
+    fn new_device_can_prepare_remote_checkout_for_restore() {
+        let root = temp_dir("tendi-backup-new-device-restore");
+        let skill = root.join("first/global/review");
+        write_skill(&skill, "review");
+        let remote = root.join("remote.git");
+        fs::create_dir_all(&root).unwrap();
+        run_git(&root, &["init", "--bare", "remote.git"]);
+
+        let first_store = Store::open(root.join("first.sqlite3")).unwrap();
+        first_store
+            .upsert_skill_source_records(&[source("review", &skill)])
+            .unwrap();
+        first_store
+            .save_skill_backup_config(&BackupConfig::new(
+                remote.display().to_string(),
+                root.join("first-checkout"),
+            ))
+            .unwrap();
+        backup_now(&first_store, &root).unwrap();
+
+        let second_config = BackupConfig::new(
+            remote.display().to_string(),
+            root.join("second-checkout"),
+        );
+        let manifest = sync_checkout_for_restore(&second_config).unwrap();
+
+        assert_eq!(manifest.unwrap().skills[0].name, "review");
+        assert!(second_config.checkout_path.join("manifest.json").is_file());
+        drop(first_store);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn restore_plan_applies_a_rules_file_artifact() {
         let root = temp_dir("tendi-backup-artifact-restore");
         fs::create_dir_all(&root).unwrap();
         let checkout = root.join("checkout");
         run_git(&root, &["init", "checkout"]);
         run_git(&checkout, &["config", "user.email", "test@example.com"]);
         run_git(&checkout, &["config", "user.name", "Tendi test"]);
-        let source = root.join("config.toml");
-        let content = br#"[mcp_servers.demo]
-command = "demo"
-"#;
+        let source = root.join("AGENTS.md");
+        let content = b"# Restored rules\n";
         fs::write(&source, content).unwrap();
-        let artifact_id = "mcp-demo".to_string();
+        let artifact_id = "rules-agents".to_string();
         let mut artifact_source_paths = std::collections::BTreeMap::new();
-        artifact_source_paths.insert(format!("mcp:{artifact_id}"), source);
+        artifact_source_paths.insert(format!("rules:{artifact_id}"), source);
         let artifact = super::BackupArtifact {
             id: artifact_id.clone(),
-            category: "mcp".to_string(),
-            name: "Codex · config.toml".to_string(),
+            category: "rules".to_string(),
+            name: "AGENTS.md".to_string(),
             agent: "codex".to_string(),
-            source_relative_path: "config.toml".to_string(),
+            source_relative_path: "AGENTS.md".to_string(),
+            entry_key: String::new(),
+            entry_selector: Vec::new(),
             files: vec![super::BackupFile {
-                path: "config.toml".to_string(),
+                path: "AGENTS.md".to_string(),
                 sha256: super::sha256_hex(content),
                 size: content.len() as u64,
             }],
@@ -2318,12 +2749,13 @@ command = "demo"
             excluded: Vec::new(),
             source_paths: Default::default(),
             artifact_source_paths,
+            artifact_contents: Default::default(),
         };
         write_snapshot(&manifest, &checkout).unwrap();
         run_git(&checkout, &["add", "."]);
         run_git(&checkout, &["commit", "-m", "backup"]);
         let revision = super::current_commit(&checkout).unwrap();
-        let target = root.join("restore/config.toml");
+        let target = root.join("restore/AGENTS.md");
         let plan = super::BackupRestorePlan {
             revision,
             target_root: root.join("restore"),
@@ -2348,6 +2780,88 @@ command = "demo"
     }
 
     #[test]
+    fn restore_plan_merges_one_mcp_entry_into_an_existing_config() {
+        let root = temp_dir("tendi-backup-mcp-entry-restore");
+        fs::create_dir_all(&root).unwrap();
+        let checkout = root.join("checkout");
+        run_git(&root, &["init", "checkout"]);
+        run_git(&checkout, &["config", "user.email", "test@example.com"]);
+        run_git(&checkout, &["config", "user.name", "Tendi test"]);
+        let entry = br#"{
+  "command": "restored"
+}
+"#;
+        let artifact_id = "mcp-entry-demo".to_string();
+        let artifact = super::BackupArtifact {
+            id: artifact_id.clone(),
+            category: "mcp".to_string(),
+            name: "demo".to_string(),
+            agent: "codex".to_string(),
+            source_relative_path: "config.toml".to_string(),
+            entry_key: "demo".to_string(),
+            entry_selector: vec!["mcp_servers".to_string()],
+            files: vec![super::BackupFile {
+                path: "entry.json".to_string(),
+                sha256: super::sha256_hex(entry),
+                size: entry.len() as u64,
+            }],
+        };
+        let manifest = BackupManifest {
+            version: 1,
+            device_label: "Test Mac".to_string(),
+            skills: Vec::new(),
+            artifacts: vec![artifact.clone()],
+            excluded: Vec::new(),
+            source_paths: Default::default(),
+            artifact_source_paths: Default::default(),
+            artifact_contents: std::collections::BTreeMap::from([(
+                format!("mcp:{artifact_id}"),
+                entry.to_vec(),
+            )]),
+        };
+        write_snapshot(&manifest, &checkout).unwrap();
+        run_git(&checkout, &["add", "."]);
+        run_git(&checkout, &["commit", "-m", "sync"]);
+        let revision = super::current_commit(&checkout).unwrap();
+        let target = root.join("restore/config.toml");
+        fs::create_dir_all(target.parent().unwrap()).unwrap();
+        fs::write(
+            &target,
+            "[mcp_servers.kept]\nurl = \"https://example.com/mcp\"\n",
+        )
+        .unwrap();
+        let plan = super::BackupRestorePlan {
+            revision,
+            target_root: root.join("restore"),
+            operations: vec![super::BackupRestoreOperation {
+                id: artifact_id.clone(),
+                name: artifact.name.clone(),
+                category: artifact.category.clone(),
+                target: target.clone(),
+                status: "planned".to_string(),
+                message: None,
+            }],
+            checkout,
+            skills: Default::default(),
+            artifacts: std::collections::BTreeMap::from([(artifact_id, artifact)]),
+        };
+
+        let result = super::apply_backup_restore_without_database(&plan, &[]).unwrap();
+        let value = toml::from_str::<toml::Value>(&fs::read_to_string(&target).unwrap()).unwrap();
+
+        assert_eq!(result.operations[0].status, "restored");
+        assert_eq!(
+            value["mcp_servers"]["demo"]["command"],
+            toml::Value::String("restored".to_string())
+        );
+        assert_eq!(
+            value["mcp_servers"]["kept"]["url"],
+            toml::Value::String("https://example.com/mcp".to_string())
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn manifest_validation_rejects_paths_that_escape_a_skill_directory() {
         let manifest = BackupManifest {
             version: 1,
@@ -2366,6 +2880,7 @@ command = "demo"
             excluded: Vec::new(),
             source_paths: Default::default(),
             artifact_source_paths: Default::default(),
+            artifact_contents: Default::default(),
         };
 
         let error = validate_manifest(&manifest).unwrap_err();
@@ -2389,7 +2904,6 @@ command = "demo"
             .save_skill_backup_config(&BackupConfig::new(
                 remote.display().to_string(),
                 checkout.clone(),
-                "Test Mac",
             ))
             .unwrap();
 
@@ -2434,7 +2948,6 @@ command = "demo"
             .save_skill_backup_config(&BackupConfig::new(
                 remote.display().to_string(),
                 root.join("first-checkout"),
-                "First Mac",
             ))
             .unwrap();
         backup_now(&first_store, &root).unwrap();
@@ -2447,7 +2960,6 @@ command = "demo"
             .save_skill_backup_config(&BackupConfig::new(
                 remote.display().to_string(),
                 root.join("second-checkout"),
-                "Second Mac",
             ))
             .unwrap();
         let report = backup_now(&second_store, &root).unwrap();
@@ -2502,7 +3014,6 @@ command = "demo"
         let first_config = BackupConfig::new(
             remote.display().to_string(),
             first_checkout.clone(),
-            "First Mac",
         );
         let first_store = Store::open(root.join("first.sqlite3")).unwrap();
         first_store
@@ -2519,7 +3030,6 @@ command = "demo"
             .save_skill_backup_config(&BackupConfig::new(
                 remote.display().to_string(),
                 root.join("second-checkout"),
-                "Second Mac",
             ))
             .unwrap();
         backup_now(&second_store, &root).unwrap();
@@ -2537,7 +3047,8 @@ command = "demo"
         )
         .unwrap();
         write_snapshot(&local_only, &first_checkout).unwrap();
-        assert!(super::commit_checkout(&first_config, &local_only).unwrap());
+        let machine_name = current_machine_name().unwrap();
+        assert!(super::commit_checkout(&first_config, &local_only, &machine_name).unwrap());
 
         let report = backup_now(&first_store, &root).unwrap();
 
@@ -2585,7 +3096,6 @@ command = "demo"
             .save_skill_backup_config(&BackupConfig::new(
                 remote.display().to_string(),
                 root.join("checkout"),
-                "Test Mac",
             ))
             .unwrap();
         backup_now(&store, &root).unwrap();
@@ -2627,7 +3137,6 @@ command = "demo"
             .save_skill_backup_config(&BackupConfig::new(
                 remote.display().to_string(),
                 root.join("checkout"),
-                "Test Mac",
             ))
             .unwrap();
         backup_now(&store, &root).unwrap();

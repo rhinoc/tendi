@@ -28,6 +28,7 @@ import { formatTokenCount } from "../lib/token-format.ts";
 import { sessionProject, type SessionRecord } from "../lib/sessions.ts";
 import { summarizeSessionUsage } from "../lib/overview.ts";
 import { formatSessionTitle, summarizeSessionPreviewRecord } from "../lib/session-preview.ts";
+import { dialogCopy } from "../lib/dialog-copy.ts";
 import {
   type AnalyticsGranularity,
   type AnalyticsRefreshProgress,
@@ -37,29 +38,28 @@ import {
 import { TauriCommand, safeInvoke } from "../lib/tauri.ts";
 import { OpenInEditorMenuItem } from "../components/shared/DataTableMenus.tsx";
 import { OverviewTrendChart, type OverviewOlderLoadReason, type OverviewUsageMetric } from "./OverviewTrendChart.tsx";
-import type { SkillRecord } from "./SkillsView.tsx";
+import { desktopStore, selectAnalyticsValue, useDesktopStore } from "../store/desktop-store.ts";
+import type { DomainKey, NormalizedSkill } from "../lib/index.ts";
+import type { SessionListStatus } from "../store/desktop-store.ts";
 import "./OverviewView.css";
 
-export type OverviewNavId = "skills" | "prompts" | "sessions" | "rules" | "hooks" | "mcp";
-export type SessionListStatus = "loading" | "loaded" | "error";
-
 export type OverviewViewProps = {
-  counts: Record<OverviewNavId, number>;
+  counts: Record<DomainKey, number>;
   hookReviewCount?: number;
-  skills: SkillRecord[];
+  skills: NormalizedSkill[];
   sessions: SessionRecord[];
   analyticsRevision: number;
   analyticsRevisionReady: boolean;
   analyticsRevisionError?: string;
   onRetryAnalyticsRevision?: () => void | Promise<void>;
   agentFilter: string;
-  overviewCountsLoaded: ReadonlySet<OverviewNavId>;
-  overviewCountErrors: ReadonlySet<OverviewNavId>;
+  overviewCountsLoaded: ReadonlySet<DomainKey>;
+  overviewCountErrors: ReadonlySet<DomainKey>;
   onRetryCounts?: () => void;
   sessionListStatus: SessionListStatus;
   sessionListError: string;
   skillUpdateCount: number;
-  onNavigate: (id: OverviewNavId) => void;
+  onNavigate: (id: DomainKey) => void;
   onOpenSession: (session: SessionRecord) => void;
 };
 
@@ -76,7 +76,6 @@ const USAGE_METRIC_LABELS: Record<OverviewUsageMetric, string> = {
   tools: "Tools",
   skills: "Skills",
 };
-const overviewAnalyticsCache = new Map<string, OverviewAnalytics>();
 const overviewAnalyticsQueries = new Map<string, Promise<OverviewAnalytics | null>>();
 
 function inclusiveDaysSince(date: string): number {
@@ -116,7 +115,7 @@ function AnalyticsLoadingState({
 
 function SessionsLoadingState() {
   return (
-    <div className="overviewSessionsLoading" role="status" aria-label="Loading recent sessions">
+    <div className="overviewSessionsLoading" role="status" aria-label={dialogCopy.linkedSessionsLoadingLabel}>
       <LoadingDots className="overviewSessionsLoadingDots" />
     </div>
   );
@@ -142,21 +141,23 @@ export function OverviewView({
   onOpenSession,
 }: OverviewViewProps) {
   const usage = useMemo(() => summarizeSessionUsage(sessions), [sessions]);
-  const initialAnalytics = overviewAnalyticsCache.get(
-    overviewAnalyticsCacheKey(agentFilter, retainedAnalyticsRange, analyticsRevision),
-  ) ?? null;
-  const [analytics, setAnalytics] = useState<OverviewAnalytics | null>(initialAnalytics);
-  const [analyticsLoading, setAnalyticsLoading] = useState(!initialAnalytics);
+  const [analyticsRange, setAnalyticsRange] = useState<number>(retainedAnalyticsRange);
+  const analyticsRangeKey = useMemo(() => ({
+    agent: agentFilter,
+    range: analyticsRange,
+    revision: analyticsRevision,
+  }), [agentFilter, analyticsRange, analyticsRevision]);
+  const analytics = useDesktopStore((state) => selectAnalyticsValue(state, analyticsRangeKey));
+  const [analyticsLoading, setAnalyticsLoading] = useState(!analytics);
   const [analyticsProgress, setAnalyticsProgress] = useState<AnalyticsRefreshProgress | null>(null);
   const [analyticsError, setAnalyticsError] = useState("");
-  const [analyticsRange, setAnalyticsRange] = useState<number>(retainedAnalyticsRange);
   const [preparingAnalyticsRange, setPreparingAnalyticsRange] = useState(false);
   const automaticGranularity = selectAnalyticsGranularity(analytics?.days.length ?? analyticsRange);
   const [granularityOverride, setGranularityOverride] = useState<AnalyticsGranularity | null>(null);
   const granularity = granularityOverride ?? automaticGranularity;
   const [usageMetric, setUsageMetric] = useState<OverviewUsageMetric>(retainedUsageMetric);
   const analyticsRequestRef = useRef(0);
-  const analyticsRef = useRef(analytics);
+  const analyticsRef = useRef<OverviewAnalytics | null>(analytics);
   analyticsRef.current = analytics;
   const loadingOlderAnalytics = Boolean(analytics && analytics.daysRequested < analyticsRange);
   const firstAvailableDate = analytics?.coverage.first;
@@ -184,17 +185,18 @@ export function OverviewView({
   const loadAnalytics = useCallback(async (refreshTranscripts = false, showLoading = refreshTranscripts) => {
     const request = ++analyticsRequestRef.current;
     const cacheKey = overviewAnalyticsCacheKey(agentFilter, analyticsRange, analyticsRevision);
-    const cached = overviewAnalyticsCache.get(cacheKey);
+    const queryKey = { agent: agentFilter, range: analyticsRange, revision: analyticsRevision };
+    const cached = selectAnalyticsValue(desktopStore.getSnapshot(), queryKey);
     if (!refreshTranscripts && cached) {
       analyticsRef.current = cached;
-      setAnalytics(cached);
       setAnalyticsLoading(false);
       setPreparingAnalyticsRange(false);
       return;
     }
     if (refreshTranscripts) {
-      overviewAnalyticsCache.clear();
       overviewAnalyticsQueries.clear();
+      desktopStore.actions.setAnalyticsValue(null, null);
+      analyticsRef.current = null;
     }
     if (showLoading) {
       setAnalyticsLoading(true);
@@ -223,12 +225,8 @@ export function OverviewView({
     const result = await query;
     if (request !== analyticsRequestRef.current) return;
     if (result) {
-      overviewAnalyticsCache.set(
-        overviewAnalyticsCacheKey(agentFilter, analyticsRange, result.revision),
-        result,
-      );
+      desktopStore.actions.setAnalyticsValue(result, queryKey);
       analyticsRef.current = result;
-      setAnalytics(result);
       setPreparingAnalyticsRange(false);
     }
     else {
@@ -251,19 +249,12 @@ export function OverviewView({
 
   useEffect(() => {
     if (!analyticsRevisionReady) return;
-    const cacheKey = overviewAnalyticsCacheKey(agentFilter, analyticsRange, analyticsRevision);
-    const cached = overviewAnalyticsCache.get(cacheKey);
-    if (cached) {
-      analyticsRef.current = cached;
-      setAnalytics(cached);
-      setAnalyticsLoading(false);
-    }
-    void loadAnalytics(false, !cached && analyticsRef.current === null);
-  }, [agentFilter, analyticsRange, analyticsRevision, analyticsRevisionReady, loadAnalytics]);
+    void loadAnalytics(false, analyticsRef.current === null);
+  }, [analyticsRevisionReady, loadAnalytics]);
 
   const updateSkillCount = skillUpdateCount;
 
-  const inventory: Array<{ id: OverviewNavId; label: string }> = [
+  const inventory: Array<{ id: DomainKey; label: string }> = [
     { id: "skills", label: "Skills" },
     { id: "sessions", label: "Sessions" },
     { id: "prompts", label: "Prompts" },
@@ -404,7 +395,7 @@ export function OverviewView({
         <div className="overviewWorkbench">
           <section className="overviewPane" aria-labelledby="overview-sessions-title">
             <div className="overviewPaneHeader">
-              <h2 id="overview-sessions-title" className="overviewPaneTitle">Recent sessions</h2>
+              <h2 id="overview-sessions-title" className="overviewPaneTitle">{dialogCopy.recentSessionsLabel}</h2>
               <button type="button" className="overviewPaneAction" onClick={() => onNavigate("sessions")}>
                 Open sessions
               </button>
@@ -413,7 +404,7 @@ export function OverviewView({
             {sessionListStatus === "loading" && usage.recentSessions.length === 0 ? (
               <SessionsLoadingState />
             ) : usage.recentSessions.length > 0 ? (
-              <div className="overviewSessionGrid" aria-label="Recent sessions">
+              <div className="overviewSessionGrid" aria-label={dialogCopy.recentSessionsLabel}>
                 {usage.recentSessions.map((session) => {
                   const previewKey = `${session.agent}:${session.id}`;
                   const preview = summarizeSessionPreviewRecord(session);

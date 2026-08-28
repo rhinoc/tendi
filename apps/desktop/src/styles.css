@@ -1568,26 +1568,6 @@ p {
   user-select: none;
 }
 
-.copyableSessionId.inSessionTable {
-  display: flex;
-  width: 100%;
-  margin-top: 0;
-}
-
-.copyableSessionId.inSessionTable code {
-  flex: 0 1 auto;
-  color: var(--faint);
-  font-size: var(--text-sm);
-  line-height: var(--leading-tight);
-}
-
-.copyableSessionId.inSessionTable .copyableSessionIdButton {
-  width: 16px;
-  height: 16px;
-  flex-basis: 16px;
-  border-radius: 4px;
-}
-
 .copyableSessionId.inInfoMenu {
   flex: 1 1 auto;
 }

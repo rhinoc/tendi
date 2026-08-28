@@ -59,6 +59,8 @@ import {
   isWebSource,
   logger,
   mergeTranscriptItems,
+  promptActionLabels,
+  revealPathLabel,
   resolveInitialSession,
   safeInvoke,
   sessionCacheRate,
@@ -90,48 +92,12 @@ import type {
   SessionResumeOutcome,
   SessionResumeState,
   SessionResumeTarget,
+  SessionRecord,
+  SessionSkillLinkRecord,
 } from "../lib/index.ts";
+import type { SkillIndexStatus } from "../store/desktop-store.ts";
 
 const SessionTokenStatusBar = lazy(() => import("../components/SessionTokenStatusBar.tsx").then(({ SessionTokenStatusBar: component }) => ({ default: component })));
-
-export type SessionRecord = {
-  id: string;
-  title: string;
-  project?: string;
-  projectPath?: string;
-  repository?: string;
-  repositoryPath?: string;
-  repositoryUrl?: string;
-  logicalProjectId?: string;
-  logicalProjectName?: string;
-  path: string;
-  agent: string;
-  startedAt?: string;
-  updatedAt?: string;
-  time?: string;
-  startedLabel?: string;
-  updatedLabel?: string;
-  updatedDetailLabel?: string;
-  messages?: number;
-  firstUserMessage?: string;
-  lastUserMessage?: string;
-  lastAssistantMessage?: string;
-  turnCount?: number;
-  model?: string;
-  mode?: string;
-  approvalMode?: string;
-  isRunEverything?: boolean;
-  parentSessionId?: string;
-  searchScore?: number;
-  searchSnippet?: string;
-  tokenUsage?: {
-    inputTokens: number;
-    cachedInputTokens: number;
-    outputTokens: number;
-    reasoningOutputTokens: number;
-    totalTokens: number;
-  };
-};
 
 type TranscriptItemRecord = {
   type: string;
@@ -148,17 +114,6 @@ type TranscriptItemRecord = {
   tools?: TranscriptItemRecord[];
   callId?: string;
   startedAtMs?: number;
-};
-
-export type SkillLinkRecord = {
-  skill_name: string;
-  skill_path: string;
-  evidence_text: string;
-  evidence_time?: string | null;
-};
-
-export type SessionSkillIndexStatus = {
-  last_indexed_at?: string | null;
 };
 
 const SESSION_SEARCH_DEBOUNCE_MS = 300;
@@ -614,17 +569,17 @@ function useTranscriptVirtualizer(items: TranscriptItemRecord[], rootRef: { curr
   };
 }
 
-function linkSkillName(link: SkillLinkRecord) {
+function linkSkillName(link: SessionSkillLinkRecord) {
   return link.skill_name;
 }
 
 
-function linkEvidenceText(link: SkillLinkRecord) {
+function linkEvidenceText(link: SessionSkillLinkRecord) {
   return link.evidence_text.trim();
 }
 
 
-function linkEvidenceTime(link: SkillLinkRecord) {
+function linkEvidenceTime(link: SessionSkillLinkRecord) {
   return `${link.evidence_time ?? ""}`.trim();
 }
 
@@ -696,7 +651,7 @@ function evidenceMatchesItem(item: TranscriptItemRecord, evidenceText: string, e
 }
 
 
-function findSkillEvidenceTarget(transcriptItems: TranscriptItemRecord[], link: SkillLinkRecord): SkillEvidenceTarget | null {
+function findSkillEvidenceTarget(transcriptItems: TranscriptItemRecord[], link: SessionSkillLinkRecord): SkillEvidenceTarget | null {
   const evidenceText = linkEvidenceText(link);
   const evidenceTime = linkEvidenceTime(link);
   for (let index = 0; index < transcriptItems.length; index += 1) {
@@ -881,7 +836,7 @@ export function TranscriptPanel({
   loading: boolean;
   hasMore: boolean;
   loadingMore: boolean;
-  skillLinks: SkillLinkRecord[];
+  skillLinks: SessionSkillLinkRecord[];
   loadingSkillLinks: boolean;
   skillLinksLoaded: boolean;
   skillLinksError?: string;
@@ -1194,7 +1149,7 @@ export function TranscriptPanel({
       setPendingTranscriptBottom(true);
     }
   }, [hasMore, onLoadAll]);
-  const jumpToSkillEvidence = useCallback((link: SkillLinkRecord) => {
+  const jumpToSkillEvidence = useCallback((link: SessionSkillLinkRecord) => {
     const target = findSkillEvidenceTarget(transcriptItems, link);
     if (target) focusTranscriptTarget(target);
   }, [focusTranscriptTarget, transcriptItems]);
@@ -1853,13 +1808,13 @@ export function SessionSkillsPopover({
   onJumpToEvidence,
 }: {
   session: SessionRecord;
-  links?: SkillLinkRecord[];
+  links?: SessionSkillLinkRecord[];
   loading?: boolean;
   loaded?: boolean;
   error?: string;
   onLoad?: () => void;
   onOpenSkill?: (skillName: string) => void;
-  onJumpToEvidence?: (link: SkillLinkRecord) => void;
+  onJumpToEvidence?: (link: SessionSkillLinkRecord) => void;
 }) {
   const handleOpenChange = (open: boolean) => {
     if (open) onLoad?.();
@@ -1967,7 +1922,7 @@ function SessionSkillsConvergence({
   onOpenSkill,
 }: {
   session: SessionRecord;
-  links: SkillLinkRecord[];
+  links: SessionSkillLinkRecord[];
   onOpenSkill?: (skillName: string) => void;
 }) {
   const currentName = `session:${sessionKey(session)}`;
@@ -2004,16 +1959,16 @@ export function SessionSkillsUsed({
   onJumpToEvidence,
 }: {
   session: SessionRecord;
-  links?: SkillLinkRecord[];
+  links?: SessionSkillLinkRecord[];
   loading?: boolean;
   error?: string;
   onOpenSkill?: (skillName: string) => void;
-  onJumpToEvidence?: (link: SkillLinkRecord) => void;
+  onJumpToEvidence?: (link: SessionSkillLinkRecord) => void;
 }) {
   return (
     <section className="sessionSkillsUsed">
       <div className="sessionSkillsHeader">
-        <span>Skills Used</span>
+        <span>Skills used</span>
       </div>
       {loading ? (
         <div className="sessionSkillsEmpty"><LoadingInline label="Loading skills" /></div>
@@ -2085,14 +2040,14 @@ export function SessionInfoMenu({ session }: { session: SessionRecord }) {
                 <AppTooltip content={displayWorkspace} onlyWhenTruncated><code>{displayWorkspace}</code></AppTooltip>
                 {hasWorkspacePath && (
                   <button
-                    aria-label="Reveal workspace in Finder"
+                    aria-label={revealPathLabel("workspace")}
                     className="appButton appButton-icon"
                     onClick={() => safeInvoke(TauriCommand.RevealInFinder, { path: workspacePath })}
                   >
                     <FolderOpen size={13} />
                   </button>
                 )}
-                <CopyButton className="appButton appButton-icon" value={workspace} copyLabel={copyValueLabel("workspace")} copiedLabel={copiedValueLabel("workspace")} />
+                <CopyButton className="appButton appButton-icon" value={workspace} copyLabel={copyPathLabel("workspace")} copiedLabel={copiedPathLabel("workspace")} />
             </InfoSection>
             <InfoSection label="Timeline" valueLine={false}>
               <div className="sessionTimeline">
@@ -2121,7 +2076,7 @@ export function SessionInfoMenu({ session }: { session: SessionRecord }) {
               <InfoSection label="Transcript" className="sessionInfoPath">
                   <AppTooltip content={displayTranscriptPath} onlyWhenTruncated><code>{displayTranscriptPath}</code></AppTooltip>
                   <button
-                    aria-label="Reveal transcript in Finder"
+                    aria-label={revealPathLabel("transcript")}
                     className="appButton appButton-icon"
                     onClick={() => safeInvoke(TauriCommand.RevealInFinder, { path: transcriptPath })}
                   >
@@ -2196,9 +2151,9 @@ function MessageSavePromptButton({ body, onSave }: { body: string; onSave: (body
       aria-label="Save as prompt"
       disabled={state === "success"}
       onClick={() => { void save(); }}
-      loadingLabel="Saving prompt"
-      successLabel="Prompt saved"
-      errorLabel="Could not save prompt"
+      loadingLabel={promptActionLabels.saving}
+      successLabel={promptActionLabels.saved}
+      errorLabel={promptActionLabels.saveFailed}
       loadingContent={<LoadingIcon size={14} />}
       successContent={<Check size={14} aria-hidden="true" />}
       errorContent={<AlertCircle size={14} aria-hidden="true" />}
@@ -2677,8 +2632,8 @@ export function SessionsView({
   loadTranscriptLocator?: (session: SessionRecord) => Promise<TranscriptLocatorPage>;
   searchTranscript?: (session: SessionRecord, query: string, scopes: TranscriptSearchScopes) => Promise<TranscriptSearchResult | null>;
   searchSessions?: (query: string, candidates: SessionRecord[]) => Promise<SessionRecord[]>;
-  loadSessionSkillLinks?: (session: SessionRecord) => Promise<SkillLinkRecord[]>;
-  skillIndexStatus?: SessionSkillIndexStatus | null;
+  loadSessionSkillLinks?: (session: SessionRecord) => Promise<SessionSkillLinkRecord[]>;
+  skillIndexStatus?: SkillIndexStatus | null;
   loadingSessions?: boolean;
   sessionListError?: string;
   sessionRefreshError?: string;
@@ -2715,7 +2670,7 @@ export function SessionsView({
   } | null>(null);
   const [nextTranscriptCursor, setNextTranscriptCursor] = useState<string | undefined>();
   const [loadingMoreTranscript, setLoadingMoreTranscript] = useState(false);
-  const [skillLinks, setSkillLinks] = useState<SkillLinkRecord[]>([]);
+  const [skillLinks, setSkillLinks] = useState<SessionSkillLinkRecord[]>([]);
   const [skillLinksKey, setSkillLinksKey] = useState("");
   const [loadingSkillLinks, setLoadingSkillLinks] = useState(false);
   const [skillLinksError, setSkillLinksError] = useState("");
@@ -3513,11 +3468,11 @@ export function SessionsView({
         {deeplink && <CopyTextMenuItem Menu={ContextMenu} text={deeplink} label="Copy deeplink" />}
         <ContextMenu.Separator className="skillMenuSeparator" />
         <OpenInEditorMenuItem Menu={ContextMenu} path={transcriptPath} />
-        <CopyPathMenuItem Menu={ContextMenu} path={transcriptPath} label="Copy transcript path" />
-        <RevealInFinderMenuItem Menu={ContextMenu} path={transcriptPath} label="Reveal transcript in Finder" />
+        <CopyPathMenuItem Menu={ContextMenu} path={transcriptPath} label={copyPathLabel("transcript")} />
+        <RevealInFinderMenuItem Menu={ContextMenu} path={transcriptPath} label={revealPathLabel("transcript")} />
         <ContextMenu.Separator className="skillMenuSeparator" />
-        <CopyPathMenuItem Menu={ContextMenu} path={workspacePath} label="Copy workspace path" />
-        <RevealInFinderMenuItem Menu={ContextMenu} path={workspacePath} label="Reveal workspace in Finder" />
+        <CopyPathMenuItem Menu={ContextMenu} path={workspacePath} label={copyPathLabel("workspace")} />
+        <RevealInFinderMenuItem Menu={ContextMenu} path={workspacePath} label={revealPathLabel("workspace")} />
       </>
     );
   }, [inferredResumeTargets, resumeSession, sessionResumeTarget]);

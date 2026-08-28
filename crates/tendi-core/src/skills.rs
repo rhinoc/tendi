@@ -2388,12 +2388,7 @@ fn plan_skill_updates_for_matches(
             continue;
         }
 
-        let Some(path) = skill
-            .paths
-            .iter()
-            .find(|path| path.update_status == "checkable")
-            .or_else(|| skill.paths.first())
-        else {
+        let Some(path) = select_update_path(skill) else {
             skipped.push(update);
             continue;
         };
@@ -4037,6 +4032,18 @@ fn install_target(agent: AgentKind, root: &Path) -> String {
     format!("{}:{}", agent.label(), root.display())
 }
 
+fn is_update_check_path(path: &SkillPath) -> bool {
+    matches!(path.update_status.as_str(), "checkable" | "tracked")
+}
+
+fn select_update_path(skill: &SkillRecord) -> Option<&SkillPath> {
+    skill
+        .paths
+        .iter()
+        .find(|path| is_update_check_path(path))
+        .or_else(|| skill.paths.first())
+}
+
 fn summarize_update_status(statuses: BTreeSet<String>) -> String {
     if statuses.iter().any(|status| status == "checkable") {
         "checkable".to_string()
@@ -4081,7 +4088,7 @@ fn fetch_git_remote_heads(
             let path = skill
                 .paths
                 .iter()
-                .find(|path| matches!(path.update_status.as_str(), "checkable" | "tracked"))?;
+                .find(|path| is_update_check_path(path))?;
             is_git_source_kind(&path.source_kind).then(|| {
                 Some((
                     git_checkout_for_skill_path(path, cancelled)?,
@@ -4127,7 +4134,7 @@ fn fetch_git_remote_commits(
         let Some(path) = skill
             .paths
             .iter()
-            .find(|path| matches!(path.update_status.as_str(), "checkable" | "tracked"))
+            .find(|path| is_update_check_path(path))
         else {
             continue;
         };
@@ -4197,7 +4204,7 @@ fn fetch_git_changed_paths(
         let Some(path) = skill
             .paths
             .iter()
-            .find(|path| matches!(path.update_status.as_str(), "checkable" | "tracked"))
+            .find(|path| is_update_check_path(path))
         else {
             continue;
         };
@@ -4266,12 +4273,7 @@ fn check_skill_update(
     git_changed_paths: &BTreeMap<PathBuf, Option<BTreeSet<String>>>,
     cancelled: &AtomicBool,
 ) -> SkillUpdateReport {
-    let Some(path) = skill
-        .paths
-        .iter()
-        .find(|path| path.update_status == "checkable")
-        .or_else(|| skill.paths.first())
-    else {
+    let Some(path) = select_update_path(skill) else {
         return SkillUpdateReport {
             name: skill.name.clone(),
             status: "unknown".to_string(),
@@ -6384,7 +6386,7 @@ mod tests {
         parse_tendi_visibility, plan_skill_add, plan_skill_delete_many,
         render_wrapper_after,
         sanitize_skill_dir_name, scan_skills_without_source_database as scan_skills,
-        sha256_file, skill_backup_exclusion_reason,
+        select_update_path, sha256_file, skill_backup_exclusion_reason,
     };
 
     fn temp_dir(prefix: &str) -> PathBuf {
@@ -8429,6 +8431,26 @@ Keep this handmade intro.
         assert!(resolver.migrations.is_empty());
 
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn update_path_selection_treats_tracked_paths_as_checkable() {
+        let mut skill = test_skill("demo", "Demo", Path::new("/tmp/demo"));
+        skill.paths[0].update_status = "tracked".to_string();
+
+        assert_eq!(select_update_path(&skill).unwrap().update_status, "tracked");
+    }
+
+    #[test]
+    fn update_path_selection_prefers_checkable_or_tracked_over_local() {
+        let mut skill = test_skill("demo", "Demo", Path::new("/tmp/demo"));
+        let mut tracked = skill.paths[0].clone();
+        tracked.path = PathBuf::from("/tmp/demo-tracked");
+        tracked.update_status = "tracked".to_string();
+        skill.paths[0].update_status = "local".to_string();
+        skill.paths.push(tracked);
+
+        assert_eq!(select_update_path(&skill).unwrap().update_status, "tracked");
     }
 
     fn test_skill(name: &str, description: &str, path: &Path) -> SkillRecord {

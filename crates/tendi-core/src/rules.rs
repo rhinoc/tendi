@@ -347,16 +347,16 @@ mod tests {
                     "repo/AGENTS.md".to_string()
                 ),
                 (
+                    vec![AgentKind::Cursor, AgentKind::Claude],
+                    "CLAUDE.md",
+                    "project",
+                    "repo/CLAUDE.md".to_string()
+                ),
+                (
                     vec![AgentKind::Cursor],
                     "cursor-rule",
                     "project",
                     "repo/.cursor/rules/project.mdc".to_string()
-                ),
-                (
-                    vec![AgentKind::Claude],
-                    "CLAUDE.md",
-                    "project",
-                    "repo/CLAUDE.md".to_string()
                 ),
                 (
                     vec![AgentKind::Claude],

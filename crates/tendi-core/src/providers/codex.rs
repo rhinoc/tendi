@@ -25,6 +25,8 @@ use super::*;
 
 pub(super) struct CodexProvider;
 
+const CODEX_EXTERNAL_SOURCE_PREFIX: &str = "__codex_external__/";
+
 fn infer_mcp_transport(spec: &Value) -> Option<String> {
     spec.get("transport")
         .or_else(|| spec.get("type"))
@@ -557,6 +559,8 @@ struct CodexHookEvents {
     post_compact: Vec<Value>,
     #[serde(rename = "SessionStart", default)]
     session_start: Vec<Value>,
+    #[serde(rename = "SessionEnd", default)]
+    session_end: Vec<Value>,
     #[serde(rename = "UserPromptSubmit", default)]
     user_prompt_submit: Vec<Value>,
     #[serde(rename = "SubagentStart", default)]
@@ -568,7 +572,7 @@ struct CodexHookEvents {
 }
 
 impl CodexHookEvents {
-    fn event_groups(&self) -> [(&str, &Vec<Value>); 10] {
+    fn event_groups(&self) -> [(&str, &Vec<Value>); 11] {
         [
             ("PreToolUse", &self.pre_tool_use),
             ("PermissionRequest", &self.permission_request),
@@ -576,6 +580,7 @@ impl CodexHookEvents {
             ("PreCompact", &self.pre_compact),
             ("PostCompact", &self.post_compact),
             ("SessionStart", &self.session_start),
+            ("SessionEnd", &self.session_end),
             ("UserPromptSubmit", &self.user_prompt_submit),
             ("SubagentStart", &self.subagent_start),
             ("SubagentStop", &self.subagent_stop),
@@ -1495,6 +1500,40 @@ fn codex_project_doc_fallbacks(ctx: &ProviderContext) -> Vec<String> {
     values
 }
 
+fn codex_model_instructions_file(path: &Path) -> Option<PathBuf> {
+    let text = fs::read_to_string(path).ok()?;
+    let value = toml::from_str::<TomlValue>(&text).ok()?;
+    let configured = value
+        .get("model_instructions_file")
+        .and_then(TomlValue::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?;
+    let configured = PathBuf::from(configured);
+    Some(if configured.is_absolute() {
+        configured
+    } else {
+        path.parent().unwrap_or_else(|| Path::new(".")).join(configured)
+    })
+}
+
+fn codex_model_instructions_files(ctx: &ProviderContext) -> Vec<(String, PathBuf)> {
+    let mut files = Vec::new();
+    let mut seen = BTreeSet::new();
+    let candidates = std::iter::once(("global".to_string(), codex_home(ctx).join("config.toml")))
+        .chain(ctx.project_dirs().iter().map(|dir| {
+            ("project".to_string(), dir.join(".codex/config.toml"))
+        }));
+    for (scope, config_path) in candidates {
+        let Some(instructions_path) = codex_model_instructions_file(&config_path) else {
+            continue;
+        };
+        if seen.insert(instructions_path.clone()) {
+            files.push((scope, instructions_path));
+        }
+    }
+    files
+}
+
 fn collect_codex_fallbacks_from_config(path: &Path, values: &mut Vec<String>) {
     let Ok(text) = fs::read_to_string(path) else {
         return;
@@ -1855,6 +1894,44 @@ impl super::AgentProvider for CodexProvider {
         )
     }
 
+    fn backup_global_source_key(&self, path: &Path) -> Option<String> {
+        let home = dirs::home_dir()?;
+        let codex_root = self.global_backup_root(&home)?;
+        if let Some(relative) = path.strip_prefix(&codex_root).ok() {
+            return relative.to_str().map(str::to_string);
+        }
+        path.strip_prefix(&home)
+            .ok()
+            .and_then(|relative| relative.to_str())
+            .map(|relative| format!("{CODEX_EXTERNAL_SOURCE_PREFIX}{relative}"))
+    }
+
+    fn restore_global_source_path(&self, relative: &str) -> Option<PathBuf> {
+        let home = dirs::home_dir()?;
+        if let Some(relative) = relative.strip_prefix(CODEX_EXTERNAL_SOURCE_PREFIX) {
+            let relative = Path::new(relative);
+            if relative.as_os_str().is_empty()
+                || relative.is_absolute()
+                || relative
+                    .components()
+                    .any(|component| !matches!(component, std::path::Component::Normal(_)))
+            {
+                return None;
+            }
+            return Some(home.join(relative));
+        }
+        let relative = Path::new(relative);
+        if relative.as_os_str().is_empty()
+            || relative.is_absolute()
+            || relative
+                .components()
+                .any(|component| !matches!(component, std::path::Component::Normal(_)))
+        {
+            return None;
+        }
+        Some(self.global_backup_root(&home)?.join(relative))
+    }
+
     fn project_skill_root(&self, cwd: &Path) -> Option<PathBuf> {
         Some(cwd.join(".codex/skills"))
     }
@@ -2163,6 +2240,17 @@ impl super::AgentProvider for CodexProvider {
         order: &mut usize,
     ) {
         let codex_home = codex_home(ctx);
+        for (scope, path) in codex_model_instructions_files(ctx) {
+            rules::add_rule_file(
+                rules_out,
+                warnings,
+                order,
+                self.kind(),
+                "model-instructions-file",
+                &scope,
+                path,
+            );
+        }
         rules::add_first_rule_file(
             rules_out,
             warnings,
@@ -2425,6 +2513,38 @@ impl super::AgentProvider for CodexProvider {
         }
     }
 
+    fn backup_mcp_entry(
+        &self,
+        path: &Path,
+        server_path: &[String],
+        name: &str,
+    ) -> Result<Value> {
+        match path.extension().and_then(|value| value.to_str()) {
+            Some("toml") => crate::mcp::read_toml_server_entry(path, "mcp_servers", name),
+            Some("json") => crate::mcp::read_json_server_entry_at_path(path, server_path, name),
+            _ => bail!("Codex MCP source must be JSON or TOML"),
+        }
+    }
+
+    fn restore_mcp_entry(
+        &self,
+        path: &Path,
+        server_path: &[String],
+        name: &str,
+        entry: &Value,
+    ) -> Result<String> {
+        match path.extension().and_then(|value| value.to_str()) {
+            Some("toml") => crate::mcp::merge_toml_server_entry(path, "mcp_servers", name, entry),
+            Some("json") => crate::mcp::merge_json_server_entry_at_path(
+                path,
+                server_path,
+                name,
+                entry,
+            ),
+            _ => bail!("Codex MCP source must be JSON or TOML"),
+        }
+    }
+
     fn mcp_status_after_toggle(&self, enabled: bool) -> &'static str {
         if enabled { "configured" } else { "disabled" }
     }
@@ -2451,6 +2571,19 @@ impl super::AgentProvider for CodexProvider {
             Some("toml") => crate::hooks::set_toml_hook_enabled(request, source),
             _ => bail!("Codex hook source must be JSON or TOML"),
         }
+    }
+
+    fn backup_hook_entry(&self, path: &Path, identity: &HookSourceMatch) -> Result<Value> {
+        crate::hooks::read_hook_entry(path, identity)
+    }
+
+    fn restore_hook_entry(
+        &self,
+        path: &Path,
+        identity: &HookSourceMatch,
+        entry: &Value,
+    ) -> Result<String> {
+        crate::hooks::merge_hook_entry(path, identity, entry)
     }
 
     fn uses_tendi_hook_review_state(&self) -> bool {
@@ -2581,4 +2714,101 @@ impl super::AgentProvider for CodexProvider {
             current_hash,
         )
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        fs,
+        path::PathBuf,
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
+    use super::{
+        AgentProvider, CodexProvider, ProviderContext, hook_current_hash, parse_codex_hook_file,
+    };
+
+    fn temp_dir() -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "tendi-codex-rules-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("system time before epoch")
+                .as_nanos()
+        ))
+    }
+
+    #[test]
+    fn scans_model_instructions_file_declared_by_codex_config() {
+        let root = temp_dir();
+        let home = root.join("home");
+        let codex_home = home.join(".codex");
+        let instructions = codex_home.join("instructions.md");
+        fs::create_dir_all(&codex_home).expect("create Codex home");
+        fs::write(
+            codex_home.join("config.toml"),
+            "model_instructions_file = \"instructions.md\"\n",
+        )
+        .expect("write Codex config");
+        fs::write(&instructions, "custom Codex instructions").expect("write instructions");
+
+        let context = ProviderContext {
+            home: Some(home),
+            project_dirs: Vec::new(),
+        };
+        let mut rules = Vec::new();
+        let mut warnings = Vec::new();
+        let mut order = 0;
+        CodexProvider.scan_rules(&context, &mut rules, &mut warnings, &mut order);
+
+        assert!(warnings.is_empty(), "warnings: {warnings:#?}");
+        assert_eq!(rules.len(), 1);
+        assert_eq!(rules[0].kind, "model-instructions-file");
+        assert_eq!(rules[0].scope, "global");
+        assert_eq!(rules[0].path, instructions);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn scans_codex_session_end_hooks() {
+        let root = temp_dir();
+        let hooks_path = root.join("hooks.json");
+        fs::create_dir_all(&root).expect("create hook root");
+        fs::write(
+            &hooks_path,
+            r#"{
+  "hooks": {
+    "SessionEnd": [
+      { "hooks": [{ "type": "command", "command": "cleanup" }] }
+    ]
+  }
+}"#,
+        )
+        .expect("write SessionEnd hooks");
+
+        let trust_hash = crate::fsutil::sha256_file(&hooks_path).expect("hash hooks");
+        let mut hooks = Vec::new();
+        let mut warnings = Vec::new();
+        assert!(parse_codex_hook_file(
+            &hooks_path,
+            &trust_hash,
+            &mut hooks,
+            &mut warnings,
+        ));
+
+        assert!(warnings.is_empty(), "warnings: {warnings:?}");
+        assert_eq!(hooks.len(), 1);
+        assert_eq!(hooks[0].event, "SessionEnd");
+        assert_eq!(hooks[0].command.as_deref(), Some("cleanup"));
+        assert_eq!(hooks[0].matcher, None);
+        assert_eq!(
+            hooks[0].provider_current_hash.as_deref(),
+            hook_current_hash("SessionEnd", None, "cleanup", 1, false, None, None).as_deref()
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
 }

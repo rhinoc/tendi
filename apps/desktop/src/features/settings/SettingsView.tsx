@@ -1,9 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { CheckCircle2, Monitor, Moon, Sun, Trash2 } from "lucide-react";
 import { DropdownMenu, Popover } from "radix-ui";
-import { actionLabels, compactDateTime, formatUserPath, remoteRepositoryLabel, TauriCommand, invokeCommand, normalizeMissingSessionProjectPolicy, normalizeSessionResumeTarget, safeInvoke, type BundledSkillInstallReport, type BundledSkillStatus, type CliInstallStatus, type DesktopUpdateState, type MissingSessionProjectPolicy, type ProjectSummary, type SessionResumeTarget } from "../../lib/index.ts";
-import { normalizeAppearance, normalizeColorTheme, normalizeFontFamily, type Appearance, type ColorTheme, type FontFamily, type ResolvedAppearance, type ThemePreferences } from "../../lib/appearance.ts";
-import { appIconOptions, appIconPreviewDataUrl, normalizeAppIcon, type AppIcon } from "../../lib/app-icon.ts";
+import { actionLabels, compactDateTime, dialogCopy, formatUserPath, logExportLabels, normalizeSettings, remoteRepositoryLabel, TauriCommand, invokeCommand, normalizeMissingSessionProjectPolicy, normalizeSessionResumeTarget, safeInvoke, type BundledSkillInstallReport, type BundledSkillStatus, type CliInstallStatus, type DesktopUpdateState, type MissingSessionProjectPolicy, type ProjectSummary, type SessionResumeTarget, type SettingsPayload, type SettingsState } from "../../lib/index.ts";
+import { type Appearance, type ColorTheme, type FontFamily, type ResolvedAppearance, type ThemePreferences } from "../../lib/appearance.ts";
+import { appIconOptions, appIconPreviewDataUrl, type AppIcon } from "../../lib/app-icon.ts";
 import { Button } from "../../components/shared/Button.tsx";
 import { Badge } from "../../components/shared/Badge.tsx";
 import { ContentTopDragStrip } from "../../components/shared/ContentTopDragStrip.tsx";
@@ -108,29 +108,20 @@ function ProjectsPopover({ projects }: { projects: ProjectSummary[] }) {
   );
 }
 
-type AppSettings = {
-  appearance: Appearance;
-  lightTheme: ColorTheme;
-  darkTheme: ColorTheme;
-  appIcon: AppIcon;
-  fontFamily: FontFamily;
-  terminal: string;
-  sessionResumeTarget: SessionResumeTarget;
-  missingSessionProjectPolicy: MissingSessionProjectPolicy;
-  editor: string;
-  developerMode: boolean;
-  additionalSessionRoots: string[];
-  configProfiles: Record<string, string>;
-};
-
 type SettingsViewProps = {
   appearance: Appearance;
   themePreferences: ThemePreferences;
   fontFamily: FontFamily;
+  terminal: string;
+  editor: string;
+  additionalSessionRoots: string[];
   developerMode: boolean;
   onAppearanceChange: (appearance: Appearance) => void;
   onThemeChange: (mode: ResolvedAppearance, theme: ColorTheme) => void;
   onFontFamilyChange: (fontFamily: FontFamily) => void;
+  onTerminalChange: (terminal: string) => void;
+  onEditorChange: (editor: string) => void;
+  onAdditionalSessionRootsChange: (roots: string[]) => void;
   onDeveloperModeChange: (enabled: boolean) => void;
   sessionResumeTarget: SessionResumeTarget;
   missingSessionProjectPolicy: MissingSessionProjectPolicy;
@@ -138,8 +129,12 @@ type SettingsViewProps = {
   onMissingSessionProjectPolicyChange: (policy: MissingSessionProjectPolicy) => void;
   appIcon: AppIcon;
   onAppIconChange: (appIcon: AppIcon) => void;
+  configProfiles: Record<string, string>;
   projects: ProjectSummary[];
   onProjectsScanned?: (projects: ProjectSummary[]) => void;
+  appSettingsLoading: boolean;
+  appSettingsLoadError: string;
+  onRetryAppSettings: () => void;
   update: DesktopUpdateState;
   onCheckForUpdates: () => void;
   onInstallUpdate: () => void;
@@ -258,23 +253,6 @@ function AppIconSelect({ value, onChange }: { value: AppIcon; onChange: (value: 
   );
 }
 
-function normalizeSettings(settings: AppSettings): AppSettings {
-  return {
-    ...settings,
-    appearance: normalizeAppearance(settings.appearance),
-    lightTheme: normalizeColorTheme(settings.lightTheme),
-    darkTheme: normalizeColorTheme(settings.darkTheme),
-    appIcon: normalizeAppIcon(settings.appIcon),
-    fontFamily: normalizeFontFamily(settings.fontFamily),
-    editor: settings.editor?.trim() || "vscode",
-    sessionResumeTarget: normalizeSessionResumeTarget(settings.sessionResumeTarget),
-    missingSessionProjectPolicy: normalizeMissingSessionProjectPolicy(settings.missingSessionProjectPolicy),
-    developerMode: settings.developerMode === true,
-    additionalSessionRoots: settings.additionalSessionRoots,
-    configProfiles: settings.configProfiles,
-  };
-}
-
 function errorMessage(error: unknown): string {
   if (typeof error === "string") return error;
   if (error instanceof Error) return error.message;
@@ -298,8 +276,7 @@ function SettingsGroup({ title, children }: { title: string; children: ReactNode
   );
 }
 
-export function SettingsView({ appearance, themePreferences, fontFamily, developerMode, sessionResumeTarget, missingSessionProjectPolicy, appIcon, projects, onAppearanceChange, onThemeChange, onFontFamilyChange, onDeveloperModeChange, onSessionResumeTargetChange, onMissingSessionProjectPolicyChange, onAppIconChange, onProjectsScanned, update, onCheckForUpdates, onInstallUpdate }: SettingsViewProps) {
-  const [settings, setSettings] = useState<AppSettings>({ appearance, lightTheme: themePreferences.light, darkTheme: themePreferences.dark, appIcon, fontFamily, terminal: "auto", sessionResumeTarget, missingSessionProjectPolicy, editor: "vscode", developerMode, additionalSessionRoots: [], configProfiles: {} });
+export function SettingsView({ appearance, themePreferences, fontFamily, terminal, editor, additionalSessionRoots, developerMode, sessionResumeTarget, missingSessionProjectPolicy, appIcon, configProfiles, projects, onAppearanceChange, onThemeChange, onFontFamilyChange, onTerminalChange, onEditorChange, onAdditionalSessionRootsChange, onDeveloperModeChange, onSessionResumeTargetChange, onMissingSessionProjectPolicyChange, onAppIconChange, onProjectsScanned, appSettingsLoading, appSettingsLoadError, onRetryAppSettings, update, onCheckForUpdates, onInstallUpdate }: SettingsViewProps) {
   const [terminalInput, setTerminalInput] = useState("auto");
   const [editorInput, setEditorInput] = useState("vscode");
   const [additionalSessionRootsInput, setAdditionalSessionRootsInput] = useState("");
@@ -360,33 +337,15 @@ export function SettingsView({ appearance, themePreferences, fontFamily, develop
     const inputRevisions = { ...inputRevisionRef.current };
     setSettingsLoading(true);
     setSettingsLoadError("");
-    const [nextSettings, apps, nextCliStatus, nextBundledSkillStatus, nextProjectScopes] = await Promise.all([
-      readSetting<AppSettings>(TauriCommand.SettingsGet),
+    const [apps, nextCliStatus, nextBundledSkillStatus, nextProjectScopes] = await Promise.all([
       readSetting<TerminalApp[]>(TauriCommand.TerminalAppsList),
       readSetting<CliInstallStatus>(TauriCommand.CliStatus),
       readSetting<BundledSkillStatus>(TauriCommand.BundledSkillStatus),
       readSetting<ProjectScanScope[]>(TauriCommand.ProjectScanScopesList),
     ]);
-    const errors = [nextSettings, apps, nextCliStatus, nextBundledSkillStatus, nextProjectScopes]
+    const errors = [apps, nextCliStatus, nextBundledSkillStatus, nextProjectScopes]
       .map((result) => result.error)
       .filter((message): message is string => Boolean(message));
-    if (nextSettings.value) {
-      const normalizedSettings = normalizeSettings(nextSettings.value);
-      setSettings(normalizedSettings);
-      onAppearanceChange(normalizedSettings.appearance);
-      onThemeChangeRef.current("light", normalizedSettings.lightTheme);
-      onThemeChangeRef.current("dark", normalizedSettings.darkTheme);
-      onAppIconChange(normalizedSettings.appIcon);
-      onFontFamilyChange(normalizedSettings.fontFamily);
-      onDeveloperModeChange(normalizedSettings.developerMode);
-      onSessionResumeTargetChange(normalizedSettings.sessionResumeTarget);
-      onMissingSessionProjectPolicyChange(normalizedSettings.missingSessionProjectPolicy);
-      if (inputRevisionRef.current.terminal === inputRevisions.terminal) setTerminalInput(normalizedSettings.terminal);
-      if (inputRevisionRef.current.editor === inputRevisions.editor) setEditorInput(normalizedSettings.editor);
-      if (inputRevisionRef.current.additionalSessionRoots === inputRevisions.additionalSessionRoots) {
-        setAdditionalSessionRootsInput(normalizedSettings.additionalSessionRoots.join("\n"));
-      }
-    }
     if (Array.isArray(apps.value)) setTerminalApps(apps.value);
     if (nextCliStatus.value) setCliStatus(nextCliStatus.value);
     if (nextBundledSkillStatus.value) setBundledSkillStatus(nextBundledSkillStatus.value);
@@ -400,65 +359,86 @@ export function SettingsView({ appearance, themePreferences, fontFamily, develop
     }
     setSettingsLoadError(errors.join("; "));
     setSettingsLoading(false);
-  }, [onAppearanceChange, onAppIconChange, onDeveloperModeChange, onFontFamilyChange, onMissingSessionProjectPolicyChange, onSessionResumeTargetChange]);
+  }, []);
 
   useEffect(() => {
     void loadSettings();
   }, [loadSettings]);
 
-  const applySavedSettings = (value: AppSettings, syncedInputs: Partial<SettingsInputRevisions> = {}) => {
+  useEffect(() => {
+    if (inputRevisionRef.current.terminal === 0) setTerminalInput(terminal);
+    if (inputRevisionRef.current.editor === 0) setEditorInput(editor);
+    if (inputRevisionRef.current.additionalSessionRoots === 0) {
+      setAdditionalSessionRootsInput(additionalSessionRoots.join("\n"));
+    }
+  }, [additionalSessionRoots, editor, terminal]);
+
+  const applySavedSettings = (value: SettingsState, syncedInputs: Partial<SettingsInputRevisions> = {}) => {
     const savedSettings = normalizeSettings(value);
-    setSettings(savedSettings);
     if (syncedInputs.terminal === inputRevisionRef.current.terminal) setTerminalInput(savedSettings.terminal);
     if (syncedInputs.editor === inputRevisionRef.current.editor) setEditorInput(savedSettings.editor);
     if (syncedInputs.additionalSessionRoots === inputRevisionRef.current.additionalSessionRoots) {
       setAdditionalSessionRootsInput(savedSettings.additionalSessionRoots.join("\n"));
     }
+    onTerminalChange(savedSettings.terminal);
+    onEditorChange(savedSettings.editor);
+    onAdditionalSessionRootsChange(savedSettings.additionalSessionRoots);
+    onAppearanceChange(savedSettings.appearance);
+    onThemeChangeRef.current("light", savedSettings.lightTheme);
+    onThemeChangeRef.current("dark", savedSettings.darkTheme);
+    onFontFamilyChange(savedSettings.fontFamily);
+    onDeveloperModeChange(savedSettings.developerMode);
     onSessionResumeTargetChange(savedSettings.sessionResumeTarget);
     onMissingSessionProjectPolicyChange(savedSettings.missingSessionProjectPolicy);
     onAppIconChange(savedSettings.appIcon);
     return savedSettings;
   };
 
+  const buildSettingsPayload = (overrides: Partial<SettingsState> = {}): SettingsPayload => ({
+    ...normalizeSettings({
+      appearance,
+      lightTheme: themePreferences.light,
+      darkTheme: themePreferences.dark,
+      appIcon,
+      fontFamily,
+      terminal,
+      editor,
+      sessionResumeTarget,
+      missingSessionProjectPolicy,
+      developerMode,
+      additionalSessionRoots,
+      ...overrides,
+    }),
+    configProfiles,
+  });
+
   const saveAppIcon = async (nextAppIcon: AppIcon) => {
-    const previousAppIcon = settings.appIcon;
+    const previousAppIcon = appIcon;
     const requestId = appIconSaveRequestRef.current + 1;
     appIconSaveRequestRef.current = requestId;
     setAppIconError("");
-    setSettings((current) => ({ ...current, appIcon: nextAppIcon }));
     onAppIconChange(nextAppIcon);
-    const nextSettings = await safeInvoke(TauriCommand.SettingsSave, {
-      ...settings,
-      appIcon: nextAppIcon,
-    });
+    const nextSettings = await safeInvoke(TauriCommand.SettingsSave, buildSettingsPayload({ appIcon: nextAppIcon }));
     if (appIconSaveRequestRef.current !== requestId) return;
     if (nextSettings) {
-      const savedSettings = applySavedSettings(nextSettings as AppSettings);
-      onAppIconChange(savedSettings.appIcon);
+      applySavedSettings(nextSettings as SettingsState);
     } else {
-      setSettings((current) => ({ ...current, appIcon: previousAppIcon }));
       onAppIconChange(previousAppIcon);
       setAppIconError(actionLabels.saveFailed);
     }
   };
 
   const saveAppearance = async (nextAppearance: Appearance) => {
-    const previousAppearance = settings.appearance;
+    const previousAppearance = appearance;
     const requestId = appearanceSaveRequestRef.current + 1;
     appearanceSaveRequestRef.current = requestId;
     setAppearanceError("");
-    setSettings((current) => ({ ...current, appearance: nextAppearance }));
     onAppearanceChange(nextAppearance);
-    const nextSettings = await safeInvoke(TauriCommand.SettingsSave, {
-      ...settings,
-      appearance: nextAppearance,
-    });
+    const nextSettings = await safeInvoke(TauriCommand.SettingsSave, buildSettingsPayload({ appearance: nextAppearance }));
     if (appearanceSaveRequestRef.current !== requestId) return;
     if (nextSettings) {
-      const savedSettings = applySavedSettings(nextSettings as AppSettings);
-      onAppearanceChange(savedSettings.appearance);
+      applySavedSettings(nextSettings as SettingsState);
     } else {
-      setSettings((current) => ({ ...current, appearance: previousAppearance }));
       onAppearanceChange(previousAppearance);
       setAppearanceError(actionLabels.saveFailed);
     }
@@ -466,45 +446,32 @@ export function SettingsView({ appearance, themePreferences, fontFamily, develop
 
   const saveTheme = async (mode: ResolvedAppearance, nextTheme: ColorTheme) => {
     const key = mode === "light" ? "lightTheme" : "darkTheme";
-    const previousTheme = settings[key];
+    const previousTheme = themePreferences[mode];
     const requestId = themeSaveRequestRef.current + 1;
     themeSaveRequestRef.current = requestId;
     setThemeError("");
-    setSettings((current) => ({ ...current, [key]: nextTheme }));
     onThemeChange(mode, nextTheme);
-    const nextSettings = await safeInvoke(TauriCommand.SettingsSave, {
-      ...settings,
-      [key]: nextTheme,
-    });
+    const nextSettings = await safeInvoke(TauriCommand.SettingsSave, buildSettingsPayload({ [key]: nextTheme }));
     if (themeSaveRequestRef.current !== requestId) return;
     if (nextSettings) {
-      const savedSettings = applySavedSettings(nextSettings as AppSettings);
-      onThemeChange("light", savedSettings.lightTheme);
-      onThemeChange("dark", savedSettings.darkTheme);
+      applySavedSettings(nextSettings as SettingsState);
     } else {
-      setSettings((current) => ({ ...current, [key]: previousTheme }));
       onThemeChange(mode, previousTheme);
       setThemeError(actionLabels.saveFailed);
     }
   };
 
   const saveFontFamily = async (nextFontFamily: FontFamily) => {
-    const previousFontFamily = settings.fontFamily;
+    const previousFontFamily = fontFamily;
     const requestId = fontFamilySaveRequestRef.current + 1;
     fontFamilySaveRequestRef.current = requestId;
     setFontFamilyError("");
-    setSettings((current) => ({ ...current, fontFamily: nextFontFamily }));
     onFontFamilyChange(nextFontFamily);
-    const nextSettings = await safeInvoke(TauriCommand.SettingsSave, {
-      ...settings,
-      fontFamily: nextFontFamily,
-    });
+    const nextSettings = await safeInvoke(TauriCommand.SettingsSave, buildSettingsPayload({ fontFamily: nextFontFamily }));
     if (fontFamilySaveRequestRef.current !== requestId) return;
     if (nextSettings) {
-      const savedSettings = applySavedSettings(nextSettings as AppSettings);
-      onFontFamilyChange(savedSettings.fontFamily);
+      applySavedSettings(nextSettings as SettingsState);
     } else {
-      setSettings((current) => ({ ...current, fontFamily: previousFontFamily }));
       onFontFamilyChange(previousFontFamily);
       setFontFamilyError(actionLabels.saveFailed);
     }
@@ -514,13 +481,10 @@ export function SettingsView({ appearance, themePreferences, fontFamily, develop
     const inputRevision = inputRevisionRef.current.terminal;
     const normalized = terminal.trim() || "auto";
     setTerminalInput(normalized);
-    if (normalized === settings.terminal) return;
-    const nextSettings = await safeInvoke(TauriCommand.SettingsSave, {
-      ...settings,
-      terminal: normalized,
-    });
+    if (normalized === terminal) return;
+    const nextSettings = await safeInvoke(TauriCommand.SettingsSave, buildSettingsPayload({ terminal: normalized }));
     if (nextSettings) {
-      applySavedSettings(nextSettings as AppSettings, { terminal: inputRevision });
+      applySavedSettings(nextSettings as SettingsState, { terminal: inputRevision });
       setTerminalError("");
     } else {
       setTerminalError(actionLabels.saveFailed);
@@ -529,19 +493,14 @@ export function SettingsView({ appearance, themePreferences, fontFamily, develop
 
   const saveSessionResumeTarget = async (target: string) => {
     const normalized = normalizeSessionResumeTarget(target);
-    if (normalized === settings.sessionResumeTarget) return;
-    const previous = settings.sessionResumeTarget;
-    setSettings((current) => ({ ...current, sessionResumeTarget: normalized }));
+    if (normalized === sessionResumeTarget) return;
+    const previous = sessionResumeTarget;
     onSessionResumeTargetChange(normalized);
-    const nextSettings = await safeInvoke(TauriCommand.SettingsSave, {
-      ...settings,
-      sessionResumeTarget: normalized,
-    });
+    const nextSettings = await safeInvoke(TauriCommand.SettingsSave, buildSettingsPayload({ sessionResumeTarget: normalized }));
     if (nextSettings) {
-      applySavedSettings(nextSettings as AppSettings);
+      applySavedSettings(nextSettings as SettingsState);
       setSessionResumeError("");
     } else {
-      setSettings((current) => ({ ...current, sessionResumeTarget: previous }));
       onSessionResumeTargetChange(previous);
       setSessionResumeError(actionLabels.saveFailed);
     }
@@ -549,19 +508,14 @@ export function SettingsView({ appearance, themePreferences, fontFamily, develop
 
   const saveMissingSessionProjectPolicy = async (policy: string) => {
     const normalized = normalizeMissingSessionProjectPolicy(policy);
-    if (normalized === settings.missingSessionProjectPolicy) return;
-    const previous = settings.missingSessionProjectPolicy;
-    setSettings((current) => ({ ...current, missingSessionProjectPolicy: normalized }));
+    if (normalized === missingSessionProjectPolicy) return;
+    const previous = missingSessionProjectPolicy;
     onMissingSessionProjectPolicyChange(normalized);
-    const nextSettings = await safeInvoke(TauriCommand.SettingsSave, {
-      ...settings,
-      missingSessionProjectPolicy: normalized,
-    });
+    const nextSettings = await safeInvoke(TauriCommand.SettingsSave, buildSettingsPayload({ missingSessionProjectPolicy: normalized }));
     if (nextSettings) {
-      applySavedSettings(nextSettings as AppSettings);
+      applySavedSettings(nextSettings as SettingsState);
       setMissingSessionProjectError("");
     } else {
-      setSettings((current) => ({ ...current, missingSessionProjectPolicy: previous }));
       onMissingSessionProjectPolicyChange(previous);
       setMissingSessionProjectError(actionLabels.saveFailed);
     }
@@ -571,13 +525,10 @@ export function SettingsView({ appearance, themePreferences, fontFamily, develop
     const inputRevision = inputRevisionRef.current.editor;
     const normalized = editor.trim() || "vscode";
     setEditorInput(normalized);
-    if (normalized === settings.editor) return;
-    const nextSettings = await safeInvoke(TauriCommand.SettingsSave, {
-      ...settings,
-      editor: normalized,
-    });
+    if (normalized === editor) return;
+    const nextSettings = await safeInvoke(TauriCommand.SettingsSave, buildSettingsPayload({ editor: normalized }));
     if (nextSettings) {
-      applySavedSettings(nextSettings as AppSettings, { editor: inputRevision });
+      applySavedSettings(nextSettings as SettingsState, { editor: inputRevision });
       setEditorError("");
     } else {
       setEditorError(actionLabels.saveFailed);
@@ -585,20 +536,14 @@ export function SettingsView({ appearance, themePreferences, fontFamily, develop
   };
 
   const saveDeveloperMode = async (nextDeveloperMode: boolean) => {
-    const previousDeveloperMode = settings.developerMode;
+    const previousDeveloperMode = developerMode;
     if (nextDeveloperMode === previousDeveloperMode) return;
     setDeveloperModeError("");
-    setSettings((current) => ({ ...current, developerMode: nextDeveloperMode }));
     onDeveloperModeChange(nextDeveloperMode);
-    const nextSettings = await safeInvoke(TauriCommand.SettingsSave, {
-      ...settings,
-      developerMode: nextDeveloperMode,
-    });
+    const nextSettings = await safeInvoke(TauriCommand.SettingsSave, buildSettingsPayload({ developerMode: nextDeveloperMode }));
     if (nextSettings) {
-      const savedSettings = applySavedSettings(nextSettings as AppSettings);
-      onDeveloperModeChange(savedSettings.developerMode);
+      applySavedSettings(nextSettings as SettingsState);
     } else {
-      setSettings((current) => ({ ...current, developerMode: previousDeveloperMode }));
       onDeveloperModeChange(previousDeveloperMode);
       setDeveloperModeError(actionLabels.saveFailed);
     }
@@ -611,13 +556,10 @@ export function SettingsView({ appearance, themePreferences, fontFamily, develop
       .map((root) => root.trim())
       .filter(Boolean);
     setAdditionalSessionRootsInput(roots.join("\n"));
-    if (roots.join("\n") === settings.additionalSessionRoots.join("\n")) return;
-    const nextSettings = await safeInvoke(TauriCommand.SettingsSave, {
-      ...settings,
-      additionalSessionRoots: roots,
-    });
+    if (roots.join("\n") === additionalSessionRoots.join("\n")) return;
+    const nextSettings = await safeInvoke(TauriCommand.SettingsSave, buildSettingsPayload({ additionalSessionRoots: roots }));
     if (nextSettings) {
-      applySavedSettings(nextSettings as AppSettings, { additionalSessionRoots: inputRevision });
+      applySavedSettings(nextSettings as SettingsState, { additionalSessionRoots: inputRevision });
       setSessionRootsError("");
     } else {
       setSessionRootsError(`${actionLabels.saveFailed}: use absolute paths`);
@@ -741,9 +683,14 @@ export function SettingsView({ appearance, themePreferences, fontFamily, develop
     && !canInstallBundledSkill;
   const setupReady = isCodingAgentsInstalled(cliStatus, bundledSkillStatus);
   const setupNeedsAttention = cliConflict || cliPathNeedsAttention || bundledSkillConflict;
-  const setupStatusLabel = settingsLoading
+  const combinedSettingsLoadError = [appSettingsLoadError, settingsLoadError].filter(Boolean).join("; ");
+  const retrySettings = () => {
+    if (appSettingsLoadError) onRetryAppSettings();
+    if (settingsLoadError) void loadSettings();
+  };
+  const setupStatusLabel = appSettingsLoading || settingsLoading
     ? "Checking…"
-    : settingsLoadError && (!cliStatus || !bundledSkillStatus)
+    : combinedSettingsLoadError && (!cliStatus || !bundledSkillStatus)
       ? "Unable to load status"
       : !cliStatus || !bundledSkillStatus
         ? "Status unavailable"
@@ -788,8 +735,10 @@ export function SettingsView({ appearance, themePreferences, fontFamily, develop
         open={confirmRemoveCodingAgents}
         items={["Tendi coding agent setup"]}
         itemLabel="setup"
+        title={dialogCopy.uninstallCodingAgentTitle}
         description="Uninstall the Tendi coding-agent skill and CLI integration? This action cannot be undone."
         confirmLabel="Uninstall"
+        loadingLabel={dialogCopy.uninstallCodingAgentLoadingLabel}
         busy={bundledSkillBusy}
         onOpenChange={setConfirmRemoveCodingAgents}
         onConfirm={() => { void removeCodingAgents(); }}
@@ -807,10 +756,10 @@ export function SettingsView({ appearance, themePreferences, fontFamily, develop
           successContent="You're up to date"
           errorContent="Check failed — try again"
         >
-          {update.status === "available" && update.version ? `Install ${update.version}` : "Check for Updates"}
+          {update.status === "available" && update.version ? `Install ${update.version}` : actionLabels.checkForUpdates}
         </StatefulButton>
       </PageHeader>
-      {settingsLoadError ? <LoadErrorState message={settingsLoadError} onRetry={() => { void loadSettings(); }} /> : null}
+      {combinedSettingsLoadError ? <LoadErrorState message={combinedSettingsLoadError} onRetry={retrySettings} /> : null}
       <div className="settingsShell">
         <div className="settingsGroups">
           <SettingsGroup title="Appearance">
@@ -845,13 +794,13 @@ export function SettingsView({ appearance, themePreferences, fontFamily, develop
                 <ThemeSelect
                   key={mode.value}
                   mode={mode}
-                  value={settings[mode.key]}
+                  value={themePreferences[mode.value]}
                   onChange={(value) => { void saveTheme(mode.value, value); }}
                 />
               ))}
               <div className="settingsThemePicker">
                 <span className="settingsThemePickerLabel">App icon</span>
-                <AppIconSelect value={settings.appIcon} onChange={(value) => { void saveAppIcon(value); }} />
+                <AppIconSelect value={appIcon} onChange={(value) => { void saveAppIcon(value); }} />
                 {appIconError ? <Toast tone="error" message={appIconError} /> : null}
               </div>
             </div>
@@ -862,7 +811,7 @@ export function SettingsView({ appearance, themePreferences, fontFamily, develop
               className="settingsFontSelect"
               contentClassName="settingsSelectContent"
               label="Application font"
-              value={settings.fontFamily}
+              value={fontFamily}
               onValueChange={(value) => { void saveFontFamily(value as FontFamily); }}
               options={[...fontOptions]}
               showOptionTooltip={false}
@@ -880,7 +829,7 @@ export function SettingsView({ appearance, themePreferences, fontFamily, develop
               menuAriaLabel="Choose terminal application"
               placeholder="Terminal application name"
               value={terminalInput}
-              savedValue={settings.terminal}
+              savedValue={terminal}
               options={terminalOptions}
               error={terminalError}
               labels={{
@@ -906,7 +855,7 @@ export function SettingsView({ appearance, themePreferences, fontFamily, develop
               menuAriaLabel="Choose editor application"
               placeholder="Editor command"
               value={editorInput}
-              savedValue={settings.editor}
+              savedValue={editor}
               options={editorOptions}
               error={editorError}
               labels={{
@@ -929,7 +878,7 @@ export function SettingsView({ appearance, themePreferences, fontFamily, develop
           <SettingsSection title="Session resume">
             <SegmentedControl
               className="settingsSessionResumeControl"
-              value={settings.sessionResumeTarget}
+              value={sessionResumeTarget}
               onValueChange={(value) => { void saveSessionResumeTarget(value); }}
               aria-label="Prefer opening resumed sessions in"
             >
@@ -942,7 +891,7 @@ export function SettingsView({ appearance, themePreferences, fontFamily, develop
           <SettingsSection title="Missing session projects">
             <SegmentedControl
               className="settingsSessionResumeControl"
-              value={settings.missingSessionProjectPolicy}
+              value={missingSessionProjectPolicy}
               onValueChange={(value) => { void saveMissingSessionProjectPolicy(value); }}
               aria-label="Handle sessions whose project path no longer exists"
             >
@@ -969,7 +918,7 @@ export function SettingsView({ appearance, themePreferences, fontFamily, develop
                 onKeyDown={(event) => {
                   if ((event.metaKey || event.ctrlKey) && event.key === "Enter") event.currentTarget.blur();
                   if (event.key === "Escape") {
-                    setAdditionalSessionRootsInput(settings.additionalSessionRoots.join("\n"));
+                    setAdditionalSessionRootsInput(additionalSessionRoots.join("\n"));
                     setSessionRootsError("");
                     event.currentTarget.blur();
                   }
@@ -1020,7 +969,7 @@ export function SettingsView({ appearance, themePreferences, fontFamily, develop
           </SettingsSection>
           </SettingsGroup>
           <SettingsGroup title="Developer">
-            <SettingsSection title="Backup" className="settingsBackupSection">
+            <SettingsSection title="Sync" className="settingsBackupSection">
               <BackupSettings />
             </SettingsSection>
           <SettingsSection title="Coding agents">
@@ -1098,7 +1047,7 @@ export function SettingsView({ appearance, themePreferences, fontFamily, develop
           <SettingsSection title="Developer mode">
             <div className="settingsCheckboxRow">
               <Switch
-                checked={settings.developerMode}
+                checked={developerMode}
                 label="Enable developer mode"
                 onCheckedChange={(checked) => { void saveDeveloperMode(checked); }}
               />
@@ -1112,12 +1061,12 @@ export function SettingsView({ appearance, themePreferences, fontFamily, develop
               width={144}
               minWidth={144}
               onClick={() => { void exportLogs(); }}
-              aria-label={logExportState === "loading" ? "Exporting logs" : logExportState === "success" ? "Logs exported" : logExportState === "error" ? "Export logs again" : "Export logs"}
+              aria-label={logExportState === "loading" ? logExportLabels.loading : logExportState === "success" ? logExportLabels.success : logExportState === "error" ? logExportLabels.retry : logExportLabels.idle}
               loadingContent={<LoadingIcon size={16} />}
-              successContent="Exported"
-              errorContent="Export failed"
+              successContent={logExportLabels.success}
+              errorContent={logExportLabels.error}
             >
-              Export Logs
+              {logExportLabels.idle}
             </StatefulButton>
             {logExportError ? <Toast tone="error" message={logExportError} /> : null}
           </SettingsSection>

@@ -193,6 +193,7 @@ fn scan_cursor_metadata_mcp(
         status: status.to_string(),
         path: path.to_path_buf(),
         trust_hash: crate::fsutil::sha256_text(&text),
+        server_path: Vec::new(),
         read_only_reason: Some("Cursor plugin metadata cannot be changed".to_string()),
     });
 }
@@ -596,6 +597,19 @@ impl super::AgentProvider for CursorProvider {
         warnings: &mut Vec<String>,
         order: &mut usize,
     ) {
+        if let Some(home) = &ctx.home {
+            rules::add_rule_tree(
+                rules_out,
+                warnings,
+                order,
+                self.kind(),
+                "cursor-rule",
+                "global",
+                &home.join(".cursor/rules"),
+                Some("mdc"),
+                6,
+            );
+        }
         for dir in ctx.project_dirs() {
             rules::add_rule_file(
                 rules_out,
@@ -605,6 +619,24 @@ impl super::AgentProvider for CursorProvider {
                 "AGENTS.md",
                 "project",
                 dir.join("AGENTS.md"),
+            );
+            rules::add_rule_file(
+                rules_out,
+                warnings,
+                order,
+                self.kind(),
+                "CLAUDE.md",
+                "project",
+                dir.join("CLAUDE.md"),
+            );
+            rules::add_rule_file(
+                rules_out,
+                warnings,
+                order,
+                self.kind(),
+                ".cursorrules",
+                "project",
+                dir.join(".cursorrules"),
             );
             rules::add_rule_tree(
                 rules_out,
@@ -760,6 +792,17 @@ impl super::AgentProvider for CursorProvider {
     ) -> Result<()> {
         if let Some(home) = &ctx.home {
             crate::mcp::scan_json_mcp(
+                &home.join(".cursor/mcp.json"),
+                self.kind(),
+                "global",
+                &["mcpServers"],
+                infer_mcp_transport,
+                infer_mcp_enabled,
+                infer_mcp_status,
+                servers,
+                warnings,
+            );
+            crate::mcp::scan_json_mcp(
                 &home.join(".cursor/cli-config.json"),
                 self.kind(),
                 "global",
@@ -800,6 +843,31 @@ impl super::AgentProvider for CursorProvider {
         crate::mcp::set_json_server_enabled(request, &["mcpServers"], update_mcp_server)
     }
 
+    fn backup_mcp_entry(
+        &self,
+        path: &Path,
+        server_path: &[String],
+        name: &str,
+    ) -> Result<Value> {
+        if path.extension().and_then(|value| value.to_str()) != Some("json") {
+            bail!("Cursor MCP source must be JSON");
+        }
+        crate::mcp::read_json_server_entry_at_path(path, server_path, name)
+    }
+
+    fn restore_mcp_entry(
+        &self,
+        path: &Path,
+        server_path: &[String],
+        name: &str,
+        entry: &Value,
+    ) -> Result<String> {
+        if path.extension().and_then(|value| value.to_str()) != Some("json") {
+            bail!("Cursor MCP source must be JSON");
+        }
+        crate::mcp::merge_json_server_entry_at_path(path, server_path, name, entry)
+    }
+
     fn mcp_status_after_toggle(&self, enabled: bool) -> &'static str {
         if enabled { "configured" } else { "disabled" }
     }
@@ -824,6 +892,19 @@ impl super::AgentProvider for CursorProvider {
             bail!("Cursor hook source must be JSON");
         }
         crate::hooks::set_json_hook_enabled(request, source)
+    }
+
+    fn backup_hook_entry(&self, path: &Path, identity: &HookSourceMatch) -> Result<Value> {
+        crate::hooks::read_hook_entry(path, identity)
+    }
+
+    fn restore_hook_entry(
+        &self,
+        path: &Path,
+        identity: &HookSourceMatch,
+        entry: &Value,
+    ) -> Result<String> {
+        crate::hooks::merge_hook_entry(path, identity, entry)
     }
 
     fn managed_hook_path(&self, path: &Path) -> bool {
@@ -871,4 +952,131 @@ impl super::AgentProvider for CursorProvider {
     fn review_hook(&self, hook: &HookRecord) -> Result<()> {
         crate::hooks::review_hook_with_tendi_state(hook)
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        fs,
+        path::PathBuf,
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
+    use super::{AgentProvider, CursorProvider, ProviderContext};
+    use crate::skills::AgentKind;
+
+    fn temp_dir() -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "tendi-cursor-rules-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("system time before epoch")
+                .as_nanos()
+        ))
+    }
+
+    #[test]
+    fn scans_global_and_project_cursor_rules_with_their_own_scopes() {
+        let root = temp_dir();
+        let home = root.join("home");
+        let project = root.join("project");
+        let global_rules = home.join(".cursor/rules");
+        let project_rules = project.join(".cursor/rules");
+        fs::create_dir_all(global_rules.join("nested")).expect("create global rules");
+        fs::create_dir_all(&project_rules).expect("create project rules");
+        fs::write(global_rules.join("global.mdc"), "global rule").expect("write global rule");
+        fs::write(global_rules.join("nested/deep.mdc"), "nested global rule")
+            .expect("write nested global rule");
+        fs::write(global_rules.join("ignored.md"), "not a Cursor rule")
+            .expect("write ignored global rule");
+        fs::write(project_rules.join("project.mdc"), "project rule")
+            .expect("write project rule");
+        fs::write(project.join(".cursorrules"), "legacy project rule")
+            .expect("write legacy project rule");
+        fs::write(project.join("CLAUDE.md"), "Claude-compatible project rule")
+            .expect("write Claude-compatible project rule");
+
+        let context = ProviderContext {
+            home: Some(home),
+            project_dirs: vec![project.clone()],
+        };
+        let mut rules = Vec::new();
+        let mut warnings = Vec::new();
+        let mut order = 0;
+        CursorProvider.scan_rules(&context, &mut rules, &mut warnings, &mut order);
+
+        assert!(warnings.is_empty(), "warnings: {warnings:#?}");
+        assert_eq!(
+            rules
+                .iter()
+                .map(|rule| (
+                    rule.path.strip_prefix(&root).unwrap().to_path_buf(),
+                    rule.scope.as_str(),
+                    rule.agents.clone(),
+                ))
+                .collect::<Vec<_>>(),
+            vec![
+                (
+                    PathBuf::from("home/.cursor/rules/global.mdc"),
+                    "global",
+                    vec![AgentKind::Cursor],
+                ),
+                (
+                    PathBuf::from("home/.cursor/rules/nested/deep.mdc"),
+                    "global",
+                    vec![AgentKind::Cursor],
+                ),
+                (
+                    PathBuf::from("project/CLAUDE.md"),
+                    "project",
+                    vec![AgentKind::Cursor],
+                ),
+                (
+                    PathBuf::from("project/.cursorrules"),
+                    "project",
+                    vec![AgentKind::Cursor],
+                ),
+                (
+                    PathBuf::from("project/.cursor/rules/project.mdc"),
+                    "project",
+                    vec![AgentKind::Cursor],
+                ),
+            ]
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn scans_cursor_global_mcp_file() {
+        let root = temp_dir();
+        let home = root.join("home");
+        let path = home.join(".cursor/mcp.json");
+        fs::create_dir_all(path.parent().expect("mcp parent")).expect("create mcp directory");
+        fs::write(
+            &path,
+            r#"{"mcpServers":{"global-server":{"command":"demo"}}}"#,
+        )
+        .expect("write global MCP");
+
+        let context = ProviderContext {
+            home: Some(home),
+            project_dirs: Vec::new(),
+        };
+        let mut servers = Vec::new();
+        let mut warnings = Vec::new();
+        CursorProvider
+            .scan_mcp(&context, &mut servers, &mut warnings)
+            .expect("scan Cursor MCP");
+
+        assert!(warnings.is_empty(), "warnings: {warnings:#?}");
+        assert_eq!(servers.len(), 1);
+        assert_eq!(servers[0].name, "global-server");
+        assert_eq!(servers[0].scope, "global");
+        assert_eq!(servers[0].path, path);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
 }

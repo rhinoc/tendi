@@ -57,12 +57,60 @@ export type NormalizedSkill = {
   statusTone: string;
   source: string;
   installTargets: string[];
-  updateStatus: string;
+  trackingStatus: string;
+  updateAvailability: string;
   ctime?: string;
   mtime?: string;
   paths: NormalizedSkillPath[];
-  meta?: string;
   [key: string]: unknown;
+};
+
+export type RawSkillRecord = Record<string, unknown>;
+
+export enum SkillOperationStatus {
+  Planned = "planned",
+  Ready = "ready",
+  AlreadyExists = "already-exists",
+  Replace = "replace",
+  AlreadyInstalled = "already-installed",
+}
+
+export type SkillOperation = {
+  name: string;
+  status: SkillOperationStatus;
+  message?: string;
+};
+
+export type AvailableSkill = {
+  name: string;
+  description?: string;
+  relative_path: string;
+  dependencies: string[];
+};
+
+export type SkillAddPlan = {
+  available: AvailableSkill[];
+  selected: AvailableSkill[];
+  source: string;
+  source_kind: string;
+  target: string;
+  operations: SkillOperation[];
+};
+
+export type SkillInstallResult = {
+  skills: RawSkillRecord[];
+  report: {
+    plan: SkillAddPlan;
+    results: Array<{ target: string }>;
+  };
+};
+
+export type WrapperArgs = {
+  name: string;
+  names: string[];
+  description?: string;
+  manualChildren: boolean;
+  refresh: boolean;
 };
 
 export function isPluginSkillSource(skill: SkillLike): boolean {
@@ -215,11 +263,11 @@ export function normalizeSkill(skill: Record<string, unknown>): NormalizedSkill 
     statusTone: tone,
     source,
     installTargets,
-    updateStatus: skill.update_status,
+    trackingStatus: skill.update_status,
+    updateAvailability: "unknown",
     ctime: typeof skill.ctime === "string" ? skill.ctime : undefined,
     mtime: typeof skill.mtime === "string" ? skill.mtime : undefined,
     paths,
-    meta: skill.update_status,
   };
 }
 
@@ -263,17 +311,25 @@ export function localSkillSourcePath(skill: SkillLike, source: SourceDetails = s
   );
 }
 
+export function skillSourceActionLabels(source: SourceDetails = { kind: "", label: "", value: "" }) {
+  const sourceIcon = sourceIconDetails(source);
+  const sourceUrl = sourceOpenUrl(source.value, source.kind, source.relativePath);
+  const label = sourceUrl ? `Open ${sourceIcon.label} source` : `Reveal ${sourceIcon.label} source in Finder`;
+  return { ariaLabel: label, title: label };
+}
+
 export function skillSourceAction(
   skill: { name: string; section?: string } & SkillLike,
   source: SourceDetails = skillSourceDetails(skill),
 ) {
   const sourceIcon = sourceIconDetails(source);
+  const sourceLabels = skillSourceActionLabels(source);
   const sourceUrl = sourceOpenUrl(source.value, source.kind, source.relativePath);
   if (sourceUrl) {
     return {
       icon: sourceIcon.icon,
-      ariaLabel: `Open ${sourceIcon.label} source for ${skill.name}`,
-      title: `Open ${sourceIcon.label} source`,
+      ariaLabel: `${sourceLabels.ariaLabel} for ${skill.name}`,
+      title: sourceLabels.title,
       onClick: () => openSource(source.value, source.kind, source.relativePath),
     };
   }
@@ -282,8 +338,8 @@ export function skillSourceAction(
     if (path) {
       return {
         icon: sourceIcon.icon,
-        ariaLabel: `Reveal ${sourceIcon.label} source for ${skill.name} in Finder`,
-        title: `Reveal ${sourceIcon.label} source in Finder`,
+        ariaLabel: `${sourceLabels.ariaLabel} for ${skill.name}`,
+        title: sourceLabels.title,
         onClick: () => safeInvoke(TauriCommand.RevealInFinder, { path }),
       };
     }
@@ -296,13 +352,6 @@ export enum SkillChangeCommand {
   UpdateMany = "skills_update_many",
   DeleteMany = "skills_delete_many",
   Wrap = "skills_wrap",
-}
-
-export function skillChangeActionLabel(command: SkillChangeCommand): string {
-  if (command === SkillChangeCommand.DeleteMany) return "Delete";
-  if (command === SkillChangeCommand.UpdateMany) return "Update";
-  if (command === SkillChangeCommand.Wrap) return "Create";
-  return "Apply";
 }
 
 export function applySkillUpdateReports<T extends { skills: NormalizedSkill[] }>(
@@ -318,8 +367,7 @@ export function applySkillUpdateReports<T extends { skills: NormalizedSkill[] }>
       if (!update) return skill;
       return {
         ...skill,
-        updateStatus: update.status,
-        meta: update.status,
+        updateAvailability: update.status,
         statusTone: update.status === "update-available" ? "warn" : skill.statusTone,
       };
     }),
@@ -334,12 +382,11 @@ export function mergeSkillListPreservingUpdates(
   const previousByName = new Map(previous.map((skill) => [skill.name, skill]));
   return next.map((skill) => {
     const prior = previousByName.get(skill.name);
-    if (!prior || prior.updateStatus !== "update-available") return skill;
-    if (skill.updateStatus === "update-available") return skill;
+    if (!prior || prior.updateAvailability !== "update-available") return skill;
+    if (skill.updateAvailability === "update-available") return skill;
     return {
       ...skill,
-      updateStatus: prior.updateStatus,
-      meta: prior.meta,
+      updateAvailability: prior.updateAvailability,
       statusTone: skill.statusTone === "muted" ? skill.statusTone : "warn",
     };
   });
@@ -367,11 +414,10 @@ export function clearSkillUpdateAvailability<T extends { skills: NormalizedSkill
   return {
     ...report,
     skills: report.skills.map((skill) => {
-      if (!selected.has(skill.name) || skill.updateStatus !== "update-available") return skill;
+      if (!selected.has(skill.name) || skill.updateAvailability !== "update-available") return skill;
       return {
         ...skill,
-        updateStatus: "up-to-date",
-        meta: "up-to-date",
+        updateAvailability: "up-to-date",
         statusTone: skill.statusTone === "warn" ? "ok" : skill.statusTone,
       };
     }),

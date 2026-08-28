@@ -31,5 +31,8 @@ walkdir = "2"
 tar = "0.4"
 zip = { version = "4", default-features = false, features = ["deflate"] }
 
+[profile.dev]
+incremental = false
+
 [profile.dev.package.tendi-core]
 opt-level = 2

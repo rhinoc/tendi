@@ -197,7 +197,7 @@ type DataTableRowProps<TRow extends Record<string, unknown>> = {
   rowContextMenu?: DataTableProps<TRow>["rowContextMenu"];
   onRowClick?: (row: TRow) => void;
   onHoveredRowChange?: (rowId: string | null) => void;
-  onContextMenuOpenChange: (rowId: string, open: boolean) => void;
+  onRowMenuOpenChange: (rowId: string, open: boolean) => void;
   renderDataCell: (cell: DataTableCell<TRow>) => ReactNode;
 };
 
@@ -212,7 +212,7 @@ function DataTableRowComponent<TRow extends Record<string, unknown>>({
   rowContextMenu,
   onRowClick,
   onHoveredRowChange,
-  onContextMenuOpenChange,
+  onRowMenuOpenChange,
   renderDataCell,
 }: DataTableRowProps<TRow>) {
   const id = row.id;
@@ -234,7 +234,7 @@ function DataTableRowComponent<TRow extends Record<string, unknown>>({
         onRowClick(row.original);
       } : undefined}
     >
-      <RowMenuOpenChangeProvider onOpenChange={(open) => onContextMenuOpenChange(id, open)}>
+      <RowMenuOpenChangeProvider onOpenChange={(open) => onRowMenuOpenChange(id, open)}>
         {pane !== "scroll" ? (
           selectable && rowSelectable ? (
             <SelectionCheckbox
@@ -256,7 +256,7 @@ function DataTableRowComponent<TRow extends Record<string, unknown>>({
     <div className="dataTableRowSlot">
       {contextMenuContent == null ? body : (
         <ContextMenu.Root
-          onOpenChange={(open) => onContextMenuOpenChange(id, open)}
+          onOpenChange={(open) => onRowMenuOpenChange(id, open)}
         >
           <ContextMenu.Trigger asChild>{body}</ContextMenu.Trigger>
           <ContextMenu.Portal>
@@ -281,7 +281,7 @@ const DataTableRow = memo(DataTableRowComponent, (previous, next) => (
   && previous.rowContextMenu === next.rowContextMenu
   && previous.onRowClick === next.onRowClick
   && previous.onHoveredRowChange === next.onHoveredRowChange
-  && previous.onContextMenuOpenChange === next.onContextMenuOpenChange
+  && previous.onRowMenuOpenChange === next.onRowMenuOpenChange
   && previous.renderDataCell === next.renderDataCell
 )) as typeof DataTableRowComponent;
 
@@ -489,8 +489,7 @@ export function DataTable<TRow extends Record<string, unknown>>({
   const suppressClickRef = useRef(false);
   const [marquee, setMarquee] = useState<MarqueeRect | null>(null);
   const [hoveredRowId, setHoveredRowId] = useState<string | null>(null);
-  const [menuRowId, setMenuRowId] = useState<string | null>(null);
-  const [rowActionsMenuId, setRowActionsMenuId] = useState<string | null>(null);
+  const [openRowMenuId, setOpenRowMenuId] = useState<string | null>(null);
   const [scrollTop, setScrollTop] = useState(0);
   const pendingScrollTopRef = useRef(0);
   const scrollUpdateFrameRef = useRef<number | null>(null);
@@ -923,13 +922,12 @@ export function DataTable<TRow extends Record<string, unknown>>({
     row.getIsSelected() && "rowSelected",
     selectionActive && "selectionActive",
     hoveredRowId === row.id && "rowHover",
-    menuRowId === row.id && "menuActive",
-    rowActionsMenuId === row.id && "menuActive",
+    openRowMenuId === row.id && "menuActive",
     extraClassName,
   ].filter(Boolean).join(" ");
 
-  const notifyRowActionsMenuOpenChange = useCallback((rowId: string, open: boolean) => {
-    setRowActionsMenuId((current) => open ? rowId : current === rowId ? null : current);
+  const notifyRowMenuOpenChange = useCallback((rowId: string, open: boolean) => {
+    setOpenRowMenuId((current) => open ? rowId : current === rowId ? null : current);
   }, []);
   const handleRowHover = useCallback((rowId: string | null) => {
     setHoveredRowId(rowId);
@@ -964,7 +962,7 @@ export function DataTable<TRow extends Record<string, unknown>>({
         selectedRows={selectedRows}
         rowContextMenu={rowContextMenu}
         onRowClick={onRowClick}
-        onContextMenuOpenChange={notifyRowActionsMenuOpenChange}
+        onRowMenuOpenChange={notifyRowMenuOpenChange}
         renderDataCell={renderDataCell}
       />
     );
@@ -986,7 +984,7 @@ export function DataTable<TRow extends Record<string, unknown>>({
         rowContextMenu={rowContextMenu}
         onRowClick={onRowClick}
         onHoveredRowChange={freezeColumn ? handleRowHover : undefined}
-        onContextMenuOpenChange={notifyRowActionsMenuOpenChange}
+        onRowMenuOpenChange={notifyRowMenuOpenChange}
         renderDataCell={renderDataCell}
       />
     );

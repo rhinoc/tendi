@@ -4,6 +4,7 @@ import { Tooltip } from "./Tooltip.tsx";
 import { Select } from "radix-ui";
 
 import { SelectTrigger } from "./SelectTrigger.tsx";
+import { useRowMenuOpenChange } from "./row-menu-context.tsx";
 import { resolveSelectValue } from "../../lib/select-options.ts";
 
 export type SelectOption = {
@@ -61,12 +62,14 @@ export function SelectControl({
   triggerTooltipContent,
   menuAction,
 }: SelectControlProps) {
+  const notifyRowMenuOpenChange = useRowMenuOpenChange();
   const resolvedValue = resolveSelectValue(value, options);
   const selectedOption = options.find((option) => option.value === resolvedValue);
   const selectedLabel = selectedOption?.label ?? value;
   return (
     <Select.Root
       value={resolvedValue}
+      onOpenChange={(open) => notifyRowMenuOpenChange?.(open)}
       onValueChange={(nextValue) => {
         if (nextValue === SELECT_MENU_ACTION_VALUE) {
           menuAction?.onSelect();

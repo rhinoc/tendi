@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { ChevronLeft, ChevronRight, Settings2 } from "lucide-react";
+import { ChevronRight, FolderOpen, Settings2 } from "lucide-react";
 import { Dialog } from "radix-ui";
 
 import { DialogActionBar } from "../../components/shared/DialogActionBar.tsx";
@@ -7,18 +7,20 @@ import { DialogActionButton } from "../../components/shared/DialogActionButton.t
 import { DialogShell } from "../../components/shared/DialogShell.tsx";
 import { IconButton } from "../../components/shared/IconButton.tsx";
 import { LoadErrorState } from "../../components/shared/LoadErrorState.tsx";
+import { LoadingInline } from "../../components/shared/LoadingInline.tsx";
 import { SelectionCheckbox } from "../../components/shared/SelectionCheckbox.tsx";
 import { SelectControl } from "../../components/shared/SelectControl.tsx";
 import { StatefulButton, type StatefulButtonState } from "../../components/shared/StatefulButton.tsx";
 import { Toast } from "../../components/shared/Toast.tsx";
-import { TauriCommand, invokeCommand } from "../../lib/index.ts";
+import { backupDialogLeadingAction } from "../../lib/backup-dialog.ts";
+import { backupConfigurationState } from "../../lib/backup-state.ts";
+import { compactCommand, formatUserPath, revealPathLabel, safeInvoke, TauriCommand, invokeCommand } from "../../lib/index.ts";
 import { resolveSelectValue } from "../../lib/select-options.ts";
 import "./BackupView.css";
 
 type BackupConfig = {
   remoteUrl: string;
   checkoutPath: string;
-  deviceLabel: string;
   contents: BackupContents;
 };
 
@@ -71,6 +73,14 @@ function backupDate(createdAt: number) {
   return new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" }).format(new Date(createdAt * 1000));
 }
 
+function backupCatalogSubtitle(category: BackupCategory, item: BackupCatalogItem) {
+  if (category === "mcp") return "";
+  if (!item.detail.trim()) return "";
+  if (category === "rules") return formatUserPath(item.detail);
+  if (category === "hooks") return compactCommand(item.detail);
+  return item.detail;
+}
+
 function defaultBackupContents(): BackupContents {
   return {
     skills: { enabled: true, excluded: [] },
@@ -80,17 +90,16 @@ function defaultBackupContents(): BackupContents {
   };
 }
 
-const backupCategoryDefinitions: Array<{ key: BackupCategory; label: string; detail: string }> = [
-  { key: "skills", label: "Skills", detail: "Global managed skills" },
-  { key: "mcp", label: "MCP", detail: "Global MCP configuration" },
-  { key: "rules", label: "Rules", detail: "Global rules" },
-  { key: "hooks", label: "Hooks", detail: "Global hooks" },
+const backupCategoryDefinitions: Array<{ key: BackupCategory; label: string }> = [
+  { key: "skills", label: "Skills" },
+  { key: "mcp", label: "MCP" },
+  { key: "rules", label: "Rules" },
+  { key: "hooks", label: "Hooks" },
 ];
 
 export function BackupSettings() {
   const [data, setData] = useState<BackupStatusResponse | null>(null);
-  const [remoteUrl, setRemoteUrl] = useState("");
-  const [deviceLabel, setDeviceLabel] = useState("My device");
+  const [repository, setRepository] = useState("");
   const [contents, setContents] = useState<BackupContents>(defaultBackupContents);
   const [loadError, setLoadError] = useState("");
   const [actionError, setActionError] = useState("");
@@ -108,6 +117,7 @@ export function BackupSettings() {
   const [restoreBusy, setRestoreBusy] = useState(false);
   const restoreTargetOptions = targets.map((target) => ({ value: target.id, label: target.displayName }));
   const resolvedRestoreTarget = resolveSelectValue(restoreTarget, restoreTargetOptions);
+  const backupConfig = data?.config;
 
   const load = useCallback(async () => {
     try {
@@ -118,9 +128,11 @@ export function BackupSettings() {
       setData(next);
       setLoadError("");
       if (next.config) {
-        setRemoteUrl(next.config.remoteUrl);
-        setDeviceLabel(next.config.deviceLabel);
+        setRepository(next.config.remoteUrl || next.config.checkoutPath);
         setContents(next.config.contents);
+      } else {
+        setRepository("");
+        setContents(defaultBackupContents());
       }
       setTargets(targetOptions);
       setRestoreTarget((current) => resolveSelectValue(
@@ -135,11 +147,15 @@ export function BackupSettings() {
   useEffect(() => { void load(); }, [load]);
 
   const configure = async () => {
-    if (!remoteUrl.trim() || !deviceLabel.trim()) return;
+    if (!repository.trim()) return;
     setAction("configure");
     setActionError("");
     try {
-      await invokeCommand(TauriCommand.SkillsBackupConfigure, { remoteUrl, deviceLabel, contents });
+      await invokeCommand(TauriCommand.SkillsBackupConfigure, {
+        repository: repository.trim(),
+        checkoutPath: backupConfig?.remoteUrl ? backupConfig.checkoutPath : "",
+        contents,
+      });
       await load();
       setContentCategory(null);
       setDetailsOpen(false);
@@ -245,17 +261,21 @@ export function BackupSettings() {
   };
 
   const stateFor = (next: typeof action): StatefulButtonState => action === next ? "loading" : "idle";
-  const configured = Boolean(data?.config);
+  const configurationState = backupConfigurationState(data);
+  const loading = configurationState === "loading";
+  const configured = configurationState === "configured";
   const lastBackup = data?.versions[0] ?? null;
   const catalog = data?.catalog ?? null;
   const activeCategory = backupCategoryDefinitions.find((category) => category.key === contentCategory) ?? null;
+  const leadingAction = backupDialogLeadingAction(Boolean(activeCategory), configured);
   const openDetails = () => {
+    if (loading) return;
     setContentCategory(null);
     if (data?.config) {
-      setRemoteUrl(data.config.remoteUrl);
-      setDeviceLabel(data.config.deviceLabel);
+      setRepository(data.config.remoteUrl || data.config.checkoutPath);
       setContents(data.config.contents);
     } else {
+      setRepository("");
       setContents(defaultBackupContents());
     }
     setDetailsOpen(true);
@@ -302,32 +322,30 @@ export function BackupSettings() {
       {loadError ? <LoadErrorState message={loadError} onRetry={() => { void load(); }} /> : null}
       {actionError ? <Toast tone="error" message={actionError} onDismiss={() => setActionError("")} /> : null}
       <div className="settingsBackupSummary">
-        <div className={`settingsBackupSummaryActions ${configured ? "isConfigured" : "isNotConfigured"}`}>
+        <div className={`settingsBackupSummaryActions ${loading ? "isLoading" : configured ? "isConfigured" : "isNotConfigured"}`} aria-busy={loading}>
           <div className="settingsBackupActionStack">
-            {configured ? <StatefulButton size="sm" variant="primary" state={stateFor("backup")} aria-label="Back up now" width={112} onClick={() => { void backupNow(); }}>Back up now</StatefulButton> : <span className="settingsBackupNotConfigured">Not configured</span>}
+            <div className="settingsBackupPrimaryActions">
+              {loading ? <LoadingInline label="Loading sync" size={14} /> : configured ? <StatefulButton size="sm" variant="primary" state={stateFor("backup")} aria-label="Sync now" width={112} onClick={() => { void backupNow(); }}>Sync now</StatefulButton> : <span className="settingsBackupNotConfigured">Not configured</span>}
+              {!loading ? <IconButton aria-label="Sync settings" onClick={openDetails}><Settings2 size={16} aria-hidden="true" /></IconButton> : null}
+            </div>
             {configured ? <span className="settingsBackupLastSync">Last sync: {lastBackup ? backupDate(lastBackup.createdAt) : "Never"}</span> : null}
           </div>
-          <IconButton aria-label="Backup settings" onClick={openDetails}><Settings2 size={16} aria-hidden="true" /></IconButton>
         </div>
       </div>
       <DialogShell open={detailsOpen} onOpenChange={setDetailsOpen} className="confirmDialogPanel backupDetailsDialog" descriptionId="backup-details-description">
-        <Dialog.Title className="confirmDialogTitle">{activeCategory ? activeCategory.label : configured ? "Backup details" : "Set up backup"}</Dialog.Title>
-        <Dialog.Description id="backup-details-description" className="dialogVisuallyHidden">Backup settings</Dialog.Description>
-        <div className="backupDetailsBody">
+        <Dialog.Title className="confirmDialogTitle">{activeCategory ? activeCategory.label : configured ? "Sync details" : "Set up sync"}</Dialog.Title>
+        <Dialog.Description id="backup-details-description" className="dialogVisuallyHidden">Sync settings</Dialog.Description>
+        <div className={`backupDetailsBody ${activeCategory ? "backupDetailsCategoryBody" : "backupDetailsHomeBody"}`}>
           {activeCategory ? (
             <>
-              <button type="button" className="backupDetailsBack" onClick={() => setContentCategory(null)}>
-                <ChevronLeft size={15} aria-hidden="true" />
-                <span>Backup contents</span>
-              </button>
-              <div className="backupDetailsSection backupContentDetailSection">
-                <h3>{activeCategory.detail}</h3>
-                {!catalog ? <p className="settingsBackupEmpty">Backup contents are unavailable. Refresh and try again.</p> : catalog[activeCategory.key].length ? (
+              <div className="backupDetailsSection">
+                {!catalog ? <p className="settingsBackupEmpty">Sync contents are unavailable. Refresh and try again.</p> : catalog[activeCategory.key].length ? (
                   <div className="backupContentItems">
                     {catalog[activeCategory.key].map((item) => {
                       const selected = contents[activeCategory.key].enabled && !contents[activeCategory.key].excluded.includes(item.id);
+                      const subtitle = backupCatalogSubtitle(activeCategory.key, item);
                       return (
-                        <div className="backupContentItemRow" key={item.id}>
+                        <label className="backupContentItemRow" key={item.id}>
                           <SelectionCheckbox
                             checked={selected}
                             disabled={!contents[activeCategory.key].enabled}
@@ -335,14 +353,14 @@ export function BackupSettings() {
                             onChange={(checked) => toggleCategoryItem(activeCategory.key, item.id, checked)}
                           />
                           <div>
-                            <strong>{item.label}</strong>
-                            <span>{item.detail}</span>
+                            <strong className="dataCellTitle">{item.label}</strong>
+                            {subtitle ? <span className="dataCellSubLine"><span className="dataCellSub">{subtitle}</span></span> : null}
                           </div>
-                        </div>
+                        </label>
                       );
                     })}
                   </div>
-                ) : <p className="settingsBackupEmpty">No global items found.</p>}
+                ) : <p className="settingsBackupEmpty">No items found.</p>}
               </div>
             </>
           ) : (
@@ -351,17 +369,21 @@ export function BackupSettings() {
                 <h3>Repository</h3>
                 <div className="settingsBackupFormGrid">
                   <label className="settingsBackupField">
-                    <span>Git remote</span>
-                    <input className="settingsTextInput" value={remoteUrl} onChange={(event) => setRemoteUrl(event.target.value)} placeholder="owner/repository or git@github.com:you/tendi-skills-backup.git" />
-                  </label>
-                  <label className="settingsBackupField">
-                    <span>Device label</span>
-                    <input className="settingsTextInput" value={deviceLabel} onChange={(event) => setDeviceLabel(event.target.value)} placeholder="My device" />
+                    <span>Repository address</span>
+                    <div className="settingsBackupRepositoryInput">
+                      <input className="settingsTextInput" value={repository} onChange={(event) => setRepository(event.target.value)} placeholder="https://github.com/org/repo or ~/path/to/repo" />
+                      {configured && backupConfig ? <IconButton
+                        aria-label={revealPathLabel("sync repository")}
+                        onClick={() => void safeInvoke(TauriCommand.RevealInFinder, { path: backupConfig.checkoutPath })}
+                      >
+                        <FolderOpen size={14} aria-hidden="true" />
+                      </IconButton> : null}
+                    </div>
                   </label>
                 </div>
               </div>
               <div className="backupDetailsSection">
-                <h3>Backup contents</h3>
+                <h3>Sync contents</h3>
                 <div className="backupCategoryList">
                   {backupCategoryDefinitions.map((category) => {
                     const selection = contents[category.key];
@@ -373,7 +395,7 @@ export function BackupSettings() {
                         <button type="button" className="backupCategoryDetail" onClick={() => setContentCategory(category.key)}>
                           <span>
                             <strong>{category.label}</strong>
-                            <span>{!catalog ? "Unavailable" : selection.enabled ? (itemCount ? `${selectedCount} of ${itemCount} included` : "No global items") : "Not included"}</span>
+                            <span>{!catalog ? "Unavailable" : selection.enabled ? (itemCount ? `${selectedCount} of ${itemCount} included` : "No items") : "Not included"}</span>
                           </span>
                           <ChevronRight size={15} aria-hidden="true" />
                         </button>
@@ -382,20 +404,24 @@ export function BackupSettings() {
                   })}
                 </div>
               </div>
-              {configured ? <div className="backupDetailsSection">
+              {configured ? <div className="backupDetailsSection backupHistorySection">
                 <h3>History</h3>
-                {data?.versions.length ? <ul className="settingsBackupVersionList">{data.versions.map((version) => <li key={version.id}><div className="settingsBackupVersionCopy"><strong>{version.summary}</strong><span>{backupDate(version.createdAt)} · <code>{version.id.slice(0, 12)}</code></span></div><DialogActionButton variant="secondary" onClick={() => openRestore(version)}>Restore</DialogActionButton></li>)}</ul> : <p className="settingsBackupEmpty">No backup versions yet.</p>}
+                {data?.versions.length ? <ul className="settingsBackupVersionList">{data.versions.map((version) => <li key={version.id}><div className="settingsBackupVersionCopy"><strong>{version.summary}</strong><span>{backupDate(version.createdAt)} · <code>{version.id.slice(0, 12)}</code></span></div><DialogActionButton variant="secondary" onClick={() => openRestore(version)}>Restore</DialogActionButton></li>)}</ul> : <p className="settingsBackupEmpty">No sync versions yet.</p>}
               </div> : null}
             </>
           )}
         </div>
-        <DialogActionBar onCancel={() => { setContentCategory(null); setDetailsOpen(false); }} cancelDisabled={action !== ""} leading={configured ? <StatefulButton size="sm" variant="danger" state={stateFor("disconnect")} aria-label="Disconnect this device from backup" width={104} onClick={() => { void disconnect(); }}>Disconnect</StatefulButton> : undefined}>
-          <StatefulButton variant="primary" state={stateFor("configure")} aria-label={configured ? "Save backup settings" : "Set up backup"} width={configured ? 112 : 96} disabled={!remoteUrl.trim() || !deviceLabel.trim()} onClick={() => { void configure(); }}>{configured ? "Save" : "Set up"}</StatefulButton>
+        <DialogActionBar
+          onCancel={() => { setContentCategory(null); setDetailsOpen(false); }}
+          cancelDisabled={action !== ""}
+          leading={leadingAction === "back" ? <DialogActionButton variant="secondary" disabled={action !== ""} onClick={() => setContentCategory(null)}>Back</DialogActionButton> : leadingAction === "disconnect" ? <StatefulButton size="sm" variant="danger" state={stateFor("disconnect")} aria-label="Disconnect this device from sync" width={104} onClick={() => { void disconnect(); }}>Disconnect</StatefulButton> : undefined}
+        >
+          <StatefulButton variant="primary" state={stateFor("configure")} aria-label={configured ? "Save sync settings" : "Set up sync"} width={configured ? 112 : 96} disabled={!repository.trim()} onClick={() => { void configure(); }}>{configured ? "Save" : "Set up"}</StatefulButton>
         </DialogActionBar>
       </DialogShell>
       <DialogShell open={restoreOpen} onOpenChange={setRestoreOpen} className="confirmDialogPanel backupRestoreDialog" descriptionId="backup-restore-description">
-        <Dialog.Title className="confirmDialogTitle">Restore backup</Dialog.Title>
-        <Dialog.Description id="backup-restore-description" className="dialogVisuallyHidden">Restore a backup version</Dialog.Description>
+        <Dialog.Title className="confirmDialogTitle">Restore sync</Dialog.Title>
+        <Dialog.Description id="backup-restore-description" className="dialogVisuallyHidden">Restore a sync version</Dialog.Description>
         <div className="backupRestoreControls">
           <SelectControl label="Agent" value={resolvedRestoreTarget} onValueChange={changeRestoreTarget} options={restoreTargetOptions} />
           <SelectControl label="Scope" value={restoreScope} onValueChange={(value) => changeRestoreScope(value as "global" | "project")} options={[{ value: "global", label: "Global" }, { value: "project", label: "Project" }]} />
@@ -403,7 +429,7 @@ export function BackupSettings() {
         {restoreBusy && !restorePlan ? <p className="backupDialogHint">Preparing restore plan…</p> : null}
         {!restorePlan && !restoreBusy ? <div className="backupRestoreEmpty"><DialogActionButton variant="secondary" onClick={prepareRestore}>Prepare restore plan</DialogActionButton></div> : null}
         {restorePlan ? <ul className="backupRestorePlan">{restorePlan.operations.map((operation) => <li key={operation.id} data-status={operation.status}><SelectionCheckbox checked={restoreSelectedIds.includes(operation.id)} label={`Restore ${operation.name}`} disabled={restoreBusy} onChange={(checked) => toggleRestoreSkill(operation.id, checked)} /><span>{operation.name}</span>{operation.status === "conflict" && restoreSelectedIds.includes(operation.id) ? <SelectControl label={`${operation.name} conflict`} value={restoreResolutions[operation.id] ?? ""} onValueChange={(value) => setRestoreResolutions((current) => ({ ...current, [operation.id]: value as RestoreResolution }))} options={[{ value: "keep-both", label: "Keep both" }, { value: "replace", label: "Replace existing" }, { value: "skip", label: "Keep existing" }]} renderValue={(option) => <span className="selectValueText">{option?.label ?? "Choose action"}</span>} /> : <span>{restoreSelectedIds.includes(operation.id) && operation.status === "planned" ? operation.target : operation.message ?? "Not selected"}</span>}</li>)}</ul> : null}
-        <DialogActionBar onCancel={() => setRestoreOpen(false)} cancelDisabled={restoreBusy}><StatefulButton variant="primary" state={restoreBusy ? "loading" : "idle"} aria-label="Restore backup" width={104} disabled={!restorePlan || restoreBusy || restoreSelectedIds.length === 0 || hasUnresolvedRestoreConflict} onClick={() => { void applyRestore(); }}>Restore</StatefulButton></DialogActionBar>
+        <DialogActionBar onCancel={() => setRestoreOpen(false)} cancelDisabled={restoreBusy}><StatefulButton variant="primary" state={restoreBusy ? "loading" : "idle"} aria-label="Restore sync" width={104} disabled={!restorePlan || restoreBusy || restoreSelectedIds.length === 0 || hasUnresolvedRestoreConflict} onClick={() => { void applyRestore(); }}>Restore</StatefulButton></DialogActionBar>
       </DialogShell>
     </div>
   );

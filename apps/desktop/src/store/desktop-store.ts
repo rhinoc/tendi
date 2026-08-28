@@ -2,13 +2,13 @@ import { useSyncExternalStore } from "react";
 
 import type { OverviewAnalytics } from "../lib/analytics.ts";
 import type { RuntimeData } from "../lib/data.ts";
+import { DOMAIN_KEYS, type DomainKey, type RuntimeDomainKey } from "../lib/domain.ts";
 import { applySkillUpdateReportsToData, countSkillUpdates } from "../lib/skill-updates.ts";
 import type { SkillUpdateReport } from "../lib/skill-updates.ts";
 
 export type { SkillUpdateReport } from "../lib/skill-updates.ts";
 
-export type DesktopDomain = "agents" | "skills" | "sessions" | "prompts" | "rules" | "hooks" | "mcp";
-export type InventoryKey = "skills" | "prompts" | "sessions" | "rules" | "hooks" | "mcp";
+export type DesktopDomain = RuntimeDomainKey;
 export type DomainLoadStatus = "idle" | "loading" | "ready" | "error";
 export type SessionListStatus = "loading" | "loaded" | "error";
 export type AgentTargetOption = {
@@ -24,6 +24,12 @@ export type SkillIndexStatus = {
   failed?: number;
   running?: boolean;
   last_indexed_at?: string | null;
+};
+
+export type AnalyticsQueryKey = {
+  agent: string;
+  range: number;
+  revision: number;
 };
 
 function sameSkillIndexStatus(left: SkillIndexStatus | null, right: SkillIndexStatus | null) {
@@ -48,32 +54,21 @@ export type DesktopStoreState = {
     errors: DomainErrorState;
     retryRevision: number;
   };
-  inventory: {
-    counts: Record<InventoryKey, number>;
-    loaded: ReadonlySet<InventoryKey>;
-    errors: ReadonlySet<InventoryKey>;
-    hookReviewCount: number;
-    skillUpdateCount: number;
-  };
   skillUpdates: {
     checking: boolean;
     error: string;
     fresh: boolean;
     indexStatus: SkillIndexStatus | null;
-    reports: ReadonlyMap<string, SkillUpdateReport>;
   };
   sessions: {
-    listStatus: SessionListStatus;
-    listError: string;
     refreshError: string;
-    listLoaded: boolean;
-    rowsAvailable: boolean;
   };
   analytics: {
     revision: number;
     ready: boolean;
     error: string;
     value: OverviewAnalytics | null;
+    valueQueryKey: AnalyticsQueryKey | null;
   };
 };
 
@@ -83,17 +78,6 @@ function resolve<T>(current: T, next: StateUpdater<T>): T {
   return typeof next === "function"
     ? (next as (current: T) => T)(current)
     : next;
-}
-
-function emptyCounts(): Record<InventoryKey, number> {
-  return {
-    skills: 0,
-    sessions: 0,
-    prompts: 0,
-    rules: 0,
-    hooks: 0,
-    mcp: 0,
-  };
 }
 
 function initialData(): RuntimeData {
@@ -119,34 +103,70 @@ function createInitialState(): DesktopStoreState {
       errors: {},
       retryRevision: 0,
     },
-    inventory: {
-      counts: emptyCounts(),
-      loaded: new Set(),
-      errors: new Set(),
-      hookReviewCount: 0,
-      skillUpdateCount: 0,
-    },
     skillUpdates: {
       checking: false,
       error: "",
       fresh: false,
       indexStatus: null,
-      reports: new Map(),
     },
     sessions: {
-      listStatus: "loading",
-      listError: "",
       refreshError: "",
-      listLoaded: false,
-      rowsAvailable: false,
     },
     analytics: {
       revision: 0,
       ready: false,
       error: "",
       value: null,
+      valueQueryKey: null,
     },
   };
+}
+
+function inventoryRows(data: RuntimeData, domain: DomainKey): unknown[] {
+  return data[domain] as unknown[];
+}
+
+export function selectCatalogCounts(data: RuntimeData): Record<DomainKey, number> {
+  return Object.fromEntries(DOMAIN_KEYS.map((domain) => [domain, inventoryRows(data, domain).length])) as Record<DomainKey, number>;
+}
+
+export function selectCatalogCountLoadedDomains(state: DesktopStoreState): ReadonlySet<DomainKey> {
+  return new Set(DOMAIN_KEYS.filter((domain) => (
+    state.catalogs.loadedDomains.has(domain) || inventoryRows(state.catalogs.data, domain).length > 0
+  )));
+}
+
+export function selectCatalogCountErrors(state: DesktopStoreState): ReadonlySet<DomainKey> {
+  return new Set(DOMAIN_KEYS.filter((domain) => Boolean(state.catalogs.errors[domain])));
+}
+
+export function selectHookReviewCount(data: RuntimeData): number {
+  return data.hooks.filter((hook) => hook.needs_review === true).length;
+}
+
+export function selectSkillUpdateCount(data: RuntimeData, agentFilter: string): number {
+  return countSkillUpdates(data, agentFilter);
+}
+
+export function selectSessionListStatus(state: DesktopStoreState): SessionListStatus {
+  const hasRows = state.catalogs.data.sessions.length > 0;
+  if (state.catalogs.loadingDomains.has("sessions")) return "loading";
+  if (!hasRows && state.catalogs.errors.sessions) return "error";
+  if (state.catalogs.loadedDomains.has("sessions") || hasRows) return "loaded";
+  return "loading";
+}
+
+function sameAnalyticsQueryKey(left: AnalyticsQueryKey | null, right: AnalyticsQueryKey | null): boolean {
+  if (left === right) return true;
+  if (!left || !right) return false;
+  return left.agent === right.agent && left.range === right.range && left.revision === right.revision;
+}
+
+export function selectAnalyticsValue(
+  state: DesktopStoreState,
+  queryKey: AnalyticsQueryKey,
+): OverviewAnalytics | null {
+  return sameAnalyticsQueryKey(state.analytics.valueQueryKey, queryKey) ? state.analytics.value : null;
 }
 
 function updateSet<T>(current: ReadonlySet<T>, value: T, present: boolean): ReadonlySet<T> {
@@ -177,23 +197,18 @@ export type DesktopStoreActions = {
   setDomainError: (domain: DesktopDomain, message: string) => void;
   markDomainLoaded: (domain: DesktopDomain, loaded?: boolean) => void;
   bumpDomainRetryRevision: () => void;
-  resetInventory: (agentFilter?: string) => void;
-  setInventoryCount: (domain: InventoryKey, count: number, secondaryCount?: number) => void;
-  setInventoryError: (domain: InventoryKey, hasError: boolean) => void;
   setSkillUpdatesChecking: (checking: boolean) => void;
   setSkillUpdateError: (message: string) => void;
   setSkillIndexStatus: (status: SkillIndexStatus | null) => void;
-  setSkillUpdateReports: (updates: SkillUpdateReport[], agentFilter?: string) => void;
-  clearSkillUpdateReports: (names: string[], agentFilter?: string) => void;
-  refreshSkillUpdateCount: (agentFilter?: string) => void;
-  setSessionListState: (patch: Partial<DesktopStoreState["sessions"]>) => void;
+  setSkillUpdateReports: (updates: SkillUpdateReport[]) => void;
+  setSessionRefreshError: (message: string) => void;
   setAnalyticsRevision: (revision: number) => void;
   setAnalyticsReady: (ready: boolean) => void;
   setAnalyticsError: (message: string) => void;
-  setAnalyticsValue: (value: OverviewAnalytics | null) => void;
+  setAnalyticsValue: (value: OverviewAnalytics | null, queryKey: AnalyticsQueryKey | null) => void;
 };
 
-class DesktopStore {
+export class DesktopStore {
   private state: DesktopStoreState = createInitialState();
   private listeners = new Set<() => void>();
 
@@ -240,55 +255,6 @@ class DesktopStore {
         },
       }));
     },
-    resetInventory: (agentFilter = "All") => {
-      this.update((current) => ({
-        ...current,
-        inventory: {
-          ...current.inventory,
-          loaded: new Set(),
-          errors: new Set(),
-          hookReviewCount: 0,
-          skillUpdateCount: current.skillUpdates.fresh
-            ? countSkillUpdates(current.catalogs.data, agentFilter)
-            : 0,
-        },
-      }));
-    },
-    setInventoryCount: (domain, count, secondaryCount = 0) => {
-      this.update((current) => {
-        const loaded = updateSet(current.inventory.loaded, domain, true);
-        const errors = updateSet(current.inventory.errors, domain, false);
-        const hookReviewCount = domain === "hooks" ? secondaryCount : current.inventory.hookReviewCount;
-        const skillUpdateCount = domain === "skills" && !current.skillUpdates.fresh
-          ? secondaryCount
-          : current.inventory.skillUpdateCount;
-        if (
-          current.inventory.counts[domain] === count
-          && loaded === current.inventory.loaded
-          && errors === current.inventory.errors
-          && hookReviewCount === current.inventory.hookReviewCount
-          && skillUpdateCount === current.inventory.skillUpdateCount
-        ) return current;
-        return {
-          ...current,
-          inventory: {
-            ...current.inventory,
-            counts: { ...current.inventory.counts, [domain]: count },
-            loaded,
-            errors,
-            hookReviewCount,
-            skillUpdateCount,
-          },
-        };
-      });
-    },
-    setInventoryError: (domain, hasError) => {
-      this.update((current) => {
-        const errors = updateSet(current.inventory.errors, domain, hasError);
-        if (errors === current.inventory.errors) return current;
-        return { ...current, inventory: { ...current.inventory, errors } };
-      });
-    },
     setSkillUpdatesChecking: (checking) => {
       this.update((current) => current.skillUpdates.checking === checking
         ? current
@@ -304,47 +270,20 @@ class DesktopStore {
         ? current
         : { ...current, skillUpdates: { ...current.skillUpdates, indexStatus } });
     },
-    setSkillUpdateReports: (updates, agentFilter = "All") => {
+    setSkillUpdateReports: (updates) => {
       this.update((current) => {
-        const reports = new Map(updates.map((update) => [update.name, update]));
         const data = applySkillUpdateReportsToData(current.catalogs.data, updates);
-        const skillUpdateCount = countSkillUpdates(data, agentFilter);
         return {
           ...current,
           catalogs: { ...current.catalogs, data },
-          inventory: { ...current.inventory, skillUpdateCount },
-          skillUpdates: { ...current.skillUpdates, fresh: true, reports },
+          skillUpdates: { ...current.skillUpdates, fresh: true },
         };
       });
     },
-    clearSkillUpdateReports: (names, agentFilter = "All") => {
-      this.update((current) => {
-        if (names.length === 0) return current;
-        const reports = new Map(current.skillUpdates.reports);
-        for (const name of names) reports.delete(name);
-        const skillUpdateCount = countSkillUpdates(current.catalogs.data, agentFilter);
-        return {
-          ...current,
-          inventory: { ...current.inventory, skillUpdateCount },
-          skillUpdates: { ...current.skillUpdates, fresh: true, reports },
-        };
-      });
-    },
-    refreshSkillUpdateCount: (agentFilter = "All") => {
-      this.update((current) => {
-        if (!current.skillUpdates.fresh) return current;
-        const skillUpdateCount = countSkillUpdates(current.catalogs.data, agentFilter);
-        if (skillUpdateCount === current.inventory.skillUpdateCount) return current;
-        return { ...current, inventory: { ...current.inventory, skillUpdateCount } };
-      });
-    },
-    setSessionListState: (patch) => {
-      this.update((current) => {
-        const changed = (Object.keys(patch) as Array<keyof DesktopStoreState["sessions"]>)
-          .some((key) => patch[key] !== undefined && patch[key] !== current.sessions[key]);
-        if (!changed) return current;
-        return { ...current, sessions: { ...current.sessions, ...patch } };
-      });
+    setSessionRefreshError: (refreshError) => {
+      this.update((current) => current.sessions.refreshError === refreshError
+        ? current
+        : { ...current, sessions: { refreshError } });
     },
     setAnalyticsRevision: (revision) => {
       this.update((current) => {
@@ -363,10 +302,14 @@ class DesktopStore {
         ? current
         : { ...current, analytics: { ...current.analytics, error: message } });
     },
-    setAnalyticsValue: (value) => {
+    setAnalyticsValue: (value, valueQueryKey) => {
+      if (value !== null && valueQueryKey === null) {
+        throw new Error("Analytics values require a query key");
+      }
       this.update((current) => current.analytics.value === value
+        && sameAnalyticsQueryKey(current.analytics.valueQueryKey, valueQueryKey)
         ? current
-        : { ...current, analytics: { ...current.analytics, value } });
+        : { ...current, analytics: { ...current.analytics, value, valueQueryKey } });
     },
   };
 

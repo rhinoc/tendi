@@ -1,4 +1,5 @@
-export { actionLabels, copiedPathLabel, copiedValueLabel, copyPathLabel, copyValueLabel, selectionCopiedLabel, selectionCopyLabel, selectionDeleteLabel } from "./action-labels.ts";
+export { actionLabels, copiedPathLabel, copiedValueLabel, copyPathLabel, copyValueLabel, deleteConfirmationDescription, logExportLabels, promptActionLabels, revealPathLabel, selectionCopiedLabel, selectionCopyLabel, selectionDeleteErrorLabel, selectionDeleteLabel, selectionDeleteLoadingLabel } from "./action-labels.ts";
+export { mcpCopy } from "./mcp-copy.ts";
 
 export {
   navItems,
@@ -79,20 +80,30 @@ export {
   targetLabel,
   targetAgentLabel,
   localSkillSourcePath,
+  skillSourceActionLabels,
   skillSourceAction,
   SkillChangeCommand,
-  skillChangeActionLabel,
   applySkillUpdateReports,
   mergeSkillListPreservingUpdates,
   replaceSkillReportPreservingUpdates,
   clearSkillUpdateAvailability,
   applyVisibilityState,
 } from "./skills.ts";
-export type { NormalizedSkill, NormalizedSkillPath } from "./skills.ts";
+export type { AvailableSkill, NormalizedSkill, NormalizedSkillPath, RawSkillRecord, SkillAddPlan, SkillInstallResult, SkillOperation, WrapperArgs } from "./skills.ts";
+export { SkillOperationStatus } from "./skills.ts";
 
 export { suppressNextClick } from "./dom.ts";
 
-export { skillChangeDescription, skillChangeTitle } from "./skill-change-copy.ts";
+export { skillChangeActionLabel, skillChangeBusyLabel, skillChangeDescription, skillChangeLoadingCopy, skillChangeTitle } from "./skill-change-copy.ts";
+
+export { dialogCopy } from "./dialog-copy.ts";
+
+export { DOMAIN_KEYS } from "./domain.ts";
+export { RUNTIME_DOMAIN_KEYS } from "./domain.ts";
+export type { DomainKey, RuntimeDomainKey } from "./domain.ts";
+
+export { normalizeConfigProfiles, normalizeSettings } from "./settings.ts";
+export type { SettingsPayload, SettingsState } from "./settings.ts";
 
 export { logger } from "./logger.ts";
 export type { LogFields, LogLevel } from "./logger.ts";
@@ -232,7 +243,7 @@ export {
   normalizeReport,
   recomputeSources,
 } from "./data.ts";
-export type { RuntimeData, RuntimeDomainKey } from "./data.ts";
+export type { RuntimeData } from "./data.ts";
 
 export {
   buildFileTreeRows,

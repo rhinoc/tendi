@@ -7,6 +7,7 @@ export type McpRecord = {
   status: string;
   path: string;
   trust_hash: string;
+  server_path?: string[];
   read_only_reason?: string | null;
 };
 
@@ -35,6 +36,9 @@ export function normalizeMcp(row: Record<string, unknown>): McpRecord | undefine
     status,
     path,
     trust_hash: trustHash,
+    server_path: Array.isArray(row.server_path)
+      ? row.server_path.filter((value): value is string => typeof value === "string")
+      : [],
     read_only_reason: typeof row.read_only_reason === "string" ? row.read_only_reason : undefined,
   };
 }
@@ -44,5 +48,5 @@ export function mcpSourcePath(row: McpRecord | null | undefined): string {
 }
 
 export function mcpRowKey(row: McpRecord): string {
-  return JSON.stringify([row.agent, row.name, row.path]);
+  return JSON.stringify([row.agent, row.name, row.path, row.server_path ?? []]);
 }

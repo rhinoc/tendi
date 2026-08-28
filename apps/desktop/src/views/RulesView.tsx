@@ -26,7 +26,7 @@ import { SearchField } from "../components/shared/SearchField.tsx";
 import { Toast } from "../components/shared/Toast.tsx";
 import type { SkillDependencyRecord } from "../features/skills/SkillDependencyGraph.tsx";
 import { ruleColumns as sharedRuleColumns } from "../lib/tableColumns.tsx";
-import { actionLabels, copiedPathLabel, copyPathLabel, RULE_FREEZE_COLUMN, selectionDeleteLabel, TauriCommand, diffPreview, formatUserPath, friendlyAgent, invokeCommand, readRuleFile, ruleAgents, ruleKey, ruleSearchText, ruleSelectionActionIds, ruleSortValue, ruleTitle, safeInvoke, scopeColumn, suppressNextClick, type ProjectSummary, type RuleRecord } from "../lib/index.ts";
+import { actionLabels, copiedPathLabel, copyPathLabel, revealPathLabel, RULE_FREEZE_COLUMN, selectionDeleteErrorLabel, selectionDeleteLabel, TauriCommand, diffPreview, formatUserPath, friendlyAgent, invokeCommand, readRuleFile, ruleAgents, ruleKey, ruleSearchText, ruleSelectionActionIds, ruleSortValue, ruleTitle, safeInvoke, scopeColumn, suppressNextClick, type ProjectSummary, type RuleRecord } from "../lib/index.ts";
 
 const MarkdownFilePane = lazy(() => import("../components/shared/MarkdownFilePane.tsx").then(({ MarkdownFilePane: component }) => ({ default: component })));
 
@@ -167,7 +167,7 @@ function RuleInfoMenu({
               <InfoSection label="Path" className="ruleInfoPath">
                   <Tooltip content={displayPath} onlyWhenTruncated><code>{displayPath}</code></Tooltip>
                   <button
-                    aria-label="Reveal rule in Finder"
+                    aria-label={revealPathLabel("rule")}
                     className="appButton appButton-icon"
                     onClick={() => safeInvoke(TauriCommand.RevealInFinder, { path })}
                   >
@@ -294,7 +294,7 @@ export function RulesView({
         return;
       }
       if (!result) {
-        setDeleteError("Could not delete rules.");
+        setDeleteError(selectionDeleteErrorLabel("rule", targets.length));
         return;
       }
       setPendingDeleteConfirmRows([]);
@@ -483,7 +483,6 @@ export function RulesView({
         open={pendingDeleteConfirmRows.length > 0}
         items={pendingDeleteConfirmRows.map((item) => formatUserPath(item.rule.path))}
         itemLabel="rule"
-        description="Delete the selected rule files? This action cannot be undone."
         busy={deleting}
         onOpenChange={(open) => { if (!open) setPendingDeleteConfirmRows([]); }}
         onConfirm={() => { void confirmDeleteRules(); }}

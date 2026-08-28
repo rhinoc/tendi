@@ -1,20 +1,29 @@
 .chartLegend {
   display: flex;
   align-items: center;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   gap: 8px 16px;
+  min-width: 0;
+  max-width: 100%;
+  height: var(--leading-body);
+  overflow-x: auto;
+  overflow-y: hidden;
+  white-space: nowrap;
   color: var(--muted);
   font-size: var(--text-xs);
+  line-height: var(--leading-body);
+  scrollbar-width: thin;
 }
 
 .chartLegendItem {
   display: inline-flex;
   align-items: center;
+  flex: 0 0 auto;
   gap: 5px;
 }
 
 .chartLegendEmpty {
-  min-height: 14px;
+  min-height: var(--leading-body);
 }
 
 .chartLegendSwatch {

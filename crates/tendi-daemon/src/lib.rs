@@ -304,6 +304,7 @@ struct DaemonState {
     session_skill_index_running: AtomicBool,
     skill_update_running: AtomicBool,
     skill_update_cancelled: AtomicBool,
+    backup_sync_dirty: AtomicBool,
     backup_sync_running: AtomicBool,
     add_preview: Mutex<Option<SkillAddPreview>>,
     update_preview: Mutex<Option<SkillUpdatePreview>>,
@@ -349,6 +350,7 @@ impl Daemon {
                 session_skill_index_running: AtomicBool::new(false),
                 skill_update_running: AtomicBool::new(false),
                 skill_update_cancelled: AtomicBool::new(false),
+                backup_sync_dirty: AtomicBool::new(true),
                 backup_sync_running: AtomicBool::new(false),
                 add_preview: Mutex::new(None),
                 update_preview: Mutex::new(None),
@@ -365,7 +367,6 @@ impl Daemon {
         let backup_daemon = daemon.clone();
         thread::spawn(move || backup_sync_loop(backup_daemon));
         daemon.initialize_config_watcher();
-        daemon.schedule_skill_backup();
         daemon
     }
 
@@ -427,7 +428,6 @@ impl Daemon {
     fn dispatch(&self, command: &str, args: &Value) -> Result<Value, DaemonError> {
         match command {
             "agents_list" => self.agents_list(),
-            "overview_count" => self.overview_count(args),
             "bundled_skill_status" => self.bundled_skill_status(),
             "bundled_skill_install" => self.bundled_skill_install(args),
             "bundled_skill_remove" => self.bundled_skill_remove(),
@@ -562,54 +562,6 @@ impl Daemon {
             },
         )?;
         serde_json::to_value(report.agents).map_err(internal_error)
-    }
-
-    fn overview_count(&self, args: &Value) -> Result<Value, DaemonError> {
-        let domain = string_arg(args, "domain")?;
-        let agent = optional_string_arg(args, "agent")
-            .map(|value| parse_agent(&value))
-            .transpose()?;
-        let store = tendi_core::storage::Store::open_default().map_err(core_error)?;
-        let count = match domain.as_str() {
-            "sessions" => {
-                tendi_core::storage::ProjectionCount {
-                    rows: store.count_sessions(agent).map_err(core_error)?,
-                    secondary: 0,
-                }
-            }
-            "prompts" => {
-                tendi_core::storage::ProjectionCount {
-                    rows: store.count_prompts().map_err(core_error)?,
-                    secondary: 0,
-                }
-            }
-            "agents" | "skills" | "rules" | "hooks" | "mcp" => {
-                let cwd = self.state.cwd.clone();
-                match store
-                    .count_projection_for_workspace(&domain, &cwd, agent)
-                    .map_err(core_error)?
-                {
-                    Some(count) => count,
-                    None => {
-                        return Ok(json!({
-                            "count": 0,
-                            "secondaryCount": 0,
-                            "ready": false,
-                        }));
-                    }
-                }
-            }
-            _ => {
-                return Err(invalid_argument(format!(
-                    "unsupported overview count domain: {domain}"
-                )));
-            }
-        };
-        Ok(json!({
-            "count": count.rows,
-            "secondaryCount": count.secondary,
-            "ready": true,
-        }))
     }
 
     fn bundled_skill_status(&self) -> Result<Value, DaemonError> {
@@ -1097,6 +1049,7 @@ impl Daemon {
         let store = tendi_core::storage::Store::open_default().map_err(core_error)?;
         let cwd = self.state.cwd.clone();
         with_database_write_lock(&store, || store.save_rules_for_workspace(&cwd, &after))?;
+        self.mark_skill_backup_dirty();
         serde_json::to_value(result).map_err(internal_error)
     }
 
@@ -1114,6 +1067,7 @@ impl Daemon {
             &project_roots,
         )
         .map_err(core_error)?;
+        self.mark_skill_backup_dirty();
         let report = self.rules_projection()?;
         serde_json::to_value(report.rules).map_err(internal_error)
     }
@@ -1149,6 +1103,7 @@ impl Daemon {
             std::slice::from_ref(&request),
         )
         .map_err(core_error)?;
+        self.mark_skill_backup_dirty();
         self.save_hook_scan(&scan)?;
         serde_json::to_value(scan.hooks).map_err(internal_error)
     }
@@ -1169,6 +1124,7 @@ impl Daemon {
         let scan =
             tendi_core::hooks::refresh_hook_scan_after_delete(&self.state.cwd, before, &requests)
                 .map_err(core_error)?;
+        self.mark_skill_backup_dirty();
         self.save_hook_scan(&scan)?;
         serde_json::to_value(scan.hooks).map_err(internal_error)
     }
@@ -1184,6 +1140,7 @@ impl Daemon {
             &request,
         )
         .map_err(core_error)?;
+        self.mark_skill_backup_dirty();
         self.save_hook_scan(&scan)?;
         serde_json::to_value(scan.hooks).map_err(internal_error)
     }
@@ -1263,12 +1220,14 @@ impl Daemon {
             server.agent == request.agent
                 && server.name == request.name
                 && server.path == request.path
+                && server.server_path == request.server_path
         }) {
             return Err(conflict_error(
                 "MCP server is not present in the current projection; refresh MCP before changing it",
             ));
         }
         let trust_hash = tendi_core::mcp::set_server_enabled(request.clone()).map_err(core_error)?;
+        self.mark_skill_backup_dirty();
         update_mcp_projection_for_toggle(&mut report, &request, trust_hash)?;
         with_database_write_lock(&store, || store.save_mcp_for_workspace(&cwd, &report))?;
         serde_json::to_value(report.servers).map_err(internal_error)
@@ -1597,47 +1556,64 @@ impl Daemon {
     }
 
     fn skills_backup_configure(&self, args: &Value) -> Result<Value, DaemonError> {
-        let remote_url = string_arg(args, "remoteUrl")?;
-        let checkout_path = optional_string_arg(args, "checkoutPath")
-            .filter(|path| !path.trim().is_empty())
-            .map(PathBuf::from)
-            .unwrap_or(tendi_core::skill_backup::default_checkout_path().map_err(core_error)?);
-        let device_label = optional_string_arg(args, "deviceLabel")
-            .filter(|label| !label.trim().is_empty())
-            .unwrap_or_else(|| "My device".to_string());
+        let repository = string_arg(args, "repository")?;
+        let repository_path = Path::new(&repository);
+        let is_remote = !repository_path.exists()
+            && tendi_core::skill_backup::is_remote_repository(&repository);
+        let (remote_url, checkout_path) = if is_remote {
+            let checkout_path = optional_string_arg(args, "checkoutPath")
+                .filter(|path| !path.trim().is_empty())
+                .map(PathBuf::from)
+                .unwrap_or(tendi_core::skill_backup::default_checkout_path().map_err(core_error)?);
+            (repository, checkout_path)
+        } else {
+            let requested_path = PathBuf::from(&repository);
+            let checkout_path =
+                tendi_core::skill_backup::discover_git_repository_root(&requested_path)
+                    .map_err(core_error)?
+                    .unwrap_or(requested_path);
+            (String::new(), checkout_path)
+        };
         let contents = args
             .get("contents")
             .cloned()
             .map(serde_json::from_value::<tendi_core::skill_backup::BackupContents>)
             .transpose()
-            .map_err(|error| invalid_argument(format!("invalid backup contents: {error}")))?
+            .map_err(|error| invalid_argument(format!("invalid sync contents: {error}")))?
             .unwrap_or_default();
-        let mut config =
-            tendi_core::skill_backup::BackupConfig::new(remote_url, checkout_path, device_label);
+        let mut config = tendi_core::skill_backup::BackupConfig::new(remote_url, checkout_path);
         config.contents = contents;
         config.validate().map_err(core_error)?;
+        let _authority = self.lock_authority()?;
         let working_directory = config
             .checkout_path
             .parent()
             .unwrap_or_else(|| Path::new("."));
-        tendi_core::skill_backup::validate_remote(&config.remote_url, working_directory)
-            .map_err(core_error)?;
+        if !config.remote_url.is_empty() {
+            tendi_core::skill_backup::validate_remote(&config.remote_url, working_directory)
+                .map_err(core_error)?;
+        }
+        tendi_core::skill_backup::sync_checkout_for_restore(&config).map_err(core_error)?;
         let store = tendi_core::storage::Store::open_default().map_err(core_error)?;
         let config = with_database_write_lock(&store, || store.save_skill_backup_config(&config))?;
-        self.schedule_skill_backup();
+        self.mark_skill_backup_dirty();
         serde_json::to_value(config).map_err(internal_error)
     }
 
     fn skills_backup_now(&self) -> Result<Value, DaemonError> {
         let _authority = self.lock_authority()?;
         if self.state.backup_sync_running.swap(true, Ordering::AcqRel) {
-            return Err(invalid_argument("a skill backup sync is already running"));
+            return Err(invalid_argument("a skill sync is already running"));
         }
+        self.state.backup_sync_dirty.store(false, Ordering::Release);
         let report = (|| -> Result<_, DaemonError> {
             self.refresh_backup_projections()?;
             let store = tendi_core::storage::Store::open_default().map_err(core_error)?;
             tendi_core::skill_backup::backup_now(&store, &self.state.cwd).map_err(core_error)
         })();
+        if report.is_err() {
+            self.mark_skill_backup_dirty();
+        }
         self.state
             .backup_sync_running
             .store(false, Ordering::Release);
@@ -1649,7 +1625,7 @@ impl Daemon {
         let store = tendi_core::storage::Store::open_default().map_err(core_error)?;
         let configured = store.skill_backup_config().map_err(core_error)?.is_some();
         if configured {
-            self.schedule_skill_backup();
+            self.mark_skill_backup_dirty();
         }
         Ok(json!({ "scheduled": configured }))
     }
@@ -1686,7 +1662,7 @@ impl Daemon {
         }
         if !bool_arg(args, "confirmed") {
             return Err(invalid_argument(
-                "backup restore requires confirmed: true after preview",
+                "sync restore requires confirmed: true after preview",
             ));
         }
         let resolutions = args
@@ -1695,7 +1671,7 @@ impl Daemon {
             .map(serde_json::from_value::<Vec<tendi_core::skill_backup::BackupRestoreResolution>>)
             .transpose()
             .map_err(|error| {
-                invalid_argument(format!("invalid backup restore resolutions: {error}"))
+                invalid_argument(format!("invalid sync restore resolutions: {error}"))
             })?
             .unwrap_or_default();
         let _authority = self.lock_authority()?;
@@ -2074,6 +2050,7 @@ impl Daemon {
         };
         let summary = tendi_core::skills::format_delete_plan(&plan);
         tendi_core::skills::apply_skill_delete_plan(&plan).map_err(core_error)?;
+        self.mark_skill_backup_dirty();
         let paths = plan
             .targets
             .iter()
@@ -2381,6 +2358,7 @@ impl Daemon {
             .map_err(core_error)?;
         let summary = tendi_core::skills::format_delete_plan(&plan);
         tendi_core::skills::apply_skill_delete_plan(&plan).map_err(core_error)?;
+        self.mark_skill_backup_dirty();
         let paths = plan
             .targets
             .iter()
@@ -2650,6 +2628,7 @@ impl Daemon {
         names: &[String],
         extra_skill_dirs: &[PathBuf],
     ) -> Result<tendi_core::skills::SkillScan, DaemonError> {
+        self.mark_skill_backup_dirty();
         let scan = tendi_core::skills::refresh_skill_scan(
             &self.state.cwd,
             before,
@@ -2660,7 +2639,6 @@ impl Daemon {
         let store = tendi_core::storage::Store::open_default().map_err(core_error)?;
         let cwd = self.state.cwd.clone();
         with_database_write_lock(&store, || store.save_skills_for_workspace(&cwd, &scan))?;
-        self.schedule_skill_backup();
         Ok(scan)
     }
 
@@ -2687,12 +2665,20 @@ impl Daemon {
                 Ok(scanned.scan)
             },
         )?;
-        self.schedule_skill_backup();
         Ok(scan)
     }
 
-    fn schedule_skill_backup(&self) {
-        if self.state.backup_sync_running.swap(true, Ordering::AcqRel) {
+    fn mark_skill_backup_dirty(&self) {
+        self.state
+            .backup_sync_dirty
+            .store(true, Ordering::Release);
+    }
+
+    fn run_scheduled_skill_backup(&self) {
+        if !claim_scheduled_skill_backup(
+            &self.state.backup_sync_dirty,
+            &self.state.backup_sync_running,
+        ) {
             return;
         }
         let daemon = self.clone();
@@ -2709,8 +2695,9 @@ impl Daemon {
                 Ok(())
             })();
             if let Err(error) = result {
+                daemon.mark_skill_backup_dirty();
                 tendi_core::logging::global().warn(
-                    "skill backup sync failed",
+                    "skill sync failed",
                     json!({ "error": format!("{error:#}") }),
                 );
             }
@@ -3026,10 +3013,21 @@ fn config_watch_loop(daemon: Daemon, receiver: Receiver<notify::Result<Event>>) 
     }
 }
 
+fn claim_scheduled_skill_backup(dirty: &AtomicBool, running: &AtomicBool) -> bool {
+    if running.swap(true, Ordering::AcqRel) {
+        return false;
+    }
+    if !dirty.swap(false, Ordering::AcqRel) {
+        running.store(false, Ordering::Release);
+        return false;
+    }
+    true
+}
+
 fn backup_sync_loop(daemon: Daemon) {
     loop {
         thread::sleep(BACKUP_SYNC_INTERVAL);
-        daemon.schedule_skill_backup();
+        daemon.run_scheduled_skill_backup();
     }
 }
 
@@ -3811,6 +3809,53 @@ mod tests {
         assert!(string_vec_arg(&args, "names").is_err());
     }
 
+    #[test]
+    fn prompt_save_rejects_empty_title_as_invalid_argument() {
+        let _test_lock = TEST_LOCK.lock().unwrap();
+        let root = temp_workspace();
+        let daemon = Daemon::new(root.clone());
+        let response = daemon.handle_json(json!({
+            "command": "prompt_save",
+            "args": {
+                "title": "  \n\t",
+                "tags": [],
+                "body": "Body"
+            }
+        }));
+
+        assert_eq!(response["ok"], false);
+        assert_eq!(response["error"]["code"], "INVALID_ARGUMENT");
+        assert_eq!(
+            response["error"]["message"],
+            "missing or empty argument: title"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn scheduled_backup_claim_consumes_dirty_and_releases_when_clean() {
+        let dirty = AtomicBool::new(true);
+        let running = AtomicBool::new(false);
+
+        assert!(claim_scheduled_skill_backup(&dirty, &running));
+        assert!(!dirty.load(Ordering::Acquire));
+        assert!(running.load(Ordering::Acquire));
+
+        running.store(false, Ordering::Release);
+        assert!(!claim_scheduled_skill_backup(&dirty, &running));
+        assert!(!running.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn scheduled_backup_claim_keeps_dirty_when_another_backup_is_running() {
+        let dirty = AtomicBool::new(true);
+        let running = AtomicBool::new(true);
+
+        assert!(!claim_scheduled_skill_backup(&dirty, &running));
+        assert!(dirty.load(Ordering::Acquire));
+        assert!(running.load(Ordering::Acquire));
+    }
+
 
     #[test]
     fn sessions_scan_start_marks_current_scan_as_not_started() {
@@ -3897,8 +3942,6 @@ mod tests {
         let requests = [
             json!({ "command": "settings_get", "args": {} }),
             json!({ "command": "skill_session_links", "args": { "skillName": "demo" } }),
-            json!({ "command": "overview_count", "args": { "domain": "sessions" } }),
-            json!({ "command": "overview_count", "args": { "domain": "prompts" } }),
             json!({ "command": "skills_targets", "args": {} }),
             json!({
                 "command": "skill_files",
@@ -4349,22 +4392,6 @@ mod tests {
     }
 
     #[test]
-    fn overview_counts_do_not_start_cold_projection_scan() {
-        let _test_lock = TEST_LOCK.lock().unwrap();
-        let root = temp_workspace();
-        let daemon = Daemon::new(root.clone());
-
-        let response = daemon.handle_json(json!({
-            "command": "overview_count",
-            "args": { "domain": "mcp" },
-        }));
-
-        assert_eq!(response["ok"], true);
-        assert_eq!(response["result"]["ready"], false);
-        let _ = fs::remove_dir_all(root);
-    }
-
-    #[test]
     fn mcp_toggle_updates_selected_cached_row_without_full_rescan() {
         let path = PathBuf::from("/tmp/tendi-mcp-config.json");
         let other_path = PathBuf::from("/tmp/tendi-other-mcp-config.json");
@@ -4379,6 +4406,7 @@ mod tests {
                     status: "configured".to_string(),
                     path: path.clone(),
                     trust_hash: "old-demo".to_string(),
+                    server_path: Vec::new(),
                     read_only_reason: None,
                 },
                 tendi_core::mcp::McpServerRecord {
@@ -4390,6 +4418,7 @@ mod tests {
                     status: "configured".to_string(),
                     path: other_path,
                     trust_hash: "old-other".to_string(),
+                    server_path: Vec::new(),
                     read_only_reason: None,
                 },
             ],
@@ -4401,6 +4430,7 @@ mod tests {
             expected_trust_hash: "old-demo".to_string(),
             name: "demo".to_string(),
             enabled: false,
+            server_path: Vec::new(),
         };
 
         update_mcp_projection_for_toggle(&mut scan, &request, "new-demo".to_string()).unwrap();

@@ -54,7 +54,7 @@ import { SKILL_BADGE_TONES } from "../features/skills/skill-badge-tones.ts";
 import { Visibility } from "../features/skills/Visibility.tsx";
 import { DataTable } from "../components/DataTable.tsx";
 import type { ColumnDef, SortState } from "../components/DataTable.types";
-import { actionLabels, SKILL_FREEZE_COLUMN, selectionDeleteLabel, TauriCommand, SkillVisibility, agentIdentityKey, allSkillVisibilities, compactDateTime, copyText, editableSkillVisibilities, invokeCommand, isReadOnlySkillSource, isSkillRowSelectable, isSkillSelectable, isSkillVisibilityEditable, primarySkillPath, safeInvoke, scopeColumn, skillSourceAction, skillSourceDetails, skillTargets, sourceRemoteDetails, suppressNextClick, type NormalizedSkill, type ProjectSummary } from "../lib/index.ts";
+import { actionLabels, SKILL_FREEZE_COLUMN, selectionDeleteLabel, TauriCommand, SkillOperationStatus, SkillVisibility, agentIdentityKey, allSkillVisibilities, compactDateTime, copyText, editableSkillVisibilities, invokeCommand, isReadOnlySkillSource, isSkillRowSelectable, isSkillSelectable, isSkillVisibilityEditable, primarySkillPath, safeInvoke, scopeColumn, skillSourceAction, skillSourceDetails, skillTargets, sourceRemoteDetails, suppressNextClick, type NormalizedSkill, type ProjectSummary, type RawSkillRecord, type SkillAddPlan, type SkillInstallResult, type SkillOperation, type WrapperArgs, type AvailableSkill } from "../lib/index.ts";
 import { captureSkillSourcePage, isSkillSourceActionReady, resolveSkillInstallTarget, restoreSkillSourcePage, shouldShowSkillQuickSelect, skillSourceErrorMessage, type SkillSourcePageSnapshot } from "../lib/add-skill-dialog.ts";
 import { skillActionIds, type SkillActionId } from "../lib/skill-actions.ts";
 
@@ -62,16 +62,13 @@ export type SkillsTableSort = SortState;
 
 type SkillsViewMode = "list" | "network";
 
-export type SkillRecord = NormalizedSkill;
-export type RawSkillRecord = Record<string, unknown>;
-
 type SkillWrapperSelection = {
   id: string;
   name: string;
   description?: string;
 };
 
-type SkillTableRow = SkillRecord;
+type SkillTableRow = NormalizedSkill;
 
 type SkillTarget = {
   id: string;
@@ -80,32 +77,11 @@ type SkillTarget = {
   path: string;
 };
 
-function skillOriginLabel(skill: SkillRecord): string {
+function skillOriginLabel(skill: NormalizedSkill): string {
   const source = skillSourceDetails(skill);
   const remote = sourceRemoteDetails(source.value, source.kind);
   return remote?.host.includes("github.") && remote.path ? remote.path : skill.section;
 }
-enum SkillOperationStatus {
-  Planned = "planned",
-  Ready = "ready",
-  AlreadyExists = "already-exists",
-  Replace = "replace",
-  AlreadyInstalled = "already-installed",
-}
-
-type SkillOperation = {
-  name: string;
-  status: SkillOperationStatus;
-  message?: string;
-};
-
-type AvailableSkill = {
-  name: string;
-  description?: string;
-  relative_path: string;
-  dependencies: string[];
-};
-
 type MarketplaceSource = {
   id: string;
   name: string;
@@ -165,37 +141,12 @@ type SkillMarkdownPreview = {
   content: string;
 };
 
-type SkillAddPlan = {
-  available: AvailableSkill[];
-  selected: AvailableSkill[];
-  source: string;
-  source_kind: string;
-  target: string;
-  operations: SkillOperation[];
-};
-
-export type SkillInstallResult = {
-  skills: RawSkillRecord[];
-  report: {
-    plan: SkillAddPlan;
-    results: Array<{ target: string }>;
-  };
-};
-
 function installedSkillName(result: SkillInstallResult): string | null {
   const installedNames = new Set(result.skills.flatMap((skill) => typeof skill.name === "string" ? [skill.name] : []));
   return result.report.plan.selected
     .map((skill) => skill.name)
     .find((name) => installedNames.has(name)) ?? null;
 }
-
-export type WrapperArgs = {
-  name: string;
-  names: string[];
-  description?: string;
-  manualChildren: boolean;
-  refresh: boolean;
-};
 
 function commandErrorMessage(error: unknown, fallback: string) {
   if (typeof error === "string" && error.trim()) return error;
@@ -220,7 +171,7 @@ type SkillMenuComponents = {
 
 export type VisibilityMenuItemsProps = {
   Menu: SkillMenuComponents;
-  selectedSkills: SkillRecord[];
+  selectedSkills: NormalizedSkill[];
   onSetVisibility: (names: string[], visibility: SkillVisibility) => void | Promise<void>;
 };
 
@@ -247,14 +198,14 @@ type SkillActionDefinition = DataTableSelectionActionDefinition & { id: SkillAct
 
 type SkillActionDefinitionOptions = {
   Menu: SkillMenuComponents;
-  selectedSkills: SkillRecord[];
+  selectedSkills: NormalizedSkill[];
   applyUpdates: (names: string[]) => void;
   deleteSkills: (names: string[]) => void;
-  manageLocations: (skills: SkillRecord[]) => void;
-  createWrapper: (skills: SkillRecord[]) => void;
+  manageLocations: (skills: NormalizedSkill[]) => void;
+  createWrapper: (skills: NormalizedSkill[]) => void;
   setVisibility: (names: string[], visibility: SkillVisibility) => void | Promise<void>;
-  addToBackup: (skills: SkillRecord[]) => void;
-  getBackupStatus: (skill: SkillRecord) => BackupStatusRecord;
+  addToBackup: (skills: NormalizedSkill[]) => void;
+  getBackupStatus: (skill: NormalizedSkill) => BackupStatusRecord;
   backupConfigured: boolean;
   backupBusy: boolean;
 };
@@ -337,13 +288,13 @@ function skillActionDefinitions({ Menu, selectedSkills, applyUpdates, deleteSkil
   const singleSkill = selectedSkills.length === 1 ? selectedSkills[0] : undefined;
   const primaryPath = singleSkill ? primarySkillPath(singleSkill) : null;
   const targets: SkillTarget[] = singleSkill ? skillTargets(singleSkill) : [];
-  const updateNames = selectedSkills.filter((skill) => skill.updateStatus === "update-available").map((skill) => skill.name);
+  const updateNames = selectedSkills.filter((skill) => skill.updateAvailability === "update-available").map((skill) => skill.name);
   const deletableNames = selectedSkills.filter(isSkillSelectable).map((skill) => skill.name);
   const movableSkills = selectedSkills.filter((skill) => !isReadOnlySkillSource(skill) && skillTargets(skill).length > 0);
   const backupSkills = backupSkillsForSelection(selectedSkills, getBackupStatus, backupConfigured);
   const updateLabel = selectedSkills.length === 1 ? "Apply update" : "Update";
   const locationLabel = selectedSkills.length === 1 ? "Manage locations" : "Locations";
-  const backupLabel = selectedSkills.length === 1 ? "Add to backup" : `Add to backup${backupSkills.length > 1 ? ` (${backupSkills.length})` : ""}`;
+  const backupLabel = selectedSkills.length === 1 ? "Add to sync" : `Add to sync${backupSkills.length > 1 ? ` (${backupSkills.length})` : ""}`;
   const deleteLabel = selectionDeleteLabel("skill", selectedSkills.length);
   const visibilityMenu = (
     <Menu.Sub>
@@ -421,14 +372,14 @@ function skillActionDefinitions({ Menu, selectedSkills, applyUpdates, deleteSkil
 
 export type SkillActionsMenuItemsProps = {
   Menu: SkillMenuComponents;
-  skill: SkillRecord;
+  skill: NormalizedSkill;
   onApplyUpdates: (names: string[]) => void;
   onDeleteSkills: (names: string[]) => void;
-  onManageLocations: (skill: SkillRecord) => void;
-  onCreateWrapper: (skill: SkillRecord) => void;
+  onManageLocations: (skill: NormalizedSkill) => void;
+  onCreateWrapper: (skill: NormalizedSkill) => void;
   onSetVisibility: (names: string[], visibility: SkillVisibility) => void | Promise<void>;
-  onAddToBackup: (skills: SkillRecord[]) => void;
-  getBackupStatus: (skill: SkillRecord) => BackupStatusRecord;
+  onAddToBackup: (skills: NormalizedSkill[]) => void;
+  getBackupStatus: (skill: NormalizedSkill) => BackupStatusRecord;
   backupConfigured: boolean;
   backupBusy: boolean;
 };
@@ -452,14 +403,14 @@ export function SkillActionsMenuItems({ Menu, skill, onApplyUpdates, onDeleteSki
 
 export type BulkSkillActionsMenuItemsProps = {
   Menu: SkillMenuComponents;
-  selectedSkills: SkillRecord[];
+  selectedSkills: NormalizedSkill[];
   onApplyUpdates: (names: string[]) => void;
   onDeleteSkills: (names: string[]) => void;
-  onManageLocations: (skills: SkillRecord[]) => void;
+  onManageLocations: (skills: NormalizedSkill[]) => void;
   createWrapper: () => void;
   setVisibility: (names: string[], visibility: SkillVisibility) => void | Promise<void>;
-  onAddToBackup: (skills: SkillRecord[]) => void;
-  getBackupStatus: (skill: SkillRecord) => BackupStatusRecord;
+  onAddToBackup: (skills: NormalizedSkill[]) => void;
+  getBackupStatus: (skill: NormalizedSkill) => BackupStatusRecord;
   backupConfigured: boolean;
   backupBusy: boolean;
 };
@@ -482,8 +433,8 @@ export function BulkSkillActionsMenuItems({ Menu, selectedSkills, onApplyUpdates
 }
 
 export type SkillMainCellProps = {
-  skill: SkillRecord;
-  openSkill: (skill: SkillRecord) => void;
+  skill: NormalizedSkill;
+  openSkill: (skill: NormalizedSkill) => void;
   onApplyUpdates: (names: string[]) => void;
 };
 
@@ -515,7 +466,7 @@ export function SkillMainCell({ skill, openSkill, onApplyUpdates }: SkillMainCel
             {sourceAction.icon}
           </button>
         )}
-        {skill.updateStatus === "update-available" && (
+        {skill.updateAvailability === "update-available" && (
           <Badge
             as="button"
             tone={SKILL_BADGE_TONES.update}
@@ -544,14 +495,14 @@ export function SkillMainCell({ skill, openSkill, onApplyUpdates }: SkillMainCel
 }
 
 export type SkillActionsCellProps = {
-  skill: SkillRecord;
+  skill: NormalizedSkill;
   onApplyUpdates: (names: string[]) => void;
   onDeleteSkills: (names: string[]) => void;
-  onManageLocations: (skill: SkillRecord) => void;
-  onCreateWrapper: (skill: SkillRecord) => void;
+  onManageLocations: (skill: NormalizedSkill) => void;
+  onCreateWrapper: (skill: NormalizedSkill) => void;
   onSetVisibility: (names: string[], visibility: SkillVisibility) => void | Promise<void>;
-  onAddToBackup: (skills: SkillRecord[]) => void;
-  getBackupStatus: (skill: SkillRecord) => BackupStatusRecord;
+  onAddToBackup: (skills: NormalizedSkill[]) => void;
+  getBackupStatus: (skill: NormalizedSkill) => BackupStatusRecord;
   backupConfigured: boolean;
   backupBusy: boolean;
 };
@@ -579,14 +530,14 @@ function SkillSelectionActions({
   backupConfigured,
   backupBusy,
 }: {
-  selectedSkills: SkillRecord[];
+  selectedSkills: NormalizedSkill[];
   applyUpdates: (names: string[]) => void;
   deleteSkills: (names: string[]) => void;
   manageLocations: () => void;
   createWrapper: () => void;
   setVisibility: (names: string[], visibility: SkillVisibility) => void;
-  addToBackup: (skills: SkillRecord[]) => void;
-  getBackupStatus: (skill: SkillRecord) => BackupStatusRecord;
+  addToBackup: (skills: NormalizedSkill[]) => void;
+  getBackupStatus: (skill: NormalizedSkill) => BackupStatusRecord;
   backupConfigured: boolean;
   backupBusy: boolean;
 }) {
@@ -1365,7 +1316,7 @@ export function AddSkillDialog({ open, onOpenChange, trigger, onClose, onPreview
         <div className="addSkillMain">
         <div className="addSkillHeader">
         <Dialog.Title className="confirmDialogTitle">
-          Add Skills
+          Add skills
         </Dialog.Title>
       </div>
       <Dialog.Description id="add-skill-dialog-description" className="dialogVisuallyHidden">
@@ -1767,8 +1718,8 @@ export function AddSkillDialog({ open, onOpenChange, trigger, onClose, onPreview
 }
 
 export type SkillsViewProps = {
-  openSkill: (skill: SkillRecord) => void;
-  skills: SkillRecord[];
+  openSkill: (skill: NormalizedSkill) => void;
+  skills: NormalizedSkill[];
   loadingSkills: boolean;
   loadError: string;
   hasRows: boolean;
@@ -1813,7 +1764,7 @@ export function SkillsView({
   const [skillAddError, setSkillAddError] = useState("");
   const [installedWrapperSkills, setInstalledWrapperSkills] = useState<SkillWrapperSelection[]>([]);
   const [skillLocatorRequest, setSkillLocatorRequest] = useState("");
-  const [locationSkills, setLocationSkills] = useState<SkillRecord[]>([]);
+  const [locationSkills, setLocationSkills] = useState<NormalizedSkill[]>([]);
   const [locationAgent, setLocationAgent] = useState<string | undefined>(undefined);
   const [backupStatuses, setBackupStatuses] = useState<Map<string, BackupStatusRecord>>(new Map());
   const [backupConfigured, setBackupConfigured] = useState(false);
@@ -1877,7 +1828,7 @@ export function SkillsView({
     setShowWrapper(false);
     setInstalledWrapperSkills([]);
   }, []);
-  const openWrapper = useCallback((skill: SkillRecord) => {
+  const openWrapper = useCallback((skill: NormalizedSkill) => {
     setSelected([skill.id]);
     setShowWrapper(true);
   }, []);
@@ -1896,11 +1847,11 @@ export function SkillsView({
   const deleteSkillsAndClear = useCallback((names: string[]) => {
     onDeleteSkills(names, clearSelection);
   }, [clearSelection, onDeleteSkills]);
-  const openManageLocations = useCallback((skill: SkillRecord, agent?: string) => {
+  const openManageLocations = useCallback((skill: NormalizedSkill, agent?: string) => {
     setLocationSkills([skill]);
     setLocationAgent(agent);
   }, []);
-  const openManageLocationsBatch = useCallback((skills: SkillRecord[]) => {
+  const openManageLocationsBatch = useCallback((skills: NormalizedSkill[]) => {
     const movableSkills = skills.filter((skill) => !isReadOnlySkillSource(skill) && skillTargets(skill).length > 0);
     if (movableSkills.length === 0) return;
     setLocationSkills(movableSkills);
@@ -1913,8 +1864,8 @@ export function SkillsView({
     if (skills) onSkillsUpdated(skills);
     else await onRefresh();
   }, [clearSelection, onRefresh, onSkillsUpdated]);
-  const getBackupStatus = useCallback((skill: SkillRecord) => backupStatusForSkill(skill, backupStatuses), [backupStatuses]);
-  const adoptSkillsForBackup = useCallback(async (skills: SkillRecord[]) => {
+  const getBackupStatus = useCallback((skill: NormalizedSkill) => backupStatusForSkill(skill, backupStatuses), [backupStatuses]);
+  const adoptSkillsForBackup = useCallback(async (skills: NormalizedSkill[]) => {
     if (!backupConfigured || backupBusy) return;
     const candidates = backupSkillsForSelection(skills, getBackupStatus, backupConfigured);
     if (candidates.length === 0) return;

@@ -17,7 +17,7 @@ import { Switch } from "../components/shared/Switch.tsx";
 import { Toast } from "../components/shared/Toast.tsx";
 import { Tooltip } from "../components/shared/Tooltip.tsx";
 import { mcpColumns as defaultMcpColumns } from "../lib/tableColumns.tsx";
-import { actionLabels, MCP_FREEZE_COLUMN, TauriCommand, mcpRowKey, mcpSelectionActionIds, mcpSourcePath, safeInvoke, scopeColumn, type McpRecord, type ProjectSummary } from "../lib/index.ts";
+import { actionLabels, MCP_FREEZE_COLUMN, mcpCopy, TauriCommand, mcpRowKey, mcpSelectionActionIds, mcpSourcePath, safeInvoke, scopeColumn, type McpRecord, type ProjectSummary } from "../lib/index.ts";
 
 export { mcpColumns } from "../lib/tableColumns.tsx";
 
@@ -254,15 +254,15 @@ export function DataListView({ title, rows, columns = defaultMcpColumns, loading
         rowContextMenu={rowContextMenu}
         bottomBar={bottomBar}
         bottomBarActionsClassName="selectionActions"
-        bottomBarCheckboxLabel={`Select visible ${title.toLowerCase()}`}
-        selectionLabel="servers"
+        bottomBarCheckboxLabel={mcpCopy.selectVisibleLabel}
+        selectionLabel={mcpCopy.selectionLabel}
         loading={loading && !hasRows}
-        loadingLabel={`Loading ${title.toLowerCase()}`}
+        loadingLabel={mcpCopy.loadingLabel}
         emptyState={loadError && !hasRows ? <LoadErrorState message={loadError} onRetry={onRetry} /> : (
           <EmptyState
             icon={<Server size={27} strokeWidth={1.55} />}
-            title="No MCP servers found"
-            description="Adjust the agent filter to see more."
+            title={mcpCopy.emptyTitle}
+            description={mcpCopy.emptyDescription}
           />
         )}
       />

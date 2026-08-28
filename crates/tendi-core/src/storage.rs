@@ -49,6 +49,7 @@ struct ProjectState {
 const SESSION_ANALYTICS_BATCH_SIZE: usize = 64;
 const SESSION_SEARCH_INDEX_VERSION: i64 = 2;
 const PROJECTION_PARSER_VERSION: &str = "scan-v4";
+const SESSION_PAYLOAD_PREVIEWS_MIGRATION_KEY: &str = "session_payload_previews_backfilled_v1";
 const DATABASE_WRITE_LOCK_ATTEMPTS: usize = 100;
 const DATABASE_WRITE_LOCK_RETRY: Duration = Duration::from_millis(50);
 
@@ -60,12 +61,6 @@ pub enum ProjectionStatus {
     Missing,
     Stale,
     Refreshing,
-}
-
-#[derive(Debug, Clone, Copy, Default)]
-pub struct ProjectionCount {
-    pub rows: usize,
-    pub secondary: usize,
 }
 
 fn analytics_refresh_progress(
@@ -853,6 +848,11 @@ impl Store {
                     last_assistant_message = excluded.last_assistant_message,
                     data_json = excluded.data_json
                  WHERE sessions.data_json IS NOT excluded.data_json
+                    OR sessions.title IS NOT excluded.title
+                    OR sessions.project IS NOT excluded.project
+                    OR sessions.started_at IS NOT excluded.started_at
+                    OR sessions.updated_at IS NOT excluded.updated_at
+                    OR sessions.message_count IS NOT excluded.message_count
                     OR sessions.first_user_message IS NOT excluded.first_user_message
                     OR sessions.last_user_message IS NOT excluded.last_user_message
                     OR sessions.last_assistant_message IS NOT excluded.last_assistant_message",
@@ -1254,38 +1254,22 @@ impl Store {
     }
 
     pub fn list_sessions(&self) -> Result<SessionScan> {
-        let mut stmt = self.conn.prepare(
-            "SELECT data_json, first_user_message, last_user_message, last_assistant_message
-             FROM sessions
-             ORDER BY updated_at DESC, id ASC",
-        )?;
-        let rows = stmt.query_map([], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, Option<String>>(1)?,
-                row.get::<_, Option<String>>(2)?,
-                row.get::<_, Option<String>>(3)?,
-            ))
-        })?;
+        // `data_json` is the SessionRecord authority. The scalar session columns are
+        // denormalized projections retained for compatibility and write-side indexing.
+        let mut stmt = self.conn.prepare("SELECT data_json FROM sessions")?;
+        let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
         let mut sessions = Vec::new();
         let mut warnings = Vec::new();
 
         for row in rows {
-            let (data_json, first_user_message, last_user_message, last_assistant_message) = row?;
+            let data_json = row?;
             match serde_json::from_str::<SessionRecord>(&data_json) {
-                Ok(mut session) => {
-                    Self::apply_session_preview_columns(
-                        &mut session,
-                        first_user_message,
-                        last_user_message,
-                        last_assistant_message,
-                    );
-                    sessions.push(session);
-                }
+                Ok(session) => sessions.push(Self::normalize_cached_session(session)),
                 Err(err) => warnings.push(format!("invalid cached session row: {err}")),
             }
         }
 
+        sessions.sort_by(Self::compare_session_updated_at);
         Ok(SessionScan { sessions, warnings })
     }
 
@@ -1682,93 +1666,6 @@ impl Store {
         self.list_mcp().map(Some)
     }
 
-    pub fn count_projection_for_workspace(
-        &self,
-        domain: &str,
-        workspace_root: &Path,
-        agent: Option<AgentKind>,
-    ) -> Result<Option<ProjectionCount>> {
-        if self.projection_status(domain, workspace_root)? != ProjectionStatus::Fresh {
-            return Ok(None);
-        }
-        let agent_label = agent.map(agent_label);
-        let count = match domain {
-            "agents" => ProjectionCount {
-                rows: self.count_rows("agents", "kind", agent_label.as_deref())?,
-                secondary: 0,
-            },
-            "skills" => {
-                let scan = self.list_skills()?;
-                let skills = scan
-                    .skills
-                    .into_iter()
-                    .filter(|skill| agent.is_none_or(|expected| skill.agents.contains(&expected)));
-                let mut count = ProjectionCount::default();
-                for skill in skills {
-                    count.rows += 1;
-                    if skill.update_status == "update-available" {
-                        count.secondary += 1;
-                    }
-                }
-                count
-            }
-            "rules" => ProjectionCount {
-                rows: self.count_rows("rules", "agent", agent_label.as_deref())?,
-                secondary: 0,
-            },
-            "hooks" => {
-                let scan = self.list_hooks()?;
-                let hooks = scan
-                    .hooks
-                    .into_iter()
-                    .filter(|hook| agent.is_none_or(|expected| hook.agent == expected));
-                let mut count = ProjectionCount::default();
-                for hook in hooks {
-                    count.rows += 1;
-                    if hook.needs_review {
-                        count.secondary += 1;
-                    }
-                }
-                count
-            }
-            "mcp" => ProjectionCount {
-                rows: self.count_rows("mcp_servers", "agent", agent_label.as_deref())?,
-                secondary: 0,
-            },
-            _ => anyhow::bail!("unknown projection domain: {domain}"),
-        };
-        Ok(Some(count))
-    }
-
-    pub fn count_sessions(&self, agent: Option<AgentKind>) -> Result<usize> {
-        let agent_label = agent.map(agent_label);
-        self.conn
-            .query_row(
-                "SELECT COUNT(*) FROM sessions WHERE (?1 IS NULL OR agent = ?1)",
-                params![agent_label],
-                |row| row.get::<_, i64>(0),
-            )
-            .map(|count| count as usize)
-            .map_err(Into::into)
-    }
-
-    pub fn count_prompts(&self) -> Result<usize> {
-        self.conn
-            .query_row("SELECT COUNT(*) FROM prompts", [], |row| {
-                row.get::<_, i64>(0)
-            })
-            .map(|count| count as usize)
-            .map_err(Into::into)
-    }
-
-    fn count_rows(&self, table: &str, column: &str, agent: Option<&str>) -> Result<usize> {
-        let sql = format!("SELECT COUNT(*) FROM {table} WHERE (?1 IS NULL OR {column} = ?1)");
-        self.conn
-            .query_row(&sql, params![agent], |row| row.get::<_, i64>(0))
-            .map(|count| count as usize)
-            .map_err(Into::into)
-    }
-
     /// Mark one domain stale after an external writer changed its source.
     /// The next list call will run only that domain's scanner.
     pub fn invalidate_projection(&self, domain: &str, workspace_root: &Path) -> Result<()> {
@@ -2007,31 +1904,32 @@ impl Store {
         )
     }
 
-    fn apply_session_preview_columns(
-        session: &mut SessionRecord,
-        first_user_message: Option<String>,
-        last_user_message: Option<String>,
-        last_assistant_message: Option<String>,
-    ) {
+    fn compare_session_updated_at(
+        left: &SessionRecord,
+        right: &SessionRecord,
+    ) -> std::cmp::Ordering {
+        right
+            .updated_at
+            .cmp(&left.updated_at)
+            .then_with(|| left.id.cmp(&right.id))
+    }
+
+    fn normalize_cached_session(mut session: SessionRecord) -> SessionRecord {
         session.title = clean_session_title(session.title.take());
-        session.first_user_message =
-            bound_session_preview(session.first_user_message.take().or(first_user_message));
-        session.last_user_message =
-            bound_session_preview(session.last_user_message.take().or(last_user_message));
-        session.last_assistant_message = bound_session_preview(
-            session
-                .last_assistant_message
-                .take()
-                .or(last_assistant_message),
-        );
+        session.first_user_message = bound_session_preview(session.first_user_message.take());
+        session.last_user_message = bound_session_preview(session.last_user_message.take());
+        session.last_assistant_message =
+            bound_session_preview(session.last_assistant_message.take());
+        session
     }
 
     fn session_metadata_json(session: &SessionRecord) -> Result<String> {
         let mut metadata = session.clone();
         metadata.title = clean_session_title(metadata.title.take());
-        metadata.first_user_message = None;
-        metadata.last_user_message = None;
-        metadata.last_assistant_message = None;
+        metadata.first_user_message = bound_session_preview(metadata.first_user_message.take());
+        metadata.last_user_message = bound_session_preview(metadata.last_user_message.take());
+        metadata.last_assistant_message =
+            bound_session_preview(metadata.last_assistant_message.take());
         Ok(serde_json::to_string(&metadata)?)
     }
 
@@ -2528,22 +2426,37 @@ impl Store {
         agent: Option<AgentKind>,
     ) -> Result<(AnalyticsCoverage, Vec<AnalyticsProviderCapability>)> {
         let agent_value = agent.map(agent_label);
-        let mut coverage = self.conn.query_row(
-            "SELECT MIN(event_min_date), MAX(event_max_date), COUNT(*),
-                    COALESCE(SUM(has_activity), 0)
-             FROM session_analytics
-             WHERE (?1 IS NULL OR agent = ?1) AND overview_indexed = 1",
-            [agent_value],
-            |row| {
-                Ok(AnalyticsCoverage {
-                    first: row.get(0)?,
-                    last: row.get(1)?,
-                    total_sessions: row.get::<_, i64>(2)? as usize,
-                    analyzed_sessions: row.get::<_, i64>(3)? as usize,
-                    indexing_sessions: 0,
-                })
-            },
-        )?;
+        let records = self.load_session_analytics_overview_metadata_records(agent)?;
+        let mut first = None;
+        let mut last = None;
+        let mut analyzed_sessions = 0;
+        let mut capabilities = BTreeMap::<AgentKind, AnalyticsCapabilities>::new();
+        for record in records {
+            if let Some(value) = record.first.as_ref()
+                && first.as_ref().is_none_or(|current| value < current)
+            {
+                first = Some(value.clone());
+            }
+            if let Some(value) = record.last.as_ref()
+                && last.as_ref().is_none_or(|current| value > current)
+            {
+                last = Some(value.clone());
+            }
+            analyzed_sessions += usize::from(record.has_activity);
+            let entry = capabilities.entry(record.agent).or_insert(record.capabilities);
+            entry.token_usage |= record.capabilities.token_usage;
+            entry.reasoning_tokens |= record.capabilities.reasoning_tokens;
+            entry.explicit_runs |= record.capabilities.explicit_runs;
+            entry.rate_limit_history |= record.capabilities.rate_limit_history;
+        }
+
+        let mut coverage = AnalyticsCoverage {
+            first,
+            last,
+            total_sessions: 0,
+            analyzed_sessions,
+            indexing_sessions: 0,
+        };
         coverage.total_sessions = self.conn.query_row(
             "SELECT COUNT(*) FROM session_analytics WHERE ?1 IS NULL OR agent = ?1",
             [agent_value],
@@ -2555,33 +2468,103 @@ impl Store {
             [agent_value],
             |row| row.get::<_, i64>(0),
         )? as usize;
-        let mut stmt = self.conn.prepare(
-            "SELECT agent,
-                    MAX(capability_token_usage),
-                    MAX(capability_reasoning_tokens),
-                    MAX(capability_explicit_runs),
-                    MAX(capability_rate_limit_history)
-             FROM session_analytics
-             WHERE (?1 IS NULL OR agent = ?1) AND overview_indexed = 1
-             GROUP BY agent",
-        )?;
-        let capabilities = stmt
-            .query_map([agent_value], |row| {
-                Ok(AnalyticsProviderCapability {
-                    agent: parse_agent_label(&row.get::<_, String>(0)?)
-                        .ok_or_else(|| {
-                            rusqlite::Error::InvalidColumnType(0, "agent".to_string(), Type::Text)
-                        })?,
-                    capabilities: AnalyticsCapabilities {
-                        token_usage: row.get(1)?,
-                        reasoning_tokens: row.get(2)?,
-                        explicit_runs: row.get(3)?,
-                        rate_limit_history: row.get(4)?,
-                    },
-                })
-            })?
-            .collect::<Result<Vec<_>, _>>()?;
+        let capabilities = capabilities
+            .into_iter()
+            .map(|(agent, capabilities)| AnalyticsProviderCapability {
+                agent,
+                capabilities,
+            })
+            .collect();
         Ok((coverage, capabilities))
+    }
+
+    fn load_session_analytics_overview_metadata_records(
+        &self,
+        agent: Option<AgentKind>,
+    ) -> Result<Vec<SessionAnalyticsOverviewRecord>> {
+        let agent_value = agent.map(agent_label);
+        let mut records = Vec::new();
+        let mut seen = HashSet::new();
+        let mut invalid = false;
+        let mut stmt = self.conn.prepare(
+            "SELECT session_id, agent, session_path, overview_json
+             FROM session_analytics_overview
+             WHERE (?1 IS NULL OR agent = ?1)",
+        )?;
+        let rows = stmt.query_map([agent_value], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        })?;
+        for row in rows {
+            let (session_id, agent, session_path, overview_json) = row?;
+            if let Ok(record) = serde_json::from_str::<SessionAnalyticsOverviewRecord>(&overview_json)
+            {
+                seen.insert(format!(
+                    "{}\0{}\0{}",
+                    agent, session_id, session_path
+                ));
+                records.push(record);
+            } else {
+                invalid = true;
+            }
+        }
+        drop(stmt);
+
+        let sql = if invalid {
+            "SELECT session_id, agent, session_path, analytics_json, parser_state_json
+             FROM session_analytics
+             WHERE overview_indexed = 1
+               AND (?1 IS NULL OR agent = ?1)"
+        } else {
+            "SELECT sa.session_id, sa.agent, sa.session_path,
+                    sa.analytics_json, sa.parser_state_json
+             FROM session_analytics AS sa
+             LEFT JOIN session_analytics_overview AS overview
+               ON overview.session_id = sa.session_id
+              AND overview.agent = sa.agent
+              AND overview.session_path = sa.session_path
+             WHERE sa.overview_indexed = 1
+               AND (?1 IS NULL OR sa.agent = ?1)
+               AND overview.session_id IS NULL"
+        };
+        let mut stmt = self.conn.prepare(sql)?;
+        let rows = stmt.query_map([agent_value], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+            ))
+        })?;
+        for row in rows {
+            let (session_id, agent, session_path, analytics_json, parser_state_json) = row?;
+            let key = format!("{}\0{}\0{}", agent, session_id, session_path);
+            if seen.contains(&key) {
+                continue;
+            }
+            let Ok(analytics) = serde_json::from_str::<crate::analytics::SessionAnalytics>(
+                &analytics_json,
+            ) else {
+                continue;
+            };
+            let Ok(state) = serde_json::from_str::<crate::analytics::AnalyticsParserState>(
+                &parser_state_json,
+            ) else {
+                continue;
+            };
+            records.push(analytics::overview_record(&SessionAnalyticsRecord {
+                analytics,
+                state,
+                file_mtime: 0,
+                file_size: 0,
+            }));
+        }
+        Ok(records)
     }
 
     pub fn analytics_revision(&self) -> Result<u64> {
@@ -2822,9 +2805,6 @@ impl Store {
     pub fn session_scan_cache(&self) -> Result<SessionScanCache> {
         let mut stmt = self.conn.prepare(
             "SELECT sessions.data_json,
-                    sessions.first_user_message,
-                    sessions.last_user_message,
-                    sessions.last_assistant_message,
                     search.file_mtime,
                     search.file_size
              FROM sessions
@@ -2836,36 +2816,18 @@ impl Store {
         let rows = stmt.query_map([], |row| {
             Ok((
                 row.get::<_, String>(0)?,
-                row.get::<_, Option<String>>(1)?,
-                row.get::<_, Option<String>>(2)?,
-                row.get::<_, Option<String>>(3)?,
-                row.get::<_, i64>(4)?,
-                row.get::<_, i64>(5)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, i64>(2)?,
             ))
         })?;
         let entries = rows.filter_map(Result::ok).filter_map(
-            |(
-                data_json,
-                first_user_message,
-                last_user_message,
-                last_assistant_message,
-                file_mtime,
-                file_size,
-            )| {
+            |(data_json, file_mtime, file_size)| {
                 serde_json::from_str::<SessionRecord>(&data_json)
                     .ok()
-                    .map(|mut session| {
-                        Self::apply_session_preview_columns(
-                            &mut session,
-                            first_user_message,
-                            last_user_message,
-                            last_assistant_message,
-                        );
-                        SessionScanCacheEntry {
-                            session,
-                            file_mtime,
-                            file_size,
-                        }
+                    .map(|session| SessionScanCacheEntry {
+                        session,
+                        file_mtime,
+                        file_size,
                     })
             },
         );
@@ -2933,13 +2895,22 @@ impl Store {
             canonical.title = clean_session_title(canonical.title.take());
             let path = canonical.path.display().to_string();
             let data_json = Self::session_metadata_json(&canonical)?;
+            let title = canonical.title.clone();
+            let project = canonical
+                .project
+                .as_ref()
+                .map(|path| path.display().to_string());
+            let started_at = canonical.started_at.clone();
+            let updated_at = canonical.updated_at.clone();
+            let message_count = canonical.message_count.map(|value| value as i64);
             let first_user_message = bound_session_preview(canonical.first_user_message.clone());
             let last_user_message = bound_session_preview(canonical.last_user_message.clone());
             let last_assistant_message =
                 bound_session_preview(canonical.last_assistant_message.clone());
             let current = tx
                 .query_row(
-                    "SELECT data_json, first_user_message, last_user_message, last_assistant_message
+                    "SELECT data_json, title, project, started_at, updated_at, message_count,
+                            first_user_message, last_user_message, last_assistant_message
                      FROM sessions WHERE id = ?1 AND agent = ?2 AND path = ?3",
                     params![canonical.id, agent, path],
                     |row| {
@@ -2948,18 +2919,26 @@ impl Store {
                             row.get::<_, Option<String>>(1)?,
                             row.get::<_, Option<String>>(2)?,
                             row.get::<_, Option<String>>(3)?,
+                            row.get::<_, Option<String>>(4)?,
+                            row.get::<_, Option<i64>>(5)?,
+                            row.get::<_, Option<String>>(6)?,
+                            row.get::<_, Option<String>>(7)?,
+                            row.get::<_, Option<String>>(8)?,
                         ))
                     },
                 )
                 .optional()?;
-            if current.as_ref().is_some_and(
-                |(current_json, current_first, current_last, current_assistant)| {
-                    current_json == &data_json
-                        && current_first == &first_user_message
-                        && current_last == &last_user_message
-                        && current_assistant == &last_assistant_message
-                },
-            ) {
+            if current.as_ref().is_some_and(|current| {
+                current.0 == data_json
+                    && current.1 == title
+                    && current.2 == project
+                    && current.3 == started_at
+                    && current.4 == updated_at
+                    && current.5 == message_count
+                    && current.6 == first_user_message
+                    && current.7 == last_user_message
+                    && current.8 == last_assistant_message
+            }) {
                 continue;
             }
             tx.execute(
@@ -2982,15 +2961,12 @@ impl Store {
                 params![
                     canonical.id,
                     agent,
-                    canonical.title,
-                    canonical
-                        .project
-                        .as_ref()
-                        .map(|path| path.display().to_string()),
+                    title,
+                    project,
                     path,
-                    canonical.started_at,
-                    canonical.updated_at,
-                    canonical.message_count.map(|value| value as i64),
+                    started_at,
+                    updated_at,
+                    message_count,
                     first_user_message,
                     last_user_message,
                     last_assistant_message,
@@ -3099,9 +3075,6 @@ impl Store {
         let mut stmt = self.conn.prepare(&format!(
             "SELECT
                 sessions.data_json,
-                sessions.first_user_message,
-                sessions.last_user_message,
-                sessions.last_assistant_message,
                 bm25(
                     session_search_fts,
                     0.5, 10.0, 5.0, 6.0, 3.0
@@ -3120,42 +3093,27 @@ impl Store {
              FROM session_search_fts
              JOIN session_search_records AS search
                ON search.rowid = session_search_fts.rowid
-             JOIN sessions
+                JOIN sessions
                ON sessions.id = search.session_id
               AND sessions.agent = search.agent
               AND sessions.path = search.session_path
-             WHERE session_search_fts MATCH ?{candidate_filter}
-             ORDER BY score ASC, sessions.updated_at DESC, sessions.id ASC"
+             WHERE session_search_fts MATCH ?{candidate_filter}"
         ))?;
         let rows = stmt.query_map(params_from_iter(sql_params.iter()), |row| {
             Ok((
                 row.get::<_, String>(0)?,
-                row.get::<_, Option<String>>(1)?,
-                row.get::<_, Option<String>>(2)?,
-                row.get::<_, Option<String>>(3)?,
-                row.get::<_, f64>(4)?,
-                row.get::<_, String>(5)?,
+                row.get::<_, f64>(1)?,
+                row.get::<_, String>(2)?,
             ))
         })?;
         let candidate_order = candidates.map(Self::session_search_candidate_order);
         let mut hits = Vec::new();
         let mut seen = HashSet::new();
         for row in rows {
-            let (
-                data_json,
-                first_user_message,
-                last_user_message,
-                last_assistant_message,
-                raw_score,
-                snippet,
-            ) = row?;
-            let mut session = serde_json::from_str::<SessionRecord>(&data_json)
-                .context("invalid cached session search row")?;
-            Self::apply_session_preview_columns(
-                &mut session,
-                first_user_message,
-                last_user_message,
-                last_assistant_message,
+            let (data_json, raw_score, snippet) = row?;
+            let session = Self::normalize_cached_session(
+                serde_json::from_str::<SessionRecord>(&data_json)
+                    .context("invalid cached session search row")?,
             );
             if !seen.insert(Self::session_search_hit_key(&session)) {
                 continue;
@@ -3172,6 +3130,13 @@ impl Store {
                     .get(&Self::session_search_hit_key(&hit.session))
                     .copied()
                     .unwrap_or(usize::MAX)
+            });
+        } else {
+            hits.sort_by(|left, right| {
+                right
+                    .search_score
+                    .total_cmp(&left.search_score)
+                    .then_with(|| Self::compare_session_updated_at(&left.session, &right.session))
             });
         }
         Ok(hits)
@@ -3210,9 +3175,6 @@ impl Store {
         let sql = format!(
             "SELECT
                 sessions.data_json,
-                sessions.first_user_message,
-                sessions.last_user_message,
-                sessions.last_assistant_message,
                 search.metadata_text,
                 search.title,
                 search.project,
@@ -3229,15 +3191,12 @@ impl Store {
         let rows = stmt.query_map(params_from_iter(sql_params.iter()), |row| {
             Ok((
                 row.get::<_, String>(0)?,
-                row.get::<_, Option<String>>(1)?,
-                row.get::<_, Option<String>>(2)?,
-                row.get::<_, Option<String>>(3)?,
                 SessionSearchDocument {
-                    metadata_text: row.get(4)?,
-                    title: row.get(5)?,
-                    project: row.get(6)?,
-                    user_text: row.get(7)?,
-                    assistant_text: row.get(8)?,
+                    metadata_text: row.get(1)?,
+                    title: row.get(2)?,
+                    project: row.get(3)?,
+                    user_text: row.get(4)?,
+                    assistant_text: row.get(5)?,
                 },
             ))
         })?;
@@ -3245,20 +3204,10 @@ impl Store {
         let mut hits: Vec<SessionSearchHit> = Vec::new();
         let mut hit_indexes: HashMap<(String, String, PathBuf), usize> = HashMap::new();
         for row in rows {
-            let (
-                data_json,
-                first_user_message,
-                last_user_message,
-                last_assistant_message,
-                document,
-            ) = row?;
-            let mut session = serde_json::from_str::<SessionRecord>(&data_json)
-                .context("invalid cached session search row")?;
-            Self::apply_session_preview_columns(
-                &mut session,
-                first_user_message,
-                last_user_message,
-                last_assistant_message,
+            let (data_json, document) = row?;
+            let session = Self::normalize_cached_session(
+                serde_json::from_str::<SessionRecord>(&data_json)
+                    .context("invalid cached session search row")?,
             );
             let key = Self::session_search_hit_key(&session);
             let hit = SessionSearchHit {
@@ -3287,13 +3236,7 @@ impl Store {
                 right
                     .search_score
                     .total_cmp(&left.search_score)
-                    .then_with(|| {
-                        right
-                            .session
-                            .updated_at
-                            .cmp(&left.session.updated_at)
-                            .then_with(|| left.session.id.cmp(&right.session.id))
-                    })
+                    .then_with(|| Self::compare_session_updated_at(&left.session, &right.session))
             });
         }
         Ok(hits)
@@ -3387,6 +3330,11 @@ impl Store {
                     last_assistant_message = excluded.last_assistant_message,
                     data_json = excluded.data_json
                  WHERE sessions.data_json IS NOT excluded.data_json
+                    OR sessions.title IS NOT excluded.title
+                    OR sessions.project IS NOT excluded.project
+                    OR sessions.started_at IS NOT excluded.started_at
+                    OR sessions.updated_at IS NOT excluded.updated_at
+                    OR sessions.message_count IS NOT excluded.message_count
                     OR sessions.first_user_message IS NOT excluded.first_user_message
                     OR sessions.last_user_message IS NOT excluded.last_user_message
                     OR sessions.last_assistant_message IS NOT excluded.last_assistant_message",
@@ -3657,11 +3605,7 @@ impl Store {
                 links.session_id,
                 links.agent,
                 links.session_path,
-                sessions.title,
-                sessions.project,
-                sessions.updated_at,
-                sessions.started_at,
-                sessions.message_count,
+                sessions.data_json,
                 links.skill_name,
                 links.skill_path,
                 links.skill_agent,
@@ -3675,48 +3619,97 @@ impl Store {
                ON sessions.id = links.session_id
               AND sessions.agent = links.agent
               AND sessions.path = links.session_path
-             {where_clause}
-             ORDER BY sessions.updated_at DESC, links.evidence_time DESC, links.skill_name ASC"
+             {where_clause}"
         );
         let mut stmt = self.conn.prepare(&sql)?;
         let rows = stmt.query_map(params, |row| {
-            Ok(SessionSkillLink {
-                session_id: row.get(0)?,
-                agent: parse_agent_label(&row.get::<_, String>(1)?)
-                    .ok_or_else(|| {
-                        rusqlite::Error::InvalidColumnType(1, "agent".to_string(), Type::Text)
-                    })?,
-                session_path: PathBuf::from(row.get::<_, String>(2)?),
-                session_title: clean_session_title(row.get(3)?),
-                session_project: row.get::<_, Option<String>>(4)?.map(PathBuf::from),
-                session_updated_at: row.get(5)?,
-                session_started_at: row.get(6)?,
-                session_message_count: row
-                    .get::<_, Option<i64>>(7)?
-                    .map(|value| value.max(0) as usize),
-                skill_name: row.get(8)?,
-                skill_path: PathBuf::from(row.get::<_, String>(9)?),
-                skill_agent: row
-                    .get::<_, Option<String>>(10)?
-                    .map(|agent| {
-                        parse_agent_label(&agent).ok_or_else(|| {
-                            rusqlite::Error::InvalidColumnType(
-                                10,
-                                "skill_agent".to_string(),
-                                Type::Text,
-                            )
-                        })
-                    })
-                    .transpose()?,
-                skill_scope: row.get(11)?,
-                evidence_kind: row.get(12)?,
-                evidence_text: row.get(13)?,
-                evidence_time: row.get(14)?,
-                confidence: row.get(15)?,
-            })
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, Option<String>>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, String>(5)?,
+                row.get::<_, Option<String>>(6)?,
+                row.get::<_, Option<String>>(7)?,
+                row.get::<_, String>(8)?,
+                row.get::<_, String>(9)?,
+                row.get::<_, Option<String>>(10)?,
+                row.get::<_, String>(11)?,
+            ))
         })?;
-        rows.collect::<std::result::Result<Vec<_>, _>>()
-            .map_err(Into::into)
+        let mut links = Vec::new();
+        for row in rows {
+            let (
+                session_id,
+                agent,
+                session_path,
+                data_json,
+                skill_name,
+                skill_path,
+                skill_agent,
+                skill_scope,
+                evidence_kind,
+                evidence_text,
+                evidence_time,
+                confidence,
+            ) = row?;
+            let agent = parse_agent_label(&agent)
+                .ok_or_else(|| anyhow::anyhow!("invalid session skill link agent: {agent}"))?;
+            let session = data_json
+                .map(|data_json| {
+                    serde_json::from_str::<SessionRecord>(&data_json)
+                        .map(Self::normalize_cached_session)
+                })
+                .transpose()
+                .with_context(|| {
+                    format!(
+                        "invalid cached session row for skill link {}:{}",
+                        agent_label(agent),
+                        session_id
+                    )
+                })?;
+            let skill_agent = skill_agent
+                .map(|agent| {
+                    parse_agent_label(&agent).ok_or_else(|| {
+                        anyhow::anyhow!("invalid session skill link skill agent: {agent}")
+                    })
+                })
+                .transpose()?;
+            let link = SessionSkillLink {
+                session_id,
+                agent,
+                session_path: PathBuf::from(session_path),
+                session_title: session
+                    .as_ref()
+                    .and_then(|session| clean_session_title(session.title.clone())),
+                session_project: session.as_ref().and_then(|session| session.project.clone()),
+                session_started_at: session
+                    .as_ref()
+                    .and_then(|session| session.started_at.clone()),
+                session_updated_at: session
+                    .as_ref()
+                    .and_then(|session| session.updated_at.clone()),
+                session_message_count: session.as_ref().and_then(|session| session.message_count),
+                skill_name,
+                skill_path: PathBuf::from(skill_path),
+                skill_agent,
+                skill_scope,
+                evidence_kind,
+                evidence_text,
+                evidence_time,
+                confidence,
+            };
+            links.push(link);
+        }
+        links.sort_by(|left, right| {
+            right
+                .session_updated_at
+                .cmp(&left.session_updated_at)
+                .then_with(|| right.evidence_time.cmp(&left.evidence_time))
+                .then_with(|| left.skill_name.cmp(&right.skill_name))
+        });
+        Ok(links)
     }
 
     pub fn skill_source_records(&self) -> Result<Vec<SkillSourceRecord>> {
@@ -4117,6 +4110,9 @@ impl Store {
             .filter(|value| !value.trim().is_empty())
             .unwrap_or_else(new_prompt_id);
         let title = prompt.title.trim().to_string();
+        if title.is_empty() {
+            anyhow::bail!("prompt title is required");
+        }
         let tags = normalize_prompt_tags(prompt.tags);
         let category = tags.first().cloned().unwrap_or_default();
         let tags_json = serde_json::to_string(&tags)?;
@@ -4247,16 +4243,6 @@ impl Store {
             );
             CREATE INDEX IF NOT EXISTS idx_projection_contexts_workspace
                 ON projection_contexts(workspace_root, domain);
-            CREATE TABLE IF NOT EXISTS projection_refresh_lock (
-                id INTEGER PRIMARY KEY CHECK(id = 1),
-                owner TEXT NOT NULL,
-                started_at INTEGER NOT NULL
-            );
-            CREATE TABLE IF NOT EXISTS projection_refresh_locks (
-                domain TEXT PRIMARY KEY,
-                owner TEXT NOT NULL,
-                started_at INTEGER NOT NULL
-            );
             CREATE TABLE IF NOT EXISTS sessions (
                 id TEXT NOT NULL,
                 agent TEXT NOT NULL,
@@ -4440,6 +4426,7 @@ impl Store {
         self.ensure_prompt_tags_column()?;
         self.ensure_skill_source_ref_column()?;
         self.ensure_session_preview_columns()?;
+        self.ensure_session_payload_previews()?;
         self.ensure_session_analytics_overview_columns()?;
         self.ensure_session_search_index_version_column()?;
         self.ensure_storage_indexes()?;
@@ -4626,6 +4613,186 @@ impl Store {
                  ON CONFLICT(key) DO UPDATE SET value = excluded.value;"
             ))?;
         }
+        tx.commit()?;
+        Ok(())
+    }
+
+    fn non_empty_session_preview(value: Option<String>) -> Option<String> {
+        value.filter(|value| !value.trim().is_empty())
+    }
+
+    fn session_search_preview(
+        tx: &Transaction<'_>,
+        id: &str,
+        agent: &str,
+        path: &str,
+        column: &str,
+        descending: bool,
+    ) -> Result<Option<String>> {
+        let column = match column {
+            "user_text" | "assistant_text" => column,
+            _ => unreachable!("session preview search column is fixed by the caller"),
+        };
+        let order = if descending { "DESC" } else { "ASC" };
+        tx.query_row(
+            &format!(
+                "SELECT {column}
+                 FROM session_search_records
+                 WHERE session_id = ?1 AND agent = ?2 AND session_path = ?3
+                   AND trim({column}) <> ''
+                 ORDER BY record_order {order}
+                 LIMIT 1"
+            ),
+            params![id, agent, path],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(Into::into)
+    }
+
+    fn session_preview_from_legacy_or_search(
+        tx: &Transaction<'_>,
+        id: &str,
+        agent: &str,
+        path: &str,
+        legacy: Option<String>,
+        column: &str,
+        descending: bool,
+    ) -> Result<Option<String>> {
+        if let Some(value) = Self::non_empty_session_preview(legacy) {
+            return Ok(Some(value));
+        }
+        Self::session_search_preview(tx, id, agent, path, column, descending)
+    }
+
+    fn ensure_session_payload_previews(&self) -> Result<()> {
+        let tx = self.conn.unchecked_transaction()?;
+        let already_migrated = tx
+            .query_row(
+                "SELECT 1 FROM meta WHERE key = ?1 LIMIT 1",
+                params![SESSION_PAYLOAD_PREVIEWS_MIGRATION_KEY],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()?
+            .is_some();
+        if already_migrated {
+            tx.commit()?;
+            return Ok(());
+        }
+
+        let rows = {
+            let mut statement = tx.prepare(
+                "SELECT id, agent, path, data_json,
+                        first_user_message, last_user_message, last_assistant_message
+                 FROM sessions",
+            )?;
+            let rows = statement.query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                    row.get::<_, Option<String>>(5)?,
+                    row.get::<_, Option<String>>(6)?,
+                ))
+            })?;
+            rows.collect::<std::result::Result<Vec<_>, _>>()?
+        };
+
+        for (id, agent, path, data_json, scalar_first, scalar_last_user, scalar_last_assistant) in
+            rows
+        {
+            let Ok(mut session) = serde_json::from_str::<SessionRecord>(&data_json) else {
+                continue;
+            };
+
+            if session
+                .first_user_message
+                .as_deref()
+                .is_none_or(|value| value.trim().is_empty())
+            {
+                session.first_user_message = Self::session_preview_from_legacy_or_search(
+                    &tx,
+                    &id,
+                    &agent,
+                    &path,
+                    scalar_first.clone(),
+                    "user_text",
+                    false,
+                )?;
+            }
+            if session
+                .last_user_message
+                .as_deref()
+                .is_none_or(|value| value.trim().is_empty())
+            {
+                session.last_user_message = Self::session_preview_from_legacy_or_search(
+                    &tx,
+                    &id,
+                    &agent,
+                    &path,
+                    scalar_last_user.clone(),
+                    "user_text",
+                    true,
+                )?;
+            }
+            if session
+                .last_assistant_message
+                .as_deref()
+                .is_none_or(|value| value.trim().is_empty())
+            {
+                session.last_assistant_message = Self::session_preview_from_legacy_or_search(
+                    &tx,
+                    &id,
+                    &agent,
+                    &path,
+                    scalar_last_assistant.clone(),
+                    "assistant_text",
+                    true,
+                )?;
+            }
+
+            let first_user_message = bound_session_preview(session.first_user_message.clone());
+            let last_user_message = bound_session_preview(session.last_user_message.clone());
+            let last_assistant_message =
+                bound_session_preview(session.last_assistant_message.clone());
+            session.first_user_message = first_user_message.clone();
+            session.last_user_message = last_user_message.clone();
+            session.last_assistant_message = last_assistant_message.clone();
+            let migrated_data_json = Self::session_metadata_json(&session)?;
+            if data_json == migrated_data_json
+                && scalar_first == first_user_message
+                && scalar_last_user == last_user_message
+                && scalar_last_assistant == last_assistant_message
+            {
+                continue;
+            }
+            tx.execute(
+                "UPDATE sessions
+                 SET first_user_message = ?1,
+                     last_user_message = ?2,
+                     last_assistant_message = ?3,
+                     data_json = ?4
+                 WHERE id = ?5 AND agent = ?6 AND path = ?7",
+                params![
+                    first_user_message,
+                    last_user_message,
+                    last_assistant_message,
+                    migrated_data_json,
+                    id,
+                    agent,
+                    path,
+                ],
+            )?;
+        }
+
+        tx.execute(
+            "INSERT INTO meta (key, value)
+             VALUES (?1, '1')
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![SESSION_PAYLOAD_PREVIEWS_MIGRATION_KEY],
+        )?;
         tx.commit()?;
         Ok(())
     }
@@ -5774,7 +5941,8 @@ mod tests {
     use rusqlite::{Connection, params};
 
     use super::{
-        AppSettings, PromptWrite, Store, normalize_repository_url,
+        AppSettings, PromptWrite, SESSION_PAYLOAD_PREVIEWS_MIGRATION_KEY, Store,
+        normalize_repository_url,
     };
 
     #[test]
@@ -6536,6 +6704,18 @@ mod tests {
         let db = temp.join("tendi.sqlite3");
         let store_a = Store::open(&db).unwrap();
         let store_b = Store::open(&db).unwrap();
+        let sql_lock_table_count = store_a
+            .conn
+            .query_row(
+                "SELECT COUNT(*)
+                 FROM sqlite_master
+                 WHERE type = 'table'
+                   AND name IN ('projection_refresh_lock', 'projection_refresh_locks')",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap();
+        assert_eq!(sql_lock_table_count, 0);
         let (started_tx, started_rx) = mpsc::channel();
         let (release_tx, release_rx) = mpsc::channel();
 
@@ -6801,7 +6981,7 @@ mod tests {
 
         store
             .save_sessions(&SessionScan {
-                sessions: vec![record],
+                sessions: vec![record.clone()],
                 warnings: Vec::new(),
             })
             .unwrap();
@@ -6843,7 +7023,181 @@ mod tests {
             Some("Cached title")
         );
 
+        store
+            .conn
+            .execute(
+                "UPDATE sessions
+                 SET title = 'Legacy title', first_user_message = 'legacy preview'
+                 WHERE id = 'canonicalized'",
+                [],
+            )
+            .unwrap();
+        store
+            .save_sessions(&SessionScan {
+                sessions: vec![record],
+                warnings: Vec::new(),
+            })
+            .unwrap();
+        let repaired = store
+            .conn
+            .query_row(
+                "SELECT title, first_user_message FROM sessions WHERE id = 'canonicalized'",
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, Option<String>>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(repaired.0.as_deref(), Some("Cached title"));
+        assert_eq!(repaired.1.as_deref(), Some("First question"));
+
         drop(store);
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn session_payload_preview_migration_rehydrates_legacy_sources() {
+        let temp = temp_dir("tendi-storage-session-payload-migration");
+        fs::create_dir_all(&temp).unwrap();
+        let db = temp.join("tendi.sqlite3");
+        let store = Store::open(&db).unwrap();
+        let scalar_session = session("legacy-scalar", "Legacy scalar");
+        let search_session = session("legacy-search", "Legacy search");
+
+        store
+            .save_sessions(&SessionScan {
+                sessions: vec![scalar_session.clone(), search_session.clone()],
+                warnings: Vec::new(),
+            })
+            .unwrap();
+        store
+            .conn
+            .execute(
+                "UPDATE sessions
+                 SET first_user_message = ?1,
+                     last_user_message = ?2,
+                     last_assistant_message = ?3
+                 WHERE id = ?4",
+                params![
+                    "scalar first",
+                    "scalar last",
+                    "scalar assistant",
+                    scalar_session.id,
+                ],
+            )
+            .unwrap();
+        store
+            .conn
+            .execute(
+                "INSERT INTO session_search_records (
+                    session_id, agent, session_path, record_order,
+                    metadata_text, title, project, user_text, assistant_text
+                 ) VALUES (?1, ?2, ?3, ?4, '', '', '', ?5, ?6)",
+                params![
+                    search_session.id,
+                    "codex",
+                    search_session.path.display().to_string(),
+                    1,
+                    "search first",
+                    "search assistant one",
+                ],
+            )
+            .unwrap();
+        store
+            .conn
+            .execute(
+                "INSERT INTO session_search_records (
+                    session_id, agent, session_path, record_order,
+                    metadata_text, title, project, user_text, assistant_text
+                 ) VALUES (?1, ?2, ?3, ?4, '', '', '', ?5, ?6)",
+                params![
+                    search_session.id,
+                    "codex",
+                    search_session.path.display().to_string(),
+                    2,
+                    "search last",
+                    "search assistant last",
+                ],
+            )
+            .unwrap();
+        store
+            .conn
+            .execute(
+                "DELETE FROM meta WHERE key = ?1",
+                params![SESSION_PAYLOAD_PREVIEWS_MIGRATION_KEY],
+            )
+            .unwrap();
+        drop(store);
+
+        let reopened = Store::open(&db).unwrap();
+        let cached = reopened.list_sessions().unwrap();
+        let scalar = cached
+            .sessions
+            .iter()
+            .find(|session| session.id == scalar_session.id)
+            .unwrap();
+        assert_eq!(scalar.first_user_message.as_deref(), Some("scalar first"));
+        assert_eq!(scalar.last_user_message.as_deref(), Some("scalar last"));
+        assert_eq!(
+            scalar.last_assistant_message.as_deref(),
+            Some("scalar assistant")
+        );
+        let search = cached
+            .sessions
+            .iter()
+            .find(|session| session.id == search_session.id)
+            .unwrap();
+        assert_eq!(search.first_user_message.as_deref(), Some("search first"));
+        assert_eq!(search.last_user_message.as_deref(), Some("search last"));
+        assert_eq!(
+            search.last_assistant_message.as_deref(),
+            Some("search assistant last")
+        );
+
+        let migrated_data_json = reopened
+            .conn
+            .query_row(
+                "SELECT data_json FROM sessions WHERE id = ?1",
+                params![search_session.id],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap();
+        let migrated_value: serde_json::Value = serde_json::from_str(&migrated_data_json).unwrap();
+        assert_eq!(
+            migrated_value
+                .get("first_user_message")
+                .and_then(serde_json::Value::as_str),
+            Some("search first")
+        );
+        assert_eq!(
+            reopened
+                .conn
+                .query_row(
+                    "SELECT COUNT(*) FROM meta WHERE key = ?1",
+                    params![SESSION_PAYLOAD_PREVIEWS_MIGRATION_KEY],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            1
+        );
+
+        drop(reopened);
+        let reopened = Store::open(&db).unwrap();
+        assert_eq!(
+            reopened
+                .list_sessions()
+                .unwrap()
+                .sessions
+                .iter()
+                .find(|session| session.id == search_session.id)
+                .and_then(|session| session.first_user_message.as_deref()),
+            Some("search first")
+        );
+
+        drop(reopened);
         fs::remove_dir_all(temp).unwrap();
     }
 
@@ -6981,6 +7335,52 @@ mod tests {
                 .iter()
                 .any(|entry| entry.agent == AgentKind::Codex)
         );
+
+        drop(store);
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn overview_metadata_uses_overview_payload_not_scalar_mirror() {
+        let temp = temp_dir("tendi-storage-overview-authority");
+        fs::create_dir_all(&temp).unwrap();
+        let store = Store::open(temp.join("tendi.sqlite3")).unwrap();
+        let timestamp = Local::now().to_rfc3339();
+        store
+            .save_session_analytics_records(&[analytics_record(
+                "authority",
+                AgentKind::Codex,
+                &timestamp,
+                25,
+            )])
+            .unwrap();
+
+        let expected = store.overview_analytics(None, 1, 1).unwrap();
+        store
+            .conn
+            .execute(
+                "UPDATE session_analytics
+                 SET event_min_date = '2099-01-01', event_max_date = '2099-01-01',
+                     has_activity = 0, capability_token_usage = 0,
+                     capability_reasoning_tokens = 0, capability_explicit_runs = 0,
+                     capability_rate_limit_history = 0",
+                [],
+            )
+            .unwrap();
+
+        let actual = store.overview_analytics(None, 1, 1).unwrap();
+        assert_eq!(actual.coverage.first, expected.coverage.first);
+        assert_eq!(actual.coverage.last, expected.coverage.last);
+        assert_eq!(actual.coverage.total_sessions, expected.coverage.total_sessions);
+        assert_eq!(
+            actual.coverage.analyzed_sessions,
+            expected.coverage.analyzed_sessions
+        );
+        assert_eq!(actual.capabilities.len(), expected.capabilities.len());
+        for (actual, expected) in actual.capabilities.iter().zip(&expected.capabilities) {
+            assert_eq!(actual.agent, expected.agent);
+            assert_eq!(actual.capabilities, expected.capabilities);
+        }
 
         drop(store);
         fs::remove_dir_all(temp).unwrap();
@@ -7539,6 +7939,29 @@ mod tests {
     }
 
     #[test]
+    fn prompts_reject_empty_titles_before_writing() {
+        let temp = temp_dir("tendi-storage-prompts-empty-title");
+        fs::create_dir_all(&temp).unwrap();
+        let store = Store::open(temp.join("tendi.sqlite3")).unwrap();
+
+        for (index, title) in ["", "  \n\t"].into_iter().enumerate() {
+            let error = store
+                .save_prompt(PromptWrite {
+                    id: Some(format!("prompt-empty-title-{index}")),
+                    title: title.to_string(),
+                    tags: Vec::new(),
+                    body: "Body".to_string(),
+                })
+                .expect_err("empty prompt title must be rejected");
+            assert_eq!(error.to_string(), "prompt title is required");
+        }
+
+        assert!(store.list_prompts().unwrap().is_empty());
+        drop(store);
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
     fn malformed_prompt_tags_are_not_replaced_by_category() {
         let temp = temp_dir("tendi-storage-prompts-invalid-tags");
         fs::create_dir_all(&temp).unwrap();
@@ -7571,8 +7994,10 @@ mod tests {
         fs::create_dir_all(&temp).unwrap();
         let db = temp.join("tendi.sqlite3");
         let store = Store::open(&db).unwrap();
-        let session_one = session("one", "First");
-        let session_two = session("two", "Second");
+        let mut session_one = session("one", "First");
+        session_one.updated_at = Some("2026-06-23T10:01:00Z".to_string());
+        let mut session_two = session("two", "Second");
+        session_two.updated_at = Some("2026-06-23T10:02:00Z".to_string());
 
         store
             .save_sessions(&SessionScan {
@@ -7601,6 +8026,18 @@ mod tests {
             )
             .unwrap();
 
+        store
+            .conn
+            .execute(
+                "UPDATE sessions
+                 SET title = 'Legacy title', project = '/legacy/project',
+                     started_at = '2099-01-01T00:00:00Z', updated_at = '2099-01-01T00:00:00Z',
+                     message_count = 999
+                 WHERE id = 'one'",
+                [],
+            )
+            .unwrap();
+
         assert_eq!(
             store
                 .session_skill_links("one", AgentKind::Codex)
@@ -7608,7 +8045,21 @@ mod tests {
                 .len(),
             1
         );
-        assert_eq!(store.skill_session_links("foo").unwrap().len(), 2);
+        let links = store.skill_session_links("foo").unwrap();
+        assert_eq!(links.len(), 2);
+        assert_eq!(links[0].session_id, "two");
+        assert_eq!(links[0].session_title.as_deref(), Some("Second"));
+        assert_eq!(
+            links[0].session_updated_at.as_deref(),
+            Some("2026-06-23T10:02:00Z")
+        );
+        assert_eq!(links[1].session_id, "one");
+        assert_eq!(links[1].session_title.as_deref(), Some("First"));
+        assert_eq!(
+            links[1].session_project,
+            Some(PathBuf::from("/tmp/tendi-test"))
+        );
+        assert_eq!(links[1].session_message_count, Some(3));
         assert!(
             store
                 .session_skill_index_is_current(&session_one, 1, 10)
@@ -7628,7 +8079,6 @@ mod tests {
         drop(store);
         fs::remove_dir_all(temp).unwrap();
     }
-
 
     fn session(id: &str, title: &str) -> SessionRecord {
         SessionRecord {
@@ -7740,8 +8190,6 @@ mod tests {
             )
             .unwrap()
     }
-
-
 
     fn temp_dir(prefix: &str) -> PathBuf {
         let nanos = SystemTime::now()

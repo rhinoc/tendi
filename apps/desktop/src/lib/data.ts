@@ -9,6 +9,7 @@ import type { RuleRecord } from "./rules.ts";
 import { normalizeSession, type SessionRecord } from "./sessions.ts";
 import { normalizeSkill, type NormalizedSkill } from "./skills.ts";
 import { friendlyAgent } from "./agents.ts";
+import type { RuntimeDomainKey } from "./domain.ts";
 
 export type RuntimeData = {
   agents: Record<string, unknown>[];
@@ -21,8 +22,6 @@ export type RuntimeData = {
   sources: Array<{ label: string; count: number }>;
   [key: string]: unknown;
 };
-
-export type RuntimeDomainKey = "agents" | "skills" | "prompts" | "sessions" | "rules" | "hooks" | "mcp";
 
 function domainList(value: unknown): unknown[] | undefined {
   return Array.isArray(value) ? value : undefined;

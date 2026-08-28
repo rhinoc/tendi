@@ -35,7 +35,7 @@ import { Toast } from "../components/shared/Toast.tsx";
 import { DataTable } from "../components/DataTable.tsx";
 import type { ColumnDef } from "../components/DataTable.types";
 import type { DataTableMenuComponents } from "../components/shared/DataTableMenus.tsx";
-import { actionLabels, copiedValueLabel, copyValueLabel, selectionCopiedLabel, selectionCopyLabel, selectionDeleteLabel, TauriCommand, compactDateTime, normalizePromptTags, promptPreview, promptSelectionActionIds, promptTagsLabel, safeInvoke, suppressNextClick, type PromptRecord } from "../lib/index.ts";
+import { actionLabels, copiedValueLabel, copyValueLabel, promptActionLabels, selectionCopiedLabel, selectionCopyLabel, selectionDeleteLabel, TauriCommand, compactDateTime, normalizePromptTags, promptPreview, promptSelectionActionIds, promptTagsLabel, safeInvoke, suppressNextClick, type PromptRecord } from "../lib/index.ts";
 
 const PromptBodyEditor = lazy(() => import("../features/prompts/PromptBodyEditor.tsx").then(({ PromptBodyEditor: component }) => ({ default: component })));
 
@@ -169,11 +169,11 @@ export function PromptDialog({ open, prompt, busy, error, onOpenChange, onSave }
       <DialogActionBar cancelDisabled={busy} onCancel={() => onOpenChange(false)}>
         <DialogStatefulButton
           state={busy ? "loading" : "idle"}
-          loadingLabel="Saving prompt"
+          loadingLabel={promptActionLabels.saving}
           loadingContent={<LoadingInline size={16} gap={6} label="Save" />}
           variant="primary"
           className="dialogAdvanceButton"
-          aria-label="Save prompt"
+          aria-label={promptActionLabels.save}
           disabled={!canSave}
           onClick={() => onSave({ id: prompt?.id, title, tags, body })}
         >
@@ -252,7 +252,7 @@ export function PromptsView({ prompts, loadingPrompts = false, loadError = "", h
     });
     setSaving(false);
     if (!result) {
-      setDialogError("Could not save prompt.");
+      setDialogError(promptActionLabels.saveFailed);
       return;
     }
     setDialogOpen(false);
@@ -400,7 +400,6 @@ export function PromptsView({ prompts, loadingPrompts = false, loadError = "", h
         open={pendingDeleteIds.length > 0}
         items={pendingDeleteIds.map((id) => prompts.find((prompt) => prompt.id === id)?.title ?? id)}
         itemLabel="prompt"
-        description="Delete the selected prompts? This action cannot be undone."
         busy={deletingPromptIds.length > 0}
         onOpenChange={(open) => { if (!open) setPendingDeleteIds([]); }}
         onConfirm={() => { void confirmDeletePrompts(); }}

@@ -66,7 +66,7 @@ pub struct HookSourceContent {
     pub truncated: bool,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct HookSourceMatch {
     pub event: String,
     pub matcher: Option<String>,
@@ -77,6 +77,31 @@ pub struct HookSourceMatch {
     pub filter: Option<String>,
     pub status_message: Option<String>,
     pub enabled: Option<bool>,
+}
+
+pub(crate) fn hook_source_match_from_record(hook: &HookRecord) -> HookSourceMatch {
+    HookSourceMatch {
+        event: hook.event.clone(),
+        matcher: hook.matcher.clone(),
+        hook_type: hook.hook_type.clone(),
+        command: hook.command.clone(),
+        url: hook.url.clone(),
+        prompt: hook.prompt.clone(),
+        filter: hook.filter.clone(),
+        status_message: hook.status_message.clone(),
+        // Enabled state is part of the entry payload, not its identity. This
+        // keeps exclusions stable when the user toggles the hook locally.
+        enabled: None,
+    }
+}
+
+pub(crate) fn hook_source_match_key(hook: &HookRecord) -> String {
+    serde_json::to_string(&hook_source_match_from_record(hook))
+        .expect("hook source match serializes")
+}
+
+pub(crate) fn hook_source_match_from_key(key: &str) -> Result<HookSourceMatch> {
+    serde_json::from_str(key).context("invalid hook sync entry key")
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -834,6 +859,193 @@ pub(crate) fn set_toml_hook_enabled(
     Ok(toml::to_string_pretty(&value)?)
 }
 
+pub(crate) fn read_hook_entry(path: &Path, identity: &HookSourceMatch) -> Result<Value> {
+    let text = fs::read_to_string(path)?;
+    let value = match path.extension().and_then(|value| value.to_str()) {
+        Some("json") => serde_json::from_str::<Value>(&text)?,
+        Some("toml") => serde_json::to_value(toml::from_str::<TomlValue>(&text)?)?,
+        Some("md") => {
+            let (frontmatter, _) = split_yaml_frontmatter(&text)?;
+            serde_json::to_value(serde_yaml::from_str::<serde_yaml::Value>(frontmatter)?)?
+        }
+        _ => bail!("unsupported hook source format"),
+    };
+    match path.extension().and_then(|value| value.to_str()) {
+        Some("toml") | Some("md") | Some("json") => {
+            find_json_hook_snippet(&value, identity)
+                .context("matching hook was not found in source")
+        }
+        _ => unreachable!(),
+    }
+}
+
+pub(crate) fn merge_hook_entry(
+    path: &Path,
+    identity: &HookSourceMatch,
+    entry: &Value,
+) -> Result<String> {
+    let extension = path.extension().and_then(|value| value.to_str());
+    let (mut value, body) = match extension {
+        Some("json") => {
+            let value = if path.is_file() {
+                serde_json::from_str::<Value>(&fs::read_to_string(path)?)?
+            } else {
+                Value::Object(serde_json::Map::new())
+            };
+            (value, None)
+        }
+        Some("toml") => {
+            let value = if path.is_file() {
+                serde_json::to_value(toml::from_str::<TomlValue>(&fs::read_to_string(path)?)?)?
+            } else {
+                Value::Object(serde_json::Map::new())
+            };
+            (value, None)
+        }
+        Some("md") => {
+            let text = if path.is_file() {
+                fs::read_to_string(path)?
+            } else {
+                "---\n{}\n---\n".to_string()
+            };
+            let (frontmatter, body) = split_yaml_frontmatter(&text)?;
+            let value = serde_json::to_value(serde_yaml::from_str::<serde_yaml::Value>(frontmatter)?)?;
+            (value, Some(body.to_string()))
+        }
+        _ => bail!("unsupported hook source format"),
+    };
+    merge_json_hook_entry(&mut value, identity, entry)?;
+    match extension {
+        Some("json") => Ok(format!("{}\n", serde_json::to_string_pretty(&value)?)),
+        Some("toml") => {
+            let value = TomlValue::try_from(value)
+                .map_err(|error| anyhow::anyhow!("hook entry is not TOML-compatible: {error}"))?;
+            Ok(toml::to_string_pretty(&value)?)
+        }
+        Some("md") => {
+            let yaml = serde_yaml::to_string(&value)?;
+            Ok(format!("---\n{yaml}---{}", body.unwrap_or_default()))
+        }
+        _ => unreachable!(),
+    }
+}
+
+fn split_yaml_frontmatter(text: &str) -> Result<(&str, &str)> {
+    let rest = text
+        .strip_prefix("---\n")
+        .context("hook markdown source has no YAML frontmatter")?;
+    let end = rest
+        .find("\n---")
+        .context("hook markdown source has an unterminated YAML frontmatter")?;
+    Ok((&rest[..end], &rest[end + 4..]))
+}
+
+fn merge_json_hook_entry(
+    value: &mut Value,
+    identity: &HookSourceMatch,
+    entry: &Value,
+) -> Result<()> {
+    let hook = entry
+        .get("hook")
+        .cloned()
+        .context("hook sync entry is missing its hook payload")?;
+    if !hook.is_object() {
+        bail!("hook sync entry payload must be an object");
+    }
+    let hook_map = value
+        .as_object_mut()
+        .context("hook source root must be an object")?
+        .entry("hooks".to_string())
+        .or_insert_with(|| Value::Object(serde_json::Map::new()))
+        .as_object_mut()
+        .context("hook collection must be an object")?;
+    let lookup = HookSourceMatch {
+        enabled: None,
+        ..identity.clone()
+    };
+    if let Some(specs) = hook_map.get_mut(&identity.event) {
+        if replace_json_event_hook(specs, &lookup, identity.matcher.as_deref(), &hook) {
+            return Ok(());
+        }
+    }
+    let mut group = serde_json::Map::new();
+    if let Some(matcher) = &identity.matcher {
+        group.insert("matcher".to_string(), Value::String(matcher.clone()));
+    }
+    if identity.enabled == Some(false) && hook.get("enabled").is_none() {
+        group.insert("enabled".to_string(), Value::Bool(false));
+    }
+    group.insert("hooks".to_string(), Value::Array(vec![hook]));
+    let group = Value::Object(group);
+    match hook_map.entry(identity.event.clone()) {
+        serde_json::map::Entry::Vacant(entry) => {
+            entry.insert(Value::Array(vec![group]));
+        }
+        serde_json::map::Entry::Occupied(mut entry) => match entry.get_mut() {
+            Value::Array(items) => items.push(group),
+            current => {
+                let previous = std::mem::replace(current, Value::Null);
+                *current = Value::Array(vec![previous, group]);
+            }
+        },
+    }
+    Ok(())
+}
+
+fn replace_json_event_hook(
+    specs: &mut Value,
+    identity: &HookSourceMatch,
+    matcher: Option<&str>,
+    replacement: &Value,
+) -> bool {
+    if let Some(items) = specs.as_array_mut() {
+        return items
+            .iter_mut()
+            .any(|item| replace_json_event_hook(item, identity, matcher, replacement));
+    }
+    let Some(object) = specs.as_object_mut() else {
+        return false;
+    };
+    let next_matcher = object
+        .get("matcher")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .or_else(|| matcher.map(str::to_string));
+    if let Some(nested) = object.get_mut("hooks") {
+        return replace_json_event_hook(nested, identity, next_matcher.as_deref(), replacement);
+    }
+    let enabled = object
+        .get("enabled")
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
+    let request = HookSourceMatch {
+        matcher: next_matcher.clone(),
+        enabled: None,
+        ..identity.clone()
+    };
+    if hook_object_matches_source_request(
+        next_matcher.as_deref(),
+        enabled,
+        object
+            .get("command")
+            .or_else(|| object.get("script"))
+            .and_then(Value::as_str),
+        object.get("url").and_then(Value::as_str),
+        object.get("prompt").and_then(Value::as_str),
+        object.get("type").and_then(Value::as_str),
+        object.get("if").and_then(Value::as_str),
+        object
+            .get("statusMessage")
+            .or_else(|| object.get("status_message"))
+            .and_then(Value::as_str),
+        &request,
+    ) {
+        *object = replacement.as_object().cloned().unwrap_or_default();
+        return true;
+    }
+    false
+}
+
 fn remove_json_hook_from_value(value: &mut Value, request: &HookDeleteRequest) -> bool {
     let Some(hook_map) = value.get_mut("hooks").and_then(Value::as_object_mut) else {
         return false;
@@ -1504,8 +1716,8 @@ mod tests {
     };
 
     use super::{
-        HookReviewRequest, HookScan, apply_tendi_hook_review_states, hook_review_identity,
-        scan_hook_file,
+        HookReviewRequest, HookScan, HookSourceMatch, apply_tendi_hook_review_states,
+        hook_review_identity, merge_hook_entry, read_hook_entry, scan_hook_file,
     };
     use crate::{
         providers::{claude::scan_claude_component_file, codex::scan_codex_config_hooks},
@@ -1605,6 +1817,70 @@ mod tests {
         assert_eq!(hooks[0].command.as_deref(), Some("/bin/echo checked"));
         assert!(!hooks[0].enabled);
         assert!(!hooks[0].trust_hash.is_empty());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn syncs_one_json_hook_without_dropping_other_hooks() {
+        let root = std::env::temp_dir().join(format!(
+            "tendi-hooks-sync-entry-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("system time before epoch")
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).expect("create temp root");
+        let path = root.join("hooks.json");
+        fs::write(
+            &path,
+            r#"{
+  "other": true,
+  "hooks": {
+    "PreToolUse": [
+      {"matcher": "Bash", "hooks": [{"type": "command", "command": "one"}]},
+      {"matcher": "Read", "hooks": [{"type": "command", "command": "two"}]}
+    ]
+  }
+}"#,
+        )
+        .expect("write hooks");
+        let identity = HookSourceMatch {
+            event: "PreToolUse".to_string(),
+            matcher: Some("Bash".to_string()),
+            hook_type: Some("command".to_string()),
+            command: Some("one".to_string()),
+            url: None,
+            prompt: None,
+            filter: None,
+            status_message: None,
+            enabled: Some(true),
+        };
+
+        let entry = read_hook_entry(&path, &identity).expect("read selected hook");
+        assert_eq!(entry["hook"]["command"], "one");
+        let merged = merge_hook_entry(
+            &path,
+            &identity,
+            &serde_json::json!({
+                "event": "PreToolUse",
+                "matcher": "Bash",
+                "enabled": true,
+                "hook": {"type": "command", "command": "updated"}
+            }),
+        )
+        .expect("merge selected hook");
+        let value = serde_json::from_str::<serde_json::Value>(&merged).expect("parse hooks");
+
+        assert_eq!(value["other"], true);
+        assert_eq!(
+            value["hooks"]["PreToolUse"][0]["hooks"][0]["command"],
+            "updated"
+        );
+        assert_eq!(
+            value["hooks"]["PreToolUse"][1]["hooks"][0]["command"],
+            "two"
+        );
         let _ = fs::remove_dir_all(root);
     }
 
@@ -1847,6 +2123,53 @@ command = "/bin/echo hello"
         assert_eq!(hooks.len(), 1);
         assert_eq!(hooks[0].event, "SessionStart");
         assert_eq!(hooks[0].command.as_deref(), Some("/bin/echo hello"));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn scans_codex_session_end_hooks() {
+        let root = std::env::temp_dir().join(format!(
+            "tendi-hooks-session-end-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("system time before epoch")
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).expect("create temp root");
+        let path = root.join("config.toml");
+        fs::write(
+            &path,
+            r#"
+[[hooks.SessionEnd]]
+[[hooks.SessionEnd.hooks]]
+type = "command"
+command = "/bin/echo session-ended"
+timeout = 2
+"#,
+        )
+        .expect("write hooks");
+        let mut hooks = Vec::new();
+        let mut warnings = Vec::new();
+
+        scan_codex_config_hooks(&path, &mut hooks, &mut warnings);
+
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(hooks.len(), 1);
+        assert_eq!(hooks[0].event, "SessionEnd");
+        assert_eq!(hooks[0].command.as_deref(), Some("/bin/echo session-ended"));
+        assert_eq!(
+            hooks[0].provider_current_hash,
+            crate::providers::codex::hook_current_hash(
+                "SessionEnd",
+                None,
+                "/bin/echo session-ended",
+                2,
+                false,
+                None,
+                None,
+            ),
+        );
         let _ = fs::remove_dir_all(root);
     }
 

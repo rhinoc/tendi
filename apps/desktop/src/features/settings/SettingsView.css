@@ -70,8 +70,7 @@
 }
 
 .settingsApplicationPair .settingsSection {
-  grid-template-columns: 1fr;
-  gap: 6px;
+  grid-template-columns: 120px minmax(0, 1fr);
 }
 
 .settingsThemeControls {

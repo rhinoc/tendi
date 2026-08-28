@@ -32,6 +32,12 @@
   gap: 3px;
 }
 
+.settingsBackupPrimaryActions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
 .settingsBackupNotConfigured,
 .settingsBackupLastSync {
   color: var(--muted);
@@ -52,6 +58,10 @@
   align-items: center;
 }
 
+.settingsBackupSummaryActions.isLoading {
+  align-items: center;
+}
+
 .settingsBackupFormGrid {
   display: grid;
   grid-template-columns: minmax(0, 1.7fr) minmax(160px, .8fr);
@@ -64,6 +74,18 @@
   color: var(--muted);
   font-size: var(--text-sm);
   line-height: var(--leading-ui);
+}
+
+.settingsBackupRepositoryInput {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.settingsBackupRepositoryInput .settingsTextInput {
+  min-width: 0;
+  flex: 1 1 auto;
 }
 
 .settingsTextInput {
@@ -100,9 +122,12 @@
 
 .settingsBackupVersionList {
   display: grid;
+  max-height: 280px;
   padding: 0;
   margin: 0;
   list-style: none;
+  overflow-y: auto;
+  overscroll-behavior: contain;
 }
 
 .settingsBackupVersionList li {
@@ -142,13 +167,40 @@
 
 .backupDetailsDialog {
   width: min(620px, calc(100vw - 32px));
+  height: min(720px, calc(100vh - 64px));
+  display: flex;
+  flex-direction: column;
 }
 
 .backupDetailsBody {
+  min-width: 0;
+  min-height: 0;
+  flex: 1 1 auto;
   box-sizing: border-box;
-  height: min(560px, calc(100vh - 160px));
-  overflow: auto;
   padding: 0 22px 20px;
+  overflow: hidden;
+}
+
+.backupDetailsCategoryBody {
+  overflow: auto;
+}
+
+.backupDetailsHomeBody {
+  display: flex;
+  flex-direction: column;
+}
+
+.backupDetailsHomeBody .backupHistorySection {
+  min-height: 0;
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+}
+
+.backupDetailsHomeBody .settingsBackupVersionList {
+  min-height: 0;
+  max-height: none;
+  flex: 1 1 auto;
 }
 
 .backupDetailsSection {
@@ -185,6 +237,14 @@
   min-height: 42px;
 }
 
+.backupContentItemRow {
+  padding-inline: 8px;
+}
+
+.backupCategoryRow {
+  min-height: 32px;
+}
+
 .backupCategoryDetail {
   min-width: 0;
   flex: 1 1 auto;
@@ -204,15 +264,24 @@
   color: var(--accent);
 }
 
-.backupCategoryDetail > span,
+.backupCategoryDetail > span {
+  min-width: 0;
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
 .backupContentItemRow > div {
   min-width: 0;
   display: grid;
   gap: 3px;
 }
 
-.backupCategoryDetail strong,
-.backupContentItemRow strong {
+.backupContentItemRow:nth-child(even) {
+  background: var(--inset-fill);
+}
+
+.backupCategoryDetail strong {
   overflow: hidden;
   color: var(--text);
   font-size: var(--text-sm);
@@ -222,35 +291,13 @@
   white-space: nowrap;
 }
 
-.backupCategoryDetail span span,
-.backupContentItemRow span {
+.backupCategoryDetail span span {
   overflow: hidden;
   color: var(--muted);
   font-size: var(--text-xs);
   line-height: var(--leading-ui);
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-
-.backupDetailsBack {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  padding: 0;
-  border: 0;
-  background: transparent;
-  color: var(--muted);
-  font: inherit;
-  font-size: var(--text-sm);
-  cursor: pointer;
-}
-
-.backupDetailsBack:hover {
-  color: var(--text);
-}
-
-.backupContentDetailSection {
-  padding-top: 12px;
 }
 
 .backupRestoreDialog {

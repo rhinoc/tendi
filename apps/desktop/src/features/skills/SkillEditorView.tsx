@@ -24,13 +24,15 @@ import {
   parentPath,
   preferredSkillFileName,
   invokeCommand,
+  dialogCopy,
   safeInvoke,
   TauriCommand,
   uniqueChildPath,
   type SkillFileEntry,
-  type SkillLike,
+  type NormalizedSkill,
   type SessionSkillLinkRecord,
 } from "../../lib/index.ts";
+import type { SkillIndexStatus } from "../../store/desktop-store.ts";
 import { EditorHeader } from "../../components/shared/EditorHeader.tsx";
 import { DialogLoadingFallback } from "../../components/shared/DialogLoadingFallback.tsx";
 import { DeleteConfirmationDialog } from "../../components/shared/DeleteConfirmationDialog.tsx";
@@ -48,24 +50,8 @@ import { LinkedSessionsDrawerFallback } from "../sessions/LinkedSessionsDrawerFa
 const DiscardChangesDialog = lazy(() => import("../../components/shared/DiscardChangesDialog.tsx").then(({ DiscardChangesDialog: component }) => ({ default: component })));
 const LinkedSessionsDrawer = lazy(() => import("../sessions/linked-sessions.tsx").then(({ LinkedSessionsDrawer: component }) => ({ default: component })));
 
-export type SkillEditorRecord = SkillLike & {
-  name: string;
-  agents: string[];
-  visibility: string;
-  description: string;
-  dependencies: string[];
-  dependents: string[];
-  paths: NonNullable<SkillLike["paths"]>;
-};
-
-export type SkillIndexStatus = {
-  indexed?: number;
-  running?: boolean;
-  last_indexed_at?: string | null;
-};
-
 export type SkillEditorViewProps = {
-  skill: SkillEditorRecord;
+  skill: NormalizedSkill;
   skills: SkillDependencyRecord[];
   back: () => void;
   onReadSkillIndexStatus?: () => Promise<SkillIndexStatus | null>;
@@ -577,7 +563,7 @@ export function SkillEditorView({ skill, skills, back, onReadSkillIndexStatus, s
       {showDiscardDialog ? (
         <Suspense fallback={(
           <DialogLoadingFallback
-            title="Discard unsaved changes?"
+            title={dialogCopy.discardChangesTitle}
             label="Loading discard dialog"
             descriptionId="discard-changes-loading-description"
             onOpenChange={setShowDiscardDialog}

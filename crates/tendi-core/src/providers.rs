@@ -8,7 +8,7 @@ use serde_json::Value;
 
 use crate::{
     analytics::{AnalyticsCapabilities, SessionAnalyticsRecord},
-    hooks::{HookDeleteRequest, HookRecord, HookSetEnabledRequest},
+    hooks::{HookDeleteRequest, HookRecord, HookSetEnabledRequest, HookSourceMatch},
     mcp::{McpServerRecord, McpSetEnabledRequest},
     rules::{self, RuleRecord},
     session_skills::Evidence,
@@ -487,6 +487,25 @@ pub(crate) trait AgentProvider: Sync {
         )
     }
 
+    fn backup_mcp_entry(
+        &self,
+        _path: &Path,
+        _server_path: &[String],
+        _name: &str,
+    ) -> Result<Value> {
+        bail!("MCP entry sync is not supported for {}", self.storage_key())
+    }
+
+    fn restore_mcp_entry(
+        &self,
+        _path: &Path,
+        _server_path: &[String],
+        _name: &str,
+        _entry: &Value,
+    ) -> Result<String> {
+        bail!("MCP entry restore is not supported for {}", self.storage_key())
+    }
+
     fn mcp_status_after_toggle(&self, enabled: bool) -> &'static str;
 
     fn delete_hooks(
@@ -503,6 +522,19 @@ pub(crate) trait AgentProvider: Sync {
         _source: &str,
     ) -> Result<String> {
         bail!("hook enable/disable is not supported for {}", self.storage_key())
+    }
+
+    fn backup_hook_entry(&self, _path: &Path, _identity: &HookSourceMatch) -> Result<Value> {
+        bail!("hook entry sync is not supported for {}", self.storage_key())
+    }
+
+    fn restore_hook_entry(
+        &self,
+        _path: &Path,
+        _identity: &HookSourceMatch,
+        _entry: &Value,
+    ) -> Result<String> {
+        bail!("hook entry restore is not supported for {}", self.storage_key())
     }
 
     fn hook_read_only_reason(&self, path: &Path) -> Option<&'static str> {
