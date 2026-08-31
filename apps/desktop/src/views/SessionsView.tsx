@@ -1,11 +1,13 @@
 import { Tooltip as AppTooltip } from "../components/shared/Tooltip.tsx";
 import { lazy, memo, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ChangeEvent, type ReactNode } from "react";
-import { AlertCircle, ArrowDownToLine, ArrowUpRight, ArrowUpToLine, BarChart3, Check, ChevronDown, ChevronLeft, ChevronRight, ChevronRight as ChevronRightIcon, Filter, FolderOpen, GitFork, Info, LocateFixed, MessageSquarePlus, MessageSquareText, PanelRightClose, RefreshCw, Search, SearchX, Sparkles, TerminalSquare, Upload, X } from "lucide-react";
+import { AlertCircle, AppWindow, ArrowDownToLine, ArrowUpRight, ArrowUpToLine, Check, ChevronDown, ChevronLeft, ChevronRight, ChevronRight as ChevronRightIcon, Filter, FolderOpen, GitFork, Info, LocateFixed, MessageSquarePlus, MessageSquareText, PanelRightClose, RefreshCw, Search, SearchX, Sparkles, TerminalSquare, Upload, X } from "lucide-react";
 import { Group as PanelGroup, Panel } from "react-resizable-panels";
 import { ContextMenu, Dialog, DropdownMenu, Popover } from "radix-ui";
 
 import { DataTable } from "../components/DataTable.tsx";
 import type { ColumnDef, SortState } from "../components/DataTable.types";
+import { SortDirection } from "../lib/sort.ts";
+import { agentDefinitions } from "../lib/agent/index.ts";
 import type { TokenMetricProps } from "../components/TokenStatusBar.tsx";
 import { AgentBadge } from "../components/shared/AgentBadge.tsx";
 import { Badge } from "../components/shared/Badge.tsx";
@@ -21,6 +23,7 @@ import { EmptyState } from "../components/shared/EmptyState.tsx";
 import { InfoDropdownMenu } from "../components/shared/InfoDropdownMenu.tsx";
 import { InfoSection } from "../components/shared/InfoSection.tsx";
 import { IconButton } from "../components/shared/IconButton.tsx";
+import { LoadErrorState } from "../components/shared/LoadErrorState.tsx";
 import { LoadingIcon } from "../components/shared/LoadingIcon.tsx";
 import { LoadingInline } from "../components/shared/LoadingInline.tsx";
 import { LoadingState } from "../components/shared/LoadingState.tsx";
@@ -33,29 +36,30 @@ import { StatefulButton } from "../components/shared/StatefulButton.tsx";
 import { Toast } from "../components/shared/Toast.tsx";
 import { useElementSize } from "../components/shared/useElementSize.ts";
 import { findTextRanges } from "../components/shared/text-ranges.ts";
-import { SkillRelationshipMap } from "../features/skills/SkillRelationshipMap.tsx";
+import { RelationshipGraphKind, SkillRelationshipMap } from "../features/skills/SkillRelationshipMap.tsx";
 import { createSessionTableColumns } from "../features/sessions/createSessionTableColumns.tsx";
 import { SessionTitleText, TranscriptLinkText } from "../components/shared/TranscriptLinkText.tsx";
 import "./SessionsView.css";
 import { cacheRateTone } from "../lib/token-style.ts";
+import { TokenUsageSource } from "../lib/tokenizer-types.ts";
+import { planSessionListLocation, SessionListLocationPlan, shouldShowSessionListLocator } from "../lib/session-list-locator.ts";
+import { fixedVirtualRange, virtualRangeFor } from "../lib/virtualization.ts";
 import {
   SESSION_FREEZE_COLUMN,
+  AsyncStatus,
   TauriCommand,
   copiedPathLabel,
   copiedValueLabel,
   copyPathLabel,
   copyValueLabel,
   compactDateTime,
-  compareSessions,
   createLatestRequestAuthority,
-  dayGroupKey,
   formatDuration,
   formatSessionTitle,
   formatTranscriptPreview,
   formatUserPath,
   friendlyAgent,
   groupTranscriptItems,
-  invokeCommand,
   isWebSource,
   logger,
   mergeTranscriptItems,
@@ -64,17 +68,22 @@ import {
   resolveInitialSession,
   safeInvoke,
   sessionCacheRate,
+  sessionIdentity,
+  sessionSourceExternalKey,
   sessionKind,
-  sessionProject,
-  sessionProjectGroupKey,
   sessionAppDeepLink,
   sessionResumeErrorMessage,
   sessionResumeLabel,
   sessionResumeTargetForAgent,
   sessionResumeTargetForMenu,
-  sessionProjectOption,
+  sessionResumeTargetsForMenu,
   sessionWorkspace,
   sessionWorkspacePath,
+  SessionResumeOutcomeStatus,
+  SessionResumeTarget,
+  SessionKind,
+  SessionSortKey,
+  TranscriptGroupType,
   transcriptItemType,
   transcriptItemsSize,
 } from "../lib/index.ts";
@@ -91,11 +100,19 @@ import type {
   SessionProjectSummary,
   SessionResumeOutcome,
   SessionResumeState,
-  SessionResumeTarget,
   SessionRecord,
   SessionSkillLinkRecord,
 } from "../lib/index.ts";
 import type { SkillIndexStatus } from "../store/desktop-store.ts";
+import {
+  IMPORTED_SESSION_AGENT,
+  createImportedSessionRecord,
+  sessionPageContextKey,
+  sessionPageForRow,
+  selectSessionRelationships,
+  selectSessionListView,
+  sessionTableRowId,
+} from "../controllers/session-controller.ts";
 
 const SessionTokenStatusBar = lazy(() => import("../components/SessionTokenStatusBar.tsx").then(({ SessionTokenStatusBar: component }) => ({ default: component })));
 
@@ -117,15 +134,23 @@ type TranscriptItemRecord = {
 };
 
 const SESSION_SEARCH_DEBOUNCE_MS = 300;
-const SESSION_SEARCH_BATCH_SIZE = 100;
 const SESSION_LOCATOR_MIN_ITEMS = 4;
 const SESSION_REFRESH_ERROR = "Could not refresh sessions. Try again.";
-const IMPORTED_SESSION_AGENT = "Imported";
 const TRANSCRIPT_CACHE_ITEM_LIMIT = 1_200;
 const TRANSCRIPT_CACHE_CHARACTER_LIMIT = 8 * 1024 * 1024;
+const TRANSCRIPT_IMPORT_PROVIDER_PLACEHOLDER = "__choose_transcript_provider__";
+const TRANSCRIPT_IMPORT_PROVIDERS = agentDefinitions
+  .filter((definition) => definition.transcriptParser)
+  .map((definition) => ({ value: definition.id, label: definition.displayName }));
 
-type ImportFeedbackState = "idle" | "loading" | "success" | "warning" | "error";
-type ResumeFeedbackState = Exclude<SessionResumeState, "idle">;
+enum ImportFeedbackState {
+  Idle = "idle",
+  Loading = "loading",
+  Success = "success",
+  Warning = "warning",
+  Error = "error",
+}
+type ResumeFeedbackState = AsyncStatus.Loading | AsyncStatus.Success | AsyncStatus.Error;
 type PendingResumeConflict = { session: SessionRecord };
 
 type TranscriptImportWorkerResponse =
@@ -134,6 +159,7 @@ type TranscriptImportWorkerResponse =
 
 function parseImportedTranscript(
   file: File,
+  providerId: string,
   workerRef: { current: { worker: Worker; cancel: () => void } | null },
 ): Promise<JsonlTranscriptParseResult> {
   const worker = new Worker(
@@ -167,7 +193,7 @@ function parseImportedTranscript(
     };
     workerRef.current = { worker, cancel };
     try {
-      worker.postMessage(file);
+      worker.postMessage({ file, providerId });
     } catch (error) {
       logger.error("sessions transcript import worker failed", { error });
       settled = true;
@@ -203,7 +229,12 @@ function trimTranscriptCache(cache: Map<string, TranscriptPage>) {
   }
 }
 
-type TranscriptSearchScope = "user" | "assistant" | "system" | "tool";
+enum TranscriptSearchScope {
+  User = "user",
+  Assistant = "assistant",
+  System = "system",
+  Tool = "tool",
+}
 
 type TranscriptSearchScopeState = Record<TranscriptSearchScope, boolean>;
 
@@ -212,36 +243,36 @@ const TRANSCRIPT_SEARCH_SCOPES: Array<{
   label: string;
   ariaLabel: string;
 }> = [
-  { id: "user", label: "User", ariaLabel: "Search user messages" },
-  { id: "assistant", label: "Assistant", ariaLabel: "Search assistant messages" },
-  { id: "system", label: "System", ariaLabel: "Search system messages" },
-  { id: "tool", label: "Tools", ariaLabel: "Search tool calls" },
+  { id: TranscriptSearchScope.User, label: "User", ariaLabel: "Search user messages" },
+  { id: TranscriptSearchScope.Assistant, label: "Assistant", ariaLabel: "Search assistant messages" },
+  { id: TranscriptSearchScope.System, label: "System", ariaLabel: "Search system messages" },
+  { id: TranscriptSearchScope.Tool, label: "Tools", ariaLabel: "Search tool calls" },
 ];
 
 const DEFAULT_TRANSCRIPT_SEARCH_SCOPES: TranscriptSearchScopeState = {
-  user: true,
-  assistant: true,
-  system: false,
-  tool: false,
+  [TranscriptSearchScope.User]: true,
+  [TranscriptSearchScope.Assistant]: true,
+  [TranscriptSearchScope.System]: false,
+  [TranscriptSearchScope.Tool]: false,
 };
 
 function transcriptSearchScope(type: string | undefined): TranscriptSearchScope {
   switch (type) {
     case "user":
     case "notification":
-      return "user";
+      return TranscriptSearchScope.User;
     case "context":
     case "compaction":
     case "model_config":
-      return "system";
+      return TranscriptSearchScope.System;
     case "tool":
-    case "toolGroup":
-      return "tool";
+    case TranscriptGroupType.ToolGroup:
+      return TranscriptSearchScope.Tool;
     case "assistant":
     case "thinking":
     case "reasoning":
     default:
-      return "assistant";
+      return TranscriptSearchScope.Assistant;
   }
 }
 
@@ -306,7 +337,10 @@ type SkillEvidenceTarget = {
 
 type TranscriptSearchTarget = SkillEvidenceTarget;
 
-type KeyboardNavigationScope = "list" | "detail";
+enum KeyboardNavigationScope {
+  List = "list",
+  Detail = "detail",
+}
 
 type KeyboardNavigationScopeRef = {
   current: KeyboardNavigationScope;
@@ -342,7 +376,7 @@ function estimatedTranscriptItemHeight(item: TranscriptItemRecord, previousItem?
     case "user":
     case "assistant":
       return 120 + TRANSCRIPT_ITEM_VERTICAL_INSET + topInset;
-    case "toolGroup":
+    case TranscriptGroupType.ToolGroup:
       return 52 + TRANSCRIPT_ITEM_VERTICAL_INSET;
     case "thinking":
     case "reasoning":
@@ -369,32 +403,25 @@ function isKeyboardNavigationIgnoredTarget(target: EventTarget | null) {
   ));
 }
 
-function offsetIndex(offsets: number[], target: number): number {
-  if (offsets.length <= 1) return 0;
-  let low = 0;
-  let high = offsets.length - 1;
-  while (low < high) {
-    const middle = Math.ceil((low + high) / 2);
-    if (offsets[middle] <= target) low = middle;
-    else high = middle - 1;
-  }
-  return Math.min(offsets.length - 2, Math.max(0, low));
-}
-
 function transcriptRangeForViewport(
   itemCount: number,
   offsets: number[],
+  measured: readonly number[] | undefined,
   scrollTop: number,
   viewportHeight: number,
   virtualized: boolean,
 ) {
   if (!virtualized || itemCount === 0) return { start: 0, end: itemCount };
-  const firstVisible = offsetIndex(offsets, Math.max(0, scrollTop));
-  const lastVisible = offsetIndex(offsets, Math.max(0, scrollTop + viewportHeight));
-  return {
-    start: Math.max(0, firstVisible - TRANSCRIPT_VIRTUAL_OVERSCAN),
-    end: Math.min(itemCount, lastVisible + TRANSCRIPT_VIRTUAL_OVERSCAN + 1),
-  };
+  return virtualRangeFor({
+    datasetEpoch: `transcript:${itemCount}:${offsets.at(-1) ?? 0}`,
+    stableKey: "transcript-index",
+    count: itemCount,
+    estimate: TRANSCRIPT_DEFAULT_ITEM_HEIGHT + TRANSCRIPT_ITEM_VERTICAL_INSET,
+    measured,
+    scrollOffset: scrollTop,
+    viewportSize: viewportHeight,
+    overscan: TRANSCRIPT_VIRTUAL_OVERSCAN,
+  });
 }
 
 function useTranscriptVirtualizer(items: TranscriptItemRecord[], rootRef: { current: HTMLDivElement | null }, resetKey: string) {
@@ -429,8 +456,14 @@ function useTranscriptVirtualizer(items: TranscriptItemRecord[], rootRef: { curr
   }, [items, measurementVersion]);
   const offsetsRef = useRef(offsets);
   offsetsRef.current = offsets;
+  const measured = useMemo(
+    () => offsets.slice(0, -1).map((end, index) => end - offsets[index]),
+    [offsets],
+  );
+  const measuredRef = useRef(measured);
+  measuredRef.current = measured;
   const updateRenderRange = useCallback((nextScrollTop: number) => {
-    const next = transcriptRangeForViewport(items.length, offsetsRef.current, nextScrollTop, viewportSize.height, virtualized);
+    const next = transcriptRangeForViewport(items.length, offsetsRef.current, measuredRef.current, nextScrollTop, viewportSize.height, virtualized);
     const current = renderRangeRef.current;
     if (current.start === next.start && current.end === next.end) return;
     renderRangeRef.current = next;
@@ -527,8 +560,8 @@ function useTranscriptVirtualizer(items: TranscriptItemRecord[], rootRef: { curr
   }, []);
 
   const range = useMemo(() => {
-    return transcriptRangeForViewport(items.length, offsets, renderScrollTop, viewportSize.height, virtualized);
-  }, [items.length, offsets, renderScrollTop, viewportSize.height, virtualized]);
+    return transcriptRangeForViewport(items.length, offsets, measured, renderScrollTop, viewportSize.height, virtualized);
+  }, [items.length, measured, offsets, renderScrollTop, viewportSize.height, virtualized]);
 
   useEffect(() => {
     renderRangeRef.current = range;
@@ -542,7 +575,7 @@ function useTranscriptVirtualizer(items: TranscriptItemRecord[], rootRef: { curr
     const top = offsetsRef.current[index] ?? 0;
     root.scrollTo({ top, behavior });
     scrollTopRef.current = top;
-    renderRangeRef.current = transcriptRangeForViewport(items.length, offsetsRef.current, top, viewportSize.height, virtualized);
+    renderRangeRef.current = transcriptRangeForViewport(items.length, offsetsRef.current, measuredRef.current, top, viewportSize.height, virtualized);
     setRenderScrollTop(top);
   }, [items.length, rootRef, viewportSize.height, virtualized]);
 
@@ -586,6 +619,41 @@ function linkEvidenceTime(link: SessionSkillLinkRecord) {
 
 function transcriptItemKey(prefix: string | undefined, index: string | number) {
   return prefix ? `${prefix}-${index}` : `${index}`;
+}
+
+function transcriptRefreshIdentity(item: TranscriptItemRecord) {
+  return JSON.stringify([
+    transcriptItemType(item),
+    item.body,
+    item.tag,
+    item.time,
+    item.command,
+    item.linkedSessionId,
+    item.model,
+    item.effort,
+    item.callId,
+    item.tools?.map((tool) => [
+      transcriptItemType(tool),
+      tool.body,
+      tool.tag,
+      tool.time,
+      tool.command,
+      tool.linkedSessionId,
+      tool.model,
+      tool.effort,
+      tool.callId,
+    ]),
+  ]);
+}
+
+function preserveTranscriptTail(currentItems: TranscriptItemRecord[], refreshedItems: TranscriptItemRecord[]) {
+  if (currentItems.length <= refreshedItems.length) return refreshedItems;
+  const sharesPrefix = refreshedItems.every((item, index) => (
+    transcriptRefreshIdentity(currentItems[index]) === transcriptRefreshIdentity(item)
+  ));
+  return sharesPrefix
+    ? [...refreshedItems, ...currentItems.slice(refreshedItems.length)]
+    : refreshedItems;
 }
 
 const transcriptObjectIdentity = new WeakMap<object, string>();
@@ -656,7 +724,7 @@ function findSkillEvidenceTarget(transcriptItems: TranscriptItemRecord[], link: 
   const evidenceTime = linkEvidenceTime(link);
   for (let index = 0; index < transcriptItems.length; index += 1) {
     const item = transcriptItems[index];
-    if (transcriptItemType(item) === "toolGroup") {
+    if (transcriptItemType(item) === TranscriptGroupType.ToolGroup) {
       const tools = item.tools ?? [];
       for (let toolIndex = 0; toolIndex < tools.length; toolIndex += 1) {
         if (evidenceMatchesItem(tools[toolIndex], evidenceText, evidenceTime)) {
@@ -689,7 +757,7 @@ function findTranscriptSearchTargets(
     const type = transcriptItemType(item);
     if (!scopes[transcriptSearchScope(type)]) return;
 
-    if (type === "toolGroup") {
+    if (type === TranscriptGroupType.ToolGroup) {
       (item.tools ?? []).forEach((tool, toolIndex) => {
         if (transcriptItemText(tool).includes(needle)) {
           matches.push({
@@ -715,7 +783,7 @@ function transcriptSearchTargetForHit(
   const item = transcriptItems[hit.groupIndex];
   if (!item) return null;
   const type = transcriptItemType(item);
-  if (type === "toolGroup" && hit.toolIndex !== undefined && item.tools?.[hit.toolIndex]) {
+  if (type === TranscriptGroupType.ToolGroup && hit.toolIndex !== undefined && item.tools?.[hit.toolIndex]) {
     return {
       key: transcriptItemKey("tool", `${hit.groupIndex}-${hit.toolIndex}`),
       groupKey: transcriptItemKey("tool-group", hit.groupIndex),
@@ -796,7 +864,6 @@ function cssEscape(value: string) {
 
 export function TranscriptPanel({
   session,
-  parentSession,
   childSessions,
   sessionTree,
   items,
@@ -810,10 +877,6 @@ export function TranscriptPanel({
   skillLinksLoaded,
   skillLinksError,
   onCollapse,
-  onResume,
-  resumeTarget,
-  inferredResumeTarget,
-  resumeState,
   onOpenSession,
   onOpenSkill,
   onLoadSkills,
@@ -822,12 +885,9 @@ export function TranscriptPanel({
   onReportError,
   searchTranscript,
   onSavePrompt,
-  showSessionLocator,
-  onLocateSession,
   keyboardNavigationScopeRef,
 }: {
   session: SessionRecord;
-  parentSession?: SessionRecord;
   childSessions: SessionRecord[];
   sessionTree: SessionRecord[];
   items: TranscriptItemRecord[];
@@ -841,10 +901,6 @@ export function TranscriptPanel({
   skillLinksLoaded: boolean;
   skillLinksError?: string;
   onCollapse: () => void;
-  onResume: (session: SessionRecord) => void;
-  resumeTarget: SessionResumeTarget;
-  inferredResumeTarget?: Exclude<SessionResumeTarget, "auto">;
-  resumeState: SessionResumeState;
   onOpenSession: (session: SessionRecord) => void;
   onOpenSkill?: (skillName: string) => void;
   onLoadSkills?: () => void;
@@ -853,8 +909,6 @@ export function TranscriptPanel({
   onReportError?: (message: string) => void;
   searchTranscript?: (session: SessionRecord, query: string, scopes: TranscriptSearchScopes) => Promise<TranscriptSearchResult | null>;
   onSavePrompt?: (body: string) => Promise<boolean>;
-  showSessionLocator: boolean;
-  onLocateSession: () => void;
   keyboardNavigationScopeRef: KeyboardNavigationScopeRef;
 }) {
   const transcriptItems = useMemo(() => {
@@ -906,11 +960,38 @@ export function TranscriptPanel({
   const transcriptNavigationKeyRef = useRef("");
   const transcriptNavigationPromiseRef = useRef(Promise.resolve());
   const transcriptNavigationSessionKeyRef = useRef("");
+  const transcriptSearchScrollSnapshotRef = useRef<{ top: number; distanceFromBottom: number } | null>(null);
   const transcriptNavigationSessionKey = `${session.agent}:${session.id}:${session.path}`;
   transcriptNavigationSessionKeyRef.current = transcriptNavigationSessionKey;
   const transcriptItemsRef = useRef(transcriptItems);
   transcriptItemsRef.current = transcriptItems;
   const normalizedSessionSearchQuery = `${sessionSearchQuery ?? ""}`.trim().toLowerCase();
+  const captureTranscriptSearchScroll = useCallback(() => {
+    const root = transcriptRef.current;
+    if (!root) return;
+    const maxScrollTop = Math.max(0, root.scrollHeight - root.clientHeight);
+    transcriptSearchScrollSnapshotRef.current = {
+      top: root.scrollTop,
+      distanceFromBottom: maxScrollTop - root.scrollTop,
+    };
+    root.scrollTo({ top: root.scrollTop, behavior: "auto" });
+  }, []);
+  const transcriptSearchContextRef = useRef({
+    query: normalizedSessionSearchQuery,
+    sessionKey: transcriptNavigationSessionKey,
+  });
+  useLayoutEffect(() => {
+    const previous = transcriptSearchContextRef.current;
+    if (previous.sessionKey !== transcriptNavigationSessionKey) {
+      transcriptSearchScrollSnapshotRef.current = null;
+    } else if (previous.query && !normalizedSessionSearchQuery && searchOpen) {
+      captureTranscriptSearchScroll();
+    }
+    transcriptSearchContextRef.current = {
+      query: normalizedSessionSearchQuery,
+      sessionKey: transcriptNavigationSessionKey,
+    };
+  }, [captureTranscriptSearchScroll, normalizedSessionSearchQuery, searchOpen, transcriptNavigationSessionKey]);
   useEffect(() => {
     window.clearTimeout(highlightTimerRef.current);
     setHighlightedKey("");
@@ -939,11 +1020,15 @@ export function TranscriptPanel({
   );
   const searchResultCount = remoteSearchActive ? (searchResult?.hits.length ?? 0) : searchTargets.length;
   const clearMessageSearch = useCallback(() => {
+    captureTranscriptSearchScroll();
+    window.clearTimeout(highlightTimerRef.current);
+    setHighlightedKey("");
+    setTranscriptFocusRequest(null);
     setSearchQuery("");
     setDebouncedSearchQuery("");
     setSearchScopes(DEFAULT_TRANSCRIPT_SEARCH_SCOPES);
     setSearchOpen(false);
-  }, []);
+  }, [captureTranscriptSearchScroll]);
   const setSearchScope = useCallback((scope: TranscriptSearchScope, checked: boolean) => {
     setSearchScopes((current) => {
       if (!checked && TRANSCRIPT_SEARCH_SCOPES.every((item) => item.id === scope || !current[item.id])) {
@@ -1076,6 +1161,19 @@ export function TranscriptPanel({
     const frame = window.requestAnimationFrame(updateTranscriptScrollEdges);
     return () => window.cancelAnimationFrame(frame);
   }, [hasMore, loading, loadingMore, transcriptItems, updateTranscriptScrollEdges]);
+  useLayoutEffect(() => {
+    const snapshot = transcriptSearchScrollSnapshotRef.current;
+    if (!snapshot || searchOpen) return;
+    const root = transcriptRef.current;
+    if (!root) return;
+    const maxScrollTop = Math.max(0, root.scrollHeight - root.clientHeight);
+    const nextScrollTop = snapshot.distanceFromBottom <= 2
+      ? maxScrollTop
+      : Math.min(snapshot.top, maxScrollTop);
+    root.scrollTo({ top: nextScrollTop, behavior: "auto" });
+    transcriptSearchScrollSnapshotRef.current = null;
+    updateTranscriptScrollEdges();
+  }, [searchOpen, updateTranscriptScrollEdges]);
   const focusTranscriptTarget = useCallback((target: TranscriptSearchTarget, preferSearchMatch = false, behavior: ScrollBehavior = "smooth") => {
     window.clearTimeout(highlightTimerRef.current);
     setHighlightedKey(target.key);
@@ -1100,7 +1198,13 @@ export function TranscriptPanel({
       ? node.querySelector(".transcriptSearchMark") ?? node
       : node;
     setTranscriptFocusRequest(null);
-    destination.scrollIntoView({ block: "center", behavior: request.behavior });
+    const destinationBounds = destination.getBoundingClientRect();
+    const rootBounds = root.getBoundingClientRect();
+    const centeredTop = root.scrollTop
+      + destinationBounds.top
+      - rootBounds.top
+      - (root.clientHeight - destinationBounds.height) / 2;
+    root.scrollTo({ top: Math.max(0, centeredTop), behavior: request.behavior });
     highlightTimerRef.current = window.setTimeout(() => setHighlightedKey(""), 1800);
   }, [transcriptFocusRequest, transcriptItems, transcriptRenderRangeKey]);
   const ensureSearchHitLoaded = useCallback(async (hit: TranscriptSearchHit) => {
@@ -1156,7 +1260,7 @@ export function TranscriptPanel({
   const selectLocatorItem = useCallback((key: string, behavior?: ScrollBehavior) => {
     const index = transcriptIndexFromKey(key);
     if (index === null) return;
-    keyboardNavigationScopeRef.current = "detail";
+    keyboardNavigationScopeRef.current = KeyboardNavigationScope.Detail;
     transcriptNavigationKeyRef.current = key;
     void ensureTranscriptIndexLoaded(index).then((loaded) => {
       if (loaded) focusTranscriptTarget({ key, index }, false, behavior);
@@ -1216,7 +1320,7 @@ export function TranscriptPanel({
     const pending = pendingUserMessageTarget;
     if (!pending) return;
     if (
-      keyboardNavigationScopeRef.current !== "detail"
+      keyboardNavigationScopeRef.current !== KeyboardNavigationScope.Detail
       || pending.sessionKey !== transcriptNavigationSessionKey
     ) {
       setPendingUserMessageTarget(null);
@@ -1240,7 +1344,7 @@ export function TranscriptPanel({
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
       if (
-        keyboardNavigationScopeRef.current !== "detail"
+      keyboardNavigationScopeRef.current !== KeyboardNavigationScope.Detail
         || (event.key !== "ArrowUp" && event.key !== "ArrowDown")
         || event.defaultPrevented
         || event.metaKey
@@ -1286,57 +1390,16 @@ export function TranscriptPanel({
     const linkedSession = childSessions.find((child) => child.id === sessionId);
     if (linkedSession) onOpenSession(linkedSession);
   }, [childSessions, onOpenSession]);
-  const configuredTarget = sessionResumeTargetForAgent(resumeTarget, session.agent);
-  const target = session.agent === IMPORTED_SESSION_AGENT
-    ? "terminal"
-    : sessionResumeTargetForMenu(configuredTarget, inferredResumeTarget);
-  const resumeLabel = sessionResumeLabel(resumeState, target);
   return (
     <aside
       className="transcriptPanel"
-      onPointerDownCapture={() => { keyboardNavigationScopeRef.current = "detail"; }}
-      onFocusCapture={() => { keyboardNavigationScopeRef.current = "detail"; }}
+      onPointerDownCapture={() => { keyboardNavigationScopeRef.current = KeyboardNavigationScope.Detail; }}
+      onFocusCapture={() => { keyboardNavigationScopeRef.current = KeyboardNavigationScope.Detail; }}
     >
       <header className="threadHeader">
         <div className="threadTitleLine">
           <h2><SessionTitleText interactive={false} value={session.title} /></h2>
           <div className="threadHeaderActions">
-            {showSessionLocator ? (
-              <AppTooltip content="Locate session in list">
-                <IconButton
-                  type="button"
-                  className="threadPanelToggle"
-                  aria-label="Locate session in list"
-                  onClick={onLocateSession}
-                >
-                  <LocateFixed size={15} aria-hidden="true" />
-                </IconButton>
-              </AppTooltip>
-            ) : null}
-            <AppTooltip content={resumeLabel}>
-              <StatefulButton
-                size="sm"
-                variant="ghost"
-                className={`threadPanelToggle sessionResumeButton${resumeState === "success" ? " isSuccess" : resumeState === "error" ? " isError" : ""}`}
-                width="30px"
-                minWidth="30px"
-                style={{ height: "30px", padding: 0, display: "grid", placeItems: "center", gap: 0 }}
-                state={resumeState}
-                aria-label={resumeLabel}
-                aria-busy={resumeState === "loading" || target === "auto"}
-                disabled={resumeState === "loading"}
-                onClick={() => onResume(session)}
-                loadingContent={<LoadingIcon size={15} />}
-                successContent={<Check size={15} aria-hidden="true" />}
-                errorContent={<AlertCircle size={15} aria-hidden="true" />}
-              >
-                {target === "app"
-                  ? <MessageSquareText size={15} aria-hidden="true" />
-                  : target === "terminal"
-                    ? <TerminalSquare size={15} aria-hidden="true" />
-                    : <LoadingIcon size={15} />}
-              </StatefulButton>
-            </AppTooltip>
             <SessionRelationsPopover
               session={session}
               sessionTree={sessionTree}
@@ -1447,8 +1510,8 @@ export function TranscriptPanel({
                 const index = transcriptRenderRange.start + relativeIndex;
                 const type = transcriptItemType(item);
                 const previousType = index > 0 ? transcriptItemType(transcriptItems[index - 1]) : undefined;
-                const itemKey = transcriptItemKey(type === "toolGroup" ? "tool-group" : type, index);
-                const reactKeyBase = type === "toolGroup"
+                const itemKey = transcriptItemKey(type === TranscriptGroupType.ToolGroup ? "tool-group" : type, index);
+                const reactKeyBase = type === TranscriptGroupType.ToolGroup
                   ? transcriptGroupReactKey(item.tools ?? [])
                   : transcriptReactKey(item, type);
                 const reactKeyOccurrence = transcriptReactKeyCounts.get(reactKeyBase) ?? 0;
@@ -1525,7 +1588,7 @@ export function TranscriptPanel({
             skillLinks={skillLinks}
             reportedSegments={reportedSegments}
             metrics={cacheMetrics}
-            usageSource={hasReportedUsage ? "reported" : "estimated"}
+            usageSource={hasReportedUsage ? TokenUsageSource.Reported : TokenUsageSource.Estimated}
           />
         ) : null}
       </Suspense>
@@ -1561,8 +1624,7 @@ const SessionLocator = memo(function SessionLocator({
   const [locatorScrollTop, setLocatorScrollTop] = useState(0);
   const dragRef = useRef<{ pointerId: number; key: string; moved: boolean } | null>(null);
   const suppressClickRef = useRef(false);
-  const itemKeys = useMemo(() => items.map((item) => item.key).join("\0"), [items]);
-  const itemKeySet = useMemo(() => new Set(itemKeys.split("\0").filter(Boolean)), [itemKeys]);
+  const itemKeySet = useMemo(() => new Set(items.map((item) => item.key)), [items]);
   const clearPreview = useCallback(() => setPreviewKey(""), []);
   const handleLocatorClick = useCallback((key: string) => {
     if (suppressClickRef.current) {
@@ -1574,14 +1636,16 @@ const SessionLocator = memo(function SessionLocator({
   useEffect(() => () => {
     if (locatorScrollFrameRef.current !== 0) window.cancelAnimationFrame(locatorScrollFrameRef.current);
   }, []);
-  const locatorStart = Math.max(0, Math.floor(locatorScrollTop / SESSION_LOCATOR_ROW_HEIGHT) - SESSION_LOCATOR_OVERSCAN);
-  const locatorEnd = Math.min(
+  const { start: locatorStart, end: locatorEnd } = fixedVirtualRange(
     items.length,
-    Math.ceil((locatorScrollTop + locatorSize.height) / SESSION_LOCATOR_ROW_HEIGHT) + SESSION_LOCATOR_OVERSCAN,
+    locatorScrollTop,
+    locatorSize.height,
+    SESSION_LOCATOR_ROW_HEIGHT,
+    SESSION_LOCATOR_OVERSCAN,
   );
 
   useEffect(() => {
-    if (loading || items.length < SESSION_LOCATOR_MIN_ITEMS) {
+    if ((loading && items.length === 0) || items.length < SESSION_LOCATOR_MIN_ITEMS) {
       setVisibleKeys((current) => current.size === 0 ? current : new Set());
       return;
     }
@@ -1660,7 +1724,7 @@ const SessionLocator = memo(function SessionLocator({
             if (!key || key === drag.key) return;
             dragRef.current = { ...drag, key, moved: true };
             setPreviewKey(key);
-            onSelect(key, "auto");
+            onSelect(key, SessionResumeTarget.Auto);
           }}
           onPointerUp={(event) => {
             const drag = dragRef.current;
@@ -1816,10 +1880,36 @@ export function SessionSkillsPopover({
   onOpenSkill?: (skillName: string) => void;
   onJumpToEvidence?: (link: SessionSkillLinkRecord) => void;
 }) {
+  const [open, setOpen] = useState(false);
+  const pendingOpenRef = useRef(false);
+  const sessionIdentity = sessionKey(session);
+
+  useEffect(() => {
+    pendingOpenRef.current = false;
+    setOpen(false);
+  }, [sessionIdentity]);
+
+  useEffect(() => {
+    if (!pendingOpenRef.current || loading || !loaded) return;
+    if (links.length === 0) {
+      pendingOpenRef.current = false;
+      return;
+    }
+    pendingOpenRef.current = false;
+    setOpen(true);
+  }, [links.length, loaded, loading]);
+
   const handleOpenChange = (open: boolean) => {
+    if (open && !loaded) {
+      pendingOpenRef.current = true;
+      onLoad?.();
+      return;
+    }
+    if (!open) pendingOpenRef.current = false;
+    setOpen(open);
     if (open) onLoad?.();
   };
-  const disabledReason = loading
+  const disabledReason = loading && links.length === 0
     ? "Loading skills used"
     : loaded && links.length === 0
       ? "No associated skills for this session"
@@ -1838,7 +1928,7 @@ export function SessionSkillsPopover({
   }
 
   return (
-    <Popover.Root onOpenChange={handleOpenChange}>
+    <Popover.Root open={open} onOpenChange={handleOpenChange}>
       <Popover.Trigger asChild>
         <IconButton className="threadPanelToggle" aria-label="Show skills used">
           <Sparkles size={15} />
@@ -1846,7 +1936,7 @@ export function SessionSkillsPopover({
       </Popover.Trigger>
       <Popover.Portal>
         <Popover.Content
-          className={`sessionSkillsPopover${links.length > 0 ? " hasChart" : ""}`}
+          className={`sessionSkillsPopover${loading || links.length > 0 ? " hasChart" : ""}`}
           align="end"
           sideOffset={8}
           data-no-drag
@@ -1857,6 +1947,7 @@ export function SessionSkillsPopover({
             links={links}
             loading={loading}
             error={error}
+            onRetry={onLoad}
             onOpenSkill={onOpenSkill}
             onJumpToEvidence={onJumpToEvidence}
           />
@@ -1885,7 +1976,7 @@ function SessionRelationsConvergence({
     return {
       name,
       label: formatSessionTitle(treeSession.title),
-      kind: sessionKind(treeSession) === "child" ? "session-child" : "session-parent",
+      kind: sessionKind(treeSession) === SessionKind.Child ? RelationshipGraphKind.SessionChild : RelationshipGraphKind.SessionParent,
     };
   });
   const edges: Array<{ from: string; to: string }> = [];
@@ -1932,8 +2023,8 @@ function SessionSkillsConvergence({
     if (name && !skillsByName.has(name)) skillsByName.set(name, `skill:${name}`);
   }
   const nodes = [
-    { name: currentName, label: formatSessionTitle(session.title), kind: sessionKind(session) === "child" ? "session-child" : "session-parent" },
-    ...[...skillsByName.entries()].map(([label, name]) => ({ name, label, kind: "skill-used" })),
+    { name: currentName, label: formatSessionTitle(session.title), kind: sessionKind(session) === SessionKind.Child ? RelationshipGraphKind.SessionChild : RelationshipGraphKind.SessionParent },
+    ...[...skillsByName.entries()].map(([label, name]) => ({ name, label, kind: RelationshipGraphKind.SkillUsed })),
   ];
   const edges = [...skillsByName.values()].map((name) => ({ from: currentName, to: name }));
   return (
@@ -1955,6 +2046,7 @@ export function SessionSkillsUsed({
   links = [],
   loading = false,
   error = "",
+  onRetry,
   onOpenSkill,
   onJumpToEvidence,
 }: {
@@ -1962,6 +2054,7 @@ export function SessionSkillsUsed({
   links?: SessionSkillLinkRecord[];
   loading?: boolean;
   error?: string;
+  onRetry?: () => void;
   onOpenSkill?: (skillName: string) => void;
   onJumpToEvidence?: (link: SessionSkillLinkRecord) => void;
 }) {
@@ -1970,10 +2063,12 @@ export function SessionSkillsUsed({
       <div className="sessionSkillsHeader">
         <span>Skills used</span>
       </div>
-      {loading ? (
+      {loading && links.length === 0 ? (
         <div className="sessionSkillsEmpty"><LoadingInline label="Loading skills" /></div>
-      ) : error ? null : links.length > 0 ? (
-        <>
+      ) : error && links.length === 0 ? (
+        <LoadErrorState message={error} onRetry={onRetry} />
+      ) : links.length > 0 ? (
+        <div className="sessionSkillsContent">
           <SessionSkillsConvergence session={session} links={links} onOpenSkill={onOpenSkill} />
           <div className="sessionSkillChips">
             {links.map((link) => (
@@ -2001,7 +2096,16 @@ export function SessionSkillsUsed({
               </div>
             ))}
           </div>
-        </>
+          {loading ? (
+            <div className="sessionSkillsStatusOverlay" role="status" aria-live="polite" aria-label="Refreshing skills">
+              <LoadingIcon size={15} />
+            </div>
+          ) : error ? (
+            <div className="sessionSkillsStatusOverlay">
+              <Toast tone="error" message={error} />
+            </div>
+          ) : null}
+        </div>
       ) : (
         <div className="sessionSkillsEmpty">No observed skill reads</div>
       )}
@@ -2102,7 +2206,7 @@ type TranscriptItemProps = {
 
 function transcriptItemIsHighlighted(item: TranscriptItemRecord, itemKey: string, highlightedKey: string) {
   const type = transcriptItemType(item);
-  if (type !== "toolGroup") return highlightedKey === itemKey;
+  if (type !== TranscriptGroupType.ToolGroup) return highlightedKey === itemKey;
   const groupIndex = itemKey.slice("tool-group-".length);
   return highlightedKey === itemKey
     || highlightedKey.startsWith(`tool-${groupIndex}-`);
@@ -2112,10 +2216,8 @@ function transcriptHighlightState(props: TranscriptItemProps) {
   return transcriptItemIsHighlighted(props.item, props.itemKey, props.highlightedKey);
 }
 
-type SavePromptButtonState = "idle" | "loading" | "success" | "error";
-
 function MessageSavePromptButton({ body, onSave }: { body: string; onSave: (body: string) => Promise<boolean> }) {
-  const [state, setState] = useState<SavePromptButtonState>("idle");
+  const [state, setState] = useState<AsyncStatus>(AsyncStatus.Idle);
   const resetTimerRef = useRef<number | undefined>(undefined);
   const clearResetTimer = useCallback(() => {
     if (resetTimerRef.current !== undefined) {
@@ -2125,18 +2227,18 @@ function MessageSavePromptButton({ body, onSave }: { body: string; onSave: (body
   }, []);
   useEffect(() => clearResetTimer, [clearResetTimer]);
   const save = useCallback(async () => {
-    if (state === "loading" || state === "success") return;
+    if (state === AsyncStatus.Loading || state === AsyncStatus.Success) return;
     clearResetTimer();
-    setState("loading");
+    setState(AsyncStatus.Loading);
     let saved = false;
     try {
       saved = await onSave(body);
     } catch {
       saved = false;
     }
-    setState(saved ? "success" : "error");
+    setState(saved ? AsyncStatus.Success : AsyncStatus.Error);
     resetTimerRef.current = window.setTimeout(() => {
-      setState("idle");
+      setState(AsyncStatus.Idle);
       resetTimerRef.current = undefined;
     }, saved ? 1600 : 2200);
   }, [body, clearResetTimer, onSave, state]);
@@ -2149,7 +2251,7 @@ function MessageSavePromptButton({ body, onSave }: { body: string; onSave: (body
       variant="ghost"
       className="messageActionButton messageSavePromptButton"
       aria-label="Save as prompt"
-      disabled={state === "success"}
+      disabled={state === AsyncStatus.Success}
       onClick={() => { void save(); }}
       loadingLabel={promptActionLabels.saving}
       successLabel={promptActionLabels.saved}
@@ -2175,7 +2277,7 @@ export const TranscriptItem = memo(function TranscriptItem({
 }: TranscriptItemProps) {
   const type = transcriptItemType(item);
   const highlighted = highlightedKey === itemKey;
-  if (type === "toolGroup") return <ToolCallGroup tools={item.tools ?? []} itemKey={itemKey} highlightedKey={highlightedKey} searchQuery={searchQuery} onOpenLinkedSession={onOpenLinkedSession} />;
+  if (type === TranscriptGroupType.ToolGroup) return <ToolCallGroup tools={item.tools ?? []} itemKey={itemKey} highlightedKey={highlightedKey} searchQuery={searchQuery} onOpenLinkedSession={onOpenLinkedSession} />;
   if (type === "tool") {
     return <ToolCall item={item} itemKey={itemKey} highlighted={highlighted} searchQuery={searchQuery} onOpenLinkedSession={onOpenLinkedSession} />;
   }
@@ -2470,138 +2572,16 @@ export function ToolCall({
 
 function sessionKey(session: SessionRecord | null | undefined) {
   if (!session) return "";
-  return `${friendlyAgent(session.agent).toLowerCase()}:${session.id}`;
+  return sessionSourceExternalKey({
+    agent: friendlyAgent(session.agent).toLowerCase(),
+    id: session.id,
+    path: session.path,
+  });
 }
 
-function sessionTableRowId(session: SessionRecord) {
-  return JSON.stringify([session.agent, session.id, session.path]);
+function sessionSourceIdentity(session: SessionRecord) {
+  return sessionIdentity(session);
 }
-
-type GroupedSessionPage = {
-  rows: SessionRecord[];
-  start: number;
-  end: number;
-  groupCount: number;
-};
-
-type SessionProjectOption = {
-  key: string;
-  label: string;
-  title: string;
-  count: number;
-};
-
-type ProjectSearchRank = {
-  distance: number;
-  start: number;
-  length: number;
-};
-
-function projectSearchRank(label: string, query: string): ProjectSearchRank | null {
-  const value = [...label.toLowerCase()];
-  const needle = [...query.toLowerCase()];
-  if (needle.length === 0) return null;
-
-  const required = new Map<string, number>();
-  for (const character of needle) required.set(character, (required.get(character) ?? 0) + 1);
-
-  const found = new Map<string, number>();
-  let complete = 0;
-  let left = 0;
-  let best: ProjectSearchRank | null = null;
-  for (let right = 0; right < value.length; right += 1) {
-    const character = value[right];
-    const requiredCount = required.get(character) ?? 0;
-    if (requiredCount === 0) continue;
-    const nextCount = (found.get(character) ?? 0) + 1;
-    found.set(character, nextCount);
-    if (nextCount <= requiredCount) complete += 1;
-
-    while (complete === needle.length && left <= right) {
-      const candidate = {
-        distance: right - left + 1,
-        start: left,
-        length: value.length,
-      } satisfies ProjectSearchRank;
-      if (!best || candidate.distance < best.distance || (candidate.distance === best.distance && candidate.start < best.start)) {
-        best = candidate;
-      }
-
-      const leftCharacter = value[left];
-      const leftRequiredCount = required.get(leftCharacter) ?? 0;
-      if (leftRequiredCount > 0) {
-        const leftCount = (found.get(leftCharacter) ?? 0) - 1;
-        found.set(leftCharacter, leftCount);
-        if (leftCount < leftRequiredCount) complete -= 1;
-      }
-      left += 1;
-    }
-  }
-  return best;
-}
-
-function sessionGroupKeyForPaging(session: SessionRecord, groupBy: string) {
-  if (groupBy === "agent") return friendlyAgent(session.agent);
-  if (groupBy === "project") return sessionProjectGroupKey(session);
-  if (groupBy === "startedAt") return dayGroupKey(session.startedAt);
-  if (groupBy === "updatedAt") return dayGroupKey(session.updatedAt);
-  const value = session[groupBy as keyof SessionRecord];
-  return `${value ?? ""}`;
-}
-
-function buildGroupedSessionPages(
-  sessions: SessionRecord[],
-  groupBy: string | null,
-  pageSize: number,
-): GroupedSessionPage[] {
-  if (!groupBy) return [];
-
-  const groups: SessionRecord[][] = [];
-  const groupIndex = new Map<string, SessionRecord[]>();
-  for (const session of sessions) {
-    const key = sessionGroupKeyForPaging(session, groupBy);
-    let group = groupIndex.get(key);
-    if (!group) {
-      group = [];
-      groupIndex.set(key, group);
-      groups.push(group);
-    }
-    group.push(session);
-  }
-
-  const pages: GroupedSessionPage[] = [];
-  let pageRows: SessionRecord[] = [];
-  let pageStart = 0;
-  let pageGroupCount = 0;
-
-  for (const group of groups) {
-    if (pageRows.length > 0 && pageRows.length >= pageSize) {
-      pages.push({
-        rows: pageRows,
-        start: pageStart,
-        end: pageStart + pageRows.length,
-        groupCount: pageGroupCount,
-      });
-      pageStart += pageRows.length;
-      pageRows = [];
-      pageGroupCount = 0;
-    }
-    pageRows.push(...group);
-    pageGroupCount += 1;
-  }
-
-  if (pageRows.length > 0 || sessions.length === 0) {
-    pages.push({
-      rows: pageRows,
-      start: pageStart,
-      end: pageStart + pageRows.length,
-      groupCount: pageGroupCount,
-    });
-  }
-
-  return pages;
-}
-
 
 export function SessionsView({
   sessions: sessionItems,
@@ -2637,9 +2617,12 @@ export function SessionsView({
   loadingSessions?: boolean;
   sessionListError?: string;
   sessionRefreshError?: string;
-  onRefreshSessions?: () => Promise<unknown>;
-  onResumeSession?: (session: SessionRecord) => Promise<SessionResumeOutcome | null | undefined>;
-  resolveSessionResumeTarget: (session: SessionRecord) => Promise<"terminal" | "app">;
+  onRefreshSessions?: () => Promise<number | null>;
+  onResumeSession?: (
+    session: SessionRecord,
+    target?: Exclude<SessionResumeTarget, SessionResumeTarget.Auto>,
+  ) => Promise<SessionResumeOutcome | null | undefined>;
+  resolveSessionResumeTarget: (session: SessionRecord) => Promise<Exclude<SessionResumeTarget, SessionResumeTarget.Auto>>;
   sessionResumeTarget: SessionResumeTarget;
   missingSessionProjectPolicy: MissingSessionProjectPolicy;
   projects?: ProjectSummary[];
@@ -2654,12 +2637,13 @@ export function SessionsView({
   });
   const [importedSessions, setImportedSessions] = useState<SessionRecord[]>([]);
   const [importedTranscripts, setImportedTranscripts] = useState<Record<string, TranscriptItemRecord[]>>({});
-  const [importFeedback, setImportFeedback] = useState<ImportFeedbackState>("idle");
+  const [importFeedback, setImportFeedback] = useState<ImportFeedbackState>(ImportFeedbackState.Idle);
   const [importError, setImportError] = useState("");
+  const [transcriptImportProvider, setTranscriptImportProvider] = useState("");
   const [query, setQuery] = useState("");
-  const [sort, setSort] = useState<SortState>({ key: "updatedAt", direction: "desc" });
+  const [sort, setSort] = useState<SortState>({ key: SessionSortKey.UpdatedAt, direction: SortDirection.Desc });
   const [searchSort, setSearchSort] = useState<SortState | null>(null);
-  const [currentPage, setCurrentPage] = useState(0);
+  const [pageSelection, setPageSelection] = useState({ contextKey: "", page: 0 });
   const [pageSize, setPageSize] = useState(50);
   const [groupBy, setGroupBy] = useState<string | null>(null);
   const [showChildSessions, setShowChildSessions] = useState(false);
@@ -2672,6 +2656,7 @@ export function SessionsView({
   const [loadingMoreTranscript, setLoadingMoreTranscript] = useState(false);
   const [skillLinks, setSkillLinks] = useState<SessionSkillLinkRecord[]>([]);
   const [skillLinksKey, setSkillLinksKey] = useState("");
+  const [skillLinksAttemptKey, setSkillLinksAttemptKey] = useState("");
   const [loadingSkillLinks, setLoadingSkillLinks] = useState(false);
   const [skillLinksError, setSkillLinksError] = useState("");
   const [loading, setLoading] = useState(false);
@@ -2696,11 +2681,11 @@ export function SessionsView({
   nextTranscriptCursorRef.current = nextTranscriptCursor;
   const importInputRef = useRef<HTMLInputElement | null>(null);
   const sessionListBodyRef = useRef<HTMLDivElement | null>(null);
-  const keyboardNavigationScopeRef = useRef<KeyboardNavigationScope>("list");
+  const keyboardNavigationScopeRef = useRef<KeyboardNavigationScope>(KeyboardNavigationScope.List);
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
       if (!(event.metaKey || event.ctrlKey) || event.key.toLowerCase() !== "f") return;
-      if (keyboardNavigationScopeRef.current !== "list") return;
+      if (keyboardNavigationScopeRef.current !== KeyboardNavigationScope.List) return;
       const target = event.target instanceof Element ? event.target : null;
       const activeElement = document.activeElement;
       const isInLocalFindPane = (element: Element | null) => Boolean(element?.closest(".codePane, .transcriptPanel, [role=\"dialog\"]"));
@@ -2716,7 +2701,6 @@ export function SessionsView({
     return () => window.removeEventListener("keydown", handleKeyDown, true);
   }, [keyboardNavigationScopeRef]);
   const handledExternalSessionKeyRef = useRef("");
-  const preserveLocatedSessionPageRef = useRef(false);
   const importWorkerRef = useRef<{ worker: Worker; cancel: () => void } | null>(null);
   const projectFilterInputRef = useRef<HTMLInputElement | null>(null);
   const importFeedbackTimerRef = useRef<number | undefined>(undefined);
@@ -2725,6 +2709,7 @@ export function SessionsView({
   const skillLinksRequestKeyRef = useRef("");
   const transcriptRequestAuthorityRef = useRef(createLatestRequestAuthority());
   const transcriptCacheRef = useRef(new Map<string, TranscriptPage>());
+  const loadedTranscriptIdentityRef = useRef("");
   const transcriptLocatorRequestAuthorityRef = useRef(createLatestRequestAuthority());
   const transcriptLocatorCacheRef = useRef(new Map<string, TranscriptLocatorPage>());
   const pendingTranscriptLocatorRef = useRef<{ key: string; session: SessionRecord } | null>(null);
@@ -2740,17 +2725,17 @@ export function SessionsView({
       importFeedbackTimerRef.current = undefined;
     }
   }, []);
-  const finishImportFeedback = useCallback((state: Exclude<ImportFeedbackState, "idle" | "loading">) => {
+  const finishImportFeedback = useCallback((state: Exclude<ImportFeedbackState, ImportFeedbackState.Idle | ImportFeedbackState.Loading>) => {
     clearImportFeedbackTimer();
     setImportFeedback(state);
-    if (state === "success") {
+    if (state === ImportFeedbackState.Success) {
       importFeedbackTimerRef.current = window.setTimeout(() => {
-        setImportFeedback("idle");
+        setImportFeedback(ImportFeedbackState.Idle);
         importFeedbackTimerRef.current = undefined;
       }, 1600);
     }
   }, [clearImportFeedbackTimer]);
-  const finishResumeFeedback = useCallback((sessionId: string, state: Exclude<SessionResumeState, "idle" | "loading">) => {
+  const finishResumeFeedback = useCallback((sessionId: string, state: AsyncStatus.Success | AsyncStatus.Error) => {
     const existingTimer = resumeFeedbackTimerRef.current[sessionId];
     if (existingTimer !== undefined) {
       window.clearTimeout(existingTimer);
@@ -2801,47 +2786,45 @@ export function SessionsView({
     importWorkerRef.current = null;
     Object.values(resumeFeedbackTimerRef.current).forEach((timer) => window.clearTimeout(timer));
   }, [clearImportFeedbackTimer, dismissSessionError]);
-  const listSessionItems = useMemo(() => [...importedSessions, ...sessionItems], [importedSessions, sessionItems]);
-  const projectSourceSessionItems = useMemo(
-    () => showChildSessions ? listSessionItems : listSessionItems.filter((session) => sessionKind(session) === "main"),
-    [listSessionItems, showChildSessions],
-  );
-  const projectOptions = useMemo<SessionProjectOption[]>(() => {
-    const options = new Map<string, SessionProjectOption>();
-    for (const session of projectSourceSessionItems) {
-      const projectOption = sessionProjectOption(session, missingSessionProjectPolicy, sessionProjects, projects);
-      if (!projectOption) continue;
-      const option = options.get(projectOption.key);
-      if (option) {
-        option.count += 1;
-      } else {
-        options.set(projectOption.key, {
-          ...projectOption,
-          count: 1,
-        });
-      }
-    }
-    return [...options.values()].sort((left, right) => left.label.localeCompare(right.label) || left.title.localeCompare(right.title));
-  }, [missingSessionProjectPolicy, projectSourceSessionItems, projects, sessionProjects]);
-  const projectGroupKeyForFilter = useCallback((session: SessionRecord) => (
-    sessionProjectOption(session, missingSessionProjectPolicy, sessionProjects, projects)?.key ?? sessionProjectGroupKey(session)
-  ), [missingSessionProjectPolicy, projects, sessionProjects]);
-  const selectedProjectKeySet = useMemo(() => new Set(selectedProjectKeys), [selectedProjectKeys]);
-  const visibleProjectOptions = useMemo(() => {
-    const normalizedProjectFilterQuery = projectFilterQuery.trim().toLowerCase();
-    const filtered = projectOptions.filter((option) => (
-      selectedProjectKeySet.has(option.key)
-      || !normalizedProjectFilterQuery
-      || projectSearchRank(option.label, normalizedProjectFilterQuery) !== null
-    ));
-    return [...filtered].sort((left, right) => {
-      const leftSelected = selectedProjectKeySet.has(left.key);
-      const rightSelected = selectedProjectKeySet.has(right.key);
-      if (leftSelected !== rightSelected) return leftSelected ? -1 : 1;
-
-      return right.count - left.count || left.label.localeCompare(right.label) || left.title.localeCompare(right.title);
-    });
-  }, [projectFilterQuery, projectOptions, selectedProjectKeySet]);
+  const listView = useMemo(() => selectSessionListView({
+    sessions: sessionItems,
+    importedSessions,
+    searchRows: searchRows ?? undefined,
+    searchRowsKey,
+    query: normalizedQuery,
+    remoteSearch: Boolean(searchSessions),
+    searchSort,
+    sort,
+    pageSize,
+    groupBy,
+    showChildSessions,
+    selectedProjectKeys,
+    projectFilterQuery,
+    missingSessionProjectPolicy,
+    projects,
+    sessionProjects,
+    currentPage: pageSelection.page,
+    pageSelectionContextKey: pageSelection.contextKey,
+  }), [groupBy, importedSessions, missingSessionProjectPolicy, normalizedQuery, pageSelection, pageSize, projectFilterQuery, projects, searchRows, searchRowsKey, searchSessions, searchSort, selectedProjectKeys, sessionItems, sessionProjects, showChildSessions, sort]);
+  const {
+    allSessionItems,
+    projectOptions,
+    visibleProjectOptions,
+    searchCandidates,
+    searchRequestKey,
+    childSessionCount,
+    activeSort,
+    pageContextKey,
+    currentPage,
+    sortedSessions,
+    groupedPages,
+    pageCount,
+    boundedCurrentPage,
+    pageStart,
+    pageEnd,
+    tableSessions,
+  } = listView;
+  const groupedPage = groupedPages[boundedCurrentPage];
   useEffect(() => {
     const availableKeys = new Set(projectOptions.map((option) => option.key));
     setSelectedProjectKeys((current) => {
@@ -2853,37 +2836,6 @@ export function SessionsView({
     if (!projectFilterOpen) return;
     window.requestAnimationFrame(() => projectFilterInputRef.current?.focus());
   }, [projectFilterOpen]);
-  const searchCandidateSort = searchSort ?? sort;
-  const searchCandidates = useMemo(() => {
-    const seen = new Set<string>();
-    const candidates = listSessionItems.filter((session) => (
-      (showChildSessions || sessionKind(session) === "main")
-      && (selectedProjectKeySet.size === 0 || selectedProjectKeySet.has(projectGroupKeyForFilter(session)))
-    )).filter((session) => {
-      const key = sessionTableRowId(session);
-      if (seen.has(key)) return false;
-      seen.add(key);
-      return true;
-    });
-    return searchCandidateSort
-      ? [...candidates].sort((left, right) => compareSessions(left, right, searchCandidateSort))
-      : candidates;
-  }, [listSessionItems, projectGroupKeyForFilter, searchCandidateSort, selectedProjectKeySet, showChildSessions]);
-  const searchRequestKey = useMemo(
-    () => normalizedQuery
-      ? `${normalizedQuery}\u0000${searchCandidates.map(sessionTableRowId).join("\u0000")}`
-      : "",
-    [normalizedQuery, searchCandidates],
-  );
-  const currentSearchRows = useMemo(
-    () => normalizedQuery && searchSessions && searchRowsKey === searchRequestKey ? (searchRows ?? []) : [],
-    [normalizedQuery, searchRequestKey, searchRows, searchRowsKey, searchSessions],
-  );
-  const allSessionItems = useMemo(() => {
-    const merged = new Map(listSessionItems.map((session) => [sessionTableRowId(session), session]));
-    for (const session of currentSearchRows) merged.set(sessionTableRowId(session), session);
-    return [...merged.values()];
-  }, [currentSearchRows, listSessionItems]);
   const pageSizeOptions = useMemo(
     () => [25, 50, 100].map((value) => ({ value: `${value}`, label: `${value}` })),
     [],
@@ -2899,10 +2851,6 @@ export function SessionsView({
     }, SESSION_SEARCH_DEBOUNCE_MS);
     return () => window.clearTimeout(timer);
   }, [normalizedInputQuery]);
-  const sessionMatchesQuery = useCallback((session: SessionRecord, currentQuery: string) => (
-    [session.title, sessionProject(session), sessionWorkspace(session), session.agent, session.model, session.mode, session.approvalMode, session.isRunEverything, session.startedAt, session.updatedAt]
-      .some((value) => `${value ?? ""}`.toLowerCase().includes(currentQuery))
-  ), []);
   useEffect(() => {
     if (!normalizedQuery || !searchSessions) {
       setSearchRows(null);
@@ -2918,16 +2866,9 @@ export function SessionsView({
 
     const runSearch = async () => {
       try {
-        for (let start = 0; start < searchCandidates.length; start += SESSION_SEARCH_BATCH_SIZE) {
-          const batch = searchCandidates.slice(start, start + SESSION_SEARCH_BATCH_SIZE);
-          const rows = await searchSessions(normalizedQuery, batch);
-          if (cancelled) return;
-          const rowsByKey = new Map(rows.map((session) => [sessionTableRowId(session), session]));
-          const batchMatches = batch
-            .filter((session) => sessionMatchesQuery(session, normalizedQuery) || rowsByKey.has(sessionTableRowId(session)))
-            .map((session) => rowsByKey.get(sessionTableRowId(session)) ?? session);
-          setSearchRows((current) => [...(current ?? []), ...batchMatches]);
-        }
+        const rows = await searchSessions(normalizedQuery, searchCandidates);
+        if (cancelled) return;
+        setSearchRows(rows);
         if (!cancelled) setSearchingSessions(false);
       } catch (error) {
         if (!cancelled) {
@@ -2941,7 +2882,7 @@ export function SessionsView({
     return () => {
       cancelled = true;
     };
-  }, [normalizedQuery, searchCandidates, searchRequestKey, searchSessions, sessionMatchesQuery, showSessionError]);
+  }, [normalizedQuery, searchCandidates, searchRequestKey, searchSessions, showSessionError]);
   useEffect(() => {
     if (sessionListError && !sessionRefreshError && sessionItems.length === 0) {
       showSessionError("Could not load sessions. Try again.");
@@ -2950,73 +2891,27 @@ export function SessionsView({
   useEffect(() => {
     if (sessionRefreshError) showSessionError(sessionRefreshError);
   }, [sessionRefreshError, showSessionError]);
-  const matchedSessions = useMemo(() => {
-    if (normalizedQuery && searchSessions) {
-      const remoteRows = currentSearchRows;
-      const matches = new Map<string, SessionRecord>();
-      for (const session of remoteRows) matches.set(sessionTableRowId(session), session);
-      return [...matches.values()].filter((session) => selectedProjectKeySet.size === 0 || selectedProjectKeySet.has(projectGroupKeyForFilter(session)));
-    }
-    if (!normalizedQuery) return selectedProjectKeySet.size === 0
-      ? listSessionItems
-      : listSessionItems.filter((session) => selectedProjectKeySet.has(projectGroupKeyForFilter(session)));
-    return listSessionItems.filter((session) => (
-      sessionMatchesQuery(session, normalizedQuery)
-      && (selectedProjectKeySet.size === 0 || selectedProjectKeySet.has(projectGroupKeyForFilter(session)))
-    ));
-  }, [currentSearchRows, listSessionItems, normalizedQuery, projectGroupKeyForFilter, searchSessions, selectedProjectKeySet, sessionMatchesQuery]);
-  const childSessionCount = useMemo(
-    () => matchedSessions.filter((session) => sessionKind(session) === "child").length,
-    [matchedSessions],
-  );
-  const filteredSessions = useMemo(
-    () => showChildSessions
-      ? matchedSessions
-      : matchedSessions.filter((session) => sessionKind(session) === "main"),
-    [matchedSessions, showChildSessions],
-  );
-  const activeSort = remoteSearchActive ? searchSort ?? sort : sort;
-  const sortedSessions = useMemo(
-    () => activeSort
-      ? [...filteredSessions].sort((a, b) => compareSessions(a, b, activeSort))
-      : filteredSessions,
-    [activeSort, filteredSessions],
-  );
-  const groupedPages = useMemo(
-    () => buildGroupedSessionPages(sortedSessions, groupBy, pageSize),
-    [groupBy, pageSize, sortedSessions],
-  );
-  const pageCount = groupBy
-    ? Math.max(1, groupedPages.length)
-    : Math.max(1, Math.ceil(sortedSessions.length / pageSize));
-  const groupedPage = groupedPages[Math.min(currentPage, Math.max(0, groupedPages.length - 1))];
-  const pageStart = groupBy
-    ? (groupedPage?.start ?? 0)
-    : sortedSessions.length === 0 ? 0 : currentPage * pageSize;
-  const pageEnd = groupBy
-    ? (groupedPage?.end ?? 0)
-    : Math.min(pageStart + pageSize, sortedSessions.length);
-  const pagedSessions = useMemo(
-    () => sortedSessions.slice(pageStart, pageEnd),
-    [pageEnd, pageStart, sortedSessions],
-  );
-  const tableSessions = groupBy ? (groupedPage?.rows ?? []) : pagedSessions;
-  const locateSessionInList = useCallback((session: SessionRecord) => {
+  const setCurrentPage = useCallback((next: number | ((current: number) => number)) => {
+    setPageSelection((current) => {
+      const currentPageForContext = current.contextKey === pageContextKey ? current.page : 0;
+      const nextPage = typeof next === "function" ? next(currentPageForContext) : next;
+      return current.contextKey === pageContextKey && current.page === nextPage
+        ? current
+        : { contextKey: pageContextKey, page: nextPage };
+    });
+  }, [pageContextKey]);
+  useLayoutEffect(() => {
+    setPageSelection((current) => current.contextKey === pageContextKey
+      ? current
+      : { contextKey: pageContextKey, page: 0 });
+  }, [pageContextKey]);
+  const revealSessionInList = useCallback((session: SessionRecord) => {
     const targetRowId = sessionTableRowId(session);
-    const showChildren = showChildSessions || sessionKind(session) === "child";
-    const sessionsToShow = allSessionItems.filter((candidate) => showChildren || sessionKind(candidate) === "main");
-    const sortedSessionsToShow = [...sessionsToShow].sort((left, right) => compareSessions(left, right, sort));
-    const targetIndex = sortedSessionsToShow.findIndex((candidate) => sessionTableRowId(candidate) === targetRowId);
-    const targetPage = groupBy
-      ? buildGroupedSessionPages(sortedSessionsToShow, groupBy, pageSize)
-        .findIndex((page) => page.rows.some((candidate) => sessionTableRowId(candidate) === targetRowId))
-      : targetIndex < 0 ? -1 : Math.floor(targetIndex / pageSize);
+    const showChildren = showChildSessions || sessionKind(session) === SessionKind.Child;
+    const targetPage = sessionPageForRow(allSessionItems, targetRowId, sort, groupBy, pageSize, showChildren);
     if (targetPage < 0) return;
 
-    keyboardNavigationScopeRef.current = "list";
-    if (normalizedQuery || (showChildren && !showChildSessions)) {
-      preserveLocatedSessionPageRef.current = true;
-    }
+    keyboardNavigationScopeRef.current = KeyboardNavigationScope.List;
     setQuery("");
     setDebouncedQuery("");
     setSearchRows(null);
@@ -3025,10 +2920,39 @@ export function SessionsView({
     setSelectedProjectKeys([]);
     setProjectFilterQuery("");
     if (showChildren && !showChildSessions) setShowChildSessions(true);
-    setCurrentPage(targetPage);
+    setPageSelection({
+      contextKey: sessionPageContextKey(sort, groupBy, "", pageSize, "", showChildren),
+      page: targetPage,
+    });
     setActiveRowId(targetRowId);
     setSessionLocatorRequest(targetRowId);
-  }, [allSessionItems, groupBy, normalizedQuery, pageSize, showChildSessions, sort]);
+  }, [allSessionItems, groupBy, pageSize, showChildSessions, sort]);
+  const locateSessionInList = useCallback((session: SessionRecord) => {
+    const targetRowId = sessionTableRowId(session);
+    const plan = planSessionListLocation({
+      targetRowId,
+      currentPageRowIds: tableSessions.map(sessionTableRowId),
+      currentResultRowIds: sortedSessions.map(sessionTableRowId),
+      allRowIds: allSessionItems.map(sessionTableRowId),
+    });
+    if (plan === SessionListLocationPlan.Missing) return;
+    if (plan === SessionListLocationPlan.Reveal) {
+      revealSessionInList(session);
+      return;
+    }
+
+    if (plan === SessionListLocationPlan.Page) {
+      const targetIndex = sortedSessions.findIndex((candidate) => sessionTableRowId(candidate) === targetRowId);
+      const targetPage = groupBy
+        ? groupedPages.findIndex((page) => page.rows.some((candidate) => sessionTableRowId(candidate) === targetRowId))
+        : targetIndex < 0 ? -1 : Math.floor(targetIndex / pageSize);
+      if (targetPage < 0) return;
+      setCurrentPage(targetPage);
+    }
+    keyboardNavigationScopeRef.current = KeyboardNavigationScope.List;
+    setActiveRowId(targetRowId);
+    setSessionLocatorRequest(targetRowId);
+  }, [allSessionItems, groupBy, groupedPages, pageSize, revealSessionInList, setCurrentPage, sortedSessions, tableSessions]);
   const completeSessionLocator = useCallback((rowId: string) => {
     setSessionLocatorRequest((current) => current === rowId ? "" : current);
   }, []);
@@ -3048,11 +2972,11 @@ export function SessionsView({
     setActiveRowId(targetId);
     setDetailCollapsed(false);
     setSessionLocatorRequest(targetId);
-  }, [activeRowId, currentPage, groupBy, groupedPages, pageSize, sortedSessions]);
+  }, [activeRowId, currentPage, groupBy, groupedPages, pageSize, setCurrentPage, sortedSessions]);
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
       if (
-        keyboardNavigationScopeRef.current !== "list"
+        keyboardNavigationScopeRef.current !== KeyboardNavigationScope.List
         || (event.key !== "ArrowUp" && event.key !== "ArrowDown")
         || event.defaultPrevented
         || event.metaKey
@@ -3072,7 +2996,7 @@ export function SessionsView({
       if (current?.key === next.key) return next;
       return {
         key: next.key,
-        direction: next.key === "title" || next.key === "project" ? "asc" : "desc",
+        direction: next.key === SessionSortKey.Title || next.key === SessionSortKey.Project ? SortDirection.Asc : SortDirection.Desc,
       } satisfies SortState;
     };
     if (remoteSearchActive) {
@@ -3084,16 +3008,9 @@ export function SessionsView({
   useEffect(() => {
     setSearchSort(null);
   }, [normalizedQuery]);
-  useEffect(() => {
-    if (preserveLocatedSessionPageRef.current) {
-      preserveLocatedSessionPageRef.current = false;
-      return;
-    }
-    setCurrentPage(0);
-  }, [activeSort?.direction, activeSort?.key, groupBy, normalizedQuery, pageSize, showChildSessions]);
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (currentPage >= pageCount) setCurrentPage(pageCount - 1);
-  }, [currentPage, pageCount]);
+  }, [currentPage, pageCount, setCurrentPage]);
   useEffect(() => {
     if (activeRowId && !allSessionItems.some((session) => sessionTableRowId(session) === activeRowId)) setActiveRowId("");
   }, [activeRowId, allSessionItems]);
@@ -3112,7 +3029,7 @@ export function SessionsView({
     }
   }, [activeSessionKey, allSessionItems, locateSessionInList]);
   const openSession = useCallback((session: SessionRecord) => {
-    keyboardNavigationScopeRef.current = "list";
+    keyboardNavigationScopeRef.current = KeyboardNavigationScope.List;
     setActiveRowId(sessionTableRowId(session));
     setDetailCollapsed(false);
   }, []);
@@ -3132,97 +3049,78 @@ export function SessionsView({
   }, [onRefreshSessions, refreshing, showSessionError]);
   const importJsonl = useCallback(async (file: File) => {
     clearImportFeedbackTimer();
-    setImportFeedback("loading");
+    setImportFeedback(ImportFeedbackState.Loading);
     setImportError("");
     try {
-      const parsed = await parseImportedTranscript(file, importWorkerRef);
+      if (!transcriptImportProvider) {
+        setImportError("Choose a transcript provider before importing");
+        showSessionError("Choose a transcript provider before importing.");
+        finishImportFeedback(ImportFeedbackState.Error);
+        return;
+      }
+      const parsed = await parseImportedTranscript(file, transcriptImportProvider, importWorkerRef);
       if (parsed.parsedCount === 0) {
         setImportError("Could not import JSONL transcript");
         showSessionError("Could not import JSONL transcript. Check the file and try again.");
-        finishImportFeedback("error");
+        finishImportFeedback(ImportFeedbackState.Error);
         return;
       }
       if (parsed.items.length === 0) {
         setImportError("Could not import JSONL transcript");
         showSessionError("Could not import JSONL transcript. Check the file and try again.");
-        finishImportFeedback("error");
+        finishImportFeedback(ImportFeedbackState.Error);
         return;
       }
       const id = `import:${file.name}:${file.lastModified}:${Date.now()}`;
-      const startedAt = parsed.startedAt ?? new Date(file.lastModified || Date.now()).toISOString();
-      const updatedAt = parsed.updatedAt ?? startedAt;
-      const userMessages = parsed.items
-        .filter((item) => transcriptItemType(item) === "user")
-        .map((item) => formatTranscriptPreview(item.body))
-        .filter(Boolean);
-      const assistantMessages = parsed.items
-        .filter((item) => transcriptItemType(item) === "assistant")
-        .map((item) => formatTranscriptPreview(item.body))
-        .filter(Boolean);
-      const session: SessionRecord = {
-        id,
-        title: formatTranscriptPreview(parsed.title),
-        project: parsed.project ?? "",
-        projectPath: parsed.project ?? "",
-        agent: IMPORTED_SESSION_AGENT,
-        path: file.name,
-        startedAt,
-        updatedAt,
-        time: updatedAt,
-        startedLabel: compactDateTime(startedAt),
-        updatedLabel: compactDateTime(updatedAt),
-        updatedDetailLabel: compactDateTime(updatedAt, { year: true }),
-        messages: parsed.items.length,
-        firstUserMessage: userMessages[0],
-        lastUserMessage: userMessages.at(-1),
-        lastAssistantMessage: assistantMessages.at(-1),
-        tokenUsage: parsed.tokenUsage,
-      };
+      const session = createImportedSessionRecord({ id, fileName: file.name, lastModified: file.lastModified, parsed });
       setImportedTranscripts((current) => ({ ...current, [id]: parsed.items as TranscriptItemRecord[] }));
       setImportedSessions((current) => [session, ...current]);
       setActiveRowId(sessionTableRowId(session));
       setDetailCollapsed(false);
       setImportError(parsed.warnings.length ? `${parsed.warnings.length} invalid lines skipped` : "");
-      finishImportFeedback(parsed.warnings.length ? "warning" : "success");
+      finishImportFeedback(parsed.warnings.length ? ImportFeedbackState.Warning : ImportFeedbackState.Success);
     } catch (error) {
       logger.warn("sessions transcript import failed", { error });
       setImportError("Could not import JSONL transcript");
       showSessionError("Could not import JSONL transcript. Check the file and try again.");
-      finishImportFeedback("error");
+      finishImportFeedback(ImportFeedbackState.Error);
     }
-  }, [clearImportFeedbackTimer, finishImportFeedback, showSessionError]);
+  }, [clearImportFeedbackTimer, finishImportFeedback, showSessionError, transcriptImportProvider]);
   const handleImportJsonlChange = useCallback((event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     event.target.value = "";
     if (!file) return;
     importJsonl(file);
   }, [importJsonl]);
-  const resumeSession = useCallback(async (session: SessionRecord) => {
+  const resumeSession = useCallback(async (
+    session: SessionRecord,
+    target?: Exclude<SessionResumeTarget, SessionResumeTarget.Auto>,
+  ) => {
     if (session.agent === IMPORTED_SESSION_AGENT) {
-      finishResumeFeedback(session.id, "error");
+      finishResumeFeedback(session.id, AsyncStatus.Error);
       showSessionError("Imported sessions cannot be opened.");
       return;
     }
     if (!onResumeSession) {
-      finishResumeFeedback(session.id, "error");
+      finishResumeFeedback(session.id, AsyncStatus.Error);
       showSessionError("Resume is unavailable.");
       return;
     }
     dismissSessionError();
-    setResumeFeedback((current) => ({ ...current, [session.id]: "loading" }));
+    setResumeFeedback((current) => ({ ...current, [session.id]: AsyncStatus.Loading }));
     try {
-      const result = await onResumeSession(session);
-      if (result?.status === "activeWriter") {
+      const result = await onResumeSession(session, target);
+      if (result?.status === SessionResumeOutcomeStatus.ActiveWriter) {
         clearResumeFeedback(session.id);
         setPendingResumeConflict({ session });
-      } else if (result?.status === "launched") {
-        finishResumeFeedback(session.id, "success");
+      } else if (result?.status === SessionResumeOutcomeStatus.Launched) {
+        finishResumeFeedback(session.id, AsyncStatus.Success);
       } else {
-        finishResumeFeedback(session.id, "error");
+        finishResumeFeedback(session.id, AsyncStatus.Error);
         showSessionError(sessionResumeErrorMessage());
       }
     } catch (error) {
-      finishResumeFeedback(session.id, "error");
+      finishResumeFeedback(session.id, AsyncStatus.Error);
       logger.warn("sessions resume failed", { error });
       showSessionError(sessionResumeErrorMessage());
     }
@@ -3232,15 +3130,15 @@ export function SessionsView({
     setPendingResumeConflict(null);
   }, [clearResumeFeedback, pendingResumeConflict]);
   const getResumeState = useCallback((session: SessionRecord): SessionResumeState => (
-    resumeFeedback[session.id] ?? "idle"
+    resumeFeedback[session.id] ?? AsyncStatus.Idle
   ), [resumeFeedback]);
   const activeSession = useMemo(
     () => allSessionItems.find((session) => sessionTableRowId(session) === activeRowId),
     [activeRowId, allSessionItems],
   );
-  const [inferredResumeTargets, setInferredResumeTargets] = useState<Record<string, "terminal" | "app">>({});
+  const [inferredResumeTargets, setInferredResumeTargets] = useState<Record<string, Exclude<SessionResumeTarget, SessionResumeTarget.Auto>>>({});
   useEffect(() => {
-    if (sessionResumeTarget !== "auto") {
+    if (sessionResumeTarget !== SessionResumeTarget.Auto) {
       setInferredResumeTargets({});
       return;
     }
@@ -3251,13 +3149,13 @@ export function SessionsView({
           session.agent !== IMPORTED_SESSION_AGENT
           && Boolean(session.id && session.agent && session.path.trim())
         ))
-        .map((session) => [sessionTableRowId(session), session] as const),
+        .map((session) => [sessionSourceIdentity(session), session] as const),
     ).values()];
     void Promise.all(resumableSessions.map(async (session) => (
-      [sessionTableRowId(session), await resolveSessionResumeTarget(session)] as const
+      [sessionSourceIdentity(session), await resolveSessionResumeTarget(session)] as const
     ))).then((entries) => {
       if (cancelled) return;
-      const retainedKeys = new Set(resumableSessions.map(sessionTableRowId));
+      const retainedKeys = new Set(resumableSessions.map(sessionSourceIdentity));
       setInferredResumeTargets((current) => {
         const next = Object.fromEntries(
           Object.entries(current).filter(([key]) => retainedKeys.has(key)),
@@ -3273,7 +3171,7 @@ export function SessionsView({
   const activeSessionVisibleInList = Boolean(
     activeSession && tableSessions.some((session) => sessionTableRowId(session) === sessionTableRowId(activeSession)),
   );
-  useEffect(() => {
+  useLayoutEffect(() => {
     let frame = 0;
     const root = sessionListBodyRef.current?.querySelector<HTMLElement>(".dataTableBodyScroll");
     const measure = () => {
@@ -3306,7 +3204,7 @@ export function SessionsView({
       measure();
       return undefined;
     }
-    scheduleMeasure();
+    measure();
     root.addEventListener("scroll", scheduleMeasure, { passive: true });
     window.addEventListener("resize", scheduleMeasure);
     const resizeObserver = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(scheduleMeasure);
@@ -3323,65 +3221,27 @@ export function SessionsView({
   }, [activeSession, locateSessionInList]);
   const activeSessionForTranscriptRef = useRef(activeSession);
   activeSessionForTranscriptRef.current = activeSession;
-  const activeParentSession = useMemo(() => {
-    if (!activeSession?.parentSessionId) return undefined;
-    const parentKey = `${friendlyAgent(activeSession.agent)}:${activeSession.parentSessionId}`.toLowerCase();
-    return allSessionItems.find((session) => sessionKey(session) === parentKey);
-  }, [activeSession, allSessionItems]);
-  const activeChildSessions = useMemo(() => {
-    if (!activeSession) return [];
-    const activeAgent = friendlyAgent(activeSession.agent).toLowerCase();
-    const activeSessionId = activeSession.id.toLowerCase();
-    return allSessionItems.filter((session) => (
-      friendlyAgent(session.agent).toLowerCase() === activeAgent
-      && session.parentSessionId?.toLowerCase() === activeSessionId
-    ));
-  }, [activeSession, allSessionItems]);
-  const activeSessionTree = useMemo(() => {
-    if (!activeSession) return [];
-    const activeAgent = friendlyAgent(activeSession.agent).toLowerCase();
-    const sameAgentSessions = allSessionItems.filter((session) => friendlyAgent(session.agent).toLowerCase() === activeAgent);
-    const byId = new Map(sameAgentSessions.map((session) => [session.id.toLowerCase(), session]));
-    let rootSession = activeSession;
-    const visited = new Set<string>();
-    while (rootSession.parentSessionId && !visited.has(rootSession.id.toLowerCase())) {
-      visited.add(rootSession.id.toLowerCase());
-      const parent = byId.get(rootSession.parentSessionId.toLowerCase());
-      if (!parent) break;
-      rootSession = parent;
-    }
-
-    const childrenByParent = new Map<string, SessionRecord[]>();
-    for (const candidate of sameAgentSessions) {
-      if (!candidate.parentSessionId) continue;
-      const siblings = childrenByParent.get(candidate.parentSessionId.toLowerCase()) ?? [];
-      siblings.push(candidate);
-      childrenByParent.set(candidate.parentSessionId.toLowerCase(), siblings);
-    }
-
-    const tree: SessionRecord[] = [];
-    const pending = [rootSession];
-    const treeKeys = new Set<string>();
-    while (pending.length > 0) {
-      const current = pending.shift();
-      if (!current || treeKeys.has(current.id.toLowerCase())) continue;
-      treeKeys.add(current.id.toLowerCase());
-      tree.push(current);
-      pending.push(...(childrenByParent.get(current.id.toLowerCase()) ?? []));
-    }
-    return tree;
-  }, [activeSession, allSessionItems]);
+  const sessionRelationships = useMemo(
+    () => selectSessionRelationships(allSessionItems, activeSession),
+    [activeSession, allSessionItems],
+  );
+  const { childSessions: activeChildSessions, tree: activeSessionTree } = sessionRelationships;
   const openRelatedSession = useCallback((session: SessionRecord) => {
     locateSessionInList(session);
-    keyboardNavigationScopeRef.current = "detail";
+    keyboardNavigationScopeRef.current = KeyboardNavigationScope.Detail;
     setDetailCollapsed(false);
   }, [locateSessionInList]);
   const activeImportedTranscript = activeSession ? importedTranscripts[activeSession.id] : undefined;
   const activeSessionTranscriptKey = useMemo(() => (
     activeSession
-      ? `${activeSession.agent}:${activeSession.path}:${activeSession.id}:${activeSession.updatedAt ?? ""}:${activeSession.messages ?? ""}`
+      ? `${activeSession.agent}:${activeSession.path}:${activeSession.id}`
       : ""
-  ), [activeSession?.agent, activeSession?.id, activeSession?.messages, activeSession?.path, activeSession?.updatedAt]);
+  ), [activeSession?.agent, activeSession?.id, activeSession?.path]);
+  const activeSessionTranscriptRefreshKey = useMemo(() => (
+    activeSession
+      ? `${activeSessionTranscriptKey}:${activeSession.updatedAt ?? ""}:${activeSession.messages ?? ""}`
+      : ""
+  ), [activeSession?.messages, activeSession?.updatedAt, activeSessionTranscriptKey]);
   const activeSessionLinkKey = useMemo(() => (
     activeSession ? sessionKey(activeSession) : ""
   ), [activeSession?.agent, activeSession?.id]);
@@ -3395,7 +3255,8 @@ export function SessionsView({
   const skillLinksLoading = loadingSkillLinks || Boolean(
     activeSession
       && activeSession.agent !== IMPORTED_SESSION_AGENT
-      && skillLinksKey !== activeSessionSkillLinksKey,
+      && skillLinksKey !== activeSessionSkillLinksKey
+      && skillLinksAttemptKey !== activeSessionSkillLinksKey,
   );
   const activeTranscriptLocatorItems = transcriptLocatorState?.key === activeSessionTranscriptKey
     ? transcriptLocatorState.items
@@ -3437,8 +3298,8 @@ export function SessionsView({
       resumeSession,
       resumeState: getResumeState,
       resumeTarget: sessionResumeTarget,
-      resumeTargetForSession: (session) => inferredResumeTargets[sessionTableRowId(session as SessionRecord)],
-    } as { normalizedQuery: string; resumeSession: typeof resumeSession; resumeState: typeof getResumeState; resumeTarget: SessionResumeTarget; resumeTargetForSession: (session: SessionRecord) => "terminal" | "app" | undefined }) as ColumnDef<SessionRecord>[],
+      resumeTargetForSession: (session) => inferredResumeTargets[sessionSourceIdentity(session as SessionRecord)],
+    }),
     [getResumeState, inferredResumeTargets, normalizedQuery, resumeSession, sessionResumeTarget],
   );
   const rowContextMenu = useCallback((session: SessionRecord) => {
@@ -3448,21 +3309,49 @@ export function SessionsView({
     const configuredTarget = sessionResumeTargetForAgent(sessionResumeTarget, session.agent);
     const target = sessionResumeTargetForMenu(
       configuredTarget,
-      inferredResumeTargets[sessionTableRowId(session)],
+      inferredResumeTargets[sessionSourceIdentity(session)],
     );
     const canResume = session.agent !== IMPORTED_SESSION_AGENT
       && Boolean(session.id && session.agent && transcriptPath);
+    const resumeTargets = sessionResumeTargetsForMenu({
+      terminal: canResume,
+      app: canResume && Boolean(deeplink),
+    });
     return (
       <>
-        <ContextMenu.Item
-          className="skillMenuItem"
-          disabled={!canResume}
-          aria-busy={target === "auto" || undefined}
-          onSelect={() => { void resumeSession(session); }}
-        >
-          {target === "app" ? <MessageSquareText size={14} /> : target === "terminal" ? <TerminalSquare size={14} /> : <LoadingIcon size={14} />}
-          {sessionResumeLabel("idle", target)}
-        </ContextMenu.Item>
+        {resumeTargets.length > 1 ? (
+          <ContextMenu.Sub>
+            <ContextMenu.SubTrigger className="skillMenuItem skillMenuSubTrigger">
+              <MessageSquareText size={14} />
+              <span>Resume in</span>
+              <ChevronRight className="skillMenuSubIcon" size={14} />
+            </ContextMenu.SubTrigger>
+            <ContextMenu.Portal>
+              <ContextMenu.SubContent className="skillMenuContent" sideOffset={8}>
+                {resumeTargets.map((resumeTarget) => (
+                  <ContextMenu.Item
+                    className="skillMenuItem"
+                    key={resumeTarget}
+                    onSelect={() => { void resumeSession(session, resumeTarget); }}
+                  >
+                    {resumeTarget === SessionResumeTarget.App ? <AppWindow size={14} /> : <TerminalSquare size={14} />}
+                    {resumeTarget === SessionResumeTarget.App ? "App" : "Terminal"}
+                  </ContextMenu.Item>
+                ))}
+              </ContextMenu.SubContent>
+            </ContextMenu.Portal>
+          </ContextMenu.Sub>
+        ) : (
+          <ContextMenu.Item
+            className="skillMenuItem"
+            disabled={!canResume}
+            aria-busy={target === SessionResumeTarget.Auto || undefined}
+            onSelect={() => { void resumeSession(session); }}
+          >
+            {target === SessionResumeTarget.App ? <AppWindow size={14} /> : target === SessionResumeTarget.Terminal ? <TerminalSquare size={14} /> : <LoadingIcon size={14} />}
+            {sessionResumeLabel(AsyncStatus.Idle, target)}
+          </ContextMenu.Item>
+        )}
         <ContextMenu.Separator className="skillMenuSeparator" />
         <CopyTextMenuItem Menu={ContextMenu} text={session.id} label="Copy session ID" />
         {deeplink && <CopyTextMenuItem Menu={ContextMenu} text={deeplink} label="Copy deeplink" />}
@@ -3481,15 +3370,24 @@ export function SessionsView({
     const requestRevision = transcriptRequestAuthorityRef.current.begin();
     transcriptLocatorRequestAuthorityRef.current.begin();
     pendingTranscriptLocatorRef.current = null;
-    transcriptSourceVersionRef.current = "";
-    transcriptItemsRef.current = [];
-    nextTranscriptCursorRef.current = undefined;
-    setItems([]);
-    setTranscriptLocatorState(null);
-    setNextTranscriptCursor(undefined);
+    const identityChanged = loadedTranscriptIdentityRef.current !== activeSessionTranscriptKey;
+    if (identityChanged) {
+      loadedTranscriptIdentityRef.current = activeSessionTranscriptKey;
+      transcriptSourceVersionRef.current = "";
+      transcriptItemsRef.current = [];
+      nextTranscriptCursorRef.current = undefined;
+      setItems([]);
+      setTranscriptLocatorState(null);
+      setNextTranscriptCursor(undefined);
+    }
+    loadMoreTranscriptInFlightRef.current = null;
+    loadAllTranscriptInFlightRef.current = null;
     setLoadingMoreTranscript(false);
     setLoading(Boolean(transcriptSession));
-    if (!transcriptSession) return;
+    if (!transcriptSession) {
+      loadedTranscriptIdentityRef.current = "";
+      return;
+    }
     if (activeImportedTranscript) {
       transcriptItemsRef.current = activeImportedTranscript;
       setItems(activeImportedTranscript);
@@ -3497,7 +3395,7 @@ export function SessionsView({
       return;
     }
     const cached = transcriptCacheRef.current.get(activeSessionTranscriptKey);
-    if (cached) {
+    if (identityChanged && cached) {
       transcriptItemsRef.current = cached.items;
       nextTranscriptCursorRef.current = cached.nextCursor;
       if (cached.locatorItems.length > 0) {
@@ -3515,29 +3413,86 @@ export function SessionsView({
       setNextTranscriptCursor(cached.nextCursor);
       setLoading(false);
     }
-    loadTranscript(transcriptSession, undefined, cached?.sourceVersion).then((page) => {
+    const knownSourceVersion = transcriptSourceVersionRef.current || cached?.sourceVersion;
+    const previousTranscriptItemCount = transcriptItemsRef.current.length;
+    loadTranscript(transcriptSession, undefined, knownSourceVersion).then(async (page) => {
       if (!transcriptRequestAuthorityRef.current.isCurrent(requestRevision)) return;
-      if (cached && page.unchanged) {
-        transcriptSourceVersionRef.current = cached.sourceVersion;
+      if (page.unchanged) {
+        transcriptSourceVersionRef.current = page.sourceVersion || knownSourceVersion || "";
         queueTranscriptLocator(transcriptSession, activeSessionTranscriptKey);
         return;
       }
-      transcriptCacheRef.current.set(activeSessionTranscriptKey, page);
+      let refreshedPage = page;
+      const shouldReloadAll = previousTranscriptItemCount > page.items.length;
+      if (shouldReloadAll) {
+        let nextCursor = page.nextCursor;
+        let restartCount = 0;
+        let allItems = [...page.items];
+        let allWarnings = [...page.warnings];
+        let latestSourceVersion = page.sourceVersion;
+        while (nextCursor) {
+          const nextPage = await loadTranscript(transcriptSession, nextCursor);
+          if (!transcriptRequestAuthorityRef.current.isCurrent(requestRevision)) return;
+          if (nextPage.restartRequired) {
+            if (restartCount >= 1) throw new Error("Transcript changed while refreshing");
+            restartCount += 1;
+            const restarted = await loadTranscript(transcriptSession);
+            if (!transcriptRequestAuthorityRef.current.isCurrent(requestRevision)) return;
+            allItems = [...restarted.items];
+            allWarnings = [...restarted.warnings];
+            latestSourceVersion = restarted.sourceVersion;
+            nextCursor = restarted.nextCursor;
+            refreshedPage = restarted;
+            continue;
+          }
+          allItems = mergeTranscriptItems(allItems, nextPage.items);
+          allWarnings.push(...nextPage.warnings);
+          latestSourceVersion = nextPage.sourceVersion || latestSourceVersion;
+          nextCursor = nextPage.nextCursor;
+        }
+        refreshedPage = {
+          ...refreshedPage,
+          items: allItems,
+          warnings: allWarnings,
+          sourceVersion: latestSourceVersion,
+          nextCursor: nextCursor ?? undefined,
+          done: !nextCursor,
+          restartRequired: false,
+          unchanged: false,
+        };
+      }
+      const sourceChanged = Boolean(
+        transcriptSourceVersionRef.current
+          && refreshedPage.sourceVersion
+          && refreshedPage.sourceVersion !== transcriptSourceVersionRef.current,
+      );
+      if (sourceChanged) {
+        transcriptLocatorRequestAuthorityRef.current.begin();
+        transcriptLocatorCacheRef.current.delete(activeSessionTranscriptKey);
+        setTranscriptLocatorState(null);
+      }
+      const refreshedItems = shouldReloadAll
+        ? refreshedPage.items
+        : preserveTranscriptTail(transcriptItemsRef.current, refreshedPage.items);
+      const pageToCache = refreshedItems === refreshedPage.items
+        ? refreshedPage
+        : { ...refreshedPage, items: refreshedItems };
+      transcriptCacheRef.current.set(activeSessionTranscriptKey, pageToCache);
       trimTranscriptCache(transcriptCacheRef.current);
-      transcriptItemsRef.current = page.items;
-      nextTranscriptCursorRef.current = page.nextCursor;
-      transcriptSourceVersionRef.current = page.sourceVersion;
-      if (page.locatorItems.length > 0) {
+      transcriptItemsRef.current = refreshedItems;
+      nextTranscriptCursorRef.current = pageToCache.nextCursor;
+      transcriptSourceVersionRef.current = pageToCache.sourceVersion;
+      if (pageToCache.locatorItems.length > 0) {
         const locatorPage: TranscriptLocatorPage = {
-          locatorItems: page.locatorItems,
-          warnings: page.warnings,
-          sourceVersion: page.sourceVersion,
+          locatorItems: pageToCache.locatorItems,
+          warnings: pageToCache.warnings,
+          sourceVersion: pageToCache.sourceVersion,
         };
         transcriptLocatorCacheRef.current.set(activeSessionTranscriptKey, locatorPage);
-        setTranscriptLocatorState({ key: activeSessionTranscriptKey, items: page.locatorItems });
+        setTranscriptLocatorState({ key: activeSessionTranscriptKey, items: pageToCache.locatorItems });
       }
-      setItems(page.items);
-      setNextTranscriptCursor(page.nextCursor);
+      setItems(refreshedItems);
+      setNextTranscriptCursor(pageToCache.nextCursor);
       queueTranscriptLocator(transcriptSession, activeSessionTranscriptKey);
     }).catch((error) => {
       if (transcriptRequestAuthorityRef.current.isCurrent(requestRevision)) {
@@ -3558,7 +3513,7 @@ export function SessionsView({
     return () => {
       transcriptRequestAuthorityRef.current.invalidate(requestRevision);
     };
-  }, [activeImportedTranscript, activeSessionTranscriptKey, loadTranscript, queueTranscriptLocator, showSessionError]);
+  }, [activeImportedTranscript, activeSessionTranscriptKey, activeSessionTranscriptRefreshKey, loadTranscript, queueTranscriptLocator, showSessionError]);
   const loadMoreTranscript = useCallback((): Promise<TranscriptItemRecord[] | null> => {
     const requestKey = activeSessionTranscriptKey;
     const existing = loadMoreTranscriptInFlightRef.current;
@@ -3670,11 +3625,12 @@ export function SessionsView({
   useEffect(() => {
     setSkillLinks([]);
     setSkillLinksKey("");
+    setSkillLinksAttemptKey("");
     setSkillLinksError("");
     setLoadingSkillLinks(false);
     skillLinksRequestKeyRef.current = "";
   }, [activeSessionLinkKey]);
-  const loadActiveSessionSkillLinks = useCallback(async () => {
+  const loadActiveSessionSkillLinks = useCallback(async (force = false) => {
     if (!activeSession || !loadSessionSkillLinks || !activeSessionSkillLinksKey) return;
     if (activeSession.agent === IMPORTED_SESSION_AGENT) {
       setSkillLinks([]);
@@ -3684,9 +3640,10 @@ export function SessionsView({
       return;
     }
     if (loadingSkillLinks) return;
-    if (skillLinksKey === activeSessionSkillLinksKey && !loadingSkillLinks) return;
+    if (!force && (skillLinksKey === activeSessionSkillLinksKey || skillLinksAttemptKey === activeSessionSkillLinksKey)) return;
     const requestKey = activeSessionSkillLinksKey;
     skillLinksRequestKeyRef.current = requestKey;
+    setSkillLinksAttemptKey(requestKey);
     setLoadingSkillLinks(true);
     setSkillLinksError("");
     try {
@@ -3703,27 +3660,35 @@ export function SessionsView({
     } finally {
       if (skillLinksRequestKeyRef.current === requestKey) setLoadingSkillLinks(false);
     }
-  }, [activeSession, activeSessionSkillLinksKey, loadSessionSkillLinks, loadingSkillLinks, showSessionError, skillLinksKey]);
+  }, [activeSession, activeSessionSkillLinksKey, loadSessionSkillLinks, loadingSkillLinks, showSessionError, skillLinksAttemptKey, skillLinksKey]);
+  const retryActiveSessionSkillLinks = useCallback(() => {
+    void loadActiveSessionSkillLinks(true);
+  }, [loadActiveSessionSkillLinks]);
   useEffect(() => {
     loadActiveSessionSkillLinks();
   }, [loadActiveSessionSkillLinks]);
 
-  const importButtonStateClass = importFeedback === "success"
+  const importButtonStateClass = importFeedback === ImportFeedbackState.Success
     ? "isSuccess"
-    : importFeedback === "warning"
+    : importFeedback === ImportFeedbackState.Warning
       ? "isWarning"
-      : importFeedback === "error"
+      : importFeedback === ImportFeedbackState.Error
         ? "isError"
         : "";
-  const importButtonLabel = importFeedback === "loading"
+  const importButtonLabel = importFeedback === ImportFeedbackState.Loading
     ? "Importing JSONL transcript"
-    : importFeedback === "success"
+    : importFeedback === ImportFeedbackState.Success
       ? "JSONL transcript imported"
-      : importFeedback === "warning"
+      : importFeedback === ImportFeedbackState.Warning
         ? "JSONL transcript imported with warnings"
-        : importFeedback === "error"
+        : importFeedback === ImportFeedbackState.Error
           ? importError || "Could not import JSONL transcript"
           : "Import JSONL transcript";
+  const showSessionListLocator = shouldShowSessionListLocator({
+    hasActiveSession: Boolean(activeSession),
+    detailCollapsed,
+    activeSessionInListViewport,
+  });
   return (
     <>
     {sessionToast ? <Toast tone="error" message={sessionToast} onDismiss={dismissSessionError} /> : null}
@@ -3733,18 +3698,30 @@ export function SessionsView({
           <PageHeader title="Sessions" compact>
             {developerMode ? (
               <>
+                <SelectControl
+                  label="Transcript provider"
+                  value={transcriptImportProvider || TRANSCRIPT_IMPORT_PROVIDER_PLACEHOLDER}
+                  onValueChange={(value) => setTranscriptImportProvider(
+                    value === TRANSCRIPT_IMPORT_PROVIDER_PLACEHOLDER ? "" : value,
+                  )}
+                  options={[
+                    { value: TRANSCRIPT_IMPORT_PROVIDER_PLACEHOLDER, label: "Choose provider" },
+                    ...TRANSCRIPT_IMPORT_PROVIDERS,
+                  ]}
+                  showOptionTooltip={false}
+                />
                 <IconButton
                   className={`sessionImportButton ${importButtonStateClass}`}
                   aria-label={importButtonLabel}
-                  aria-busy={importFeedback === "loading"}
-                  disabled={importFeedback === "loading"}
+                  aria-busy={importFeedback === ImportFeedbackState.Loading}
+                  disabled={importFeedback === ImportFeedbackState.Loading || !transcriptImportProvider}
                   onClick={() => importInputRef.current?.click()}
                 >
-                  {importFeedback === "loading"
+                  {importFeedback === ImportFeedbackState.Loading
                     ? <LoadingIcon size={16} />
-                    : importFeedback === "success"
+                    : importFeedback === ImportFeedbackState.Success
                       ? <Check size={16} />
-                      : importFeedback === "warning" || importFeedback === "error"
+                      : importFeedback === ImportFeedbackState.Warning || importFeedback === ImportFeedbackState.Error
                         ? <AlertCircle size={16} />
                         : <Upload size={16} />}
                 </IconButton>
@@ -3816,7 +3793,7 @@ export function SessionsView({
                     </div>
                     <div className="sessionProjectFilterOptions">
                       {visibleProjectOptions.map((option) => {
-                        const active = selectedProjectKeySet.has(option.key);
+                        const active = selectedProjectKeys.includes(option.key);
                         return (
                           <DropdownMenu.CheckboxItem
                             key={option.key}
@@ -3865,19 +3842,20 @@ export function SessionsView({
           <div
             className="sessionListBody"
             ref={sessionListBodyRef}
-            onPointerDownCapture={() => { keyboardNavigationScopeRef.current = "list"; }}
-            onFocusCapture={() => { keyboardNavigationScopeRef.current = "list"; }}
+            onPointerDownCapture={() => { keyboardNavigationScopeRef.current = KeyboardNavigationScope.List; }}
+            onFocusCapture={() => { keyboardNavigationScopeRef.current = KeyboardNavigationScope.List; }}
           >
             <DataTable
               rows={tableSessions}
               columns={columns}
               getRowId={sessionTableRowId}
               freezeColumn={SESSION_FREEZE_COLUMN}
-              defaultSort={{ key: "updatedAt", direction: "desc" }}
+              defaultSort={{ key: SessionSortKey.UpdatedAt, direction: SortDirection.Desc }}
               sort={activeSort}
               onSortChange={handleSortChange}
               manualSorting
               rowHeight={SESSION_TABLE_ROW_HEIGHT}
+              scrollResetKey={`${pageContextKey}\u0000${boundedCurrentPage}`}
               scrollToRowId={sessionLocatorRequest}
               onScrollToRowComplete={completeSessionLocator}
               groupBy={groupBy}
@@ -3889,6 +3867,17 @@ export function SessionsView({
               loadingLabel="Loading sessions"
               emptyState={<EmptyState icon={<SearchX size={22} strokeWidth={1.75} />} iconTone="muted" title="No matching sessions" />}
             />
+            {showSessionListLocator ? (
+              <AppTooltip content="Locate session in list">
+                <IconButton
+                  className="sessionListLocator"
+                  aria-label="Locate session in list"
+                  onClick={locateActiveSession}
+                >
+                  <LocateFixed size={15} aria-hidden="true" />
+                </IconButton>
+              </AppTooltip>
+            ) : null}
           </div>
           <div className="sessionPager">
             <div className="sessionPagerInfo">
@@ -3911,15 +3900,15 @@ export function SessionsView({
               <IconButton
                 aria-label="Previous page"
                 onClick={() => setCurrentPage((page) => Math.max(0, page - 1))}
-                disabled={currentPage === 0}
+                disabled={boundedCurrentPage === 0}
               >
                 <ChevronLeft size={15} />
               </IconButton>
-              <span>{currentPage + 1} / {pageCount}</span>
+              <span>{boundedCurrentPage + 1} / {pageCount}</span>
               <IconButton
                 aria-label="Next page"
                 onClick={() => setCurrentPage((page) => Math.min(pageCount - 1, page + 1))}
-                disabled={currentPage >= pageCount - 1}
+                disabled={boundedCurrentPage >= pageCount - 1}
               >
                 <ChevronRight size={15} />
               </IconButton>
@@ -3940,7 +3929,6 @@ export function SessionsView({
         >
           <TranscriptPanel
             session={activeSession}
-            parentSession={activeParentSession}
             childSessions={activeChildSessions}
             sessionTree={activeSessionTree}
               items={items}
@@ -3955,19 +3943,13 @@ export function SessionsView({
               skillLinksLoaded={skillLinksKey === activeSessionSkillLinksKey}
               skillLinksError={skillLinksError}
             onCollapse={() => {
-              keyboardNavigationScopeRef.current = "list";
+              keyboardNavigationScopeRef.current = KeyboardNavigationScope.List;
               setDetailCollapsed(true);
             }}
             keyboardNavigationScopeRef={keyboardNavigationScopeRef}
-            showSessionLocator={!activeSessionVisibleInList || activeSessionInListViewport === false}
-            onLocateSession={locateActiveSession}
-            onResume={resumeSession}
-            resumeTarget={sessionResumeTarget}
-            inferredResumeTarget={inferredResumeTargets[sessionTableRowId(activeSession)]}
-            resumeState={getResumeState(activeSession)}
             onOpenSession={openRelatedSession}
             onOpenSkill={onOpenSkill}
-            onLoadSkills={loadActiveSessionSkillLinks}
+            onLoadSkills={retryActiveSessionSkillLinks}
             onLoadMore={loadMoreTranscript}
             onLoadAll={loadAllTranscript}
             searchTranscript={searchTranscript}

@@ -29,11 +29,14 @@ import type { SkillDependencyRecord } from "./SkillDependencyGraph.tsx";
 import { Visibility } from "./Visibility.tsx";
 
 export type SkillInfoMenuSkill = SkillLike & {
+  id?: string;
   name: string;
   visibility: string;
   agents: string[];
   dependencies: string[];
   dependents: string[];
+  dependencyIds?: string[];
+  dependentIds?: string[];
   description: string;
 };
 
@@ -43,13 +46,9 @@ export type SkillInfoMenuProps = {
   onOpenSkill?: (name: string) => void;
 };
 
-function relationList(names: string[], skills: SkillDependencyRecord[]) {
-  const skillsByName = new Map(skills.map((item) => [item.name, item]));
-  return names
-    .flatMap((name) => {
-      const skill = skillsByName.get(name);
-      return skill ? [skill] : [];
-    })
+function relationList(ids: string[], skills: SkillDependencyRecord[]) {
+  return ids
+    .flatMap((id) => skills.filter((item) => item.id === id))
     .sort((left, right) => left.name.localeCompare(right.name));
 }
 
@@ -69,11 +68,10 @@ function SkillInfoRelations({
             <td>
               <div className="skillInfoRelationList">
                 {row.skills.map((relatedSkill) => (
-                  <Tooltip key={relatedSkill.name} content={relatedSkill.description}><button
+                  <Tooltip key={relatedSkill.id ?? relatedSkill.name} content={relatedSkill.description}><button
                     className="skillInfoRelationChip"
-                    key={relatedSkill.name}
                     disabled={!onOpenSkill}
-                    onClick={() => onOpenSkill?.(relatedSkill.name)}
+                    onClick={() => onOpenSkill?.(relatedSkill.id ?? relatedSkill.name)}
                   >
                     {relatedSkill.name}
                   </button></Tooltip>
@@ -95,8 +93,8 @@ export function SkillInfoMenu({ skill, skills, onOpenSkill }: SkillInfoMenuProps
   const sourceUrl = sourceOpenUrl(sourceValue, sourceDetails.kind, sourceDetails.relativePath);
   const sourceActionLabels = skillSourceActionLabels(sourceDetails);
   const installLocations = skillTargets(skill);
-  const dependencies = relationList(skill.dependencies, skills);
-  const dependents = relationList(skill.dependents, skills);
+  const dependencies = relationList(skill.dependencyIds ?? [], skills);
+  const dependents = relationList(skill.dependentIds ?? [], skills);
   const relationRows = [
     { label: "Depends on", skills: dependencies },
     { label: "Used by", skills: dependents },

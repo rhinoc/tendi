@@ -1,12 +1,13 @@
-export type TableSelectionActionId =
-  | "open-editor"
-  | "copy"
-  | "copy-path"
-  | "reveal"
-  | "edit"
-  | "enable"
-  | "disable"
-  | "delete";
+export enum TableSelectionActionId {
+  OpenEditor = "open-editor",
+  Copy = "copy",
+  CopyPath = "copy-path",
+  Reveal = "reveal",
+  Edit = "edit",
+  Enable = "enable",
+  Disable = "disable",
+  Delete = "delete",
+}
 
 export function visibleSelectionActionCount(
   availableWidth: number,
@@ -38,27 +39,27 @@ function actionIdsForCount(
 export function hookSelectionActionIds(selectionCount: number) {
   return actionIdsForCount(
     selectionCount,
-    ["open-editor", "reveal", "copy-path", "enable", "disable", "delete"],
-    ["enable", "disable", "delete"],
+    [TableSelectionActionId.OpenEditor, TableSelectionActionId.Reveal, TableSelectionActionId.CopyPath, TableSelectionActionId.Enable, TableSelectionActionId.Disable, TableSelectionActionId.Delete],
+    [TableSelectionActionId.Enable, TableSelectionActionId.Disable, TableSelectionActionId.Delete],
   );
 }
 
 export function mcpSelectionActionIds(selectionCount: number) {
   return actionIdsForCount(
     selectionCount,
-    ["enable", "disable", "open-editor", "reveal", "copy-path"],
-    ["enable", "disable"],
+    [TableSelectionActionId.Enable, TableSelectionActionId.Disable, TableSelectionActionId.OpenEditor, TableSelectionActionId.Reveal, TableSelectionActionId.CopyPath],
+    [TableSelectionActionId.Enable, TableSelectionActionId.Disable],
   );
 }
 
 export function promptSelectionActionIds(selectionCount: number) {
-  return actionIdsForCount(selectionCount, ["copy", "edit", "delete"], ["delete"]);
+  return actionIdsForCount(selectionCount, [TableSelectionActionId.Copy, TableSelectionActionId.Edit, TableSelectionActionId.Delete], [TableSelectionActionId.Delete]);
 }
 
 export function ruleSelectionActionIds(selectionCount: number) {
-  return actionIdsForCount(selectionCount, ["open-editor", "reveal", "copy-path", "delete"], ["delete"]);
+  return actionIdsForCount(selectionCount, [TableSelectionActionId.OpenEditor, TableSelectionActionId.Reveal, TableSelectionActionId.CopyPath, TableSelectionActionId.Delete], [TableSelectionActionId.Delete]);
 }
 
 export function configSelectionActionIds(selectionCount: number) {
-  return actionIdsForCount(selectionCount, ["open-editor", "reveal", "copy-path", "delete"], ["delete"]);
+  return actionIdsForCount(selectionCount, [TableSelectionActionId.OpenEditor, TableSelectionActionId.Reveal, TableSelectionActionId.CopyPath, TableSelectionActionId.Delete], [TableSelectionActionId.Delete]);
 }

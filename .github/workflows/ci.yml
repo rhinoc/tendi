@@ -14,6 +14,30 @@ permissions:
   contents: read
 
 jobs:
+  release-notes:
+    name: Validate release notes
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate changeset scripts
+        run: |
+          bash -n scripts/consume_changesets.sh
+          bash -n scripts/render_changesets.sh
+          bash -n scripts/test_changesets.sh
+          scripts/test_changesets.sh
+
+      - name: Require a release changeset
+        run: |
+          notes="$RUNNER_TEMP/release-notes.md"
+          scripts/render_changesets.sh "$notes"
+          if [[ ! -s "$notes" ]]; then
+            echo "Every pull request must include an English .changeset/*.md entry." >&2
+            exit 1
+          fi
+          cat "$notes"
+
   rust:
     name: Rust tests and check
     runs-on: macos-14
@@ -100,11 +124,20 @@ jobs:
       - name: Install frontend dependencies
         run: npm ci --prefix apps/desktop
 
+      - name: Validate runtime schema and generated contracts
+        run: |
+          npm run runtime:validate-schema --prefix apps/desktop
+          npm run runtime:codegen --prefix apps/desktop -- --check
+          npm run runtime:test-contract --prefix apps/desktop
+
       - name: Check frontend UI boundaries
         run: npm run check:ui-boundaries --prefix apps/desktop
 
       - name: Check provider boundaries
         run: npm run test:provider-boundaries --prefix apps/desktop
+
+      - name: Check architecture boundaries
+        run: npm run check:architecture --prefix apps/desktop
 
       - name: Check frontend typography tokens
         run: npm run check:typography --prefix apps/desktop

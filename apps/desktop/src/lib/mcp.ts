@@ -43,6 +43,16 @@ export function normalizeMcp(row: Record<string, unknown>): McpRecord | undefine
   };
 }
 
+export function isMcpMutationDelta(value: unknown): value is McpMutationDelta {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const record = value as Record<string, unknown>;
+  return "updated" in record && !("error" in record);
+}
+
+export type McpMutationDelta = {
+  updated?: unknown[];
+};
+
 export function mcpSourcePath(row: McpRecord | null | undefined): string {
   return row?.path ?? "";
 }

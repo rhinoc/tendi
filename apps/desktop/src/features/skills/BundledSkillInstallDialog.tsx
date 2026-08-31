@@ -5,6 +5,7 @@ import { DialogShell } from "../../components/shared/DialogShell.tsx";
 import { DialogStatefulButton } from "../../components/shared/DialogStatefulButton.tsx";
 import { Toast } from "../../components/shared/Toast.tsx";
 import { dialogCopy } from "../../lib/index.ts";
+import { AsyncStatus } from "../../lib/async-status.ts";
 
 type BundledSkillInstallDialogProps = {
   open: boolean;
@@ -40,7 +41,7 @@ export function BundledSkillInstallDialog({
             <DialogActionButton variant="secondary" disabled={busy} onClick={onDismiss}>Skip</DialogActionButton>
             <DialogStatefulButton
               className="dialogStatefulButtonWide"
-              state={busy ? "loading" : "idle"}
+              state={busy ? AsyncStatus.Loading : AsyncStatus.Idle}
               loadingLabel="Setting up"
               variant="primary"
               aria-label="Set up"

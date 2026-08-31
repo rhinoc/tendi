@@ -12,9 +12,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-use crate::{sessions::SessionRecord, skills::AgentKind};
+use crate::{sessions::SessionRecord, skills::AgentKind, time::parse_timestamp};
 
-const ANALYTICS_PARSER_VERSION: u32 = 2;
+const ANALYTICS_PARSER_VERSION: u32 = 3;
 
 #[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -1130,7 +1130,7 @@ fn update_coverage(timestamp: &str, first: &mut Option<String>, last: &mut Optio
 }
 
 fn analytics_timestamp(timestamp: &str) -> Option<DateTime<chrono::FixedOffset>> {
-    DateTime::parse_from_rfc3339(timestamp).ok()
+    parse_timestamp(timestamp)
 }
 
 fn analytics_date(timestamp: &str) -> Option<NaiveDate> {
@@ -1350,11 +1350,20 @@ fn is_line_boundary(path: &Path, offset: u64) -> bool {
 }
 
 pub(crate) fn parse_message_line(line: &str, record: &mut SessionAnalyticsRecord) {
+    parse_message_line_with_timestamp(line, record, None);
+}
+
+pub(crate) fn parse_message_line_with_timestamp(
+    line: &str,
+    record: &mut SessionAnalyticsRecord,
+    timestamp_override: Option<String>,
+) {
     let Ok(value) = serde_json::from_str::<Value>(line) else {
         record.analytics.malformed_lines += 1;
         return;
     };
-    let timestamp = string_at(&value, &["timestamp"])
+    let timestamp = timestamp_override
+        .or_else(|| string_at(&value, &["timestamp"]))
         .filter(|timestamp| !timestamp.is_empty())
         .unwrap_or_else(|| record.state.last_timestamp.clone());
     let previous_stamp = record.state.last_timestamp.clone();
@@ -1964,6 +1973,42 @@ mod tests {
         assert_eq!(parsed.analytics.snapshot_runs(&parsed.state).len(), 1);
         assert!(parsed.analytics.snapshot_runs(&parsed.state)[0].completed);
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn cursor_analytics_uses_embedded_timestamps_for_each_turn() {
+        let root = temp_dir("tendi-analytics-cursor-embedded-timestamp");
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("session-1.jsonl");
+        fs::write(
+            &path,
+            concat!(
+                "{\"role\":\"user\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"<timestamp>Thursday, Aug 27, 2026, 11:59 PM (UTC+8)</timestamp>\\n<user_query>First</user_query>\"}]}}\n",
+                "{\"role\":\"assistant\",\"message\":{\"content\":[{\"type\":\"tool_use\",\"name\":\"Read\",\"input\":{\"path\":\"/tmp/first\"}}]}}\n",
+                "{\"role\":\"user\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"<timestamp>Friday, Aug 28, 2026, 12:01 AM (UTC+8)</timestamp>\\n<user_query>Second</user_query>\"}]}}\n",
+                "{\"role\":\"assistant\",\"message\":{\"content\":[{\"type\":\"tool_use\",\"name\":\"Read\",\"input\":{\"path\":\"/tmp/second\"}}]}}\n"
+            ),
+        )
+        .unwrap();
+
+        let parsed = analyze_session(&session(&path, AgentKind::Cursor), None).unwrap();
+
+        assert_eq!(
+            parsed
+                .analytics
+                .tools
+                .iter()
+                .map(|tool| tool.timestamp.as_str())
+                .collect::<Vec<_>>(),
+            vec!["2026-08-27T23:59:00+08:00", "2026-08-28T00:01:00+08:00"]
+        );
+        let runs = parsed.analytics.snapshot_runs(&parsed.state);
+        assert_eq!(runs.len(), 2);
+        assert_eq!(runs[0].start, "2026-08-27T23:59:00+08:00");
+        assert_eq!(runs[0].end, "2026-08-27T23:59:00+08:00");
+        assert_eq!(runs[1].start, "2026-08-28T00:01:00+08:00");
+        assert_eq!(runs[1].end, "2026-08-28T00:01:00+08:00");
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

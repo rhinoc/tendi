@@ -1,11 +1,10 @@
-import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { ComponentType, ReactNode } from "react";
 import { ContextMenu, Dialog, DropdownMenu } from "radix-ui";
 import {
   ChevronLeft,
   ChevronRight,
   Code2,
-  CloudUpload,
   Copy,
   ArrowRightLeft,
   Eye,
@@ -35,7 +34,6 @@ import { DialogTextField } from "../components/shared/DialogTextField.tsx";
 import { EmptyState } from "../components/shared/EmptyState.tsx";
 import { IconButton } from "../components/shared/IconButton.tsx";
 import { LoadingIcon } from "../components/shared/LoadingIcon.tsx";
-import { LoadingInline } from "../components/shared/LoadingInline.tsx";
 import { LoadingState } from "../components/shared/LoadingState.tsx";
 import { LoadErrorState } from "../components/shared/LoadErrorState.tsx";
 import { DataTableSelectionActions, renderDataTableSelectionMenu, type DataTableSelectionActionDefinition } from "../components/shared/DataTableSelectionActions.tsx";
@@ -47,20 +45,47 @@ import { SearchField } from "../components/shared/SearchField.tsx";
 import { SegmentedControl, SegmentedControlItem } from "../components/shared/SegmentedControl.tsx";
 import { SelectControl } from "../components/shared/SelectControl.tsx";
 import { Toast } from "../components/shared/Toast.tsx";
-import { SkillRelationshipMap } from "../features/skills/SkillRelationshipMap.tsx";
+import { RelationshipGraphKind, SkillRelationshipMap } from "../features/skills/SkillRelationshipMap.tsx";
 import { SkillLocationDialog } from "../features/skills/SkillLocationDialog.tsx";
-import { backupSkillsForSelection, backupStatusForSkill, type BackupStatusRecord } from "../features/skills/backup-action.ts";
 import { SKILL_BADGE_TONES } from "../features/skills/skill-badge-tones.ts";
 import { Visibility } from "../features/skills/Visibility.tsx";
 import { DataTable } from "../components/DataTable.tsx";
-import type { ColumnDef, SortState } from "../components/DataTable.types";
-import { actionLabels, SKILL_FREEZE_COLUMN, selectionDeleteLabel, TauriCommand, SkillOperationStatus, SkillVisibility, agentIdentityKey, allSkillVisibilities, compactDateTime, copyText, editableSkillVisibilities, invokeCommand, isReadOnlySkillSource, isSkillRowSelectable, isSkillSelectable, isSkillVisibilityEditable, primarySkillPath, safeInvoke, scopeColumn, skillSourceAction, skillSourceDetails, skillTargets, sourceRemoteDetails, suppressNextClick, type NormalizedSkill, type ProjectSummary, type RawSkillRecord, type SkillAddPlan, type SkillInstallResult, type SkillOperation, type WrapperArgs, type AvailableSkill } from "../lib/index.ts";
-import { captureSkillSourcePage, isSkillSourceActionReady, resolveSkillInstallTarget, restoreSkillSourcePage, shouldShowSkillQuickSelect, skillSourceErrorMessage, type SkillSourcePageSnapshot } from "../lib/add-skill-dialog.ts";
-import { skillActionIds, type SkillActionId } from "../lib/skill-actions.ts";
+import { ColumnDataType, type ColumnDef, type SortState } from "../components/DataTable.types";
+import { SortDirection } from "../lib/sort.ts";
+import { actionLabels, SKILL_FREEZE_COLUMN, selectionDeleteLabel, SkillUpdateAvailability, TauriCommand, SkillOperationStatus, SkillVisibility, agentIdentityKey, allSkillVisibilities, compactDateTime, copyText, editableSkillVisibilities, findSkillBySelector, isReadOnlySkillSource, isSkillRowSelectable, isSkillSelectable, isSkillVisibilityEditable, primarySkillPath, safeInvoke, scopeColumn, skillSourceAction, skillSourceDetails, skillTargets, sourceRemoteDetails, suppressNextClick, type NormalizedSkill, type ProjectSummary, type RawSkillRecord, type SkillAddPlan, type SkillInstallResult, type WrapperArgs } from "../lib/index.ts";
+import { captureSkillSourcePage, isSkillSourceActionReady, normalizeSkillAddPlan, resolveSkillInstallTarget, restoreSkillSourcePage, shouldShowSkillQuickSelect, skillSourceErrorMessage, type SkillSourcePageSnapshot } from "../lib/add-skill-dialog.ts";
+import { SkillActionId, skillActionIds } from "../lib/skill-actions.ts";
+import {
+  buildSkillInstallViewModel,
+  isExistingSkillOperationStatus,
+  isSelectableOperationStatus,
+  SkillInstallFilter,
+  selectSkillListView,
+} from "../controllers/skill-controller.ts";
+import {
+  installSkillAdd,
+  previewSkillAdd,
+  readSkillPreview,
+  searchSkillMarketplace,
+  SkillDistributionMode,
+  SkillScope,
+  type MarketplaceSource,
+  type SkillChangeResponse,
+  type SkillPreviewReadResponse,
+} from "../lib/runtime-gateway.ts";
 
 export type SkillsTableSort = SortState;
 
-type SkillsViewMode = "list" | "network";
+enum SkillsViewMode {
+  List = "list",
+  Network = "network",
+}
+
+enum SkillAddBusyAction {
+  Idle = "",
+  Preview = "preview",
+  Install = "install",
+}
 
 type SkillWrapperSelection = {
   id: string;
@@ -82,24 +107,6 @@ function skillOriginLabel(skill: NormalizedSkill): string {
   const remote = sourceRemoteDetails(source.value, source.kind);
   return remote?.host.includes("github.") && remote.path ? remote.path : skill.section;
 }
-type MarketplaceSource = {
-  id: string;
-  name: string;
-  description?: string;
-  source: string;
-  url?: string;
-  version?: string;
-  metric?: number;
-  metricLabel?: string;
-  trustLabel?: string;
-  kind: string;
-};
-
-type MarketplaceSearchResponse = {
-  items: MarketplaceSource[];
-  warnings: string[];
-};
-
 const recommendedSkillSources: MarketplaceSource[] = [
   {
     id: "mattpocock-skills",
@@ -135,14 +142,9 @@ const recommendedSkillSources: MarketplaceSource[] = [
   },
 ];
 
-type SkillMarkdownPreview = {
-  name: string;
-  relativePath: string;
-  content: string;
-};
-
 function installedSkillName(result: SkillInstallResult): string | null {
-  const installedNames = new Set(result.skills.flatMap((skill) => typeof skill.name === "string" ? [skill.name] : []));
+  const rows = result.updated ?? result.skills ?? [];
+  const installedNames = new Set(rows.flatMap((skill) => typeof skill.name === "string" ? [skill.name] : []));
   return result.report.plan.selected
     .map((skill) => skill.name)
     .find((name) => installedNames.has(name)) ?? null;
@@ -176,7 +178,7 @@ export type VisibilityMenuItemsProps = {
 };
 
 export function VisibilityMenuItems({ Menu, selectedSkills, onSetVisibility }: VisibilityMenuItemsProps) {
-  const names = selectedSkills.filter(isSkillVisibilityEditable).map((skill) => skill.name);
+  const names = selectedSkills.filter(isSkillVisibilityEditable).map((skill) => skill.id || skill.name);
   const disabled = names.length === 0;
   return (
     <>
@@ -204,24 +206,20 @@ type SkillActionDefinitionOptions = {
   manageLocations: (skills: NormalizedSkill[]) => void;
   createWrapper: (skills: NormalizedSkill[]) => void;
   setVisibility: (names: string[], visibility: SkillVisibility) => void | Promise<void>;
-  addToBackup: (skills: NormalizedSkill[]) => void;
-  getBackupStatus: (skill: NormalizedSkill) => BackupStatusRecord;
-  backupConfigured: boolean;
-  backupBusy: boolean;
 };
 
-type SkillPathActionId = "reveal" | "copy-path";
+type SkillPathActionId = SkillActionId.Reveal | SkillActionId.CopyPath;
 
 function skillPathActionLabel(action: SkillPathActionId) {
-  return action === "reveal" ? actionLabels.revealInFinder : actionLabels.copyPath;
+  return action === SkillActionId.Reveal ? actionLabels.revealInFinder : actionLabels.copyPath;
 }
 
 function skillPathActionIcon(action: SkillPathActionId) {
-  return action === "reveal" ? FolderOpen : Copy;
+  return action === SkillActionId.Reveal ? FolderOpen : Copy;
 }
 
 function runSkillPathAction(action: SkillPathActionId, path: string) {
-  if (action === "reveal") safeInvoke(TauriCommand.RevealInFinder, { path });
+  if (action === SkillActionId.Reveal) safeInvoke(TauriCommand.RevealInFinder, { path });
   else copyText(path);
 }
 
@@ -284,17 +282,15 @@ function renderSkillPathDirectAction(action: SkillPathActionId, targets: SkillTa
   );
 }
 
-function skillActionDefinitions({ Menu, selectedSkills, applyUpdates, deleteSkills, manageLocations, createWrapper, setVisibility, addToBackup, getBackupStatus, backupConfigured, backupBusy }: SkillActionDefinitionOptions): SkillActionDefinition[] {
+function skillActionDefinitions({ Menu, selectedSkills, applyUpdates, deleteSkills, manageLocations, createWrapper, setVisibility }: SkillActionDefinitionOptions): SkillActionDefinition[] {
   const singleSkill = selectedSkills.length === 1 ? selectedSkills[0] : undefined;
   const primaryPath = singleSkill ? primarySkillPath(singleSkill) : null;
   const targets: SkillTarget[] = singleSkill ? skillTargets(singleSkill) : [];
-  const updateNames = selectedSkills.filter((skill) => skill.updateAvailability === "update-available").map((skill) => skill.name);
-  const deletableNames = selectedSkills.filter(isSkillSelectable).map((skill) => skill.name);
+  const updateNames = selectedSkills.filter((skill) => skill.updateAvailability === SkillUpdateAvailability.UpdateAvailable).map((skill) => skill.id || skill.name);
+  const deletableNames = selectedSkills.filter(isSkillSelectable).map((skill) => skill.id || skill.name);
   const movableSkills = selectedSkills.filter((skill) => !isReadOnlySkillSource(skill) && skillTargets(skill).length > 0);
-  const backupSkills = backupSkillsForSelection(selectedSkills, getBackupStatus, backupConfigured);
   const updateLabel = selectedSkills.length === 1 ? "Apply update" : "Update";
   const locationLabel = selectedSkills.length === 1 ? "Manage locations" : "Locations";
-  const backupLabel = selectedSkills.length === 1 ? "Add to sync" : `Add to sync${backupSkills.length > 1 ? ` (${backupSkills.length})` : ""}`;
   const deleteLabel = selectionDeleteLabel("skill", selectedSkills.length);
   const visibilityMenu = (
     <Menu.Sub>
@@ -311,63 +307,57 @@ function skillActionDefinitions({ Menu, selectedSkills, applyUpdates, deleteSkil
     </Menu.Sub>
   );
   const actions: Record<SkillActionId, SkillActionDefinition> = {
-    "open-editor": {
-      id: "open-editor",
+    [SkillActionId.OpenEditor]: {
+      id: SkillActionId.OpenEditor,
       direct: <button aria-label={actionLabels.openInEditor} disabled={!primaryPath} onClick={() => primaryPath && safeInvoke(TauriCommand.OpenInEditor, { path: primaryPath })}><Code2 size={15} /><span>{actionLabels.openInEditor}</span></button>,
       menu: <OpenInEditorMenuItem Menu={Menu} path={primaryPath} />,
       measure: <><Code2 size={15} /><span>{actionLabels.openInEditor}</span></>,
     },
-    locations: {
-      id: "locations",
+    [SkillActionId.Locations]: {
+      id: SkillActionId.Locations,
       direct: <button aria-label={locationLabel} disabled={movableSkills.length === 0} onClick={() => movableSkills.length > 0 && manageLocations(movableSkills)}><ArrowRightLeft size={15} /><span>{locationLabel}</span></button>,
       menu: <Menu.Item className="skillMenuItem" disabled={movableSkills.length === 0} onSelect={() => { if (movableSkills.length === 0) return; suppressNextClick(); manageLocations(movableSkills); }}><ArrowRightLeft size={14} />{locationLabel}</Menu.Item>,
       measure: <><ArrowRightLeft size={15} /><span>{locationLabel}</span></>,
     },
-    update: {
-      id: "update",
+    [SkillActionId.Update]: {
+      id: SkillActionId.Update,
       direct: <button className="skillApplyUpdatesButton" aria-label={updateLabel} disabled={updateNames.length === 0} onClick={() => updateNames.length > 0 && applyUpdates(updateNames)}><RefreshCw size={15} aria-hidden="true" /><span>{updateLabel}{selectedSkills.length > 1 && updateNames.length ? ` (${updateNames.length})` : ""}</span></button>,
       menu: <Menu.Item className="skillMenuItem" disabled={updateNames.length === 0} onSelect={() => { if (updateNames.length === 0) return; suppressNextClick(); applyUpdates(updateNames); }}><RefreshCw size={14} />{updateLabel}{selectedSkills.length > 1 && updateNames.length ? ` (${updateNames.length})` : ""}</Menu.Item>,
       measure: <><RefreshCw size={15} /><span>{updateLabel}{selectedSkills.length > 1 && updateNames.length ? ` (${updateNames.length})` : ""}</span></>,
     },
-    reveal: {
-      id: "reveal",
-      direct: renderSkillPathDirectAction("reveal", targets, primaryPath),
-      menu: renderSkillPathMenuItems(Menu, "reveal", targets, primaryPath),
+    [SkillActionId.Reveal]: {
+      id: SkillActionId.Reveal,
+      direct: renderSkillPathDirectAction(SkillActionId.Reveal, targets, primaryPath),
+      menu: renderSkillPathMenuItems(Menu, SkillActionId.Reveal, targets, primaryPath),
       measure: <><FolderOpen size={15} /><span>{actionLabels.revealInFinder}</span></>,
     },
-    "copy-path": {
-      id: "copy-path",
-      direct: renderSkillPathDirectAction("copy-path", targets, primaryPath),
-      menu: renderSkillPathMenuItems(Menu, "copy-path", targets, primaryPath),
+    [SkillActionId.CopyPath]: {
+      id: SkillActionId.CopyPath,
+      direct: renderSkillPathDirectAction(SkillActionId.CopyPath, targets, primaryPath),
+      menu: renderSkillPathMenuItems(Menu, SkillActionId.CopyPath, targets, primaryPath),
       measure: <><Copy size={15} /><span>{actionLabels.copyPath}</span></>,
     },
-    visibility: {
-      id: "visibility",
+    [SkillActionId.Visibility]: {
+      id: SkillActionId.Visibility,
       direct: <DropdownMenu.Root><DropdownMenu.Trigger asChild><button aria-label="Visibility"><Eye size={15} /><span>Visibility</span></button></DropdownMenu.Trigger><DropdownMenu.Portal><MenuContent align="start" sideOffset={6}><VisibilityMenuItems Menu={DropdownMenu} selectedSkills={selectedSkills} onSetVisibility={setVisibility} /></MenuContent></DropdownMenu.Portal></DropdownMenu.Root>,
       menu: visibilityMenu,
       measure: <><Eye size={15} /><span>Visibility</span></>,
     },
-    backup: {
-      id: "backup",
-      direct: <button aria-label={backupLabel} aria-busy={backupBusy} disabled={backupSkills.length === 0 || backupBusy} onClick={() => backupSkills.length > 0 && addToBackup(backupSkills)}>{backupBusy ? <LoadingIcon size={15} /> : <><CloudUpload size={15} /><span>{backupLabel}</span></>}</button>,
-      menu: <Menu.Item className="skillMenuItem" disabled={backupSkills.length === 0 || backupBusy} onSelect={() => { if (backupSkills.length === 0 || backupBusy) return; suppressNextClick(); addToBackup(backupSkills); }}><CloudUpload size={14} />{backupLabel}</Menu.Item>,
-      measure: <><CloudUpload size={15} /><span>{backupLabel}</span></>,
-    },
-    wrapper: {
-      id: "wrapper",
+    [SkillActionId.Wrapper]: {
+      id: SkillActionId.Wrapper,
       direct: <button aria-label="Create wrapper" onClick={() => createWrapper(selectedSkills)}><PackagePlus size={15} /><span>Create wrapper</span></button>,
       menu: <Menu.Item className="skillMenuItem" onSelect={() => { suppressNextClick(); createWrapper(selectedSkills); }}><PackagePlus size={14} />Create wrapper</Menu.Item>,
       measure: <><PackagePlus size={15} /><span>Create wrapper</span></>,
     },
-    delete: {
-      id: "delete",
+    [SkillActionId.Delete]: {
+      id: SkillActionId.Delete,
       direct: <button className="danger" aria-label={deleteLabel} disabled={deletableNames.length === 0} onClick={() => deletableNames.length > 0 && deleteSkills(deletableNames)}><Trash2 size={15} /><span>{deleteLabel}</span></button>,
       menu: <Menu.Item className="skillMenuItem danger" disabled={deletableNames.length === 0} onSelect={() => { if (deletableNames.length === 0) return; suppressNextClick(); deleteSkills(deletableNames); }}><Trash2 size={14} />{deleteLabel}</Menu.Item>,
       measure: <><Trash2 size={15} /><span>{deleteLabel}</span></>,
       separatorBefore: true,
     },
   };
-  return skillActionIds({ selectionCount: selectedSkills.length, backupConfigured }).map((id) => actions[id]);
+  return skillActionIds({ selectionCount: selectedSkills.length }).map((id) => actions[id]);
 }
 
 export type SkillActionsMenuItemsProps = {
@@ -378,13 +368,9 @@ export type SkillActionsMenuItemsProps = {
   onManageLocations: (skill: NormalizedSkill) => void;
   onCreateWrapper: (skill: NormalizedSkill) => void;
   onSetVisibility: (names: string[], visibility: SkillVisibility) => void | Promise<void>;
-  onAddToBackup: (skills: NormalizedSkill[]) => void;
-  getBackupStatus: (skill: NormalizedSkill) => BackupStatusRecord;
-  backupConfigured: boolean;
-  backupBusy: boolean;
 };
 
-export function SkillActionsMenuItems({ Menu, skill, onApplyUpdates, onDeleteSkills, onManageLocations, onCreateWrapper, onSetVisibility, onAddToBackup, getBackupStatus, backupConfigured, backupBusy }: SkillActionsMenuItemsProps) {
+export function SkillActionsMenuItems({ Menu, skill, onApplyUpdates, onDeleteSkills, onManageLocations, onCreateWrapper, onSetVisibility }: SkillActionsMenuItemsProps) {
   const actions = skillActionDefinitions({
     Menu,
     selectedSkills: [skill],
@@ -393,10 +379,6 @@ export function SkillActionsMenuItems({ Menu, skill, onApplyUpdates, onDeleteSki
     manageLocations: (skills) => { if (skills[0]) onManageLocations(skills[0]); },
     createWrapper: (skills) => { if (skills[0]) onCreateWrapper(skills[0]); },
     setVisibility: onSetVisibility,
-    addToBackup: onAddToBackup,
-    getBackupStatus,
-    backupConfigured,
-    backupBusy,
   });
   return renderDataTableSelectionMenu(actions);
 }
@@ -409,13 +391,9 @@ export type BulkSkillActionsMenuItemsProps = {
   onManageLocations: (skills: NormalizedSkill[]) => void;
   createWrapper: () => void;
   setVisibility: (names: string[], visibility: SkillVisibility) => void | Promise<void>;
-  onAddToBackup: (skills: NormalizedSkill[]) => void;
-  getBackupStatus: (skill: NormalizedSkill) => BackupStatusRecord;
-  backupConfigured: boolean;
-  backupBusy: boolean;
 };
 
-export function BulkSkillActionsMenuItems({ Menu, selectedSkills, onApplyUpdates, onDeleteSkills, onManageLocations, createWrapper, setVisibility, onAddToBackup, getBackupStatus, backupConfigured, backupBusy }: BulkSkillActionsMenuItemsProps) {
+export function BulkSkillActionsMenuItems({ Menu, selectedSkills, onApplyUpdates, onDeleteSkills, onManageLocations, createWrapper, setVisibility }: BulkSkillActionsMenuItemsProps) {
   const actions = skillActionDefinitions({
     Menu,
     selectedSkills,
@@ -424,10 +402,6 @@ export function BulkSkillActionsMenuItems({ Menu, selectedSkills, onApplyUpdates
     manageLocations: onManageLocations,
     createWrapper: () => createWrapper(),
     setVisibility,
-    addToBackup: onAddToBackup,
-    getBackupStatus,
-    backupConfigured,
-    backupBusy,
   });
   return renderDataTableSelectionMenu(actions);
 }
@@ -466,7 +440,7 @@ export function SkillMainCell({ skill, openSkill, onApplyUpdates }: SkillMainCel
             {sourceAction.icon}
           </button>
         )}
-        {skill.updateAvailability === "update-available" && (
+        {skill.updateAvailability === SkillUpdateAvailability.UpdateAvailable && (
           <Badge
             as="button"
             tone={SKILL_BADGE_TONES.update}
@@ -501,19 +475,15 @@ export type SkillActionsCellProps = {
   onManageLocations: (skill: NormalizedSkill) => void;
   onCreateWrapper: (skill: NormalizedSkill) => void;
   onSetVisibility: (names: string[], visibility: SkillVisibility) => void | Promise<void>;
-  onAddToBackup: (skills: NormalizedSkill[]) => void;
-  getBackupStatus: (skill: NormalizedSkill) => BackupStatusRecord;
-  backupConfigured: boolean;
-  backupBusy: boolean;
 };
 
-export function SkillActionsCell({ skill, onApplyUpdates, onDeleteSkills, onManageLocations, onCreateWrapper, onSetVisibility, onAddToBackup, getBackupStatus, backupConfigured, backupBusy }: SkillActionsCellProps) {
+export function SkillActionsCell({ skill, onApplyUpdates, onDeleteSkills, onManageLocations, onCreateWrapper, onSetVisibility }: SkillActionsCellProps) {
   return (
     <RowActionsMenu
       ariaLabel={`Skill actions for ${skill.name}`}
       onOpenChange={(open) => { if (!open) suppressNextClick(); }}
     >
-      <SkillActionsMenuItems Menu={DropdownMenu} skill={skill} onApplyUpdates={onApplyUpdates} onDeleteSkills={onDeleteSkills} onManageLocations={onManageLocations} onCreateWrapper={onCreateWrapper} onSetVisibility={onSetVisibility} onAddToBackup={onAddToBackup} getBackupStatus={getBackupStatus} backupConfigured={backupConfigured} backupBusy={backupBusy} />
+      <SkillActionsMenuItems Menu={DropdownMenu} skill={skill} onApplyUpdates={onApplyUpdates} onDeleteSkills={onDeleteSkills} onManageLocations={onManageLocations} onCreateWrapper={onCreateWrapper} onSetVisibility={onSetVisibility} />
     </RowActionsMenu>
   );
 }
@@ -525,10 +495,6 @@ function SkillSelectionActions({
   manageLocations,
   createWrapper,
   setVisibility,
-  addToBackup,
-  getBackupStatus,
-  backupConfigured,
-  backupBusy,
 }: {
   selectedSkills: NormalizedSkill[];
   applyUpdates: (names: string[]) => void;
@@ -536,10 +502,6 @@ function SkillSelectionActions({
   manageLocations: () => void;
   createWrapper: () => void;
   setVisibility: (names: string[], visibility: SkillVisibility) => void;
-  addToBackup: (skills: NormalizedSkill[]) => void;
-  getBackupStatus: (skill: NormalizedSkill) => BackupStatusRecord;
-  backupConfigured: boolean;
-  backupBusy: boolean;
 }) {
   const actions = useMemo(
     () => skillActionDefinitions({
@@ -550,12 +512,8 @@ function SkillSelectionActions({
       manageLocations: () => manageLocations(),
       createWrapper,
       setVisibility,
-      addToBackup,
-      getBackupStatus,
-      backupConfigured,
-      backupBusy,
     }),
-    [addToBackup, applyUpdates, backupBusy, backupConfigured, createWrapper, deleteSkills, getBackupStatus, manageLocations, selectedSkills, setVisibility],
+    [applyUpdates, createWrapper, deleteSkills, manageLocations, selectedSkills, setVisibility],
   );
   return <DataTableSelectionActions actions={actions} ariaLabel="More selected skill actions" />;
 }
@@ -586,7 +544,7 @@ export type WrapperDialogProps = {
   open: boolean;
   selectedSkills: SkillWrapperSelection[];
   onOpenChange: (open: boolean) => void;
-  onApplyWrapper: (args: WrapperArgs) => Promise<unknown>;
+  onApplyWrapper: (args: WrapperArgs) => Promise<SkillChangeResponse>;
 };
 
 export function WrapperDialog({ open, selectedSkills, onOpenChange, onApplyWrapper }: WrapperDialogProps) {
@@ -597,6 +555,7 @@ export function WrapperDialog({ open, selectedSkills, onOpenChange, onApplyWrapp
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const selectedNames = useMemo(() => selectedSkills.map((skill) => skill.name), [selectedSkills]);
+  const selectedSkillIds = useMemo(() => selectedSkills.map((skill) => skill.id), [selectedSkills]);
   const selectedSkillIdentity = useMemo(
     () => selectedSkills.map((skill) => skill.id).sort().join("\u0000"),
     [selectedSkills],
@@ -630,27 +589,25 @@ export function WrapperDialog({ open, selectedSkills, onOpenChange, onApplyWrapp
 
   const args = useMemo((): WrapperArgs => ({
     name: name.trim(),
-    names: selectedNames,
+    skillIds: selectedSkillIds,
     description: description.trim(),
     manualChildren,
     refresh: false,
-  }), [description, manualChildren, name, selectedNames]);
+  }), [description, manualChildren, name, selectedNames, selectedSkillIds]);
 
   const apply = async () => {
     if (!canCreate || busy) return;
     setBusy(true);
     setError("");
-    let result: unknown;
     try {
-      result = await onApplyWrapper(args);
+      await onApplyWrapper(args);
     } catch (error) {
       setBusy(false);
       setError(commandErrorMessage(error, "Could not create the wrapper skill."));
       return;
     }
     setBusy(false);
-    if (result) onOpenChange(false);
-    else setError("Could not create the wrapper skill.");
+    onOpenChange(false);
   };
 
   return (
@@ -699,140 +656,11 @@ export function WrapperDialog({ open, selectedSkills, onOpenChange, onApplyWrapp
   );
 }
 
-function normalizeSkillOperationStatus(status: unknown): SkillOperationStatus | undefined {
-  if (!status) return undefined;
-  if (status === SkillOperationStatus.Planned) return SkillOperationStatus.Planned;
-  if (status === SkillOperationStatus.Ready) return SkillOperationStatus.Ready;
-  if (status === SkillOperationStatus.AlreadyExists) return SkillOperationStatus.AlreadyExists;
-  if (status === SkillOperationStatus.Replace) return SkillOperationStatus.Replace;
-  if (status === SkillOperationStatus.AlreadyInstalled) return SkillOperationStatus.AlreadyInstalled;
-  return undefined;
-}
-
-function normalizeSkillAddPlan(plan: SkillAddPlan | null | undefined): SkillAddPlan | null {
-  if (!plan) return null;
-  if (
-    !Array.isArray(plan.available)
-    || !Array.isArray(plan.selected)
-    || !Array.isArray(plan.operations)
-    || typeof plan.source !== "string"
-    || !plan.source.trim()
-    || typeof plan.source_kind !== "string"
-    || !plan.source_kind.trim()
-    || typeof plan.target !== "string"
-    || !plan.target.trim()
-  ) return null;
-  const normalizeAvailable = (skills: AvailableSkill[]) => skills.flatMap((skill) => (
-    typeof skill.name === "string"
-      && skill.name.trim()
-      && typeof skill.relative_path === "string"
-      && skill.relative_path.trim()
-      && Array.isArray(skill.dependencies)
-      ? [{
-        ...skill,
-        name: skill.name.trim(),
-        relative_path: skill.relative_path.trim(),
-        dependencies: skill.dependencies.filter((dependency): dependency is string => typeof dependency === "string"),
-      }]
-      : []
-  ));
-  const available = normalizeAvailable(plan.available);
-  const selected = normalizeAvailable(plan.selected);
-  const operations = plan.operations.flatMap((operation) => {
-    const status = normalizeSkillOperationStatus(operation.status);
-    return typeof operation.name === "string" && operation.name.trim() && status
-      ? [{ ...operation, name: operation.name.trim(), status }]
-      : [];
-  });
-  return {
-    ...plan,
-    source: plan.source.trim(),
-    source_kind: plan.source_kind.trim(),
-    target: plan.target.trim(),
-    available,
-    selected,
-    operations,
-  };
-}
-
 function skillOperationStatusLabel(status: SkillOperationStatus | undefined) {
   if (status === SkillOperationStatus.AlreadyInstalled) return "Installed";
   if (status === SkillOperationStatus.AlreadyExists) return "Exists";
   if (status === SkillOperationStatus.Replace) return "Replace";
   return "";
-}
-
-export function selectedExistingSkillOperation(
-  operation: SkillOperation | undefined,
-  selected: boolean,
-): SkillOperation | undefined {
-  if (!operation || !selected || operation.status !== SkillOperationStatus.AlreadyExists) return operation;
-  return {
-    ...operation,
-    status: SkillOperationStatus.Replace,
-    message: operation.message?.startsWith("target already exists:")
-      ? operation.message.replace("target already exists:", "will replace existing target:")
-      : operation.message,
-  };
-}
-
-export function isNewSkillOperationStatus(status: SkillOperationStatus | undefined) {
-  return !status || status === SkillOperationStatus.Planned || status === SkillOperationStatus.Ready;
-}
-
-export function isExistingSkillOperationStatus(status: SkillOperationStatus | undefined) {
-  return status === SkillOperationStatus.AlreadyInstalled
-    || status === SkillOperationStatus.AlreadyExists
-    || status === SkillOperationStatus.Replace;
-}
-
-export function isSelectableOperationStatus(status: SkillOperationStatus | undefined) {
-  return isNewSkillOperationStatus(status) || isExistingSkillOperationStatus(status);
-}
-
-function expandSelectedSkillNames(
-  selectedNames: string[],
-  dependencyByName: Map<string, string[]>,
-  selectableNames: Set<string>,
-) {
-  const expanded = new Set<string>();
-  const stack = [...selectedNames].filter((name) => selectableNames.has(name));
-  while (stack.length > 0) {
-    const name = stack.pop();
-    if (!name || expanded.has(name) || !selectableNames.has(name)) continue;
-    expanded.add(name);
-    for (const dependency of dependencyByName.get(name) ?? []) {
-      if (!expanded.has(dependency)) stack.push(dependency);
-    }
-  }
-  return [...expanded].sort((left, right) => left.localeCompare(right));
-}
-
-function dependencyReasonsFor(
-  name: string,
-  selectedRoots: Set<string>,
-  dependencyByName: Map<string, string[]>,
-  selectableNames: Set<string>,
-) {
-  const reasons = new Set<string>();
-  for (const root of selectedRoots) {
-    if (root === name) continue;
-    const expanded = expandSelectedSkillNames([root], dependencyByName, selectableNames);
-    if (expanded.includes(name)) reasons.add(root);
-  }
-  return [...reasons].sort((left, right) => left.localeCompare(right));
-}
-
-function availableSkillSearchText(skill: AvailableSkill) {
-  return [
-    skill.name,
-    skill.description,
-    skill.relative_path,
-    ...skill.dependencies,
-  ]
-    .filter(Boolean)
-    .join(" ")
-    .toLowerCase();
 }
 
 function isDirectSkillSource(value: string) {
@@ -846,13 +674,16 @@ const TiptapMarkdownPreview = lazy(() => import("../components/shared/TiptapMark
 export type AddSkillDialogProps = {
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  trigger: ReactNode;
+  trigger?: ReactNode;
   onClose: () => void;
   onPreviewError: (message: string) => void;
   onInstalled: (result: SkillInstallResult) => void;
   onRequestWrapper: (skills: SkillWrapperSelection[]) => void;
   installedAgentKeys: string[];
   targetOptions: SkillTargetOption[];
+  initialSource?: string;
+  sourceLocked?: boolean;
+  title?: string;
 };
 
 export type SkillTargetOption = {
@@ -862,15 +693,16 @@ export type SkillTargetOption = {
   globalPath?: string;
 };
 
-export function AddSkillDialog({ open, onOpenChange, trigger, onClose, onPreviewError, onInstalled, onRequestWrapper, installedAgentKeys, targetOptions }: AddSkillDialogProps) {
-  const [source, setSource] = useState("");
+export function AddSkillDialog({ open, onOpenChange, trigger, onClose, onPreviewError, onInstalled, onRequestWrapper, installedAgentKeys, targetOptions, initialSource = "", sourceLocked = false, title = "Add skills" }: AddSkillDialogProps) {
+  const lockedSource = sourceLocked && Boolean(initialSource.trim());
+  const [source, setSource] = useState(initialSource);
   const [sourcePageBeforePreview, setSourcePageBeforePreview] = useState<SkillSourcePageSnapshot<MarketplaceSource> | null>(null);
   const [marketplaceQuery, setMarketplaceQuery] = useState("");
   const [marketplaceResults, setMarketplaceResults] = useState<MarketplaceSource[]>([]);
   const [marketplaceBusy, setMarketplaceBusy] = useState(false);
   const [marketplaceError, setMarketplaceError] = useState("");
   const [marketplaceNotice, setMarketplaceNotice] = useState("");
-  const [skillPreview, setSkillPreview] = useState<SkillMarkdownPreview | null>(null);
+  const [skillPreview, setSkillPreview] = useState<SkillPreviewReadResponse | null>(null);
   const [skillPreviewBusy, setSkillPreviewBusy] = useState("");
   const [skillPreviewError, setSkillPreviewError] = useState("");
   const [target, setTarget] = useState("");
@@ -881,16 +713,18 @@ export function AddSkillDialog({ open, onOpenChange, trigger, onClose, onPreview
   const [selectedRoots, setSelectedRoots] = useState<string[]>([]);
   const [createWrapper, setCreateWrapper] = useState(false);
   const [replaceExisting, setReplaceExisting] = useState(false);
-  const [skillFilter, setSkillFilter] = useState<"all" | "new" | "existing">("all");
+  const [skillFilter, setSkillFilter] = useState<SkillInstallFilter>(SkillInstallFilter.All);
   const [reviewingSkills, setReviewingSkills] = useState(false);
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [skillSearch, setSkillSearch] = useState("");
-  const [busyAction, setBusyAction] = useState("");
+  const [busyAction, setBusyAction] = useState<SkillAddBusyAction>(SkillAddBusyAction.Idle);
   const [error, setError] = useState("");
   const skillItemRefs = useRef(new Map<string, HTMLDivElement>());
-  const busy = busyAction !== "";
+  const skillListRef = useRef<HTMLDivElement>(null);
+  const initialPreviewRequestRef = useRef("");
+  const busy = busyAction !== SkillAddBusyAction.Idle;
   const dialogBusy = busy || marketplaceBusy || Boolean(skillPreviewBusy);
-  const installing = busyAction === "install";
+  const installing = busyAction === SkillAddBusyAction.Install;
   const visibleInstallTargets = useMemo(
     () => {
       const installed = new Set(installedAgentKeys);
@@ -919,83 +753,38 @@ export function AddSkillDialog({ open, onOpenChange, trigger, onClose, onPreview
   }, [target, visibleInstallTargets]);
   const available = plan?.available ?? [];
   const showSkillSearch = available.length > 10;
+  const installView = useMemo(
+    () => buildSkillInstallViewModel(
+      available,
+      plan?.operations ?? [],
+      selectedRoots,
+      skillFilter,
+      skillSearch,
+      replaceExisting,
+    ),
+    [available, plan?.operations, replaceExisting, selectedRoots, skillFilter, skillSearch],
+  );
+  const {
+    selectableSkills,
+    selectableNameSet,
+    selected,
+    selectedSet,
+    selectedRootSet,
+    selectedHasExisting,
+    operationByName,
+    dependencyReasonsByName,
+    newSkills,
+    existingSkills,
+    visibleAvailableSkills,
+    searchMatches,
+    searchMatchSet,
+  } = installView;
   const normalizedSkillSearch = skillSearch.trim().toLowerCase();
-  const dependencyByName = useMemo(
-    () => new Map(available.map((skill) => [skill.name, skill.dependencies])),
-    [available],
-  );
-  const rawOperationByName = useMemo(
-    () => new Map((plan?.operations ?? []).map((operation) => [operation.name, operation])),
-    [plan],
-  );
-  const selectableSkills = useMemo(
-    () => available.filter((skill) => {
-      const status = rawOperationByName.get(skill.name)?.status;
-      return isSelectableOperationStatus(status);
-    }),
-    [available, rawOperationByName],
-  );
-  const selectableNameSet = useMemo(
-    () => new Set(selectableSkills.map((skill) => skill.name)),
-    [selectableSkills],
-  );
-  const selected = useMemo(
-    () => expandSelectedSkillNames(selectedRoots, dependencyByName, selectableNameSet),
-    [dependencyByName, selectableNameSet, selectedRoots],
-  );
-  const selectedSet = useMemo(() => new Set(selected), [selected]);
-  const selectedHasExisting = useMemo(
-    () => selected.some((name) => isExistingSkillOperationStatus(rawOperationByName.get(name)?.status)),
-    [rawOperationByName, selected],
-  );
   useEffect(() => {
     setReplaceExisting(selectedHasExisting);
   }, [selectedHasExisting]);
-  const operationByName = useMemo(
-    () => new Map((plan?.operations ?? []).map((operation) => [
-      operation.name,
-      selectedExistingSkillOperation(operation, selectedSet.has(operation.name) && replaceExisting),
-    ])),
-    [plan, replaceExisting, selectedSet],
-  );
-  const selectedRootSet = useMemo(() => new Set(selectedRoots), [selectedRoots]);
-  const dependencyReasonsByName = useMemo(
-    () => new Map(available.map((skill) => [
-      skill.name,
-      dependencyReasonsFor(skill.name, selectedRootSet, dependencyByName, selectableNameSet),
-    ])),
-    [available, dependencyByName, selectableNameSet, selectedRootSet],
-  );
-  const newSkills = useMemo(
-    () => available.filter((skill) => isNewSkillOperationStatus(rawOperationByName.get(skill.name)?.status)),
-    [available, rawOperationByName],
-  );
-  const existingSkills = useMemo(
-    () => available.filter((skill) => isExistingSkillOperationStatus(rawOperationByName.get(skill.name)?.status)),
-    [available, rawOperationByName],
-  );
   const allSelected = selectableSkills.length > 0 && selectableSkills.every((skill) => selectedSet.has(skill.name));
   const mixedSelected = selected.length > 0 && !allSelected;
-  const visibleAvailableSkills = useMemo(
-    () => {
-      const statusFilteredSkills = skillFilter === "all"
-        ? available
-        : available.filter((skill) => skillFilter === "new"
-          ? isNewSkillOperationStatus(rawOperationByName.get(skill.name)?.status)
-          : isExistingSkillOperationStatus(rawOperationByName.get(skill.name)?.status));
-      return normalizedSkillSearch
-        ? statusFilteredSkills.filter((skill) => availableSkillSearchText(skill).includes(normalizedSkillSearch))
-        : statusFilteredSkills;
-    },
-    [available, normalizedSkillSearch, rawOperationByName, skillFilter],
-  );
-  const searchMatches = useMemo(() => {
-    if (!normalizedSkillSearch) return [];
-    return visibleAvailableSkills
-      .filter((skill) => availableSkillSearchText(skill).includes(normalizedSkillSearch))
-      .map((skill) => skill.name);
-  }, [normalizedSkillSearch, visibleAvailableSkills]);
-  const searchMatchSet = useMemo(() => new Set(searchMatches), [searchMatches]);
   const firstSearchMatch = searchMatches[0] ?? "";
   const canInstall = Boolean(target && source.trim() && plan && selected.length > 0 && (!selectedHasExisting || replaceExisting) && !busy);
   const canGoBack = Boolean(plan) || sourcePageBeforePreview !== null;
@@ -1005,7 +794,7 @@ export function AddSkillDialog({ open, onOpenChange, trigger, onClose, onPreview
   const sourceCandidatesLabel = source.trim() ? "Matches" : "Recommended";
 
   const handleSourceChange = (value: string) => {
-    if (marketplaceBusy) return;
+    if (marketplaceBusy || lockedSource) return;
     setSource(value);
     setSourcePageBeforePreview(null);
     setMarketplaceQuery(value);
@@ -1035,9 +824,7 @@ export function AddSkillDialog({ open, onOpenChange, trigger, onClose, onPreview
     setSkillPreview(null);
     setSkillPreviewError("");
     try {
-      const response = await invokeCommand<MarketplaceSearchResponse>(TauriCommand.SkillsMarketplaceSearch, {
-        query,
-      });
+      const response = await searchSkillMarketplace(query);
       setMarketplaceResults(response.items);
       setMarketplaceNotice(response.warnings.length
         ? "Some marketplaces are unavailable."
@@ -1060,19 +847,19 @@ export function AddSkillDialog({ open, onOpenChange, trigger, onClose, onPreview
     setMarketplaceNotice("");
     setSkillPreview(null);
     setSkillPreviewError("");
-    setBusyAction("preview");
+    setBusyAction(SkillAddBusyAction.Preview);
     setError("");
     try {
-      const response = await invokeCommand(TauriCommand.SkillsAdd, {
+      const response = await previewSkillAdd({
         source: normalizedSource,
         target: resolvedTarget,
-        scope: "global",
+        scope: SkillScope.Global,
         skills: [],
         copy,
         overwrite: false,
         visibility: visibility.toLowerCase(),
         dryRun: true,
-      }) as { plan?: SkillAddPlan; previewId?: string } | null;
+      });
       if (!response?.plan || !response.previewId) {
         throw new Error("Skill preview returned no data. Restart the development service and try again.");
       }
@@ -1083,14 +870,20 @@ export function AddSkillDialog({ open, onOpenChange, trigger, onClose, onPreview
       setCreateWrapper(false);
       setReplaceExisting(false);
       setReviewingSkills(false);
-      setSkillFilter("all");
+      setSkillFilter(SkillInstallFilter.All);
       setSkillSearch("");
       setSelectedRoots(nextPlan.selected.map((skill) => skill.name));
     } catch (previewError) {
-      restoreSourcePage(previousPage);
-      onPreviewError(skillSourceErrorMessage(previewError));
+      const message = skillSourceErrorMessage(previewError);
+      if (lockedSource) {
+        setSource(initialSource);
+        setError(message);
+      } else {
+        restoreSourcePage(previousPage);
+      }
+      onPreviewError(message);
     } finally {
-      setBusyAction("");
+      setBusyAction(SkillAddBusyAction.Idle);
     }
   };
 
@@ -1114,10 +907,7 @@ export function AddSkillDialog({ open, onOpenChange, trigger, onClose, onPreview
     setSkillPreviewBusy(name);
     setSkillPreviewError("");
     try {
-      const preview = await invokeCommand<SkillMarkdownPreview>(TauriCommand.SkillsAddPreviewRead, {
-        previewId,
-        skillName: name,
-      });
+      const preview = await readSkillPreview(previewId, name);
       setSkillPreview(preview);
     } catch (previewError) {
       setSkillPreview(null);
@@ -1135,7 +925,7 @@ export function AddSkillDialog({ open, onOpenChange, trigger, onClose, onPreview
   }, []);
 
   const resetDialogState = useCallback(() => {
-    setSource("");
+    setSource(initialSource);
     setSourcePageBeforePreview(null);
     setMarketplaceQuery("");
     setMarketplaceResults([]);
@@ -1153,14 +943,15 @@ export function AddSkillDialog({ open, onOpenChange, trigger, onClose, onPreview
     setSelectedRoots([]);
     setCreateWrapper(false);
     setReplaceExisting(false);
-    setSkillFilter("all");
+    setSkillFilter(SkillInstallFilter.All);
     setReviewingSkills(false);
     setAdvancedOpen(false);
     setSkillSearch("");
-    setBusyAction("");
+    setBusyAction(SkillAddBusyAction.Idle);
     setError("");
     skillItemRefs.current.clear();
-  }, []);
+    initialPreviewRequestRef.current = "";
+  }, [initialSource]);
 
   const closeDialog = () => {
     if (dialogBusy) return;
@@ -1180,13 +971,20 @@ export function AddSkillDialog({ open, onOpenChange, trigger, onClose, onPreview
     setMarketplaceResults(restoredPage.marketplaceResults);
     setSourcePageBeforePreview(null);
     clearTransientErrors();
-    setSkillFilter("all");
+    setSkillFilter(SkillInstallFilter.All);
     setSkillSearch("");
     setReplaceExisting(false);
     setCreateWrapper(false);
     setReviewingSkills(false);
     setAdvancedOpen(false);
   };
+
+  useEffect(() => {
+    if (!open || !lockedSource || !initialSource.trim() || plan || busyAction || marketplaceBusy) return;
+    if (initialPreviewRequestRef.current === initialSource) return;
+    initialPreviewRequestRef.current = initialSource;
+    void previewSource(initialSource);
+  }, [initialSource, lockedSource, marketplaceBusy, open, plan, resolvedTarget]);
 
   const goBack = () => {
     if (dialogBusy) return;
@@ -1203,11 +1001,11 @@ export function AddSkillDialog({ open, onOpenChange, trigger, onClose, onPreview
     if (!canInstall || busy) return;
     setError("");
     try {
-      setBusyAction("preview");
-      const previewResponse = await invokeCommand<{ plan?: SkillAddPlan; previewId?: string }>(TauriCommand.SkillsAdd, {
+      setBusyAction(SkillAddBusyAction.Preview);
+      const previewResponse = await previewSkillAdd({
         source: source.trim(),
         target,
-        scope: "global",
+        scope: SkillScope.Global,
         skills: selected,
         copy,
         overwrite: replaceExisting,
@@ -1228,11 +1026,11 @@ export function AddSkillDialog({ open, onOpenChange, trigger, onClose, onPreview
       if (finalSelectedHasExisting && !replaceExisting) {
         throw new Error("Some selected skills already exist at this destination. Choose Replace existing skills and try again.");
       }
-      setBusyAction("install");
-      const result = await invokeCommand<SkillInstallResult>(TauriCommand.SkillsAdd, {
+      setBusyAction(SkillAddBusyAction.Install);
+      const result = await installSkillAdd({
         source: source.trim(),
         target,
-        scope: "global",
+        scope: SkillScope.Global,
         skills: selected,
         copy,
         overwrite: replaceExisting,
@@ -1255,7 +1053,7 @@ export function AddSkillDialog({ open, onOpenChange, trigger, onClose, onPreview
     } catch (installError) {
       setError(`${installError}`);
     } finally {
-      setBusyAction("");
+      setBusyAction(SkillAddBusyAction.Idle);
     }
   };
 
@@ -1264,12 +1062,27 @@ export function AddSkillDialog({ open, onOpenChange, trigger, onClose, onPreview
     if (plan) install();
   };
 
-  useEffect(() => {
-    if (!firstSearchMatch) return;
-    skillItemRefs.current.get(firstSearchMatch)?.scrollIntoView({
-      block: "nearest",
-      behavior: "smooth",
-    });
+  useLayoutEffect(() => {
+    const root = skillListRef.current;
+    if (!root) return;
+    if (!firstSearchMatch) {
+      root.scrollTo({ top: root.scrollTop, behavior: "auto" });
+      return;
+    }
+    const target = skillItemRefs.current.get(firstSearchMatch);
+    if (!target) return;
+    const rootBounds = root.getBoundingClientRect();
+    const targetBounds = target.getBoundingClientRect();
+    const targetTop = root.scrollTop + targetBounds.top - rootBounds.top;
+    const targetBottom = targetTop + targetBounds.height;
+    const visibleTop = root.scrollTop;
+    const visibleBottom = visibleTop + root.clientHeight;
+    const nextScrollTop = targetTop < visibleTop
+      ? targetTop
+      : targetBottom > visibleBottom
+        ? targetBottom - root.clientHeight
+        : root.scrollTop;
+    root.scrollTo({ top: Math.max(0, nextScrollTop), behavior: "auto" });
   }, [firstSearchMatch]);
 
   useEffect(() => {
@@ -1288,8 +1101,8 @@ export function AddSkillDialog({ open, onOpenChange, trigger, onClose, onPreview
     setSelectedRoots(allSelected ? [] : selectableSkills.map((skill) => skill.name));
   };
 
-  const selectSkillPreset = (preset: "all" | "new" | "existing") => {
-    const skills = preset === "all" ? selectableSkills : preset === "new" ? newSkills : existingSkills;
+  const selectSkillPreset = (preset: SkillInstallFilter) => {
+    const skills = preset === SkillInstallFilter.All ? selectableSkills : preset === SkillInstallFilter.New ? newSkills : existingSkills;
     setSkillFilter(preset);
     setSelectedRoots(
       skills
@@ -1309,26 +1122,28 @@ export function AddSkillDialog({ open, onOpenChange, trigger, onClose, onPreview
         onOpenChange(nextOpen);
       }}
       trigger={trigger}
-      className={`addSkillPanel ${plan ? "hasPlan" : "sourceStage"} ${reviewingSkills ? "isReviewing" : ""} ${advancedOpen ? "hasAdvanced" : ""} ${skillPreview ? "hasSkillPreview" : ""}`}
+        className={`addSkillPanel ${plan ? "hasPlan" : "sourceStage"} ${reviewingSkills ? "isReviewing" : ""} ${advancedOpen ? "hasAdvanced" : ""} ${skillPreview ? "hasSkillPreview" : ""}`}
       descriptionId="add-skill-dialog-description"
     >
       <div className="addSkillBody">
         <div className="addSkillMain">
         <div className="addSkillHeader">
         <Dialog.Title className="confirmDialogTitle">
-          Add skills
+          {title}
         </Dialog.Title>
       </div>
       <Dialog.Description id="add-skill-dialog-description" className="dialogVisuallyHidden">
         {!plan
-          ? "Choose a skill source and review it before installation."
+          ? lockedSource
+            ? "Review the bundled Tendi skill before installation."
+            : "Choose a skill source and review it before installation."
           : reviewingSkills
             ? "Select the skills to install."
             : "Review the selected skills and install them with the default settings."}
       </Dialog.Description>
       {!reviewingSkills && <div className={`addSkillGrid ${plan ? "hasPlan" : "sourceStage"}`}>
-        {!plan && <div className="skillSourceField">
-          {busyAction !== "preview" && (
+        {!plan && !lockedSource && <div className="skillSourceField">
+          {busyAction !== SkillAddBusyAction.Preview && (
             <form
               className="skillSourceForm"
               onSubmit={(event) => {
@@ -1350,13 +1165,13 @@ export function AddSkillDialog({ open, onOpenChange, trigger, onClose, onPreview
               />
             </form>
           )}
-          {!plan && (marketplaceBusy || busyAction === "preview") && (
+          {!plan && (marketplaceBusy || busyAction === SkillAddBusyAction.Preview) && (
             <LoadingState
               variant="progress"
               label={marketplaceBusy ? "Searching marketplaces" : "Scanning repository"}
             />
           )}
-          {source.trim() && !marketplaceBusy && busyAction !== "preview" && sourceCandidates.length === 0 && !marketplaceNotice && !marketplaceError && (
+          {source.trim() && !marketplaceBusy && busyAction !== SkillAddBusyAction.Preview && sourceCandidates.length === 0 && !marketplaceNotice && !marketplaceError && (
             <EmptyState
               className="sourceSearchEmpty"
               compact
@@ -1481,14 +1296,14 @@ export function AddSkillDialog({ open, onOpenChange, trigger, onClose, onPreview
                   className="addSkillQuickSelect"
                   value={skillFilter}
                   onValueChange={(value) => {
-                    if (value === "all" || value === "new" || value === "existing") selectSkillPreset(value);
+                    if (value === SkillInstallFilter.All || value === SkillInstallFilter.New || value === SkillInstallFilter.Existing) selectSkillPreset(value);
                   }}
                   aria-label="Quick select and filter skills"
                 >
                   {([
-                    ["all", "All", available.length],
-                    ["new", "New", newSkills.length],
-                    ["existing", "Existing", existingSkills.length],
+                    [SkillInstallFilter.All, "All", available.length],
+                    [SkillInstallFilter.New, "New", newSkills.length],
+                    [SkillInstallFilter.Existing, "Existing", existingSkills.length],
                   ] as const).map(([value, label, count]) => (
                     <SegmentedControlItem
                       value={value}
@@ -1513,7 +1328,7 @@ export function AddSkillDialog({ open, onOpenChange, trigger, onClose, onPreview
               ) : null}
             />
           )}
-          <div className="addSkillList">
+          <div className="addSkillList" ref={skillListRef}>
             {normalizedSkillSearch && visibleAvailableSkills.length === 0 ? (
               <EmptyState
                 compact
@@ -1569,7 +1384,7 @@ export function AddSkillDialog({ open, onOpenChange, trigger, onClose, onPreview
                   }}
                 >
                   {skillPreviewBusy === skill.name
-                    ? <LoadingInline size={14} gap={3} label="Preview" />
+                    ? <LoadingIcon size={14} />
                     : <><span>Preview</span><ChevronRight size={14} aria-hidden="true" /></>}
                 </button>
               </div>
@@ -1638,19 +1453,19 @@ export function AddSkillDialog({ open, onOpenChange, trigger, onClose, onPreview
               <span>Install mode</span>
               <SegmentedControl
                 fullWidth
-                value={copy ? "copy" : "symlink"}
+                value={copy ? SkillDistributionMode.Copy : SkillDistributionMode.Symlink}
                 disabled={installing}
                 onValueChange={(value) => {
                   if (!value || busy) return;
-                  const nextCopy = value === "copy";
+                  const nextCopy = value === SkillDistributionMode.Copy;
                   setCopy(nextCopy);
                 }}
                 aria-label="Skill install mode"
               >
-                <SegmentedControlItem value="symlink" aria-label="Install using symlink">
+                <SegmentedControlItem value={SkillDistributionMode.Symlink} aria-label="Install using symlink">
                   Symlink
                 </SegmentedControlItem>
-                <SegmentedControlItem value="copy" aria-label="Install by copying files">
+                <SegmentedControlItem value={SkillDistributionMode.Copy} aria-label="Install by copying files">
                   Copy
                 </SegmentedControlItem>
               </SegmentedControl>
@@ -1702,6 +1517,15 @@ export function AddSkillDialog({ open, onOpenChange, trigger, onClose, onPreview
             disabled={!canInstall}
             onClick={advance}
           />
+        ) : !busy && !marketplaceBusy && lockedSource ? (
+          <DialogActionButton
+            variant="primary"
+            disabled={!initialSource.trim()}
+            aria-label="Retry skill preview"
+            onClick={() => { void previewSource(initialSource); }}
+          >
+            Retry
+          </DialogActionButton>
         ) : !busy && !marketplaceBusy ? (
           <DialogActionButton
             variant="primary"
@@ -1726,9 +1550,9 @@ export type SkillsViewProps = {
   checkingUpdates: boolean;
   updateError: string;
   onRefresh: () => void | Promise<void>;
-  onSkillsUpdated: (skills: RawSkillRecord[]) => void;
+  onSkillsUpdated: (skills: RawSkillRecord[], options?: { patch?: boolean; deleted?: string[] }) => void;
   onSetVisibility: (names: string[], visibility: SkillVisibility) => void | Promise<void>;
-  onApplyWrapper: (args: WrapperArgs) => Promise<unknown>;
+  onApplyWrapper: (args: WrapperArgs) => Promise<SkillChangeResponse>;
   onApplyUpdates: (names: string[], onApplied?: () => void) => void;
   onDeleteSkills: (names: string[], onApplied?: () => void) => void;
   onAddInstalled: (result: SkillInstallResult) => void;
@@ -1758,7 +1582,7 @@ export function SkillsView({
 }: SkillsViewProps) {
   const [selected, setSelected] = useState<string[]>([]);
   const [query, setQuery] = useState("");
-  const [viewMode, setViewMode] = useState<SkillsViewMode>("list");
+  const [viewMode, setViewMode] = useState<SkillsViewMode>(SkillsViewMode.List);
   const [showWrapper, setShowWrapper] = useState(false);
   const [showAddSkill, setShowAddSkill] = useState(false);
   const [skillAddError, setSkillAddError] = useState("");
@@ -1766,56 +1590,24 @@ export function SkillsView({
   const [skillLocatorRequest, setSkillLocatorRequest] = useState("");
   const [locationSkills, setLocationSkills] = useState<NormalizedSkill[]>([]);
   const [locationAgent, setLocationAgent] = useState<string | undefined>(undefined);
-  const [backupStatuses, setBackupStatuses] = useState<Map<string, BackupStatusRecord>>(new Map());
-  const [backupConfigured, setBackupConfigured] = useState(false);
-  const [backupBusy, setBackupBusy] = useState(false);
-  const backupStatusInFlight = useRef<Promise<void> | null>(null);
-  const refreshBackupStatuses = useCallback((): Promise<void> => {
-    if (backupStatusInFlight.current) return backupStatusInFlight.current;
-    const request = (async () => {
-      try {
-        const result = await invokeCommand<{ config: unknown | null; statuses: BackupStatusRecord[] }>(TauriCommand.SkillsBackupStatus);
-        const next = new Map<string, BackupStatusRecord>();
-        for (const status of result.statuses) next.set(status.skillPath, status);
-        setBackupConfigured(Boolean(result.config));
-        setBackupStatuses(next);
-      } catch {
-        // Backup availability is auxiliary to skill management; retain the last known state.
-      }
-    })();
-    backupStatusInFlight.current = request;
-    void request.then(
-      () => {
-        if (backupStatusInFlight.current === request) backupStatusInFlight.current = null;
-      },
-      () => {
-        if (backupStatusInFlight.current === request) backupStatusInFlight.current = null;
-      },
-    );
-    return request;
-  }, []);
-  useEffect(() => {
-    if (skillItems.length > 0) void refreshBackupStatuses();
-  }, [refreshBackupStatuses, skillItems]);
   const normalizedQuery = query.trim().toLowerCase();
-  const visibleSkills = useMemo(() => {
-    if (!normalizedQuery) return skillItems;
-    return skillItems.filter((skill) => [skill.name, skill.description].some((value) => value.toLowerCase().includes(normalizedQuery)));
-  }, [normalizedQuery, skillItems]);
+  const skillListView = useMemo(() => selectSkillListView(skillItems, query, selected), [query, selected, skillItems]);
+  const { visibleSkills, selectedSkills } = skillListView;
   const tableRows = visibleSkills;
   const networkNodes = useMemo(
     () => visibleSkills.map((skill) => ({
+      id: skill.id,
       name: skill.name,
       label: skill.name,
       description: skill.description,
       dependencies: skill.dependencies,
       dependents: skill.dependents,
-      kind: skill.isWrapper ? "wrapper" : skill.section.toLowerCase(),
+      dependencyIds: skill.dependencyIds,
+      dependentIds: skill.dependentIds,
+      kind: skill.isWrapper ? RelationshipGraphKind.Wrapper : skill.section.toLowerCase(),
     })),
     [visibleSkills],
   );
-  const selectedSkills = useMemo(() => skillItems.filter((skill) => selected.includes(skill.id)), [selected, skillItems]);
-
   useEffect(() => {
     setSelected((current) => current.filter((id) => {
       const skill = skillItems.find((item) => item.id === id);
@@ -1857,39 +1649,22 @@ export function SkillsView({
     setLocationSkills(movableSkills);
     setLocationAgent(undefined);
   }, []);
-  const applyLocationsAndClear = useCallback(async (skills?: RawSkillRecord[]) => {
+  const applyLocationsAndClear = useCallback(async (
+    skills?: RawSkillRecord[],
+    options?: { patch?: boolean; deleted?: string[] },
+  ) => {
     setLocationSkills([]);
     setLocationAgent(undefined);
     clearSelection();
-    if (skills) onSkillsUpdated(skills);
+    if (skills || options?.deleted?.length) onSkillsUpdated(skills ?? [], { patch: true, deleted: options?.deleted });
     else await onRefresh();
   }, [clearSelection, onRefresh, onSkillsUpdated]);
-  const getBackupStatus = useCallback((skill: NormalizedSkill) => backupStatusForSkill(skill, backupStatuses), [backupStatuses]);
-  const adoptSkillsForBackup = useCallback(async (skills: NormalizedSkill[]) => {
-    if (!backupConfigured || backupBusy) return;
-    const candidates = backupSkillsForSelection(skills, getBackupStatus, backupConfigured);
-    if (candidates.length === 0) return;
-    setBackupBusy(true);
-    try {
-      let latestSkills: RawSkillRecord[] | undefined;
-      for (const skill of candidates) {
-        const status = getBackupStatus(skill);
-        const result = await invokeCommand<{ skills: RawSkillRecord[] }>(TauriCommand.SkillsBackupAdopt, { name: skill.name, skillPath: status.skillPath });
-        latestSkills = result.skills;
-      }
-      if (latestSkills) onSkillsUpdated(latestSkills);
-      await refreshBackupStatuses();
-    } finally {
-      setBackupBusy(false);
-    }
-  }, [backupBusy, backupConfigured, getBackupStatus, onSkillsUpdated, refreshBackupStatuses]);
-
   const handleInstalled = useCallback((result: SkillInstallResult) => {
     onAddInstalled(result);
     const name = installedSkillName(result);
     if (!name) return;
     setQuery("");
-    setViewMode("list");
+    setViewMode(SkillsViewMode.List);
     setSkillLocatorRequest(name);
   }, [onAddInstalled]);
   const handleAddSkillOpenChange = useCallback((open: boolean) => {
@@ -1904,7 +1679,7 @@ export function SkillsView({
     {
       key: "main",
       header: "Skill",
-      type: "text",
+      type: ColumnDataType.Text,
       sortValue: (skill) => skill.name.toLowerCase(),
       width: "minmax(250px, 1fr)",
       render: (skill) => <SkillMainCell skill={skill} openSkill={openSkill} onApplyUpdates={applyUpdatesAndClear} />,
@@ -1912,7 +1687,7 @@ export function SkillsView({
     {
       key: "agents",
       header: "Agents",
-      type: "enum",
+      type: ColumnDataType.Enum,
       groupBy: (skill) => skill.agents.join(", "),
       sortValue: (skill) => skill.agents.join(",").toLowerCase(),
       width: "90px",
@@ -1921,7 +1696,7 @@ export function SkillsView({
     {
       key: "origin",
       header: "Origin",
-      type: "enum",
+      type: ColumnDataType.Enum,
       groupBy: (skill) => skill.section,
       groupOrder: ["Local", "Remote", "Plugin", "System"],
       sortValue: (skill) => skillOriginLabel(skill).toLowerCase(),
@@ -1932,7 +1707,7 @@ export function SkillsView({
     {
       key: "visibility",
       header: "Visibility",
-      type: "enum",
+      type: ColumnDataType.Enum,
       groupOrder: [...allSkillVisibilities],
       sortValue: (skill) => skill.visibility.toLowerCase(),
       width: "98px",
@@ -1941,7 +1716,7 @@ export function SkillsView({
     {
       key: "ctime",
       header: "Created",
-      type: "date",
+      type: ColumnDataType.Date,
       sortValue: (skill) => skill.ctime ?? "",
       width: "98px",
       value: (skill) => compactDateTime(skill.ctime),
@@ -1950,7 +1725,7 @@ export function SkillsView({
     {
       key: "mtime",
       header: "Updated",
-      type: "date",
+      type: ColumnDataType.Date,
       sortValue: (skill) => skill.mtime ?? "",
       width: "98px",
       value: (skill) => compactDateTime(skill.mtime),
@@ -1960,9 +1735,9 @@ export function SkillsView({
       key: "actions",
       header: "",
       width: "40px",
-      render: (skill) => <SkillActionsCell skill={skill} onApplyUpdates={applyUpdatesAndClear} onDeleteSkills={deleteSkillsAndClear} onManageLocations={openManageLocations} onCreateWrapper={openWrapper} onSetVisibility={setVisibilityAndClear} onAddToBackup={adoptSkillsForBackup} getBackupStatus={getBackupStatus} backupConfigured={backupConfigured} backupBusy={backupBusy} />,
+      render: (skill) => <SkillActionsCell skill={skill} onApplyUpdates={applyUpdatesAndClear} onDeleteSkills={deleteSkillsAndClear} onManageLocations={openManageLocations} onCreateWrapper={openWrapper} onSetVisibility={setVisibilityAndClear} />,
     },
-  ], [adoptSkillsForBackup, applyUpdatesAndClear, backupBusy, backupConfigured, deleteSkillsAndClear, getBackupStatus, openManageLocations, openSkill, openWrapper, projects, setVisibilityAndClear]);
+  ], [applyUpdatesAndClear, deleteSkillsAndClear, openManageLocations, openSkill, openWrapper, projects, setVisibilityAndClear]);
 
   const rowContextMenu = useCallback((skill: SkillTableRow, { selectedRows, selected: isSelected }: { selectedRows: SkillTableRow[]; selected: boolean }) => {
     const showBulk = isSelected && selectedRows.length > 1;
@@ -1975,15 +1750,11 @@ export function SkillsView({
         onManageLocations={openManageLocationsBatch}
         createWrapper={() => setShowWrapper(true)}
         setVisibility={setVisibilityAndClear}
-        onAddToBackup={adoptSkillsForBackup}
-        getBackupStatus={getBackupStatus}
-        backupConfigured={backupConfigured}
-        backupBusy={backupBusy}
       />
     ) : (
-      <SkillActionsMenuItems Menu={ContextMenu} skill={skill} onApplyUpdates={applyUpdatesAndClear} onDeleteSkills={deleteSkillsAndClear} onManageLocations={openManageLocations} onCreateWrapper={openWrapper} onSetVisibility={setVisibilityAndClear} onAddToBackup={adoptSkillsForBackup} getBackupStatus={getBackupStatus} backupConfigured={backupConfigured} backupBusy={backupBusy} />
+      <SkillActionsMenuItems Menu={ContextMenu} skill={skill} onApplyUpdates={applyUpdatesAndClear} onDeleteSkills={deleteSkillsAndClear} onManageLocations={openManageLocations} onCreateWrapper={openWrapper} onSetVisibility={setVisibilityAndClear} />
     );
-  }, [adoptSkillsForBackup, applyUpdatesAndClear, backupBusy, backupConfigured, deleteSkillsAndClear, getBackupStatus, openManageLocations, openManageLocationsBatch, openWrapper, setVisibilityAndClear]);
+  }, [applyUpdatesAndClear, deleteSkillsAndClear, openManageLocations, openManageLocationsBatch, openWrapper, setVisibilityAndClear]);
 
   const bottomBar = useCallback((selectedRows: SkillTableRow[]) => (
     <SkillSelectionActions
@@ -1993,12 +1764,8 @@ export function SkillsView({
       manageLocations={() => openManageLocationsBatch(selectedRows)}
       createWrapper={() => setShowWrapper(true)}
       setVisibility={setVisibilityAndClear}
-      addToBackup={adoptSkillsForBackup}
-      getBackupStatus={getBackupStatus}
-      backupConfigured={backupConfigured}
-      backupBusy={backupBusy}
     />
-  ), [adoptSkillsForBackup, applyUpdatesAndClear, backupBusy, backupConfigured, deleteSkillsAndClear, getBackupStatus, openManageLocationsBatch, setVisibilityAndClear]);
+  ), [applyUpdatesAndClear, deleteSkillsAndClear, openManageLocationsBatch, setVisibilityAndClear]);
 
   return (
     <>
@@ -2010,14 +1777,14 @@ export function SkillsView({
           variant="icon"
           value={viewMode}
           onValueChange={(value) => {
-            if (value === "list" || value === "network") setViewMode(value);
+            if (value === SkillsViewMode.List || value === SkillsViewMode.Network) setViewMode(value);
           }}
           aria-label="Skills view"
         >
-          <SegmentedControlItem value="list" aria-label="Show skills as a list">
+          <SegmentedControlItem value={SkillsViewMode.List} aria-label="Show skills as a list">
             <List size={15} aria-hidden="true" />
           </SegmentedControlItem>
-          <SegmentedControlItem value="network" aria-label="Show skill relationships">
+          <SegmentedControlItem value={SkillsViewMode.Network} aria-label="Show skill relationships">
             <Waypoints size={15} aria-hidden="true" />
           </SegmentedControlItem>
         </SegmentedControl>
@@ -2051,14 +1818,14 @@ export function SkillsView({
         />
       </PageHeader>
       {loadError && hasRows ? <LoadErrorState message={loadError} onRetry={() => { void onRefresh(); }} /> : null}
-      {viewMode === "network" ? (
+      {viewMode === SkillsViewMode.Network ? (
         <SkillRelationshipMap
           nodes={networkNodes}
           loading={loadingSkills}
           error={hasRows ? "" : loadError}
           onRetry={() => { void onRefresh(); }}
-          onOpenSkill={(name) => {
-            const skill = skillItems.find((item) => item.name === name);
+          onOpenSkill={(selector) => {
+            const skill = findSkillBySelector(skillItems, selector);
             if (skill) openSkill(skill);
           }}
         />
@@ -2077,7 +1844,7 @@ export function SkillsView({
             scrollToRowId={skillLocatorRequest}
             onScrollToRowComplete={completeSkillLocator}
             defaultGroupBy="origin"
-            defaultSort={{ key: "mtime", direction: "desc" }}
+            defaultSort={{ key: "mtime", direction: SortDirection.Desc }}
             onRowClick={openSkill}
             rowContextMenu={rowContextMenu}
             bottomBar={bottomBar}

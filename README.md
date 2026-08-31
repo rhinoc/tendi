@@ -2,8 +2,13 @@
   <br />
   <img src="./apps/desktop/src-tauri/icons/tendi-icon.svg" alt="Tendi app icon" width="112" height="112" />
   <h1>tendi</h1>
-  <p>A local-first control plane for coding-agent sessions, skills, rules, hooks, MCP servers, and configuration.</p>
   <p>
+    A local-first macOS app for <strong>Codex</strong>, <strong>Cursor</strong>, and <strong>Claude Code</strong>.<br />
+    Browse sessions, manage skills, and keep rules, hooks, MCP, and config in one place — with a matching CLI.
+  </p>
+  <p>
+    <a href="./README.zh-CN.md">中文</a>
+    &nbsp;·&nbsp;
     <a href="https://github.com/rhinoc/tendi/releases">Releases</a>
     &nbsp;·&nbsp;
     <a href="./LICENSE">License</a>
@@ -13,238 +18,122 @@
   <br />
 </div>
 
-> Status: early development. The current desktop workflow targets macOS and is not yet a
-> signed or notarized public release.
-
 ## Screenshots
 
-<p align="center">
-  <img src="./docs/screenshots/sessions-desktop.png" alt="Tendi desktop sessions view" width="960" />
-</p>
-
-> Screenshot captured from the Tendi desktop app.
+<table>
+  <tr>
+    <td align="center">
+      <img src="./docs/screenshots/showcase-overview.jpg" width="250" alt="Tendi overview with usage analytics and recent sessions" />
+      <br />
+      <sub>Overview and usage trends</sub>
+    </td>
+    <td align="center">
+      <img src="./docs/screenshots/showcase-skills.jpg" width="250" alt="Tendi skills inventory with visibility controls" />
+      <br />
+      <sub>Skills</sub>
+    </td>
+    <td align="center">
+      <img src="./docs/screenshots/showcase-sessions.jpg" width="250" alt="Tendi sessions list with transcript detail panel" />
+      <br />
+      <sub>Sessions</sub>
+    </td>
+  </tr>
+</table>
 
 ## Features
 
-- 🔎 **One searchable surface** — Scan local agent configuration and activity into one snapshot-backed CLI and desktop app.
-- 🧩 **Skill management** — Add, link, copy, wrap, configure visibility, and check updates for skills from local paths, Git, registries, and HTTP sources.
-- 🧰 **Agent configuration discovery** — Inspect Codex, Cursor, and Claude Code executables, versions, configuration roots, rules, hooks, and MCP servers.
-- 🗂️ **Session search** — List sessions, search transcripts, and inspect token, model, cache, duration, and completion analytics.
-- 🖥️ **Native desktop workflow** — Use React and Tauri views for overview, skills, prompts, sessions, rules, hooks, MCP, and agent profiles.
-- 🛡️ **Safe file changes** — Preview plans, protect writes with hashes, and use atomic file replacement for managed changes.
+- 📊 **Usage** — Overview shows token usage and trends across sessions, turns, models, tools, and skills. Each session exposes cache rate and token usage.
+- 🧩 **Skills** — Install, edit, update, and set visibility (`auto` / `manual` / `off`). Local edits to remote skills survive upstream updates through three-way merge.
+- 💬 **Sessions** — Read transcripts as an IM-style thread, including injected prompts and tool-call detail that agent UIs often omit, then resume in place.
+- 🎛️ **Config** — Switch agent config profiles quickly — for example when rotating API keys — without digging through provider files.
+- 📜 **Rules, hooks, and MCP** — Browse provider-owned configuration in one place, open source files, and apply supported changes.
+- 🔄 **Sync** — Snapshot skills, MCP, rules, and hooks to a Git repo, then restore with an explicit plan.
+- 🖥️ **Desktop and CLI** — The app and `tendi` share the same local scanner and snapshot database.
+
+## Why Tendi
+
+Tendi is for people who already run more than one coding agent.
+
+In that setup, sessions are scattered across apps, skills accumulate on `auto`, and remote skills are awkward to customize because the next update may overwrite local changes. Tendi keeps Codex, Cursor, and Claude Code on one local surface, and focuses on a few concrete gaps:
+
+- Unused skills left on `auto` still contribute description text every turn. Set them to `manual` or `off` from one list.
+- Search, review, and resume sessions across agents instead of rebuilding context after switching tools.
+- Edit installed remote skills locally; pull upstream updates with three-way merge rather than overwrite-or-fork.
+
+If you use a single agent and rarely touch skills or old sessions, the agent apps alone are usually enough.
 
 ## Requirements
 
-- Rust stable toolchain with Cargo
-- Node.js and npm
-- Git, for Git-backed skill sources and update checks
-- `sqlite3` on `PATH` when running the full acceptance script
-- Apple Silicon macOS for the current desktop development workflow
+- **macOS** on Apple Silicon for the desktop app.
+- At runtime, network access is used only for skill sources, marketplace search, update checks, or a sync remote you configure.
 
 ## Install
 
-Tendi does not have a signed public installer yet. To run the CLI from a checkout:
+Download the latest **`tendi-<version>-aarch64.dmg`** from **[GitHub Releases](https://github.com/rhinoc/tendi/releases)**.
 
-```bash
-git clone https://github.com/rhinoc/tendi.git
-cd tendi
-cargo run -p tendi-cli -- scan
-```
+1. Open the DMG.
+2. Drag **`tendi.app`** to **Applications**.
+3. Eject the disk image, then launch **Tendi** from Applications or Spotlight.
 
-To install desktop dependencies and start the Tauri app:
+The app also ships the `tendi` CLI. Install it from the first-run prompt, or later under **Settings → Developer → Coding helpers**.
 
-```bash
-cd apps/desktop
-npm ci
-TENDI_CWD=/path/to/project npm run dev:tauri
-```
-
-`TENDI_CWD` is optional. Without it, tendi uses the desktop process working directory when
-scanning project-level rules, hooks, MCP configuration, and skills.
-
-Tauri and the web daemon use separate Cargo target directories during development, so their
-hot-reload builds cannot overwrite each other's artifacts. Set `TENDI_DAEMON_TARGET_DIR` only
-when a custom daemon target directory is needed.
-
-### Build a local macOS DMG
-
-Build the release `.app` and a local disk image from the repository root:
-
-```bash
-cd apps/desktop
-npm ci
-npm run build:dmg
-```
-
-The artifact is written to `dist/tendi-<version>-<arch>.dmg`. The DMG contains `tendi.app`, an
-**Applications** shortcut, and the checked-in background at
-`apps/desktop/src-tauri/res/dmg-background.png`.
-
-Release builds bundle the matching `tendi` CLI inside the app. The first-run setup or the
-**Command line** section in Settings can register it on the user's shell `PATH`; the DMG does not
-silently modify shell configuration.
-
-Published releases also include Tauri updater artifacts and `latest.json`. Installed apps can
-check for updates from **Settings → Updates**. Release signing requires a repository secret named
-`TAURI_SIGNING_PRIVATE_KEY`; an optional
-`TAURI_SIGNING_PRIVATE_KEY_PASSWORD` is supported when the key is password-protected.
+Installed apps can check for updates under **Settings → Updates**.
 
 ### First launch and Gatekeeper
 
-Browser downloads are tagged with Gatekeeper **quarantine** (`com.apple.quarantine`). The local
-DMG build is not signed or notarized. If macOS warns that the app cannot be opened or is from an
-unidentified developer, first verify that the DMG came from a trusted source, copy `tendi.app` to
-**Applications**, then remove quarantine:
+Browser downloads are quarantined by Gatekeeper. Release and local builds are not Apple Developer ID-signed or notarized yet. If macOS blocks the app, confirm the DMG source, move `tendi.app` to Applications, then:
 
 ```bash
 xattr -dr com.apple.quarantine /Applications/tendi.app
 ```
 
-The DMG builder runs `xattr -cr` on its temporary app copy to strip extended attributes and avoid
-AppleDouble sidecar files in the image. This packaging cleanup does not sign the app or replace
-Developer ID signing and Apple notarization.
-
 ## Usage
+
+### Desktop
+
+Views: **Overview**, **Skills**, **Sessions**, **Rules**, **MCP**, **Hooks**, **Prompts**, **Config**, and **Settings**.
+
+Common paths:
+
+- **Skills → Add** — Paste a Git URL or path, or search a marketplace, preview, then install.
+- **Sessions** — Search transcripts, open detail, resume into Codex, Cursor, or Claude Code.
+- **Settings → Developer → Sync** — Point at a Git repo, choose what to include, sync, and restore from history.
 
 ### CLI
 
-Run `cargo run -p tendi-cli -- --help` for the complete generated help. The main command groups
-are:
-
-```text
-tendi scan [--json]
-tendi agents list [--json]
-tendi skills guide [--json]
-tendi setup skills [--to <shared|codex|cursor|claude>] [options]
-tendi skills list [--json]
-tendi skills add <source> [--visibility <auto|manual|off>] [options]
-tendi skills set <pattern> --visibility <auto|manual|off> [options]
-tendi skills wrap <name> --from <pattern> [options]
-tendi skills updates [--check] [--json]
-tendi skills update <pattern> [options]
-tendi skills link <source> --to <codex|cursor|claude|shared> [options]
-tendi sessions list [--json]
-tendi sessions search <query> [--json]
-tendi sessions transcript <path> --agent <codex|cursor|claude|shared> [--json]
-tendi rules list [--json]
-tendi hooks list [--json]
-tendi mcp list [--json]
-```
-
-Commands that change files show a plan first. Use `--dry-run` to inspect a change without
-applying it and `--yes` to confirm non-interactively.
-
-On the first interactive CLI run, Tendi offers to install its bundled agent skill into
-`~/.agents/skills/tendi`. The desktop app shows the same one-time prompt. The installed skill is
-a small discovery stub: it asks the current `tendi` binary for `tendi skills guide`, then uses
-the version-matched guide to search sessions, inspect agent inventory, and preview or apply skill
-changes. Existing files with different content require an explicit `--overwrite`.
-
-### Desktop app
-
-The Tauri app currently includes views for:
-
-- Overview and analytics
-- Skills and skill file editing
-- Prompts
-- Sessions, search, transcript details, and live scan updates
-- Rules, hooks, and MCP
-- Agent configuration profiles
-
-The React UI uses real local data through Tauri. When opened in a browser without Tauri, it can
-use prototype data for UI development.
-
-### Local data and permissions
-
-The core scanner and snapshot database run locally. On macOS, the default database is:
-
-```text
-~/Library/Application Support/tendi/tendi.sqlite3
-```
-
-The scanner reads agent configuration, skills, rules, hooks, MCP configuration, and local
-session files from configured project and global roots. Remote access only occurs when a
-requested skill source or update check uses GitHub, Git, a registry, or HTTP.
-
-Global skill roots currently include:
-
-```text
-~/.agents/skills
-~/.codex/skills
-~/.cursor/skills
-~/.claude/skills
-```
-
-Matching project-level `.agents`, `.codex`, `.cursor`, and `.claude` skill roots are included
-when a project context is provided.
-
-## Development
-
-### Repository layout
-
-```text
-crates/tendi-core/       scanning, storage, planning, parsing, and domain logic
-crates/tendi-cli/        `tendi` command-line interface
-apps/desktop/            React/Vite frontend
-apps/desktop/src-tauri/  Tauri shell and native commands
-scripts/                 acceptance, performance, and smoke checks
-docs/                    design and audit notes
-```
-
-### Validation
-
-Run focused checks from the repository root:
+After installing the CLI:
 
 ```bash
-cargo test -p tendi-core
-cargo check
-cd apps/desktop && npm run typecheck && npm run build
+tendi scan
+tendi skills list
+tendi sessions search "your query"
+tendi rules list
+tendi hooks list
+tendi mcp list
 ```
 
-Run the complete local acceptance gate:
+Commands that change files show a plan first. Use `--dry-run` to preview without writing, and `--yes` to confirm non-interactively.
 
-```bash
-node scripts/acceptance.mjs
-```
+When you install the CLI, you can also install Tendi's bundled skill at `~/.agents/skills/tendi`, so coding agents can search local sessions and manage skills. Skip it if you prefer, or install later from **Settings → Developer → Coding helpers**.
 
-The acceptance gate covers core tests, Rust checks, a performance fast pass, real CLI scans,
-SQLite count checks, CLI write confirmation, desktop alignment e2e, the frontend build, and the
-Tauri bundle build.
+See `tendi --help` for all commands.
 
-Performance checks are also available independently:
+### Local data
 
-```bash
-node scripts/perf-check.mjs --fast
-node scripts/perf-check.mjs --full
-```
+| Location | What it stores |
+| --- | --- |
+| `~/Library/Application Support/tendi/tendi.sqlite3` | Local snapshot database |
+| `~/.agents/skills`, `~/.codex/skills` (or `$CODEX_HOME/skills`), `~/.cursor/skills`, `~/.claude/skills` | Global skill roots Tendi scans |
+| Project `.agents` / `.codex` / `.cursor` / `.claude` trees | Project skills, rules, hooks, and MCP when a project context is set |
 
-To enable the repository-managed pre-push check once per clone:
-
-```bash
-git config core.hooksPath .githooks
-```
+Scanning runs entirely on local files. Remote access only occurs for skill sources, marketplace or update checks, and sync remotes you configure.
 
 ## Contributing
 
-For development setup, coding conventions, tests, asset rules, release boundaries, and security
-reports, read **[CONTRIBUTING.md](./CONTRIBUTING.md)**.
-
-## Third-Party Assets and Licenses
-
-The Rust workspace and source repository use the **MIT License**. See **[LICENSE](./LICENSE)**.
-
-The Tendi app icon and DMG background are project assets. Any future bundled fonts, models,
-media, SDK components, or other binary assets must include their source, license, attribution,
-and redistribution terms before being added to the public repository.
-
-## Current limitations
-
-- Cursor transcript parsing does not yet cover every event shape.
-- Rules, hooks, and MCP currently have scan/list workflows but not complete editor flows.
-- There are no signed, notarized, or published release binaries yet.
-- The updater is wired for signed Tauri artifacts, but no release has been published yet.
+See **[CONTRIBUTING.md](./CONTRIBUTING.md)** for setup, conventions, tests, assets, and release boundaries. Focused notes live under **[docs/](./docs/README.md)**.
 
 ## License
 
-The Rust workspace and source repository use the [MIT License](LICENSE). Third-party dependencies
-and future bundled assets retain their own licenses and attribution requirements.
+The Rust workspace and source repository use the [MIT License](LICENSE). Third-party dependencies and bundled assets retain their own licenses and attribution requirements.
+
+The Tendi app icon and DMG background are project assets. New fonts, media, or other binary assets must include source, license, attribution, and redistribution terms before landing in the public repository.

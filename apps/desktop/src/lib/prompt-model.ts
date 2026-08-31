@@ -25,16 +25,16 @@ export function normalizePrompt(prompt: Record<string, unknown>): PromptRecord |
     || typeof prompt.title !== "string"
     || !Array.isArray(prompt.tags)
     || !prompt.tags.every((tag): tag is string => typeof tag === "string")
-    || typeof prompt.body !== "string"
     || typeof prompt.created_at !== "string"
     || typeof prompt.updated_at !== "string"
   ) return undefined;
+  const body = typeof prompt.body === "string" ? prompt.body : "";
   const tags = normalizePromptTags(prompt.tags);
   return {
     id,
     title: prompt.title,
     tags,
-    body: prompt.body,
+    body,
     createdAt: prompt.created_at,
     updatedAt: prompt.updated_at,
   };

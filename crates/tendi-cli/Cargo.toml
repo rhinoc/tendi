@@ -9,11 +9,11 @@ tendi-core = { path = "../tendi-core" }
 anyhow.workspace = true
 chrono = { workspace = true, optional = true }
 clap.workspace = true
-serde = { workspace = true, optional = true }
+serde.workspace = true
 serde_json.workspace = true
 
 [features]
-perf-runner = ["dep:chrono", "dep:serde"]
+perf-runner = ["dep:chrono"]
 
 [[bin]]
 name = "tendi"

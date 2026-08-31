@@ -1,9 +1,20 @@
 export type SkillDependencyRecord = {
+  id?: string;
   name: string;
   description: string;
   dependencies: string[];
   dependents: string[];
+  dependencyIds?: string[];
+  dependentIds?: string[];
+  paths?: Array<{ scope?: string | null }>;
 };
+
+enum SkillGraphEmptySide {
+  Both = "both",
+  Dependencies = "dependencies",
+  Dependents = "dependents",
+  None = "none",
+}
 
 export type SkillDependencyGraphProps = {
   skill?: SkillDependencyRecord | null;
@@ -13,12 +24,12 @@ export type SkillDependencyGraphProps = {
   onOpenSkill?: (name: string) => void;
 };
 
-function relationList(names: string[], skillsByName: Map<string, SkillDependencyRecord>) {
-  return names
-    .flatMap((name) => {
-      const skill = skillsByName.get(name);
-      return skill ? [skill] : [];
-    })
+function relationList(
+  ids: string[],
+  skills: SkillDependencyRecord[],
+) {
+  return ids
+    .flatMap((id) => skills.filter((item) => item.id === id))
     .sort((left, right) => left.name.localeCompare(right.name));
 }
 
@@ -38,15 +49,15 @@ function SkillRelationSection({
       <div className="skillGraphSectionTitle">{title}</div>
       {skills.length > 0 ? (
         <div className="skillGraphList">
-          {skills.map((skill) => (
+          {skills.map((item) => (
             <button
               className="skillGraphNode"
-              key={skill.name}
+              key={item.id ?? item.name}
               disabled={!onOpenSkill}
-              onClick={() => onOpenSkill?.(skill.name)}
+              onClick={() => onOpenSkill?.(item.id ?? item.name)}
             >
-              <strong>{skill.name}</strong>
-              {skill.description && <span>{skill.description}</span>}
+              <strong>{item.name}</strong>
+              {item.description && <span>{item.description}</span>}
             </button>
           ))}
         </div>
@@ -64,7 +75,6 @@ export function SkillDependencyGraph({
   emptyLabel = "No selected skill",
   onOpenSkill,
 }: SkillDependencyGraphProps) {
-  const skillsByName = new Map(skills.map((item) => [item.name, item]));
   if (!skill) {
     return (
       <section className="skillGraph">
@@ -74,11 +84,11 @@ export function SkillDependencyGraph({
     );
   }
 
-  const dependencies = relationList(skill.dependencies, skillsByName);
-  const dependents = relationList(skill.dependents, skillsByName);
+  const dependencies = relationList(skill.dependencyIds ?? [], skills);
+  const dependents = relationList(skill.dependentIds ?? [], skills);
   const emptySide = dependencies.length === 0
-    ? dependents.length === 0 ? "both" : "dependencies"
-    : dependents.length === 0 ? "dependents" : "none";
+    ? dependents.length === 0 ? SkillGraphEmptySide.Both : SkillGraphEmptySide.Dependencies
+    : dependents.length === 0 ? SkillGraphEmptySide.Dependents : SkillGraphEmptySide.None;
 
   return (
     <section className="skillGraph">

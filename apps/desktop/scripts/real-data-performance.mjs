@@ -259,7 +259,14 @@ try {
         if (command === "settings_get") return { appearance: "system", lightTheme: "default", darkTheme: "default", additionalSessionRoots: [], configProfiles: {} };
         if (command === "scan") return report;
         if (command === "skills_list" || command === "skills_refresh") return report.skills?.skills || [];
-        if (command === "sessions_list") return report.sessions?.sessions || [];
+        if (command === "sessions_snapshot") return {
+          scopeKey: "workspace:/real-data-performance",
+          domain: "sessions",
+          revision: 0,
+          schemaVersion: 1,
+          snapshotId: "sessions:real-data-performance:0",
+          payload: report.sessions?.sessions || [],
+        };
         if (command === "rules_list") return report.rules?.rules || [];
         if (command === "hooks_list") return report.hooks?.hooks || [];
         if (command === "mcp_list") return report.mcp?.servers || [];

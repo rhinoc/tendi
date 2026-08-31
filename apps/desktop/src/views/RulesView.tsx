@@ -5,7 +5,9 @@ import { Code2, Copy, FolderOpen, Info, ScrollText, SearchX, Trash2 } from "luci
 import { Group as PanelGroup, Panel } from "react-resizable-panels";
 
 import { DataTable } from "../components/DataTable.tsx";
-import type { ColumnDef, SortState } from "../components/DataTable.types";
+import { ColumnDataType, type ColumnDef, type SortState } from "../components/DataTable.types";
+import { SortDirection } from "../lib/sort.ts";
+import { DiffLineKind } from "../lib/diff.ts";
 import { AgentChips } from "../components/shared/AgentChips.tsx";
 import { CopyButton } from "../components/shared/CopyButton.tsx";
 import { CopyPathMenuItem, DeleteMenuItem, OpenInEditorMenuItem, RevealInFinderMenuItem } from "../components/shared/DataTableMenus.tsx";
@@ -20,13 +22,16 @@ import { InfoDropdownMenu } from "../components/shared/InfoDropdownMenu.tsx";
 import { InfoSection } from "../components/shared/InfoSection.tsx";
 import { IconButton } from "../components/shared/IconButton.tsx";
 import { LoadErrorState } from "../components/shared/LoadErrorState.tsx";
+import { LoadingState } from "../components/shared/LoadingState.tsx";
 import { PageHeader } from "../components/shared/PageHeader.tsx";
 import { RowActionsMenu } from "../components/shared/RowActionsMenu.tsx";
 import { SearchField } from "../components/shared/SearchField.tsx";
 import { Toast } from "../components/shared/Toast.tsx";
 import type { SkillDependencyRecord } from "../features/skills/SkillDependencyGraph.tsx";
 import { ruleColumns as sharedRuleColumns } from "../lib/tableColumns.tsx";
-import { actionLabels, copiedPathLabel, copyPathLabel, revealPathLabel, RULE_FREEZE_COLUMN, selectionDeleteErrorLabel, selectionDeleteLabel, TauriCommand, diffPreview, formatUserPath, friendlyAgent, invokeCommand, readRuleFile, ruleAgents, ruleKey, ruleSearchText, ruleSelectionActionIds, ruleSortValue, ruleTitle, safeInvoke, scopeColumn, suppressNextClick, type ProjectSummary, type RuleRecord } from "../lib/index.ts";
+import { actionLabels, copiedPathLabel, copyPathLabel, revealPathLabel, RULE_FREEZE_COLUMN, RuleScope, selectionDeleteErrorLabel, selectionDeleteLabel, TableSelectionActionId, TauriCommand, diffPreview, formatUserPath, friendlyAgent, ruleAgents, ruleKey, ruleSelectionActionIds, ruleSortValue, ruleTitle, safeInvoke, scopeColumn, suppressNextClick, type ProjectSummary, type RuleRecord } from "../lib/index.ts";
+import { selectRuleListView } from "../controllers/rule-controller.ts";
+import { readRule, saveRule, SkillScope, type CatalogMutationResponse } from "../lib/runtime-gateway.ts";
 
 const MarkdownFilePane = lazy(() => import("../components/shared/MarkdownFilePane.tsx").then(({ MarkdownFilePane: component }) => ({ default: component })));
 
@@ -48,9 +53,9 @@ function ruleSourcePath(rule: RuleRecord): string {
   return rule.path;
 }
 
-function operationError(value: unknown): string | null {
+function operationError(value: CatalogMutationResponse | undefined): string | null {
   if (!value || typeof value !== "object") return null;
-  const error = (value as { error?: unknown }).error;
+  const error = "error" in value ? value.error : undefined;
   return typeof error === "string" ? error : null;
 }
 
@@ -66,27 +71,27 @@ function ruleSelectionActions(
   const deletable = selectedRows.filter((item) => Boolean(item.rule.path));
   const deleteLabel = selectionDeleteLabel("rule", selectedRows.length);
   const actions: Record<string, DataTableSelectionActionDefinition> = {
-    "open-editor": {
-      id: "open-editor",
+    [TableSelectionActionId.OpenEditor]: {
+      id: TableSelectionActionId.OpenEditor,
       direct: <button aria-label={actionLabels.openInEditor} disabled={!path} onClick={() => path && safeInvoke(TauriCommand.OpenInEditor, { path })}><Code2 size={15} /><span>{actionLabels.openInEditor}</span></button>,
       menu: <OpenInEditorMenuItem Menu={Menu} path={path} />,
       measure: <><Code2 size={15} /><span>{actionLabels.openInEditor}</span></>,
     },
-    reveal: {
-      id: "reveal",
+    [TableSelectionActionId.Reveal]: {
+      id: TableSelectionActionId.Reveal,
       direct: <button aria-label={actionLabels.revealInFinder} disabled={!path} onClick={() => path && safeInvoke(TauriCommand.RevealInFinder, { path })}><FolderOpen size={15} /><span>{actionLabels.revealInFinder}</span></button>,
       menu: <RevealInFinderMenuItem Menu={Menu} path={path} />,
       measure: <><FolderOpen size={15} /><span>{actionLabels.revealInFinder}</span></>,
       separatorBefore: true,
     },
-    "copy-path": {
-      id: "copy-path",
+    [TableSelectionActionId.CopyPath]: {
+      id: TableSelectionActionId.CopyPath,
       direct: <CopyButton value={path} disabled={!path} copyLabel={actionLabels.copyPath} copiedLabel={actionLabels.pathCopied} iconSize={15}>{actionLabels.copyPath}</CopyButton>,
       menu: <CopyPathMenuItem Menu={Menu} path={path} />,
       measure: <><Copy size={15} /><span>{actionLabels.copyPath}</span></>,
     },
-    delete: {
-      id: "delete",
+    [TableSelectionActionId.Delete]: {
+      id: TableSelectionActionId.Delete,
       direct: <button type="button" className="danger" aria-label={deleteLabel} disabled={deletable.length === 0 || deleting} onClick={() => requestDeleteRules(deletable)}><Trash2 size={15} /><span>{deleteLabel}</span></button>,
       menu: <DeleteMenuItem Menu={Menu} label={deleteLabel} disabled={deletable.length === 0 || deleting} onSelect={() => requestDeleteRules(deletable)} />,
       measure: <><Trash2 size={15} /><span>{deleteLabel}</span></>,
@@ -111,25 +116,44 @@ function normalizeSkillName(value: string) {
   return value.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
 }
 
-function ruleSkillRefs(content: string, skills: SkillDependencyRecord[]) {
-  const byName = new Map(skills.map((skill) => [normalizeSkillName(skill.name), skill.name]));
-  const refs = new Set<string>();
-  for (const match of content.matchAll(/(?:^|[^\w])[$/]([a-zA-Z0-9][a-zA-Z0-9_-]*)/g)) {
-    const name = byName.get(normalizeSkillName(match[1]));
-    if (name) refs.add(name);
+function preferReferencedSkill(matches: SkillDependencyRecord[], rule: RuleRecord) {
+  if (matches.length <= 1) return matches[0];
+  if (rule.scope === RuleScope.Project) {
+    const project = matches.find((skill) =>
+      (skill.paths ?? []).some((path) => path.scope === SkillScope.Project),
+    );
+    if (project) return project;
   }
-  return [...refs].sort((left, right) => left.localeCompare(right));
+  return matches.find((skill) => (skill.paths ?? []).every((path) => path.scope !== SkillScope.Project))
+    ?? matches[0];
+}
+
+function ruleSkillRefs(content: string, skills: SkillDependencyRecord[], rule: RuleRecord | null) {
+  if (!rule) return [];
+  const byName = new Map<string, SkillDependencyRecord[]>();
+  for (const skill of skills) {
+    const key = normalizeSkillName(skill.name);
+    const group = byName.get(key) ?? [];
+    group.push(skill);
+    byName.set(key, group);
+  }
+  const refs = new Map<string, SkillDependencyRecord>();
+  for (const match of content.matchAll(/(?:^|[^\w])[$/]([a-zA-Z0-9][a-zA-Z0-9_-]*)/g)) {
+    const candidates = byName.get(normalizeSkillName(match[1]));
+    if (!candidates?.length) continue;
+    const preferred = preferReferencedSkill(candidates, rule);
+    refs.set(preferred.id ?? preferred.name, preferred);
+  }
+  return [...refs.values()].sort((left, right) => left.name.localeCompare(right.name));
 }
 
 function RuleInfoMenu({
   rule,
-  referencedSkillNames,
-  skillsByName,
+  referencedSkills,
   onOpenSkill,
 }: {
   rule: RuleRecord;
-  referencedSkillNames: string[];
-  skillsByName: Map<string, SkillDependencyRecord>;
+  referencedSkills: SkillDependencyRecord[];
   onOpenSkill?: (name: string) => void;
 }) {
   const title = ruleTitle(rule);
@@ -176,21 +200,17 @@ function RuleInfoMenu({
                   <CopyButton className="appButton appButton-icon" value={path} copyLabel={copyPathLabel("rule")} copiedLabel={copiedPathLabel("rule")} />
               </InfoSection>
             )}
-            {referencedSkillNames.length > 0 && (
+            {referencedSkills.length > 0 && (
               <InfoSection label="Referenced skills" valueLine={false}>
                 <div className="ruleInfoSkillRefs">
-                  {referencedSkillNames.map((name) => {
-                    const skill = skillsByName.get(name);
-                    return (
-                      <Tooltip key={name} content={skill?.description}><button
-                        key={name}
-                        disabled={!onOpenSkill}
-                        onClick={() => onOpenSkill?.(name)}
-                      >
-                        {name}
-                      </button></Tooltip>
-                    );
-                  })}
+                  {referencedSkills.map((skill) => (
+                    <Tooltip key={skill.id ?? skill.name} content={skill.description}><button
+                      disabled={!onOpenSkill}
+                      onClick={() => onOpenSkill?.(skill.id ?? skill.name)}
+                    >
+                      {skill.name}
+                    </button></Tooltip>
+                  ))}
                 </div>
               </InfoSection>
             )}
@@ -207,6 +227,7 @@ export function RulesView({
   onRetry,
   onOpenSkill,
   onDeleteRules,
+  onRuleSaved,
   projects,
 }: {
   rows: RuleRecord[];
@@ -216,15 +237,17 @@ export function RulesView({
   hasRows?: boolean;
   onRetry?: () => void;
   onOpenSkill?: (name: string) => void;
-  onDeleteRules?: (paths: string[]) => Promise<unknown>;
+  onDeleteRules?: (paths: string[]) => Promise<CatalogMutationResponse>;
+  onRuleSaved?: (path: string, sha256: string) => void;
   projects?: ProjectSummary[];
 }) {
   const projectList = projects ?? [];
-  const ruleItems = useMemo(() => rows.map((rule) => ({ key: ruleKey(rule), rule })), [rows]);
+  const [query, setQuery] = useState("");
+  const ruleView = useMemo(() => selectRuleListView(rows, query), [query, rows]);
+  const { items: ruleItems, tableRows } = ruleView;
   const [activeKey, setActiveKey] = useState(ruleItems[0]?.key ?? "");
   const [selected, setSelected] = useState<string[]>([]);
-  const [query, setQuery] = useState("");
-  const [sort, setSort] = useState<SortState>({ key: "order", direction: "asc" });
+  const [sort, setSort] = useState<SortState>({ key: "order", direction: SortDirection.Asc });
   const [draft, setDraft] = useState({ content: "", originalContent: "", sha256: "" });
   const [loading, setLoading] = useState(false);
   const [detailCollapsed, setDetailCollapsed] = useState(false);
@@ -240,10 +263,16 @@ export function RulesView({
   const normalizedQuery = query.trim().toLowerCase();
   const activeItem = useMemo(() => ruleItems.find((item) => item.key === activeKey), [activeKey, ruleItems]);
   const activeRule = activeItem?.rule ?? null;
-  const skillsByName = useMemo(() => new Map(skills.map((skill) => [skill.name, skill])), [skills]);
   const content = draft.content;
+  const hasLoadedRule = Boolean(
+    activeRule
+      && loadedRulePathRef.current === activeRule.path,
+  );
   const deferredContent = useDeferredValue(content);
-  const referencedSkillNames = useMemo(() => ruleSkillRefs(content, skills), [content, skills]);
+  const referencedSkills = useMemo(
+    () => ruleSkillRefs(content, skills, activeRule),
+    [activeRule, content, skills],
+  );
   const dirty = content !== draft.originalContent;
   const dirtyRef = useRef(dirty);
   dirtyRef.current = dirty;
@@ -254,20 +283,12 @@ export function RulesView({
   const diffStats = useMemo(
     () => diffLines.reduce(
       (counts: { added: number; removed: number }, line: { kind?: string }) => ({
-        added: counts.added + (line.kind === "added" ? 1 : 0),
-        removed: counts.removed + (line.kind === "removed" ? 1 : 0),
+        added: counts.added + (line.kind === DiffLineKind.Added ? 1 : 0),
+        removed: counts.removed + (line.kind === DiffLineKind.Removed ? 1 : 0),
       }),
       { added: 0, removed: 0 },
     ),
     [diffLines],
-  );
-  const filteredRules = useMemo(() => {
-    if (!normalizedQuery) return ruleItems;
-    return ruleItems.filter((item) => ruleSearchText(item.rule).includes(normalizedQuery));
-  }, [normalizedQuery, ruleItems]);
-  const tableRows = useMemo(
-    () => filteredRules.map((item) => ({ ...item, id: item.key })),
-    [filteredRules],
   );
   const requestDeleteRules = useCallback((items: RuleTableRow[]) => {
     const deletable = items.filter((item) => Boolean(item.rule.path));
@@ -309,7 +330,7 @@ export function RulesView({
     {
       key: "source",
       header: "Rule",
-      type: "text",
+      type: ColumnDataType.Text,
       sticky: true,
       sortable: true,
       sortValue: (row) => ruleTitle(row.rule).toLowerCase(),
@@ -332,7 +353,7 @@ export function RulesView({
           key: column.key,
           width: column.width,
           header: column.label ?? column.header,
-          type: column.type ?? (["agents", "kind", "scope"].includes(column.key) ? "enum" : "text"),
+          type: column.type ?? (["agents", "kind", "scope"].includes(column.key) ? ColumnDataType.Enum : ColumnDataType.Text),
           sortable: true,
           sortValue: (row) => ruleSortValue({ rule: row.rule }, column.key),
         };
@@ -395,19 +416,26 @@ export function RulesView({
     if (dirtyRef.current && loadedRulePathRef.current === rulePath) {
       return () => { cancelled = true; };
     }
-    loadedRulePathRef.current = rulePath;
-    setDraft({ content: "", originalContent: "", sha256: "" });
+    const sameRule = loadedRulePathRef.current === rulePath;
+    if (!sameRule) {
+      loadedRulePathRef.current = "";
+      setDraft({ content: "", originalContent: "", sha256: "" });
+    }
     setLoading(true);
     setRuleLoadError("");
     async function loadRule() {
       try {
-        const result = await readRuleFile(() => invokeCommand(TauriCommand.RuleFileRead, { path: rulePath }));
+        const result = await readRule(rulePath);
         if (cancelled) return;
+        loadedRulePathRef.current = rulePath;
         setDraft({ content: result.content, originalContent: result.content, sha256: result.sha256 });
         setRuleLoadError("");
       } catch {
         if (cancelled) return;
-        setDraft({ content: "", originalContent: "", sha256: "" });
+        if (!sameRule) {
+          loadedRulePathRef.current = "";
+          setDraft({ content: "", originalContent: "", sha256: "" });
+        }
         setRuleLoadError("Could not load rule. Try again.");
       } finally {
         if (!cancelled) setLoading(false);
@@ -419,15 +447,17 @@ export function RulesView({
 
   const save = useCallback(async () => {
     if (!dirty || !draft.sha256 || !activeRule?.path) return;
-    const result = await safeInvoke(TauriCommand.RuleFileSave, {
+    const result = await saveRule({
       path: activeRule.path,
       expectedSha256: draft.sha256,
       content,
-    }) as { sha256?: string; content?: string } | null;
-    if (typeof result?.content === "string" && typeof result.sha256 === "string") {
-      setDraft({ content: result.content, originalContent: result.content, sha256: result.sha256 });
+    });
+    if (typeof result?.sha256 === "string") {
+      const savedContent = typeof result.content === "string" ? result.content : content;
+      setDraft({ content: savedContent, originalContent: savedContent, sha256: result.sha256 });
+      if (activeRule?.path) onRuleSaved?.(activeRule.path, result.sha256);
     }
-  }, [activeRule?.path, content, dirty, draft.sha256]);
+  }, [activeRule?.path, content, dirty, draft.sha256, onRuleSaved]);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -504,7 +534,7 @@ export function RulesView({
               selectedIds={selected}
               onSelectionChange={setSelected}
               enableMarquee
-              defaultSort={{ key: "order", direction: "asc" }}
+              defaultSort={{ key: "order", direction: SortDirection.Asc }}
               sort={sort}
               onSortChange={setSort}
               freezeColumn={RULE_FREEZE_COLUMN}
@@ -545,31 +575,41 @@ export function RulesView({
             headerActions={(
               <RuleInfoMenu
                 rule={activeRule}
-                referencedSkillNames={referencedSkillNames}
-                skillsByName={skillsByName}
+                referencedSkills={referencedSkills}
                 onOpenSkill={onOpenSkill}
               />
             )}
           >
-            {loading ? (
-              <EditorStatePlaceholder className="ruleEditorLoading" label="Loading rule" />
-            ) : ruleLoadError ? (
+            {!hasLoadedRule && ruleLoadError ? (
               <div className="ruleEditorLoading">
                 <LoadErrorState message={ruleLoadError} onRetry={() => setRuleLoadAttempt((attempt) => attempt + 1)} />
               </div>
+            ) : !hasLoadedRule ? (
+              <EditorStatePlaceholder className="ruleEditorLoading" label="Loading rule" />
             ) : (
-              <Suspense fallback={<EditorStatePlaceholder className="ruleEditorLoading" label="Loading editor" />}>
-                <MarkdownFilePane
-                  activePath={ruleSourcePath(activeRule)}
-                  dirty={dirty}
-                  diffStats={diffStats}
-                  content={content}
-                  originalContent={draft.originalContent}
-                  copyablePath
-                  onSave={save}
-                  onChange={(nextContent: string) => setDraft((current) => ({ ...current, content: nextContent }))}
-                />
-              </Suspense>
+              <div className="ruleEditorContent">
+                <Suspense fallback={<EditorStatePlaceholder className="ruleEditorLoading" label="Loading editor" />}>
+                  <MarkdownFilePane
+                    activePath={ruleSourcePath(activeRule)}
+                    dirty={dirty}
+                    diffStats={diffStats}
+                    content={content}
+                    originalContent={draft.originalContent}
+                    copyablePath
+                    onSave={save}
+                    onChange={(nextContent: string) => setDraft((current) => ({ ...current, content: nextContent }))}
+                  />
+                </Suspense>
+                {loading ? (
+                  <div className="ruleEditorStatusOverlay" aria-live="polite">
+                    <LoadingState label="Refreshing rule" />
+                  </div>
+                ) : ruleLoadError ? (
+                  <div className="ruleEditorStatusOverlay">
+                    <LoadErrorState message={ruleLoadError} onRetry={() => setRuleLoadAttempt((attempt) => attempt + 1)} />
+                  </div>
+                ) : null}
+              </div>
             )}
           </DetailPanel>
         ) : null}

@@ -69,6 +69,17 @@
   background: var(--danger-soft);
 }
 
+.sessionsLayout .sessionListBody {
+  position: relative;
+}
+
+.sessionListLocator {
+  position: absolute;
+  right: var(--page-right-inset);
+  bottom: var(--page-bottom-inset);
+  z-index: var(--z-selection-bar);
+}
+
 .transcriptViewport {
   position: relative;
   flex: 1;
@@ -93,9 +104,9 @@
   pointer-events: none;
 }
 
-.transcriptScrollControls .threadPanelToggle {
+.transcriptScrollControls .threadPanelToggle,
+.sessionListLocator {
   position: absolute;
-  left: 50%;
   width: 32px;
   height: 32px;
   margin-left: 0;
@@ -104,6 +115,10 @@
   background: var(--panel-bg);
   box-shadow: 0 1px 3px color-mix(in oklch, var(--overlay-scrim) 18%, transparent);
   pointer-events: auto;
+}
+
+.transcriptScrollControls .threadPanelToggle {
+  left: 50%;
 }
 
 .transcriptScrollControls .transcriptScrollTop {
@@ -116,7 +131,8 @@
   transform: translateX(-50%);
 }
 
-.transcriptScrollControls .threadPanelToggle:hover {
+.transcriptScrollControls .threadPanelToggle:hover,
+.sessionListLocator:hover {
   background: var(--panel-bg);
   color: var(--text);
   box-shadow: 0 1px 3px color-mix(in oklch, var(--overlay-scrim) 18%, transparent);
@@ -406,6 +422,7 @@
 
 .sessionProjectFilterSearch {
   height: 40px;
+  flex: 0 0 auto;
   display: flex;
   align-items: center;
   gap: 8px;
@@ -488,6 +505,7 @@
 
 .sessionProjectFilterFooter {
   min-height: 40px;
+  flex: 0 0 auto;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -591,7 +609,7 @@
   background: var(--chat-assistant-bg);
   color: var(--text);
   overflow-wrap: anywhere;
-  word-break: break-word;
+  word-break: break-all;
   -webkit-user-select: text;
   user-select: text;
 }
@@ -608,9 +626,10 @@
   font-size: var(--text-ui);
   line-height: var(--leading-body);
   font-weight: 400;
-  white-space: pre-wrap;
+  white-space: normal;
+  text-wrap: wrap;
   overflow-wrap: anywhere;
-  word-break: break-word;
+  word-break: break-all;
   -webkit-user-select: text;
   user-select: text;
 }
@@ -619,7 +638,7 @@
   min-height: var(--control-size-icon);
   width: 100%;
   margin-top: 0;
-  padding-inline: var(--transcript-inline-padding);
+  padding-inline: calc((var(--control-size-icon) - 13px) / 2) 0;
   box-sizing: border-box;
   display: flex;
   align-items: center;
@@ -829,8 +848,6 @@
 
 .transcriptPanel .badge {
   flex: 0 0 auto;
-  height: var(--badge-height);
-  padding-inline: var(--badge-padding-inline);
   border-radius: var(--radius-sm);
 }
 

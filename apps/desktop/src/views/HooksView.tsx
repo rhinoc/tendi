@@ -1,11 +1,12 @@
 import { Tooltip } from "../components/shared/Tooltip.tsx";
-import { lazy, Suspense, useCallback, useEffect, useMemo, useState, type ComponentType, type ReactNode } from "react";
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, type ComponentType, type ReactNode } from "react";
 import { Group as PanelGroup, Panel } from "react-resizable-panels";
 import { ContextMenu, Dialog, DropdownMenu } from "radix-ui";
 import { Code2, Copy, Crosshair, FolderOpen, Power, PowerOff, SearchX, Trash2, Webhook } from "lucide-react";
 
 import { DataTable } from "../components/DataTable.tsx";
-import type { ColumnDef, SortState } from "../components/DataTable.types";
+import { ColumnDataType, type ColumnDef, type SortState } from "../components/DataTable.types";
+import { SortDirection } from "../lib/sort.ts";
 import { AgentBadge } from "../components/shared/AgentBadge.tsx";
 import { Badge } from "../components/shared/Badge.tsx";
 import { Button } from "../components/shared/Button.tsx";
@@ -19,7 +20,6 @@ import { DialogShell } from "../components/shared/DialogShell.tsx";
 import { DialogStatefulButton } from "../components/shared/DialogStatefulButton.tsx";
 import { EmptyState } from "../components/shared/EmptyState.tsx";
 import { LoadingIcon } from "../components/shared/LoadingIcon.tsx";
-import { LoadingInline } from "../components/shared/LoadingInline.tsx";
 import { LoadingState } from "../components/shared/LoadingState.tsx";
 import { LoadErrorState } from "../components/shared/LoadErrorState.tsx";
 import { PageHeader } from "../components/shared/PageHeader.tsx";
@@ -27,6 +27,7 @@ import { RowActionsMenu } from "../components/shared/RowActionsMenu.tsx";
 import { SearchField } from "../components/shared/SearchField.tsx";
 import { Switch } from "../components/shared/Switch.tsx";
 import { Toast } from "../components/shared/Toast.tsx";
+import { AsyncStatus } from "../lib/async-status.ts";
 import "./HooksView.css";
 
 import {
@@ -35,6 +36,7 @@ import {
   copyValueLabel,
   HOOK_FREEZE_COLUMN,
   selectionDeleteLabel,
+  TableSelectionActionId,
   TauriCommand,
   compactCommand,
   copyText,
@@ -49,7 +51,6 @@ import {
   hookSourcePath,
   hookTrustHash,
   hookTypeLabel,
-  invokeCommand,
   isWebSource,
   selectionDeleteErrorLabel,
   type HookRecord,
@@ -59,10 +60,32 @@ import {
   suppressNextClick,
   type ProjectSummary,
 } from "../lib/index.ts";
+import { readHookSource, type CatalogMutationResponse } from "../lib/runtime-gateway.ts";
 
 const HookSourcePreview = lazy(() => import("../features/hooks/HookSourcePreview.tsx").then(({ HookSourcePreview: component }) => ({ default: component })));
 
 type HookItem = { key: string; hook: HookRecord };
+
+function hookSelectionIdentity(hook: HookRecord | null | undefined) {
+  if (!hook) return "";
+  return [hook.agent, hook.path, hook.event, hook.matcher, hook.hook_type]
+    .map((value) => `${value ?? ""}`).join("|");
+}
+
+function hookSourceIdentity(hook: HookRecord | null | undefined) {
+  if (!hook) return "";
+  return [
+    hook.agent,
+    hook.path,
+    hook.event,
+    hook.matcher,
+    hook.hook_type,
+    hook.command,
+    hook.url,
+    hook.prompt,
+    hook.filter,
+  ].map((value) => `${value ?? ""}`).join("|");
+}
 
 type HookSourceData = {
   content?: string;
@@ -84,7 +107,6 @@ type HookMenuComponents = {
 type HookSourceState = {
   key: string;
   loading: boolean;
-  showLoading: boolean;
   data: HookSourceData;
   error: string;
 };
@@ -113,21 +135,19 @@ type HooksViewProps = {
   loadError?: string;
   hasRows?: boolean;
   onRetry?: () => void;
-  onDeleteHook?: (hook: HookRecord) => Promise<unknown>;
-  onDeleteHooks?: (hooks: HookRecord[]) => Promise<unknown>;
-  onSetHookEnabled?: (hook: HookRecord, enabled: boolean) => Promise<unknown>;
-  onReviewHook?: (hook: HookRecord) => Promise<unknown>;
+  onDeleteHook?: (hook: HookRecord) => Promise<CatalogMutationResponse>;
+  onDeleteHooks?: (hooks: HookRecord[]) => Promise<CatalogMutationResponse>;
+  onSetHookEnabled?: (hook: HookRecord, enabled: boolean) => Promise<CatalogMutationResponse>;
+  onSetHooksEnabled?: (hooks: HookRecord[], enabled: boolean) => Promise<CatalogMutationResponse>;
+  onReviewHook?: (hook: HookRecord) => Promise<CatalogMutationResponse>;
   projects?: ProjectSummary[];
 };
 
-const defaultSort: SortState = { key: "event", direction: "asc" };
+const defaultSort: SortState = { key: "event", direction: SortDirection.Asc };
 
-function hookOperationError(result: unknown): string | undefined {
-  if (result && typeof result === "object" && !Array.isArray(result) && "error" in result) {
-    const error = (result as { error?: unknown }).error;
-    return typeof error === "string" ? error : undefined;
-  }
-  return undefined;
+function hookOperationError(result: CatalogMutationResponse | undefined): string | undefined {
+  if (!result || !("error" in result)) return undefined;
+  return typeof result.error === "string" ? result.error : undefined;
 }
 
 export function HookDetailRow({ label, value, mono = false, copyable = false }: HookDetailRowProps) {
@@ -225,38 +245,38 @@ function hookSelectionActions(
   const disableTargets = selectedRows.filter((item) => !hookEnableDisabledReason(item.hook) && Boolean(item.hook.enabled));
   const deleteLabel = selectionDeleteLabel("hook", selectedRows.length);
   const actions: Record<string, DataTableSelectionActionDefinition> = {
-    "open-editor": {
-      id: "open-editor",
+    [TableSelectionActionId.OpenEditor]: {
+      id: TableSelectionActionId.OpenEditor,
       direct: <button aria-label={actionLabels.openInEditor} disabled={!path} onClick={() => path && void safeInvoke(TauriCommand.OpenInEditor, { path })}><Code2 size={15} /><span>{actionLabels.openInEditor}</span></button>,
       menu: <OpenInEditorMenuItem Menu={Menu} path={path} />,
       measure: <><Code2 size={15} /><span>{actionLabels.openInEditor}</span></>,
     },
-    reveal: {
-      id: "reveal",
+    [TableSelectionActionId.Reveal]: {
+      id: TableSelectionActionId.Reveal,
       direct: <button aria-label={actionLabels.revealInFinder} disabled={!path} onClick={() => path && void safeInvoke(TauriCommand.RevealInFinder, { path })}><FolderOpen size={15} /><span>{actionLabels.revealInFinder}</span></button>,
       menu: <Menu.Item className="skillMenuItem" disabled={!path} onSelect={() => path && void safeInvoke(TauriCommand.RevealInFinder, { path })}><FolderOpen size={14} />{actionLabels.revealInFinder}</Menu.Item>,
       measure: <><FolderOpen size={15} /><span>{actionLabels.revealInFinder}</span></>,
     },
-    "copy-path": {
-      id: "copy-path",
+    [TableSelectionActionId.CopyPath]: {
+      id: TableSelectionActionId.CopyPath,
       direct: <CopyButton value={path} disabled={!path} copyLabel={actionLabels.copyPath} copiedLabel={actionLabels.pathCopied} iconSize={15}>{actionLabels.copyPath}</CopyButton>,
       menu: <Menu.Item className="skillMenuItem" disabled={!path} onSelect={() => path && copyText(path)}><Copy size={14} />{actionLabels.copyPath}</Menu.Item>,
       measure: <><Copy size={15} /><span>{actionLabels.copyPath}</span></>,
     },
-    enable: {
-      id: "enable",
+    [TableSelectionActionId.Enable]: {
+      id: TableSelectionActionId.Enable,
       direct: <Button size="sm" variant="ghost" aria-label="Enable selected hooks" disabled={enableTargets.length === 0 || busy} onClick={() => { void setSelectedHooksEnabled(enableTargets, true); }}><Power size={15} /><span>{actionLabels.enable}</span></Button>,
       menu: <Menu.Item className="skillMenuItem" disabled={enableTargets.length === 0 || busy} onSelect={() => { void setSelectedHooksEnabled(enableTargets, true); }}><Power size={14} />{actionLabels.enable}</Menu.Item>,
       measure: <><Power size={15} /><span>{actionLabels.enable}</span></>,
     },
-    disable: {
-      id: "disable",
+    [TableSelectionActionId.Disable]: {
+      id: TableSelectionActionId.Disable,
       direct: <Button size="sm" variant="ghost" aria-label="Disable selected hooks" disabled={disableTargets.length === 0 || busy} onClick={() => { void setSelectedHooksEnabled(disableTargets, false); }}><PowerOff size={15} /><span>{actionLabels.disable}</span></Button>,
       menu: <Menu.Item className="skillMenuItem" disabled={disableTargets.length === 0 || busy} onSelect={() => { void setSelectedHooksEnabled(disableTargets, false); }}><PowerOff size={14} />{actionLabels.disable}</Menu.Item>,
       measure: <><PowerOff size={15} /><span>{actionLabels.disable}</span></>,
     },
-    delete: {
-      id: "delete",
+    [TableSelectionActionId.Delete]: {
+      id: TableSelectionActionId.Delete,
       direct: <Button size="sm" variant="ghost" className="danger" aria-label={deleteLabel} aria-busy={deleting || undefined} disabled={deletable.length === 0 || busy} onClick={() => requestDeleteHooks(deletable)}>{deleting ? <LoadingIcon size={15} /> : <Trash2 size={15} />}<span>{deleteLabel}</span></Button>,
       menu: <Menu.Item className="skillMenuItem danger" disabled={deletable.length === 0 || busy} onSelect={() => requestDeleteHooks(deletable)}><Trash2 size={14} />{deleteLabel}</Menu.Item>,
       measure: <><Trash2 size={15} /><span>{deleteLabel}</span></>,
@@ -281,7 +301,7 @@ function hookParameterRows(hook: HookRecord | null, enabledControl: ReactNode): 
   return rows;
 }
 
-export function HooksView({ rows, loadingRows = false, loadError = "", hasRows = false, onRetry, onDeleteHook, onDeleteHooks, onSetHookEnabled, onReviewHook, projects = [] }: HooksViewProps) {
+export function HooksView({ rows, loadingRows = false, loadError = "", hasRows = false, onRetry, onDeleteHook, onDeleteHooks, onSetHookEnabled, onSetHooksEnabled, onReviewHook, projects = [] }: HooksViewProps) {
   const hookItems = useMemo(() => hookItemsFromRows(rows), [rows]);
   const [activeKey, setActiveKey] = useState(hookItems[0]?.key ?? "");
   const [selected, setSelected] = useState<string[]>([]);
@@ -293,7 +313,8 @@ export function HooksView({ rows, loadingRows = false, loadError = "", hasRows =
   const [pendingReviewItem, setPendingReviewItem] = useState<HookItem | null>(null);
   const [deleteError, setDeleteError] = useState("");
   const [pendingDeleteItems, setPendingDeleteItems] = useState<HookItem[]>([]);
-  const [sourceState, setSourceState] = useState<HookSourceState>({ key: "", loading: false, showLoading: false, data: null, error: "" });
+  const [sourceState, setSourceState] = useState<HookSourceState>({ key: "", loading: false, data: null, error: "" });
+  const activeHookSelectionIdentityRef = useRef("");
   const normalizedQuery = query.trim().toLowerCase();
   const filteredHooks = useMemo(() => {
     if (!normalizedQuery) return hookItems;
@@ -325,12 +346,19 @@ export function HooksView({ rows, loadingRows = false, loadError = "", hasRows =
 
     setUpdatingEnabledKeys(new Set(targets.map((item) => item.key)));
     setDeleteError("");
-    let latestRows = rows;
-    let firstError = "";
     try {
+      if (targets.length > 1 && onSetHooksEnabled) {
+        const result = await onSetHooksEnabled(targets.map((item) => item.hook), enabled);
+        const updateError = hookOperationError(result);
+        if (updateError) setDeleteError(updateError);
+        else if (!result) setDeleteError("Could not update selected hooks.");
+        else setSelected([]);
+        return;
+      }
+      let firstError = "";
       for (const item of targets) {
         const identity = hookDeleteIdentity(item.hook);
-        const hook = latestRows.find((row) => hookDeleteIdentity(row) === identity);
+        const hook = rows.find((row) => hookDeleteIdentity(row) === identity);
         if (!hook) {
           firstError ||= "Could not find selected hook.";
           continue;
@@ -340,17 +368,16 @@ export function HooksView({ rows, loadingRows = false, loadError = "", hasRows =
           const updateError = hookOperationError(result);
           if (updateError) firstError ||= updateError;
           else if (!result) firstError ||= "Could not update selected hooks.";
-          else if (Array.isArray(result)) latestRows = result as HookRecord[];
         } catch (error) {
           firstError ||= `${error}`;
         }
       }
-    } finally {
-      setUpdatingEnabledKeys(new Set());
       if (firstError) setDeleteError(firstError);
       else setSelected([]);
+    } finally {
+      setUpdatingEnabledKeys(new Set());
     }
-  }, [onSetHookEnabled, rows, updatingEnabledKeys.size]);
+  }, [onSetHookEnabled, onSetHooksEnabled, rows, updatingEnabledKeys.size]);
   const reviewHook = useCallback(async (item: HookItem) => {
     if (!item?.hook || reviewingKey) return;
     const disabledReason = hookReviewDisabledReason(item.hook);
@@ -393,11 +420,10 @@ export function HooksView({ rows, loadingRows = false, loadError = "", hasRows =
       setSelected([]);
       return;
     }
-    let latestRows = rows;
     for (const item of targets) {
       const identity = hookDeleteIdentity(item.hook);
       if (!identity) continue;
-      const hook = latestRows.find((row) => hookDeleteIdentity(row) === identity);
+      const hook = rows.find((row) => hookDeleteIdentity(row) === identity);
       if (!hook) continue;
       setDeletingKey(identity);
       const result = await onDeleteHook?.(hook);
@@ -410,7 +436,6 @@ export function HooksView({ rows, loadingRows = false, loadError = "", hasRows =
         setDeleteError(selectionDeleteErrorLabel("hook", 1));
         break;
       }
-      if (Array.isArray(result)) latestRows = result as HookRecord[];
     }
     setDeletingKey("");
     setSelected([]);
@@ -423,7 +448,7 @@ export function HooksView({ rows, loadingRows = false, loadError = "", hasRows =
     {
       key: "event",
       header: "Event",
-      type: "enum",
+      type: ColumnDataType.Enum,
       sticky: true,
       groupBy: (item) => item.hook.event,
       sortable: true,
@@ -461,7 +486,7 @@ export function HooksView({ rows, loadingRows = false, loadError = "", hasRows =
     {
       key: "agent",
       header: "Agent",
-      type: "enum",
+      type: ColumnDataType.Enum,
       groupBy: (item) => friendlyAgent(item.hook.agent),
       sortable: true,
       sortValue: (item) => friendlyAgent(item.hook.agent),
@@ -471,7 +496,7 @@ export function HooksView({ rows, loadingRows = false, loadError = "", hasRows =
     {
       key: "enabled",
       header: "Enabled",
-      type: "enum",
+      type: ColumnDataType.Enum,
       groupBy: (item) => (item.hook.enabled ? "On" : "Off"),
       sortable: true,
       sortValue: (item) => (item.hook.enabled ? 1 : 0),
@@ -505,8 +530,18 @@ export function HooksView({ rows, loadingRows = false, loadError = "", hasRows =
       ),
     },
   ], [deletingKey, projects, requestDeleteHooks, requestReviewHook, reviewingKey, setHookEnabled, setSelectedHooksEnabled, updatingEnabledKeys]);
-  const activeItem = useMemo(() => hookItems.find((item) => item.key === activeKey), [activeKey, hookItems]);
+  const activeItem = useMemo(() => {
+    const exact = hookItems.find((item) => item.key === activeKey);
+    if (exact) return exact;
+    const previousIdentity = activeHookSelectionIdentityRef.current;
+    return previousIdentity
+      ? hookItems.find((item) => hookSelectionIdentity(item.hook) === previousIdentity)
+      : undefined;
+  }, [activeKey, hookItems]);
   const activeHook = activeItem?.hook ?? null;
+  activeHookSelectionIdentityRef.current = hookSelectionIdentity(activeHook);
+  const activeSourceIdentity = hookSourceIdentity(activeHook);
+  const sourceData = sourceState.key === activeSourceIdentity ? sourceState.data : null;
   const activeEnableControl = useMemo(() => activeItem ? (
     <HookEnabledSwitch
       checked={Boolean(activeHook?.enabled)}
@@ -519,9 +554,9 @@ export function HooksView({ rows, loadingRows = false, loadError = "", hasRows =
   const openHookSourceInEditor = useCallback(() => {
     const path = activeHook ? hookSourcePath(activeHook) : "";
     if (!path) return;
-    const line = sourceState.data?.source_line;
-    void safeInvoke(TauriCommand.OpenInEditor, { path, line });
-  }, [activeHook, sourceState.data?.source_line]);
+    const line = sourceData?.source_line;
+    void safeInvoke(TauriCommand.OpenInEditor, { path, line: line ?? undefined });
+  }, [activeHook, sourceData?.source_line]);
   const rowContextMenu = useCallback((item: HookItem, { selectedRows, selected: isSelected }: { selectedRows: HookItem[]; selected: boolean }) => {
     const actionRows = isSelected ? selectedRows : [item];
     const actions = hookSelectionActions(
@@ -551,26 +586,22 @@ export function HooksView({ rows, loadingRows = false, loadError = "", hasRows =
   useEffect(() => {
     setDeleteError("");
     if (!activeHook) {
-      setSourceState({ key: "", loading: false, showLoading: false, data: null, error: "" });
+      setSourceState({ key: "", loading: false, data: null, error: "" });
       return undefined;
     }
     const path = hookSourcePath(activeHook);
     if (!path) {
-      setSourceState({ key: activeKey, loading: false, showLoading: false, data: null, error: "Missing hook source path" });
+      setSourceState({ key: activeSourceIdentity, loading: false, data: null, error: "Missing hook source path" });
       return undefined;
     }
     let cancelled = false;
-    const loadingTimer = window.setTimeout(() => {
-      if (!cancelled) {
-        setSourceState((current) => (
-          current.key === activeKey && current.loading
-            ? { ...current, showLoading: true }
-            : current
-        ));
-      }
-    }, 180);
-    setSourceState({ key: activeKey, loading: true, showLoading: false, data: null, error: "" });
-    invokeCommand<HookSourceData>(TauriCommand.HookSourceRead, {
+    setSourceState((current) => ({
+      key: activeSourceIdentity,
+      loading: true,
+      data: current.key === activeSourceIdentity ? current.data : null,
+      error: "",
+    }));
+    readHookSource({
       agent: activeHook.agent,
       path,
       expectedTrustHash: hookTrustHash(activeHook),
@@ -585,16 +616,18 @@ export function HooksView({ rows, loadingRows = false, loadError = "", hasRows =
       enabled: activeHook.enabled,
     })
       .then((data) => {
-        window.clearTimeout(loadingTimer);
-        if (!cancelled) setSourceState({ key: activeKey, loading: false, showLoading: false, data, error: "" });
+        if (!cancelled) setSourceState({ key: activeSourceIdentity, loading: false, data, error: "" });
       })
       .catch((error) => {
-        window.clearTimeout(loadingTimer);
-        if (!cancelled) setSourceState({ key: activeKey, loading: false, showLoading: false, data: null, error: `${error}` });
+        if (!cancelled) setSourceState((current) => ({
+          key: activeSourceIdentity,
+          loading: false,
+          data: current.key === activeSourceIdentity ? current.data : null,
+          error: `${error}`,
+        }));
       });
     return () => {
       cancelled = true;
-      window.clearTimeout(loadingTimer);
     };
   }, [
     activeHook?.agent,
@@ -609,13 +642,14 @@ export function HooksView({ rows, loadingRows = false, loadError = "", hasRows =
     activeHook?.status_message,
     activeHook?.trust_hash,
     activeHook?.url,
-    activeKey,
+    activeSourceIdentity,
   ]);
 
   useEffect(() => {
     if (!activeKey && hookItems[0]) setActiveKey(hookItems[0].key);
     if (activeKey && !hookItems.some((item) => item.key === activeKey)) {
-      setActiveKey(hookItems[0]?.key ?? "");
+      const preserved = hookItems.find((item) => hookSelectionIdentity(item.hook) === activeHookSelectionIdentityRef.current);
+      setActiveKey(preserved?.key ?? hookItems[0]?.key ?? "");
     }
   }, [activeKey, hookItems]);
 
@@ -720,29 +754,42 @@ export function HooksView({ rows, loadingRows = false, loadError = "", hasRows =
                         <Crosshair size={13} />
                       </button>
                     ) : null}
-                    {sourceState.data?.content ? (
+                    {sourceData?.content ? (
                       <CopyButton
                         className="hookCopyButton hookSourceCopyButton"
-                        value={sourceState.data?.content ?? ""}
+                        value={sourceData.content}
                         copyLabel={copyValueLabel("config preview")}
                         copiedLabel={copiedValueLabel("config preview")}
                       />
                     ) : null}
                   </div>
                 </div>
-                {sourceState.loading && sourceState.showLoading ? (
+                {sourceState.loading && !sourceData?.content ? (
                   <LoadingState className="hookSourceLoading" label="Loading source" />
-                ) : sourceState.loading ? null : sourceState.error ? (
+                ) : sourceState.error && !sourceData?.content ? (
                   <Toast
                     tone="error"
                     message={sourceState.error}
                     onDismiss={() => setSourceState((current) => ({ ...current, error: "" }))}
                   />
-                ) : sourceState.data?.content ? (
+                ) : sourceData?.content ? (
                   <div className="hookSourcePreview">
                     <Suspense fallback={<LoadingState className="hookSourceLoading" label="Loading preview" />}>
-                      <HookSourcePreview content={sourceState.data.content} />
+                      <HookSourcePreview content={sourceData.content} />
                     </Suspense>
+                    {sourceState.loading ? (
+                      <div className="hookSourceStatusOverlay" aria-live="polite">
+                        <LoadingState label="Refreshing source" />
+                      </div>
+                    ) : sourceState.error ? (
+                      <div className="hookSourceStatusOverlay">
+                        <Toast
+                          tone="error"
+                          message={sourceState.error}
+                          onDismiss={() => setSourceState((current) => ({ ...current, error: "" }))}
+                        />
+                      </div>
+                    ) : null}
                   </div>
                 ) : (
                   <div className="hookSourcePlaceholder">No source preview available</div>
@@ -763,7 +810,7 @@ export function HooksView({ rows, loadingRows = false, loadError = "", hasRows =
           <div className="confirmDialogActions">
             <DialogActionButton variant="secondary" onClick={() => setPendingDeleteItems([])}>Cancel</DialogActionButton>
             <DialogStatefulButton
-              state={deletingKey ? "loading" : "idle"}
+              state={deletingKey ? AsyncStatus.Loading : AsyncStatus.Idle}
               loadingLabel={pendingDeleteLoadingLabel}
               variant="danger"
               aria-label={pendingDeleteItems.length === 1 ? "Delete hook" : "Delete hooks"}
@@ -790,7 +837,7 @@ export function HooksView({ rows, loadingRows = false, loadError = "", hasRows =
           <div className="confirmDialogActions">
             <DialogActionButton variant="secondary" onClick={() => setPendingReviewItem(null)}>Cancel</DialogActionButton>
             <DialogStatefulButton
-              state={reviewingKey ? "loading" : "idle"}
+              state={reviewingKey ? AsyncStatus.Loading : AsyncStatus.Idle}
               loadingLabel="Approving hook"
               variant="primary"
               aria-label="Approve hook"

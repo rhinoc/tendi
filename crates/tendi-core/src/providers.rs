@@ -182,6 +182,10 @@ pub(crate) trait AgentProvider: Sync {
         crate::skills::render_skill_frontmatter_with_provider_key(before, visibility, None)
     }
 
+    fn skill_frontmatter_visibility_key(&self) -> Option<&'static str> {
+        None
+    }
+
     fn plan_skill_visibility(
         &self,
         _skill_dir: &Path,
@@ -193,6 +197,17 @@ pub(crate) trait AgentProvider: Sync {
 
     fn is_managed_skill_file(&self, _relative_path: &str) -> bool {
         false
+    }
+
+    fn normalize_skill_file_for_merge(
+        &self,
+        _relative_path: &str,
+        _local: Option<&str>,
+        _base: Option<&str>,
+        _incoming: Option<&str>,
+        _visibility: SkillVisibility,
+    ) -> Option<(Option<String>, Option<String>, Option<String>)> {
+        None
     }
 
     fn skill_roots(&self, _ctx: &ProviderContext) -> Vec<SkillRoot> {

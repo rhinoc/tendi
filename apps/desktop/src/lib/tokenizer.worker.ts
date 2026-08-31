@@ -2,30 +2,27 @@ import {
   markdownTokenStats,
   transcriptTokenSegments,
 } from "./tokenizer.ts";
-import type {
-  TokenBreakdownSegment,
-  TranscriptSkillLink,
-  TranscriptTokenItem,
-} from "./tokenizer-types.ts";
+import { TokenizerKind, TokenizerWorkerResponseType } from "./tokenizer-types.ts";
+import type { TokenBreakdownSegment, TranscriptSkillLink, TranscriptTokenItem } from "./tokenizer-types.ts";
 
 type TokenizerWorkerRequest =
   | {
       id: number;
-      kind: "markdown";
+      kind: TokenizerKind.Markdown;
       activePath: string;
       content: string;
       selectionText: string;
     }
   | {
       id: number;
-      kind: "transcript";
+      kind: TokenizerKind.Transcript;
       items: TranscriptTokenItem[];
       skillLinks: TranscriptSkillLink[];
     };
 
 type TokenizerWorkerResponse =
-  | { id: number; kind: TokenizerWorkerRequest["kind"]; type: "result"; segments: TokenBreakdownSegment[] }
-  | { id: number; kind: TokenizerWorkerRequest["kind"]; type: "error"; message: string };
+  | { id: number; kind: TokenizerWorkerRequest["kind"]; type: TokenizerWorkerResponseType.Result; segments: TokenBreakdownSegment[] }
+  | { id: number; kind: TokenizerWorkerRequest["kind"]; type: TokenizerWorkerResponseType.Error; message: string };
 
 type TokenizerWorkerScope = {
   onmessage: ((event: MessageEvent<TokenizerWorkerRequest>) => void) | null;
@@ -37,20 +34,20 @@ const workerScope = self as unknown as TokenizerWorkerScope;
 workerScope.onmessage = (event) => {
   const request = event.data;
   try {
-    const segments = request.kind === "markdown"
+    const segments = request.kind === TokenizerKind.Markdown
       ? markdownTokenSegments(request.activePath, request.content, request.selectionText)
       : transcriptTokenSegments(request.items, request.skillLinks);
     workerScope.postMessage({
       id: request.id,
       kind: request.kind,
-      type: "result",
+      type: TokenizerWorkerResponseType.Result,
       segments,
     });
   } catch (error) {
     workerScope.postMessage({
       id: request.id,
       kind: request.kind,
-      type: "error",
+      type: TokenizerWorkerResponseType.Error,
       message: error instanceof Error ? error.message : String(error),
     });
   }

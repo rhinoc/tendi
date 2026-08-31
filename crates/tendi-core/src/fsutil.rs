@@ -25,6 +25,14 @@ pub fn sha256_file(path: &Path) -> Result<String> {
     Ok(sha256_bytes(&bytes))
 }
 
+pub(crate) fn preserve_newline_style(source: &str, rendered: String) -> String {
+    if source.contains("\r\n") {
+        rendered.replace("\r\n", "\n").replace('\n', "\r\n")
+    } else {
+        rendered
+    }
+}
+
 pub fn atomic_write(path: &Path, text: &str) -> Result<()> {
     atomic_write_bytes(path, text.as_bytes())
 }

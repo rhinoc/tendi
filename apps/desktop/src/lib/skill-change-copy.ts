@@ -26,6 +26,38 @@ export function skillChangeBusyLabel(command: SkillChangeCommand | null): string
   return "Applying…";
 }
 
+export function skillChangeCanConfirm(
+  command: SkillChangeCommand | null,
+  state: {
+    previewLoading: boolean;
+    previewError?: string;
+    canApply?: boolean;
+    unresolvedFiles: number;
+  },
+): boolean {
+  if (state.previewLoading || Boolean(state.previewError) || state.unresolvedFiles > 0) return false;
+  return command !== "skills_update_many" || state.canApply !== false;
+}
+
+export function skillChangeDisabledReason(
+  command: SkillChangeCommand | null,
+  state: {
+    previewLoading: boolean;
+    previewError?: string;
+    canApply?: boolean;
+    unresolvedFiles: number;
+  },
+): string {
+  if (state.previewLoading) return "Preparing the update preview.";
+  if (state.previewError) return "The update preview has an error.";
+  if (state.unresolvedFiles > 0) {
+    const files = state.unresolvedFiles === 1 ? "file" : "files";
+    return `${state.unresolvedFiles} ${files} still need resolution. Resolve them before applying.`;
+  }
+  if (command === "skills_update_many" && state.canApply === false) return "There are no applicable updates.";
+  return "";
+}
+
 export const skillChangeLoadingCopy = {
   description: "Preparing skill change preview.",
   previewLabel: "Preparing update preview",

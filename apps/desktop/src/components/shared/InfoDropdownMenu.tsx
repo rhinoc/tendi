@@ -1,6 +1,7 @@
 import type { ReactElement, ReactNode } from "react";
 import { DropdownMenu } from "radix-ui";
 
+import { MenuContent } from "./MenuContent.tsx";
 import { useRowMenuOpenChange } from "./row-menu-context.tsx";
 
 export type InfoDropdownMenuProps = {
@@ -26,13 +27,13 @@ export function InfoDropdownMenu({
     <DropdownMenu.Root onOpenChange={(open) => notifyRowMenuOpenChange?.(open)}>
       <DropdownMenu.Trigger asChild>{trigger}</DropdownMenu.Trigger>
       <DropdownMenu.Portal>
-        <DropdownMenu.Content className={className} align="end" sideOffset={sideOffset} data-no-drag onMouseDown={(event) => event.stopPropagation()}>
+        <MenuContent className={className} align="end" sideOffset={sideOffset} data-no-drag onMouseDown={(event) => event.stopPropagation()}>
           <div className="skillInfoHeader">
             <span>{label}</span>
             <strong>{title}</strong>
           </div>
           <div className="skillInfoSections">{children}</div>
-        </DropdownMenu.Content>
+        </MenuContent>
       </DropdownMenu.Portal>
     </DropdownMenu.Root>
   );

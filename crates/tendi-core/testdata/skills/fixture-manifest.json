@@ -1,0 +1,7 @@
+{
+  "fixtures": [
+    { "scope": "global", "provider": "shared", "path": "global/shared/demo/SKILL.md" },
+    { "scope": "project", "provider": "codex", "path": "project/codex/demo/SKILL.md" },
+    { "scope": "provider", "provider": "claude", "path": "provider/claude/demo/SKILL.md" }
+  ]
+}

@@ -31,7 +31,7 @@ export type {
 const ESTIMATED_CONTEXT_LIMIT = 200_000;
 
 export { cacheRateTone, tokenTone, tokenToneClass } from "./token-style.ts";
-export type { TokenTone } from "./token-style.ts";
+export { TokenTone } from "./token-style.ts";
 
 export type { TokenBreakdownSegment } from "./tokenizer-types.ts";
 

@@ -1,12 +1,13 @@
 import { Tooltip } from "./Tooltip.tsx";
 import { Toast } from "./Toast.tsx";
 import { Badge } from "./Badge.tsx";
-import { lazy, Suspense, useCallback, useEffect, useRef, useState, type ReactNode } from "react";
+import { lazy, Suspense, useCallback, useEffect, useRef, useState, useTransition, type ReactNode } from "react";
 import { Check, ChevronDown, ChevronUp, Code2, Eye, Save, Search, X } from "lucide-react";
 
 import { actionLabels, formatUserPath, isJsonPath, isMarkdownPath, isYamlPath } from "../../lib/index.ts";
+import { SaveStatus } from "../../lib/save-status.ts";
 import { loadCodeMirrorFileEditor } from "./code-mirror-loader.ts";
-import type { CodeMirrorLanguage } from "./CodeMirrorFileEditor.tsx";
+import { CodeMirrorLanguage, type CodeMirrorLanguage as CodeMirrorLanguageType } from "./CodeMirrorFileEditor.tsx";
 import { EditorStatePlaceholder } from "./EditorStatePlaceholder.tsx";
 import { LoadingIcon } from "./LoadingIcon.tsx";
 import { PlainTextFileEditor } from "./PlainTextFileEditor.tsx";
@@ -59,7 +60,7 @@ export type MarkdownFilePaneProps = {
   originalContent: string;
   onChange: (value: string) => void;
   onSave: () => void;
-  language?: CodeMirrorLanguage;
+  language?: CodeMirrorLanguageType;
   readOnly?: boolean;
   onNormalize?: (value: string) => void;
   showConflictMarkers?: boolean;
@@ -68,7 +69,7 @@ export type MarkdownFilePaneProps = {
   copyablePath?: boolean;
   showDirtyIndicator?: boolean;
   showTokenStatusBar?: boolean;
-  saveState?: "idle" | "saving" | "saved" | "error";
+  saveState?: SaveStatus;
   saveError?: string;
 };
 
@@ -88,13 +89,13 @@ export function MarkdownFilePane({
   copyablePath = false,
   showDirtyIndicator = true,
   showTokenStatusBar = true,
-  saveState = "idle",
+  saveState = SaveStatus.Idle,
   saveError = "",
 }: MarkdownFilePaneProps) {
   const displayPath = formatUserPath(activePath);
-  const markdown = language === "markdown" || (!language && isMarkdownPath(activePath));
+  const markdown = language === CodeMirrorLanguage.Markdown || (!language && isMarkdownPath(activePath));
   const activeLanguage = language ?? (
-    isYamlPath(activePath) ? "yaml" : isJsonPath(activePath) ? "json" : undefined
+    isYamlPath(activePath) ? CodeMirrorLanguage.Yaml : isJsonPath(activePath) ? CodeMirrorLanguage.Json : undefined
   );
   const useCodeMirror = Boolean(activeLanguage) || markdown || content.length >= LARGE_PLAIN_TEXT_CHARS;
   const paneRef = useRef<HTMLElement>(null);
@@ -107,6 +108,7 @@ export function MarkdownFilePane({
   const [showPreview, setShowPreview] = useState(false);
   const [showDiff, setShowDiff] = useState(false);
   const [selectionText, setSelectionText] = useState("");
+  const [, startPreviewTransition] = useTransition();
   const showEditorDiff = !readOnly && !showPreview && showDiff;
   const hasDiff = diffStats.added > 0 || diffStats.removed > 0;
   const activeSearchIndex = searchCount > 0 ? Math.min(searchIndex, searchCount - 1) : 0;
@@ -128,6 +130,10 @@ export function MarkdownFilePane({
     setSearchOpen(false);
     setSearchQuery("");
   }, []);
+
+  const togglePreview = useCallback(() => {
+    startPreviewTransition(() => setShowPreview((value) => !value));
+  }, [startPreviewTransition]);
 
   const moveSearch = useCallback((direction: number) => {
     if (searchCount === 0) return;
@@ -199,9 +205,9 @@ export function MarkdownFilePane({
             />
           ) : null}
           {!readOnly && showDirtyIndicator && dirty && <Badge tone="warning">modified</Badge>}
-          {!readOnly && saveState === "saving" && <Badge tone="info">saving</Badge>}
-          {!readOnly && saveState === "saved" && <Badge tone="success">saved</Badge>}
-          {!readOnly && saveState === "error" && <Toast tone="error" message={saveError || actionLabels.saveFailed} />}
+          {!readOnly && saveState === SaveStatus.Saving && <Badge tone="info">saving</Badge>}
+          {!readOnly && saveState === SaveStatus.Saved && <Badge tone="success">saved</Badge>}
+          {!readOnly && saveState === SaveStatus.Error && <Toast tone="error" message={saveError || actionLabels.saveFailed} />}
         </div>
         <div className="codeTabActions">
           <IconButton
@@ -215,7 +221,7 @@ export function MarkdownFilePane({
           {markdown && (
             <IconButton
               aria-label={showPreview ? "Switch to edit" : "Switch to preview"}
-              onClick={() => setShowPreview((value: boolean) => !value)}
+              onClick={togglePreview}
             >
               {showPreview ? <Code2 size={13} /> : <Eye size={13} />}
             </IconButton>
@@ -223,14 +229,14 @@ export function MarkdownFilePane({
           {!readOnly && (
             <>
               <IconButton
-                aria-label={saveState === "saving" ? "Saving file" : saveState === "saved" ? "File saved" : "Save file"}
-                aria-busy={saveState === "saving"}
+                aria-label={saveState === SaveStatus.Saving ? "Saving file" : saveState === SaveStatus.Saved ? "File saved" : "Save file"}
+                aria-busy={saveState === SaveStatus.Saving}
                 onClick={onSave}
-                disabled={!dirty || saveState === "saving" || saveDisabled}
+                disabled={!dirty || saveState === SaveStatus.Saving || saveDisabled}
               >
-                {saveState === "saving"
+                {saveState === SaveStatus.Saving
                   ? <LoadingIcon size={13} />
-                  : saveState === "saved"
+                  : saveState === SaveStatus.Saved
                     ? <Check size={13} strokeWidth={2.6} />
                     : <Save size={13} />}
               </IconButton>

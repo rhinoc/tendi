@@ -27,6 +27,19 @@ pub struct SkillFileContent {
     pub sha256: String,
 }
 
+/// Write/create responses omit echoed file bodies; callers already have the bytes.
+#[derive(Debug, Clone, Serialize)]
+pub struct SkillFileWriteResult {
+    pub path: PathBuf,
+    pub relative_path: String,
+    pub sha256: String,
+}
+
+pub fn skill_relative_path_affects_projection(relative_path: &str) -> bool {
+    let path = relative_path.replace('\\', "/");
+    path == "SKILL.md" || path.starts_with("agents/")
+}
+
 pub fn list_skill_files(
     cwd: &Path,
     skill_name: &str,
@@ -99,7 +112,7 @@ pub fn save_skill_file(
     expected_sha256: &str,
     content: &str,
     cached_skill_dir: Option<&Path>,
-) -> Result<SkillFileContent> {
+) -> Result<SkillFileWriteResult> {
     let skill_dir = resolve_skill_dir(cwd, skill_name, cached_skill_dir)?;
     let path = safe_join(&skill_dir, relative_path)?;
     let current_sha = sha256_file_streaming(&path)?;
@@ -108,10 +121,9 @@ pub fn save_skill_file(
     }
 
     atomic_write(&path, content)?;
-    Ok(SkillFileContent {
+    Ok(SkillFileWriteResult {
         path,
         relative_path: relative_path.to_string(),
-        content: content.to_string(),
         sha256: sha256_text(content),
     })
 }
@@ -136,7 +148,7 @@ pub fn create_skill_file(
     skill_name: &str,
     relative_path: &str,
     cached_skill_dir: Option<&Path>,
-) -> Result<SkillFileContent> {
+) -> Result<SkillFileWriteResult> {
     ensure_not_root_skill_manifest(relative_path)?;
     let skill_dir = resolve_skill_dir(cwd, skill_name, cached_skill_dir)?;
     let path = safe_child_path(&skill_dir, relative_path)?;
@@ -148,10 +160,9 @@ pub fn create_skill_file(
             .with_context(|| format!("failed to create {}", parent.display()))?;
     }
     atomic_write(&path, "")?;
-    Ok(SkillFileContent {
+    Ok(SkillFileWriteResult {
         path,
         relative_path: relative_path.to_string(),
-        content: String::new(),
         sha256: sha256_text(""),
     })
 }
@@ -348,7 +359,7 @@ mod tests {
         assert!(stale.is_err());
         assert_eq!(
             fs::read_to_string(skill_dir.join("SKILL.md")).expect("read saved skill"),
-            updated.content
+            "---\nname: demo\ndescription: Demo\n---\n\nnew\n",
         );
 
         let _ = fs::remove_dir_all(root);

@@ -7,11 +7,12 @@ use walkdir::WalkDir;
 use crate::transcript::{
     TranscriptItem, attach_tool_result, collect_message_content, compact_time,
     extract_content_text, extract_duration_ms, extract_thinking_text, extract_tool_command,
-    parse_timestamp_ms, push_item, push_tool_item, summarize_tool_call,
+    push_item, push_tool_item, summarize_tool_call,
 };
 use crate::{
     analytics::AnalyticsCapabilities,
     skills::SkillVisibility,
+    time::timestamp_ms,
 };
 
 use super::*;
@@ -265,9 +266,7 @@ pub(crate) fn scan_claude_component_file(
 }
 
 fn yaml_frontmatter(text: &str) -> Option<&str> {
-    let rest = text.strip_prefix("---\n")?;
-    let end = rest.find("\n---")?;
-    Some(&rest[..end])
+    crate::skills::split_frontmatter_raw(text).map(|(yaml, _, _)| yaml)
 }
 
 pub(super) fn apply_config_profile(command: &mut SessionCommand, profile: &str) -> Result<()> {
@@ -335,7 +334,7 @@ fn collect_claude_item(value: &Value, items: &mut Vec<TranscriptItem>) {
     let timestamp_ms = value
         .get("timestamp")
         .and_then(Value::as_str)
-        .and_then(parse_timestamp_ms);
+        .and_then(timestamp_ms);
 
     if kind == "user" || kind == "assistant" {
         let content = value
@@ -603,6 +602,10 @@ impl super::AgentProvider for ClaudeProvider {
             visibility,
             Some(CLAUDE_SKILL_FRONTMATTER_KEY),
         )
+    }
+
+    fn skill_frontmatter_visibility_key(&self) -> Option<&'static str> {
+        Some(CLAUDE_SKILL_FRONTMATTER_KEY)
     }
 
     fn app_bundle_path(&self) -> Option<&'static str> {

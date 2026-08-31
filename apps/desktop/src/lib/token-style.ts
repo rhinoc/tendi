@@ -1,12 +1,19 @@
-export type TokenTone = "tiny" | "small" | "medium" | "large" | "huge" | "massive";
+export enum TokenTone {
+  Tiny = "tiny",
+  Small = "small",
+  Medium = "medium",
+  Large = "large",
+  Huge = "huge",
+  Massive = "massive",
+}
 
 export function tokenTone(value: number): TokenTone {
-  if (value <= 200) return "tiny";
-  if (value <= 1000) return "small";
-  if (value <= 10000) return "medium";
-  if (value <= 100000) return "large";
-  if (value <= 200000) return "huge";
-  return "massive";
+  if (value <= 200) return TokenTone.Tiny;
+  if (value <= 1000) return TokenTone.Small;
+  if (value <= 10000) return TokenTone.Medium;
+  if (value <= 100000) return TokenTone.Large;
+  if (value <= 200000) return TokenTone.Huge;
+  return TokenTone.Massive;
 }
 
 export function tokenToneClass(value: number): string {
@@ -14,10 +21,10 @@ export function tokenToneClass(value: number): string {
 }
 
 export function cacheRateTone(rate: number): TokenTone {
-  if (rate >= 90) return "tiny";
-  if (rate >= 70) return "small";
-  if (rate >= 50) return "medium";
-  if (rate >= 30) return "large";
-  if (rate >= 10) return "huge";
-  return "massive";
+  if (rate >= 90) return TokenTone.Tiny;
+  if (rate >= 70) return TokenTone.Small;
+  if (rate >= 50) return TokenTone.Medium;
+  if (rate >= 30) return TokenTone.Large;
+  if (rate >= 10) return TokenTone.Huge;
+  return TokenTone.Massive;
 }

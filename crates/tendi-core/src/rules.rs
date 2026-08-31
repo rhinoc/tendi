@@ -23,7 +23,7 @@ pub struct RuleRecord {
     pub sha256: String,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct RuleScan {
     pub rules: Vec<RuleRecord>,
     pub warnings: Vec<String>,
@@ -33,6 +33,12 @@ pub struct RuleScan {
 pub struct RuleFileContent {
     pub path: PathBuf,
     pub content: String,
+    pub sha256: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct RuleFileWriteResult {
+    pub path: PathBuf,
     pub sha256: String,
 }
 
@@ -105,7 +111,7 @@ pub fn save_rule_file(
     path: &Path,
     expected_sha256: &str,
     content: &str,
-) -> Result<RuleFileContent> {
+) -> Result<RuleFileWriteResult> {
     save_rule_file_for_project_roots(cwd, path, expected_sha256, content, &[])
 }
 
@@ -115,7 +121,7 @@ pub fn save_rule_file_for_project_roots(
     expected_sha256: &str,
     content: &str,
     project_roots: &[PathBuf],
-) -> Result<RuleFileContent> {
+) -> Result<RuleFileWriteResult> {
     ensure_known_rule_for_project_roots(cwd, path, project_roots)?;
     save_rule_file_at_path(path, expected_sha256, content)
 }
@@ -124,19 +130,27 @@ pub fn save_rule_file_at_path(
     path: &Path,
     expected_sha256: &str,
     content: &str,
-) -> Result<RuleFileContent> {
-    let before =
-        fs::read_to_string(path).with_context(|| format!("failed to read {}", path.display()))?;
-    let current_sha = sha256_text(&before);
-    if current_sha != expected_sha256 {
-        bail!("refusing to overwrite changed file {}", path.display());
+) -> Result<RuleFileWriteResult> {
+    {
+        let before = fs::read_to_string(path)
+            .with_context(|| format!("failed to read {}", path.display()))?;
+        let current_sha = sha256_text(&before);
+        if current_sha != expected_sha256 {
+            bail!("refusing to overwrite changed file {}", path.display());
+        }
     }
     atomic_write(path, content)?;
-    Ok(RuleFileContent {
+    Ok(RuleFileWriteResult {
         path: path.to_path_buf(),
         sha256: sha256_text(content),
-        content: content.to_string(),
     })
+}
+
+pub fn delete_rule_files(paths: &[PathBuf]) -> Result<()> {
+    for path in paths {
+        fs::remove_file(path).with_context(|| format!("failed to delete {}", path.display()))?;
+    }
+    Ok(())
 }
 
 pub fn delete_rule_files_for_project_roots(
@@ -150,10 +164,7 @@ pub fn delete_rule_files_for_project_roots(
             bail!("refusing to delete unknown rule {}", path.display());
         }
     }
-    for path in paths {
-        fs::remove_file(path).with_context(|| format!("failed to delete {}", path.display()))?;
-    }
-    Ok(())
+    delete_rule_files(paths)
 }
 
 fn ensure_known_rule_for_project_roots(

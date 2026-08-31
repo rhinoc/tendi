@@ -1,4 +1,5 @@
-import { sessionKind, sessionTimeMs, type SessionRecord } from "./sessions.ts";
+import { sessionKind, SessionKind, type SessionRecord } from "./sessions.ts";
+import { compareTimestamps } from "./time.ts";
 
 export type TokenMix = {
   cachedInput: number;
@@ -22,9 +23,9 @@ function hasTokenUsage(session: SessionRecord): boolean {
 export function summarizeSessionUsage(sessions: SessionRecord[]): SessionUsageSummary {
   const withUsage = sessions.filter(hasTokenUsage);
   const sortedByUpdated = sessions
-    .filter((session) => sessionKind(session) === "main")
+    .filter((session) => sessionKind(session) === SessionKind.Main)
     .sort(
-      (a, b) => sessionTimeMs(b.updatedAt) - sessionTimeMs(a.updatedAt),
+      (a, b) => compareTimestamps(b.updatedAt, a.updatedAt),
     );
   const recentSessions = sortedByUpdated.slice(0, RECENT_SESSION_LIMIT);
 

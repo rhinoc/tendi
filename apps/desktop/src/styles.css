@@ -351,7 +351,7 @@ p {
   margin: 7px 0 0;
   color: var(--muted);
   line-height: var(--leading-body);
-  text-wrap: pretty;
+  text-wrap: wrap;
 }
 
 .skillMenuContent {
@@ -1233,6 +1233,7 @@ p {
   min-height: 0;
   flex: 1 1 auto;
   display: grid;
+  align-content: start;
   gap: 0;
   overflow: auto;
   border-top: 1px solid var(--line);
@@ -2723,52 +2724,6 @@ button.skillInfoSourceIcon:hover {
   cursor: col-resize;
 }
 
-.tiptapDiffPreview {
-  flex: 1;
-  min-height: 0;
-  overflow: auto;
-  padding: 16px 0 40px;
-  background: var(--editor-bg);
-  color: var(--text);
-  font-family: var(--font-mono);
-  font-size: var(--text-ui);
-  line-height: var(--leading-lg);
-}
-
-.tiptapDiffPreview .diffLine {
-  display: grid;
-  grid-template-columns: 28px minmax(0, 1fr);
-  min-height: 21px;
-  padding: 0 20px;
-  white-space: pre-wrap;
-  word-break: break-word;
-}
-
-.tiptapDiffPreview .diffLine.added {
-  color: var(--tone-ok);
-  background: var(--green-soft);
-}
-
-.tiptapDiffPreview .diffLine.removed {
-  color: var(--orange);
-  background: var(--orange-soft);
-}
-
-.tiptapDiffPreview .diffLine.added .diffCharChanged {
-  border-radius: 3px;
-  background: var(--green-soft-strong);
-}
-
-.tiptapDiffPreview .diffLine.removed .diffCharChanged {
-  border-radius: 3px;
-  background: var(--orange-soft-strong);
-}
-
-.tiptapDiffPreview .diffMarker {
-  color: var(--faint);
-  user-select: none;
-}
-
 .rowActions {
   display: inline-flex;
   align-items: center;
@@ -2938,6 +2893,22 @@ button.skillInfoSourceIcon:hover {
   font-size: var(--text-sm);
   text-transform: none;
   font-weight: 500;
+}
+
+.sessionSkillsContent {
+  position: relative;
+  display: grid;
+  gap: 9px;
+}
+
+.sessionSkillsStatusOverlay {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  display: grid;
+  place-items: center;
+  padding: 10px;
+  background: color-mix(in srgb, var(--inset-fill) 82%, transparent);
 }
 
 .sessionSkillChips {
@@ -3110,11 +3081,29 @@ button.skillInfoSourceIcon:hover {
   gap: 0;
 }
 
+.skillRelationshipContent {
+  position: relative;
+  min-width: 0;
+  min-height: 0;
+  flex: 1;
+  display: flex;
+}
+
 .skillRelationshipCanvas {
   min-height: 0;
   flex: 1;
   overflow: hidden;
   overscroll-behavior: contain;
+}
+
+.skillRelationshipStatusOverlay {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  display: grid;
+  place-items: center;
+  padding: 16px;
+  background: color-mix(in srgb, var(--content-bg) 82%, transparent);
 }
 
 .skillRelationshipSvg {

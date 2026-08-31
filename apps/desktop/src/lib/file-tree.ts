@@ -1,5 +1,4 @@
 import { basename } from "./strings.ts";
-import type { NormalizedSkill } from "./skills.ts";
 
 export type SkillFileEntry = {
   name: string;

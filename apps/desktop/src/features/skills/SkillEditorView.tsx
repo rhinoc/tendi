@@ -16,25 +16,38 @@ import {
   buildFileTreeRows,
   diffPreview,
   displayFileName,
-  isMarkdownPath,
   isReadOnlySkillSource,
   joinRelativePath,
-  normalizeSkillFileEntries,
   normalizeSessionSkillLink,
   parentPath,
   preferredSkillFileName,
-  invokeCommand,
   dialogCopy,
   safeInvoke,
   TauriCommand,
   uniqueChildPath,
   type SkillFileEntry,
   type NormalizedSkill,
+  type RawSkillRecord,
   type SessionSkillLinkRecord,
 } from "../../lib/index.ts";
+import { DiffLineKind } from "../../lib/diff.ts";
+import { SaveStatus } from "../../lib/save-status.ts";
+import {
+  createSkillFile,
+  createSkillFolder,
+  deleteSkillPath,
+  invokeSkillSessionLinks,
+  readSkillFile,
+  readSkillFiles,
+  renameSkillPath,
+  saveSkillFile,
+  type SkillFileMutationResponse,
+  type SkillFileReadResponse,
+} from "../../lib/runtime-gateway.ts";
 import type { SkillIndexStatus } from "../../store/desktop-store.ts";
 import { EditorHeader } from "../../components/shared/EditorHeader.tsx";
 import { DialogLoadingFallback } from "../../components/shared/DialogLoadingFallback.tsx";
+import { DialogActionButton } from "../../components/shared/DialogActionButton.tsx";
 import { DeleteConfirmationDialog } from "../../components/shared/DeleteConfirmationDialog.tsx";
 import { EditorStatePlaceholder } from "../../components/shared/EditorStatePlaceholder.tsx";
 import { FileTreeContextMenuItems } from "./FileTreeContextMenuItems.tsx";
@@ -58,7 +71,7 @@ export type SkillEditorViewProps = {
   skillIndexStatus?: SkillIndexStatus | null;
   onOpenSession?: (link: Record<string, unknown>) => void;
   onOpenSkill?: (name: string) => void;
-  onSaved?: (skills?: SkillDependencyRecord[]) => void;
+  onSaved?: (skills?: RawSkillRecord[]) => void;
 };
 
 type SkillDraft = {
@@ -88,17 +101,6 @@ function trimCleanDrafts(drafts: Record<string, SkillDraft>, activePath: string)
   return next;
 }
 
-type SkillFileReadResult = {
-  content?: string;
-  sha256?: string;
-};
-
-type SkillFileWriteResult = {
-  content?: string;
-  sha256?: string;
-  skills?: SkillDependencyRecord[];
-};
-
 export function SkillEditorView({ skill, skills, back, onReadSkillIndexStatus, skillIndexStatus, onOpenSession, onOpenSkill, onSaved }: SkillEditorViewProps) {
   const currentSkill = skill;
   const skillPath = currentSkill.paths.find((path) => path.path)?.path;
@@ -123,10 +125,11 @@ export function SkillEditorView({ skill, skills, back, onReadSkillIndexStatus, s
   const [fileError, setFileError] = useState("");
   const [loadingContent, setLoadingContent] = useState(false);
   const [contentError, setContentError] = useState("");
-  const [saveState, setSaveState] = useState<"idle" | "saving" | "saved" | "error">("idle");
+  const [saveState, setSaveState] = useState<SaveStatus>(SaveStatus.Idle);
   const [saveError, setSaveError] = useState("");
   const renameInputRef = useRef<HTMLInputElement>(null);
   const linkedSessionsRequestRef = useRef(0);
+  const linkedSessionsSkillRef = useRef(currentSkill.name);
   const fileTreePanelRef = usePanelRef();
   const activeDraft = drafts[activePath] ?? { content: "", originalContent: "", sha256: "" };
   const content = activeDraft.content;
@@ -152,12 +155,12 @@ export function SkillEditorView({ skill, skills, back, onReadSkillIndexStatus, s
       setCollapsedFolders(new Set());
       setShowDiscardDialog(false);
       setLoadingContent(true);
-      const fileListRead = invokeCommand(TauriCommand.SkillFiles, {
-        name: currentSkill.name,
+      const fileListRead = readSkillFiles({
+        skillId: currentSkill.id,
         skillPath,
       });
-      const initialContentRead = invokeCommand<SkillFileReadResult>(TauriCommand.SkillFileRead, {
-        name: currentSkill.name,
+      const initialContentRead = readSkillFile({
+        skillId: currentSkill.id,
         relativePath: "SKILL.md",
         skillPath,
       });
@@ -172,14 +175,14 @@ export function SkillEditorView({ skill, skills, back, onReadSkillIndexStatus, s
         return;
       }
       if (cancelled) return;
-      const next = normalizeSkillFileEntries(fileListResult.value);
+      const next = [...fileListResult.value];
       const firstFile = preferredSkillFileName(next);
       setFiles(next);
       setActivePath(firstFile ?? "");
       setSelectedPath(firstFile ?? "");
       if (firstFile &&
         initialContentResult.status === "fulfilled"
-        && typeof initialContentResult.value?.content === "string"
+        && typeof initialContentResult.value.content === "string"
         && typeof initialContentResult.value.sha256 === "string"
       ) {
         const fileContent = initialContentResult.value.content;
@@ -212,7 +215,7 @@ export function SkillEditorView({ skill, skills, back, onReadSkillIndexStatus, s
   }, [renamingPath]);
 
   useEffect(() => {
-    setSaveState("idle");
+    setSaveState(SaveStatus.Idle);
     setSaveError("");
     setContentError("");
   }, [activePath]);
@@ -223,12 +226,12 @@ export function SkillEditorView({ skill, skills, back, onReadSkillIndexStatus, s
     async function loadContent() {
       setLoadingContent(true);
       setContentError("");
-      const fileRead = invokeCommand<SkillFileReadResult>(TauriCommand.SkillFileRead, {
-        name: currentSkill.name,
+      const fileRead = readSkillFile({
+        skillId: currentSkill.id,
         relativePath: activePath,
         skillPath,
       });
-      let result: SkillFileReadResult;
+      let result: SkillFileReadResponse;
       try {
         result = await fileRead;
       } catch (error) {
@@ -261,31 +264,30 @@ export function SkillEditorView({ skill, skills, back, onReadSkillIndexStatus, s
   }, [activePath, currentSkill.name, drafts, loadingFiles, skillPath]);
 
   const save = useCallback(async () => {
-    if (readOnly || !dirty || !original.sha256 || saveState === "saving") return;
-    setSaveState("saving");
+    if (readOnly || !dirty || !original.sha256 || saveState === SaveStatus.Saving) return;
+    setSaveState(SaveStatus.Saving);
     setSaveError("");
     try {
-      const result = await invokeCommand<SkillFileWriteResult>(TauriCommand.SkillFileSave, {
-        name: currentSkill.name,
+      const result = await saveSkillFile({
+        skillId: currentSkill.id,
         relativePath: activePath,
         expectedSha256: original.sha256,
         content,
       });
-      if (typeof result.content !== "string" || typeof result.sha256 !== "string") {
-        throw new Error("Save returned incomplete file content");
+      if (typeof result.sha256 !== "string") {
+        throw new Error("Save returned incomplete file metadata");
       }
-      const savedContent = result.content;
       const savedSha256 = result.sha256;
       setDrafts((current) => ({
         ...current,
-        [activePath]: { content: savedContent, originalContent: savedContent, sha256: savedSha256 },
+        [activePath]: { content, originalContent: content, sha256: savedSha256 },
       }));
-      setSaveState("saved");
+      setSaveState(SaveStatus.Saved);
       onSaved?.(result.skills);
     } catch (error) {
       const message = error instanceof Error ? error.message : `${error}`;
       setSaveError(message);
-      setSaveState("error");
+      setSaveState(SaveStatus.Error);
     }
   }, [activePath, content, currentSkill.name, dirty, onSaved, original.sha256, readOnly, saveState]);
   const rows = useMemo(() => buildFileTreeRows(files, collapsedFolders), [collapsedFolders, files]);
@@ -300,26 +302,15 @@ export function SkillEditorView({ skill, skills, back, onReadSkillIndexStatus, s
   const diffStats = useMemo(
     () => diffLines.reduce(
       (counts: DiffStats, line: { kind?: string }) => ({
-        added: counts.added + (line.kind === "added" ? 1 : 0),
-        removed: counts.removed + (line.kind === "removed" ? 1 : 0),
+        added: counts.added + (line.kind === DiffLineKind.Added ? 1 : 0),
+        removed: counts.removed + (line.kind === DiffLineKind.Removed ? 1 : 0),
       }),
       { added: 0, removed: 0 },
     ),
     [diffLines],
   );
-  const reloadFiles = async (preferredPath = selectedPath) => {
-    let result: unknown;
-    try {
-      result = await invokeCommand(TauriCommand.SkillFiles, {
-        name: currentSkill.name,
-        skillPath,
-      });
-      setFileError("");
-    } catch (error) {
-      setFileError(error instanceof Error ? error.message : `${error}`);
-      return [];
-    }
-    const next = normalizeSkillFileEntries(result);
+  const applyFilesList = (fileList: readonly SkillFileEntry[], preferredPath = selectedPath) => {
+    const next = [...fileList];
     const firstFile = preferredSkillFileName(next);
     const preferred = next.find((file) => file.name === preferredPath && file.kind === "file");
     const nextSelected = preferred?.name ?? firstFile ?? "";
@@ -329,6 +320,27 @@ export function SkillEditorView({ skill, skills, back, onReadSkillIndexStatus, s
       setActivePath(firstFile ?? "");
     }
     return next;
+  };
+  const reloadFiles = async (preferredPath = selectedPath) => {
+    let result: SkillFileEntry[];
+    try {
+      result = await readSkillFiles({
+        skillId: currentSkill.id,
+        skillPath,
+      });
+      setFileError("");
+    } catch (error) {
+      setFileError(error instanceof Error ? error.message : `${error}`);
+      return [];
+    }
+    return applyFilesList(result, preferredPath);
+  };
+  const applyMutationFiles = (result: SkillFileMutationResponse | null, preferredPath: string) => {
+    if (result?.files) {
+      setFileError("");
+      return applyFilesList(result.files, preferredPath);
+    }
+    return null;
   };
   const toggleFolder = (name: string) => {
     setCollapsedFolders((current) => {
@@ -361,11 +373,18 @@ export function SkillEditorView({ skill, skills, back, onReadSkillIndexStatus, s
     const nextPath = joinRelativePath(parentPath(entry.name), nextName);
     setRenamingPath("");
     if (nextPath === entry.name) return;
-    await safeInvoke(TauriCommand.SkillPathRename, {
-      name: currentSkill.name,
-      fromRelativePath: entry.name,
-      toRelativePath: nextPath,
-    });
+    let result: SkillFileMutationResponse;
+    try {
+      result = await renameSkillPath({
+        skillId: currentSkill.id,
+        fromRelativePath: entry.name,
+        toRelativePath: nextPath,
+        skillPath,
+      });
+    } catch (error) {
+      setFileError(error instanceof Error ? error.message : `${error}`);
+      return;
+    }
     setDrafts((current) => {
       const next: Record<string, SkillDraft> = {};
       for (const [path, draft] of Object.entries(current)) {
@@ -390,39 +409,56 @@ export function SkillEditorView({ skill, skills, back, onReadSkillIndexStatus, s
     if (activePath === entry.name || activePath.startsWith(`${entry.name}/`)) {
       setActivePath(`${nextPath}${activePath.slice(entry.name.length)}`);
     }
-    await reloadFiles(nextPath);
+    if (!applyMutationFiles(result, nextPath)) await reloadFiles(nextPath);
+    if (result.skills) onSaved?.(result.skills);
   };
   const createEntry = async (kind: "file" | "folder", baseEntry: SkillFileEntry | null = selectedEntry) => {
     if (readOnly) return;
     const parent = baseEntry?.kind === "folder" ? baseEntry.name : parentPath(baseEntry?.name ?? activePath);
     const relativePath = uniqueChildPath(files, parent, kind);
+    let result: SkillFileMutationResponse | null = null;
+    try {
+      if (kind === "folder") {
+        result = await createSkillFolder({ skillId: currentSkill.id, relativePath, skillPath });
+      } else {
+        result = await createSkillFile({ skillId: currentSkill.id, relativePath, skillPath });
+      }
+    } catch (error) {
+      setFileError(error instanceof Error ? error.message : `${error}`);
+      return;
+    }
     if (kind === "folder") {
-      await safeInvoke(TauriCommand.SkillFolderCreate, { name: currentSkill.name, relativePath });
       setCollapsedFolders((current) => {
         const next = new Set(current);
         if (parent) next.delete(parent);
         return next;
       });
     } else {
-      const result = await safeInvoke(TauriCommand.SkillFileCreate, { name: currentSkill.name, relativePath }) as SkillFileReadResult | null;
-      if (typeof result?.content === "string" && typeof result.sha256 === "string") {
-        const createdContent = result.content;
-        const createdSha256 = result.sha256;
+      const createdSha256 = result?.sha256;
+      if (typeof createdSha256 === "string") {
         setActivePath(relativePath);
         setDrafts((current) => ({
           ...current,
-          [relativePath]: { content: createdContent, originalContent: createdContent, sha256: createdSha256 },
+          [relativePath]: { content: "", originalContent: "", sha256: createdSha256 },
         }));
       }
     }
     setCreatedPaths((current) => new Set(current).add(relativePath));
-    await reloadFiles(relativePath);
+    if (!applyMutationFiles(result, relativePath)) await reloadFiles(relativePath);
+    if (result?.skills) onSaved?.(result.skills);
     beginRename({ name: relativePath, kind: kind as SkillFileEntry["kind"] });
   };
   const performDeleteEntry = async (entry: SkillFileEntry) => {
     if (readOnly || !entry || entry.name === "SKILL.md") return;
-    await safeInvoke(TauriCommand.SkillPathDelete, { name: currentSkill.name, relativePath: entry.name });
-    const next = await reloadFiles(activePath === entry.name ? "" : activePath);
+    let result: SkillFileMutationResponse;
+    try {
+      result = await deleteSkillPath({ skillId: currentSkill.id, relativePath: entry.name, skillPath });
+    } catch (error) {
+      setFileError(error instanceof Error ? error.message : `${error}`);
+      return;
+    }
+    const next = applyMutationFiles(result, activePath === entry.name ? "" : activePath)
+      ?? await reloadFiles(activePath === entry.name ? "" : activePath);
     if (activePath === entry.name || entry.kind === "folder" && activePath.startsWith(`${entry.name}/`)) {
       const nextFile = preferredSkillFileName(next);
       setActivePath(nextFile ?? "");
@@ -437,6 +473,7 @@ export function SkillEditorView({ skill, skills, back, onReadSkillIndexStatus, s
       }
       return nextCreated;
     });
+    if (result.skills) onSaved?.(result.skills);
   };
   const requestDeleteEntry = (entry: SkillFileEntry | null = selectedEntry) => {
     if (readOnly || !entry || entry.name === "SKILL.md") return;
@@ -500,14 +537,23 @@ export function SkillEditorView({ skill, skills, back, onReadSkillIndexStatus, s
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [save]);
 
+  useLayoutEffect(() => {
+    if (linkedSessionsSkillRef.current === currentSkill.name) return;
+    linkedSessionsSkillRef.current = currentSkill.name;
+    linkedSessionsRequestRef.current += 1;
+    setLinkedSessions([]);
+    setLinkedSessionsError("");
+    setLoadingLinkedSessions(false);
+    setShowLinkedSessions(false);
+  }, [currentSkill.name]);
+
   const loadLinkedSessions = useCallback(async () => {
     const request = ++linkedSessionsRequestRef.current;
     setLoadingLinkedSessions(true);
     setLinkedSessionsError("");
     try {
       if (onReadSkillIndexStatus) await onReadSkillIndexStatus();
-      const links = await invokeCommand<unknown[]>(TauriCommand.SkillSessionLinks, { skillName: currentSkill.name });
-      if (!Array.isArray(links)) throw new Error("Invalid linked sessions response");
+      const links = await invokeSkillSessionLinks(currentSkill.name);
       if (request === linkedSessionsRequestRef.current) {
         setLinkedSessions(links.flatMap((link) => {
           const normalized = normalizeSessionSkillLink(link);
@@ -529,7 +575,6 @@ export function SkillEditorView({ skill, skills, back, onReadSkillIndexStatus, s
 
   /* The open handler primes the state so the drawer never renders a stale empty result. */
   const openLinkedSessions = () => {
-    setLinkedSessions([]);
     setLinkedSessionsError("");
     setLoadingLinkedSessions(true);
     setShowLinkedSessions(true);
@@ -567,6 +612,22 @@ export function SkillEditorView({ skill, skills, back, onReadSkillIndexStatus, s
             label="Loading discard dialog"
             descriptionId="discard-changes-loading-description"
             onOpenChange={setShowDiscardDialog}
+            description="This file has edits that have not been saved."
+            showLoading={false}
+            actions={(
+              <>
+                <DialogActionButton variant="secondary" onClick={() => setShowDiscardDialog(false)}>Cancel</DialogActionButton>
+                <DialogActionButton
+                  variant="danger"
+                  onClick={() => {
+                    setShowDiscardDialog(false);
+                    back();
+                  }}
+                >
+                  Discard changes
+                </DialogActionButton>
+              </>
+            )}
           />
         )}>
           <DiscardChangesDialog open onOpenChange={setShowDiscardDialog} onDiscard={back} />
@@ -738,7 +799,7 @@ export function SkillEditorView({ skill, skills, back, onReadSkillIndexStatus, s
               onSave={save}
               onChange={(nextContent: string) => {
                 if (readOnly) return;
-                setSaveState("idle");
+                setSaveState(SaveStatus.Idle);
                 setSaveError("");
                 setDrafts((current) => {
                   const draft = current[activePath] ?? { content: "", originalContent: "", sha256: "" };

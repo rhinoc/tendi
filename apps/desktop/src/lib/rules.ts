@@ -1,5 +1,6 @@
 import { basename } from "./strings.ts";
 import { friendlyAgent } from "./agents.ts";
+import { SortDirection } from "./sort.ts";
 
 export type RuleRecord = {
   agents: string[];
@@ -10,9 +11,14 @@ export type RuleRecord = {
   sha256: string;
 };
 
+export enum RuleScope {
+  Global = "global",
+  Project = "project",
+}
+
 export type RuleRow = { rule: RuleRecord };
 
-export type SortState = { key: string; direction: "asc" | "desc" };
+export type SortState = { key: string; direction: SortDirection };
 
 export function ruleAgents(rule: RuleRecord): string[] {
   return rule.agents;
@@ -65,7 +71,7 @@ export function ruleSortValue(item: RuleRow, key: string): string | number {
 export function compareRules(a: RuleRow, b: RuleRow, sort: SortState): number {
   const left = ruleSortValue(a, sort.key);
   const right = ruleSortValue(b, sort.key);
-  const direction = sort.direction === "asc" ? 1 : -1;
+  const direction = sort.direction === SortDirection.Asc ? 1 : -1;
   if (typeof left === "number" || typeof right === "number") {
     return ((Number(left) || 0) - (Number(right) || 0)) * direction;
   }

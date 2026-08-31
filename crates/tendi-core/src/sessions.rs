@@ -11,7 +11,12 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use walkdir::WalkDir;
 
-use crate::{git, skills::AgentKind};
+use crate::{
+    git,
+    runtime_contract::{SessionKey, SourceLocator},
+    skills::AgentKind,
+    time::compare_timestamps,
+};
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct SessionTokenUsage {
@@ -79,6 +84,27 @@ impl From<&SessionRecord> for SessionIdentity {
             agent: session.agent,
             path: session.path.clone(),
         }
+    }
+}
+
+impl SessionRecord {
+    pub fn session_key(&self) -> Option<SessionKey> {
+        SessionKey::new(self.agent, self.agent.label(), self.id.clone()).ok()
+    }
+
+    pub fn source_locator(&self) -> Option<SourceLocator> {
+        SourceLocator::new(
+            self.agent,
+            self.path.display().to_string(),
+            Some(self.id.clone()),
+        )
+        .ok()
+    }
+}
+
+impl SessionIdentity {
+    pub fn session_key(&self) -> Option<SessionKey> {
+        SessionKey::new(self.agent, self.agent.label(), self.id.clone()).ok()
     }
 }
 
@@ -271,8 +297,7 @@ fn scan_sessions_with_additional_roots_with_cache(
     normalize_session_projects(&mut sessions);
     enrich_session_repositories(&mut sessions);
     sessions.sort_by(|a, b| {
-        b.updated_at
-            .cmp(&a.updated_at)
+        compare_timestamps(b.updated_at.as_deref(), a.updated_at.as_deref())
             .then_with(|| a.id.cmp(&b.id))
     });
 
@@ -426,9 +451,7 @@ pub fn scan_session_paths(paths: &[PathBuf], cache: &SessionScanCache) -> Sessio
     normalize_session_projects(&mut sessions);
     enrich_session_repositories(&mut sessions);
     sessions.sort_by(|left, right| {
-        right
-            .updated_at
-            .cmp(&left.updated_at)
+        compare_timestamps(right.updated_at.as_deref(), left.updated_at.as_deref())
             .then_with(|| left.id.cmp(&right.id))
     });
     SessionScan { sessions, warnings }
@@ -812,6 +835,7 @@ fn scan_detected_jsonl_session(
 
 fn detect_jsonl_agent(path: &Path) -> Option<AgentKind> {
     let file = fs::File::open(path).ok()?;
+    let mut candidates = BTreeSet::new();
     for line in BufReader::new(file)
         .lines()
         .map_while(Result::ok)
@@ -821,14 +845,16 @@ fn detect_jsonl_agent(path: &Path) -> Option<AgentKind> {
         let Ok(value) = serde_json::from_str::<Value>(&line) else {
             continue;
         };
-        if let Some(provider) = crate::providers::all_providers()
-            .into_iter()
-            .find(|provider| provider.recognizes_transcript(&value))
-        {
-            return Some(provider.kind());
+        for provider in crate::providers::all_providers() {
+            if provider.recognizes_transcript(&value) {
+                candidates.insert(provider.kind());
+            }
+        }
+        if candidates.len() > 1 {
+            return None;
         }
     }
-    None
+    return candidates.into_iter().next();
 }
 
 fn merge_sessions(sessions: Vec<SessionRecord>) -> Vec<SessionRecord> {
@@ -852,15 +878,17 @@ fn merge_session(existing: &mut SessionRecord, incoming: &SessionRecord) {
         existing.project = incoming.project.clone();
     }
     if let Some(started_at) = &incoming.started_at {
-        if existing
-            .started_at
-            .as_deref()
-            .is_none_or(|current| started_at.as_str() < current)
+        if existing.started_at.as_deref().is_none_or(|current| {
+            compare_timestamps(Some(started_at), Some(current)).is_lt()
+        })
         {
             existing.started_at = Some(started_at.clone());
         }
     }
-    if existing.updated_at.is_none() || incoming.updated_at > existing.updated_at {
+    if existing.updated_at.is_none()
+        || compare_timestamps(incoming.updated_at.as_deref(), existing.updated_at.as_deref())
+            .is_gt()
+    {
         existing.updated_at = incoming.updated_at.clone();
     }
     if existing.message_count.is_none() {
@@ -1066,11 +1094,11 @@ fn scan_jsonl_meta_lines<I, S>(
         let prefix = metadata_hint_prefix(line);
         meta.has_content |= provider
             .and_then(|provider| provider.session_line_has_content(prefix))
-            .unwrap_or_else(|| generic_line_has_session_content(prefix));
+            .unwrap_or_else(|| fallback_line_has_session_content(prefix));
         if !provider
             .and_then(|provider| provider.session_line_requires_metadata_parse(prefix, meta))
             .unwrap_or_else(|| {
-                provider.is_none() || generic_line_requires_metadata_parse(prefix, meta)
+                provider.is_none() || fallback_line_requires_metadata_parse(prefix, meta)
             })
         {
             if let Some(timestamp) = json_string_field(prefix, "\"timestamp\"") {
@@ -1159,7 +1187,7 @@ fn metadata_hint_prefix(line: &str) -> &str {
     &line[..prefix_end]
 }
 
-fn generic_line_requires_metadata_parse(prefix: &str, meta: &SessionMetadata) -> bool {
+fn fallback_line_requires_metadata_parse(prefix: &str, meta: &SessionMetadata) -> bool {
     match json_string_field(prefix, "\"type\"") {
         Some("assistant" | "user") => true,
         _ => {
@@ -1170,7 +1198,7 @@ fn generic_line_requires_metadata_parse(prefix: &str, meta: &SessionMetadata) ->
     }
 }
 
-fn generic_line_has_session_content(prefix: &str) -> bool {
+fn fallback_line_has_session_content(prefix: &str) -> bool {
     matches!(
         json_string_field(prefix, "\"role\""),
         Some("user" | "assistant")
@@ -1278,19 +1306,15 @@ fn json_str<'a>(value: &'a Value, path: &[&str]) -> Option<&'a str> {
     current.as_str()
 }
 
-fn apply_time_bounds(meta: &mut SessionMetadata, timestamp: &str) {
-    if meta
-        .started_at
-        .as_deref()
-        .is_none_or(|current| timestamp < current)
-    {
+pub(crate) fn apply_time_bounds(meta: &mut SessionMetadata, timestamp: &str) {
+    if meta.started_at.as_deref().is_none_or(|current| {
+        compare_timestamps(Some(timestamp), Some(current)).is_lt()
+    }) {
         meta.started_at = Some(timestamp.to_string());
     }
-    if meta
-        .updated_at
-        .as_deref()
-        .is_none_or(|current| timestamp > current)
-    {
+    if meta.updated_at.as_deref().is_none_or(|current| {
+        compare_timestamps(Some(timestamp), Some(current)).is_gt()
+    }) {
         meta.updated_at = Some(timestamp.to_string());
     }
 }
@@ -1718,7 +1742,8 @@ mod tests {
     use super::{
         SESSION_PREVIEW_MAX_CHARS, SessionRecord, SessionRepositoryResolver, SessionScanCache,
         SessionScanCacheEntry, clean_preview_text, clean_title, extract_session_title, file_state,
-        infer_session_project, infer_session_resume_target, is_session_candidate_path,
+        compare_timestamps, infer_session_project, infer_session_resume_target,
+        is_session_candidate_path,
         merge_sessions, normalize_session_projects,
         repository_from_git_snapshot, scan_additional_session_roots, scan_jsonl_meta_for_agent,
         scan_jsonl_sessions, session_requires_rescan,
@@ -1738,6 +1763,24 @@ mod tests {
                 .unwrap()
                 .as_nanos()
         ))
+    }
+
+    #[test]
+    fn compares_session_timestamps_by_instant_across_offsets() {
+        assert_eq!(
+            compare_timestamps(
+                Some("2026-08-28T11:49:00+08:00"),
+                Some("2026-08-28T03:57:03.099Z"),
+            ),
+            std::cmp::Ordering::Less,
+        );
+        assert_eq!(
+            compare_timestamps(
+                Some("2026-08-28T03:57:03.099Z"),
+                Some("2026-08-28T11:49:00+08:00"),
+            ),
+            std::cmp::Ordering::Greater,
+        );
     }
 
     #[test]
@@ -2360,6 +2403,44 @@ mod tests {
         );
         assert!(bounded_preview.ends_with('…'));
         assert_eq!(clean_title("# AGENTS.md instructions\nhidden"), None);
+    }
+
+    #[test]
+    fn cursor_embedded_timestamps_define_session_bounds() {
+        let root = temp_dir("tendi-cursor-embedded-timestamp-session");
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("session.jsonl");
+        let first = json!({
+            "role": "user",
+            "message": {
+                "content": [{
+                    "type": "text",
+                    "text": "<timestamp>Thursday, Aug 27, 2026, 11:01 PM (UTC+8)</timestamp>\n<user_query>First</user_query>"
+                }]
+            }
+        });
+        let second = json!({
+            "role": "user",
+            "message": {
+                "content": [{
+                    "type": "text",
+                    "text": "<timestamp>Friday, Aug 28, 2026, 12:05 AM (UTC+8)</timestamp>\n<user_query>Second</user_query>"
+                }]
+            }
+        });
+        fs::write(&path, format!("{first}\n{second}\n")).unwrap();
+
+        let meta = scan_jsonl_meta_for_agent(&path, Some(AgentKind::Cursor));
+
+        assert_eq!(
+            meta.started_at.as_deref(),
+            Some("2026-08-27T23:01:00+08:00")
+        );
+        assert_eq!(
+            meta.updated_at.as_deref(),
+            Some("2026-08-28T00:05:00+08:00")
+        );
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

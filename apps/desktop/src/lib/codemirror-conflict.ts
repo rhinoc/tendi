@@ -2,11 +2,24 @@ import { StateField } from "@codemirror/state";
 import type { EditorState, Range } from "@codemirror/state";
 import { Decoration, EditorView, WidgetType } from "@codemirror/view";
 
-import { diffPreview, type DiffSegment } from "./diff.ts";
+import { DiffLineKind, diffPreview, type DiffSegment } from "./diff.ts";
 
-type ConflictMarkerKind = "start" | "base" | "separator" | "end";
-type ConflictSection = "local" | "base" | "incoming";
-type ConflictResolutionSide = "local" | "incoming" | "both";
+enum ConflictMarkerKind {
+  Start = "start",
+  Base = "base",
+  Separator = "separator",
+  End = "end",
+}
+enum ConflictSection {
+  Local = "local",
+  Base = "base",
+  Incoming = "incoming",
+}
+enum ConflictResolutionSide {
+  Local = "local",
+  Incoming = "incoming",
+  Both = "both",
+}
 
 type ConflictBlock = {
   startLine: number;
@@ -19,32 +32,32 @@ type ConflictBlock = {
 
 function conflictMarkerKind(line: string): ConflictMarkerKind | null {
   const normalized = line.endsWith("\r") ? line.slice(0, -1) : line;
-  if (normalized.startsWith("<<<<<<< ")) return "start";
-  if (normalized.startsWith("||||||| ")) return "base";
-  if (normalized === "=======") return "separator";
-  if (normalized.startsWith(">>>>>>> ")) return "end";
+  if (normalized.startsWith("<<<<<<< ")) return ConflictMarkerKind.Start;
+  if (normalized.startsWith("||||||| ")) return ConflictMarkerKind.Base;
+  if (normalized === "=======") return ConflictMarkerKind.Separator;
+  if (normalized.startsWith(">>>>>>> ")) return ConflictMarkerKind.End;
   return null;
 }
 
 function sectionLineClass(section: ConflictSection) {
-  return section === "local"
+  return section === ConflictSection.Local
     ? "cmConflictLocalLine"
-    : section === "base"
+    : section === ConflictSection.Base
       ? "cmConflictBaseLine"
       : "cmConflictIncomingLine";
 }
 
 function markerLineClass(kind: ConflictMarkerKind) {
-  if (kind === "start") return "cmConflictLocalMarkerLine";
-  if (kind === "base") return "cmConflictBaseMarkerLine";
-  if (kind === "end") return "cmConflictIncomingMarkerLine";
+  if (kind === ConflictMarkerKind.Start) return "cmConflictLocalMarkerLine";
+  if (kind === ConflictMarkerKind.Base) return "cmConflictBaseMarkerLine";
+  if (kind === ConflictMarkerKind.End) return "cmConflictIncomingMarkerLine";
   return "cmConflictSeparatorLine";
 }
 
 function markerTextClass(kind: ConflictMarkerKind) {
-  if (kind === "start") return "cmConflictLocalMarkerText";
-  if (kind === "base") return "cmConflictBaseMarkerText";
-  if (kind === "end") return "cmConflictIncomingMarkerText";
+  if (kind === ConflictMarkerKind.Start) return "cmConflictLocalMarkerText";
+  if (kind === ConflictMarkerKind.Base) return "cmConflictBaseMarkerText";
+  if (kind === ConflictMarkerKind.End) return "cmConflictIncomingMarkerText";
   return "cmConflictSeparatorText";
 }
 
@@ -52,21 +65,21 @@ function conflictBlocks(content: string): ConflictBlock[] {
   const lines = content.split("\n");
   const blocks: ConflictBlock[] = [];
   for (let startLine = 0; startLine < lines.length; startLine += 1) {
-    if (conflictMarkerKind(lines[startLine]) !== "start") continue;
+    if (conflictMarkerKind(lines[startLine]) !== ConflictMarkerKind.Start) continue;
     let baseLine = -1;
     let separatorLine = -1;
     let endLine = -1;
     for (let line = startLine + 1; line < lines.length; line += 1) {
       const kind = conflictMarkerKind(lines[line]);
-      if (kind === "base" && baseLine === -1) baseLine = line;
-      if (kind === "separator") {
+      if (kind === ConflictMarkerKind.Base && baseLine === -1) baseLine = line;
+      if (kind === ConflictMarkerKind.Separator) {
         separatorLine = line;
         break;
       }
     }
     if (separatorLine === -1) continue;
     for (let line = separatorLine + 1; line < lines.length; line += 1) {
-      if (conflictMarkerKind(lines[line]) === "end") {
+      if (conflictMarkerKind(lines[line]) === ConflictMarkerKind.End) {
         endLine = line;
         break;
       }
@@ -89,9 +102,9 @@ function resolveConflictBlock(content: string, index: number, side: ConflictReso
   const lines = content.split("\n");
   const block = conflictBlocks(content)[index];
   if (!block) return content;
-  const replacement = side === "local"
+  const replacement = side === ConflictResolutionSide.Local
     ? lines.slice(block.localStart, block.localEnd)
-    : side === "incoming"
+    : side === ConflictResolutionSide.Incoming
       ? lines.slice(block.incomingStart, block.incomingEnd)
       : [
         ...lines.slice(block.localStart, block.localEnd),
@@ -108,12 +121,12 @@ function conflictCharDiff(before: string, after: string) {
   let beforeLine = 0;
   let afterLine = 0;
   for (const line of diffLines) {
-    if (line.kind === "removed") {
+    if (line.kind === DiffLineKind.Removed) {
       beforeChanged.set(beforeLine, line.segments ?? [{ text: line.text, changed: true }]);
       beforeLine += 1;
       continue;
     }
-    if (line.kind === "added") {
+    if (line.kind === DiffLineKind.Added) {
       afterChanged.set(afterLine, line.segments ?? [{ text: line.text, changed: true }]);
       afterLine += 1;
       continue;
@@ -147,9 +160,9 @@ function addChangedCharDecorations(
 }
 
 const conflictActions: { side: ConflictResolutionSide; label: string; className: string }[] = [
-  { side: "local", label: "Accept Local", className: "cmConflictActionLocal" },
-  { side: "incoming", label: "Accept Remote", className: "cmConflictActionRemote" },
-  { side: "both", label: "Accept Both", className: "cmConflictActionBoth" },
+  { side: ConflictResolutionSide.Local, label: "Accept Local", className: "cmConflictActionLocal" },
+  { side: ConflictResolutionSide.Incoming, label: "Accept Remote", className: "cmConflictActionRemote" },
+  { side: ConflictResolutionSide.Both, label: "Accept Both", className: "cmConflictActionBoth" },
 ];
 
 class ConflictActionWidget extends WidgetType {
@@ -217,7 +230,7 @@ function buildConflictDecorations(
     const marker = conflictMarkerKind(line.text);
     if (marker) {
       const conflictIndex = blockByStartLine.get(lineNumber);
-      if (marker === "start" && conflictIndex !== undefined && onResolve) {
+      if (marker === ConflictMarkerKind.Start && conflictIndex !== undefined && onResolve) {
         decorations.push(Decoration.widget({
           widget: new ConflictActionWidget(state.doc.toString(), conflictIndex, onResolve),
           side: -1,
@@ -227,18 +240,18 @@ function buildConflictDecorations(
       if (line.from < line.to) {
         decorations.push(Decoration.mark({ class: `cmConflictMarkerText ${markerTextClass(marker)}` }).range(line.from, line.to));
       }
-      if (marker === "start") section = "local";
-      else if (marker === "base") section = "base";
-      else if (marker === "separator") section = "incoming";
+      if (marker === ConflictMarkerKind.Start) section = ConflictSection.Local;
+      else if (marker === ConflictMarkerKind.Base) section = ConflictSection.Base;
+      else if (marker === ConflictMarkerKind.Separator) section = ConflictSection.Incoming;
       else section = null;
       continue;
     }
     if (section) {
       decorations.push(Decoration.line({ class: sectionLineClass(section) }).range(line.from));
       if (line.from < line.to) {
-        const textClass = section === "local"
+        const textClass = section === ConflictSection.Local
           ? "cmConflictLocalText"
-          : section === "base"
+          : section === ConflictSection.Base
             ? "cmConflictBaseText"
             : "cmConflictIncomingText";
         decorations.push(Decoration.mark({ class: textClass }).range(line.from, line.to));

@@ -8,6 +8,9 @@ import { formatTokenCount } from "../lib/token-format.ts";
 import {
   TOKENIZER_PACKAGE,
   TOKENIZER_URL,
+  TokenizerKind,
+  TokenizerWorkerResponseType,
+  TokenUsageSource,
   type TokenBreakdownDetail,
   type TokenBreakdownSegment,
 } from "../lib/tokenizer-types.ts";
@@ -21,7 +24,7 @@ type TokenStatusBarProps = {
   selectionText?: string;
   segments?: TokenSegmentProps[];
   metrics?: TokenMetricProps[];
-  usageSource?: "estimated" | "reported";
+  usageSource?: TokenUsageSource;
   leadingSlot?: ReactNode;
 };
 
@@ -39,11 +42,11 @@ export type TokenSegmentProps = {
   notes?: string[];
 };
 
-function tokenValue(value: number, usageSource: "estimated" | "reported") {
-  return `${usageSource === "estimated" ? "~" : ""}${formatTokenCount(value)}`;
+function tokenValue(value: number, usageSource: TokenUsageSource) {
+  return `${usageSource === TokenUsageSource.Estimated ? "~" : ""}${formatTokenCount(value)}`;
 }
 
-export function TokenSegment({ label, value, usageSource = "estimated" }: TokenSegmentProps & { usageSource?: "estimated" | "reported" }) {
+export function TokenSegment({ label, value, usageSource = TokenUsageSource.Estimated }: TokenSegmentProps & { usageSource?: TokenUsageSource }) {
   return (
     <span className="tokenSegment">
       <span className="tokenSegmentLabel">{label}</span>{" "}
@@ -76,14 +79,14 @@ function openTokenizerUrl(event: React.MouseEvent<HTMLAnchorElement>) {
   void safeInvoke(TauriCommand.OpenUrl, { url: TOKENIZER_URL });
 }
 
-export function TokenBreakdownPanel({ segments, usageSource = "estimated" }: { segments: TokenSegmentProps[]; usageSource?: "estimated" | "reported" }) {
+export function TokenBreakdownPanel({ segments, usageSource = TokenUsageSource.Estimated }: { segments: TokenSegmentProps[]; usageSource?: TokenUsageSource }) {
   const rows = tokenBreakdownRows(segments);
   const notes = tokenBreakdownNotes(segments);
   const showTable = rows.length > 1;
   return (
     <div className="tokenBreakdownPanel" role="tooltip" data-selectable-text onMouseDown={(event) => event.stopPropagation()}>
       <div className="tokenBreakdownHeader">
-        {usageSource === "reported" ? (
+        {usageSource === TokenUsageSource.Reported ? (
           <>
             <span>Actual token usage</span>
             <span>Read from usage records reported in the session JSONL. No tokenizer estimate.</span>
@@ -152,7 +155,7 @@ export function TokenEstimateInfo() {
   );
 }
 
-export function TokenSegments({ segments, usageSource = "estimated" }: { segments: TokenSegmentProps[]; usageSource?: "estimated" | "reported" }) {
+export function TokenSegments({ segments, usageSource = TokenUsageSource.Estimated }: { segments: TokenSegmentProps[]; usageSource?: TokenUsageSource }) {
   return (
     <span className="tokenSegments">
       {segments.map((segment, index) => (
@@ -177,7 +180,7 @@ export function TokenMetrics({ metrics }: { metrics: TokenMetricProps[] }) {
   ));
 }
 
-export function TokenStatusBar({ activePath = "", content = "", selectionText = "", segments: providedSegments, metrics = [], usageSource = "estimated", leadingSlot }: TokenStatusBarProps) {
+export function TokenStatusBar({ activePath = "", content = "", selectionText = "", segments: providedSegments, metrics = [], usageSource = TokenUsageSource.Estimated, leadingSlot }: TokenStatusBarProps) {
   const workerRef = useRef<TokenizerWorkerClient | null>(null);
   const latestRequestRef = useRef(0);
   const [estimatedSegments, setEstimatedSegments] = useState<TokenBreakdownSegment[] | null>(null);
@@ -187,11 +190,11 @@ export function TokenStatusBar({ activePath = "", content = "", selectionText = 
     const worker = createTokenizerWorker(
       (response) => {
         if (response.id !== latestRequestRef.current) return;
-        if (response.type === "result") setEstimatedSegments(response.segments);
-        else setEstimatedSegments([]);
+        if (response.type === TokenizerWorkerResponseType.Result) setEstimatedSegments(response.segments);
+        else setEstimatedSegments((current) => current ?? []);
       },
       () => {
-        if (latestRequestRef.current > 0) setEstimatedSegments([]);
+        if (latestRequestRef.current > 0) setEstimatedSegments((current) => current ?? []);
       },
     );
     workerRef.current = worker;
@@ -203,9 +206,8 @@ export function TokenStatusBar({ activePath = "", content = "", selectionText = 
 
   useEffect(() => {
     if (providedSegments || !workerRef.current) return;
-    setEstimatedSegments(null);
     latestRequestRef.current = workerRef.current.request({
-      kind: "markdown",
+      kind: TokenizerKind.Markdown,
       activePath,
       content,
       selectionText,

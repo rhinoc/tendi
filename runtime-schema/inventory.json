@@ -1,0 +1,1156 @@
+{
+  "generatedFrom": "runtime-schema/runtime.openrpc.json",
+  "openrpc": "1.3.2",
+  "protocolVersion": 2,
+  "schemaVersion": 1,
+  "methods": [
+    {
+      "name": "scan",
+      "owner": "daemon",
+      "wire": "jsonrpc",
+      "clients": [
+        "cli"
+      ],
+      "execution": "write"
+    },
+    {
+      "name": "agents_list",
+      "owner": "daemon",
+      "wire": "jsonrpc",
+      "clients": [
+        "desktop",
+        "cli"
+      ],
+      "execution": "read"
+    },
+    {
+      "name": "bundled_skill_status",
+      "owner": "daemon",
+      "wire": "jsonrpc",
+      "clients": [
+        "desktop"
+      ],
+      "execution": "read"
+    },
+    {
+      "name": "bundled_skill_install",
+      "owner": "daemon",
+      "wire": "jsonrpc",
+      "clients": [
+        "desktop"
+      ],
+      "execution": "write"
+    },
+    {
+      "name": "bundled_skill_remove",
+      "owner": "daemon",
+      "wire": "jsonrpc",
+      "clients": [
+        "desktop"
+      ],
+      "execution": "write"
+    },
+    {
+      "name": "bundled_skill_prompt_dismiss",
+      "owner": "daemon",
+      "wire": "jsonrpc",
+      "clients": [
+        "desktop"
+      ],
+      "execution": "write"
+    },
+    {
+      "name": "skills_list",
+      "owner": "daemon",
+      "wire": "jsonrpc",
+      "clients": [
+        "desktop",
+        "cli"
+      ],
+      "execution": "read"
+    },
+    {
+      "name": "skills_refresh",
+      "owner": "daemon",
+      "wire": "jsonrpc",
+      "clients": [
+        "desktop"
+      ],
+      "execution": "write"
+    },
+    {
+      "name": "sessions_snapshot",
+      "owner": "daemon",
+      "wire": "jsonrpc",
+      "clients": [
+        "desktop",
+        "cli"
+      ],
+      "execution": "read"
+    },
+    {
+      "name": "sessions_scan_start",
+      "owner": "daemon",
+      "wire": "jsonrpc",
+      "clients": [
+        "desktop"
+      ],
+      "execution": "write"
+    },
+    {
+      "name": "sessions_search",
+      "owner": "daemon",
+      "wire": "jsonrpc",
+      "clients": [
+        "desktop",
+        "cli"
+      ],
+      "execution": "read"
+    },
+    {
+      "name": "analytics_overview",
+      "owner": "daemon",
+      "wire": "jsonrpc",
+      "clients": [
+        "desktop"
+      ],
+      "execution": "read"
+    },
+    {
+      "name": "analytics_revision",
+      "owner": "daemon",
+      "wire": "jsonrpc",
+      "clients": [
+        "desktop"
+      ],
+      "execution": "read"
+    },
+    {
+      "name": "session_skill_index_status",
+      "owner": "daemon",
+      "wire": "jsonrpc",
+      "clients": [
+        "desktop"
+      ],
+      "execution": "read"
+    },
+    {
+      "name": "session_skill_index_run",
+      "owner": "daemon",
+      "wire": "jsonrpc",
+      "clients": [
+        "desktop"
+      ],
+      "execution": "write"
+    },
+    {
+      "name": "session_skill_links",
+      "owner": "daemon",
+      "wire": "jsonrpc",
+      "clients": [
+        "desktop"
+      ],
+      "execution": "read"
+    },
+    {
+      "name": "skill_session_links",
+      "owner": "daemon",
+      "wire": "jsonrpc",
+      "clients": [
+        "desktop"
+      ],
+      "execution": "read"
+    },
+    {
+      "name": "settings_get",
+      "owner": "daemon",
+      "wire": "jsonrpc",
+      "clients": [
+        "desktop"
+      ],
+      "execution": "read"
+    },
+    {
+      "name": "settings_save",
+      "owner": "daemon",
+      "wire": "jsonrpc",
+      "clients": [
+        "desktop"
+      ],
+      "execution": "write"
+    },
+    {
+      "name": "session_projects_list",
+      "owner": "daemon",
+      "wire": "jsonrpc",
+      "clients": [
+        "desktop"
+      ],
+      "execution": "read"
+    },
+    {
+      "name": "project_scan_scopes_list",
+      "owner": "daemon",
+      "wire": "jsonrpc",
+      "clients": [
+        "desktop"
+      ],
+      "execution": "read"
+    },
+    {
+      "name": "project_scan_scopes_save",
+      "owner": "daemon",
+      "wire": "jsonrpc",
+      "clients": [
+        "desktop"
+      ],
+      "execution": "write"
+    },
+    {
+      "name": "projects_list",
+      "owner": "daemon",
+      "wire": "jsonrpc",
+      "clients": [
+        "desktop"
+      ],
+      "execution": "read"
+    },
+    {
+      "name": "projects_scan",
+      "owner": "daemon",
+      "wire": "jsonrpc",
+      "clients": [
+        "desktop"
+      ],
+      "execution": "write"
+    },
+    {
+      "name": "terminal_apps_list",
+      "owner": "daemon",
+      "wire": "jsonrpc",
+      "clients": [
+        "desktop"
+      ],
+      "execution": "read"
+    },
+    {
+      "name": "agent_configs_list",
+      "owner": "daemon",
+      "wire": "jsonrpc",
+      "clients": [
+        "desktop"
+      ],
+      "execution": "read"
+    },
+    {
+      "name": "agent_config_watch",
+      "owner": "daemon",
+      "wire": "jsonrpc",
+      "clients": [
+        "desktop"
+      ],
+      "execution": "write"
+    },
+    {
+      "name": "agent_config_read",
+      "owner": "daemon",
+      "wire": "jsonrpc",
+      "clients": [
+        "desktop"
+      ],
+      "execution": "read"
+    },
+    {
+      "name": "agent_config_save",
+      "owner": "daemon",
+      "wire": "jsonrpc",
+      "clients": [
+        "desktop"
+      ],
+      "execution": "write"
+    },
+    {
+      "name": "agent_configs_delete_many",
+      "owner": "daemon",
+      "wire": "jsonrpc",
+      "clients": [
+        "desktop"
+      ],
+      "execution": "write"
+    },
+    {
+      "name": "config_profile_create",
+      "owner": "daemon",
+      "wire": "jsonrpc",
+      "clients": [
+        "desktop"
+      ],
+      "execution": "write"
+    },
+    {
+      "name": "config_profile_set",
+      "owner": "daemon",
+      "wire": "jsonrpc",
+      "clients": [
+        "desktop"
+      ],
+      "execution": "write"
+    },
+    {
+      "name": "rules_list",
+      "owner": "daemon",
+      "wire": "jsonrpc",
+      "clients": [
+        "desktop"
+      ],
+      "execution": "read"
+    },
+    {
+      "name": "rule_file_read",
+      "owner": "daemon",
+      "wire": "jsonrpc",
+      "clients": [
+        "desktop"
+      ],
+      "execution": "read"
+    },
+    {
+      "name": "rule_file_save",
+      "owner": "daemon",
+      "wire": "jsonrpc",
+      "clients": [
+        "desktop"
+      ],
+      "execution": "write"
+    },
+    {
+      "name": "rule_file_delete_many",
+      "owner": "daemon",
+      "wire": "jsonrpc",
+      "clients": [
+        "desktop"
+      ],
+      "execution": "write"
+    },
+    {
+      "name": "hooks_list",
+      "owner": "daemon",
+      "wire": "jsonrpc",
+      "clients": [
+        "desktop"
+      ],
+      "execution": "read"
+    },
+    {
+      "name": "hook_delete",
+      "owner": "daemon",
+      "wire": "jsonrpc",
+      "clients": [
+        "desktop"
+      ],
+      "execution": "write"
+    },
+    {
+      "name": "hook_delete_many",
+      "owner": "daemon",
+      "wire": "jsonrpc",
+      "clients": [
+        "desktop"
+      ],
+      "execution": "write"
+    },
+    {
+      "name": "hook_set_enabled",
+      "owner": "daemon",
+      "wire": "jsonrpc",
+      "clients": [
+        "desktop"
+      ],
+      "execution": "write"
+    },
+    {
+      "name": "hook_set_enabled_many",
+      "owner": "daemon",
+      "wire": "jsonrpc",
+      "clients": [
+        "desktop"
+      ],
+      "execution": "write"
+    },
+    {
+      "name": "hook_review",
+      "owner": "daemon",
+      "wire": "jsonrpc",
+      "clients": [
+        "desktop"
+      ],
+      "execution": "write"
+    },
+    {
+      "name": "hook_source_read",
+      "owner": "daemon",
+      "wire": "jsonrpc",
+      "clients": [
+        "desktop"
+      ],
+      "execution": "read"
+    },
+    {
+      "name": "mcp_list",
+      "owner": "daemon",
+      "wire": "jsonrpc",
+      "clients": [
+        "desktop",
+        "cli"
+      ],
+      "execution": "read"
+    },
+    {
+      "name": "mcp_set_enabled",
+      "owner": "daemon",
+      "wire": "jsonrpc",
+      "clients": [
+        "desktop"
+      ],
+      "execution": "write"
+    },
+    {
+      "name": "mcp_set_enabled_many",
+      "owner": "daemon",
+      "wire": "jsonrpc",
+      "clients": [
+        "desktop"
+      ],
+      "execution": "write"
+    },
+    {
+      "name": "prompts_list",
+      "owner": "daemon",
+      "wire": "jsonrpc",
+      "clients": [
+        "desktop"
+      ],
+      "execution": "read"
+    },
+    {
+      "name": "prompt_save",
+      "owner": "daemon",
+      "wire": "jsonrpc",
+      "clients": [
+        "desktop"
+      ],
+      "execution": "write"
+    },
+    {
+      "name": "prompts_delete_many",
+      "owner": "daemon",
+      "wire": "jsonrpc",
+      "clients": [
+        "desktop"
+      ],
+      "execution": "write"
+    },
+    {
+      "name": "session_transcript",
+      "owner": "daemon",
+      "wire": "jsonrpc",
+      "clients": [
+        "desktop"
+      ],
+      "execution": "read"
+    },
+    {
+      "name": "session_transcript_locator",
+      "owner": "daemon",
+      "wire": "jsonrpc",
+      "clients": [
+        "desktop"
+      ],
+      "execution": "read"
+    },
+    {
+      "name": "session_transcript_search",
+      "owner": "daemon",
+      "wire": "jsonrpc",
+      "clients": [
+        "desktop"
+      ],
+      "execution": "read"
+    },
+    {
+      "name": "skills_targets",
+      "owner": "daemon",
+      "wire": "jsonrpc",
+      "clients": [
+        "desktop"
+      ],
+      "execution": "read"
+    },
+    {
+      "name": "skills_backup_status",
+      "owner": "daemon",
+      "wire": "jsonrpc",
+      "clients": [
+        "desktop"
+      ],
+      "execution": "read"
+    },
+    {
+      "name": "skills_backup_configure",
+      "owner": "daemon",
+      "wire": "jsonrpc",
+      "clients": [
+        "desktop"
+      ],
+      "execution": "write"
+    },
+    {
+      "name": "skills_backup_sync",
+      "owner": "daemon",
+      "wire": "jsonrpc",
+      "clients": [
+        "desktop"
+      ],
+      "execution": "write"
+    },
+    {
+      "name": "skills_backup_now",
+      "owner": "daemon",
+      "wire": "jsonrpc",
+      "clients": [
+        "desktop"
+      ],
+      "execution": "write"
+    },
+    {
+      "name": "skills_backup_versions",
+      "owner": "daemon",
+      "wire": "jsonrpc",
+      "clients": [
+        "desktop"
+      ],
+      "execution": "read"
+    },
+    {
+      "name": "skills_backup_restore",
+      "owner": "daemon",
+      "wire": "jsonrpc",
+      "clients": [
+        "desktop"
+      ],
+      "execution": "write"
+    },
+    {
+      "name": "skills_backup_adopt",
+      "owner": "daemon",
+      "wire": "jsonrpc",
+      "clients": [
+        "desktop"
+      ],
+      "execution": "write"
+    },
+    {
+      "name": "skills_backup_adopt_many",
+      "owner": "daemon",
+      "wire": "jsonrpc",
+      "clients": [
+        "desktop"
+      ],
+      "execution": "write"
+    },
+    {
+      "name": "skills_backup_disconnect",
+      "owner": "daemon",
+      "wire": "jsonrpc",
+      "clients": [
+        "desktop"
+      ],
+      "execution": "write"
+    },
+    {
+      "name": "skills_add",
+      "owner": "daemon",
+      "wire": "jsonrpc",
+      "clients": [
+        "desktop",
+        "cli"
+      ],
+      "execution": "write"
+    },
+    {
+      "name": "skills_add_preview_read",
+      "owner": "daemon",
+      "wire": "jsonrpc",
+      "clients": [
+        "desktop"
+      ],
+      "execution": "read"
+    },
+    {
+      "name": "skills_distribute",
+      "owner": "daemon",
+      "wire": "jsonrpc",
+      "clients": [
+        "desktop",
+        "cli"
+      ],
+      "execution": "write"
+    },
+    {
+      "name": "skills_remove_locations",
+      "owner": "daemon",
+      "wire": "jsonrpc",
+      "clients": [
+        "desktop"
+      ],
+      "execution": "write"
+    },
+    {
+      "name": "skills_set",
+      "owner": "daemon",
+      "wire": "jsonrpc",
+      "clients": [
+        "desktop",
+        "cli"
+      ],
+      "execution": "write"
+    },
+    {
+      "name": "skills_wrap",
+      "owner": "daemon",
+      "wire": "jsonrpc",
+      "clients": [
+        "desktop",
+        "cli"
+      ],
+      "execution": "write"
+    },
+    {
+      "name": "skills_updates",
+      "owner": "daemon",
+      "wire": "jsonrpc",
+      "clients": [
+        "desktop"
+      ],
+      "execution": "write"
+    },
+    {
+      "name": "skills_updates_cancel",
+      "owner": "daemon",
+      "wire": "jsonrpc",
+      "clients": [
+        "desktop"
+      ],
+      "execution": "write"
+    },
+    {
+      "name": "skills_update",
+      "owner": "daemon",
+      "wire": "jsonrpc",
+      "clients": [
+        "desktop",
+        "cli"
+      ],
+      "execution": "write"
+    },
+    {
+      "name": "skills_update_many",
+      "owner": "daemon",
+      "wire": "jsonrpc",
+      "clients": [
+        "desktop"
+      ],
+      "execution": "write"
+    },
+    {
+      "name": "skills_delete_many",
+      "owner": "daemon",
+      "wire": "jsonrpc",
+      "clients": [
+        "desktop"
+      ],
+      "execution": "write"
+    },
+    {
+      "name": "skills_marketplace_search",
+      "owner": "daemon",
+      "wire": "jsonrpc",
+      "clients": [
+        "desktop"
+      ],
+      "execution": "read"
+    },
+    {
+      "name": "skill_files",
+      "owner": "daemon",
+      "wire": "jsonrpc",
+      "clients": [
+        "desktop"
+      ],
+      "execution": "read"
+    },
+    {
+      "name": "skill_file_read",
+      "owner": "daemon",
+      "wire": "jsonrpc",
+      "clients": [
+        "desktop"
+      ],
+      "execution": "read"
+    },
+    {
+      "name": "skill_file_save",
+      "owner": "daemon",
+      "wire": "jsonrpc",
+      "clients": [
+        "desktop"
+      ],
+      "execution": "write"
+    },
+    {
+      "name": "skill_file_create",
+      "owner": "daemon",
+      "wire": "jsonrpc",
+      "clients": [
+        "desktop"
+      ],
+      "execution": "write"
+    },
+    {
+      "name": "skill_folder_create",
+      "owner": "daemon",
+      "wire": "jsonrpc",
+      "clients": [
+        "desktop"
+      ],
+      "execution": "write"
+    },
+    {
+      "name": "skill_path_rename",
+      "owner": "daemon",
+      "wire": "jsonrpc",
+      "clients": [
+        "desktop"
+      ],
+      "execution": "write"
+    },
+    {
+      "name": "skill_path_delete",
+      "owner": "daemon",
+      "wire": "jsonrpc",
+      "clients": [
+        "desktop"
+      ],
+      "execution": "write"
+    },
+    {
+      "name": "app_icon_set",
+      "owner": "desktop",
+      "wire": "tauri",
+      "clients": [
+        "desktop"
+      ],
+      "execution": "write"
+    },
+    {
+      "name": "cli_status",
+      "owner": "desktop",
+      "wire": "tauri",
+      "clients": [
+        "desktop"
+      ],
+      "execution": "read"
+    },
+    {
+      "name": "cli_install",
+      "owner": "desktop",
+      "wire": "tauri",
+      "clients": [
+        "desktop"
+      ],
+      "execution": "write"
+    },
+    {
+      "name": "cli_remove",
+      "owner": "desktop",
+      "wire": "tauri",
+      "clients": [
+        "desktop"
+      ],
+      "execution": "write"
+    },
+    {
+      "name": "terminal_app_test",
+      "owner": "desktop",
+      "wire": "tauri",
+      "clients": [
+        "desktop"
+      ],
+      "execution": "read"
+    },
+    {
+      "name": "editor_app_test",
+      "owner": "desktop",
+      "wire": "tauri",
+      "clients": [
+        "desktop"
+      ],
+      "execution": "read"
+    },
+    {
+      "name": "session_resume_target",
+      "owner": "desktop",
+      "wire": "tauri",
+      "clients": [
+        "desktop"
+      ],
+      "execution": "read"
+    },
+    {
+      "name": "session_resume_in_terminal",
+      "owner": "desktop",
+      "wire": "tauri",
+      "clients": [
+        "desktop"
+      ],
+      "execution": "write"
+    },
+    {
+      "name": "open_in_editor",
+      "owner": "desktop",
+      "wire": "tauri",
+      "clients": [
+        "desktop"
+      ],
+      "execution": "write"
+    },
+    {
+      "name": "reveal_in_finder",
+      "owner": "desktop",
+      "wire": "tauri",
+      "clients": [
+        "desktop"
+      ],
+      "execution": "write"
+    },
+    {
+      "name": "logs_export",
+      "owner": "desktop",
+      "wire": "tauri",
+      "clients": [
+        "desktop"
+      ],
+      "execution": "read"
+    },
+    {
+      "name": "open_url",
+      "owner": "desktop",
+      "wire": "tauri",
+      "clients": [
+        "desktop"
+      ],
+      "execution": "write"
+    },
+    {
+      "name": "check_for_updates",
+      "owner": "desktop",
+      "wire": "tauri",
+      "clients": [
+        "desktop"
+      ],
+      "execution": "read"
+    },
+    {
+      "name": "install_update",
+      "owner": "desktop",
+      "wire": "tauri",
+      "clients": [
+        "desktop"
+      ],
+      "execution": "write"
+    }
+  ],
+  "events": [
+    {
+      "name": "sessions://scan",
+      "wire": "sse",
+      "clients": [
+        "desktop",
+        "cli"
+      ],
+      "revisioned": true,
+      "replay": true
+    },
+    {
+      "name": "analytics://progress",
+      "wire": "sse",
+      "clients": [
+        "desktop"
+      ],
+      "revisioned": false,
+      "replay": false
+    },
+    {
+      "name": "analytics://revision",
+      "wire": "sse",
+      "clients": [
+        "desktop"
+      ],
+      "revisioned": true,
+      "replay": true
+    },
+    {
+      "name": "skills://updates",
+      "wire": "sse",
+      "clients": [
+        "desktop"
+      ],
+      "revisioned": false,
+      "replay": false
+    },
+    {
+      "name": "config://changed",
+      "wire": "sse",
+      "clients": [
+        "desktop"
+      ],
+      "revisioned": false,
+      "replay": false
+    },
+    {
+      "name": "tendi://update-available",
+      "wire": "tauri",
+      "clients": [
+        "desktop"
+      ],
+      "revisioned": false,
+      "replay": false
+    }
+  ],
+  "sourceInventory": {
+    "daemonMethods": [
+      "agent_config_read",
+      "agent_config_save",
+      "agent_config_watch",
+      "agent_configs_delete_many",
+      "agent_configs_list",
+      "agents_list",
+      "analytics_overview",
+      "analytics_revision",
+      "bundled_skill_install",
+      "bundled_skill_prompt_dismiss",
+      "bundled_skill_remove",
+      "bundled_skill_status",
+      "config_profile_create",
+      "config_profile_set",
+      "hook_delete",
+      "hook_delete_many",
+      "hook_review",
+      "hook_set_enabled",
+      "hook_set_enabled_many",
+      "hook_source_read",
+      "hooks_list",
+      "mcp_list",
+      "mcp_set_enabled",
+      "mcp_set_enabled_many",
+      "project_scan_scopes_list",
+      "project_scan_scopes_save",
+      "projects_list",
+      "projects_scan",
+      "prompt_save",
+      "prompts_delete_many",
+      "prompts_list",
+      "rule_file_delete_many",
+      "rule_file_read",
+      "rule_file_save",
+      "rules_list",
+      "scan",
+      "session_projects_list",
+      "session_skill_index_run",
+      "session_skill_index_status",
+      "session_skill_links",
+      "session_transcript",
+      "session_transcript_locator",
+      "session_transcript_search",
+      "sessions_scan_start",
+      "sessions_search",
+      "sessions_snapshot",
+      "settings_get",
+      "settings_save",
+      "skill_file_create",
+      "skill_file_read",
+      "skill_file_save",
+      "skill_files",
+      "skill_folder_create",
+      "skill_path_delete",
+      "skill_path_rename",
+      "skill_session_links",
+      "skills_add",
+      "skills_add_preview_read",
+      "skills_backup_adopt",
+      "skills_backup_adopt_many",
+      "skills_backup_configure",
+      "skills_backup_disconnect",
+      "skills_backup_now",
+      "skills_backup_restore",
+      "skills_backup_status",
+      "skills_backup_sync",
+      "skills_backup_versions",
+      "skills_delete_many",
+      "skills_distribute",
+      "skills_list",
+      "skills_marketplace_search",
+      "skills_refresh",
+      "skills_remove_locations",
+      "skills_set",
+      "skills_targets",
+      "skills_update",
+      "skills_update_many",
+      "skills_updates",
+      "skills_updates_cancel",
+      "skills_wrap",
+      "terminal_apps_list"
+    ],
+    "tauriCommands": [
+      "app_icon_set",
+      "check_for_updates",
+      "cli_install",
+      "cli_remove",
+      "cli_status",
+      "daemon_invoke",
+      "daemon_next_event",
+      "daemon_subscribe_events",
+      "daemon_unsubscribe_events",
+      "editor_app_test",
+      "install_update",
+      "log_event",
+      "logs_export",
+      "open_in_editor",
+      "open_url",
+      "reveal_in_finder",
+      "session_resume_in_terminal",
+      "session_resume_target",
+      "terminal_app_test"
+    ],
+    "cliMethods": [
+      "agents_list",
+      "bundled_skill_install",
+      "hooks_list",
+      "mcp_list",
+      "rules_list",
+      "scan",
+      "sessions_search",
+      "sessions_snapshot",
+      "skills_add",
+      "skills_backup_adopt",
+      "skills_backup_configure",
+      "skills_backup_disconnect",
+      "skills_backup_now",
+      "skills_backup_restore",
+      "skills_backup_status",
+      "skills_backup_versions",
+      "skills_distribute",
+      "skills_list",
+      "skills_set",
+      "skills_update",
+      "skills_wrap"
+    ],
+    "frontendMethods": [
+      "agent_config_read",
+      "agent_config_save",
+      "agent_config_watch",
+      "agent_configs_delete_many",
+      "agent_configs_list",
+      "agents_list",
+      "analytics_overview",
+      "analytics_revision",
+      "app_icon_set",
+      "bundled_skill_install",
+      "bundled_skill_prompt_dismiss",
+      "bundled_skill_status",
+      "check_for_updates",
+      "cli_install",
+      "cli_remove",
+      "cli_status",
+      "config_profile_create",
+      "config_profile_set",
+      "editor_app_test",
+      "hook_delete",
+      "hook_delete_many",
+      "hook_review",
+      "hook_set_enabled",
+      "hook_set_enabled_many",
+      "hook_source_read",
+      "hooks_list",
+      "install_update",
+      "logs_export",
+      "mcp_list",
+      "mcp_set_enabled",
+      "mcp_set_enabled_many",
+      "open_in_editor",
+      "open_url",
+      "project_scan_scopes_list",
+      "project_scan_scopes_save",
+      "projects_list",
+      "projects_scan",
+      "prompt_save",
+      "prompts_delete_many",
+      "prompts_list",
+      "reveal_in_finder",
+      "rule_file_delete_many",
+      "rule_file_read",
+      "rule_file_save",
+      "rules_list",
+      "session_projects_list",
+      "session_resume_in_terminal",
+      "session_resume_target",
+      "session_skill_index_run",
+      "session_skill_index_status",
+      "session_skill_links",
+      "session_transcript",
+      "session_transcript_locator",
+      "session_transcript_search",
+      "sessions_scan_start",
+      "sessions_search",
+      "sessions_snapshot",
+      "settings_get",
+      "settings_save",
+      "skill_file_create",
+      "skill_file_read",
+      "skill_file_save",
+      "skill_files",
+      "skill_folder_create",
+      "skill_path_delete",
+      "skill_path_rename",
+      "skill_session_links",
+      "skills_add",
+      "skills_add_preview_read",
+      "skills_backup_configure",
+      "skills_backup_disconnect",
+      "skills_backup_now",
+      "skills_backup_restore",
+      "skills_backup_status",
+      "skills_backup_sync",
+      "skills_delete_many",
+      "skills_distribute",
+      "skills_list",
+      "skills_marketplace_search",
+      "skills_refresh",
+      "skills_remove_locations",
+      "skills_set",
+      "skills_targets",
+      "skills_update_many",
+      "skills_updates",
+      "skills_wrap",
+      "terminal_app_test",
+      "terminal_apps_list"
+    ],
+    "daemonEvents": [
+      "analytics://progress",
+      "analytics://revision",
+      "config://changed",
+      "sessions://scan",
+      "skills://updates"
+    ]
+  }
+}

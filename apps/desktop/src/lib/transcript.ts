@@ -12,7 +12,11 @@ export type TranscriptItem = {
   [key: string]: unknown;
 };
 
-export type TranscriptGroup = TranscriptItem | { type: "toolGroup"; tools: TranscriptItem[] };
+export enum TranscriptGroupType {
+  ToolGroup = "toolGroup",
+}
+
+export type TranscriptGroup = TranscriptItem | { type: TranscriptGroupType.ToolGroup; tools: TranscriptItem[] };
 
 export type TranscriptLocatorItem = {
   index: number;
@@ -74,8 +78,6 @@ export type JsonlTranscriptParseResult = {
 };
 
 export type JsonObject = Record<string, unknown>;
-type ParsedTokenUsage = NonNullable<JsonlTranscriptParseResult["tokenUsage"]>;
-
 type InternalContextMarker = {
   closing?: string;
   label: string;
@@ -287,14 +289,14 @@ export function groupTranscriptItems(items: TranscriptItem[]): TranscriptGroup[]
       tools.push(items[index]);
     }
 
-    grouped.push(tools.length > 1 ? { type: "toolGroup", tools } : item);
+    grouped.push(tools.length > 1 ? { type: TranscriptGroupType.ToolGroup, tools } : item);
   }
   return grouped;
 }
 
-export function collectGenericItem(value: JsonObject, items: TranscriptItem[]) {
+export function collectCursorItemWithTimestamp(value: JsonObject, items: TranscriptItem[], timestamp?: string) {
   const kind = stringValue(value.role) || stringValue(value.type);
-  const time = compactTime(stringValue(value.timestamp));
+  const time = compactTime(timestamp ?? "");
   const message = isJsonObject(value.message) ? value.message.content : value.message;
   const content = message ?? value.content;
   if (kind === "developer" || kind === "system") {
@@ -322,9 +324,9 @@ export function pushItem(
 }
 
 export function attachToolResult(items: TranscriptItem[], id: string, result = "", duration?: number, endedAtMs?: number) {
-  if (!result) return false;
+  if (!id.trim() || !result) return false;
   const item = [...items].reverse().find((candidate) => (
-    candidate.type === "tool" && (id ? candidate.callId === id : !candidate.result)
+    candidate.type === "tool" && candidate.callId === id
   ));
   if (!item) return false;
   item.result = truncateText(result.trim(), 12_000);
@@ -552,10 +554,7 @@ export function compactTime(value: string) {
   return value.split("T")[1]?.slice(0, 5) || value;
 }
 
-export function timestampMs(value: unknown) {
-  const time = Date.parse(stringValue(value));
-  return Number.isFinite(time) ? time : undefined;
-}
+export { timestampMs } from "./time.ts";
 
 export function stringAt(value: JsonObject, path: string[]) {
   let current: unknown = value;

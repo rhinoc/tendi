@@ -30,7 +30,7 @@ export function OpenInEditorMenuItem({
     <Menu.Item
       className="skillMenuItem"
       disabled={!resolved}
-      onSelect={() => resolved && safeInvoke(TauriCommand.OpenInEditor, { path: resolved, line })}
+      onSelect={() => resolved && safeInvoke(TauriCommand.OpenInEditor, { path: resolved, line: line ?? undefined })}
     >
       <Code2 size={14} />
       {label}

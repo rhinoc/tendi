@@ -1,0 +1,2 @@
+{"role":"user","message":{"content":[{"type":"text","text":"<timestamp>Friday, Aug 28, 2026, 6:11 PM (UTC+08:00)</timestamp>\n<user_query>Inspect the fixture parser</user_query>"}]}}
+{"role":"assistant","message":{"content":[{"type":"text","text":"<timestamp>Friday, Aug 28, 2026, 6:11 PM (UTC+08:00)</timestamp>\nI will inspect it."},{"type":"tool_use","name":"Read","input":{"command":"printf fixture"}}]}}

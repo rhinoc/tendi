@@ -34,10 +34,12 @@ import { SelectionActionBar } from "./shared/SelectionActionBar.tsx";
 import { SelectionCheckbox } from "./shared/SelectionCheckbox.tsx";
 import { RowMenuOpenChangeProvider } from "./shared/row-menu-context.tsx";
 import { useElementSize } from "./shared/useElementSize.ts";
+import { fixedVirtualRange, virtualRangeFor } from "../lib/virtualization.ts";
 import {
   MARQUEE_DRAG_THRESHOLD,
   clientPointFromContent,
   clientRectFromPoints,
+  compareTimestamps,
   contentPointFromClient,
   dayGroupKey,
   elementContentRect,
@@ -45,9 +47,9 @@ import {
   marqueeAutoScrollDelta,
   rectFromPoints,
   rectsIntersect,
-  suppressNextClick,
 } from "../lib/index.ts";
-import type { ColumnDef, DataTableProps, SortState } from "./DataTable.types";
+import { ColumnCellVariant, ColumnDataType, type ColumnDef, type DataTableProps, type SortState } from "./DataTable.types";
+import { SortDirection } from "../lib/sort.ts";
 import "./DataTable.css";
 
 export type { ColumnDef, DataTableProps, FreezeColumnConfig, SortState } from "./DataTable.types";
@@ -103,19 +105,19 @@ function columnLabel<TRow>(column: ColumnDef<TRow>) {
 
 function columnType<TRow>(column: ColumnDef<TRow>) {
   if (column.type) return column.type;
-  if (column.groupByDay) return "date";
-  if (column.groupable === true || typeof column.groupBy === "function" || column.groupOrder) return "enum";
-  return "text";
+  if (column.groupByDay) return ColumnDataType.Date;
+  if (column.groupable === true || typeof column.groupBy === "function" || column.groupOrder) return ColumnDataType.Enum;
+  return ColumnDataType.Text;
 }
 
 function groupsByDay<TRow>(column: ColumnDef<TRow>) {
-  return columnType(column) === "date" || column.groupByDay;
+  return columnType(column) === ColumnDataType.Date || column.groupByDay;
 }
 
 function canGroupColumn<TRow>(column: ColumnDef<TRow>) {
   if (!columnLabel(column) || column.groupable === false) return false;
   const type = columnType(column);
-  return type === "date" || type === "enum";
+  return type === ColumnDataType.Date || type === ColumnDataType.Enum;
 }
 
 function normalizeGroupKey(raw: unknown) {
@@ -150,7 +152,8 @@ function groupColumnValue<TRow>(column: ColumnDef<TRow>, row: TRow) {
   return normalizeGroupKey(row[column.key as keyof TRow]);
 }
 
-function compareColumnValue(left: unknown, right: unknown) {
+function compareColumnValue<TRow>(column: ColumnDef<TRow>, left: unknown, right: unknown) {
+  if (columnType(column) === ColumnDataType.Date) return compareTimestamps(left, right);
   if (typeof left === "number" || typeof right === "number") {
     return (Number(left) || 0) - (Number(right) || 0);
   }
@@ -159,9 +162,9 @@ function compareColumnValue(left: unknown, right: unknown) {
 
 function renderTextCell<TRow>(column: ColumnDef<TRow>, row: TRow) {
   const display = columnDisplayValue(column, row);
-  const className = column.cell === "number"
+  const className = column.cell === ColumnCellVariant.Number
     ? "dataCellNumber"
-    : column.cell === "title"
+    : column.cell === ColumnCellVariant.Title
       ? "dataCellTitle"
       : "dataCellText";
   const explicitTitle = column.title?.(row);
@@ -186,9 +189,15 @@ type DataTableCellContext<TRow> = {
 
 type DataTableCell<TRow> = ReturnType<Row<TRow>["getVisibleCells"]>[number];
 
+enum DataTablePane {
+  Full = "full",
+  Frozen = "frozen",
+  Scroll = "scroll",
+}
+
 type DataTableRowProps<TRow extends Record<string, unknown>> = {
   row: Row<TRow>;
-  pane: "full" | "frozen" | "scroll";
+  pane: DataTablePane;
   className: string;
   rowSelectable: boolean;
   selectable: boolean;
@@ -217,7 +226,7 @@ function DataTableRowComponent<TRow extends Record<string, unknown>>({
 }: DataTableRowProps<TRow>) {
   const id = row.id;
   const cells = row.getVisibleCells().filter((cell) => (
-    pane === "full" || (pane === "frozen" ? cell.column.getIsPinned() : !cell.column.getIsPinned())
+    pane === DataTablePane.Full || (pane === DataTablePane.Frozen ? cell.column.getIsPinned() : !cell.column.getIsPinned())
   ));
   const rowLabel = getRowLabel?.(row.original);
   const contextMenuContent = rowContextMenu?.(row.original, { selectedRows, selected: row.getIsSelected() }) ?? null;
@@ -235,7 +244,7 @@ function DataTableRowComponent<TRow extends Record<string, unknown>>({
       } : undefined}
     >
       <RowMenuOpenChangeProvider onOpenChange={(open) => onRowMenuOpenChange(id, open)}>
-        {pane !== "scroll" ? (
+        {pane !== DataTablePane.Scroll ? (
           selectable && rowSelectable ? (
             <SelectionCheckbox
               checked={row.getIsSelected()}
@@ -291,12 +300,12 @@ function renderDataTableCell<TRow extends Record<string, unknown>>({ column, row
 }
 
 function sortStateToTable(sort: SortState | null): SortingState {
-  return sort ? [{ id: sort.key, desc: sort.direction === "desc" }] : [];
+  return sort ? [{ id: sort.key, desc: sort.direction === SortDirection.Desc }] : [];
 }
 
 function tableSortingToSortState(sorting: SortingState): SortState | null {
   const item = sorting[0];
-  return item ? { key: item.id, direction: item.desc ? "desc" : "asc" } : null;
+  return item ? { key: item.id, direction: item.desc ? SortDirection.Desc : SortDirection.Asc } : null;
 }
 
 function selectedIdsToRowSelection(ids: string[]): RowSelectionState {
@@ -339,15 +348,22 @@ function groupVirtualRange(
   viewportHeight: number,
   rowHeight: number,
   overscan: number,
+  datasetEpoch: string,
+  stableKey: string,
 ) {
   const bodyBottom = layout.bodyTop + layout.bodyHeight;
   const bufferedTop = Math.max(0, scrollTop - overscan * rowHeight);
   const bufferedBottom = scrollTop + viewportHeight + overscan * rowHeight;
   if (bufferedBottom > layout.bodyTop && bufferedTop < bodyBottom) {
-    return {
-      start: Math.max(0, Math.floor((bufferedTop - layout.bodyTop) / rowHeight)),
-      end: Math.min(count, Math.ceil((bufferedBottom - layout.bodyTop) / rowHeight)),
-    };
+    return virtualRangeFor({
+      datasetEpoch,
+      stableKey,
+      count,
+      estimate: rowHeight,
+      scrollOffset: Math.max(0, scrollTop - layout.bodyTop),
+      viewportSize: viewportHeight,
+      overscan,
+    });
   }
   if (scrollTop >= bodyBottom) return { start: count, end: count };
   return { start: 0, end: 0 };
@@ -361,6 +377,8 @@ function groupVirtualSeekGap(
   viewportHeight: number,
   rowHeight: number,
   overscan: number,
+  datasetEpoch: string,
+  stableKey: string,
 ) {
   const viewportBottom = targetScrollTop + viewportHeight;
   const covered: Array<{ top: number; bottom: number }> = [];
@@ -376,7 +394,7 @@ function groupVirtualSeekGap(
       covered.push({ top: Math.max(targetScrollTop, headerTop), bottom: Math.min(viewportBottom, layout.bodyTop) });
     }
     if (!layout.expanded) return;
-    const rendered = groupVirtualRange(layout, group.subRows.length, renderedScrollTop, viewportHeight, rowHeight, overscan);
+    const rendered = groupVirtualRange(layout, group.subRows.length, renderedScrollTop, viewportHeight, rowHeight, overscan, datasetEpoch, `${stableKey}:${index}`);
     if (rendered.start >= rendered.end) return;
     const rowsTop = layout.bodyTop + rendered.start * rowHeight;
     const rowsBottom = layout.bodyTop + rendered.end * rowHeight;
@@ -430,6 +448,7 @@ export function DataTable<TRow extends Record<string, unknown>>({
   onSortChange,
   manualSorting = false,
   rowHeight = DATA_TABLE_ROW_HEIGHT,
+  scrollResetKey,
   scrollToRowId,
   onScrollToRowComplete,
   freezeColumn,
@@ -446,7 +465,12 @@ export function DataTable<TRow extends Record<string, unknown>>({
 }: DataTableProps<TRow>) {
   const shellRef = useRef<HTMLDivElement>(null);
   const scrollAnchorRef = useRef<{ id: string; offsetTop: number } | null>(null);
+  const previousScrollResetKeyRef = useRef(scrollResetKey);
   const scrollHeaderTrackRef = useRef<HTMLDivElement>(null);
+  const [scrollTop, setScrollTop] = useState(0);
+  const pendingScrollTopRef = useRef(0);
+  const scrollUpdateFrameRef = useRef<number | null>(null);
+  const virtualSeekRef = useRef<HTMLDivElement>(null);
   const { ref: scrollRef, size: scrollSize } = useElementSize<HTMLDivElement>(
     { width: 0, height: 720 },
     {
@@ -459,16 +483,31 @@ export function DataTable<TRow extends Record<string, unknown>>({
   useLayoutEffect(() => {
     const scroll = scrollRef.current;
     if (!scroll) return undefined;
+    const resetToTop = () => {
+      scroll.scrollTop = 0;
+      pendingScrollTopRef.current = 0;
+      setScrollTop(0);
+      virtualSeekRef.current?.classList.remove("dataTableVirtualSeek--visible");
+    };
+    const resetRequested = previousScrollResetKeyRef.current !== scrollResetKey;
+    previousScrollResetKeyRef.current = scrollResetKey;
     const anchor = scrollAnchorRef.current;
-    if (anchor) {
+    if (resetRequested) {
+      scrollAnchorRef.current = null;
+      resetToTop();
+    } else if (anchor) {
       const viewport = scroll.getBoundingClientRect();
       const row = [...scroll.querySelectorAll<HTMLElement>("[data-row-id]")]
         .find((candidate) => candidate.dataset.rowId === anchor.id && candidate.getBoundingClientRect().bottom > viewport.top);
       if (row) {
         const currentOffsetTop = row.getBoundingClientRect().top - viewport.top;
         scroll.scrollTop += currentOffsetTop - anchor.offsetTop;
+      } else {
+        resetToTop();
       }
       scrollAnchorRef.current = null;
+    } else if (scroll.scrollTop > 0) {
+      resetToTop();
     }
     return () => {
       const currentScroll = scrollRef.current;
@@ -484,16 +523,12 @@ export function DataTable<TRow extends Record<string, unknown>>({
         };
       }
     };
-  }, [rows]);
+  }, [rows, scrollResetKey]);
   const marqueeDragRef = useRef<MarqueeDrag | null>(null);
   const suppressClickRef = useRef(false);
   const [marquee, setMarquee] = useState<MarqueeRect | null>(null);
   const [hoveredRowId, setHoveredRowId] = useState<string | null>(null);
   const [openRowMenuId, setOpenRowMenuId] = useState<string | null>(null);
-  const [scrollTop, setScrollTop] = useState(0);
-  const pendingScrollTopRef = useRef(0);
-  const scrollUpdateFrameRef = useRef<number | null>(null);
-  const virtualSeekRef = useRef<HTMLDivElement>(null);
   const [expandedGroups, setExpandedGroups] = useState<string[]>([]);
   const previousGroupStateRef = useRef<{ groupingKey: string; groupKeys: string[] } | null>(null);
   const groupingControlled = controlledGroupBy !== undefined;
@@ -576,6 +611,7 @@ export function DataTable<TRow extends Record<string, unknown>>({
       enableGrouping: canGroupColumn(column),
       getGroupingValue: (row) => groupColumnValue(column, row),
       sortingFn: (rowA, rowB) => compareColumnValue(
+        column,
         primitiveColumnValue(column, rowA.original),
         primitiveColumnValue(column, rowB.original),
       ),
@@ -641,15 +677,21 @@ export function DataTable<TRow extends Record<string, unknown>>({
   );
   const modelRows = table.getRowModel().rows;
   const virtualizedRows = !grouping[0] && modelRows.length > DATA_TABLE_VIRTUAL_THRESHOLD;
+  const virtualDatasetEpoch = `${scrollResetKey ?? "default"}:${JSON.stringify(grouping)}:${JSON.stringify(sorting)}:${modelRows.length}`;
+  const virtualStableKey = `${modelRows[0]?.id ?? ""}:${modelRows.at(-1)?.id ?? ""}`;
   const visibleRows = useMemo(() => {
     if (!virtualizedRows) {
       return { rows: modelRows, top: 0, bottom: 0, start: 0, end: modelRows.length };
     }
-    const start = Math.max(0, Math.floor(scrollTop / rowHeight) - DATA_TABLE_VIRTUAL_OVERSCAN);
-    const end = Math.min(
-      modelRows.length,
-      Math.ceil((scrollTop + scrollSize.height) / rowHeight) + DATA_TABLE_VIRTUAL_OVERSCAN,
-    );
+    const { start, end } = virtualRangeFor({
+      datasetEpoch: virtualDatasetEpoch,
+      stableKey: virtualStableKey,
+      count: modelRows.length,
+      estimate: rowHeight,
+      scrollOffset: scrollTop,
+      viewportSize: scrollSize.height,
+      overscan: DATA_TABLE_VIRTUAL_OVERSCAN,
+    });
     return {
       rows: modelRows.slice(start, end),
       top: start * rowHeight,
@@ -657,7 +699,7 @@ export function DataTable<TRow extends Record<string, unknown>>({
       start,
       end,
     };
-  }, [modelRows, rowHeight, scrollSize.height, scrollTop, virtualizedRows]);
+  }, [modelRows, rowHeight, scrollSize.height, scrollTop, virtualDatasetEpoch, virtualStableKey, virtualizedRows]);
   const selectableRows = useMemo(() => leafRows.filter((row) => row.getCanSelect()), [leafRows]);
   const selectableIds = useMemo(() => selectableRows.map((row) => row.id), [selectableRows]);
   const selectedRows = useMemo(
@@ -882,7 +924,7 @@ export function DataTable<TRow extends Record<string, unknown>>({
           {sortable ? (
             <button
               type="button"
-              className={`dataHeaderLabelButton dataHeaderSortLabelButton ${sortDirection ? "activeSort" : ""} ${sortDirection === "asc" ? "ascending" : ""}`}
+              className={`dataHeaderLabelButton dataHeaderSortLabelButton ${sortDirection ? "activeSort" : ""} ${sortDirection === SortDirection.Asc ? "ascending" : ""}`}
               aria-label={`Sort by ${label}`}
               onClick={header.column.getToggleSortingHandler()}
             >
@@ -954,7 +996,7 @@ export function DataTable<TRow extends Record<string, unknown>>({
       <DataTableRow
         key={id}
         row={row}
-        pane="full"
+        pane={DataTablePane.Full}
         className={rowClassName(row, rowProps?.(row.original)?.className)}
         rowSelectable={rowSelectable}
         selectable={Boolean(selectable)}
@@ -968,7 +1010,7 @@ export function DataTable<TRow extends Record<string, unknown>>({
     );
   };
 
-  const renderSplitDataRow = (row: Row<TRow>, pane: "frozen" | "scroll") => {
+  const renderSplitDataRow = (row: Row<TRow>, pane: Exclude<DataTablePane, DataTablePane.Full>) => {
     const id = row.id;
     const rowSelectable = row.getCanSelect();
     return (
@@ -1087,7 +1129,7 @@ export function DataTable<TRow extends Record<string, unknown>>({
     const nextScrollTop = Math.min(maxScrollTop, Math.max(0, targetTop));
     if (Math.abs(scroll.scrollTop - nextScrollTop) > 1) scroll.scrollTop = nextScrollTop;
     setScrollTop((current) => current === nextScrollTop ? current : nextScrollTop);
-  }, [expandedGroupSet, freezeColumn, groupLayouts, groupRows, grouping, modelRows, onScrollToRowComplete, rowHeight, scrollRef, scrollToRowId, setExpandedGroups, showColumnHeader]);
+  }, [expandedGroupSet, freezeColumn, groupLayouts, groupRows, grouping, modelRows, onScrollToRowComplete, rowHeight, scrollRef, scrollToRowId, scrollTop, setExpandedGroups, showColumnHeader]);
 
   const renderGroupedRows = (
     group: Row<TRow>,
@@ -1105,6 +1147,8 @@ export function DataTable<TRow extends Record<string, unknown>>({
       scrollSize.height,
       rowHeight,
       DATA_TABLE_GROUP_VIRTUAL_OVERSCAN,
+      virtualDatasetEpoch,
+      `${virtualStableKey}:${group.id}`,
     );
 
     return (
@@ -1187,7 +1231,7 @@ export function DataTable<TRow extends Record<string, unknown>>({
                 </Accordion.Trigger>
               </div>
             </Accordion.Header>
-            <Accordion.Content>{renderGroupedRows(group, groupLayouts[index], (row) => renderSplitDataRow(row, "frozen"))}</Accordion.Content>
+            <Accordion.Content>{renderGroupedRows(group, groupLayouts[index], (row) => renderSplitDataRow(row, DataTablePane.Frozen))}</Accordion.Content>
           </Accordion.Item>
         );
       })}
@@ -1200,7 +1244,7 @@ export function DataTable<TRow extends Record<string, unknown>>({
         return (
           <div className="dataGroup" key={group.id}>
             <div className="sectionHeading dataSplitGroupSpacer" aria-hidden="true" />
-            {renderGroupedRows(group, groupLayouts[index], (row) => renderSplitDataRow(row, "scroll"))}
+            {renderGroupedRows(group, groupLayouts[index], (row) => renderSplitDataRow(row, DataTablePane.Scroll))}
           </div>
         );
       })}
@@ -1235,12 +1279,12 @@ export function DataTable<TRow extends Record<string, unknown>>({
     return groupRows.some((group, index) => {
       const layout = groupLayouts[index];
       if (!layout?.expanded) return false;
-      const target = groupVirtualRange(layout, group.subRows.length, targetTop, viewportHeight, rowHeight, 0);
+      const target = groupVirtualRange(layout, group.subRows.length, targetTop, viewportHeight, rowHeight, 0, virtualDatasetEpoch, `${virtualStableKey}:${index}`);
       if (target.start === target.end) return false;
-      const rendered = groupVirtualRange(layout, group.subRows.length, scrollTop, viewportHeight, rowHeight, DATA_TABLE_GROUP_VIRTUAL_OVERSCAN);
+      const rendered = groupVirtualRange(layout, group.subRows.length, scrollTop, viewportHeight, rowHeight, DATA_TABLE_GROUP_VIRTUAL_OVERSCAN, virtualDatasetEpoch, `${virtualStableKey}:${index}`);
       return rendered.start > target.start || rendered.end < target.end;
     });
-  }, [groupLayouts, groupRows, rowHeight, scrollTop, virtualizedGroups]);
+  }, [groupLayouts, groupRows, rowHeight, scrollTop, virtualDatasetEpoch, virtualStableKey, virtualizedGroups]);
 
   const handleBodyScroll = useCallback(() => {
     const scroll = scrollRef.current;
@@ -1256,28 +1300,31 @@ export function DataTable<TRow extends Record<string, unknown>>({
       : null;
     const groupedWindowMissed = groupedWindowMissedAt(viewportTop, scroll.clientHeight);
     const groupedSeekGap = groupedWindowMissed
-      ? groupVirtualSeekGap(groupLayouts, groupRows, scrollTop, viewportTop, scroll.clientHeight, rowHeight, DATA_TABLE_GROUP_VIRTUAL_OVERSCAN)
+      ? groupVirtualSeekGap(groupLayouts, groupRows, scrollTop, viewportTop, scroll.clientHeight, rowHeight, DATA_TABLE_GROUP_VIRTUAL_OVERSCAN, virtualDatasetEpoch, virtualStableKey)
       : null;
     if (seekGap) setVirtualSeekVisible(true, seekGap.top, seekGap.height);
     else if (groupedSeekGap) setVirtualSeekVisible(true, groupedSeekGap.top, groupedSeekGap.height);
+    else setVirtualSeekVisible(false);
     pendingScrollTopRef.current = viewportTop;
     if (scrollUpdateFrameRef.current === null) {
       scrollUpdateFrameRef.current = window.requestAnimationFrame(() => {
         scrollUpdateFrameRef.current = null;
         const nextScrollTop = pendingScrollTopRef.current;
         if (virtualizedRows) {
-          const nextStart = Math.max(0, Math.floor(nextScrollTop / rowHeight) - DATA_TABLE_VIRTUAL_OVERSCAN);
-          const nextEnd = Math.min(
+          const nextRange = fixedVirtualRange(
             modelRows.length,
-            Math.ceil((nextScrollTop + scrollSize.height) / rowHeight) + DATA_TABLE_VIRTUAL_OVERSCAN,
+            nextScrollTop,
+            scrollSize.height,
+            rowHeight,
+            DATA_TABLE_VIRTUAL_OVERSCAN,
           );
-          if (visibleRows.start === nextStart && visibleRows.end === nextEnd) return;
+          if (visibleRows.start === nextRange.start && visibleRows.end === nextRange.end) return;
         }
         if (virtualizedGroups && !groupedWindowMissedAt(nextScrollTop, scrollSize.height)) return;
         setScrollTop((current) => current === nextScrollTop ? current : nextScrollTop);
       });
     }
-  }, [freezeColumn, groupLayouts, groupRows, groupedWindowMissedAt, modelRows.length, rowHeight, scrollRef, scrollSize.height, scrollTop, setVirtualSeekVisible, showColumnHeader, syncScrollHeader, virtualizedGroups, virtualizedRows, visibleRows]);
+  }, [freezeColumn, groupLayouts, groupRows, groupedWindowMissedAt, modelRows.length, rowHeight, scrollRef, scrollSize.height, scrollTop, setVirtualSeekVisible, showColumnHeader, syncScrollHeader, virtualDatasetEpoch, virtualStableKey, virtualizedGroups, virtualizedRows, visibleRows]);
 
   const handleBodyWheel = useCallback((event: ReactWheelEvent<HTMLDivElement>) => {
     if (event.deltaY === 0 || (!virtualizedRows && !virtualizedGroups)) return;
@@ -1287,12 +1334,14 @@ export function DataTable<TRow extends Record<string, unknown>>({
     const nextScrollTop = Math.min(maxScrollTop, Math.max(0, scroll.scrollTop + event.deltaY));
     if (Math.abs(scroll.scrollTop - nextScrollTop) <= 1) return;
     const flatWindowMissed = virtualizedRows && (() => {
-      const nextStart = Math.max(0, Math.floor(nextScrollTop / rowHeight) - DATA_TABLE_VIRTUAL_OVERSCAN);
-      const nextEnd = Math.min(
+      const nextRange = fixedVirtualRange(
         modelRows.length,
-        Math.ceil((nextScrollTop + scroll.clientHeight) / rowHeight) + DATA_TABLE_VIRTUAL_OVERSCAN,
+        nextScrollTop,
+        scroll.clientHeight,
+        rowHeight,
+        DATA_TABLE_VIRTUAL_OVERSCAN,
       );
-      return visibleRows.start !== nextStart || visibleRows.end !== nextEnd;
+      return visibleRows.start !== nextRange.start || visibleRows.end !== nextRange.end;
     })();
     const groupedWindowMissed = groupedWindowMissedAt(nextScrollTop, scroll.clientHeight);
     if (flatWindowMissed || groupedWindowMissed) {
@@ -1343,14 +1392,14 @@ export function DataTable<TRow extends Record<string, unknown>>({
             <div className="dataTableBody">
               {grouping[0]
                 ? renderFrozenGroups()
-                : renderVisibleRows((row) => renderSplitDataRow(row, "frozen"))}
+                : renderVisibleRows((row) => renderSplitDataRow(row, DataTablePane.Frozen))}
             </div>
           </div>
           <div className="dataTableScrollPane">
             <div className="dataTableBody">
               {grouping[0]
                 ? renderScrollGroups()
-                : renderVisibleRows((row) => renderSplitDataRow(row, "scroll"))}
+                : renderVisibleRows((row) => renderSplitDataRow(row, DataTablePane.Scroll))}
             </div>
           </div>
         </div>

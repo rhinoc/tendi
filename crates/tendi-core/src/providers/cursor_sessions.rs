@@ -353,18 +353,6 @@ fn cursor_store_cache_put(path: &Path, version: CursorStoreVersion, meta: Cursor
     });
 }
 
-#[cfg(test)]
-pub(crate) fn cursor_store_cache_full_scans(path: &Path) -> Option<usize> {
-    let cache = CURSOR_STORE_CACHE
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    cache
-        .entries
-        .iter()
-        .find(|entry| entry.path == path)
-        .map(|entry| entry.full_scans)
-}
-
 pub(crate) fn scan_cursor_store_db(path: Option<PathBuf>) -> CursorStoreMeta {
     let Some(path) = path else {
         return CursorStoreMeta::default();

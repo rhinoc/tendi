@@ -10,7 +10,7 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::{providers::agent_provider, skills::AgentKind};
+use crate::{providers::agent_provider, skills::AgentKind, time::timestamp_ms};
 
 #[derive(Debug, Clone, Serialize)]
 pub struct TranscriptItem {
@@ -389,6 +389,7 @@ pub fn parse_transcript_locator_page(
     let mut locator_builder = TranscriptLocatorBuilder::default();
     let warnings = for_each_transcript_item(path, agent, |item| {
         locator_builder.push(&item);
+        Ok(())
     })?;
     Ok(TranscriptLocatorPage {
         locator_items: locator_builder.finish(),
@@ -401,26 +402,6 @@ pub fn transcript_source_version(path: &Path) -> Result<String> {
     let mut file =
         fs::File::open(path).with_context(|| format!("failed to read {}", path.display()))?;
     Ok(transcript_source_snapshot(&mut file, None)?.version())
-}
-
-#[cfg(test)]
-fn parse_transcript_page_with_store(
-    path: &Path,
-    agent: AgentKind,
-    cursor: Option<&str>,
-    limit: Option<usize>,
-    cursor_store: Option<&Path>,
-) -> Result<TranscriptPage> {
-    parse_transcript_page_with_known_source_version_options(
-        path,
-        agent,
-        cursor,
-        limit,
-        cursor_store,
-        None,
-        false,
-        true,
-    )
 }
 
 fn parse_transcript_page_with_known_source_version_options(
@@ -849,6 +830,33 @@ pub fn parse_transcript(path: &Path, agent: AgentKind) -> Result<TranscriptScan>
     Ok(TranscriptScan { items, warnings })
 }
 
+/// Writes transcript items without retaining the complete transcript in memory.
+/// Providers that enrich items after parsing keep the existing materialized path.
+pub fn write_transcript_json<W: std::io::Write>(
+    path: &Path,
+    agent: AgentKind,
+    writer: &mut W,
+) -> Result<Vec<String>> {
+    if !agent_provider(agent).transcript_cacheable() {
+        let transcript = parse_transcript(path, agent)?;
+        serde_json::to_writer(&mut *writer, &transcript.items)?;
+        return Ok(transcript.warnings);
+    }
+
+    writer.write_all(b"[")?;
+    let mut first = true;
+    let warnings = for_each_transcript_item(path, agent, |item| {
+        if !first {
+            writer.write_all(b",")?;
+        }
+        first = false;
+        serde_json::to_writer(&mut *writer, &item)?;
+        Ok(())
+    })?;
+    writer.write_all(b"]")?;
+    Ok(warnings)
+}
+
 #[derive(Default)]
 struct TranscriptLocatorBuilder {
     items: Vec<TranscriptLocatorItem>,
@@ -890,7 +898,7 @@ impl TranscriptLocatorBuilder {
 
 fn for_each_transcript_item<F>(path: &Path, agent: AgentKind, mut visit: F) -> Result<Vec<String>>
 where
-    F: FnMut(TranscriptItem),
+    F: FnMut(TranscriptItem) -> Result<()>,
 {
     let file =
         fs::File::open(path).with_context(|| format!("failed to read {}", path.display()))?;
@@ -922,7 +930,7 @@ where
         let item_start = items.len();
         collect_transcript_value(&value, agent, &mut items);
         for item in items[item_start..].iter().cloned() {
-            visit(item);
+            visit(item)?;
         }
         items.retain(|item| item.kind == "tool" && item.result.is_none());
     }
@@ -1235,40 +1243,6 @@ fn transcript_search_cache_offsets(
         })
 }
 
-#[cfg(test)]
-fn transcript_chunk_cache_offsets(
-    path: &Path,
-    agent: AgentKind,
-    source_version: &str,
-) -> Vec<(u64, u64)> {
-    let cache = TRANSCRIPT_CHUNK_CACHE
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    cache
-        .entries
-        .iter()
-        .filter(|entry| {
-            entry.path == path && entry.agent == agent && entry.source_version == source_version
-        })
-        .map(|entry| (entry.start, entry.end))
-        .collect()
-}
-
-#[cfg(test)]
-fn transcript_chunk_cache_hits(path: &Path, agent: AgentKind, source_version: &str) -> usize {
-    let cache = TRANSCRIPT_CHUNK_CACHE
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    cache
-        .entries
-        .iter()
-        .filter(|entry| {
-            entry.path == path && entry.agent == agent && entry.source_version == source_version
-        })
-        .map(|entry| entry.hits)
-        .sum()
-}
-
 pub fn search_transcript(
     path: &Path,
     agent: AgentKind,
@@ -1522,7 +1496,27 @@ pub(crate) fn json_string_hint<'a>(line: &'a str, marker: &str) -> Option<&'a st
     }
 }
 
-pub(crate) fn collect_generic_item(value: &Value, items: &mut Vec<TranscriptItem>) {
+pub(crate) fn collect_shared_item(value: &Value, items: &mut Vec<TranscriptItem>) {
+    let timestamp = value
+        .get("timestamp")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    collect_shared_format_item_with_timestamp(value, items, timestamp);
+}
+
+pub(crate) fn collect_cursor_item_with_timestamp(
+    value: &Value,
+    items: &mut Vec<TranscriptItem>,
+    timestamp: Option<String>,
+) {
+    collect_shared_format_item_with_timestamp(value, items, timestamp);
+}
+
+fn collect_shared_format_item_with_timestamp(
+    value: &Value,
+    items: &mut Vec<TranscriptItem>,
+    timestamp: Option<String>,
+) {
     let kind = value
         .get("role")
         .or_else(|| value.get("type"))
@@ -1546,10 +1540,7 @@ pub(crate) fn collect_generic_item(value: &Value, items: &mut Vec<TranscriptItem
                     }
                     .to_string(),
                 ),
-                value
-                    .get("timestamp")
-                    .and_then(Value::as_str)
-                    .map(compact_time),
+                timestamp.as_deref().map(compact_time),
             );
         }
         return;
@@ -1558,10 +1549,7 @@ pub(crate) fn collect_generic_item(value: &Value, items: &mut Vec<TranscriptItem
         return;
     }
 
-    let time = value
-        .get("timestamp")
-        .and_then(Value::as_str)
-        .map(compact_time);
+    let time = timestamp.as_deref().map(compact_time);
     let content = value
         .pointer("/message/content")
         .or_else(|| value.get("content"))
@@ -1586,10 +1574,7 @@ pub(crate) fn collect_generic_item(value: &Value, items: &mut Vec<TranscriptItem
                     None,
                     extract_duration_ms(item, None),
                     item.get("id").and_then(Value::as_str).map(str::to_string),
-                    value
-                        .get("timestamp")
-                        .and_then(Value::as_str)
-                        .and_then(parse_timestamp_ms),
+                    timestamp.as_deref().and_then(timestamp_ms),
                 );
             }
         }
@@ -2034,12 +2019,11 @@ pub(crate) fn attach_tool_result(
     let Some(result) = result else {
         return false;
     };
+    let Some(call_id) = call_id.filter(|call_id| !call_id.trim().is_empty()) else {
+        return false;
+    };
     let matched = items.iter_mut().rev().find(|item| {
-        item.kind == "tool"
-            && match call_id {
-                Some(call_id) => item.call_id.as_deref() == Some(call_id),
-                None => item.result.is_none(),
-            }
+        item.kind == "tool" && item.call_id.as_deref() == Some(call_id)
     });
     let Some(item) = matched else {
         return false;
@@ -2129,52 +2113,6 @@ fn parse_wall_time_ms(output: &str) -> Option<u64> {
     })
 }
 
-pub(crate) fn parse_timestamp_ms(value: &str) -> Option<i64> {
-    let text = value.trim();
-    let year = text.get(0..4)?.parse::<i32>().ok()?;
-    let month = text.get(5..7)?.parse::<u32>().ok()?;
-    let day = text.get(8..10)?.parse::<u32>().ok()?;
-    let hour = text.get(11..13)?.parse::<u32>().ok()?;
-    let minute = text.get(14..16)?.parse::<u32>().ok()?;
-    let second = text.get(17..19)?.parse::<u32>().ok()?;
-    let millis = text
-        .get(19..)
-        .and_then(|rest| rest.strip_prefix('.'))
-        .map(|fraction| {
-            fraction
-                .chars()
-                .take_while(|char| char.is_ascii_digit())
-                .take(3)
-                .collect::<String>()
-        })
-        .filter(|fraction| !fraction.is_empty())
-        .and_then(|fraction| format!("{fraction:0<3}").parse::<i64>().ok())
-        .unwrap_or(0);
-
-    let days = days_from_civil(year, month, day)?;
-    Some(
-        days * 86_400_000
-            + i64::from(hour) * 3_600_000
-            + i64::from(minute) * 60_000
-            + i64::from(second) * 1000
-            + millis,
-    )
-}
-
-fn days_from_civil(year: i32, month: u32, day: u32) -> Option<i64> {
-    if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
-        return None;
-    }
-    let year = year - i32::from(month <= 2);
-    let era = if year >= 0 { year } else { year - 399 } / 400;
-    let year_of_era = year - era * 400;
-    let month = i32::try_from(month).ok()?;
-    let day = i32::try_from(day).ok()?;
-    let day_of_year = (153 * (month + if month > 2 { -3 } else { 9 }) + 2) / 5 + day - 1;
-    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
-    Some(i64::from(era) * 146_097 + i64::from(day_of_era) - 719_468)
-}
-
 fn truncate_text(value: &str, limit: usize) -> String {
     let mut text: String = value.chars().take(limit).collect();
     if value.chars().count() > limit {
@@ -2206,7 +2144,7 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        TranscriptSearchScopes, collect_generic_item, parse_search_transcript,
+        TranscriptSearchScopes, collect_shared_item, parse_search_transcript,
         parse_transcript,
         parse_transcript_locator_page, parse_transcript_page, parse_transcript_page_at_snapshot,
         search_transcript, summarize_tool_call, transcript_search_cache_offsets, transcript_source_version,
@@ -2963,6 +2901,35 @@ mod tests {
     }
 
     #[test]
+    fn preserves_timezone_offsets_when_measuring_tool_duration() {
+        let call = json!({
+            "type": "response_item",
+            "timestamp": "2026-08-28T11:49:00+08:00",
+            "payload": {
+                "type": "function_call",
+                "call_id": "call_1",
+                "name": "exec_command",
+                "arguments": "{\"cmd\":\"pwd\"}"
+            }
+        });
+        let output = json!({
+            "type": "response_item",
+            "timestamp": "2026-08-28T03:57:03.099Z",
+            "payload": {
+                "type": "function_call_output",
+                "call_id": "call_1",
+                "output": "done"
+            }
+        });
+        let mut items = Vec::new();
+
+        collect_codex_item(&call, &mut items);
+        collect_codex_item(&output, &mut items);
+
+        assert_eq!(items[0].duration_ms, Some(483_099));
+    }
+
+    #[test]
     fn links_codex_spawn_agent_call_to_child_session() {
         let call = json!({
             "type": "response_item",
@@ -3144,6 +3111,31 @@ mod tests {
 
         collect_claude_item(&claude_legacy_result, &mut items);
         assert!(items.is_empty());
+    }
+
+    #[test]
+    fn tool_results_without_call_ids_do_not_bind_to_the_latest_tool() {
+        let call = json!({
+            "type": "response_item",
+            "payload": {
+                "type": "function_call",
+                "call_id": "call-1",
+                "name": "exec",
+                "arguments": {"cmd": "true"}
+            }
+        });
+        let result = json!({
+            "type": "response_item",
+            "payload": {
+                "type": "function_call_output",
+                "output": "should remain orphaned"
+            }
+        });
+        let mut items = Vec::new();
+        collect_codex_item(&call, &mut items);
+        collect_codex_item(&result, &mut items);
+        assert_eq!(items.len(), 1);
+        assert!(items[0].result.is_none());
     }
 
     #[test]
@@ -3360,8 +3352,8 @@ mod tests {
         });
         let mut items = Vec::new();
 
-        collect_generic_item(&user, &mut items);
-        collect_generic_item(&assistant, &mut items);
+        collect_shared_item(&user, &mut items);
+        collect_shared_item(&assistant, &mut items);
 
         assert_eq!(items.len(), 3);
         assert_eq!(items[0].kind, "user");
@@ -3415,10 +3407,10 @@ mod tests {
         });
         let mut items = Vec::new();
 
-        collect_generic_item(&notification, &mut items);
-        collect_generic_item(&notification_with_details, &mut items);
-        collect_generic_item(&internal, &mut items);
-        collect_generic_item(&user, &mut items);
+        collect_shared_item(&notification, &mut items);
+        collect_shared_item(&notification_with_details, &mut items);
+        collect_shared_item(&internal, &mut items);
+        collect_shared_item(&user, &mut items);
 
         assert_eq!(items.len(), 4);
         assert_eq!(items[0].kind, "notification");

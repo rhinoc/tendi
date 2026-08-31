@@ -2,10 +2,13 @@ use std::{fs, path::{Path, PathBuf}};
 
 use anyhow::Result;
 use anyhow::bail;
+use chrono::{DateTime, SecondsFormat};
 use serde_json::Value;
 use walkdir::WalkDir;
 
-use crate::transcript::{TranscriptItem, collect_generic_item};
+use crate::transcript::{
+    TranscriptItem, collect_cursor_item_with_timestamp, extract_raw_content_text,
+};
 
 use super::*;
 
@@ -214,7 +217,52 @@ pub(super) fn apply_config_profile(command: &mut SessionCommand, profile: &str) 
 }
 
 pub(super) fn parse_transcript(value: &Value, items: &mut Vec<TranscriptItem>) {
-    collect_generic_item(value, items);
+    collect_cursor_item_with_timestamp(value, items, cursor_event_timestamp(value));
+}
+
+pub(crate) fn cursor_event_timestamp(value: &Value) -> Option<String> {
+    let content = value
+        .pointer("/message/content")
+        .or_else(|| value.get("content"))
+        .or_else(|| value.get("message"));
+    let text = extract_raw_content_text(content)?;
+    let start = text.find("<timestamp>")? + "<timestamp>".len();
+    let end = text[start..].find("</timestamp>")? + start;
+    let value = text[start..end].trim();
+    let normalized = normalize_cursor_timestamp(value)?;
+    DateTime::parse_from_str(&normalized, "%A, %b %-d, %Y, %-I:%M %p %:z")
+        .ok()
+        .map(|timestamp| timestamp.to_rfc3339_opts(SecondsFormat::Secs, true))
+}
+
+fn normalize_cursor_timestamp(value: &str) -> Option<String> {
+    let (date_time, zone) = value.rsplit_once(" (")?;
+    let zone = zone.strip_suffix(')')?.strip_prefix("UTC")?;
+    let offset = normalize_cursor_offset(zone)?;
+    Some(format!("{date_time} {offset}"))
+}
+
+fn normalize_cursor_offset(value: &str) -> Option<String> {
+    if value.is_empty() {
+        return Some("+00:00".to_string());
+    }
+    let sign = value
+        .chars()
+        .next()
+        .filter(|sign| matches!(sign, '+' | '-'))?;
+    let digits = value[sign.len_utf8()..].replace(':', "");
+    if !digits.chars().all(|digit| digit.is_ascii_digit()) {
+        return None;
+    }
+    let (hours, minutes) = match digits.len() {
+        1 | 2 => (digits.parse::<u32>().ok()?, 0),
+        4 => (
+            digits.get(..2)?.parse::<u32>().ok()?,
+            digits.get(2..)?.parse::<u32>().ok()?,
+        ),
+        _ => return None,
+    };
+    (hours <= 23 && minutes <= 59).then(|| format!("{sign}{hours:02}:{minutes:02}"))
 }
 
 pub(super) fn append_transcript_metadata(
@@ -523,6 +571,10 @@ impl super::AgentProvider for CursorProvider {
         )
     }
 
+    fn skill_frontmatter_visibility_key(&self) -> Option<&'static str> {
+        Some(CURSOR_SKILL_FRONTMATTER_KEY)
+    }
+
     fn session_scan_priority(&self, root: &Path) -> Option<u8> {
         root.to_string_lossy().contains("/.cursor/").then_some(1)
     }
@@ -671,6 +723,35 @@ impl super::AgentProvider for CursorProvider {
         })
     }
 
+    fn session_requires_rescan(&self, session: &SessionRecord) -> Option<bool> {
+        if session.started_at.is_some() && session.updated_at.is_some() {
+            return None;
+        }
+        if session
+            .path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            != Some("jsonl")
+        {
+            return None;
+        }
+        fs::read_to_string(&session.path)
+            .ok()
+            .is_some_and(|text| text.contains("<timestamp>") && text.contains("</timestamp>"))
+            .then_some(true)
+    }
+
+    fn update_session_metadata(
+        &self,
+        value: &Value,
+        meta: &mut SessionMetadata,
+        _deduplicated_usage: &mut BTreeMap<String, SessionTokenUsage>,
+    ) {
+        if let Some(timestamp) = cursor_event_timestamp(value) {
+            sessions::apply_time_bounds(meta, &timestamp);
+        }
+    }
+
     fn parse_transcript_value(&self, value: &Value, items: &mut Vec<TranscriptItem>) {
         parse_transcript(value, items);
     }
@@ -720,11 +801,14 @@ impl super::AgentProvider for CursorProvider {
     }
 
     fn parse_analytics_line(&self, line: &str, record: &mut SessionAnalyticsRecord) {
-        crate::analytics::parse_message_line(line, record);
+        let timestamp = serde_json::from_str::<Value>(line)
+            .ok()
+            .and_then(|value| cursor_event_timestamp(&value));
+        crate::analytics::parse_message_line_with_timestamp(line, record, timestamp);
     }
 
     fn extract_skill_tool_payloads<'a>(&self, value: &'a Value) -> Vec<(&'a Value, Evidence)> {
-        crate::providers::shared::generic_tool_payloads(value)
+        crate::providers::shared::shared_tool_payloads(value)
     }
 
     fn infer_session_project(&self, path: &Path, project: Option<PathBuf>) -> Option<PathBuf> {
@@ -962,8 +1046,11 @@ mod tests {
         time::{SystemTime, UNIX_EPOCH},
     };
 
-    use super::{AgentProvider, CursorProvider, ProviderContext};
+    use super::{
+        AgentProvider, CursorProvider, ProviderContext, cursor_event_timestamp, parse_transcript,
+    };
     use crate::skills::AgentKind;
+    use serde_json::json;
 
     fn temp_dir() -> PathBuf {
         std::env::temp_dir().join(format!(
@@ -974,6 +1061,30 @@ mod tests {
                 .expect("system time before epoch")
                 .as_nanos()
         ))
+    }
+
+    #[test]
+    fn parses_embedded_cursor_timestamp_for_transcript_items() {
+        let user = json!({
+            "role": "user",
+            "message": {
+                "content": [{
+                    "type": "text",
+                    "text": "<timestamp>Thursday, Aug 27, 2026, 11:01 PM (UTC+8)</timestamp>\n<user_query>Why did sending fail?</user_query>"
+                }]
+            }
+        });
+        assert_eq!(
+            cursor_event_timestamp(&user).as_deref(),
+            Some("2026-08-27T23:01:00+08:00")
+        );
+
+        let mut items = Vec::new();
+        parse_transcript(&user, &mut items);
+
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].body, "Why did sending fail?");
+        assert_eq!(items[0].time.as_deref(), Some("23:01"));
     }
 
     #[test]

@@ -15,6 +15,7 @@ const fs = require("node:fs");
 
 const version = process.env.VERSION;
 const releaseUrl = process.env.RELEASE_URL;
+const releaseNotesPath = process.env.RELEASE_NOTES_PATH;
 const artifacts = {
   "darwin-aarch64": "aarch64",
   "darwin-aarch64-app": "aarch64",
@@ -35,10 +36,16 @@ for (const [platform, arch] of Object.entries(artifacts)) {
 
 const latest = {
   version,
-  notes: "Open the DMG and drag tendi.app to Applications.",
+  notes: releaseNotesPath
+    ? fs.readFileSync(releaseNotesPath, "utf8").trim()
+    : "Open the DMG and drag tendi.app to Applications.",
   pub_date: new Date().toISOString(),
   platforms,
 };
+
+if (releaseNotesPath && !latest.notes) {
+  throw new Error(`Release notes are empty: ${releaseNotesPath}`);
+}
 
 fs.mkdirSync("dist", { recursive: true });
 fs.writeFileSync("dist/latest.json", `${JSON.stringify(latest, null, 2)}\n`);

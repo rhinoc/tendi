@@ -20,10 +20,16 @@ type ChartGroup = {
   count: number;
 };
 
+enum SkillSessionProjectNodeType {
+  Skill = "skill",
+  Session = "session",
+  Project = "project",
+}
+
 type ActiveNode =
-  | { type: "skill"; key: string }
-  | { type: "session"; key: string }
-  | { type: "project"; key: string }
+  | { type: SkillSessionProjectNodeType.Skill; key: string }
+  | { type: SkillSessionProjectNodeType.Session; key: string }
+  | { type: SkillSessionProjectNodeType.Project; key: string }
   | null;
 
 function compactLabel(value: string, maxLength: number) {
@@ -99,10 +105,10 @@ export function SkillSessionProjectChart({
           const sourceY = skillY(sourceIndex);
           const targetY = projectY(targetIndex);
           const isDirectlyConnected = activeNode === null
-            || (activeNode.type === "skill" && activeNode.key === item.skillKey)
-            || (activeNode.type === "session" && activeNode.key === item.key)
-            || (activeNode.type === "project" && activeNode.key === item.projectKey);
-          const isActive = activeNode?.type === "session" && activeNode.key === item.key;
+            || (activeNode.type === SkillSessionProjectNodeType.Skill && activeNode.key === item.skillKey)
+            || (activeNode.type === SkillSessionProjectNodeType.Session && activeNode.key === item.key)
+            || (activeNode.type === SkillSessionProjectNodeType.Project && activeNode.key === item.projectKey);
+          const isActive = activeNode?.type === SkillSessionProjectNodeType.Session && activeNode.key === item.key;
           const connectionClass = activeNode === null ? "" : isDirectlyConnected ? " isActive" : " isDimmed";
           const activate = () => onSessionClick?.(item);
           const sessionLabel = formatSessionTitle(item.sessionLabel);
@@ -115,9 +121,9 @@ export function SkillSessionProjectChart({
               aria-label={onSessionClick ? `Open ${sessionLabel}` : undefined}
               onClick={onSessionClick ? activate : undefined}
               onKeyDown={onSessionClick ? (event) => activateOnKeyboard(event, activate) : undefined}
-              onMouseEnter={() => setActiveNode({ type: "session", key: item.key })}
+              onMouseEnter={() => setActiveNode({ type: SkillSessionProjectNodeType.Session, key: item.key })}
               onMouseLeave={() => setActiveNode(null)}
-              onFocus={() => setActiveNode({ type: "session", key: item.key })}
+              onFocus={() => setActiveNode({ type: SkillSessionProjectNodeType.Session, key: item.key })}
               onBlur={() => setActiveNode(null)}
             >
               <path className="skillSessionProjectPath" d={`M ${skillX + 8} ${sourceY} C 145 ${sourceY} 205 ${y} ${sessionX - 8} ${y}`} />
@@ -138,14 +144,14 @@ export function SkillSessionProjectChart({
         {skills.map((skill, index) => {
           const y = skillY(index);
           const radius = Math.min(14, 3 + skill.count * 0.45);
-          const isActive = activeNode?.type === "skill" && activeNode.key === skill.key;
+          const isActive = activeNode?.type === SkillSessionProjectNodeType.Skill && activeNode.key === skill.key;
           return (
             <g
               key={skill.key}
               className={`skillSessionProjectSkill${isActive ? " isActive" : ""}`}
-              onMouseEnter={() => setActiveNode({ type: "skill", key: skill.key })}
+              onMouseEnter={() => setActiveNode({ type: SkillSessionProjectNodeType.Skill, key: skill.key })}
               onMouseLeave={() => setActiveNode(null)}
-              onFocus={() => setActiveNode({ type: "skill", key: skill.key })}
+              onFocus={() => setActiveNode({ type: SkillSessionProjectNodeType.Skill, key: skill.key })}
               onBlur={() => setActiveNode(null)}
             >
               <circle className="skillSessionProjectSkillNode" cx={skillX} cy={y} r={radius} />
@@ -165,8 +171,8 @@ export function SkillSessionProjectChart({
         {projects.map((project, index) => {
           const y = projectY(index);
           const radius = Math.min(16, 3 + project.count * 0.55);
-          const isActive = activeNode?.type === "project" && activeNode.key === project.key;
-          const activate = () => setActiveNode((current) => current?.type === "project" && current.key === project.key ? null : { type: "project", key: project.key });
+          const isActive = activeNode?.type === SkillSessionProjectNodeType.Project && activeNode.key === project.key;
+          const activate = () => setActiveNode((current) => current?.type === SkillSessionProjectNodeType.Project && current.key === project.key ? null : { type: SkillSessionProjectNodeType.Project, key: project.key });
           return (
             <g
               key={project.key}
@@ -175,9 +181,9 @@ export function SkillSessionProjectChart({
               tabIndex={0}
               aria-label={`${project.label}, ${project.count} linked sessions`}
               onKeyDown={(event) => activateOnKeyboard(event, activate)}
-              onMouseEnter={() => setActiveNode({ type: "project", key: project.key })}
+              onMouseEnter={() => setActiveNode({ type: SkillSessionProjectNodeType.Project, key: project.key })}
               onMouseLeave={() => setActiveNode(null)}
-              onFocus={() => setActiveNode({ type: "project", key: project.key })}
+              onFocus={() => setActiveNode({ type: SkillSessionProjectNodeType.Project, key: project.key })}
               onBlur={() => setActiveNode(null)}
             >
               <circle className="skillSessionProjectProjectNode" cx={projectX} cy={y} r={radius} />

@@ -461,20 +461,15 @@
 }
 
 .overviewTrendRung.category0,
-.chartLegendSwatch.category0,
-.chartTooltipDetailSwatch.category0 { background: var(--chart-cat-0); }
+.chartLegendSwatch.category0 { background: var(--chart-cat-0); }
 .overviewTrendRung.category1,
-.chartLegendSwatch.category1,
-.chartTooltipDetailSwatch.category1 { background: var(--chart-cat-1); }
+.chartLegendSwatch.category1 { background: var(--chart-cat-1); }
 .overviewTrendRung.category2,
-.chartLegendSwatch.category2,
-.chartTooltipDetailSwatch.category2 { background: var(--chart-cat-2); }
+.chartLegendSwatch.category2 { background: var(--chart-cat-2); }
 .overviewTrendRung.category3,
-.chartLegendSwatch.category3,
-.chartTooltipDetailSwatch.category3 { background: var(--chart-cat-3); }
+.chartLegendSwatch.category3 { background: var(--chart-cat-3); }
 .overviewTrendRung.categoryOther,
-.chartLegendSwatch.categoryOther,
-.chartTooltipDetailSwatch.categoryOther { background: var(--chart-other, var(--faint)); }
+.chartLegendSwatch.categoryOther { background: var(--chart-other, var(--faint)); }
 .chartLegendSwatch.tokensPerResponse { background: var(--chart-line); }
 .overviewTrendTooltipValues {
   display: flex;
@@ -487,37 +482,30 @@
 
 .overviewTrendTooltipValues > span {
   color: var(--muted);
-  font-size: var(--text-sm);
+  font-size: var(--text-xs);
   font-weight: 600;
 }
 
 .overviewTrendTooltipValues > strong {
   color: var(--accent);
-  font-size: var(--text-sm);
+  font-size: var(--text-xs);
   font-weight: 750;
 }
 
 .overviewTrendRung.agentCodex,
-.chartLegendSwatch.agentCodex,
-.chartTooltipDetailSwatch.agentCodex { background: var(--agent-codex, var(--chart-cat-0)); }
+.chartLegendSwatch.agentCodex { background: var(--agent-codex, var(--chart-cat-0)); }
 .overviewTrendRung.agentClaude,
-.chartLegendSwatch.agentClaude,
-.chartTooltipDetailSwatch.agentClaude { background: var(--agent-claude, var(--chart-cat-1)); }
+.chartLegendSwatch.agentClaude { background: var(--agent-claude, var(--chart-cat-1)); }
 .overviewTrendRung.agentCursor,
-.chartLegendSwatch.agentCursor,
-.chartTooltipDetailSwatch.agentCursor { background: var(--agent-cursor, var(--chart-cat-2)); }
+.chartLegendSwatch.agentCursor { background: var(--agent-cursor, var(--chart-cat-2)); }
 .overviewTrendRung.agentOther,
-.chartLegendSwatch.agentOther,
-.chartTooltipDetailSwatch.agentOther { background: var(--chart-other, var(--faint)); }
+.chartLegendSwatch.agentOther { background: var(--chart-other, var(--faint)); }
 .overviewTrendRung.statusCompleted,
-.chartLegendSwatch.statusCompleted,
-.chartTooltipDetailSwatch.statusCompleted { background: var(--tone-ok); }
+.chartLegendSwatch.statusCompleted { background: var(--tone-ok); }
 .overviewTrendRung.statusAborted,
-.chartLegendSwatch.statusAborted,
-.chartTooltipDetailSwatch.statusAborted { background: var(--tone-alert); }
+.chartLegendSwatch.statusAborted { background: var(--tone-alert); }
 .overviewTrendRung.statusUnclosed,
-.chartLegendSwatch.statusUnclosed,
-.chartTooltipDetailSwatch.statusUnclosed { background: var(--tone-warn); }
+.chartLegendSwatch.statusUnclosed { background: var(--tone-warn); }
 
 .overviewTrendXAxis {
   height: 24px;
@@ -700,15 +688,14 @@
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   grid-template-rows: repeat(5, auto);
-  grid-auto-flow: column;
-  grid-auto-columns: minmax(0, 1fr);
+  grid-auto-flow: row;
   gap: 12px 24px;
   min-width: 0;
 }
 
 .overviewSessionRow {
   display: grid;
-  grid-template-rows: auto auto auto auto;
+  grid-template-rows: auto auto auto;
   align-content: start;
   gap: 7px;
   width: calc(100% - 8px);
@@ -760,16 +747,33 @@
   margin-block-start: 1px;
 }
 
-.overviewSessionProject {
+.overviewSessionProject,
+.overviewSessionUpdated {
   max-width: 35%;
   min-width: 0;
   overflow: hidden;
   color: var(--muted);
   font-size: var(--text-sm);
   line-height: var(--leading-body);
-  text-align: end;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.overviewSessionProject {
+  align-self: start;
+  text-align: end;
+}
+
+.overviewSessionFooter {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: end;
+  gap: 8px;
+  min-width: 0;
+}
+
+.overviewSessionUpdated {
+  text-align: end;
 }
 
 .overviewSessionRowTitle {
@@ -804,9 +808,7 @@
   color: var(--muted);
   font-size: var(--text-sm);
   text-overflow: ellipsis;
-  display: -webkit-box;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 2;
+  white-space: nowrap;
 }
 
 @container overview (max-width: 560px) {

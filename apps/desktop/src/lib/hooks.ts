@@ -116,3 +116,14 @@ export function hookDeleteDisabledReason(hook: HookRecord | null | undefined): s
   if (readOnlyReason) return readOnlyReason;
   return "";
 }
+
+export type HookMutationDelta = {
+  updated?: unknown[];
+  deleted?: unknown[];
+};
+
+export function isHookMutationDelta(value: unknown): value is HookMutationDelta {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const record = value as Record<string, unknown>;
+  return ("updated" in record || "deleted" in record) && !("error" in record);
+}

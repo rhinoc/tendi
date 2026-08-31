@@ -1,6 +1,11 @@
 import type { JsonObject, JsonlTranscriptParseResult, TranscriptItem } from "../transcript.ts";
 
-export type AgentTranscriptFormat = "codex" | "claude" | "generic";
+export enum AgentTranscriptFormat {
+  Codex = "codex",
+  Claude = "claude",
+  Cursor = "cursor",
+  Shared = "shared",
+}
 
 export type TranscriptParseContext = {
   items: TranscriptItem[];

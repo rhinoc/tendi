@@ -1,28 +1,41 @@
-import {
-  collectGenericItem,
-  extractTitle,
-  isJsonObject,
-  stringAt,
-} from "../transcript.ts";
+import { extractTitle, isJsonObject, stringAt } from "../transcript.ts";
 import type { JsonObject, JsonlTranscriptParseResult, TranscriptItem } from "../transcript.ts";
+import { compareTimestamps } from "../time.ts";
 import { agentDefinitions } from "./index.ts";
 import type { AgentDefinition, TranscriptParser } from "./types.ts";
 
 type ParsedTokenUsage = NonNullable<JsonlTranscriptParseResult["tokenUsage"]>;
 
-export function parseJsonlTranscript(
+/** Parse using one provider's owner. Callers that already know the source
+ * must use this entry point so another provider cannot claim the record first.
+ */
+export function parseJsonlTranscriptForProvider(
   text: string,
+  providerId: string,
   definitions: readonly AgentDefinition[] = agentDefinitions,
+): JsonlTranscriptParseResult {
+  const definition = definitions.find((candidate) => (
+    candidate.id === providerId || candidate.aliases.includes(providerId)
+  ));
+  if (!definition?.transcriptParser) {
+    return {
+      items: [],
+      warnings: [`Unsupported transcript provider: ${providerId}`],
+      lineCount: text.split(/\r?\n/).filter((line) => line.trim()).length,
+      parsedCount: 0,
+    };
+  }
+  return parseJsonlTranscriptWithParsers(text, [definition.transcriptParser]);
+}
+
+function parseJsonlTranscriptWithParsers(
+  text: string,
+  parsers: readonly TranscriptParser[],
 ): JsonlTranscriptParseResult {
   const items: TranscriptItem[] = [];
   const warnings: string[] = [];
   const meta: Partial<JsonlTranscriptParseResult> = {};
   const messageUsage = new Map<string, ParsedTokenUsage>();
-  const parsers = definitions.flatMap<TranscriptParser>((definition) => (
-    definition.transcriptFormat !== "generic" && definition.transcriptParser
-      ? [definition.transcriptParser]
-      : []
-  ));
   let lineCount = 0;
   let parsedCount = 0;
 
@@ -40,7 +53,7 @@ export function parseJsonlTranscript(
     if (!isJsonObject(value)) return;
     collectJsonlMeta(value, meta);
     if (parsers.some((parser) => parser(value, { items, meta, messageUsage }))) return;
-    collectGenericItem(value, items);
+    warnings.push(`Line ${index + 1}: unsupported transcript record was ignored`);
   });
 
   if (!meta.tokenUsage && messageUsage.size > 0) {
@@ -52,12 +65,24 @@ export function parseJsonlTranscript(
 
 function collectJsonlMeta(value: JsonObject, meta: Partial<JsonlTranscriptParseResult>) {
   const timestamp = stringAt(value, ["timestamp"]) || stringAt(value, ["payload", "timestamp"]);
-  if (timestamp) {
-    if (!meta.startedAt || timestamp < meta.startedAt) meta.startedAt = timestamp;
-    if (!meta.updatedAt || timestamp > meta.updatedAt) meta.updatedAt = timestamp;
-  }
+  if (timestamp) updateJsonlTimeBounds(meta, timestamp);
   meta.project ||= stringAt(value, ["cwd"]) || stringAt(value, ["payload", "cwd"]);
   meta.title ??= extractTitle(value);
+}
+
+function updateJsonlTimeBounds(meta: Partial<JsonlTranscriptParseResult>, timestamp: string) {
+  if (
+    !meta.startedAt
+    || compareTimestamps(timestamp, meta.startedAt) < 0
+  ) {
+    meta.startedAt = timestamp;
+  }
+  if (
+    !meta.updatedAt
+    || compareTimestamps(timestamp, meta.updatedAt) > 0
+  ) {
+    meta.updatedAt = timestamp;
+  }
 }
 
 function sumTokenUsage(usages: Iterable<ParsedTokenUsage>): ParsedTokenUsage {

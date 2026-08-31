@@ -8,6 +8,7 @@ import { MenuContent } from "../../components/shared/MenuContent.tsx";
 import { StatefulButton } from "../../components/shared/StatefulButton.tsx";
 import { Toast } from "../../components/shared/Toast.tsx";
 import { useElementSize } from "../../components/shared/useElementSize.ts";
+import { AsyncStatus } from "../../lib/async-status.ts";
 
 export type SettingsApplicationOption = {
   value: string;
@@ -15,7 +16,7 @@ export type SettingsApplicationOption = {
   available?: boolean;
 };
 
-type TestState = "idle" | "loading" | "success" | "error";
+type TestState = AsyncStatus;
 
 export type SettingsApplicationPickerProps = {
   id: string;
@@ -54,7 +55,7 @@ export function SettingsApplicationPicker({
   onTest,
 }: SettingsApplicationPickerProps) {
   const [menuOpen, setMenuOpen] = useState(false);
-  const [testState, setTestState] = useState<TestState>("idle");
+  const [testState, setTestState] = useState<TestState>(AsyncStatus.Idle);
   const testRequestRef = useRef(0);
   const { ref: applicationInputRef, size: applicationInputSize } = useElementSize<HTMLDivElement>({ width: 0, height: 0 });
   const selectedOption = options.find((option) => option.value === value);
@@ -62,7 +63,7 @@ export function SettingsApplicationPicker({
 
   const resetTestState = () => {
     testRequestRef.current += 1;
-    setTestState("idle");
+    setTestState(AsyncStatus.Idle);
   };
 
   const chooseOption = (nextValue: string) => {
@@ -77,17 +78,17 @@ export function SettingsApplicationPicker({
     if (!application) return;
     const requestId = testRequestRef.current + 1;
     testRequestRef.current = requestId;
-    setTestState("loading");
+    setTestState(AsyncStatus.Loading);
     const succeeded = await onTest(application);
     if (testRequestRef.current !== requestId) return;
-    setTestState(succeeded ? "success" : "error");
+    setTestState(succeeded ? AsyncStatus.Success : AsyncStatus.Error);
   };
 
-  const testLabel = testState === "loading"
+  const testLabel = testState === AsyncStatus.Loading
     ? labels.opening
-    : testState === "success"
+    : testState === AsyncStatus.Success
       ? labels.opened
-      : testState === "error"
+      : testState === AsyncStatus.Error
         ? labels.failed
         : labels.test;
 

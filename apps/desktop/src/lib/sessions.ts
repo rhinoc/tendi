@@ -1,7 +1,9 @@
 import { basename, compactDateTime } from "./strings.ts";
-import { friendlyAgent, normalizedAgentKey } from "./agents.ts";
+import { compareTimestamps, timestampMs } from "./time.ts";
+import { agentIdentityKey, friendlyAgent, normalizedAgentKey } from "./agents.ts";
 import { agentDefinition } from "./agent/index.ts";
 import { sessionProjectOptionForPaths, type MissingSessionProjectPolicy, type ProjectSummary, type SessionProjectSummary } from "./projects.ts";
+import { SortDirection } from "./sort.ts";
 
 export type SessionRecord = {
   id: string;
@@ -79,22 +81,33 @@ export function normalizeSessionSkillLink(value: unknown): SessionSkillLinkRecor
   };
 }
 
-export type SessionResumeTarget = "auto" | "terminal" | "app";
+export enum SessionResumeTarget {
+  Auto = "auto",
+  Terminal = "terminal",
+  App = "app",
+}
+
+export enum SessionResumeOutcomeStatus {
+  ActiveWriter = "activeWriter",
+  Launched = "launched",
+}
 
 export type SessionResumeOutcome =
-  | { status: "activeWriter"; lockPath: string }
-  | { status: "launched"; target: SessionResumeTarget; terminal?: string };
+  | { status: typeof SessionResumeOutcomeStatus.ActiveWriter; lockPath: string }
+  | { status: typeof SessionResumeOutcomeStatus.Launched; target: SessionResumeTarget; terminal?: string };
 
 export function normalizeSessionResumeTarget(value: unknown): SessionResumeTarget {
-  if (value === "app") return "app";
-  if (value === "terminal") return "terminal";
-  return "auto";
+  if (value === SessionResumeTarget.App) return SessionResumeTarget.App;
+  if (value === SessionResumeTarget.Terminal) return SessionResumeTarget.Terminal;
+  return SessionResumeTarget.Auto;
 }
 
 export function sessionResumeTargetForAgent(target: SessionResumeTarget, agent: unknown): SessionResumeTarget {
-  if (target === "auto") return "auto";
+  if (target === SessionResumeTarget.Auto) return SessionResumeTarget.Auto;
   const definition = agentDefinition(normalizedAgentKey(agent));
-  return target === "app" && definition?.sessionAppDeepLink ? "app" : "terminal";
+  return target === SessionResumeTarget.App && definition?.sessionAppDeepLink
+    ? SessionResumeTarget.App
+    : SessionResumeTarget.Terminal;
 }
 
 export function sessionAppDeepLink(session: Pick<SessionRecord, "id" | "agent" | "project" | "projectPath">): string | undefined {
@@ -109,9 +122,23 @@ export type SessionTokenUsage = {
   totalTokens: number;
 };
 
-export type SortState = { key: string; direction: "asc" | "desc" };
+export enum SessionSortKey {
+  Title = "title",
+  Agent = "agent",
+  Project = "project",
+  StartedAt = "startedAt",
+  UpdatedAt = "updatedAt",
+  Messages = "messages",
+  Turns = "turns",
+  CacheRate = "cacheRate",
+}
 
-export type SessionKind = "main" | "child";
+export type SortState = { key: string; direction: SortDirection };
+
+export enum SessionKind {
+  Main = "main",
+  Child = "child",
+}
 
 function textValue(value: unknown): string {
   return typeof value === "string" ? value.trim() : "";
@@ -165,7 +192,9 @@ export function normalizeSession(session: Record<string, unknown>): SessionRecor
     logicalProjectId: logicalProjectId || undefined,
     logicalProjectName: logicalProjectName || undefined,
     path,
-    agent: friendlyAgent(agent),
+    // Keep the provider identity in the domain record. Display labels belong at
+    // render boundaries; runtime commands require the canonical agent key.
+    agent: agentIdentityKey(agent),
     startedAt,
     updatedAt,
     time: updatedAt,
@@ -268,7 +297,7 @@ export function sessionProjectGroupLabel(key: string): string {
 }
 
 export function sessionKind(session: Pick<SessionRecord, "parentSessionId">): SessionKind {
-  return session.parentSessionId ? "child" : "main";
+  return session.parentSessionId ? SessionKind.Child : SessionKind.Main;
 }
 
 export function sessionCacheRate(session: Pick<SessionRecord, "tokenUsage">): number | undefined {
@@ -277,26 +306,8 @@ export function sessionCacheRate(session: Pick<SessionRecord, "tokenUsage">): nu
   return (usage.cachedInputTokens / usage.inputTokens) * 100;
 }
 
-export function sessionSnapshot(session: SessionRecord): string {
-  return JSON.stringify(session);
-}
-
-export function mergeSessionRows(currentRows: SessionRecord[], incomingRows: Array<Record<string, unknown>>): SessionRecord[] {
-  const currentByKey = new Map(currentRows.map((row) => [sessionIdentity(row), row]));
-  const nextRows = incomingRows.flatMap((row) => {
-    const nextRow = normalizeSession(row);
-    if (!nextRow) return [];
-    const currentRow = currentByKey.get(sessionIdentity(nextRow));
-    return [currentRow && sessionSnapshot(currentRow) === sessionSnapshot(nextRow) ? currentRow : nextRow];
-  });
-  if (nextRows.length !== currentRows.length) return nextRows;
-  for (let index = 0; index < nextRows.length; index += 1) {
-    if (nextRows[index] !== currentRows[index]) return nextRows;
-  }
-  return currentRows;
-}
-
 export type SessionIdentityRecord = {
+  [key: string]: unknown;
   id?: unknown;
   agent?: unknown;
   path?: unknown;
@@ -310,52 +321,35 @@ export function sessionIdentityRecordKey(record: SessionIdentityRecord): string 
   return sessionIdentity({ id, agent, path });
 }
 
-export function applySessionDelta(
-  currentRows: SessionRecord[],
-  incomingRows: Array<Record<string, unknown>>,
-  deletedRows: SessionIdentityRecord[] = [],
-): SessionRecord[] {
-  const deletedKeys = new Set(deletedRows.flatMap((row) => {
-    const key = sessionIdentityRecordKey(row);
-    return key ? [key] : [];
-  }));
-  const incoming = incomingRows.flatMap((row) => {
-    const normalized = normalizeSession(row);
-    return normalized ? [normalized] : [];
-  });
-  const incomingByKey = new Map(incoming.map((row) => [sessionLogicalIdentity(row), row]));
-  const emittedKeys = new Set<string>();
-  const nextRows = currentRows.flatMap((row) => {
-    const identity = sessionIdentity(row);
-    const key = sessionLogicalIdentity(row);
-    if (deletedKeys.has(identity) || emittedKeys.has(key)) return [];
-    emittedKeys.add(key);
-    const nextRow = incomingByKey.get(key);
-    if (!nextRow) return [row];
-    incomingByKey.delete(key);
-    return [sessionSnapshot(row) === sessionSnapshot(nextRow) ? row : nextRow];
-  });
-  nextRows.push(...incomingByKey.values());
-  if (nextRows.length !== currentRows.length) return nextRows;
-  return nextRows.some((row, index) => row !== currentRows[index]) ? nextRows : currentRows;
+export function sessionLogicalIdentityRecordKey(record: SessionIdentityRecord): string | undefined {
+  const id = textValue(record.id);
+  const agent = textValue(record.agent);
+  if (!id || !agent) return undefined;
+  return sessionLogicalIdentity({ id, agent });
 }
 
 export function sortValue(session: SessionRecord, key: string): string | number {
-  if (key === "title") return session.title.toLowerCase();
-  if (key === "agent") return session.agent.toLowerCase();
-  if (key === "project") return sessionProject(session).toLowerCase();
-  if (key === "startedAt") return `${session.startedAt ?? ""}`;
-  if (key === "updatedAt") return `${session.updatedAt ?? ""}`;
-  if (key === "messages") return Number(session.messages) || 0;
-  if (key === "turns") return Number(session.turnCount) || 0;
-  if (key === "cacheRate") return sessionCacheRate(session) ?? -1;
+  if (key === SessionSortKey.Title) return session.title.toLowerCase();
+  if (key === SessionSortKey.Agent) return session.agent.toLowerCase();
+  if (key === SessionSortKey.Project) return sessionProject(session).toLowerCase();
+  if (key === SessionSortKey.StartedAt) return sessionTimeMs(session.startedAt);
+  if (key === SessionSortKey.UpdatedAt) return sessionTimeMs(session.updatedAt);
+  if (key === SessionSortKey.Messages) return Number(session.messages) || 0;
+  if (key === SessionSortKey.Turns) return Number(session.turnCount) || 0;
+  if (key === SessionSortKey.CacheRate) return sessionCacheRate(session) ?? -1;
   return "";
 }
 
 export function compareSessions(a: SessionRecord, b: SessionRecord, sort: SortState): number {
+  if (sort.key === SessionSortKey.StartedAt) {
+    return compareTimestamps(a.startedAt, b.startedAt) * (sort.direction === SortDirection.Asc ? 1 : -1);
+  }
+  if (sort.key === SessionSortKey.UpdatedAt) {
+    return compareTimestamps(a.updatedAt, b.updatedAt) * (sort.direction === SortDirection.Asc ? 1 : -1);
+  }
   const left = sortValue(a, sort.key);
   const right = sortValue(b, sort.key);
-  const direction = sort.direction === "asc" ? 1 : -1;
+  const direction = sort.direction === SortDirection.Asc ? 1 : -1;
   if (typeof left === "number" || typeof right === "number") {
     return ((Number(left) || 0) - (Number(right) || 0)) * direction;
   }
@@ -363,6 +357,5 @@ export function compareSessions(a: SessionRecord, b: SessionRecord, sort: SortSt
 }
 
 export function sessionTimeMs(value: unknown): number {
-    const time = Date.parse(`${value ?? ""}`);
-    return Number.isFinite(time) ? time : 0;
+  return timestampMs(value) ?? 0;
 }

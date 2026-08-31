@@ -3,9 +3,10 @@ import { forwardRef, type CSSProperties, type ReactNode } from "react";
 
 import { Button, type ButtonProps } from "./Button.tsx";
 import { LoadingIcon } from "./LoadingIcon.tsx";
+import { AsyncStatus } from "../../lib/async-status.ts";
 import "./StatefulButton.css";
 
-export type StatefulButtonState = "idle" | "loading" | "success" | "error";
+export type StatefulButtonState = AsyncStatus;
 
 export type StatefulButtonProps = Omit<ButtonProps, "children" | "disabled" | "aria-busy"> & {
   state: StatefulButtonState;
@@ -38,19 +39,19 @@ export const StatefulButton = forwardRef<HTMLButtonElement, StatefulButtonProps>
   "aria-label": ariaLabel,
   ...buttonProps
 }, ref) {
-  const stateLabel = state === "loading"
+  const stateLabel = state === AsyncStatus.Loading
     ? loadingLabel ?? ariaLabel ?? "Working"
-    : state === "success"
+    : state === AsyncStatus.Success
       ? successLabel ?? ariaLabel ?? "Completed"
-      : state === "error"
+      : state === AsyncStatus.Error
         ? errorLabel ?? ariaLabel ?? "Failed"
         : ariaLabel;
 
-  const content = state === "loading"
+  const content = state === AsyncStatus.Loading
     ? loadingContent ?? <LoadingIcon size={16} />
-    : state === "success"
+    : state === AsyncStatus.Success
       ? successContent ?? (successLabel ? <><Check size={16} aria-hidden="true" /><span>{successLabel}</span></> : <Check size={16} aria-hidden="true" />)
-      : state === "error"
+      : state === AsyncStatus.Error
         ? errorContent ?? (errorLabel ? <><AlertCircle size={16} aria-hidden="true" /><span>{errorLabel}</span></> : <AlertCircle size={16} aria-hidden="true" />)
         : children;
 
@@ -66,9 +67,9 @@ export const StatefulButton = forwardRef<HTMLButtonElement, StatefulButtonProps>
       {...buttonProps}
       className={["statefulButton", className].filter(Boolean).join(" ")}
       style={resolvedStyle}
-      disabled={disabled || state === "loading"}
+      disabled={disabled || state === AsyncStatus.Loading}
       aria-label={stateLabel}
-      aria-busy={state === "loading"}
+      aria-busy={state === AsyncStatus.Loading}
       data-state={state}
     >
       {content}

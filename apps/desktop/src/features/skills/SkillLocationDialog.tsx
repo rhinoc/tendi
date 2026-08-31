@@ -13,8 +13,10 @@ import { DialogMenuContent } from "../../components/shared/DialogMenuContent.tsx
 import { SegmentedControl, SegmentedControlItem } from "../../components/shared/SegmentedControl.tsx";
 import { Toast } from "../../components/shared/Toast.tsx";
 import { Tooltip } from "../../components/shared/Tooltip.tsx";
-import { agentIdentityKey, formatUserPath, invokeCommand, TauriCommand } from "../../lib/index.ts";
+import { agentIdentityKey, formatUserPath } from "../../lib/index.ts";
 import type { NormalizedSkill, RawSkillRecord } from "../../lib/index.ts";
+import { distributeSkills, removeSkillLocations, SkillDistributionMode, SkillScope } from "../../lib/runtime-gateway.ts";
+import { mergeSkillRows } from "../../controllers/skill-controller.ts";
 
 type SkillTargetOption = {
   id: string;
@@ -23,11 +25,12 @@ type SkillTargetOption = {
   globalPath?: string;
 };
 
-type DistributionMode = "move" | "symlink" | "copy";
+type DistributionMode = SkillDistributionMode;
 
-type DistributionResponse = {
-  skills: RawSkillRecord[];
-};
+enum SkillLocationBusyAction {
+  Idle = "",
+  Apply = "apply",
+}
 
 export type SkillLocationDialogProps = {
   open: boolean;
@@ -37,13 +40,13 @@ export type SkillLocationDialogProps = {
   installedAgentKeys: string[];
   targetOptions?: SkillTargetOption[];
   onOpenChange: (open: boolean) => void;
-  onApplied: (skills?: RawSkillRecord[]) => void | Promise<void>;
+  onApplied: (skills?: RawSkillRecord[], options?: { patch?: boolean; deleted?: string[] }) => void | Promise<void>;
 };
 
 const modeOptions: Array<{ value: DistributionMode; label: string; icon: typeof ArrowRightLeft }> = [
-  { value: "move", label: "Move", icon: ArrowRightLeft },
-  { value: "copy", label: "Copy", icon: Copy },
-  { value: "symlink", label: "Link", icon: Link2 },
+  { value: SkillDistributionMode.Move, label: "Move", icon: ArrowRightLeft },
+  { value: SkillDistributionMode.Copy, label: "Copy", icon: Copy },
+  { value: SkillDistributionMode.Symlink, label: "Link", icon: Link2 },
 ];
 
 function sourcePathForSkill(skill: NormalizedSkill, initialAgent: string | undefined, singleSkill: boolean): string {
@@ -61,7 +64,7 @@ function targetOptionsForDialog(options: SkillTargetOption[]): SkillTargetOption
 function skillHasTarget(skill: NormalizedSkill, target: SkillTargetOption): boolean {
   return skill.paths.some((path) => {
     const scope = `${path.scope ?? ""}`.toLowerCase();
-    if (scope && scope !== "global") return false;
+    if (scope && scope !== SkillScope.Global) return false;
     const agent = path.install_target.split(":")[0];
     return agentIdentityKey(agent) === agentIdentityKey(target.id);
   });
@@ -81,9 +84,9 @@ export function SkillLocationDialog({
     () => skills?.length ? skills : skill ? [skill] : [],
     [skill, skills],
   );
-  const [mode, setMode] = useState<DistributionMode>("move");
+  const [mode, setMode] = useState<DistributionMode>(SkillDistributionMode.Move);
   const [targetOverrides, setTargetOverrides] = useState<Record<string, boolean>>({});
-  const [busy, setBusy] = useState<"apply" | "">("");
+  const [busy, setBusy] = useState<SkillLocationBusyAction>(SkillLocationBusyAction.Idle);
   const [confirmRemoval, setConfirmRemoval] = useState(false);
   const [error, setError] = useState("");
 
@@ -157,13 +160,13 @@ export function SkillLocationDialog({
 
   useEffect(() => {
     if (!open || selectedSkills.length === 0) return;
-    setMode("move");
+    setMode(SkillDistributionMode.Move);
     setTargetOverrides({});
     setConfirmRemoval(false);
     setError("");
   }, [initialAgent, open, selectedSkillsKey]);
 
-  const moveHasMultipleAdds = mode === "move" && locationChanges.addedTargetIds.length > 1;
+  const moveHasMultipleAdds = mode === SkillDistributionMode.Move && locationChanges.addedTargetIds.length > 1;
   const missingSource = locationChanges.addedTargetIds.length > 0 && sourcePaths.length !== selectedSkills.length;
   const canApply = (locationChanges.addedTargetIds.length > 0 || locationChanges.removedTargetIds.length > 0)
     && !moveHasMultipleAdds
@@ -185,35 +188,37 @@ export function SkillLocationDialog({
       setConfirmRemoval(true);
       return;
     }
-    setBusy("apply");
+    setBusy(SkillLocationBusyAction.Apply);
     setError("");
     try {
-      let updatedSkills: RawSkillRecord[] | undefined;
-      for (const targetId of locationChanges.addedTargetIds) {
-        const response = await invokeCommand<DistributionResponse>(TauriCommand.SkillsDistribute, {
+      let updatedSkills: RawSkillRecord[] = [];
+      let deleted: string[] = [];
+      if (locationChanges.addedTargetIds.length > 0) {
+        const response = await distributeSkills({
           sourcePaths,
-          target: targetId,
-          scope: "global",
+          targets: locationChanges.addedTargetIds,
+          scope: SkillScope.Global,
           mode,
           dryRun: false,
         });
-        updatedSkills = response.skills;
+        updatedSkills = mergeSkillRows(updatedSkills, response.updated ?? response.skills ?? []);
       }
       if (locationChanges.removedTargetIds.length > 0) {
-        const response = await invokeCommand<DistributionResponse>(TauriCommand.SkillsRemoveLocations, {
+        const response = await removeSkillLocations({
           names: selectedSkills.map((item) => item.name),
           targets: locationChanges.removedTargetIds,
-          scope: "global",
+          scope: SkillScope.Global,
         });
-        updatedSkills = response.skills;
+        updatedSkills = mergeSkillRows(updatedSkills, response.updated ?? response.skills ?? []);
+        deleted = response.deleted ?? [];
       }
       setConfirmRemoval(false);
       onOpenChange(false);
-      await onApplied(updatedSkills);
+      await onApplied(updatedSkills, { patch: true, deleted: deleted.length > 0 ? deleted : undefined });
     } catch (applyError) {
       setError(String(applyError));
     } finally {
-      setBusy("");
+      setBusy(SkillLocationBusyAction.Idle);
     }
   };
 
@@ -239,7 +244,7 @@ export function SkillLocationDialog({
                 type="button"
                 className="selectControlTrigger skillLocationTrigger"
                 aria-label={`Locations: ${locationTriggerLabel}`}
-                disabled={busy === "apply"}
+                disabled={busy === SkillLocationBusyAction.Apply}
               >
                 <span className="skillLocationTriggerText">{locationTriggerLabel}</span>
                 <ChevronDown size={14} aria-hidden="true" />
@@ -263,7 +268,7 @@ export function SkillLocationDialog({
                       className="skillMenuItem skillLocationMenuItem"
                       checked={checked}
                       aria-checked={mixed ? "mixed" : checked}
-                      disabled={busy === "apply"}
+                      disabled={busy === SkillLocationBusyAction.Apply}
                       onCheckedChange={(nextChecked) => {
                         setTargetOverrides((current) => ({ ...current, [option.id]: nextChecked }));
                       }}
@@ -292,7 +297,7 @@ export function SkillLocationDialog({
             fullWidth
             value={mode}
             onValueChange={(value) => {
-              if (value === "move" || value === "copy" || value === "symlink") setMode(value);
+              if (value === SkillDistributionMode.Move || value === SkillDistributionMode.Copy || value === SkillDistributionMode.Symlink) setMode(value);
             }}
             aria-label="Skill distribution mode"
           >
@@ -315,7 +320,7 @@ export function SkillLocationDialog({
               label="Apply"
               busyLabel="Applying location changes"
               ariaLabel={applyDisabledReason || "Apply location changes"}
-              busy={busy === "apply"}
+              busy={busy === SkillLocationBusyAction.Apply}
               disabled={!canApply}
               onClick={() => { void apply(); }}
             />

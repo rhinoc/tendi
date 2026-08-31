@@ -11,19 +11,31 @@ import {
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 
+export enum AppPage {
+  Overview = "overview",
+  Skills = "skills",
+  Prompts = "prompts",
+  Sessions = "sessions",
+  Rules = "rules",
+  Hooks = "hooks",
+  Mcp = "mcp",
+  Config = "config",
+  Settings = "settings",
+  SkillDetail = "skillDetail",
+}
 
-export type NavItem = { id: string; label: string; icon: LucideIcon };
+export type NavItem = { id: Exclude<AppPage, AppPage.SkillDetail>; label: string; icon: LucideIcon };
 
 export const navItems: NavItem[] = [
-  { id: "overview", label: "Overview", icon: LayoutDashboard },
-  { id: "skills", label: "Skills", icon: Sparkles },
-  { id: "sessions", label: "Sessions", icon: MessagesSquare },
-  { id: "rules", label: "Rules", icon: ScrollText },
-  { id: "mcp", label: "MCP", icon: Server },
-  { id: "hooks", label: "Hooks", icon: Webhook },
-  { id: "prompts", label: "Prompts", icon: MessageSquareText },
-  { id: "config", label: "Config", icon: FileCode },
-  { id: "settings", label: "Settings", icon: Settings },
+  { id: AppPage.Overview, label: "Overview", icon: LayoutDashboard },
+  { id: AppPage.Skills, label: "Skills", icon: Sparkles },
+  { id: AppPage.Sessions, label: "Sessions", icon: MessagesSquare },
+  { id: AppPage.Rules, label: "Rules", icon: ScrollText },
+  { id: AppPage.Mcp, label: "MCP", icon: Server },
+  { id: AppPage.Hooks, label: "Hooks", icon: Webhook },
+  { id: AppPage.Prompts, label: "Prompts", icon: MessageSquareText },
+  { id: AppPage.Config, label: "Config", icon: FileCode },
+  { id: AppPage.Settings, label: "Settings", icon: Settings },
 ];
 
 export const SIDEBAR_SIZE = "200px";

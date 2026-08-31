@@ -2,10 +2,10 @@ use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     fs::{self, File, OpenOptions},
     path::{Path, PathBuf},
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use chrono::Local;
 use rusqlite::{
     Connection, OptionalExtension, Transaction, params, params_from_iter,
@@ -18,7 +18,7 @@ mod fs_manifest;
 pub use fs_manifest::{FsManifestEntry, canonical_workspace_root};
 
 use crate::{
-    HookRecord, HookScan, McpScan, McpServerRecord, RuleRecord, RuleScan, ScanReport,
+    HookScan, McpScan, RuleRecord, RuleScan, ScanReport,
     analytics::{
         self, AnalyticsCapabilities, AnalyticsCoverage, AnalyticsProviderCapability,
         AnalyticsRefreshProgress, AnalyticsRefreshReport, OverviewAnalytics,
@@ -26,16 +26,19 @@ use crate::{
     },
     fsutil::sha256_text,
     projects::{self, ProjectRecord, ProjectScanResult, ProjectScanScope},
-    rules::merge_rules_by_path,
+    runtime_contract::{
+        OperationId, OperationRecord, OperationStatus, ProjectionHead, Revision, ScopeKey,
+        SourceVersion,
+    },
     session_skills::{SessionFileState, SessionSkillIndexStatus, SessionSkillLink},
     sessions::{
         SESSION_PREVIEW_MAX_CHARS, SessionIdentity, SessionRecord, SessionScan, SessionScanCache,
-        SessionScanCacheEntry, bound_session_preview, clean_session_title,
-        normalize_session_projects,
+        SessionScanCacheEntry, bound_session_preview, clean_session_title, normalize_session_projects,
     },
     skills::{
-        AgentKind, SkillRecord, SkillScan, SkillSnapshot, SkillSnapshotFile, SkillSourceRecord,
+        AgentKind, SkillScan, SkillSnapshot, SkillSnapshotFile, SkillSourceRecord,
     },
+    time::compare_timestamps,
     transcript,
 };
 
@@ -48,12 +51,43 @@ struct ProjectState {
 
 const SESSION_ANALYTICS_BATCH_SIZE: usize = 64;
 const SESSION_SEARCH_INDEX_VERSION: i64 = 2;
-const PROJECTION_PARSER_VERSION: &str = "scan-v4";
+const PROJECTION_PARSER_VERSION: &str = "scan-v5";
 const SESSION_PAYLOAD_PREVIEWS_MIGRATION_KEY: &str = "session_payload_previews_backfilled_v1";
 const DATABASE_WRITE_LOCK_ATTEMPTS: usize = 100;
 const DATABASE_WRITE_LOCK_RETRY: Duration = Duration::from_millis(50);
+const SCOPED_SESSION_TABLE: &str = "scoped_sessions";
+const DEFAULT_SCOPE_KEY: &str = "installation:default";
+const NORMALIZED_SNAPSHOT_TABLE: &str = "normalized_snapshots";
+const SCOPED_PROJECTION_CONTEXT_TABLE: &str = "scoped_projection_contexts";
 
 const PROJECTION_DOMAINS: [&str; 5] = ["agents", "skills", "rules", "hooks", "mcp"];
+
+fn workspace_scope_key(workspace_root: &Path) -> Result<ScopeKey> {
+    ScopeKey::new(format!(
+        "workspace:{}",
+        canonical_workspace_root(workspace_root).display()
+    ))
+    .map_err(|error| anyhow::anyhow!(error))
+}
+
+fn workspace_root_for_manifest_root(root: &Path) -> PathBuf {
+    let is_agent_dir = |path: &Path| {
+        matches!(
+            path.file_name().and_then(|name| name.to_str()),
+            Some(".agents" | ".codex" | ".claude" | ".cursor")
+        )
+    };
+    if root.file_name().and_then(|name| name.to_str()) == Some("skills")
+        && root.parent().is_some_and(is_agent_dir)
+    {
+        return root
+            .parent()
+            .and_then(Path::parent)
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| root.to_path_buf());
+    }
+    root.to_path_buf()
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProjectionStatus {
@@ -127,7 +161,7 @@ fn default_font_family() -> String {
 }
 
 fn default_color_theme() -> String {
-    "sakura-pop".to_string()
+    "vercel".to_string()
 }
 
 fn default_app_icon() -> String {
@@ -221,7 +255,7 @@ pub struct PromptWrite {
     pub body: String,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct SessionSearchHit {
     #[serde(flatten)]
     pub session: SessionRecord,
@@ -229,7 +263,7 @@ pub struct SessionSearchHit {
     pub search_snippet: String,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionProjectSummary {
     pub id: String,
@@ -492,66 +526,68 @@ impl Store {
                     .then(|| (agent.to_string(), profile.to_string()))
             })
             .collect::<BTreeMap<_, _>>();
-        self.conn.execute(
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute(
             "INSERT INTO app_settings (key, value) VALUES ('appearance', ?1)
              ON CONFLICT(key) DO UPDATE SET value = excluded.value",
             params![appearance],
         )?;
-        self.conn.execute(
+        tx.execute(
             "INSERT INTO app_settings (key, value) VALUES ('font_family', ?1)
              ON CONFLICT(key) DO UPDATE SET value = excluded.value",
             params![font_family],
         )?;
-        self.conn.execute(
+        tx.execute(
             "INSERT INTO app_settings (key, value) VALUES ('light_theme', ?1)
              ON CONFLICT(key) DO UPDATE SET value = excluded.value",
             params![light_theme],
         )?;
-        self.conn.execute(
+        tx.execute(
             "INSERT INTO app_settings (key, value) VALUES ('dark_theme', ?1)
              ON CONFLICT(key) DO UPDATE SET value = excluded.value",
             params![dark_theme],
         )?;
-        self.conn.execute(
+        tx.execute(
             "INSERT INTO app_settings (key, value) VALUES ('app_icon', ?1)
              ON CONFLICT(key) DO UPDATE SET value = excluded.value",
             params![app_icon],
         )?;
-        self.conn.execute(
+        tx.execute(
             "INSERT INTO app_settings (key, value) VALUES ('terminal', ?1)
              ON CONFLICT(key) DO UPDATE SET value = excluded.value",
             params![terminal],
         )?;
-        self.conn.execute(
+        tx.execute(
             "INSERT INTO app_settings (key, value) VALUES ('session_resume_target', ?1)
              ON CONFLICT(key) DO UPDATE SET value = excluded.value",
             params![session_resume_target],
         )?;
-        self.conn.execute(
+        tx.execute(
             "INSERT INTO app_settings (key, value) VALUES ('missing_session_project_policy', ?1)
              ON CONFLICT(key) DO UPDATE SET value = excluded.value",
             params![missing_session_project_policy],
         )?;
-        self.conn.execute(
+        tx.execute(
             "INSERT INTO app_settings (key, value) VALUES ('editor', ?1)
              ON CONFLICT(key) DO UPDATE SET value = excluded.value",
             params![editor],
         )?;
-        self.conn.execute(
+        tx.execute(
             "INSERT INTO app_settings (key, value) VALUES ('developer_mode', ?1)
              ON CONFLICT(key) DO UPDATE SET value = excluded.value",
             params![serde_json::to_string(&developer_mode)?],
         )?;
-        self.conn.execute(
+        tx.execute(
             "INSERT INTO app_settings (key, value) VALUES ('additional_session_roots', ?1)
              ON CONFLICT(key) DO UPDATE SET value = excluded.value",
             params![serde_json::to_string(&additional_session_roots)?],
         )?;
-        self.conn.execute(
+        tx.execute(
             "INSERT INTO app_settings (key, value) VALUES ('config_profiles', ?1)
              ON CONFLICT(key) DO UPDATE SET value = excluded.value",
             params![serde_json::to_string(&config_profiles)?],
         )?;
+        tx.commit()?;
         Ok(AppSettings {
             appearance,
             font_family,
@@ -729,12 +765,6 @@ impl Store {
         })
     }
 
-    pub fn save_scan(&self, report: &ScanReport) -> Result<()> {
-        self.save_scan_inner(report)?;
-        self.upsert_fs_manifest_entries(&fs_manifest_entries_from_scan(report))?;
-        Ok(())
-    }
-
     /// Persist a complete scan and bind all filesystem-backed projections to
     /// one canonical workspace context.
     pub fn save_scan_for_workspace(
@@ -742,210 +772,96 @@ impl Store {
         workspace_root: &Path,
         report: &ScanReport,
     ) -> Result<()> {
-        self.save_scan_inner(report)?;
-        self.finalize_projection_scan(workspace_root, report)
-    }
-
-    fn save_scan_inner(&self, report: &ScanReport) -> Result<()> {
-        self.insert_skill_source_records_if_missing(&report.skill_source_migrations)?;
+        let workspace_root = canonical_workspace_root(workspace_root);
+        let scope_key = workspace_scope_key(&workspace_root)?;
         let tx = self.conn.unchecked_transaction()?;
-        tx.execute_batch(
-            "
-            DELETE FROM agents;
-            DELETE FROM skills;
-            DELETE FROM skill_paths;
-            CREATE TEMP TABLE IF NOT EXISTS current_sessions (
-                id TEXT NOT NULL,
-                agent TEXT NOT NULL,
-                path TEXT NOT NULL,
-                PRIMARY KEY (id, agent, path)
-            );
-            DELETE FROM current_sessions;
-            DELETE FROM rules;
-            DELETE FROM hooks;
-            DELETE FROM mcp_servers;
-            ",
-        )?;
-
-        for agent in &report.agents.agents {
-            tx.execute(
-                "INSERT INTO agents (kind, name, installed, config_dir, executable, version, data_json)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                params![
-                    agent_label(agent.kind),
-                    agent.name,
-                    agent.installed,
-                    agent.config_dir.as_ref().map(|path| path.display().to_string()),
-                    agent.executable,
-                    agent.version,
-                    serde_json::to_string(agent)?,
-                ],
+        if report.skills.warnings.is_empty() {
+            self.insert_skill_source_records_if_missing_for_workspace_in_tx(
+                &tx,
+                &scope_key,
+                &report.skill_source_migrations,
             )?;
+            self.write_normalized_snapshot_in_tx(&tx, &scope_key, "skills", &report.skills)?;
         }
-
-        for skill in &report.skills.skills {
-            tx.execute(
-                "INSERT INTO skills (name, visibility, agents_json, description, is_system, data_json)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                params![
-                    skill.name,
-                    format!("{:?}", skill.visibility).to_lowercase(),
-                    serde_json::to_string(&skill.agents)?,
-                    skill.description,
-                    skill.is_system,
-                    serde_json::to_string(skill)?,
-                ],
-            )?;
-            for path in &skill.paths {
-                tx.execute(
-                    "INSERT INTO skill_paths (skill_name, path, root, scope, agent, sha256, data_json)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
-                     ON CONFLICT(skill_name, path) DO UPDATE SET
-                        root = excluded.root,
-                        scope = excluded.scope,
-                        agent = excluded.agent,
-                        sha256 = excluded.sha256,
-                        data_json = excluded.data_json",
-                    params![
-                        skill.name,
-                        path.path.display().to_string(),
-                        path.root.display().to_string(),
-                        path.scope,
-                        agent_label(path.agent),
-                        path.sha256,
-                        serde_json::to_string(path)?,
-                    ],
-                )?;
-            }
+        if report.agents.warnings.is_empty() {
+            self.write_normalized_snapshot_in_tx(&tx, &scope_key, "agents", &report.agents)?;
         }
-
-        for session in &report.sessions.sessions {
-            let title = clean_session_title(session.title.clone());
-            let first_user_message = bound_session_preview(session.first_user_message.clone());
-            let last_user_message = bound_session_preview(session.last_user_message.clone());
-            let last_assistant_message =
-                bound_session_preview(session.last_assistant_message.clone());
-            tx.execute(
-                "INSERT INTO current_sessions (id, agent, path)
-                 VALUES (?1, ?2, ?3)",
-                params![
-                    session.id,
-                    agent_label(session.agent),
-                    session.path.display().to_string(),
-                ],
-            )?;
-            tx.execute(
-                "INSERT INTO sessions (id, agent, title, project, path, started_at, updated_at, message_count, first_user_message, last_user_message, last_assistant_message, data_json)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
-                 ON CONFLICT(id, agent, path) DO UPDATE SET
-                    title = excluded.title,
-                    project = excluded.project,
-                    started_at = excluded.started_at,
-                    updated_at = excluded.updated_at,
-                    message_count = excluded.message_count,
-                    first_user_message = excluded.first_user_message,
-                    last_user_message = excluded.last_user_message,
-                    last_assistant_message = excluded.last_assistant_message,
-                    data_json = excluded.data_json
-                 WHERE sessions.data_json IS NOT excluded.data_json
-                    OR sessions.title IS NOT excluded.title
-                    OR sessions.project IS NOT excluded.project
-                    OR sessions.started_at IS NOT excluded.started_at
-                    OR sessions.updated_at IS NOT excluded.updated_at
-                    OR sessions.message_count IS NOT excluded.message_count
-                    OR sessions.first_user_message IS NOT excluded.first_user_message
-                    OR sessions.last_user_message IS NOT excluded.last_user_message
-                    OR sessions.last_assistant_message IS NOT excluded.last_assistant_message",
-                params![
-                    session.id,
-                    agent_label(session.agent),
-                    title,
-                    session.project.as_ref().map(|path| path.display().to_string()),
-                    session.path.display().to_string(),
-                    session.started_at,
-                    session.updated_at,
-                    session.message_count.map(|value| value as i64),
-                    first_user_message,
-                    last_user_message,
-                    last_assistant_message,
-                    Self::session_metadata_json(session)?,
-                ],
-            )?;
-            index_session_search_document_best_effort(&tx, session);
+        if report.rules.warnings.is_empty() {
+            self.write_normalized_snapshot_in_tx(&tx, &scope_key, "rules", &report.rules)?;
+        }
+        if report.hooks.warnings.is_empty() {
+            self.write_normalized_snapshot_in_tx(&tx, &scope_key, "hooks", &report.hooks)?;
+        }
+        if report.mcp.warnings.is_empty() {
+            self.write_normalized_snapshot_in_tx(&tx, &scope_key, "mcp", &report.mcp)?;
         }
         if report.sessions.warnings.is_empty() {
-            tx.execute(
-                "DELETE FROM sessions
-                 WHERE NOT EXISTS (
-                    SELECT 1 FROM current_sessions
-                    WHERE current_sessions.id = sessions.id
-                      AND current_sessions.agent = sessions.agent
-                      AND current_sessions.path = sessions.path
-                 )",
-                [],
+            self.save_sessions_at_with_scope_in_tx(
+                &tx,
+                &report.sessions,
+                unix_now(),
+                &scope_key,
             )?;
-            cleanup_stale_session_skill_rows(&tx)?;
-            cleanup_stale_session_search_rows(&tx)?;
-            cleanup_stale_session_analytics_rows(&tx)?;
+            let normalized_sessions = SessionScan {
+                sessions: report
+                    .sessions
+                    .sessions
+                    .iter()
+                    .cloned()
+                    .map(Self::normalize_cached_session)
+                    .collect(),
+                warnings: report.sessions.warnings.clone(),
+            };
+            self.write_normalized_snapshot_in_tx(&tx, &scope_key, "sessions", &normalized_sessions)?;
+            let session_projects = Self::session_project_summaries_from_sessions(
+                &normalized_sessions.sessions,
+            );
+            self.write_normalized_snapshot_in_tx(&tx, &scope_key, "session_projects", &session_projects)?;
         }
-        tx.execute("DELETE FROM current_sessions", [])?;
-
-        for rule in &report.rules.rules {
-            let agent = primary_rule_agent(rule)
-                .ok_or_else(|| anyhow::anyhow!("rule {} has no agents", rule.path.display()))?;
-            tx.execute(
-                "INSERT INTO rules (agent, kind, scope, path, effective_order, sha256, data_json)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                params![
-                    agent_label(agent),
-                    rule.kind,
-                    rule.scope,
-                    rule.path.display().to_string(),
-                    rule.order as i64,
-                    rule.sha256,
-                    serde_json::to_string(rule)?,
-                ],
+        for (domain, ready, error) in [
+            (
+                "agents",
+                report.agents.warnings.is_empty(),
+                report.agents.warnings.join("; "),
+            ),
+            (
+                "skills",
+                report.skills.warnings.is_empty(),
+                report.skills.warnings.join("; "),
+            ),
+            (
+                "rules",
+                report.rules.warnings.is_empty(),
+                report.rules.warnings.join("; "),
+            ),
+            (
+                "hooks",
+                report.hooks.warnings.is_empty(),
+                report.hooks.warnings.join("; "),
+            ),
+            (
+                "mcp",
+                report.mcp.warnings.is_empty(),
+                report.mcp.warnings.join("; "),
+            ),
+        ] {
+            let entries = match domain {
+                "agents" => manifest_entries_for_agents(&report.agents, &workspace_root),
+                "skills" => manifest_entries_for_skills(&report.skills, &workspace_root),
+                "rules" => manifest_entries_for_rules(&report.rules, &workspace_root),
+                "hooks" => manifest_entries_for_hooks(&report.hooks, &workspace_root),
+                "mcp" => manifest_entries_for_mcp(&report.mcp, &workspace_root),
+                _ => unreachable!("projection domain is validated by the match above"),
+            };
+            self.finalize_projection_domain_in_tx(
+                &tx,
+                domain,
+                &workspace_root,
+                &entries,
+                ready,
+                (!ready).then_some(error),
             )?;
         }
-
-        for hook in &report.hooks.hooks {
-            tx.execute(
-                "INSERT INTO hooks (agent, event, command, enabled, path, trust_hash, data_json)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                params![
-                    agent_label(hook.agent),
-                    hook.event,
-                    hook.command,
-                    hook.enabled,
-                    hook.path.display().to_string(),
-                    hook.trust_hash,
-                    serde_json::to_string(hook)?,
-                ],
-            )?;
-        }
-
-        for server in &report.mcp.servers {
-            tx.execute(
-                "INSERT INTO mcp_servers (agent, name, transport, status, path, data_json)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                params![
-                    agent_label(server.agent),
-                    server.name,
-                    server.transport,
-                    server.status,
-                    server.path.display().to_string(),
-                    serde_json::to_string(server)?,
-                ],
-            )?;
-        }
-
-        tx.execute(
-            "INSERT INTO meta (key, value) VALUES ('last_scan_at', ?1)
-             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-            params![unix_now().to_string()],
-        )?;
-        cleanup_stale_session_skill_rows(&tx)?;
-        cleanup_stale_skill_link_rows(&tx)?;
         tx.commit()?;
         Ok(())
     }
@@ -964,10 +880,10 @@ impl Store {
         for entry in entries {
             tx.execute(
                 "INSERT INTO fs_manifest (
-                    source_kind, path, root, agent, scope, mtime_ns, size, inode, device,
+                    scope_key, source_kind, path, root, agent, scope, mtime_ns, size, inode, device,
                     sha256, parser_version, last_seen_at, parse_status
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
-                 ON CONFLICT(source_kind, path) DO UPDATE SET
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
+                 ON CONFLICT(scope_key, source_kind, path) DO UPDATE SET
                     root = excluded.root,
                     agent = excluded.agent,
                     scope = excluded.scope,
@@ -980,6 +896,7 @@ impl Store {
                     last_seen_at = excluded.last_seen_at,
                     parse_status = excluded.parse_status",
                 params![
+                    DEFAULT_SCOPE_KEY,
                     entry.source_kind,
                     entry.path.display().to_string(),
                     entry.root.display().to_string(),
@@ -1000,6 +917,7 @@ impl Store {
         Ok(entries.len())
     }
 
+
     pub fn fs_manifest_entry(
         &self,
         source_kind: &str,
@@ -1010,8 +928,8 @@ impl Store {
                 "SELECT source_kind, path, root, agent, scope, mtime_ns, size, inode, device,
                         sha256, parser_version, last_seen_at, parse_status
                  FROM fs_manifest
-                 WHERE source_kind = ?1 AND path = ?2",
-                params![source_kind, path.display().to_string()],
+                 WHERE scope_key = ?1 AND source_kind = ?2 AND path = ?3",
+                params![DEFAULT_SCOPE_KEY, source_kind, path.display().to_string()],
                 fs_manifest_from_row,
             )
             .optional()
@@ -1019,23 +937,26 @@ impl Store {
     }
 
     pub fn list_fs_manifest_for_root(&self, root: &Path) -> Result<Vec<FsManifestEntry>> {
+        let scope_key = workspace_scope_key(&workspace_root_for_manifest_root(root))?;
         let mut statement = self.conn.prepare(
             "SELECT source_kind, path, root, agent, scope, mtime_ns, size, inode, device,
                     sha256, parser_version, last_seen_at, parse_status
              FROM fs_manifest
-             WHERE root = ?1
+             WHERE scope_key = ?1 AND root = ?2
              ORDER BY source_kind ASC, path ASC",
         )?;
-        let rows =
-            statement.query_map(params![root.display().to_string()], fs_manifest_from_row)?;
+        let rows = statement.query_map(
+            params![scope_key.as_str(), root.display().to_string()],
+            fs_manifest_from_row,
+        )?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
             .map_err(Into::into)
     }
 
     pub fn delete_fs_manifest_entry(&self, source_kind: &str, path: &Path) -> Result<bool> {
         Ok(self.conn.execute(
-            "DELETE FROM fs_manifest WHERE source_kind = ?1 AND path = ?2",
-            params![source_kind, path.display().to_string()],
+            "DELETE FROM fs_manifest WHERE scope_key = ?1 AND source_kind = ?2 AND path = ?3",
+            params![DEFAULT_SCOPE_KEY, source_kind, path.display().to_string()],
         )? > 0)
     }
 
@@ -1050,9 +971,9 @@ impl Store {
             let mut statement = self.conn.prepare(
                 "SELECT path
                  FROM fs_manifest
-                 WHERE source_kind = ?1 AND root = ?2",
+                 WHERE scope_key = ?1 AND source_kind = ?2 AND root = ?3",
             )?;
-            let rows = statement.query_map(params![source_kind, root_key], |row| {
+            let rows = statement.query_map(params![DEFAULT_SCOPE_KEY, source_kind, root_key], |row| {
                 row.get::<_, String>(0)
             })?;
             rows.collect::<std::result::Result<Vec<_>, _>>()?
@@ -1068,8 +989,8 @@ impl Store {
             if !seen_paths.contains(&path) {
                 deleted += tx.execute(
                     "DELETE FROM fs_manifest
-                     WHERE source_kind = ?1 AND path = ?2 AND root = ?3",
-                    params![source_kind, path, root_key],
+                     WHERE scope_key = ?1 AND source_kind = ?2 AND path = ?3 AND root = ?4",
+                    params![DEFAULT_SCOPE_KEY, source_kind, path, root_key],
                 )?;
             }
         }
@@ -1077,7 +998,11 @@ impl Store {
         Ok(deleted)
     }
 
-    fn list_fs_manifest_for_domain(&self, domain: &str) -> Result<Vec<FsManifestEntry>> {
+    fn list_fs_manifest_for_domain(
+        &self,
+        domain: &str,
+        scope_key: &ScopeKey,
+    ) -> Result<Vec<FsManifestEntry>> {
         let kinds = manifest_source_kinds(domain)?;
         let placeholders = std::iter::repeat_n("?", kinds.len())
             .collect::<Vec<_>>()
@@ -1086,57 +1011,21 @@ impl Store {
             "SELECT source_kind, path, root, agent, scope, mtime_ns, size, inode, device,
                     sha256, parser_version, last_seen_at, parse_status
              FROM fs_manifest
-             WHERE source_kind IN ({placeholders})
+             WHERE scope_key = ?1
+               AND source_kind IN ({placeholders})
              ORDER BY source_kind ASC, path ASC"
         );
         let mut statement = self.conn.prepare(&sql)?;
-        let rows = statement.query_map(params_from_iter(kinds.iter()), fs_manifest_from_row)?;
+        let mut values = vec![SqlValue::Text(scope_key.as_str().to_string())];
+        values.extend(kinds.iter().map(|kind| SqlValue::Text((*kind).to_string())));
+        let rows = statement.query_map(params_from_iter(values.iter()), fs_manifest_from_row)?;
         let entries = rows.collect::<std::result::Result<Vec<_>, _>>()?;
         Ok(entries)
     }
 
-    fn finalize_projection_scan(&self, workspace_root: &Path, report: &ScanReport) -> Result<()> {
-        let workspace_root = canonical_workspace_root(workspace_root);
-        self.finalize_projection_domain(
-            "agents",
-            &workspace_root,
-            &manifest_entries_for_agents(&report.agents, &workspace_root),
-            report.agents.warnings.is_empty(),
-            (!report.agents.warnings.is_empty()).then(|| report.agents.warnings.join("; ")),
-        )?;
-        self.finalize_projection_domain(
-            "skills",
-            &workspace_root,
-            &manifest_entries_for_skills(&report.skills, &workspace_root),
-            report.skills.warnings.is_empty(),
-            (!report.skills.warnings.is_empty()).then(|| report.skills.warnings.join("; ")),
-        )?;
-        self.finalize_projection_domain(
-            "rules",
-            &workspace_root,
-            &manifest_entries_for_rules(&report.rules, &workspace_root),
-            report.rules.warnings.is_empty(),
-            (!report.rules.warnings.is_empty()).then(|| report.rules.warnings.join("; ")),
-        )?;
-        self.finalize_projection_domain(
-            "hooks",
-            &workspace_root,
-            &manifest_entries_for_hooks(&report.hooks, &workspace_root),
-            report.hooks.warnings.is_empty(),
-            (!report.hooks.warnings.is_empty()).then(|| report.hooks.warnings.join("; ")),
-        )?;
-        self.finalize_projection_domain(
-            "mcp",
-            &workspace_root,
-            &manifest_entries_for_mcp(&report.mcp, &workspace_root),
-            report.mcp.warnings.is_empty(),
-            (!report.mcp.warnings.is_empty()).then(|| report.mcp.warnings.join("; ")),
-        )?;
-        Ok(())
-    }
-
-    fn finalize_projection_domain(
+    fn finalize_projection_domain_in_tx(
         &self,
+        tx: &Transaction<'_>,
         domain: &str,
         workspace_root: &Path,
         entries: &[FsManifestEntry],
@@ -1144,19 +1033,26 @@ impl Store {
         error: Option<String>,
     ) -> Result<()> {
         let kinds = manifest_source_kinds(domain)?;
-        let placeholders = std::iter::repeat_n("?", kinds.len())
-            .collect::<Vec<_>>()
-            .join(", ");
-        let delete_sql = format!("DELETE FROM fs_manifest WHERE source_kind IN ({placeholders})");
-        let tx = self.conn.unchecked_transaction()?;
-        tx.execute(&delete_sql, params_from_iter(kinds.iter()))?;
+        let scope_key = workspace_scope_key(workspace_root)?;
+        let delete_sql = format!(
+            "DELETE FROM fs_manifest
+             WHERE scope_key = ?1 AND source_kind IN ({})",
+            std::iter::repeat_n("?", kinds.len())
+                .enumerate()
+                .map(|(index, _)| format!("?{}", index + 2))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        let mut delete_params = vec![SqlValue::Text(scope_key.as_str().to_string())];
+        delete_params.extend(kinds.iter().map(|kind| SqlValue::Text((*kind).to_string())));
+        tx.execute(&delete_sql, params_from_iter(delete_params.iter()))?;
         for entry in entries {
             tx.execute(
                 "INSERT INTO fs_manifest (
-                    source_kind, path, root, agent, scope, mtime_ns, size, inode, device,
+                    scope_key, source_kind, path, root, agent, scope, mtime_ns, size, inode, device,
                     sha256, parser_version, last_seen_at, parse_status
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
-                 ON CONFLICT(source_kind, path) DO UPDATE SET
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
+                 ON CONFLICT(scope_key, source_kind, path) DO UPDATE SET
                     root = excluded.root,
                     agent = excluded.agent,
                     scope = excluded.scope,
@@ -1169,6 +1065,7 @@ impl Store {
                     last_seen_at = excluded.last_seen_at,
                     parse_status = excluded.parse_status",
                 params![
+                    scope_key.as_str(),
                     entry.source_kind,
                     entry.path.display().to_string(),
                     entry.root.display().to_string(),
@@ -1185,13 +1082,24 @@ impl Store {
                 ],
             )?;
         }
-        tx.commit()?;
-        self.set_projection_context(
+        self.set_projection_context_in_tx(
+            tx,
+            &scope_key,
             domain,
-            &canonical_workspace_root(workspace_root),
             if ready { "ready" } else { "failed" },
             error,
-        )
+        )?;
+        let source_version = SourceVersion::new(PROJECTION_PARSER_VERSION)
+            .map_err(|error| anyhow::anyhow!(error))?;
+        advance_projection_head_in_tx(
+            tx,
+            &scope_key,
+            domain,
+            Some(&source_version),
+            if ready { "ready" } else { "failed" },
+        )?;
+        self.sync_normalized_snapshot_revision_in_tx(tx, &scope_key, domain)?;
+        Ok(())
     }
 
     fn set_projection_context(
@@ -1202,21 +1110,36 @@ impl Store {
         error: Option<String>,
     ) -> Result<()> {
         ensure_projection_domain(domain)?;
-        self.conn.execute(
-            "INSERT INTO projection_contexts
-                (domain, workspace_root, state, scanned_at, error, parser_version)
+        let workspace_root = canonical_workspace_root(workspace_root);
+        let scope_key = ScopeKey::new(format!("workspace:{}", workspace_root.display()))
+            .map_err(|error| anyhow::anyhow!(error))?;
+        let tx = self.conn.unchecked_transaction()?;
+        self.set_projection_context_in_tx(&tx, &scope_key, domain, state, error)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    fn set_projection_context_in_tx(
+        &self,
+        tx: &Transaction<'_>,
+        scope_key: &ScopeKey,
+        domain: &str,
+        state: &str,
+        error: Option<String>,
+    ) -> Result<()> {
+        ensure_projection_domain(domain)?;
+        tx.execute(
+            &format!("INSERT INTO {SCOPED_PROJECTION_CONTEXT_TABLE}
+                (scope_key, domain, state, scanned_at, error, parser_version)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)
-             ON CONFLICT(domain) DO UPDATE SET
-                workspace_root = excluded.workspace_root,
+             ON CONFLICT(scope_key, domain) DO UPDATE SET
                 state = excluded.state,
                 scanned_at = excluded.scanned_at,
                 error = excluded.error,
-                parser_version = excluded.parser_version",
+                parser_version = excluded.parser_version"),
             params![
+                scope_key.as_str(),
                 domain,
-                canonical_workspace_root(workspace_root)
-                    .display()
-                    .to_string(),
                 state,
                 (state == "ready").then(|| unix_now() as i64),
                 error,
@@ -1224,6 +1147,104 @@ impl Store {
             ],
         )?;
         Ok(())
+    }
+
+    fn write_normalized_snapshot<T: Serialize>(
+        &self,
+        scope_key: &ScopeKey,
+        domain: &str,
+        payload: &T,
+    ) -> Result<()> {
+        let tx = self.conn.unchecked_transaction()?;
+        self.write_normalized_snapshot_in_tx(&tx, scope_key, domain, payload)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    fn write_normalized_snapshot_in_tx<T: Serialize>(
+        &self,
+        tx: &Transaction<'_>,
+        scope_key: &ScopeKey,
+        domain: &str,
+        payload: &T,
+    ) -> Result<()> {
+        let payload_json = serde_json::to_string(payload)?;
+        let revision = tx
+            .query_row(
+                "SELECT revision FROM projection_heads
+                 WHERE scope_key = ?1 AND domain = ?2",
+                params![scope_key.as_str(), domain],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()?
+            .unwrap_or(Revision::ZERO.value() as i64);
+        tx.execute(
+            &format!("INSERT INTO {NORMALIZED_SNAPSHOT_TABLE}
+                (scope_key, domain, payload_json, source_version, revision, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+             ON CONFLICT(scope_key, domain) DO UPDATE SET
+                payload_json = excluded.payload_json,
+                source_version = excluded.source_version,
+                revision = excluded.revision,
+                updated_at = excluded.updated_at"),
+            params![
+                scope_key.as_str(),
+                domain,
+                payload_json,
+                PROJECTION_PARSER_VERSION,
+                revision,
+                unix_now() as i64,
+            ],
+        )?;
+        Ok(())
+    }
+
+    fn sync_normalized_snapshot_revision_in_tx(
+        &self,
+        tx: &Transaction<'_>,
+        scope_key: &ScopeKey,
+        domain: &str,
+    ) -> Result<()> {
+        let Some(revision) = tx
+            .query_row(
+                "SELECT revision FROM projection_heads
+                 WHERE scope_key = ?1 AND domain = ?2",
+                params![scope_key.as_str(), domain],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()?
+        else {
+            return Ok(());
+        };
+        tx.execute(
+            &format!(
+                "UPDATE {NORMALIZED_SNAPSHOT_TABLE}
+                 SET revision = ?1, updated_at = ?2
+                 WHERE scope_key = ?3 AND domain = ?4"
+            ),
+            params![revision, unix_now() as i64, scope_key.as_str(), domain],
+        )?;
+        Ok(())
+    }
+
+    fn read_normalized_snapshot<T: for<'de> Deserialize<'de>>(
+        &self,
+        scope_key: &ScopeKey,
+        domain: &str,
+    ) -> Result<Option<T>> {
+        self.conn
+            .query_row(
+                &format!("SELECT payload_json FROM {NORMALIZED_SNAPSHOT_TABLE}
+                 WHERE scope_key = ?1 AND domain = ?2"),
+                params![scope_key.as_str(), domain],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+            .map(|payload| {
+                serde_json::from_str(&payload)
+                    .with_context(|| format!("invalid {domain} normalized snapshot"))
+            })
+            .transpose()
     }
 
     fn lock_file_path(&self, name: &str) -> PathBuf {
@@ -1253,16 +1274,47 @@ impl Store {
         }
     }
 
-    pub fn list_sessions(&self) -> Result<SessionScan> {
+    pub fn list_sessions_for_scope(&self, scope_key: &ScopeKey) -> Result<SessionScan> {
+        if let Some(snapshot) = self.read_normalized_snapshot(scope_key, "sessions")? {
+            return Ok(snapshot);
+        }
+        self.list_sessions_from_table(scope_key)
+    }
+
+    pub fn normalized_snapshot_json_for_scope(
+        &self,
+        scope_key: &ScopeKey,
+        domain: &str,
+    ) -> Result<Option<String>> {
+        self.conn
+            .query_row(
+                &format!(
+                    "SELECT payload_json FROM {NORMALIZED_SNAPSHOT_TABLE}
+                     WHERE scope_key = ?1 AND domain = ?2"
+                ),
+                params![scope_key.as_str(), domain],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    fn refresh_scoped_session_snapshot(&self, scope_key: &ScopeKey) -> Result<()> {
+        let snapshot = self.list_sessions_from_table(scope_key)?;
+        self.write_normalized_snapshot(scope_key, "sessions", &snapshot)
+    }
+
+    fn list_sessions_from_table(&self, scope_key: &ScopeKey) -> Result<SessionScan> {
         // `data_json` is the SessionRecord authority. The scalar session columns are
         // denormalized projections retained for compatibility and write-side indexing.
-        let mut stmt = self.conn.prepare("SELECT data_json FROM sessions")?;
-        let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+        let mut stmt = self.conn.prepare(
+            "SELECT data_json FROM scoped_sessions WHERE scope_key = ?1",
+        )?;
         let mut sessions = Vec::new();
         let mut warnings = Vec::new();
-
-        for row in rows {
-            let data_json = row?;
+        let mut rows = stmt.query(params![scope_key.as_str()])?;
+        while let Some(row) = rows.next()? {
+            let data_json = row.get::<_, String>(0)?;
             match serde_json::from_str::<SessionRecord>(&data_json) {
                 Ok(session) => sessions.push(Self::normalize_cached_session(session)),
                 Err(err) => warnings.push(format!("invalid cached session row: {err}")),
@@ -1273,197 +1325,64 @@ impl Store {
         Ok(SessionScan { sessions, warnings })
     }
 
-    pub fn list_session_projects(&self) -> Result<Vec<SessionProjectSummary>> {
-        let mut project_statement = self.conn.prepare(
-            "SELECT id, name
-             FROM session_projects
-             ORDER BY name COLLATE NOCASE ASC, id ASC",
-        )?;
-        let projects = project_statement
-            .query_map([], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-            })?
-            .collect::<std::result::Result<Vec<_>, _>>()?;
+    /// Return logical projects observed in one workspace. The serialized
+    /// summary is a workspace snapshot; the old global project tables are only
+    /// consulted to enrich paths for the migration period.
+    pub fn list_session_projects_for_scope(
+        &self,
+        scope_key: &ScopeKey,
+    ) -> Result<Vec<SessionProjectSummary>> {
+        if let Some(snapshot) = self.read_normalized_snapshot(scope_key, "session_projects")? {
+            return Ok(snapshot);
+        }
+        self.session_project_summaries_for_scope(scope_key)
+    }
 
-        let mut summaries = Vec::with_capacity(projects.len());
-        for (id, name) in projects {
-            let mut alias_statement = self.conn.prepare(
-                "SELECT kind, value
-                 FROM session_project_aliases
-                 WHERE project_id = ?1
-                 ORDER BY kind ASC, value ASC",
-            )?;
-            let aliases = alias_statement
-                .query_map([&id], |row| {
-                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-                })?
-                .collect::<std::result::Result<Vec<_>, _>>()?;
-            let mut paths = aliases
-                .into_iter()
-                .filter_map(|(kind, value)| {
-                    matches!(kind.as_str(), "workspace_path" | "repository_path")
-                        .then(|| PathBuf::from(value))
-                })
-                .collect::<Vec<_>>();
-            paths.sort();
-            paths.dedup();
-            let missing = !paths.iter().any(|path| path.is_dir());
-            summaries.push(SessionProjectSummary {
-                id,
-                name,
-                missing,
-                paths,
+    fn session_project_summaries_for_scope(
+        &self,
+        scope_key: &ScopeKey,
+    ) -> Result<Vec<SessionProjectSummary>> {
+        let sessions = self
+            .list_sessions_from_table(scope_key)?
+            .sessions;
+        Ok(Self::session_project_summaries_from_sessions(&sessions))
+    }
+
+    fn session_project_summaries_from_sessions(
+        sessions: &[SessionRecord],
+    ) -> Vec<SessionProjectSummary> {
+        let mut summaries = BTreeMap::<String, SessionProjectSummary>::new();
+        for session in sessions {
+            let Some(id) = session.logical_project_id.as_ref() else {
+                continue;
+            };
+            let entry = summaries.entry(id.clone()).or_insert_with(|| SessionProjectSummary {
+                id: id.clone(),
+                name: session
+                    .logical_project_name
+                    .clone()
+                    .unwrap_or_else(|| "Unnamed project".to_string()),
+                missing: true,
+                paths: Vec::new(),
             });
-        }
-        Ok(summaries)
-    }
-
-    pub fn list_agents(&self) -> anyhow::Result<crate::agents::AgentScan> {
-        #[derive(Deserialize)]
-        struct CachedAgentRecord {
-            kind: AgentKind,
-            name: String,
-            installed: bool,
-            config_dir: Option<PathBuf>,
-            executable: Option<String>,
-            version: Option<String>,
-        }
-
-        let mut stmt = self
-            .conn
-            .prepare("SELECT kind, data_json FROM agents ORDER BY kind")?;
-        let rows = stmt.query_map([], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-        })?;
-        let mut agents = Vec::new();
-        let mut warnings = Vec::new();
-
-        for row in rows {
-            let (kind, data_json) = row?;
-            match serde_json::from_str::<CachedAgentRecord>(&data_json) {
-                Ok(record) => agents.push(crate::agents::AgentRecord {
-                    kind: record.kind,
-                    name: record.name,
-                    installed: record.installed,
-                    config_dir: record.config_dir,
-                    executable: record.executable,
-                    version: record.version,
-                }),
-                Err(err) => warnings.push(format!("invalid cached agent row ({kind}): {err}")),
+            if let Some(path) = &session.project {
+                entry.paths.push(path.clone());
+            }
+            if let Some(name) = &session.logical_project_name {
+                entry.name = name.clone();
             }
         }
-
-        Ok(crate::agents::AgentScan { agents, warnings })
+        for summary in summaries.values_mut() {
+            summary.paths.sort();
+            summary.paths.dedup();
+            summary.missing = !summary.paths.iter().any(|path| path.is_dir());
+        }
+        summaries.into_values().collect()
     }
 
-    pub fn list_skills(&self) -> anyhow::Result<SkillScan> {
-        let mut stmt = self
-            .conn
-            .prepare("SELECT name, data_json FROM skills ORDER BY name")?;
-        let rows = stmt.query_map([], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-        })?;
-        let mut skills = Vec::new();
-        let mut warnings = Vec::new();
-        for row in rows {
-            let (name, data_json) = row?;
-            match serde_json::from_str::<serde_json::Value>(&data_json) {
-                Ok(value) => match serde_json::from_value(value) {
-                    Ok(skill) => skills.push(skill),
-                    Err(err) => warnings.push(format!("invalid cached skill row ({name}): {err}")),
-                },
-                Err(err) => warnings.push(format!("invalid cached skill row ({name}): {err}")),
-            }
-        }
-        Ok(SkillScan {
-            roots: Vec::new(),
-            skills,
-            warnings,
-        })
-    }
-
-    pub fn list_rules(&self) -> anyhow::Result<RuleScan> {
-        let mut stmt = self.conn.prepare("SELECT agent, kind, scope, path, effective_order, data_json FROM rules ORDER BY agent, kind, scope, path, effective_order")?;
-        let rows = stmt.query_map([], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, String>(3)?,
-                row.get::<_, i64>(4)?,
-                row.get::<_, String>(5)?,
-            ))
-        })?;
-        let mut rules = Vec::new();
-        let mut warnings = Vec::new();
-        for row in rows {
-            let (agent, kind, scope, path, order, data_json) = row?;
-            match serde_json::from_str::<RuleRecord>(&data_json) {
-                Ok(rule) if !rule.agents.is_empty() => rules.push(rule),
-                Ok(_) => warnings.push(format!(
-                    "invalid cached rule row ({agent}/{kind}/{scope}/{path}/{order}): missing agents"
-                )),
-                Err(err) => warnings.push(format!(
-                    "invalid cached rule row ({agent}/{kind}/{scope}/{path}/{order}): {err}"
-                )),
-            }
-        }
-        Ok(RuleScan {
-            rules: merge_rules_by_path(rules),
-            warnings,
-        })
-    }
-
-    pub fn list_hooks(&self) -> anyhow::Result<HookScan> {
-        let mut stmt = self.conn.prepare(
-            "SELECT agent, event, path, data_json FROM hooks ORDER BY agent, event, path",
-        )?;
-        let rows = stmt.query_map([], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, String>(3)?,
-            ))
-        })?;
-        let mut hooks = Vec::new();
-        let mut warnings = Vec::new();
-        for row in rows {
-            let (agent, event, path, data_json) = row?;
-            match serde_json::from_str::<HookRecord>(&data_json) {
-                Ok(hook) => hooks.push(hook),
-                Err(err) => warnings.push(format!(
-                    "invalid cached hook row ({agent}/{event}/{path}): {err}"
-                )),
-            }
-        }
-        Ok(HookScan { hooks, warnings })
-    }
-
-    pub fn list_mcp(&self) -> anyhow::Result<McpScan> {
-        let mut stmt = self.conn.prepare("SELECT agent, name, transport, status, path, data_json FROM mcp_servers ORDER BY agent, name, transport, status, path")?;
-        let rows = stmt.query_map([], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, String>(3)?,
-                row.get::<_, String>(4)?,
-                row.get::<_, String>(5)?,
-            ))
-        })?;
-        let mut servers = Vec::new();
-        let mut warnings = Vec::new();
-        for row in rows {
-            let (agent, name, transport, status, path, data_json) = row?;
-            match serde_json::from_str::<McpServerRecord>(&data_json) {
-                Ok(server) => servers.push(server),
-                Err(err) => warnings.push(format!(
-                    "invalid cached mcp row ({agent}/{name}/{transport}/{status}/{path}): {err}"
-                )),
-            }
-        }
-        Ok(McpScan { servers, warnings })
+    fn refresh_scoped_session_project_snapshot(&self, scope_key: &ScopeKey) -> Result<()> {
+        let summaries = self.session_project_summaries_for_scope(scope_key)?;
+        self.write_normalized_snapshot(scope_key, "session_projects", &summaries)
     }
 
     pub fn projection_status(
@@ -1473,27 +1392,33 @@ impl Store {
     ) -> Result<ProjectionStatus> {
         ensure_projection_domain(domain)?;
         let workspace_root = canonical_workspace_root(workspace_root);
+        let scope_key = ScopeKey::new(format!("workspace:{}", workspace_root.display()))
+            .map_err(|error| anyhow::anyhow!(error))?;
         let context = self
             .conn
             .query_row(
-                "SELECT workspace_root, state
-                 FROM projection_contexts
-                 WHERE domain = ?1",
-                params![domain],
-                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+                &format!("SELECT state
+                 FROM {SCOPED_PROJECTION_CONTEXT_TABLE}
+                 WHERE scope_key = ?1 AND domain = ?2"),
+                params![scope_key.as_str(), domain],
+                |row| row.get::<_, String>(0),
             )
             .optional()?;
-        let Some((stored_root, state)) = context else {
+        let Some(state) = context else {
             return Ok(ProjectionStatus::Missing);
         };
         if state == "refreshing" {
             return Ok(ProjectionStatus::Refreshing);
         }
-        if stored_root != workspace_root.display().to_string() || state != "ready" {
+        if state != "ready"
+            || self
+                .read_normalized_snapshot::<serde_json::Value>(&scope_key, domain)?
+                .is_none()
+        {
             return Ok(ProjectionStatus::Stale);
         }
 
-        let entries = self.list_fs_manifest_for_domain(domain)?;
+        let entries = self.list_fs_manifest_for_domain(domain, &scope_key)?;
         if entries.is_empty() {
             return Ok(ProjectionStatus::Missing);
         }
@@ -1517,14 +1442,16 @@ impl Store {
         if self.projection_status("agents", workspace_root)? != ProjectionStatus::Fresh {
             return Ok(None);
         }
-        self.list_agents().map(Some)
+        let scope_key = workspace_scope_key(workspace_root)?;
+        self.read_normalized_snapshot(&scope_key, "agents")
     }
 
     pub fn list_skills_for_workspace(&self, workspace_root: &Path) -> Result<Option<SkillScan>> {
         if self.projection_status("skills", workspace_root)? != ProjectionStatus::Fresh {
             return Ok(None);
         }
-        self.list_skills().map(Some)
+        let scope_key = workspace_scope_key(workspace_root)?;
+        self.read_normalized_snapshot(&scope_key, "skills")
     }
 
     /// Return the last cached skill projection for this workspace without checking
@@ -1535,32 +1462,31 @@ impl Store {
         workspace_root: &Path,
     ) -> Result<Option<SkillScan>> {
         let workspace_root = canonical_workspace_root(workspace_root);
+        let scope_key = workspace_scope_key(&workspace_root)?;
         let context = self
             .conn
             .query_row(
-                "SELECT workspace_root, state, parser_version
-                 FROM projection_contexts
-                 WHERE domain = 'skills'",
-                [],
+                &format!("SELECT state, parser_version
+                 FROM {SCOPED_PROJECTION_CONTEXT_TABLE}
+                 WHERE scope_key = ?1 AND domain = 'skills'"),
+                params![scope_key.as_str()],
                 |row| {
                     Ok((
                         row.get::<_, String>(0)?,
                         row.get::<_, String>(1)?,
-                        row.get::<_, String>(2)?,
                     ))
                 },
             )
             .optional()?;
-        let Some((stored_root, state, parser_version)) = context else {
+        let Some((state, parser_version)) = context else {
             return Ok(None);
         };
-        if stored_root != workspace_root.display().to_string()
-            || !matches!(state.as_str(), "ready" | "stale" | "failed")
+        if !matches!(state.as_str(), "ready" | "stale" | "failed")
             || parser_version != PROJECTION_PARSER_VERSION
         {
             return Ok(None);
         }
-        self.list_skills().map(Some)
+        self.read_normalized_snapshot(&scope_key, "skills")
     }
 
     /// Return the cached skill projection when the explicitly selected skills
@@ -1577,33 +1503,32 @@ impl Store {
         }
 
         let workspace_root = canonical_workspace_root(workspace_root);
+        let scope_key = workspace_scope_key(&workspace_root)?;
         let context = self
             .conn
             .query_row(
-                "SELECT workspace_root, state, parser_version
-                 FROM projection_contexts
-                 WHERE domain = 'skills'",
-                [],
+                &format!("SELECT state, parser_version
+                 FROM {SCOPED_PROJECTION_CONTEXT_TABLE}
+                 WHERE scope_key = ?1 AND domain = 'skills'"),
+                params![scope_key.as_str()],
                 |row| {
                     Ok((
                         row.get::<_, String>(0)?,
                         row.get::<_, String>(1)?,
-                        row.get::<_, String>(2)?,
                     ))
                 },
             )
             .optional()?;
-        let Some((stored_root, state, parser_version)) = context else {
+        let Some((state, parser_version)) = context else {
             return Ok(None);
         };
-        if stored_root != workspace_root.display().to_string()
-            || state != "ready"
+        if state != "ready"
             || parser_version != PROJECTION_PARSER_VERSION
         {
             return Ok(None);
         }
 
-        let entries = self.list_fs_manifest_for_domain("skills")?;
+        let entries = self.list_fs_manifest_for_domain("skills", &scope_key)?;
         if entries.is_empty() {
             return Ok(None);
         }
@@ -1615,11 +1540,17 @@ impl Store {
             return Ok(None);
         }
 
-        let scan = self.list_skills()?;
+        let Some(scan) = self.read_normalized_snapshot::<SkillScan>(&scope_key, "skills")? else {
+            return Ok(None);
+        };
         let selected = scan
             .skills
             .iter()
-            .filter(|skill| selected_names.contains(&skill.name))
+            .filter(|skill| {
+                selected_names
+                    .iter()
+                    .any(|name| crate::skills::skill_matches_selector(skill, name))
+            })
             .collect::<Vec<_>>();
         if selected.len() != selected_names.len() {
             return Ok(None);
@@ -1649,21 +1580,24 @@ impl Store {
         if self.projection_status("rules", workspace_root)? != ProjectionStatus::Fresh {
             return Ok(None);
         }
-        self.list_rules().map(Some)
+        let scope_key = workspace_scope_key(workspace_root)?;
+        self.read_normalized_snapshot(&scope_key, "rules")
     }
 
     pub fn list_hooks_for_workspace(&self, workspace_root: &Path) -> Result<Option<HookScan>> {
         if self.projection_status("hooks", workspace_root)? != ProjectionStatus::Fresh {
             return Ok(None);
         }
-        self.list_hooks().map(Some)
+        let scope_key = workspace_scope_key(workspace_root)?;
+        self.read_normalized_snapshot(&scope_key, "hooks")
     }
 
     pub fn list_mcp_for_workspace(&self, workspace_root: &Path) -> Result<Option<McpScan>> {
         if self.projection_status("mcp", workspace_root)? != ProjectionStatus::Fresh {
             return Ok(None);
         }
-        self.list_mcp().map(Some)
+        let scope_key = workspace_scope_key(workspace_root)?;
+        self.read_normalized_snapshot(&scope_key, "mcp")
     }
 
     /// Mark one domain stale after an external writer changed its source.
@@ -1685,9 +1619,17 @@ impl Store {
     where
         F: FnOnce() -> Result<T>,
     {
+        let lock_started = Instant::now();
         let Some(lock_file) = self.try_acquire_file_lock("database-write")? else {
             return Ok(None);
         };
+        crate::logging::global().debug(
+            "database write lock acquired",
+            serde_json::json!({
+                "lockWaitMs": lock_started.elapsed().as_secs_f64() * 1000.0,
+                "lock": "database-write",
+            }),
+        );
 
         let result = write();
         drop(lock_file);
@@ -1735,50 +1677,27 @@ impl Store {
         scan: &crate::agents::AgentScan,
     ) -> Result<()> {
         let workspace_root = canonical_workspace_root(workspace_root);
-        if !scan.warnings.is_empty() {
-            return self.set_projection_context(
-                "agents",
-                &workspace_root,
-                "failed",
-                Some(scan.warnings.join("; ")),
-            );
-        }
-        let tx = self.conn.unchecked_transaction()?;
-        tx.execute("DELETE FROM agents", [])?;
-        for agent in &scan.agents {
-            tx.execute(
-                "INSERT INTO agents (kind, name, installed, config_dir, executable, version, data_json)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                params![
-                    agent_label(agent.kind),
-                    agent.name,
-                    agent.installed,
-                    agent.config_dir.as_ref().map(|path| path.display().to_string()),
-                    agent.executable,
-                    agent.version,
-                    serde_json::to_string(agent)?,
-                ],
-            )?;
-        }
-        tx.commit()?;
-        self.finalize_projection_domain(
-            "agents",
+        self.save_projection_domain_snapshot(
             &workspace_root,
+            "agents",
+            scan.warnings.is_empty().then_some(scan),
             &manifest_entries_for_agents(scan, &workspace_root),
             scan.warnings.is_empty(),
             (!scan.warnings.is_empty()).then(|| scan.warnings.join("; ")),
+            &[],
         )
     }
 
     pub fn save_skills_for_workspace(&self, workspace_root: &Path, scan: &SkillScan) -> Result<()> {
         let workspace_root = canonical_workspace_root(workspace_root);
-        self.save_skills(scan)?;
-        self.finalize_projection_domain(
-            "skills",
+        self.save_projection_domain_snapshot(
             &workspace_root,
+            "skills",
+            scan.warnings.is_empty().then_some(scan),
             &manifest_entries_for_skills(scan, &workspace_root),
             scan.warnings.is_empty(),
             (!scan.warnings.is_empty()).then(|| scan.warnings.join("; ")),
+            &[],
         )
     }
 
@@ -1788,129 +1707,95 @@ impl Store {
         scan: &SkillScan,
         source_migrations: &[SkillSourceRecord],
     ) -> Result<()> {
-        self.insert_skill_source_records_if_missing(source_migrations)?;
-        self.save_skills_for_workspace(workspace_root, scan)
+        let workspace_root = canonical_workspace_root(workspace_root);
+        self.save_projection_domain_snapshot(
+            &workspace_root,
+            "skills",
+            scan.warnings.is_empty().then_some(scan),
+            &manifest_entries_for_skills(scan, &workspace_root),
+            scan.warnings.is_empty(),
+            (!scan.warnings.is_empty()).then(|| scan.warnings.join("; ")),
+            source_migrations,
+        )
     }
 
     pub fn save_rules_for_workspace(&self, workspace_root: &Path, scan: &RuleScan) -> Result<()> {
         let workspace_root = canonical_workspace_root(workspace_root);
-        if !scan.warnings.is_empty() {
-            return self.set_projection_context(
-                "rules",
-                &workspace_root,
-                "failed",
-                Some(scan.warnings.join("; ")),
-            );
-        }
-        let tx = self.conn.unchecked_transaction()?;
-        tx.execute("DELETE FROM rules", [])?;
-        for rule in &scan.rules {
-            let agent = primary_rule_agent(rule)
-                .ok_or_else(|| anyhow::anyhow!("rule {} has no agents", rule.path.display()))?;
-            tx.execute(
-                "INSERT INTO rules (agent, kind, scope, path, effective_order, sha256, data_json)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                params![
-                    agent_label(agent),
-                    rule.kind,
-                    rule.scope,
-                    rule.path.display().to_string(),
-                    rule.order as i64,
-                    rule.sha256,
-                    serde_json::to_string(rule)?,
-                ],
-            )?;
-        }
-        tx.commit()?;
-        self.finalize_projection_domain(
-            "rules",
+        self.save_projection_domain_snapshot(
             &workspace_root,
+            "rules",
+            scan.warnings.is_empty().then_some(scan),
             &manifest_entries_for_rules(scan, &workspace_root),
-            true,
-            None,
+            scan.warnings.is_empty(),
+            (!scan.warnings.is_empty()).then(|| scan.warnings.join("; ")),
+            &[],
         )
     }
 
     pub fn save_hooks_for_workspace(&self, workspace_root: &Path, scan: &HookScan) -> Result<()> {
         let workspace_root = canonical_workspace_root(workspace_root);
-        if !scan.warnings.is_empty() {
-            return self.set_projection_context(
-                "hooks",
-                &workspace_root,
-                "failed",
-                Some(scan.warnings.join("; ")),
-            );
-        }
-        let tx = self.conn.unchecked_transaction()?;
-        tx.execute("DELETE FROM hooks", [])?;
-        for hook in &scan.hooks {
-            tx.execute(
-                "INSERT INTO hooks (agent, event, command, enabled, path, trust_hash, data_json)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                params![
-                    agent_label(hook.agent),
-                    hook.event,
-                    hook.command,
-                    hook.enabled,
-                    hook.path.display().to_string(),
-                    hook.trust_hash,
-                    serde_json::to_string(hook)?,
-                ],
-            )?;
-        }
-        tx.commit()?;
-        self.finalize_projection_domain(
-            "hooks",
+        self.save_projection_domain_snapshot(
             &workspace_root,
+            "hooks",
+            scan.warnings.is_empty().then_some(scan),
             &manifest_entries_for_hooks(scan, &workspace_root),
-            true,
-            None,
+            scan.warnings.is_empty(),
+            (!scan.warnings.is_empty()).then(|| scan.warnings.join("; ")),
+            &[],
         )
     }
 
     pub fn save_mcp_for_workspace(&self, workspace_root: &Path, scan: &McpScan) -> Result<()> {
         let workspace_root = canonical_workspace_root(workspace_root);
-        if !scan.warnings.is_empty() {
-            return self.set_projection_context(
-                "mcp",
-                &workspace_root,
-                "failed",
-                Some(scan.warnings.join("; ")),
-            );
-        }
-        let tx = self.conn.unchecked_transaction()?;
-        tx.execute("DELETE FROM mcp_servers", [])?;
-        for server in &scan.servers {
-            tx.execute(
-                "INSERT INTO mcp_servers (agent, name, transport, status, path, data_json)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                params![
-                    agent_label(server.agent),
-                    server.name,
-                    server.transport,
-                    server.status,
-                    server.path.display().to_string(),
-                    serde_json::to_string(server)?,
-                ],
-            )?;
-        }
-        tx.commit()?;
-        self.finalize_projection_domain(
-            "mcp",
+        self.save_projection_domain_snapshot(
             &workspace_root,
+            "mcp",
+            scan.warnings.is_empty().then_some(scan),
             &manifest_entries_for_mcp(scan, &workspace_root),
-            true,
-            None,
+            scan.warnings.is_empty(),
+            (!scan.warnings.is_empty()).then(|| scan.warnings.join("; ")),
+            &[],
         )
     }
+
+    fn save_projection_domain_snapshot<T: Serialize>(
+        &self,
+        workspace_root: &Path,
+        domain: &str,
+        snapshot: Option<&T>,
+        entries: &[FsManifestEntry],
+        ready: bool,
+        error: Option<String>,
+        source_migrations: &[SkillSourceRecord],
+    ) -> Result<()> {
+        let scope_key = workspace_scope_key(workspace_root)?;
+        let tx = self.conn.unchecked_transaction()?;
+        self.insert_skill_source_records_if_missing_for_workspace_in_tx(
+            &tx,
+            &scope_key,
+            source_migrations,
+        )?;
+        if let Some(snapshot) = snapshot {
+            self.write_normalized_snapshot_in_tx(&tx, &scope_key, domain, snapshot)?;
+        }
+        self.finalize_projection_domain_in_tx(
+            &tx,
+            domain,
+            workspace_root,
+            entries,
+            ready,
+            error,
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
 
     fn compare_session_updated_at(
         left: &SessionRecord,
         right: &SessionRecord,
     ) -> std::cmp::Ordering {
-        right
-            .updated_at
-            .cmp(&left.updated_at)
+        compare_timestamps(right.updated_at.as_deref(), left.updated_at.as_deref())
             .then_with(|| left.id.cmp(&right.id))
     }
 
@@ -1933,13 +1818,30 @@ impl Store {
         Ok(serde_json::to_string(&metadata)?)
     }
 
-    pub fn resolve_session_projects(&self, sessions: &mut [SessionRecord]) -> Result<()> {
+    pub fn resolve_session_projects_for_scope(
+        &self,
+        scope_key: &ScopeKey,
+        sessions: &mut [SessionRecord],
+    ) -> Result<()> {
         normalize_session_projects(sessions);
         let tx = self.conn.unchecked_transaction()?;
-        let mut projects = load_session_projects(&tx)?;
-        let mut aliases = load_session_project_aliases(&tx)?;
+        self.resolve_session_projects_in_tx(&tx, sessions, scope_key)?;
+        tx.commit()?;
+        self.refresh_scoped_session_snapshot(scope_key)?;
+        self.refresh_scoped_session_project_snapshot(scope_key)?;
+        Ok(())
+    }
 
-        for session in sessions {
+    fn resolve_session_projects_in_tx(
+        &self,
+        tx: &Transaction<'_>,
+        sessions: &mut [SessionRecord],
+        scope_key: &ScopeKey,
+    ) -> Result<()> {
+        let mut projects = load_session_projects(tx, scope_key)?;
+        let mut aliases = load_session_project_aliases(tx, scope_key)?;
+
+        for session in sessions.iter_mut() {
             let evidence = session_project_aliases(session);
             if evidence.is_empty() {
                 session.logical_project_id = None;
@@ -1967,9 +1869,10 @@ impl Store {
                 );
                 let last_seen_at = session_project_seen_at(session);
                 tx.execute(
-                    "INSERT OR IGNORE INTO session_projects (id, name, name_custom, last_seen_at)
-                     VALUES (?1, ?2, 0, ?3)",
-                    params![project_id, name, last_seen_at],
+                    "INSERT OR IGNORE INTO session_projects
+                        (scope_key, id, name, name_custom, last_seen_at)
+                     VALUES (?1, ?2, ?3, 0, ?4)",
+                    params![scope_key.as_str(), project_id, name, last_seen_at],
                 )?;
                 projects.entry(project_id.clone()).or_insert(ProjectState {
                     name,
@@ -1980,17 +1883,20 @@ impl Store {
             } else {
                 let target = candidates
                     .iter()
-                    .max_by_key(|project_id| {
-                        projects
-                            .get(*project_id)
-                            .map(|project| project.last_seen_at.as_str())
-                            .unwrap_or("")
+                    .max_by(|left, right| {
+                        let left_seen_at = projects
+                            .get(*left)
+                            .map(|project| project.last_seen_at.as_str());
+                        let right_seen_at = projects
+                            .get(*right)
+                            .map(|project| project.last_seen_at.as_str());
+                        compare_timestamps(left_seen_at, right_seen_at)
                     })
                     .cloned()
                     .context("session project alias references a missing project")?;
                 candidates.remove(&target);
                 for source in candidates {
-                    merge_session_project_rows(&tx, &target, &source)?;
+                    merge_session_project_rows(tx, &target, &source, scope_key)?;
                     for alias_project_id in aliases.values_mut() {
                         if *alias_project_id == source {
                             *alias_project_id = target.clone();
@@ -2004,10 +1910,10 @@ impl Store {
             for alias in evidence {
                 if aliases.get(&alias) != Some(&project_id) {
                     tx.execute(
-                        "INSERT INTO session_project_aliases (project_id, kind, value)
-                         VALUES (?1, ?2, ?3)
-                         ON CONFLICT(kind, value) DO UPDATE SET project_id = excluded.project_id",
-                        params![project_id, alias.0, alias.1],
+                        "INSERT OR REPLACE INTO session_project_aliases
+                            (scope_key, project_id, kind, value)
+                         VALUES (?1, ?2, ?3, ?4)",
+                        params![scope_key.as_str(), project_id, alias.0, alias.1],
                     )?;
                     aliases.insert(alias, project_id.clone());
                 }
@@ -2016,7 +1922,12 @@ impl Store {
             let seen_at = session_project_seen_at(session);
             let suggested_name = suggested_project_name(session);
             if let Some(project) = projects.get_mut(&project_id) {
-                if seen_at > project.last_seen_at {
+                if compare_timestamps(
+                    Some(seen_at.as_str()),
+                    Some(project.last_seen_at.as_str()),
+                )
+                .is_gt()
+                {
                     project.last_seen_at = seen_at.clone();
                     if !project.name_custom {
                         if let Some(suggested_name) = suggested_name {
@@ -2025,9 +1936,14 @@ impl Store {
                     }
                     tx.execute(
                         "UPDATE session_projects
-                         SET name = ?2, last_seen_at = ?3
-                         WHERE id = ?1",
-                        params![project_id, project.name, project.last_seen_at],
+                         SET name = ?3, last_seen_at = ?4
+                         WHERE scope_key = ?1 AND id = ?2",
+                        params![
+                            scope_key.as_str(),
+                            project_id,
+                            project.name,
+                            project.last_seen_at
+                        ],
                     )?;
                 }
                 session.logical_project_id = Some(project_id);
@@ -2035,19 +1951,30 @@ impl Store {
             }
         }
 
-        tx.commit()?;
+        for session in sessions.iter() {
+            let data_json = Self::session_metadata_json(session)?;
+            tx.execute(
+                &format!(
+                    "UPDATE {SCOPED_SESSION_TABLE}
+                     SET data_json = ?1
+                     WHERE scope_key = ?2 AND id = ?3 AND agent = ?4 AND path = ?5"
+                ),
+                params![
+                    data_json,
+                    scope_key.as_str(),
+                    session.id,
+                    agent_label(session.agent),
+                    session.path.display().to_string(),
+                ],
+            )?;
+            index_scoped_session_search_document_best_effort(tx, scope_key, session);
+        }
         Ok(())
     }
 
-    pub fn refresh_session_analytics(
+    pub fn refresh_session_analytics_for_scope_with_progress<F>(
         &self,
-        sessions: &[SessionRecord],
-    ) -> Result<AnalyticsRefreshReport> {
-        self.refresh_session_analytics_with_progress(sessions, |_| {})
-    }
-
-    pub fn refresh_session_analytics_with_progress<F>(
-        &self,
+        scope_key: &ScopeKey,
         sessions: &[SessionRecord],
         mut on_progress: F,
     ) -> Result<AnalyticsRefreshReport>
@@ -2070,22 +1997,24 @@ impl Store {
             {
                 let mut state_stmt = self.conn.prepare(
                     "SELECT file_mtime, file_size, parser_state_json
-                     FROM session_analytics
-                     WHERE session_id = ?1 AND agent = ?2 AND session_path = ?3",
+                     FROM scoped_session_analytics
+                     WHERE scope_key = ?1 AND session_id = ?2 AND agent = ?3 AND session_path = ?4",
                 )?;
                 let mut cache_stmt = self.conn.prepare(
                     "SELECT file_mtime, file_size, analytics_json, parser_state_json
-                     FROM session_analytics
-                     WHERE session_id = ?1 AND agent = ?2 AND session_path = ?3",
+                     FROM scoped_session_analytics
+                     WHERE scope_key = ?1 AND session_id = ?2 AND agent = ?3 AND session_path = ?4",
                 )?;
 
                 for session in batch {
+                    let session_path = session.path.display().to_string();
                     let cached_state = state_stmt
                         .query_row(
                             params![
+                                scope_key.as_str(),
                                 session.id,
                                 agent_label(session.agent),
-                                session.path.display().to_string(),
+                                session_path,
                             ],
                             |row| {
                                 Ok((
@@ -2120,6 +2049,7 @@ impl Store {
                     let cached_row = cache_stmt
                         .query_row(
                             params![
+                                scope_key.as_str(),
                                 session.id,
                                 agent_label(session.agent),
                                 session.path.display().to_string(),
@@ -2147,7 +2077,7 @@ impl Store {
                             }),
                             (Err(err), _) | (_, Err(err)) => {
                                 warnings.push(format!(
-                                    "invalid analytics cache row for {}: {err}",
+                                    "invalid scoped analytics cache row for {}: {err}",
                                     session.path.display()
                                 ));
                                 None
@@ -2175,19 +2105,46 @@ impl Store {
                 }
             }
 
-            self.save_session_analytics_records(&updates)?;
+            self.save_session_analytics_records_for_scope(scope_key, &updates)?;
             let completed = ((batch_index + 1) * SESSION_ANALYTICS_BATCH_SIZE).min(sessions.len());
             on_progress(analytics_refresh_progress(&report, completed));
         }
 
         let tx = self.conn.unchecked_transaction()?;
-        cleanup_stale_session_analytics_rows(&tx)?;
+        tx.execute(
+            "DELETE FROM scoped_session_analytics_overview
+             WHERE scope_key = ?1
+               AND NOT EXISTS (
+                   SELECT 1 FROM scoped_sessions
+                   WHERE scoped_sessions.scope_key = scoped_session_analytics_overview.scope_key
+                     AND scoped_sessions.id = scoped_session_analytics_overview.session_id
+                     AND scoped_sessions.agent = scoped_session_analytics_overview.agent
+                     AND scoped_sessions.path = scoped_session_analytics_overview.session_path
+               )",
+            [scope_key.as_str()],
+        )?;
+        tx.execute(
+            "DELETE FROM scoped_session_analytics
+             WHERE scope_key = ?1
+               AND NOT EXISTS (
+                   SELECT 1 FROM scoped_sessions
+                   WHERE scoped_sessions.scope_key = scoped_session_analytics.scope_key
+                     AND scoped_sessions.id = scoped_session_analytics.session_id
+                     AND scoped_sessions.agent = scoped_session_analytics.agent
+                     AND scoped_sessions.path = scoped_session_analytics.session_path
+               )",
+            [scope_key.as_str()],
+        )?;
         tx.commit()?;
         report.warnings = warnings;
         Ok(report)
     }
 
-    fn save_session_analytics_records(&self, records: &[SessionAnalyticsRecord]) -> Result<()> {
+    fn save_session_analytics_records_for_scope(
+        &self,
+        scope_key: &ScopeKey,
+        records: &[SessionAnalyticsRecord],
+    ) -> Result<()> {
         if records.is_empty() {
             return Ok(());
         }
@@ -2196,15 +2153,15 @@ impl Store {
             let overview = record.analytics.overview_index(&record.state);
             let overview_record = analytics::overview_record(record);
             tx.execute(
-                "INSERT INTO session_analytics (
-                    session_id, agent, session_path, file_mtime, file_size,
+                "INSERT INTO scoped_session_analytics (
+                    scope_key, session_id, agent, session_path, file_mtime, file_size,
                     indexed_at, analytics_json, parser_state_json,
                     event_min_date, event_max_date, has_activity,
                     capability_token_usage, capability_reasoning_tokens,
                     capability_explicit_runs, capability_rate_limit_history,
                     overview_indexed, overview_index_error
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, 1, NULL)
-                 ON CONFLICT(session_id, agent, session_path) DO UPDATE SET
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, 1, NULL)
+                 ON CONFLICT(scope_key, session_id, agent, session_path) DO UPDATE SET
                     file_mtime = excluded.file_mtime,
                     file_size = excluded.file_size,
                     indexed_at = excluded.indexed_at,
@@ -2220,6 +2177,7 @@ impl Store {
                     overview_indexed = 1,
                     overview_index_error = NULL",
                 params![
+                    scope_key.as_str(),
                     record.analytics.session_id,
                     agent_label(record.analytics.agent),
                     record.analytics.session_path.display().to_string(),
@@ -2238,16 +2196,17 @@ impl Store {
                 ],
             )?;
             tx.execute(
-                "INSERT INTO session_analytics_overview (
-                    session_id, agent, session_path, event_min_date, event_max_date,
-                    has_activity, overview_json
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
-                 ON CONFLICT(session_id, agent, session_path) DO UPDATE SET
+                "INSERT INTO scoped_session_analytics_overview (
+                    scope_key, session_id, agent, session_path, event_min_date,
+                    event_max_date, has_activity, overview_json
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                 ON CONFLICT(scope_key, session_id, agent, session_path) DO UPDATE SET
                     event_min_date = excluded.event_min_date,
                     event_max_date = excluded.event_max_date,
                     has_activity = excluded.has_activity,
                     overview_json = excluded.overview_json",
                 params![
+                    scope_key.as_str(),
                     &overview_record.session_id,
                     agent_label(overview_record.agent),
                     overview_record.session_path.display().to_string(),
@@ -2258,180 +2217,58 @@ impl Store {
                 ],
             )?;
         }
-        bump_analytics_revision(&tx)?;
+        let source_version = SourceVersion::new(PROJECTION_PARSER_VERSION)
+            .map_err(|error| anyhow::anyhow!(error))?;
+        advance_projection_head_in_tx(
+            &tx,
+            scope_key,
+            "analytics",
+            Some(&source_version),
+            "ready",
+        )?;
         tx.commit()?;
         Ok(())
     }
 
-    pub fn overview_analytics(
+    /// Return analytics for one workspace only. Scoped analytics are stored in
+    /// their own composite-key projection, so the workspace boundary is
+    /// enforced by SQL rather than by filtering a global cache in memory.
+    pub fn overview_analytics_for_scope(
         &self,
+        scope_key: &ScopeKey,
         agent: Option<AgentKind>,
         days: u32,
         rank_days: u32,
     ) -> Result<OverviewAnalytics> {
+        let scoped_sessions = self.list_sessions_for_scope(scope_key)?.sessions;
+        let allowed = scoped_sessions
+            .iter()
+            .filter(|session| agent.is_none_or(|expected| session.agent == expected))
+            .map(|session| {
+                (
+                    session.id.clone(),
+                    session.agent,
+                    session.path.clone(),
+                )
+            })
+            .collect::<HashSet<_>>();
         let today = chrono::Local::now().date_naive();
         let days = days.clamp(1, 365);
         let rank_days = rank_days.clamp(1, 730);
         let since = today - chrono::Duration::days(i64::from(days.saturating_sub(1)));
         let rank_since = today - chrono::Duration::days(i64::from(rank_days.saturating_sub(1)));
         let cutoff = since.min(rank_since).to_string();
-        let (records, warnings) = self.load_session_analytics_overview_records(agent, &cutoff)?;
+        let (records, warnings) = self.load_session_analytics_overview_records_for_scope(
+            scope_key,
+            agent,
+            &cutoff,
+        )?;
         let mut overview =
             analytics::aggregate_overview_records(&records, days, rank_days, warnings);
-        let (coverage, capabilities) = self.analytics_overview_metadata(agent)?;
-        overview.revision = self.analytics_revision()?;
-        overview.coverage = coverage;
-        overview.capabilities = capabilities;
-        overview
-            .warnings
-            .extend(self.analytics_overview_index_warnings(agent)?);
-        Ok(overview)
-    }
-
-    fn load_session_analytics_overview_records(
-        &self,
-        agent: Option<AgentKind>,
-        cutoff: &str,
-    ) -> Result<(Vec<SessionAnalyticsOverviewRecord>, Vec<String>)> {
-        let agent_value = agent.map(agent_label);
-        let mut records = Vec::new();
-        let mut warnings = Vec::new();
-        let mut invalid = false;
-        let mut stmt = self.conn.prepare(
-            "SELECT overview_json
-             FROM session_analytics_overview
-             WHERE (?1 IS NULL OR agent = ?1)
-               AND event_max_date >= ?2",
-        )?;
-        let rows = stmt.query_map(params![agent_value, cutoff], |row| row.get::<_, String>(0))?;
-        for row in rows {
-            let overview_json = row?;
-            match serde_json::from_str::<SessionAnalyticsOverviewRecord>(&overview_json) {
-                Ok(record) => records.push(record),
-                Err(error) => {
-                    invalid = true;
-                    warnings.push(format!("invalid analytics overview cache row: {error}"));
-                }
-            }
-        }
-        drop(stmt);
-
-        if invalid {
-            let (full_records, warnings) =
-                self.load_session_analytics_records(agent, Some(cutoff))?;
-            return Ok((
-                full_records
-                    .iter()
-                    .map(analytics::overview_record)
-                    .collect(),
-                warnings,
-            ));
-        }
-
-        let mut stmt = self.conn.prepare(
-            "SELECT sa.file_mtime, sa.file_size, sa.analytics_json, sa.parser_state_json
-             FROM session_analytics AS sa
-             LEFT JOIN session_analytics_overview AS overview
-               ON overview.session_id = sa.session_id
-              AND overview.agent = sa.agent
-              AND overview.session_path = sa.session_path
-             WHERE (?1 IS NULL OR sa.agent = ?1)
-               AND sa.overview_indexed = 1
-               AND sa.event_max_date >= ?2
-               AND overview.session_id IS NULL",
-        )?;
-        let rows = stmt.query_map(params![agent_value, cutoff], |row| {
-            Ok((
-                row.get::<_, i64>(0)?,
-                row.get::<_, i64>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, String>(3)?,
-            ))
-        })?;
-        for row in rows {
-            let (file_mtime, file_size, analytics_json, parser_state_json) = row?;
-            match (
-                serde_json::from_str::<crate::analytics::SessionAnalytics>(&analytics_json),
-                serde_json::from_str::<crate::analytics::AnalyticsParserState>(&parser_state_json),
-            ) {
-                (Ok(analytics), Ok(state)) => {
-                    records.push(analytics::overview_record(&SessionAnalyticsRecord {
-                        analytics,
-                        state,
-                        file_mtime,
-                        file_size,
-                    }))
-                }
-                (Err(error), _) | (_, Err(error)) => {
-                    warnings.push(format!("invalid analytics cache row: {error}"))
-                }
-            }
-        }
-        Ok((records, warnings))
-    }
-
-    fn load_session_analytics_records(
-        &self,
-        agent: Option<AgentKind>,
-        event_cutoff: Option<&str>,
-    ) -> Result<(Vec<SessionAnalyticsRecord>, Vec<String>)> {
-        let mut records = Vec::new();
-        let mut warnings = Vec::new();
-        let sql = if agent.is_some() {
-            "SELECT file_mtime, file_size, analytics_json, parser_state_json
-             FROM session_analytics
-             WHERE agent = ?1
-               AND overview_indexed = 1
-               AND (?2 IS NULL OR event_max_date >= ?2)"
-        } else {
-            "SELECT file_mtime, file_size, analytics_json, parser_state_json
-             FROM session_analytics
-             WHERE ?1 IS NULL
-               AND overview_indexed = 1
-               AND (?2 IS NULL OR event_max_date >= ?2)"
-        };
-        let agent_value = agent.map(agent_label);
-        let mut stmt = self.conn.prepare(sql)?;
-        let rows = stmt.query_map(params![agent_value, event_cutoff], |row| {
-            Ok((
-                row.get::<_, i64>(0)?,
-                row.get::<_, i64>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, String>(3)?,
-            ))
-        })?;
-        for row in rows {
-            let (file_mtime, file_size, analytics_json, parser_state_json) = row?;
-            let analytics =
-                serde_json::from_str::<crate::analytics::SessionAnalytics>(&analytics_json);
-            let state =
-                serde_json::from_str::<crate::analytics::AnalyticsParserState>(&parser_state_json);
-            match (analytics, state) {
-                (Ok(analytics), Ok(state)) => records.push(SessionAnalyticsRecord {
-                    analytics,
-                    state,
-                    file_mtime,
-                    file_size,
-                }),
-                (Err(err), _) | (_, Err(err)) => {
-                    warnings.push(format!("invalid analytics cache row: {err}"));
-                }
-            }
-        }
-        Ok((records, warnings))
-    }
-
-    fn analytics_overview_metadata(
-        &self,
-        agent: Option<AgentKind>,
-    ) -> Result<(AnalyticsCoverage, Vec<AnalyticsProviderCapability>)> {
-        let agent_value = agent.map(agent_label);
-        let records = self.load_session_analytics_overview_metadata_records(agent)?;
         let mut first = None;
         let mut last = None;
-        let mut analyzed_sessions = 0;
         let mut capabilities = BTreeMap::<AgentKind, AnalyticsCapabilities>::new();
-        for record in records {
+        for record in &records {
             if let Some(value) = record.first.as_ref()
                 && first.as_ref().is_none_or(|current| value < current)
             {
@@ -2442,129 +2279,103 @@ impl Store {
             {
                 last = Some(value.clone());
             }
-            analyzed_sessions += usize::from(record.has_activity);
             let entry = capabilities.entry(record.agent).or_insert(record.capabilities);
             entry.token_usage |= record.capabilities.token_usage;
             entry.reasoning_tokens |= record.capabilities.reasoning_tokens;
             entry.explicit_runs |= record.capabilities.explicit_runs;
             entry.rate_limit_history |= record.capabilities.rate_limit_history;
         }
-
-        let mut coverage = AnalyticsCoverage {
+        let total_sessions = allowed.len();
+        let analyzed_sessions = records.iter().filter(|record| record.has_activity).count();
+        overview.revision = self
+            .projection_head(scope_key, "analytics")?
+            .map(|head| head.revision.value())
+            .unwrap_or(0);
+        overview.coverage = AnalyticsCoverage {
             first,
             last,
-            total_sessions: 0,
+            total_sessions,
             analyzed_sessions,
-            indexing_sessions: 0,
+            indexing_sessions: total_sessions.saturating_sub(records.len()),
         };
-        coverage.total_sessions = self.conn.query_row(
-            "SELECT COUNT(*) FROM session_analytics WHERE ?1 IS NULL OR agent = ?1",
-            [agent_value],
-            |row| row.get::<_, i64>(0),
-        )? as usize;
-        coverage.indexing_sessions = self.conn.query_row(
-            "SELECT COUNT(*) FROM session_analytics
-             WHERE overview_indexed = 0 AND (?1 IS NULL OR agent = ?1)",
-            [agent_value],
-            |row| row.get::<_, i64>(0),
-        )? as usize;
-        let capabilities = capabilities
+        overview.capabilities = capabilities
             .into_iter()
             .map(|(agent, capabilities)| AnalyticsProviderCapability {
                 agent,
                 capabilities,
             })
             .collect();
-        Ok((coverage, capabilities))
+        overview.warnings.extend(
+            self.analytics_overview_index_warnings_for_scope(scope_key, agent)?,
+        );
+        Ok(overview)
     }
 
-    fn load_session_analytics_overview_metadata_records(
+    fn load_session_analytics_overview_records_for_scope(
         &self,
+        scope_key: &ScopeKey,
         agent: Option<AgentKind>,
-    ) -> Result<Vec<SessionAnalyticsOverviewRecord>> {
+        cutoff: &str,
+    ) -> Result<(Vec<SessionAnalyticsOverviewRecord>, Vec<String>)> {
         let agent_value = agent.map(agent_label);
         let mut records = Vec::new();
-        let mut seen = HashSet::new();
+        let mut warnings = Vec::new();
         let mut invalid = false;
         let mut stmt = self.conn.prepare(
-            "SELECT session_id, agent, session_path, overview_json
-             FROM session_analytics_overview
-             WHERE (?1 IS NULL OR agent = ?1)",
+            "SELECT overview_json
+             FROM scoped_session_analytics_overview
+             WHERE scope_key = ?1
+               AND (?2 IS NULL OR agent = ?2)
+               AND event_max_date >= ?3",
         )?;
-        let rows = stmt.query_map([agent_value], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, String>(3)?,
-            ))
+        let rows = stmt.query_map(params![scope_key.as_str(), agent_value, cutoff], |row| {
+            row.get::<_, String>(0)
         })?;
         for row in rows {
-            let (session_id, agent, session_path, overview_json) = row?;
-            if let Ok(record) = serde_json::from_str::<SessionAnalyticsOverviewRecord>(&overview_json)
-            {
-                seen.insert(format!(
-                    "{}\0{}\0{}",
-                    agent, session_id, session_path
-                ));
-                records.push(record);
-            } else {
-                invalid = true;
+            match serde_json::from_str::<SessionAnalyticsOverviewRecord>(&row?) {
+                Ok(record) => records.push(record),
+                Err(error) => {
+                    invalid = true;
+                    warnings.push(format!("invalid scoped analytics overview cache row: {error}"));
+                }
             }
         }
         drop(stmt);
 
-        let sql = if invalid {
-            "SELECT session_id, agent, session_path, analytics_json, parser_state_json
-             FROM session_analytics
-             WHERE overview_indexed = 1
-               AND (?1 IS NULL OR agent = ?1)"
-        } else {
-            "SELECT sa.session_id, sa.agent, sa.session_path,
-                    sa.analytics_json, sa.parser_state_json
-             FROM session_analytics AS sa
-             LEFT JOIN session_analytics_overview AS overview
-               ON overview.session_id = sa.session_id
-              AND overview.agent = sa.agent
-              AND overview.session_path = sa.session_path
-             WHERE sa.overview_indexed = 1
-               AND (?1 IS NULL OR sa.agent = ?1)
-               AND overview.session_id IS NULL"
-        };
-        let mut stmt = self.conn.prepare(sql)?;
-        let rows = stmt.query_map([agent_value], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, String>(3)?,
-                row.get::<_, String>(4)?,
-            ))
-        })?;
-        for row in rows {
-            let (session_id, agent, session_path, analytics_json, parser_state_json) = row?;
-            let key = format!("{}\0{}\0{}", agent, session_id, session_path);
-            if seen.contains(&key) {
-                continue;
+        if invalid {
+            records.clear();
+            let mut stmt = self.conn.prepare(
+                "SELECT analytics_json, parser_state_json
+                 FROM scoped_session_analytics
+                 WHERE scope_key = ?1
+                   AND (?2 IS NULL OR agent = ?2)
+                   AND overview_indexed = 1
+                   AND event_max_date >= ?3",
+            )?;
+            let rows = stmt.query_map(params![scope_key.as_str(), agent_value, cutoff], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?;
+            for row in rows {
+                let (analytics_json, parser_state_json) = row?;
+                match (
+                    serde_json::from_str::<crate::analytics::SessionAnalytics>(&analytics_json),
+                    serde_json::from_str::<crate::analytics::AnalyticsParserState>(&parser_state_json),
+                ) {
+                    (Ok(analytics), Ok(state)) => {
+                        records.push(analytics::overview_record(&SessionAnalyticsRecord {
+                            analytics,
+                            state,
+                            file_mtime: 0,
+                            file_size: 0,
+                        }));
+                    }
+                    (Err(error), _) | (_, Err(error)) => {
+                        warnings.push(format!("invalid scoped analytics cache row: {error}"));
+                    }
+                }
             }
-            let Ok(analytics) = serde_json::from_str::<crate::analytics::SessionAnalytics>(
-                &analytics_json,
-            ) else {
-                continue;
-            };
-            let Ok(state) = serde_json::from_str::<crate::analytics::AnalyticsParserState>(
-                &parser_state_json,
-            ) else {
-                continue;
-            };
-            records.push(analytics::overview_record(&SessionAnalyticsRecord {
-                analytics,
-                state,
-                file_mtime: 0,
-                file_size: 0,
-            }));
         }
-        Ok(records)
+        Ok((records, warnings))
     }
 
     pub fn analytics_revision(&self) -> Result<u64> {
@@ -2580,41 +2391,20 @@ impl Store {
             .map(|value| value.unwrap_or(0))
     }
 
-    pub fn session_overview_metadata(
+    fn analytics_overview_index_warnings_for_scope(
         &self,
+        scope_key: &ScopeKey,
         agent: Option<AgentKind>,
-    ) -> Result<(usize, Vec<AgentKind>)> {
-        let agent_value = agent.map(agent_label);
-        let total = self.conn.query_row(
-            "SELECT COUNT(*) FROM sessions WHERE ?1 IS NULL OR agent = ?1",
-            [agent_value],
-            |row| row.get::<_, i64>(0),
-        )? as usize;
-        let mut stmt = self.conn.prepare(
-            "SELECT DISTINCT agent FROM sessions
-             WHERE ?1 IS NULL OR agent = ?1
-             ORDER BY agent",
-        )?;
-        let agents = stmt
-            .query_map([agent_value], |row| {
-                parse_agent_label(&row.get::<_, String>(0)?)
-                    .ok_or_else(|| {
-                        rusqlite::Error::InvalidColumnType(0, "agent".to_string(), Type::Text)
-                    })
-            })?
-            .collect::<Result<Vec<_>, _>>()?;
-        Ok((total, agents))
-    }
-
-    fn analytics_overview_index_warnings(&self, agent: Option<AgentKind>) -> Result<Vec<String>> {
+    ) -> Result<Vec<String>> {
         let agent_value = agent.map(agent_label);
         let mut stmt = self.conn.prepare(
             "SELECT session_path, overview_index_error
-             FROM session_analytics
+             FROM scoped_session_analytics
              WHERE overview_index_error IS NOT NULL
-               AND (?1 IS NULL OR agent = ?1)",
+               AND scope_key = ?1
+               AND (?2 IS NULL OR agent = ?2)",
         )?;
-        stmt.query_map([agent_value], |row| {
+        stmt.query_map(params![scope_key.as_str(), agent_value], |row| {
             Ok(format!(
                 "analytics index unavailable for {}: {}",
                 row.get::<_, String>(0)?,
@@ -2802,43 +2592,30 @@ impl Store {
         })
     }
 
-    pub fn session_scan_cache(&self) -> Result<SessionScanCache> {
-        let mut stmt = self.conn.prepare(
-            "SELECT sessions.data_json,
-                    search.file_mtime,
-                    search.file_size
-             FROM sessions
-             JOIN session_search_index AS search
-               ON search.session_id = sessions.id
-              AND search.agent = sessions.agent
-              AND search.session_path = sessions.path",
-        )?;
-        let rows = stmt.query_map([], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, i64>(1)?,
-                row.get::<_, i64>(2)?,
-            ))
-        })?;
-        let entries = rows.filter_map(Result::ok).filter_map(
-            |(data_json, file_mtime, file_size)| {
-                serde_json::from_str::<SessionRecord>(&data_json)
-                    .ok()
-                    .map(|session| SessionScanCacheEntry {
-                        session,
-                        file_mtime,
-                        file_size,
-                    })
-            },
-        );
+
+    pub fn session_scan_cache_for_scope(&self, scope_key: &ScopeKey) -> Result<SessionScanCache> {
+        let sessions = self.list_sessions_for_scope(scope_key)?.sessions;
+        let entries = sessions.into_iter().filter_map(|session| {
+            let state = crate::session_skills::session_file_state(&session.path).ok()?;
+            Some(SessionScanCacheEntry {
+                session,
+                file_mtime: state.file_mtime,
+                file_size: state.file_size,
+            })
+        });
         Ok(SessionScanCache::from_entries(entries))
     }
 
-    pub fn sessions_last_scan_at(&self) -> Result<Option<u64>> {
+
+    pub fn sessions_last_scan_at_for_scope(&self, scope_key: &ScopeKey) -> Result<Option<u64>> {
+        self.sessions_last_scan_at_for_key(&format!("sessions_last_scan_at:{}", scope_key.as_str()))
+    }
+
+    fn sessions_last_scan_at_for_key(&self, key: &str) -> Result<Option<u64>> {
         self.conn
             .query_row(
-                "SELECT value FROM meta WHERE key = 'sessions_last_scan_at'",
-                [],
+                "SELECT value FROM meta WHERE key = ?1",
+                params![key],
                 |row| row.get::<_, String>(0),
             )
             .optional()?
@@ -2862,15 +2639,334 @@ impl Store {
             .transpose()
     }
 
-    pub fn apply_session_delta(&self, sessions: &[SessionRecord]) -> Result<Vec<SessionRecord>> {
+    pub fn projection_head(
+        &self,
+        scope_key: &ScopeKey,
+        domain: &str,
+    ) -> Result<Option<ProjectionHead>> {
+        let row = self
+            .conn
+            .query_row(
+                "SELECT scope_key, domain, revision, source_version, schema_version, status
+                 FROM projection_heads
+                 WHERE scope_key = ?1 AND domain = ?2",
+                params![scope_key.as_str(), domain],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, i64>(2)?,
+                        row.get::<_, Option<String>>(3)?,
+                        row.get::<_, i64>(4)?,
+                        row.get::<_, String>(5)?,
+                    ))
+                },
+            )
+            .optional()?;
+        row.map(|(scope, domain, revision, source_version, schema_version, status)| {
+            Ok(ProjectionHead {
+                scope_key: ScopeKey::new(scope).map_err(|error| anyhow::anyhow!(error))?,
+                domain,
+                revision: Revision::new(
+                    u64::try_from(revision).context("invalid projection revision")?,
+                ),
+                source_version: source_version
+                    .map(SourceVersion::new)
+                    .transpose()
+                    .map_err(|error| anyhow::anyhow!(error))?,
+                schema_version: u32::try_from(schema_version)
+                    .context("invalid projection schema version")?,
+                status,
+            })
+        })
+        .transpose()
+    }
+
+    pub fn advance_projection_head(
+        &self,
+        scope_key: &ScopeKey,
+        domain: &str,
+        source_version: Option<&SourceVersion>,
+        status: &str,
+    ) -> Result<ProjectionHead> {
+        if domain.trim().is_empty() {
+            anyhow::bail!("projection domain must not be empty");
+        }
+        if status.trim().is_empty() {
+            anyhow::bail!("projection status must not be empty");
+        }
         let tx = self.conn.unchecked_transaction()?;
+        let head = advance_projection_head_in_tx(
+            &tx,
+            scope_key,
+            domain,
+            source_version,
+            status,
+        )?;
+        tx.commit()?;
+        Ok(head)
+    }
+
+    pub fn record_operation(&self, operation: &OperationRecord) -> Result<()> {
+        let now = i64::try_from(unix_now()).context("invalid operation timestamp")?;
+        self.conn.execute(
+            "INSERT INTO operation_journal
+                (operation_id, kind, scope_key, status, input_revision, source_version,
+                 checkpoint_json, error, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?9)
+             ON CONFLICT(operation_id) DO UPDATE SET
+                kind = excluded.kind,
+                scope_key = excluded.scope_key,
+                status = excluded.status,
+                input_revision = excluded.input_revision,
+                source_version = excluded.source_version,
+                checkpoint_json = excluded.checkpoint_json,
+                error = excluded.error,
+                updated_at = excluded.updated_at",
+            params![
+                operation.operation_id.as_str(),
+                operation.kind.as_str(),
+                operation.scope_key.as_str(),
+                operation.status.as_str(),
+                operation.input_revision.value(),
+                operation.source_version.as_ref().map(SourceVersion::as_str),
+                operation.checkpoint_json.as_deref(),
+                operation.error.as_deref(),
+                now,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn update_operation(
+        &self,
+        operation_id: &OperationId,
+        status: OperationStatus,
+        checkpoint_json: Option<&str>,
+        error: Option<&str>,
+    ) -> Result<bool> {
+        let updated = self.conn.execute(
+            "UPDATE operation_journal
+             SET status = ?2, checkpoint_json = ?3, error = ?4, updated_at = ?5
+             WHERE operation_id = ?1",
+            params![
+                operation_id.as_str(),
+                status.as_str(),
+                checkpoint_json,
+                error,
+                i64::try_from(unix_now()).context("invalid operation timestamp")?,
+            ],
+        )?;
+        Ok(updated > 0)
+    }
+
+    pub fn recover_inflight_operations(&self) -> Result<usize> {
+        let updated = self.conn.execute(
+            "UPDATE operation_journal
+             SET status = 'failed',
+                 error = COALESCE(error, ?1),
+                 updated_at = ?2
+             WHERE status IN ('queued', 'running', 'committing')",
+            params![
+                "daemon restarted before the operation completed",
+                i64::try_from(unix_now()).context("invalid operation timestamp")?,
+            ],
+        )?;
+        Ok(updated)
+    }
+
+    pub fn operation(&self, operation_id: &OperationId) -> Result<Option<OperationRecord>> {
+        let row = self
+            .conn
+            .query_row(
+                "SELECT operation_id, kind, scope_key, status, input_revision,
+                        source_version, checkpoint_json, error
+                 FROM operation_journal
+                 WHERE operation_id = ?1",
+                params![operation_id.as_str()],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, i64>(4)?,
+                        row.get::<_, Option<String>>(5)?,
+                        row.get::<_, Option<String>>(6)?,
+                        row.get::<_, Option<String>>(7)?,
+                    ))
+                },
+            )
+            .optional()?;
+        row.map(|(
+            operation_id,
+            kind,
+            scope_key,
+            status,
+            input_revision,
+            source_version,
+            checkpoint_json,
+            error,
+        )| {
+            let kind = match kind.as_str() {
+                "scan" => crate::runtime_contract::OperationKind::Scan,
+                "watch" => crate::runtime_contract::OperationKind::Watch,
+                "backfill" => crate::runtime_contract::OperationKind::Backfill,
+                "analytics" => crate::runtime_contract::OperationKind::Analytics,
+                "skill_update" => crate::runtime_contract::OperationKind::SkillUpdate,
+                "projection" => crate::runtime_contract::OperationKind::Projection,
+                other => anyhow::bail!("unknown operation kind: {other}"),
+            };
+            let status = match status.as_str() {
+                "queued" => OperationStatus::Queued,
+                "running" => OperationStatus::Running,
+                "committing" => OperationStatus::Committing,
+                "committed" => OperationStatus::Committed,
+                "published" => OperationStatus::Published,
+                "failed" => OperationStatus::Failed,
+                "cancelled" => OperationStatus::Cancelled,
+                "timed_out" => OperationStatus::TimedOut,
+                "stale" => OperationStatus::Stale,
+                other => anyhow::bail!("unknown operation status: {other}"),
+            };
+            Ok(OperationRecord {
+                operation_id: OperationId::new(operation_id)
+                    .map_err(|error| anyhow::anyhow!(error))?,
+                kind,
+                scope_key: ScopeKey::new(scope_key).map_err(|error| anyhow::anyhow!(error))?,
+                status,
+                input_revision: Revision::new(
+                    u64::try_from(input_revision).context("invalid operation revision")?,
+                ),
+                source_version: source_version
+                    .map(SourceVersion::new)
+                    .transpose()
+                    .map_err(|error| anyhow::anyhow!(error))?,
+                checkpoint_json,
+                error,
+            })
+        })
+        .transpose()
+    }
+
+
+    pub fn apply_session_delta_for_scope(
+        &self,
+        scope_key: &ScopeKey,
+        sessions: &[SessionRecord],
+    ) -> Result<Vec<SessionRecord>> {
+        let tx = self.conn.unchecked_transaction()?;
+        let changed = Self::apply_session_delta_in_tx(
+            &tx,
+            sessions,
+            scope_key,
+        )?;
+        if !changed.is_empty() {
+            advance_projection_head_in_tx(&tx, scope_key, "sessions", None, "ready")?;
+        }
+        cleanup_stale_scoped_session_skill_rows(&tx, scope_key)?;
+        tx.commit()?;
+        self.refresh_scoped_session_snapshot(scope_key)?;
+        Ok(changed)
+    }
+
+
+    pub fn apply_session_delta_and_resolve_projects_for_scope(
+        &self,
+        scope_key: &ScopeKey,
+        sessions: &[SessionRecord],
+    ) -> Result<Vec<SessionRecord>> {
+        let tx = self.conn.unchecked_transaction()?;
+        let mut changed = Self::apply_session_delta_in_tx(
+            &tx,
+            sessions,
+            scope_key,
+        )?;
+        self.resolve_session_projects_in_tx(
+            &tx,
+            &mut changed,
+            scope_key,
+        )?;
+        if !changed.is_empty() {
+            advance_projection_head_in_tx(&tx, scope_key, "sessions", None, "ready")?;
+        }
+        cleanup_stale_scoped_session_skill_rows(&tx, scope_key)?;
+        tx.commit()?;
+        self.refresh_scoped_session_snapshot(scope_key)?;
+        Ok(changed)
+    }
+
+    pub fn apply_session_changes_for_scope(
+        &self,
+        scope_key: &ScopeKey,
+        sessions: &[SessionRecord],
+        removed_paths: &[PathBuf],
+    ) -> Result<(
+        Vec<SessionRecord>,
+        Vec<crate::sessions::SessionIdentity>,
+    )> {
+        let tx = self.conn.unchecked_transaction()?;
+        let mut changed = Self::apply_session_delta_in_tx(
+            &tx,
+            sessions,
+            scope_key,
+        )?;
+        self.resolve_session_projects_in_tx(
+            &tx,
+            &mut changed,
+            scope_key,
+        )?;
+        let existing = Self::list_sessions_in_tx(&tx, scope_key)?;
+        let removed = existing
+            .into_iter()
+            .filter(|session| {
+                removed_paths
+                    .iter()
+                    .any(|path| session.path == *path || session.path.starts_with(path))
+            })
+            .collect::<Vec<_>>();
+        for session in &removed {
+            tx.execute(
+                &format!(
+                    "DELETE FROM {SCOPED_SESSION_TABLE}
+                     WHERE scope_key = ?1 AND id = ?2 AND agent = ?3 AND path = ?4"
+                ),
+                params![
+                    scope_key.as_str(),
+                    session.id,
+                    agent_label(session.agent),
+                    session.path.display().to_string(),
+                ],
+            )?;
+        }
+        if !changed.is_empty() || !removed.is_empty() {
+            advance_projection_head_in_tx(&tx, scope_key, "sessions", None, "ready")?;
+        }
+        cleanup_stale_scoped_session_skill_rows(&tx, scope_key)?;
+        tx.commit()?;
+        self.refresh_scoped_session_snapshot(scope_key)?;
+        Ok((
+            changed,
+            removed
+                .iter()
+                .map(crate::sessions::SessionIdentity::from)
+                .collect(),
+        ))
+    }
+
+    fn apply_session_delta_in_tx(
+        tx: &Transaction<'_>,
+        sessions: &[SessionRecord],
+        scope_key: &ScopeKey,
+    ) -> Result<Vec<SessionRecord>> {
         let mut changed = Vec::new();
         for session in sessions {
             let agent = agent_label(session.agent);
             let existing_session = tx
                 .query_row(
-                    "SELECT data_json FROM sessions WHERE id = ?1 AND agent = ?2 LIMIT 1",
-                    params![session.id, agent],
+                    "SELECT data_json FROM scoped_sessions
+                     WHERE scope_key = ?1 AND id = ?2 AND agent = ?3 LIMIT 1",
+                    params![scope_key.as_str(), session.id, agent],
                     |row| row.get::<_, String>(0),
                 )
                 .optional()?
@@ -2911,8 +3007,9 @@ impl Store {
                 .query_row(
                     "SELECT data_json, title, project, started_at, updated_at, message_count,
                             first_user_message, last_user_message, last_assistant_message
-                     FROM sessions WHERE id = ?1 AND agent = ?2 AND path = ?3",
-                    params![canonical.id, agent, path],
+                     FROM scoped_sessions
+                     WHERE scope_key = ?1 AND id = ?2 AND agent = ?3 AND path = ?4",
+                    params![scope_key.as_str(), canonical.id, agent, path],
                     |row| {
                         Ok((
                             row.get::<_, String>(0)?,
@@ -2942,23 +3039,26 @@ impl Store {
                 continue;
             }
             tx.execute(
-                "DELETE FROM sessions WHERE id = ?1 AND agent = ?2 AND path <> ?3",
-                params![canonical.id, agent, path],
+                "DELETE FROM scoped_sessions
+                 WHERE scope_key = ?1 AND id = ?2 AND agent = ?3 AND path <> ?4",
+                params![scope_key.as_str(), canonical.id, agent, path],
             )?;
             tx.execute(
-                "INSERT INTO sessions (id, agent, title, project, path, started_at, updated_at, message_count, first_user_message, last_user_message, last_assistant_message, data_json)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
-                 ON CONFLICT(id, agent, path) DO UPDATE SET
-                    title = excluded.title,
-                    project = excluded.project,
-                    started_at = excluded.started_at,
-                    updated_at = excluded.updated_at,
-                    message_count = excluded.message_count,
-                    first_user_message = excluded.first_user_message,
-                    last_user_message = excluded.last_user_message,
-                    last_assistant_message = excluded.last_assistant_message,
-                    data_json = excluded.data_json",
+                "INSERT INTO scoped_sessions
+                (scope_key, id, agent, title, project, path, started_at, updated_at, message_count, first_user_message, last_user_message, last_assistant_message, data_json)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+             ON CONFLICT(scope_key, id, agent, path) DO UPDATE SET
+                title = excluded.title,
+                project = excluded.project,
+                started_at = excluded.started_at,
+                updated_at = excluded.updated_at,
+                message_count = excluded.message_count,
+                first_user_message = excluded.first_user_message,
+                last_user_message = excluded.last_user_message,
+                last_assistant_message = excluded.last_assistant_message,
+                data_json = excluded.data_json",
                 params![
+                    scope_key.as_str(),
                     canonical.id,
                     agent,
                     title,
@@ -2975,30 +3075,90 @@ impl Store {
             )?;
             changed.push(canonical);
         }
-        cleanup_stale_session_skill_rows(&tx)?;
-        cleanup_stale_session_search_rows(&tx)?;
-        cleanup_stale_session_analytics_rows(&tx)?;
-        tx.commit()?;
         Ok(changed)
     }
 
-    pub fn index_session_delta(&self, sessions: &[SessionRecord]) -> Result<()> {
-        let tx = self.conn.unchecked_transaction()?;
-        for session in sessions {
-            index_session_search_document_best_effort(&tx, session);
+    fn list_sessions_in_tx(
+        tx: &Transaction<'_>,
+        scope_key: &ScopeKey,
+    ) -> Result<Vec<SessionRecord>> {
+        let mut stmt = tx.prepare(
+            "SELECT data_json FROM scoped_sessions WHERE scope_key = ?1",
+        )?;
+        let mut sessions = Vec::new();
+        let mut rows = stmt.query([scope_key.as_str()])?;
+        while let Some(row) = rows.next()? {
+            if let Ok(session) = serde_json::from_str::<SessionRecord>(&row.get::<_, String>(0)?) {
+                sessions.push(Self::normalize_cached_session(session));
+            }
         }
+        Ok(sessions)
+    }
+
+
+    fn ensure_scoped_fs_manifest(&self) -> Result<()> {
+        let mut stmt = self.conn.prepare("PRAGMA table_info(fs_manifest)")?;
+        let columns = stmt
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(1)?, row.get::<_, i64>(5)?))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        drop(stmt);
+        let scope_is_primary = columns
+            .iter()
+            .any(|(name, primary)| name == "scope_key" && *primary > 0);
+        if scope_is_primary {
+            return Ok(());
+        }
+
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute_batch(
+            "
+            DROP INDEX IF EXISTS idx_fs_manifest_root_kind_path;
+            ALTER TABLE fs_manifest RENAME TO fs_manifest_legacy;
+            CREATE TABLE fs_manifest (
+                scope_key TEXT NOT NULL DEFAULT 'installation:default',
+                source_kind TEXT NOT NULL,
+                path TEXT NOT NULL,
+                root TEXT NOT NULL,
+                agent TEXT,
+                scope TEXT,
+                mtime_ns INTEGER,
+                size INTEGER,
+                inode INTEGER,
+                device INTEGER,
+                sha256 TEXT,
+                parser_version TEXT NOT NULL,
+                last_seen_at INTEGER NOT NULL,
+                parse_status TEXT NOT NULL,
+                PRIMARY KEY (scope_key, source_kind, path)
+            );
+            INSERT INTO fs_manifest (
+                scope_key, source_kind, path, root, agent, scope, mtime_ns, size,
+                inode, device, sha256, parser_version, last_seen_at, parse_status
+            )
+            SELECT scope_key, source_kind, path, root, agent, scope, mtime_ns, size,
+                   inode, device, sha256, parser_version, last_seen_at, parse_status
+            FROM fs_manifest_legacy;
+            DROP TABLE fs_manifest_legacy;
+            CREATE INDEX idx_fs_manifest_root_kind_path
+                ON fs_manifest(scope_key, root, source_kind, path);
+            ",
+        )?;
         tx.commit()?;
         Ok(())
     }
 
-    pub fn remove_sessions_for_paths(
+
+    pub fn remove_sessions_for_paths_for_scope(
         &self,
+        scope_key: &ScopeKey,
         paths: &[PathBuf],
     ) -> Result<Vec<crate::sessions::SessionIdentity>> {
         if paths.is_empty() {
             return Ok(Vec::new());
         }
-        let existing = self.list_sessions()?.sessions;
+        let existing = self.list_sessions_for_scope(scope_key)?.sessions;
         let removed = existing
             .into_iter()
             .filter(|session| {
@@ -3010,60 +3170,60 @@ impl Store {
         if removed.is_empty() {
             return Ok(Vec::new());
         }
+
         let tx = self.conn.unchecked_transaction()?;
         for session in &removed {
             tx.execute(
-                "DELETE FROM sessions WHERE id = ?1 AND agent = ?2 AND path = ?3",
+                &format!(
+                    "DELETE FROM {SCOPED_SESSION_TABLE}
+                     WHERE scope_key = ?1 AND id = ?2 AND agent = ?3 AND path = ?4"
+                ),
                 params![
+                    scope_key.as_str(),
                     session.id,
                     agent_label(session.agent),
                     session.path.display().to_string(),
                 ],
             )?;
         }
-        cleanup_stale_session_skill_rows(&tx)?;
-        cleanup_stale_session_search_rows(&tx)?;
-        cleanup_stale_session_analytics_rows(&tx)?;
+        cleanup_stale_scoped_session_skill_rows(&tx, scope_key)?;
+        cleanup_stale_scoped_session_search_rows(&tx, scope_key)?;
+        advance_projection_head_in_tx(&tx, scope_key, "sessions", None, "ready")?;
         tx.commit()?;
+        self.refresh_scoped_session_snapshot(scope_key)?;
         Ok(removed
             .iter()
             .map(crate::sessions::SessionIdentity::from)
             .collect())
     }
 
-    pub fn search_sessions(&self, query: &str) -> Result<Vec<SessionSearchHit>> {
+
+    /// Search the workspace-owned session projection through its own scoped
+    /// FTS index. The legacy global FTS tables are never consulted here.
+    pub fn search_sessions_for_scope(
+        &self,
+        scope_key: &ScopeKey,
+        query: &str,
+        candidates: Option<&[SessionIdentity]>,
+    ) -> Result<Vec<SessionSearchHit>> {
         let terms = session_search_terms(query);
         if terms.is_empty() {
             return Ok(Vec::new());
         }
         if terms.iter().any(|term| term.chars().count() < 3) {
-            return self.search_sessions_by_contains(&terms, None);
+            return self.search_scoped_sessions_by_contains(scope_key, &terms, candidates);
         }
-        self.search_sessions_by_fts(&terms, None)
+        self.search_scoped_sessions_by_fts(scope_key, &terms, candidates)
     }
 
-    pub fn search_sessions_batch(
+    fn search_scoped_sessions_by_fts(
         &self,
-        query: &str,
-        candidates: &[SessionIdentity],
-    ) -> Result<Vec<SessionSearchHit>> {
-        let terms = session_search_terms(query);
-        if terms.is_empty() || candidates.is_empty() {
-            return Ok(Vec::new());
-        }
-        if terms.iter().any(|term| term.chars().count() < 3) {
-            return self.search_sessions_by_contains(&terms, Some(candidates));
-        }
-        self.search_sessions_by_fts(&terms, Some(candidates))
-    }
-
-    fn search_sessions_by_fts(
-        &self,
+        scope_key: &ScopeKey,
         terms: &[String],
         candidates: Option<&[SessionIdentity]>,
     ) -> Result<Vec<SessionSearchHit>> {
         let query = session_search_query(terms);
-        let mut sql_params = vec![SqlValue::Text(query)];
+        let mut sql_params = vec![SqlValue::Text(scope_key.as_str().to_string()), SqlValue::Text(query)];
         let candidate_filter = candidates
             .map(|candidates| {
                 format!(
@@ -3075,29 +3235,28 @@ impl Store {
         let mut stmt = self.conn.prepare(&format!(
             "SELECT
                 sessions.data_json,
-                bm25(
-                    session_search_fts,
-                    0.5, 10.0, 5.0, 6.0, 3.0
-                ) AS score,
+                bm25(scoped_session_search_fts, 0.5, 10.0, 5.0, 6.0, 3.0) AS score,
                 CASE
-                    WHEN instr(highlight(session_search_fts, 1, '⟦', '⟧'), '⟦') > 0
-                        THEN highlight(session_search_fts, 1, '⟦', '⟧')
-                    WHEN instr(snippet(session_search_fts, 3, '⟦', '⟧', ' … ', 32), '⟦') > 0
-                        THEN snippet(session_search_fts, 3, '⟦', '⟧', ' … ', 32)
-                    WHEN instr(snippet(session_search_fts, 4, '⟦', '⟧', ' … ', 32), '⟦') > 0
-                        THEN snippet(session_search_fts, 4, '⟦', '⟧', ' … ', 32)
-                    WHEN instr(highlight(session_search_fts, 2, '⟦', '⟧'), '⟦') > 0
-                        THEN highlight(session_search_fts, 2, '⟦', '⟧')
-                    ELSE highlight(session_search_fts, 0, '⟦', '⟧')
+                    WHEN instr(highlight(scoped_session_search_fts, 1, '⟦', '⟧'), '⟦') > 0
+                        THEN highlight(scoped_session_search_fts, 1, '⟦', '⟧')
+                    WHEN instr(snippet(scoped_session_search_fts, 3, '⟦', '⟧', ' … ', 32), '⟦') > 0
+                        THEN snippet(scoped_session_search_fts, 3, '⟦', '⟧', ' … ', 32)
+                    WHEN instr(snippet(scoped_session_search_fts, 4, '⟦', '⟧', ' … ', 32), '⟦') > 0
+                        THEN snippet(scoped_session_search_fts, 4, '⟦', '⟧', ' … ', 32)
+                    WHEN instr(highlight(scoped_session_search_fts, 2, '⟦', '⟧'), '⟦') > 0
+                        THEN highlight(scoped_session_search_fts, 2, '⟦', '⟧')
+                    ELSE highlight(scoped_session_search_fts, 0, '⟦', '⟧')
                 END AS snippet
-             FROM session_search_fts
-             JOIN session_search_records AS search
-               ON search.rowid = session_search_fts.rowid
-                JOIN sessions
-               ON sessions.id = search.session_id
+             FROM scoped_session_search_fts
+             JOIN scoped_session_search_records AS search
+               ON search.id = scoped_session_search_fts.rowid
+              AND search.scope_key = ?1
+             JOIN scoped_sessions AS sessions
+               ON sessions.scope_key = search.scope_key
+              AND sessions.id = search.session_id
               AND sessions.agent = search.agent
               AND sessions.path = search.session_path
-             WHERE session_search_fts MATCH ?{candidate_filter}"
+             WHERE scoped_session_search_fts MATCH ?2{candidate_filter}"
         ))?;
         let rows = stmt.query_map(params_from_iter(sql_params.iter()), |row| {
             Ok((
@@ -3107,13 +3266,13 @@ impl Store {
             ))
         })?;
         let candidate_order = candidates.map(Self::session_search_candidate_order);
-        let mut hits = Vec::new();
+        let mut hits: Vec<SessionSearchHit> = Vec::new();
         let mut seen = HashSet::new();
         for row in rows {
             let (data_json, raw_score, snippet) = row?;
             let session = Self::normalize_cached_session(
                 serde_json::from_str::<SessionRecord>(&data_json)
-                    .context("invalid cached session search row")?,
+                    .context("invalid cached scoped session search row")?,
             );
             if !seen.insert(Self::session_search_hit_key(&session)) {
                 continue;
@@ -3132,18 +3291,14 @@ impl Store {
                     .unwrap_or(usize::MAX)
             });
         } else {
-            hits.sort_by(|left, right| {
-                right
-                    .search_score
-                    .total_cmp(&left.search_score)
-                    .then_with(|| Self::compare_session_updated_at(&left.session, &right.session))
-            });
+            hits.sort_by(Self::compare_session_search_hits);
         }
         Ok(hits)
     }
 
-    fn search_sessions_by_contains(
+    fn search_scoped_sessions_by_contains(
         &self,
+        scope_key: &ScopeKey,
         terms: &[String],
         candidates: Option<&[SessionIdentity]>,
     ) -> Result<Vec<SessionSearchHit>> {
@@ -3160,10 +3315,12 @@ impl Store {
             })
             .collect::<Vec<_>>()
             .join(" AND ");
-        let mut sql_params = terms
-            .iter()
-            .map(|term| SqlValue::Text(format!("%{}%", escape_like(term))))
-            .collect::<Vec<_>>();
+        let mut sql_params = vec![SqlValue::Text(scope_key.as_str().to_string())];
+        sql_params.extend(
+            terms
+                .iter()
+                .map(|term| SqlValue::Text(format!("%{}%", escape_like(term)))),
+        );
         let candidate_filter = candidates
             .map(|candidates| {
                 format!(
@@ -3180,12 +3337,13 @@ impl Store {
                 search.project,
                 search.user_text,
                 search.assistant_text
-             FROM session_search_records AS search
-             JOIN sessions
-               ON sessions.id = search.session_id
+             FROM scoped_session_search_records AS search
+             JOIN scoped_sessions AS sessions
+               ON sessions.scope_key = search.scope_key
+              AND sessions.id = search.session_id
               AND sessions.agent = search.agent
               AND sessions.path = search.session_path
-             WHERE {where_clause}{candidate_filter}"
+             WHERE search.scope_key = ?1 AND {where_clause}{candidate_filter}"
         );
         let mut stmt = self.conn.prepare(&sql)?;
         let rows = stmt.query_map(params_from_iter(sql_params.iter()), |row| {
@@ -3207,7 +3365,7 @@ impl Store {
             let (data_json, document) = row?;
             let session = Self::normalize_cached_session(
                 serde_json::from_str::<SessionRecord>(&data_json)
-                    .context("invalid cached session search row")?,
+                    .context("invalid cached scoped session search row")?,
             );
             let key = Self::session_search_hit_key(&session);
             let hit = SessionSearchHit {
@@ -3232,15 +3390,23 @@ impl Store {
                     .unwrap_or(usize::MAX)
             });
         } else {
-            hits.sort_by(|left, right| {
-                right
-                    .search_score
-                    .total_cmp(&left.search_score)
-                    .then_with(|| Self::compare_session_updated_at(&left.session, &right.session))
-            });
+            hits.sort_by(Self::compare_session_search_hits);
         }
         Ok(hits)
     }
+
+
+
+    fn compare_session_search_hits(
+        left: &SessionSearchHit,
+        right: &SessionSearchHit,
+    ) -> std::cmp::Ordering {
+        right
+            .search_score
+            .total_cmp(&left.search_score)
+            .then_with(|| Self::compare_session_updated_at(&left.session, &right.session))
+    }
+
 
     fn session_search_candidate_clause(
         alias: &str,
@@ -3288,12 +3454,59 @@ impl Store {
         )
     }
 
-    pub fn save_sessions(&self, sessions: &SessionScan) -> Result<()> {
-        self.save_sessions_at(sessions, unix_now())
+
+    pub fn save_sessions_at_for_scope(
+        &self,
+        scope_key: &ScopeKey,
+        sessions: &SessionScan,
+        scanned_at: u64,
+    ) -> Result<()> {
+        self.save_sessions_at_with_scope(sessions, scanned_at, scope_key)
     }
 
-    pub fn save_sessions_at(&self, sessions: &SessionScan, scanned_at: u64) -> Result<()> {
+
+    /// Rebuild the derived scoped search index from the canonical session
+    /// projection. The index is disposable; search itself never falls back to
+    /// another workspace or treats stale index rows as session data.
+    pub fn rebuild_scoped_session_search_for_scope(&self, scope_key: &ScopeKey) -> Result<usize> {
+        let sessions = self.list_sessions_from_table(scope_key)?;
         let tx = self.conn.unchecked_transaction()?;
+        tx.execute(
+            "DELETE FROM scoped_session_search_records WHERE scope_key = ?1",
+            params![scope_key.as_str()],
+        )?;
+        tx.execute(
+            "DELETE FROM scoped_session_search_index WHERE scope_key = ?1",
+            params![scope_key.as_str()],
+        )?;
+        for session in &sessions.sessions {
+            index_scoped_session_search_document(&tx, scope_key, session)?;
+        }
+        tx.commit()?;
+        Ok(sessions.sessions.len())
+    }
+
+    fn save_sessions_at_with_scope(
+        &self,
+        sessions: &SessionScan,
+        scanned_at: u64,
+        scope_key: &ScopeKey,
+    ) -> Result<()> {
+        let tx = self.conn.unchecked_transaction()?;
+        self.save_sessions_at_with_scope_in_tx(&tx, sessions, scanned_at, scope_key)?;
+        tx.commit()?;
+        self.refresh_scoped_session_snapshot(scope_key)?;
+        self.refresh_scoped_session_project_snapshot(scope_key)?;
+        Ok(())
+    }
+
+    fn save_sessions_at_with_scope_in_tx(
+        &self,
+        tx: &Transaction<'_>,
+        sessions: &SessionScan,
+        scanned_at: u64,
+        scope_key: &ScopeKey,
+    ) -> Result<()> {
         tx.execute_batch(
             "
             CREATE TEMP TABLE IF NOT EXISTS current_sessions (
@@ -3317,9 +3530,11 @@ impl Store {
                 params![session.id, agent, path],
             )?;
             tx.execute(
-                "INSERT INTO sessions (id, agent, title, project, path, started_at, updated_at, message_count, first_user_message, last_user_message, last_assistant_message, data_json)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
-                 ON CONFLICT(id, agent, path) DO UPDATE SET
+                &format!(
+                    "INSERT INTO {SCOPED_SESSION_TABLE}
+                    (scope_key, id, agent, title, project, path, started_at, updated_at, message_count, first_user_message, last_user_message, last_assistant_message, data_json)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+                 ON CONFLICT(scope_key, id, agent, path) DO UPDATE SET
                     title = excluded.title,
                     project = excluded.project,
                     started_at = excluded.started_at,
@@ -3329,16 +3544,18 @@ impl Store {
                     last_user_message = excluded.last_user_message,
                     last_assistant_message = excluded.last_assistant_message,
                     data_json = excluded.data_json
-                 WHERE sessions.data_json IS NOT excluded.data_json
-                    OR sessions.title IS NOT excluded.title
-                    OR sessions.project IS NOT excluded.project
-                    OR sessions.started_at IS NOT excluded.started_at
-                    OR sessions.updated_at IS NOT excluded.updated_at
-                    OR sessions.message_count IS NOT excluded.message_count
-                    OR sessions.first_user_message IS NOT excluded.first_user_message
-                    OR sessions.last_user_message IS NOT excluded.last_user_message
-                    OR sessions.last_assistant_message IS NOT excluded.last_assistant_message",
+                 WHERE {SCOPED_SESSION_TABLE}.data_json IS NOT excluded.data_json
+                    OR {SCOPED_SESSION_TABLE}.title IS NOT excluded.title
+                    OR {SCOPED_SESSION_TABLE}.project IS NOT excluded.project
+                    OR {SCOPED_SESSION_TABLE}.started_at IS NOT excluded.started_at
+                    OR {SCOPED_SESSION_TABLE}.updated_at IS NOT excluded.updated_at
+                    OR {SCOPED_SESSION_TABLE}.message_count IS NOT excluded.message_count
+                    OR {SCOPED_SESSION_TABLE}.first_user_message IS NOT excluded.first_user_message
+                    OR {SCOPED_SESSION_TABLE}.last_user_message IS NOT excluded.last_user_message
+                    OR {SCOPED_SESSION_TABLE}.last_assistant_message IS NOT excluded.last_assistant_message"
+                ),
                 params![
+                    scope_key.as_str(),
                     session.id,
                     agent,
                     title,
@@ -3353,50 +3570,64 @@ impl Store {
                     data_json,
                 ],
             )?;
-            index_session_search_document_best_effort(&tx, session);
+            index_scoped_session_search_document_best_effort(&tx, scope_key, session);
         }
 
         if sessions.warnings.is_empty() {
             tx.execute(
-                "DELETE FROM sessions
-                 WHERE NOT EXISTS (
-                    SELECT 1 FROM current_sessions
-                    WHERE current_sessions.id = sessions.id
-                      AND current_sessions.agent = sessions.agent
-                      AND current_sessions.path = sessions.path
-                 )",
-                [],
+                &format!(
+                    "DELETE FROM {SCOPED_SESSION_TABLE}
+                     WHERE scope_key = ?1
+                       AND NOT EXISTS (
+                        SELECT 1 FROM current_sessions
+                        WHERE current_sessions.id = {SCOPED_SESSION_TABLE}.id
+                          AND current_sessions.agent = {SCOPED_SESSION_TABLE}.agent
+                          AND current_sessions.path = {SCOPED_SESSION_TABLE}.path
+                       )"
+                ),
+                params![scope_key.as_str()],
             )?;
-            cleanup_stale_session_skill_rows(&tx)?;
-            cleanup_stale_session_search_rows(&tx)?;
-            cleanup_stale_session_analytics_rows(&tx)?;
+            cleanup_stale_scoped_session_skill_rows(&tx, scope_key)?;
+            cleanup_stale_scoped_session_search_rows(&tx, scope_key)?;
         }
         tx.execute("DELETE FROM current_sessions", [])?;
+        let key = format!("sessions_last_scan_at:{}", scope_key.as_str());
         tx.execute(
-            "INSERT INTO meta (key, value) VALUES ('sessions_last_scan_at', ?1)
+            "INSERT INTO meta (key, value) VALUES (?1, ?2)
              ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-            params![scanned_at.to_string()],
+            params![key, scanned_at.to_string()],
+        )?;
+        advance_projection_head_in_tx(&tx, scope_key, "sessions", None, "ready")?;
+        Ok(())
+    }
+
+
+    pub fn clear_session_skill_index_for_scope(&self, scope_key: &ScopeKey) -> Result<()> {
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute(
+            "DELETE FROM scoped_session_skill_links WHERE scope_key = ?1",
+            [scope_key.as_str()],
+        )?;
+        tx.execute(
+            "DELETE FROM scoped_session_skill_index WHERE scope_key = ?1",
+            [scope_key.as_str()],
         )?;
         tx.commit()?;
         Ok(())
     }
 
-    pub fn clear_session_skill_index(&self) -> Result<()> {
-        self.conn.execute_batch(
-            "
-            DELETE FROM session_skill_links;
-            DELETE FROM session_skill_index;
-            ",
-        )?;
-        Ok(())
-    }
 
-    pub fn ensure_session_skill_index_version(&self, version: &str) -> Result<bool> {
+    pub fn ensure_session_skill_index_version_for_scope(
+        &self,
+        scope_key: &ScopeKey,
+        version: &str,
+    ) -> Result<bool> {
+        let meta_key = format!("session_skill_index_version:{}", scope_key.as_str());
         let current = self
             .conn
             .query_row(
-                "SELECT value FROM meta WHERE key = 'session_skill_index_version'",
-                [],
+                "SELECT value FROM meta WHERE key = ?1",
+                [&meta_key],
                 |row| row.get::<_, String>(0),
             )
             .optional()?;
@@ -3405,23 +3636,27 @@ impl Store {
         }
 
         let tx = self.conn.unchecked_transaction()?;
-        tx.execute_batch(
-            "
-            DELETE FROM session_skill_links;
-            DELETE FROM session_skill_index;
-            ",
+        tx.execute(
+            "DELETE FROM scoped_session_skill_links WHERE scope_key = ?1",
+            [scope_key.as_str()],
         )?;
         tx.execute(
-            "INSERT INTO meta (key, value) VALUES ('session_skill_index_version', ?1)
+            "DELETE FROM scoped_session_skill_index WHERE scope_key = ?1",
+            [scope_key.as_str()],
+        )?;
+        tx.execute(
+            "INSERT INTO meta (key, value) VALUES (?1, ?2)
              ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-            [version],
+            params![meta_key, version],
         )?;
         tx.commit()?;
         Ok(true)
     }
 
-    pub fn session_skill_index_is_current(
+
+    pub fn session_skill_index_is_current_for_scope(
         &self,
+        scope_key: &ScopeKey,
         session: &SessionRecord,
         file_mtime: i64,
         file_size: i64,
@@ -3429,10 +3664,11 @@ impl Store {
         let status = self
             .conn
             .query_row(
-                "SELECT status FROM session_skill_index
-                 WHERE session_id = ?1 AND agent = ?2 AND session_path = ?3
-                   AND file_mtime = ?4 AND file_size = ?5",
+                "SELECT status FROM scoped_session_skill_index
+                 WHERE scope_key = ?1 AND session_id = ?2 AND agent = ?3
+                   AND session_path = ?4 AND file_mtime = ?5 AND file_size = ?6",
                 params![
+                    scope_key.as_str(),
                     session.id,
                     agent_label(session.agent),
                     session.path.display().to_string(),
@@ -3445,8 +3681,10 @@ impl Store {
         Ok(status.as_deref() == Some("indexed"))
     }
 
-    pub fn replace_session_skill_links(
+
+    pub fn replace_session_skill_links_for_scope(
         &self,
+        scope_key: &ScopeKey,
         session: &SessionRecord,
         state: &SessionFileState,
         links: &[SessionSkillLink],
@@ -3455,19 +3693,20 @@ impl Store {
         let agent = agent_label(session.agent);
         let session_path = session.path.display().to_string();
         tx.execute(
-            "DELETE FROM session_skill_links
-             WHERE session_id = ?1 AND agent = ?2 AND session_path = ?3",
-            params![session.id, agent, session_path],
+            "DELETE FROM scoped_session_skill_links
+             WHERE scope_key = ?1 AND session_id = ?2 AND agent = ?3 AND session_path = ?4",
+            params![scope_key.as_str(), session.id, agent, session_path],
         )?;
         for link in links {
             tx.execute(
-                "INSERT INTO session_skill_links (
-                    session_id, agent, session_path, skill_name, skill_path,
+                "INSERT INTO scoped_session_skill_links (
+                    scope_key, session_id, agent, session_path, skill_name, skill_path,
                     skill_agent, skill_scope, evidence_kind, evidence_text,
                     evidence_time, confidence
                  )
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
                 params![
+                    scope_key.as_str(),
                     link.session_id,
                     agent_label(link.agent),
                     link.session_path.display().to_string(),
@@ -3483,18 +3722,19 @@ impl Store {
             )?;
         }
         tx.execute(
-            "INSERT INTO session_skill_index (
-                session_id, agent, session_path, file_mtime, file_size,
+            "INSERT INTO scoped_session_skill_index (
+                scope_key, session_id, agent, session_path, file_mtime, file_size,
                 indexed_at, status, error
              )
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'indexed', NULL)
-             ON CONFLICT(session_id, agent, session_path) DO UPDATE SET
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'indexed', NULL)
+             ON CONFLICT(scope_key, session_id, agent, session_path) DO UPDATE SET
                 file_mtime = excluded.file_mtime,
                 file_size = excluded.file_size,
                 indexed_at = excluded.indexed_at,
                 status = excluded.status,
                 error = NULL",
             params![
+                scope_key.as_str(),
                 session.id,
                 agent,
                 session_path,
@@ -3507,26 +3747,29 @@ impl Store {
         Ok(())
     }
 
-    pub fn mark_session_skill_index_failed(
+
+    pub fn mark_session_skill_index_failed_for_scope(
         &self,
+        scope_key: &ScopeKey,
         session: &SessionRecord,
         file_mtime: i64,
         file_size: i64,
         error: &str,
     ) -> Result<()> {
         self.conn.execute(
-            "INSERT INTO session_skill_index (
-                session_id, agent, session_path, file_mtime, file_size,
+            "INSERT INTO scoped_session_skill_index (
+                scope_key, session_id, agent, session_path, file_mtime, file_size,
                 indexed_at, status, error
              )
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'failed', ?7)
-             ON CONFLICT(session_id, agent, session_path) DO UPDATE SET
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'failed', ?8)
+             ON CONFLICT(scope_key, session_id, agent, session_path) DO UPDATE SET
                 file_mtime = excluded.file_mtime,
                 file_size = excluded.file_size,
                 indexed_at = excluded.indexed_at,
                 status = excluded.status,
                 error = excluded.error",
             params![
+                scope_key.as_str(),
                 session.id,
                 agent_label(session.agent),
                 session.path.display().to_string(),
@@ -3539,32 +3782,42 @@ impl Store {
         Ok(())
     }
 
-    pub fn session_skill_index_status(&self, running: bool) -> Result<SessionSkillIndexStatus> {
+
+    pub fn session_skill_index_status_for_scope(
+        &self,
+        scope_key: &ScopeKey,
+        running: bool,
+    ) -> Result<SessionSkillIndexStatus> {
         let total = self
             .conn
-            .query_row("SELECT COUNT(*) FROM sessions", [], |row| {
-                row.get::<_, i64>(0)
-            })?
+            .query_row(
+                "SELECT COUNT(*) FROM scoped_sessions WHERE scope_key = ?1",
+                [scope_key.as_str()],
+                |row| row.get::<_, i64>(0),
+            )?
             .max(0) as usize;
         let indexed = self
             .conn
             .query_row(
-                "SELECT COUNT(*) FROM session_skill_index WHERE status = 'indexed'",
-                [],
+                "SELECT COUNT(*) FROM scoped_session_skill_index
+                 WHERE scope_key = ?1 AND status = 'indexed'",
+                [scope_key.as_str()],
                 |row| row.get::<_, i64>(0),
             )?
             .max(0) as usize;
         let failed = self
             .conn
             .query_row(
-                "SELECT COUNT(*) FROM session_skill_index WHERE status = 'failed'",
-                [],
+                "SELECT COUNT(*) FROM scoped_session_skill_index
+                 WHERE scope_key = ?1 AND status = 'failed'",
+                [scope_key.as_str()],
                 |row| row.get::<_, i64>(0),
             )?
             .max(0) as usize;
         let last_indexed_at = self.conn.query_row(
-            "SELECT MAX(indexed_at) FROM session_skill_index WHERE status = 'indexed'",
-            [],
+            "SELECT MAX(indexed_at) FROM scoped_session_skill_index
+             WHERE scope_key = ?1 AND status = 'indexed'",
+            [scope_key.as_str()],
             |row| row.get::<_, Option<String>>(0),
         )?;
         Ok(SessionSkillIndexStatus {
@@ -3577,35 +3830,64 @@ impl Store {
         })
     }
 
-    pub fn session_skill_links(
+
+    pub fn session_skill_links_for_scope(
         &self,
+        scope_key: &ScopeKey,
         session_id: &str,
         agent: AgentKind,
     ) -> Result<Vec<SessionSkillLink>> {
-        self.query_session_skill_links(
-            "WHERE links.session_id = ?1 AND links.agent = ?2",
-            params![session_id, agent_label(agent)],
+        self.query_session_skill_links_from(
+            "scoped_session_skill_links",
+            "scoped_sessions",
+            "WHERE links.scope_key = ?1 AND links.session_id = ?2 AND links.agent = ?3",
+            params![scope_key.as_str(), session_id, agent_label(agent)],
         )
     }
 
-    pub fn skill_session_links(&self, skill_name: &str) -> Result<Vec<SessionSkillLink>> {
-        self.query_session_skill_links("WHERE links.skill_name = ?1", params![skill_name])
+    pub fn skill_session_links_for_scope(
+        &self,
+        scope_key: &ScopeKey,
+        skill_name: &str,
+    ) -> Result<Vec<SessionSkillLink>> {
+        self.query_session_skill_links_from(
+            "scoped_session_skill_links",
+            "scoped_sessions",
+            "WHERE links.scope_key = ?1 AND links.skill_name = ?2",
+            params![scope_key.as_str(), skill_name],
+        )
     }
 
-    fn query_session_skill_links<P>(
+
+    fn query_session_skill_links_from<P>(
         &self,
+        links_table: &str,
+        sessions_table: &str,
         where_clause: &str,
         params: P,
     ) -> Result<Vec<SessionSkillLink>>
     where
         P: rusqlite::Params,
     {
+        // Read only the Session fields Linked Sessions needs from data_json.
+        // Scalar session columns are projections, not authority (see list_sessions).
+        // ORDER BY mirrors the prior in-memory sort keys; compare_timestamps
+        // still re-sorts so RFC3339 offsets and invalid stamps stay equivalent.
         let sql = format!(
             "SELECT
                 links.session_id,
                 links.agent,
                 links.session_path,
-                sessions.data_json,
+                CASE
+                  WHEN sessions.data_json IS NULL THEN 0
+                  WHEN json_valid(sessions.data_json) THEN 0
+                  ELSE 1
+                END,
+                json_extract(sessions.data_json, '$.title'),
+                json_extract(sessions.data_json, '$.project'),
+                json_extract(sessions.data_json, '$.started_at'),
+                json_extract(sessions.data_json, '$.updated_at'),
+                json_extract(sessions.data_json, '$.message_count'),
                 links.skill_name,
                 links.skill_path,
                 links.skill_agent,
@@ -3614,12 +3896,17 @@ impl Store {
                 links.evidence_text,
                 links.evidence_time,
                 links.confidence
-             FROM session_skill_links links
-             LEFT JOIN sessions
+             FROM {links_table} links
+             LEFT JOIN {sessions_table} sessions
                ON sessions.id = links.session_id
               AND sessions.agent = links.agent
               AND sessions.path = links.session_path
-             {where_clause}"
+              AND sessions.scope_key = links.scope_key
+             {where_clause}
+             ORDER BY
+                json_extract(sessions.data_json, '$.updated_at') DESC,
+                links.evidence_time DESC,
+                links.skill_name ASC"
         );
         let mut stmt = self.conn.prepare(&sql)?;
         let rows = stmt.query_map(params, |row| {
@@ -3627,15 +3914,20 @@ impl Store {
                 row.get::<_, String>(0)?,
                 row.get::<_, String>(1)?,
                 row.get::<_, String>(2)?,
-                row.get::<_, Option<String>>(3)?,
-                row.get::<_, String>(4)?,
-                row.get::<_, String>(5)?,
+                row.get::<_, i64>(3)?,
+                row.get::<_, Option<String>>(4)?,
+                row.get::<_, Option<String>>(5)?,
                 row.get::<_, Option<String>>(6)?,
                 row.get::<_, Option<String>>(7)?,
-                row.get::<_, String>(8)?,
+                row.get::<_, Option<i64>>(8)?,
                 row.get::<_, String>(9)?,
-                row.get::<_, Option<String>>(10)?,
-                row.get::<_, String>(11)?,
+                row.get::<_, String>(10)?,
+                row.get::<_, Option<String>>(11)?,
+                row.get::<_, Option<String>>(12)?,
+                row.get::<_, String>(13)?,
+                row.get::<_, String>(14)?,
+                row.get::<_, Option<String>>(15)?,
+                row.get::<_, String>(16)?,
             ))
         })?;
         let mut links = Vec::new();
@@ -3644,7 +3936,12 @@ impl Store {
                 session_id,
                 agent,
                 session_path,
-                data_json,
+                invalid_session_json,
+                session_title,
+                session_project,
+                session_started_at,
+                session_updated_at,
+                session_message_count,
                 skill_name,
                 skill_path,
                 skill_agent,
@@ -3656,19 +3953,13 @@ impl Store {
             ) = row?;
             let agent = parse_agent_label(&agent)
                 .ok_or_else(|| anyhow::anyhow!("invalid session skill link agent: {agent}"))?;
-            let session = data_json
-                .map(|data_json| {
-                    serde_json::from_str::<SessionRecord>(&data_json)
-                        .map(Self::normalize_cached_session)
-                })
-                .transpose()
-                .with_context(|| {
-                    format!(
-                        "invalid cached session row for skill link {}:{}",
-                        agent_label(agent),
-                        session_id
-                    )
-                })?;
+            if invalid_session_json != 0 {
+                anyhow::bail!(
+                    "invalid cached session row for skill link {}:{}",
+                    agent_label(agent),
+                    session_id
+                );
+            }
             let skill_agent = skill_agent
                 .map(|agent| {
                     parse_agent_label(&agent).ok_or_else(|| {
@@ -3676,21 +3967,25 @@ impl Store {
                     })
                 })
                 .transpose()?;
+            let message_count = session_message_count
+                .map(|count| usize::try_from(count))
+                .transpose()
+                .with_context(|| {
+                    format!(
+                        "invalid session message_count for skill link {}:{}",
+                        agent_label(agent),
+                        session_id
+                    )
+                })?;
             let link = SessionSkillLink {
                 session_id,
                 agent,
                 session_path: PathBuf::from(session_path),
-                session_title: session
-                    .as_ref()
-                    .and_then(|session| clean_session_title(session.title.clone())),
-                session_project: session.as_ref().and_then(|session| session.project.clone()),
-                session_started_at: session
-                    .as_ref()
-                    .and_then(|session| session.started_at.clone()),
-                session_updated_at: session
-                    .as_ref()
-                    .and_then(|session| session.updated_at.clone()),
-                session_message_count: session.as_ref().and_then(|session| session.message_count),
+                session_title: clean_session_title(session_title),
+                session_project: session_project.map(PathBuf::from),
+                session_started_at,
+                session_updated_at,
+                session_message_count: message_count,
                 skill_name,
                 skill_path: PathBuf::from(skill_path),
                 skill_agent,
@@ -3703,20 +3998,61 @@ impl Store {
             links.push(link);
         }
         links.sort_by(|left, right| {
-            right
-                .session_updated_at
-                .cmp(&left.session_updated_at)
-                .then_with(|| right.evidence_time.cmp(&left.evidence_time))
-                .then_with(|| left.skill_name.cmp(&right.skill_name))
+            compare_timestamps(
+                right.session_updated_at.as_deref(),
+                left.session_updated_at.as_deref(),
+            )
+            .then_with(|| {
+                compare_timestamps(
+                    right.evidence_time.as_deref(),
+                    left.evidence_time.as_deref(),
+                )
+            })
+            .then_with(|| left.skill_name.cmp(&right.skill_name))
         });
         Ok(links)
     }
 
     pub fn skill_source_records(&self) -> Result<Vec<SkillSourceRecord>> {
-        let mut statement = self
-            .conn
-            .prepare("SELECT data_json FROM skill_sources ORDER BY skill_name, skill_path")?;
-        let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
+        let mut records = Vec::new();
+        for table in ["skill_sources", "scoped_skill_sources"] {
+            let mut statement = self
+                .conn
+                .prepare(&format!("SELECT data_json FROM {table}"))?;
+            let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
+            for row in rows {
+                let data_json = row?;
+                records.push(serde_json::from_str::<SkillSourceRecord>(&data_json).map_err(
+                    |error| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            0,
+                            rusqlite::types::Type::Text,
+                            Box::new(error),
+                        )
+                    },
+                )?);
+            }
+        }
+        records.sort_by(|left, right| {
+            left.skill_name
+                .cmp(&right.skill_name)
+                .then_with(|| left.skill_path.cmp(&right.skill_path))
+        });
+        records.dedup_by(|left, right| left.skill_path == right.skill_path);
+        Ok(records)
+    }
+
+    pub fn skill_source_records_for_workspace(
+        &self,
+        workspace_root: &Path,
+    ) -> Result<Vec<SkillSourceRecord>> {
+        let scope_key = workspace_scope_key(&canonical_workspace_root(workspace_root))?;
+        let mut statement = self.conn.prepare(
+            "SELECT data_json FROM scoped_skill_sources
+             WHERE scope_key = ?1
+             ORDER BY skill_name, skill_path",
+        )?;
+        let rows = statement.query_map(params![scope_key.as_str()], |row| row.get::<_, String>(0))?;
         rows.map(|row| {
             let data_json = row?;
             serde_json::from_str::<SkillSourceRecord>(&data_json).map_err(|error| {
@@ -3737,6 +4073,38 @@ impl Store {
             .query_row(
                 "SELECT data_json FROM skill_sources WHERE skill_path = ?1",
                 params![skill_path.display().to_string()],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        let data_json = match data_json {
+            Some(data_json) => Some(data_json),
+            None => self
+                .conn
+                .query_row(
+                    "SELECT data_json FROM scoped_skill_sources WHERE skill_path = ?1
+                     ORDER BY scope_key LIMIT 1",
+                    params![skill_path.display().to_string()],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()?,
+        };
+        data_json
+            .map(|data_json| serde_json::from_str(&data_json).map_err(Into::into))
+            .transpose()
+    }
+
+    pub fn skill_source_record_for_workspace(
+        &self,
+        workspace_root: &Path,
+        skill_path: &Path,
+    ) -> Result<Option<SkillSourceRecord>> {
+        let scope_key = workspace_scope_key(&canonical_workspace_root(workspace_root))?;
+        let data_json = self
+            .conn
+            .query_row(
+                "SELECT data_json FROM scoped_skill_sources
+                 WHERE scope_key = ?1 AND skill_path = ?2",
+                params![scope_key.as_str(), skill_path.display().to_string()],
                 |row| row.get::<_, String>(0),
             )
             .optional()?;
@@ -3775,6 +4143,56 @@ impl Store {
             )?;
         }
         tx.commit()?;
+        Ok(inserted)
+    }
+
+    pub fn insert_skill_source_records_if_missing_for_workspace(
+        &self,
+        workspace_root: &Path,
+        records: &[SkillSourceRecord],
+    ) -> Result<usize> {
+        if records.is_empty() {
+            return Ok(0);
+        }
+        let scope_key = workspace_scope_key(&canonical_workspace_root(workspace_root))?;
+        let tx = self.conn.unchecked_transaction()?;
+        let inserted = self.insert_skill_source_records_if_missing_for_workspace_in_tx(
+            &tx,
+            &scope_key,
+            records,
+        )?;
+        tx.commit()?;
+        Ok(inserted)
+    }
+
+    fn insert_skill_source_records_if_missing_for_workspace_in_tx(
+        &self,
+        tx: &Transaction<'_>,
+        scope_key: &ScopeKey,
+        records: &[SkillSourceRecord],
+    ) -> Result<usize> {
+        let mut inserted = 0;
+        for record in records {
+            inserted += tx.execute(
+                "INSERT OR IGNORE INTO scoped_skill_sources (
+                    scope_key, skill_path, skill_name, source_kind, source, source_ref, source_version,
+                    source_relative_path, update_status, origin, data_json
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                params![
+                    scope_key.as_str(),
+                    record.skill_path.display().to_string(),
+                    record.skill_name,
+                    record.source_kind,
+                    record.source,
+                    record.source_ref,
+                    record.source_version,
+                    record.source_relative_path,
+                    record.update_status,
+                    record.origin,
+                    serde_json::to_string(record)?,
+                ],
+            )?;
+        }
         Ok(inserted)
     }
 
@@ -3818,6 +4236,52 @@ impl Store {
         Ok(changed)
     }
 
+    pub fn upsert_skill_source_records_for_workspace(
+        &self,
+        workspace_root: &Path,
+        records: &[SkillSourceRecord],
+    ) -> Result<usize> {
+        if records.is_empty() {
+            return Ok(0);
+        }
+        let scope_key = workspace_scope_key(&canonical_workspace_root(workspace_root))?;
+        let tx = self.conn.unchecked_transaction()?;
+        let mut changed = 0;
+        for record in records {
+            changed += tx.execute(
+                "INSERT INTO scoped_skill_sources (
+                    scope_key, skill_path, skill_name, source_kind, source, source_ref, source_version,
+                    source_relative_path, update_status, origin, data_json
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+                 ON CONFLICT(scope_key, skill_path) DO UPDATE SET
+                    skill_name = excluded.skill_name,
+                    source_kind = excluded.source_kind,
+                    source = excluded.source,
+                    source_ref = excluded.source_ref,
+                    source_version = excluded.source_version,
+                    source_relative_path = excluded.source_relative_path,
+                    update_status = excluded.update_status,
+                    origin = excluded.origin,
+                    data_json = excluded.data_json",
+                params![
+                    scope_key.as_str(),
+                    record.skill_path.display().to_string(),
+                    record.skill_name,
+                    record.source_kind,
+                    record.source,
+                    record.source_ref,
+                    record.source_version,
+                    record.source_relative_path,
+                    record.update_status,
+                    record.origin,
+                    serde_json::to_string(record)?,
+                ],
+            )?;
+        }
+        tx.commit()?;
+        Ok(changed)
+    }
+
     pub fn delete_skill_source_records(&self, skill_paths: &[PathBuf]) -> Result<usize> {
         if skill_paths.is_empty() {
             return Ok(0);
@@ -3832,6 +4296,31 @@ impl Store {
             tx.execute(
                 "DELETE FROM skill_snapshots WHERE skill_path = ?1",
                 params![skill_path.display().to_string()],
+            )?;
+        }
+        tx.commit()?;
+        Ok(deleted)
+    }
+
+    pub fn delete_skill_source_records_for_workspace(
+        &self,
+        workspace_root: &Path,
+        skill_paths: &[PathBuf],
+    ) -> Result<usize> {
+        if skill_paths.is_empty() {
+            return Ok(0);
+        }
+        let scope_key = workspace_scope_key(&canonical_workspace_root(workspace_root))?;
+        let tx = self.conn.unchecked_transaction()?;
+        let mut deleted = 0;
+        for skill_path in skill_paths {
+            deleted += tx.execute(
+                "DELETE FROM scoped_skill_sources WHERE scope_key = ?1 AND skill_path = ?2",
+                params![scope_key.as_str(), skill_path.display().to_string()],
+            )?;
+            tx.execute(
+                "DELETE FROM scoped_skill_snapshots WHERE scope_key = ?1 AND skill_path = ?2",
+                params![scope_key.as_str(), skill_path.display().to_string()],
             )?;
         }
         tx.commit()?;
@@ -3862,32 +4351,50 @@ impl Store {
     }
 
     pub fn skill_snapshot(&self, skill_path: &Path) -> Result<Option<SkillSnapshot>> {
-        let mut statement = self.conn.prepare(
+        let path = skill_path.display().to_string();
+        let read_snapshot = |sql: &str| -> Result<Option<SkillSnapshot>> {
+            let mut statement = self.conn.prepare(sql)?;
+            let mut rows = statement.query(params![&path])?;
+            let Some(first) = rows.next()? else {
+                return Ok(None);
+            };
+            let source_version = first.get::<_, String>(0)?;
+            let mut files = vec![SkillSnapshotFile {
+                relative_path: first.get(1)?,
+                content: first.get(2)?,
+            }];
+            while let Some(row) = rows.next()? {
+                files.push(SkillSnapshotFile {
+                    relative_path: row.get(1)?,
+                    content: row.get(2)?,
+                });
+            }
+            Ok(Some(SkillSnapshot {
+                skill_path: skill_path.to_path_buf(),
+                source_version,
+                files,
+            }))
+        };
+
+        if let Some(snapshot) = read_snapshot(
             "SELECT source_version, relative_path, content
              FROM skill_snapshots
              WHERE skill_path = ?1
              ORDER BY relative_path",
-        )?;
-        let mut rows = statement.query(params![skill_path.display().to_string()])?;
-        let Some(first) = rows.next()? else {
-            return Ok(None);
-        };
-        let source_version = first.get::<_, String>(0)?;
-        let mut files = vec![SkillSnapshotFile {
-            relative_path: first.get(1)?,
-            content: first.get(2)?,
-        }];
-        while let Some(row) = rows.next()? {
-            files.push(SkillSnapshotFile {
-                relative_path: row.get(1)?,
-                content: row.get(2)?,
-            });
+        )? {
+            return Ok(Some(snapshot));
         }
-        Ok(Some(SkillSnapshot {
-            skill_path: skill_path.to_path_buf(),
-            source_version,
-            files,
-        }))
+        read_snapshot(
+            "SELECT source_version, relative_path, content
+             FROM scoped_skill_snapshots
+             WHERE skill_path = ?1
+               AND scope_key = (
+                   SELECT scope_key FROM scoped_skill_snapshots
+                   WHERE skill_path = ?1
+                   ORDER BY scope_key LIMIT 1
+               )
+             ORDER BY relative_path",
+        )
     }
 
     pub fn replace_skill_snapshots(&self, snapshots: &[SkillSnapshot]) -> Result<()> {
@@ -3918,6 +4425,312 @@ impl Store {
         Ok(())
     }
 
+    pub fn replace_skill_snapshots_for_workspace(
+        &self,
+        workspace_root: &Path,
+        snapshots: &[SkillSnapshot],
+    ) -> Result<()> {
+        if snapshots.is_empty() {
+            return Ok(());
+        }
+        let scope_key = workspace_scope_key(&canonical_workspace_root(workspace_root))?;
+        let tx = self.conn.unchecked_transaction()?;
+        for snapshot in snapshots {
+            tx.execute(
+                "DELETE FROM scoped_skill_snapshots
+                 WHERE scope_key = ?1 AND skill_path = ?2",
+                params![scope_key.as_str(), snapshot.skill_path.display().to_string()],
+            )?;
+            for file in &snapshot.files {
+                tx.execute(
+                    "INSERT INTO scoped_skill_snapshots (
+                        scope_key, skill_path, source_version, relative_path, content
+                     ) VALUES (?1, ?2, ?3, ?4, ?5)",
+                    params![
+                        scope_key.as_str(),
+                        snapshot.skill_path.display().to_string(),
+                        snapshot.source_version,
+                        file.relative_path,
+                        file.content,
+                    ],
+                )?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn persist_skill_update_persistence(
+        &self,
+        source_records: &[SkillSourceRecord],
+        snapshots: &[SkillSnapshot],
+    ) -> Result<()> {
+        if source_records.is_empty() && snapshots.is_empty() {
+            return Ok(());
+        }
+        let tx = self.conn.unchecked_transaction()?;
+        for record in source_records {
+            tx.execute(
+                "INSERT INTO skill_sources (
+                    skill_path, skill_name, source_kind, source, source_ref, source_version,
+                    source_relative_path, update_status, origin, data_json
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+                 ON CONFLICT(skill_path) DO UPDATE SET
+                    skill_name = excluded.skill_name,
+                    source_kind = excluded.source_kind,
+                    source = excluded.source,
+                    source_ref = excluded.source_ref,
+                    source_version = excluded.source_version,
+                    source_relative_path = excluded.source_relative_path,
+                    update_status = excluded.update_status,
+                    origin = excluded.origin,
+                    data_json = excluded.data_json",
+                params![
+                    record.skill_path.display().to_string(),
+                    record.skill_name,
+                    record.source_kind,
+                    record.source,
+                    record.source_ref,
+                    record.source_version,
+                    record.source_relative_path,
+                    record.update_status,
+                    record.origin,
+                    serde_json::to_string(record)?,
+                ],
+            )?;
+        }
+        for snapshot in snapshots {
+            tx.execute(
+                "DELETE FROM skill_snapshots WHERE skill_path = ?1",
+                params![snapshot.skill_path.display().to_string()],
+            )?;
+            for file in &snapshot.files {
+                tx.execute(
+                    "INSERT INTO skill_snapshots (
+                        skill_path, source_version, relative_path, content
+                     ) VALUES (?1, ?2, ?3, ?4)",
+                    params![
+                        snapshot.skill_path.display().to_string(),
+                        snapshot.source_version,
+                        file.relative_path,
+                        file.content,
+                    ],
+                )?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn persist_skill_update_persistence_checked(
+        &self,
+        expected_source_versions: &[(PathBuf, Option<String>)],
+        source_records: &[SkillSourceRecord],
+        snapshots: &[SkillSnapshot],
+    ) -> Result<()> {
+        self.validate_skill_source_versions(expected_source_versions)?;
+        self.persist_skill_update_persistence(source_records, snapshots)
+    }
+
+    pub fn validate_skill_source_versions(
+        &self,
+        expected_source_versions: &[(PathBuf, Option<String>)],
+    ) -> Result<()> {
+        if expected_source_versions.is_empty() {
+            return Ok(());
+        }
+        for (path, expected_version) in expected_source_versions {
+            let current_version = self
+                .conn
+                .query_row(
+                    "SELECT source_version FROM skill_sources WHERE skill_path = ?1",
+                    params![path.display().to_string()],
+                    |row| row.get::<_, Option<String>>(0),
+                )
+                .optional()?;
+            if current_version.flatten() != expected_version.clone() {
+                bail!(
+                    "skill source {} changed after the update preview; preview the update again",
+                    path.display()
+                );
+            }
+        }
+        Ok(())
+    }
+
+    pub fn persist_skill_update_persistence_for_workspace(
+        &self,
+        workspace_root: &Path,
+        source_records: &[SkillSourceRecord],
+        snapshots: &[SkillSnapshot],
+    ) -> Result<()> {
+        self.persist_skill_update_persistence_for_workspace_with_deleted(
+            workspace_root,
+            &[],
+            source_records,
+            snapshots,
+        )
+    }
+
+    pub fn persist_skill_update_persistence_for_workspace_checked(
+        &self,
+        workspace_root: &Path,
+        expected_source_versions: &[(PathBuf, Option<String>)],
+        source_records: &[SkillSourceRecord],
+        snapshots: &[SkillSnapshot],
+    ) -> Result<()> {
+        self.persist_skill_update_persistence_for_workspace_with_deleted_checked(
+            workspace_root,
+            &[],
+            expected_source_versions,
+            source_records,
+            snapshots,
+        )
+    }
+
+    pub fn persist_skill_update_persistence_for_workspace_with_deleted(
+        &self,
+        workspace_root: &Path,
+        deleted_paths: &[PathBuf],
+        source_records: &[SkillSourceRecord],
+        snapshots: &[SkillSnapshot],
+    ) -> Result<()> {
+        self.persist_skill_update_persistence_for_workspace_with_deleted_checked(
+            workspace_root,
+            deleted_paths,
+            &[],
+            source_records,
+            snapshots,
+        )
+    }
+
+    pub fn persist_skill_update_persistence_for_workspace_with_deleted_checked(
+        &self,
+        workspace_root: &Path,
+        deleted_paths: &[PathBuf],
+        expected_source_versions: &[(PathBuf, Option<String>)],
+        source_records: &[SkillSourceRecord],
+        snapshots: &[SkillSnapshot],
+    ) -> Result<()> {
+        if deleted_paths.is_empty() && source_records.is_empty() && snapshots.is_empty() {
+            return Ok(());
+        }
+        let scope_key = workspace_scope_key(&canonical_workspace_root(workspace_root))?;
+        let tx = self.conn.unchecked_transaction()?;
+        for (path, expected_version) in expected_source_versions {
+            let current_version = tx
+                .query_row(
+                    "SELECT source_version FROM scoped_skill_sources
+                     WHERE scope_key = ?1 AND skill_path = ?2",
+                    params![scope_key.as_str(), path.display().to_string()],
+                    |row| row.get::<_, Option<String>>(0),
+                )
+                .optional()?;
+            if current_version.flatten() != expected_version.clone() {
+                bail!(
+                    "skill source {} changed after the update preview; preview the update again",
+                    path.display()
+                );
+            }
+        }
+        for path in deleted_paths {
+            tx.execute(
+                "DELETE FROM scoped_skill_sources
+                 WHERE scope_key = ?1 AND skill_path = ?2",
+                params![scope_key.as_str(), path.display().to_string()],
+            )?;
+            tx.execute(
+                "DELETE FROM scoped_skill_snapshots
+                 WHERE scope_key = ?1 AND skill_path = ?2",
+                params![scope_key.as_str(), path.display().to_string()],
+            )?;
+        }
+        for record in source_records {
+            tx.execute(
+                "INSERT INTO scoped_skill_sources (
+                    scope_key, skill_path, skill_name, source_kind, source, source_ref, source_version,
+                    source_relative_path, update_status, origin, data_json
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+                 ON CONFLICT(scope_key, skill_path) DO UPDATE SET
+                    skill_name = excluded.skill_name,
+                    source_kind = excluded.source_kind,
+                    source = excluded.source,
+                    source_ref = excluded.source_ref,
+                    source_version = excluded.source_version,
+                    source_relative_path = excluded.source_relative_path,
+                    update_status = excluded.update_status,
+                    origin = excluded.origin,
+                    data_json = excluded.data_json",
+                params![
+                    scope_key.as_str(),
+                    record.skill_path.display().to_string(),
+                    record.skill_name,
+                    record.source_kind,
+                    record.source,
+                    record.source_ref,
+                    record.source_version,
+                    record.source_relative_path,
+                    record.update_status,
+                    record.origin,
+                    serde_json::to_string(record)?,
+                ],
+            )?;
+        }
+        for snapshot in snapshots {
+            tx.execute(
+                "DELETE FROM scoped_skill_snapshots
+                 WHERE scope_key = ?1 AND skill_path = ?2",
+                params![scope_key.as_str(), snapshot.skill_path.display().to_string()],
+            )?;
+            for file in &snapshot.files {
+                tx.execute(
+                    "INSERT INTO scoped_skill_snapshots (
+                        scope_key, skill_path, source_version, relative_path, content
+                     ) VALUES (?1, ?2, ?3, ?4, ?5)",
+                    params![
+                        scope_key.as_str(),
+                        snapshot.skill_path.display().to_string(),
+                        snapshot.source_version,
+                        file.relative_path,
+                        file.content,
+                    ],
+                )?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn validate_skill_source_versions_for_workspace(
+        &self,
+        workspace_root: &Path,
+        expected_source_versions: &[(PathBuf, Option<String>)],
+    ) -> Result<()> {
+        if expected_source_versions.is_empty() {
+            return Ok(());
+        }
+        let scope_key = workspace_scope_key(&canonical_workspace_root(workspace_root))?;
+        let tx = self.conn.unchecked_transaction()?;
+        for (path, expected_version) in expected_source_versions {
+            let current_version = tx
+                .query_row(
+                    "SELECT source_version FROM scoped_skill_sources
+                     WHERE scope_key = ?1 AND skill_path = ?2",
+                    params![scope_key.as_str(), path.display().to_string()],
+                    |row| row.get::<_, Option<String>>(0),
+                )
+                .optional()?;
+            if current_version.flatten() != expected_version.clone() {
+                bail!(
+                    "skill source {} changed after the update preview; preview the update again",
+                    path.display()
+                );
+            }
+        }
+        tx.rollback()?;
+        Ok(())
+    }
+
     pub fn delete_skill_snapshots(&self, skill_paths: &[PathBuf]) -> Result<()> {
         if skill_paths.is_empty() {
             return Ok(());
@@ -3933,155 +4746,6 @@ impl Store {
         Ok(())
     }
 
-    pub fn save_skills(&self, skills: &SkillScan) -> Result<()> {
-        if !skills.warnings.is_empty() {
-            return Ok(());
-        }
-
-        let tx = self.conn.unchecked_transaction()?;
-        tx.execute_batch(
-            "
-            DELETE FROM skills;
-            DELETE FROM skill_paths;
-            ",
-        )?;
-
-        for skill in &skills.skills {
-            tx.execute(
-                "INSERT INTO skills (name, visibility, agents_json, description, is_system, data_json)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                params![
-                    skill.name,
-                    format!("{:?}", skill.visibility).to_lowercase(),
-                    serde_json::to_string(&skill.agents)?,
-                    skill.description,
-                    skill.is_system,
-                    serde_json::to_string(skill)?,
-                ],
-            )?;
-            for path in &skill.paths {
-                tx.execute(
-                    "INSERT INTO skill_paths (skill_name, path, root, scope, agent, sha256, data_json)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
-                     ON CONFLICT(skill_name, path) DO UPDATE SET
-                        root = excluded.root,
-                        scope = excluded.scope,
-                        agent = excluded.agent,
-                        sha256 = excluded.sha256,
-                        data_json = excluded.data_json",
-                    params![
-                        skill.name,
-                        path.path.display().to_string(),
-                        path.root.display().to_string(),
-                        path.scope,
-                        agent_label(path.agent),
-                        path.sha256,
-                        serde_json::to_string(path)?,
-                    ],
-                )?;
-            }
-        }
-
-        tx.execute(
-            "INSERT INTO meta (key, value) VALUES ('skills_last_scan_at', ?1)
-             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-            params![unix_now().to_string()],
-        )?;
-        cleanup_stale_skill_link_rows(&tx)?;
-        tx.commit()?;
-        Ok(())
-    }
-
-    pub fn remove_skills(&self, names: &[String]) -> Result<()> {
-        if names.is_empty() {
-            return Ok(());
-        }
-
-        let tx = self.conn.unchecked_transaction()?;
-        for name in names {
-            tx.execute("DELETE FROM skills WHERE name = ?1", params![name])?;
-            tx.execute(
-                "DELETE FROM skill_paths WHERE skill_name = ?1",
-                params![name],
-            )?;
-        }
-        tx.execute(
-            "INSERT INTO meta (key, value) VALUES ('skills_last_scan_at', ?1)
-             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-            params![unix_now().to_string()],
-        )?;
-        cleanup_stale_skill_link_rows(&tx)?;
-        tx.commit()?;
-        Ok(())
-    }
-
-    pub fn save_skill_delta(&self, upserts: &[SkillRecord], removed: &[String]) -> Result<()> {
-        if upserts.is_empty() && removed.is_empty() {
-            return Ok(());
-        }
-
-        let tx = self.conn.unchecked_transaction()?;
-        for name in removed {
-            tx.execute("DELETE FROM skills WHERE name = ?1", params![name])?;
-            tx.execute(
-                "DELETE FROM skill_paths WHERE skill_name = ?1",
-                params![name],
-            )?;
-        }
-        for skill in upserts {
-            tx.execute(
-                "INSERT INTO skills (name, visibility, agents_json, description, is_system, data_json)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)
-                 ON CONFLICT(name) DO UPDATE SET
-                   visibility = excluded.visibility,
-                   agents_json = excluded.agents_json,
-                   description = excluded.description,
-                   is_system = excluded.is_system,
-                   data_json = excluded.data_json",
-                params![
-                    skill.name,
-                    format!("{:?}", skill.visibility).to_lowercase(),
-                    serde_json::to_string(&skill.agents)?,
-                    skill.description,
-                    skill.is_system,
-                    serde_json::to_string(skill)?,
-                ],
-            )?;
-            tx.execute(
-                "DELETE FROM skill_paths WHERE skill_name = ?1",
-                params![skill.name],
-            )?;
-            for path in &skill.paths {
-                tx.execute(
-                    "INSERT INTO skill_paths (skill_name, path, root, scope, agent, sha256, data_json)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
-                     ON CONFLICT(skill_name, path) DO UPDATE SET
-                        root = excluded.root,
-                        scope = excluded.scope,
-                        agent = excluded.agent,
-                        sha256 = excluded.sha256,
-                        data_json = excluded.data_json",
-                    params![
-                        skill.name,
-                        path.path.display().to_string(),
-                        path.root.display().to_string(),
-                        path.scope,
-                        agent_label(path.agent),
-                        path.sha256,
-                        serde_json::to_string(path)?,
-                    ],
-                )?;
-            }
-        }
-        tx.execute(
-            "INSERT INTO meta (key, value) VALUES ('skills_last_scan_at', ?1)
-             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-            params![unix_now().to_string()],
-        )?;
-        cleanup_stale_skill_link_rows(&tx)?;
-        tx.commit()?;
-        Ok(())
-    }
 
     pub fn list_prompts(&self) -> Result<Vec<PromptRecord>> {
         let mut stmt = self.conn.prepare(
@@ -4168,6 +4832,7 @@ impl Store {
                 value TEXT NOT NULL
             );
             CREATE TABLE IF NOT EXISTS skills (
+                scope_key TEXT NOT NULL DEFAULT 'installation:default',
                 name TEXT PRIMARY KEY,
                 visibility TEXT NOT NULL,
                 agents_json TEXT NOT NULL,
@@ -4176,6 +4841,7 @@ impl Store {
                 data_json TEXT NOT NULL
             );
             CREATE TABLE IF NOT EXISTS agents (
+                scope_key TEXT NOT NULL DEFAULT 'installation:default',
                 kind TEXT PRIMARY KEY,
                 name TEXT NOT NULL,
                 installed INTEGER NOT NULL,
@@ -4185,6 +4851,7 @@ impl Store {
                 data_json TEXT NOT NULL
             );
             CREATE TABLE IF NOT EXISTS skill_paths (
+                scope_key TEXT NOT NULL DEFAULT 'installation:default',
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 skill_name TEXT NOT NULL,
                 path TEXT NOT NULL,
@@ -4195,6 +4862,7 @@ impl Store {
                 data_json TEXT NOT NULL
             );
             CREATE TABLE IF NOT EXISTS skill_sources (
+                scope_key TEXT NOT NULL DEFAULT 'installation:default',
                 skill_path TEXT PRIMARY KEY,
                 skill_name TEXT NOT NULL,
                 source_kind TEXT NOT NULL,
@@ -4207,15 +4875,43 @@ impl Store {
                 data_json TEXT NOT NULL
             );
             CREATE TABLE IF NOT EXISTS skill_snapshots (
+                scope_key TEXT NOT NULL DEFAULT 'installation:default',
                 skill_path TEXT NOT NULL,
                 source_version TEXT NOT NULL,
                 relative_path TEXT NOT NULL,
                 content BLOB NOT NULL,
                 PRIMARY KEY (skill_path, relative_path)
             );
+            CREATE TABLE IF NOT EXISTS scoped_skill_sources (
+                scope_key TEXT NOT NULL,
+                skill_path TEXT NOT NULL,
+                skill_name TEXT NOT NULL,
+                source_kind TEXT NOT NULL,
+                source TEXT,
+                source_ref TEXT,
+                source_version TEXT,
+                source_relative_path TEXT,
+                update_status TEXT NOT NULL,
+                origin TEXT NOT NULL,
+                data_json TEXT NOT NULL,
+                PRIMARY KEY (scope_key, skill_path)
+            );
+            CREATE TABLE IF NOT EXISTS scoped_skill_snapshots (
+                scope_key TEXT NOT NULL,
+                skill_path TEXT NOT NULL,
+                source_version TEXT NOT NULL,
+                relative_path TEXT NOT NULL,
+                content BLOB NOT NULL,
+                PRIMARY KEY (scope_key, skill_path, relative_path)
+            );
+            CREATE INDEX IF NOT EXISTS idx_scoped_skill_sources_name
+                ON scoped_skill_sources(scope_key, skill_name);
+            CREATE INDEX IF NOT EXISTS idx_scoped_skill_snapshots_path
+                ON scoped_skill_snapshots(scope_key, skill_path);
             CREATE INDEX IF NOT EXISTS idx_skill_sources_name
                 ON skill_sources(skill_name);
             CREATE TABLE IF NOT EXISTS fs_manifest (
+                scope_key TEXT NOT NULL DEFAULT 'installation:default',
                 source_kind TEXT NOT NULL,
                 path TEXT NOT NULL,
                 root TEXT NOT NULL,
@@ -4229,11 +4925,12 @@ impl Store {
                 parser_version TEXT NOT NULL,
                 last_seen_at INTEGER NOT NULL,
                 parse_status TEXT NOT NULL,
-                PRIMARY KEY (source_kind, path)
+                PRIMARY KEY (scope_key, source_kind, path)
             );
             CREATE INDEX IF NOT EXISTS idx_fs_manifest_root_kind_path
-                ON fs_manifest(root, source_kind, path);
+                ON fs_manifest(scope_key, root, source_kind, path);
             CREATE TABLE IF NOT EXISTS projection_contexts (
+                scope_key TEXT NOT NULL DEFAULT 'installation:default',
                 domain TEXT PRIMARY KEY,
                 workspace_root TEXT NOT NULL,
                 state TEXT NOT NULL,
@@ -4241,9 +4938,59 @@ impl Store {
                 error TEXT,
                 parser_version TEXT NOT NULL
             );
+            -- Workspace projections are canonical payloads. The older per-field
+            -- tables remain write-side indexes for legacy APIs, while all
+            -- workspace reads use these scope-keyed rows.
+            CREATE TABLE IF NOT EXISTS normalized_snapshots (
+                scope_key TEXT NOT NULL,
+                domain TEXT NOT NULL,
+                payload_json TEXT NOT NULL,
+                source_version TEXT,
+                revision INTEGER NOT NULL DEFAULT 0,
+                updated_at INTEGER NOT NULL,
+                PRIMARY KEY (scope_key, domain)
+            );
+            CREATE TABLE IF NOT EXISTS scoped_projection_contexts (
+                scope_key TEXT NOT NULL,
+                domain TEXT NOT NULL,
+                state TEXT NOT NULL,
+                scanned_at INTEGER,
+                error TEXT,
+                parser_version TEXT NOT NULL,
+                PRIMARY KEY (scope_key, domain)
+            );
+            CREATE INDEX IF NOT EXISTS idx_normalized_snapshots_domain
+                ON normalized_snapshots(domain, updated_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_scoped_projection_contexts_domain
+                ON scoped_projection_contexts(domain, state, scanned_at DESC);
             CREATE INDEX IF NOT EXISTS idx_projection_contexts_workspace
                 ON projection_contexts(workspace_root, domain);
+            CREATE TABLE IF NOT EXISTS projection_heads (
+                scope_key TEXT NOT NULL,
+                domain TEXT NOT NULL,
+                revision INTEGER NOT NULL,
+                source_version TEXT,
+                schema_version INTEGER NOT NULL DEFAULT 1,
+                status TEXT NOT NULL,
+                updated_at INTEGER NOT NULL,
+                PRIMARY KEY (scope_key, domain)
+            );
+            CREATE TABLE IF NOT EXISTS operation_journal (
+                operation_id TEXT PRIMARY KEY,
+                kind TEXT NOT NULL,
+                scope_key TEXT NOT NULL,
+                status TEXT NOT NULL,
+                input_revision INTEGER NOT NULL,
+                source_version TEXT,
+                checkpoint_json TEXT,
+                error TEXT,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_operation_journal_scope_status
+                ON operation_journal(scope_key, status, updated_at);
             CREATE TABLE IF NOT EXISTS sessions (
+                scope_key TEXT NOT NULL DEFAULT 'installation:default',
                 id TEXT NOT NULL,
                 agent TEXT NOT NULL,
                 title TEXT,
@@ -4258,27 +5005,57 @@ impl Store {
                 data_json TEXT NOT NULL,
                 PRIMARY KEY (id, agent, path)
             );
+            -- Session rows are scoped because more than one daemon/workspace can
+            -- share the same SQLite file. The legacy `sessions` table remains the
+            -- unscoped API used by CLI and migration code.
+            CREATE TABLE IF NOT EXISTS scoped_sessions (
+                scope_key TEXT NOT NULL,
+                id TEXT NOT NULL,
+                agent TEXT NOT NULL,
+                title TEXT,
+                project TEXT,
+                path TEXT NOT NULL,
+                started_at TEXT,
+                updated_at TEXT,
+                message_count INTEGER,
+                first_user_message TEXT,
+                last_user_message TEXT,
+                last_assistant_message TEXT,
+                data_json TEXT NOT NULL,
+                PRIMARY KEY (scope_key, id, agent, path)
+            );
+            CREATE INDEX IF NOT EXISTS idx_scoped_sessions_updated_id
+                ON scoped_sessions(updated_at DESC, id ASC);
+            CREATE INDEX IF NOT EXISTS idx_scoped_sessions_agent_updated_id
+                ON scoped_sessions(agent, updated_at DESC, id ASC);
+            CREATE INDEX IF NOT EXISTS idx_scoped_sessions_path
+                ON scoped_sessions(path);
             CREATE TABLE IF NOT EXISTS session_projects (
-                id TEXT PRIMARY KEY,
+                scope_key TEXT NOT NULL DEFAULT 'installation:default',
+                id TEXT NOT NULL,
                 name TEXT NOT NULL,
                 name_custom INTEGER NOT NULL DEFAULT 0,
-                last_seen_at TEXT NOT NULL DEFAULT ''
+                last_seen_at TEXT NOT NULL DEFAULT '',
+                PRIMARY KEY (scope_key, id)
             );
             CREATE TABLE IF NOT EXISTS session_project_aliases (
+                scope_key TEXT NOT NULL DEFAULT 'installation:default',
                 project_id TEXT NOT NULL,
                 kind TEXT NOT NULL,
                 value TEXT NOT NULL,
-                PRIMARY KEY (kind, value)
+                PRIMARY KEY (scope_key, kind, value)
             );
             CREATE INDEX IF NOT EXISTS idx_session_project_aliases_project
                 ON session_project_aliases(project_id);
             CREATE TABLE IF NOT EXISTS project_scan_scopes (
+                scope_key TEXT NOT NULL DEFAULT 'installation:default',
                 id TEXT PRIMARY KEY,
                 path TEXT NOT NULL UNIQUE,
                 enabled INTEGER NOT NULL DEFAULT 1,
                 last_scanned_at TEXT
             );
             CREATE TABLE IF NOT EXISTS projects (
+                scope_key TEXT NOT NULL DEFAULT 'installation:default',
                 id TEXT PRIMARY KEY,
                 root_path TEXT NOT NULL UNIQUE,
                 name TEXT NOT NULL,
@@ -4291,6 +5068,7 @@ impl Store {
             CREATE INDEX IF NOT EXISTS idx_projects_scope_status
                 ON projects(scope_id, status);
             CREATE TABLE IF NOT EXISTS session_skill_index (
+                scope_key TEXT NOT NULL DEFAULT 'installation:default',
                 session_id TEXT NOT NULL,
                 agent TEXT NOT NULL,
                 session_path TEXT NOT NULL,
@@ -4302,6 +5080,7 @@ impl Store {
                 PRIMARY KEY (session_id, agent, session_path)
             );
             CREATE TABLE IF NOT EXISTS session_skill_links (
+                scope_key TEXT NOT NULL DEFAULT 'installation:default',
                 session_id TEXT NOT NULL,
                 agent TEXT NOT NULL,
                 session_path TEXT NOT NULL,
@@ -4315,7 +5094,35 @@ impl Store {
                 confidence TEXT NOT NULL,
                 PRIMARY KEY (session_id, agent, session_path, skill_path)
             );
+            CREATE TABLE IF NOT EXISTS scoped_session_skill_index (
+                scope_key TEXT NOT NULL,
+                session_id TEXT NOT NULL,
+                agent TEXT NOT NULL,
+                session_path TEXT NOT NULL,
+                file_mtime INTEGER NOT NULL,
+                file_size INTEGER NOT NULL,
+                indexed_at TEXT,
+                status TEXT NOT NULL,
+                error TEXT,
+                PRIMARY KEY (scope_key, session_id, agent, session_path)
+            );
+            CREATE TABLE IF NOT EXISTS scoped_session_skill_links (
+                scope_key TEXT NOT NULL,
+                session_id TEXT NOT NULL,
+                agent TEXT NOT NULL,
+                session_path TEXT NOT NULL,
+                skill_name TEXT NOT NULL,
+                skill_path TEXT NOT NULL,
+                skill_agent TEXT,
+                skill_scope TEXT,
+                evidence_kind TEXT NOT NULL,
+                evidence_text TEXT NOT NULL,
+                evidence_time TEXT,
+                confidence TEXT NOT NULL,
+                PRIMARY KEY (scope_key, session_id, agent, session_path, skill_path)
+            );
             CREATE TABLE IF NOT EXISTS session_search_index (
+                scope_key TEXT NOT NULL DEFAULT 'installation:default',
                 session_id TEXT NOT NULL,
                 agent TEXT NOT NULL,
                 session_path TEXT NOT NULL,
@@ -4327,6 +5134,7 @@ impl Store {
                 PRIMARY KEY (session_id, agent, session_path)
             );
             CREATE TABLE IF NOT EXISTS session_analytics (
+                scope_key TEXT NOT NULL DEFAULT 'installation:default',
                 session_id TEXT NOT NULL,
                 agent TEXT NOT NULL,
                 session_path TEXT NOT NULL,
@@ -4347,6 +5155,7 @@ impl Store {
                 PRIMARY KEY (session_id, agent, session_path)
             );
             CREATE TABLE IF NOT EXISTS session_analytics_overview (
+                scope_key TEXT NOT NULL DEFAULT 'installation:default',
                 session_id TEXT NOT NULL,
                 agent TEXT NOT NULL,
                 session_path TEXT NOT NULL,
@@ -4356,7 +5165,40 @@ impl Store {
                 overview_json TEXT NOT NULL,
                 PRIMARY KEY (session_id, agent, session_path)
             );
+            CREATE TABLE IF NOT EXISTS scoped_session_analytics (
+                scope_key TEXT NOT NULL,
+                session_id TEXT NOT NULL,
+                agent TEXT NOT NULL,
+                session_path TEXT NOT NULL,
+                file_mtime INTEGER NOT NULL,
+                file_size INTEGER NOT NULL,
+                indexed_at TEXT NOT NULL,
+                analytics_json TEXT NOT NULL,
+                parser_state_json TEXT NOT NULL,
+                event_min_date TEXT,
+                event_max_date TEXT,
+                has_activity INTEGER NOT NULL DEFAULT 0,
+                capability_token_usage INTEGER NOT NULL DEFAULT 0,
+                capability_reasoning_tokens INTEGER NOT NULL DEFAULT 0,
+                capability_explicit_runs INTEGER NOT NULL DEFAULT 0,
+                capability_rate_limit_history INTEGER NOT NULL DEFAULT 0,
+                overview_indexed INTEGER NOT NULL DEFAULT 1,
+                overview_index_error TEXT,
+                PRIMARY KEY (scope_key, session_id, agent, session_path)
+            );
+            CREATE TABLE IF NOT EXISTS scoped_session_analytics_overview (
+                scope_key TEXT NOT NULL,
+                session_id TEXT NOT NULL,
+                agent TEXT NOT NULL,
+                session_path TEXT NOT NULL,
+                event_min_date TEXT,
+                event_max_date TEXT,
+                has_activity INTEGER NOT NULL DEFAULT 0,
+                overview_json TEXT NOT NULL,
+                PRIMARY KEY (scope_key, session_id, agent, session_path)
+            );
             CREATE TABLE IF NOT EXISTS session_search_records (
+                scope_key TEXT NOT NULL DEFAULT 'installation:default',
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 session_id TEXT NOT NULL,
                 agent TEXT NOT NULL,
@@ -4369,17 +5211,52 @@ impl Store {
                 assistant_text TEXT NOT NULL,
                 UNIQUE (session_id, agent, session_path, record_order)
             );
+            CREATE TABLE IF NOT EXISTS scoped_session_search_index (
+                scope_key TEXT NOT NULL,
+                session_id TEXT NOT NULL,
+                agent TEXT NOT NULL,
+                session_path TEXT NOT NULL,
+                file_mtime INTEGER NOT NULL,
+                file_size INTEGER NOT NULL,
+                indexed_at TEXT NOT NULL,
+                search_metadata TEXT NOT NULL DEFAULT '',
+                search_index_version INTEGER NOT NULL DEFAULT 1,
+                PRIMARY KEY (scope_key, session_id, agent, session_path)
+            );
+            CREATE TABLE IF NOT EXISTS scoped_session_search_records (
+                scope_key TEXT NOT NULL,
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL,
+                agent TEXT NOT NULL,
+                session_path TEXT NOT NULL,
+                record_order INTEGER NOT NULL,
+                metadata_text TEXT NOT NULL DEFAULT '',
+                title TEXT NOT NULL DEFAULT '',
+                project TEXT NOT NULL DEFAULT '',
+                user_text TEXT NOT NULL,
+                assistant_text TEXT NOT NULL,
+                UNIQUE (scope_key, session_id, agent, session_path, record_order)
+            );
             CREATE INDEX IF NOT EXISTS idx_session_skill_links_session
                 ON session_skill_links(session_id, agent);
             CREATE INDEX IF NOT EXISTS idx_session_skill_links_skill
                 ON session_skill_links(skill_name);
             CREATE INDEX IF NOT EXISTS idx_session_skill_links_path
                 ON session_skill_links(skill_path);
+            CREATE INDEX IF NOT EXISTS idx_scoped_session_skill_links_session
+                ON scoped_session_skill_links(scope_key, session_id, agent);
+            CREATE INDEX IF NOT EXISTS idx_scoped_session_skill_links_skill
+                ON scoped_session_skill_links(scope_key, skill_name);
             CREATE INDEX IF NOT EXISTS idx_session_search_index_session
                 ON session_search_index(session_id, agent);
             CREATE INDEX IF NOT EXISTS idx_session_search_records_session
                 ON session_search_records(session_id, agent, session_path);
+            CREATE INDEX IF NOT EXISTS idx_scoped_session_search_index_session
+                ON scoped_session_search_index(scope_key, session_id, agent, session_path);
+            CREATE INDEX IF NOT EXISTS idx_scoped_session_search_records_session
+                ON scoped_session_search_records(scope_key, session_id, agent, session_path);
             CREATE TABLE IF NOT EXISTS rules (
+                scope_key TEXT NOT NULL DEFAULT 'installation:default',
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 agent TEXT NOT NULL,
                 kind TEXT NOT NULL,
@@ -4390,6 +5267,7 @@ impl Store {
                 data_json TEXT NOT NULL
             );
             CREATE TABLE IF NOT EXISTS hooks (
+                scope_key TEXT NOT NULL DEFAULT 'installation:default',
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 agent TEXT NOT NULL,
                 event TEXT NOT NULL,
@@ -4400,6 +5278,7 @@ impl Store {
                 data_json TEXT NOT NULL
             );
             CREATE TABLE IF NOT EXISTS mcp_servers (
+                scope_key TEXT NOT NULL DEFAULT 'installation:default',
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 agent TEXT NOT NULL,
                 name TEXT NOT NULL,
@@ -4423,6 +5302,7 @@ impl Store {
             );
             ",
         )?;
+        self.ensure_scope_columns()?;
         self.ensure_prompt_tags_column()?;
         self.ensure_skill_source_ref_column()?;
         self.ensure_session_preview_columns()?;
@@ -4431,6 +5311,55 @@ impl Store {
         self.ensure_session_search_index_version_column()?;
         self.ensure_storage_indexes()?;
         self.ensure_session_search_fts()?;
+        Ok(())
+    }
+
+    /// Older databases predate workspace-scoped projection rows. Keep the
+    /// migration additive so opening one never drops user data; all new writes
+    /// still use the canonical scoped snapshot tables.
+    fn ensure_scope_columns(&self) -> Result<()> {
+        let tables = [
+            "skills",
+            "agents",
+            "skill_paths",
+            "skill_sources",
+            "skill_snapshots",
+            "fs_manifest",
+            "projection_contexts",
+            "sessions",
+            "session_projects",
+            "session_project_aliases",
+            "project_scan_scopes",
+            "projects",
+            "session_skill_index",
+            "session_skill_links",
+            "session_search_index",
+            "session_analytics",
+            "session_analytics_overview",
+            "session_search_records",
+            "rules",
+            "hooks",
+            "mcp_servers",
+        ];
+        let tx = self.conn.unchecked_transaction()?;
+        for table in tables {
+            let has_scope = tx
+                .prepare(&format!("PRAGMA table_info({table})"))?
+                .query_map([], |row| row.get::<_, String>(1))?
+                .collect::<Result<Vec<_>, _>>()?
+                .into_iter()
+                .any(|column| column == "scope_key");
+            if !has_scope {
+                tx.execute(
+                    &format!(
+                        "ALTER TABLE {table} ADD COLUMN scope_key TEXT NOT NULL DEFAULT 'installation:default'"
+                    ),
+                    [],
+                )?;
+            }
+        }
+        tx.commit()?;
+        self.ensure_scoped_fs_manifest()?;
         Ok(())
     }
 
@@ -4535,7 +5464,11 @@ impl Store {
             "CREATE INDEX IF NOT EXISTS idx_session_analytics_agent_max_date
              ON session_analytics(agent, event_max_date);
              CREATE INDEX IF NOT EXISTS idx_session_analytics_overview_agent_max_date
-             ON session_analytics_overview(agent, event_max_date);",
+             ON session_analytics_overview(agent, event_max_date);
+             CREATE INDEX IF NOT EXISTS idx_scoped_session_analytics_scope_date
+             ON scoped_session_analytics(scope_key, agent, event_max_date);
+             CREATE INDEX IF NOT EXISTS idx_scoped_session_analytics_overview_scope_date
+             ON scoped_session_analytics_overview(scope_key, agent, event_max_date);",
         )?;
         tx.commit()?;
         Ok(())
@@ -4891,6 +5824,57 @@ impl Store {
                     new.user_text, new.assistant_text
                 );
             END;
+            CREATE VIRTUAL TABLE IF NOT EXISTS scoped_session_search_fts USING fts5(
+                metadata_text,
+                title,
+                project,
+                user_text,
+                assistant_text,
+                content = 'scoped_session_search_records',
+                content_rowid = 'id',
+                tokenize = 'trigram case_sensitive 0'
+            );
+            CREATE TRIGGER IF NOT EXISTS scoped_session_search_records_ai
+            AFTER INSERT ON scoped_session_search_records BEGIN
+                INSERT INTO scoped_session_search_fts(
+                    rowid, metadata_text, title, project,
+                    user_text, assistant_text
+                )
+                VALUES (
+                    new.id, new.metadata_text, new.title, new.project,
+                    new.user_text, new.assistant_text
+                );
+            END;
+            CREATE TRIGGER IF NOT EXISTS scoped_session_search_records_ad
+            AFTER DELETE ON scoped_session_search_records BEGIN
+                INSERT INTO scoped_session_search_fts(
+                    scoped_session_search_fts, rowid, metadata_text, title, project,
+                    user_text, assistant_text
+                )
+                VALUES (
+                    'delete', old.id, old.metadata_text, old.title, old.project,
+                    old.user_text, old.assistant_text
+                );
+            END;
+            CREATE TRIGGER IF NOT EXISTS scoped_session_search_records_au
+            AFTER UPDATE ON scoped_session_search_records BEGIN
+                INSERT INTO scoped_session_search_fts(
+                    scoped_session_search_fts, rowid, metadata_text, title, project,
+                    user_text, assistant_text
+                )
+                VALUES (
+                    'delete', old.id, old.metadata_text, old.title, old.project,
+                    old.user_text, old.assistant_text
+                );
+                INSERT INTO scoped_session_search_fts(
+                    rowid, metadata_text, title, project,
+                    user_text, assistant_text
+                )
+                VALUES (
+                    new.id, new.metadata_text, new.title, new.project,
+                    new.user_text, new.assistant_text
+                );
+            END;
             ",
         )?;
         Ok(())
@@ -4908,10 +5892,16 @@ fn normalize_setting_value(value: &str, fallback: &str) -> String {
 
 type SessionProjectAlias = (String, String);
 
-fn load_session_projects(tx: &Transaction<'_>) -> Result<HashMap<String, ProjectState>> {
-    let mut stmt =
-        tx.prepare("SELECT id, name, name_custom, last_seen_at FROM session_projects")?;
-    let rows = stmt.query_map([], |row| {
+fn load_session_projects(
+    tx: &Transaction<'_>,
+    scope_key: &ScopeKey,
+) -> Result<HashMap<String, ProjectState>> {
+    let mut stmt = tx.prepare(
+        "SELECT id, name, name_custom, last_seen_at
+         FROM session_projects
+         WHERE scope_key = ?1",
+    )?;
+    let rows = stmt.query_map([scope_key.as_str()], |row| {
         Ok((
             row.get::<_, String>(0)?,
             ProjectState {
@@ -4927,9 +5917,16 @@ fn load_session_projects(tx: &Transaction<'_>) -> Result<HashMap<String, Project
 
 fn load_session_project_aliases(
     tx: &Transaction<'_>,
+    scope_key: &ScopeKey,
 ) -> Result<HashMap<SessionProjectAlias, String>> {
-    let mut stmt = tx.prepare("SELECT kind, value, project_id FROM session_project_aliases")?;
-    let rows = stmt.query_map([], |row| Ok(((row.get(0)?, row.get(1)?), row.get(2)?)))?;
+    let mut stmt = tx.prepare(
+        "SELECT kind, value, project_id
+         FROM session_project_aliases
+         WHERE scope_key = ?1",
+    )?;
+    let rows = stmt.query_map([scope_key.as_str()], |row| {
+        Ok(((row.get(0)?, row.get(1)?), row.get(2)?))
+    })?;
     rows.collect::<std::result::Result<HashMap<_, _>, _>>()
         .map_err(Into::into)
 }
@@ -4938,17 +5935,19 @@ fn merge_session_project_rows(
     tx: &Transaction<'_>,
     target_project_id: &str,
     source_project_id: &str,
+    scope_key: &ScopeKey,
 ) -> Result<()> {
     if target_project_id == source_project_id {
         return Ok(());
     }
     tx.execute(
-        "UPDATE session_project_aliases SET project_id = ?1 WHERE project_id = ?2",
-        params![target_project_id, source_project_id],
+        "UPDATE session_project_aliases SET project_id = ?1
+         WHERE scope_key = ?3 AND project_id = ?2",
+        params![target_project_id, source_project_id, scope_key.as_str()],
     )?;
     tx.execute(
-        "DELETE FROM session_projects WHERE id = ?1",
-        [source_project_id],
+        "DELETE FROM session_projects WHERE scope_key = ?2 AND id = ?1",
+        params![source_project_id, scope_key.as_str()],
     )?;
     Ok(())
 }
@@ -5100,101 +6099,6 @@ fn fs_manifest_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<FsManifestE
         last_seen_at: row.get(11)?,
         parse_status: row.get(12)?,
     })
-}
-
-fn fs_manifest_entries_from_scan(report: &ScanReport) -> Vec<FsManifestEntry> {
-    let last_seen_at = unix_now() as i64;
-    let mut entries = Vec::new();
-
-    let mut add = |source_kind: &str,
-                   path: &Path,
-                   root: &Path,
-                   agent: Option<String>,
-                   scope: Option<String>,
-                   sha256: Option<String>| {
-        let Ok(metadata) = fs::metadata(path) else {
-            return;
-        };
-        let mtime_ns = metadata.modified().ok().and_then(|mtime| {
-            let duration = mtime.duration_since(UNIX_EPOCH).ok()?;
-            i64::try_from(duration.as_nanos())
-                .ok()
-                .or_else(|| i64::try_from(duration.as_millis()).ok())
-                .or_else(|| i64::try_from(duration.as_secs()).ok())
-        });
-        entries.push(FsManifestEntry {
-            source_kind: source_kind.to_string(),
-            path: path.to_path_buf(),
-            root: root.to_path_buf(),
-            agent,
-            scope,
-            mtime_ns,
-            size: i64::try_from(metadata.len()).ok(),
-            inode: None,
-            device: None,
-            sha256,
-            parser_version: PROJECTION_PARSER_VERSION.to_string(),
-            last_seen_at,
-            parse_status: "ok".to_string(),
-        });
-    };
-
-    for session in &report.sessions.sessions {
-        add(
-            "session",
-            &session.path,
-            session.path.parent().unwrap_or(Path::new(".")),
-            Some(agent_label(session.agent).to_string()),
-            None,
-            None,
-        );
-    }
-    for skill in &report.skills.skills {
-        for path in &skill.paths {
-            add(
-                "skill",
-                &path.path.join("SKILL.md"),
-                &path.root,
-                Some(agent_label(path.agent).to_string()),
-                Some(path.scope.clone()),
-                (!path.sha256.is_empty()).then(|| path.sha256.clone()),
-            );
-        }
-    }
-    for rule in &report.rules.rules {
-        let Some(agent) = primary_rule_agent(rule) else {
-            continue;
-        };
-        add(
-            "rule",
-            &rule.path,
-            rule.path.parent().unwrap_or(Path::new(".")),
-            Some(agent_label(agent).to_string()),
-            Some(rule.scope.clone()),
-            (!rule.sha256.is_empty()).then(|| rule.sha256.clone()),
-        );
-    }
-    for hook in &report.hooks.hooks {
-        add(
-            "hook",
-            &hook.path,
-            hook.path.parent().unwrap_or(Path::new(".")),
-            Some(agent_label(hook.agent).to_string()),
-            None,
-            (!hook.trust_hash.is_empty()).then(|| hook.trust_hash.clone()),
-        );
-    }
-    for server in &report.mcp.servers {
-        add(
-            "mcp",
-            &server.path,
-            server.path.parent().unwrap_or(Path::new(".")),
-            Some(agent_label(server.agent).to_string()),
-            Some(server.scope.clone()),
-            None,
-        );
-    }
-    entries
 }
 
 fn ensure_projection_domain(domain: &str) -> Result<()> {
@@ -5359,6 +6263,9 @@ fn domain_candidate_files(domain: &str, root: &Path) -> Vec<PathBuf> {
             paths.extend(provider.projection_candidate_files(domain, ancestor));
         }
     }
+    if domain == "skills" {
+        paths.extend(crate::skills::skill_provenance_candidate_files(root));
+    }
     paths
 }
 
@@ -5457,80 +6364,62 @@ fn manifest_entries_for_mcp(scan: &McpScan, workspace_root: &Path) -> Vec<FsMani
     entries
 }
 
-fn cleanup_stale_session_skill_rows(conn: &rusqlite::Transaction<'_>) -> Result<()> {
-    conn.execute(
-        "DELETE FROM session_skill_links
-         WHERE NOT EXISTS (
-            SELECT 1 FROM sessions
-            WHERE sessions.id = session_skill_links.session_id
-              AND sessions.agent = session_skill_links.agent
-              AND sessions.path = session_skill_links.session_path
-         )",
-        [],
-    )?;
-    conn.execute(
-        "DELETE FROM session_skill_index
-         WHERE NOT EXISTS (
-            SELECT 1 FROM sessions
-            WHERE sessions.id = session_skill_index.session_id
-              AND sessions.agent = session_skill_index.agent
-              AND sessions.path = session_skill_index.session_path
-         )",
-        [],
-    )?;
-    Ok(())
-}
-
-fn cleanup_stale_session_search_rows(conn: &rusqlite::Transaction<'_>) -> Result<()> {
-    conn.execute(
-        "DELETE FROM session_search_records
-         WHERE NOT EXISTS (
-            SELECT 1 FROM sessions
-            WHERE sessions.id = session_search_records.session_id
-              AND sessions.agent = session_search_records.agent
-              AND sessions.path = session_search_records.session_path
-         )",
-        [],
-    )?;
-    conn.execute(
-        "DELETE FROM session_search_index
-         WHERE NOT EXISTS (
-            SELECT 1 FROM sessions
-            WHERE sessions.id = session_search_index.session_id
-              AND sessions.agent = session_search_index.agent
-              AND sessions.path = session_search_index.session_path
-         )",
-        [],
-    )?;
-    Ok(())
-}
-
-fn cleanup_stale_session_analytics_rows(conn: &rusqlite::Transaction<'_>) -> Result<()> {
-    conn.execute(
-        "DELETE FROM session_analytics_overview
-         WHERE NOT EXISTS (
-            SELECT 1 FROM sessions
-            WHERE sessions.id = session_analytics_overview.session_id
-              AND sessions.agent = session_analytics_overview.agent
-              AND sessions.path = session_analytics_overview.session_path
-         )",
-        [],
-    )?;
-    let deleted = conn.execute(
-        "DELETE FROM session_analytics
-         WHERE NOT EXISTS (
-            SELECT 1 FROM sessions
-            WHERE sessions.id = session_analytics.session_id
-              AND sessions.agent = session_analytics.agent
-              AND sessions.path = session_analytics.session_path
-         )",
-        [],
-    )?;
-    if deleted > 0 {
-        bump_analytics_revision(conn)?;
+fn advance_projection_head_in_tx(
+    tx: &Transaction<'_>,
+    scope_key: &ScopeKey,
+    domain: &str,
+    source_version: Option<&SourceVersion>,
+    status: &str,
+) -> Result<ProjectionHead> {
+    if domain.trim().is_empty() {
+        anyhow::bail!("projection domain must not be empty");
     }
-    Ok(())
+    if status.trim().is_empty() {
+        anyhow::bail!("projection status must not be empty");
+    }
+    let current = tx
+        .query_row(
+            "SELECT revision FROM projection_heads
+             WHERE scope_key = ?1 AND domain = ?2",
+            params![scope_key.as_str(), domain],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()?
+        .unwrap_or(0);
+    let revision = current
+        .checked_add(1)
+        .context("projection revision overflow")?;
+    let updated_at = i64::try_from(unix_now()).context("invalid projection timestamp")?;
+    tx.execute(
+        "INSERT INTO projection_heads
+            (scope_key, domain, revision, source_version, schema_version, status, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+         ON CONFLICT(scope_key, domain) DO UPDATE SET
+            revision = excluded.revision,
+            source_version = excluded.source_version,
+            schema_version = excluded.schema_version,
+            status = excluded.status,
+            updated_at = excluded.updated_at",
+        params![
+            scope_key.as_str(),
+            domain,
+            revision,
+            source_version.map(SourceVersion::as_str),
+            1_i64,
+            status,
+            updated_at,
+        ],
+    )?;
+    Ok(ProjectionHead {
+        scope_key: scope_key.clone(),
+        domain: domain.to_string(),
+        revision: Revision::new(u64::try_from(revision)?),
+        source_version: source_version.cloned(),
+        schema_version: 1,
+        status: status.to_string(),
+    })
 }
+
 
 fn bump_analytics_revision(conn: &rusqlite::Transaction<'_>) -> Result<()> {
     conn.execute(
@@ -5542,20 +6431,85 @@ fn bump_analytics_revision(conn: &rusqlite::Transaction<'_>) -> Result<()> {
     Ok(())
 }
 
-fn cleanup_stale_skill_link_rows(conn: &rusqlite::Transaction<'_>) -> Result<()> {
+fn cleanup_stale_scoped_session_skill_rows(
+    conn: &rusqlite::Transaction<'_>,
+    scope_key: &ScopeKey,
+) -> Result<()> {
     conn.execute(
-        "DELETE FROM session_skill_links
-         WHERE NOT EXISTS (
-            SELECT 1 FROM skill_paths
-            WHERE skill_paths.skill_name = session_skill_links.skill_name
-              AND skill_paths.path = session_skill_links.skill_path
+        "DELETE FROM scoped_session_skill_links
+         WHERE scope_key = ?1
+           AND NOT EXISTS (
+            SELECT 1 FROM scoped_sessions
+            WHERE scoped_sessions.scope_key = scoped_session_skill_links.scope_key
+              AND scoped_sessions.id = scoped_session_skill_links.session_id
+              AND scoped_sessions.agent = scoped_session_skill_links.agent
+              AND scoped_sessions.path = scoped_session_skill_links.session_path
          )",
-        [],
+        [scope_key.as_str()],
+    )?;
+    conn.execute(
+        "DELETE FROM scoped_session_skill_index
+         WHERE scope_key = ?1
+           AND NOT EXISTS (
+            SELECT 1 FROM scoped_sessions
+            WHERE scoped_sessions.scope_key = scoped_session_skill_index.scope_key
+              AND scoped_sessions.id = scoped_session_skill_index.session_id
+              AND scoped_sessions.agent = scoped_session_skill_index.agent
+              AND scoped_sessions.path = scoped_session_skill_index.session_path
+         )",
+        [scope_key.as_str()],
     )?;
     Ok(())
 }
 
-fn index_session_search_document(tx: &Transaction<'_>, session: &SessionRecord) -> Result<()> {
+
+fn cleanup_stale_scoped_session_search_rows(
+    conn: &rusqlite::Transaction<'_>,
+    scope_key: &ScopeKey,
+) -> Result<()> {
+    conn.execute(
+        "DELETE FROM scoped_session_search_records
+         WHERE scope_key = ?1
+           AND NOT EXISTS (
+            SELECT 1 FROM scoped_sessions
+            WHERE scoped_sessions.scope_key = scoped_session_search_records.scope_key
+              AND scoped_sessions.id = scoped_session_search_records.session_id
+              AND scoped_sessions.agent = scoped_session_search_records.agent
+              AND scoped_sessions.path = scoped_session_search_records.session_path
+         )",
+        [scope_key.as_str()],
+    )?;
+    conn.execute(
+        "DELETE FROM scoped_session_search_index
+         WHERE scope_key = ?1
+           AND NOT EXISTS (
+            SELECT 1 FROM scoped_sessions
+            WHERE scoped_sessions.scope_key = scoped_session_search_index.scope_key
+              AND scoped_sessions.id = scoped_session_search_index.session_id
+              AND scoped_sessions.agent = scoped_session_search_index.agent
+              AND scoped_sessions.path = scoped_session_search_index.session_path
+         )",
+        [scope_key.as_str()],
+    )?;
+    Ok(())
+}
+
+
+
+
+fn index_scoped_session_search_document_best_effort(
+    tx: &Transaction<'_>,
+    scope_key: &ScopeKey,
+    session: &SessionRecord,
+) {
+    let _ = index_scoped_session_search_document(tx, scope_key, session);
+}
+
+fn index_scoped_session_search_document(
+    tx: &Transaction<'_>,
+    scope_key: &ScopeKey,
+    session: &SessionRecord,
+) -> Result<()> {
     let agent = agent_label(session.agent);
     let session_path = session.path.display().to_string();
     let search_metadata = session_search_metadata(session);
@@ -5563,29 +6517,45 @@ fn index_session_search_document(tx: &Transaction<'_>, session: &SessionRecord) 
         Ok(state) => state,
         Err(_) => {
             tx.execute(
-                "DELETE FROM session_search_records
-                 WHERE session_id = ?1 AND agent = ?2 AND session_path = ?3",
-                params![session.id, agent, session_path],
+                "DELETE FROM scoped_session_search_records
+                 WHERE scope_key = ?1 AND session_id = ?2 AND agent = ?3 AND session_path = ?4",
+                params![scope_key.as_str(), session.id, agent, session_path],
+            )?;
+            insert_scoped_session_search_record(
+                tx,
+                scope_key,
+                session,
+                0,
+                &session_search_metadata_document(session),
             )?;
             tx.execute(
-                "DELETE FROM session_search_index
-                 WHERE session_id = ?1 AND agent = ?2 AND session_path = ?3",
-                params![session.id, agent, session_path],
+                "INSERT INTO scoped_session_search_index (
+                    scope_key, session_id, agent, session_path, file_mtime, file_size,
+                    indexed_at, search_metadata, search_index_version
+                 ) VALUES (?1, ?2, ?3, ?4, 0, 0, ?5, ?6, ?7)
+                 ON CONFLICT(scope_key, session_id, agent, session_path) DO UPDATE SET
+                    indexed_at = excluded.indexed_at,
+                    search_metadata = excluded.search_metadata,
+                    search_index_version = excluded.search_index_version",
+                params![
+                    scope_key.as_str(),
+                    session.id,
+                    agent,
+                    session_path,
+                    unix_now().to_string(),
+                    search_metadata,
+                    SESSION_SEARCH_INDEX_VERSION,
+                ],
             )?;
             return Ok(());
         }
     };
-
     let current = tx
         .query_row(
-            "SELECT
-                file_mtime,
-                file_size,
-                search_metadata,
-                search_index_version
-             FROM session_search_index
-             WHERE session_id = ?1 AND agent = ?2 AND session_path = ?3",
-            params![session.id, agent, session_path],
+            "SELECT file_mtime, file_size, search_metadata, search_index_version
+             FROM scoped_session_search_index
+             WHERE scope_key = ?1 AND session_id = ?2 AND agent = ?3 AND session_path = ?4",
+            params![scope_key.as_str(), session.id, agent, session_path],
             |row| {
                 Ok((
                     row.get::<_, i64>(0)?,
@@ -5604,24 +6574,19 @@ fn index_session_search_document(tx: &Transaction<'_>, session: &SessionRecord) 
     }) {
         return Ok(());
     }
-
-    if current
-        .as_ref()
-        .is_some_and(|current| {
-            current.0 == state.file_mtime
-                && current.1 == state.file_size
-                && current.3 == SESSION_SEARCH_INDEX_VERSION
-        })
-    {
+    if current.as_ref().is_some_and(|current| {
+        current.0 == state.file_mtime
+            && current.1 == state.file_size
+            && current.3 == SESSION_SEARCH_INDEX_VERSION
+    }) {
         let document = session_search_metadata_document(session);
         tx.execute(
-            "UPDATE session_search_records
-             SET metadata_text = ?4, title = ?5, project = ?6
-             WHERE session_id = ?1
-               AND agent = ?2
-               AND session_path = ?3
-               AND record_order = 0",
+            "UPDATE scoped_session_search_records
+             SET metadata_text = ?5, title = ?6, project = ?7
+             WHERE scope_key = ?1 AND session_id = ?2 AND agent = ?3
+               AND session_path = ?4 AND record_order = 0",
             params![
+                scope_key.as_str(),
                 session.id,
                 agent,
                 session_path,
@@ -5631,10 +6596,11 @@ fn index_session_search_document(tx: &Transaction<'_>, session: &SessionRecord) 
             ],
         )?;
         tx.execute(
-            "UPDATE session_search_index
-             SET indexed_at = ?4, search_metadata = ?5
-             WHERE session_id = ?1 AND agent = ?2 AND session_path = ?3",
+            "UPDATE scoped_session_search_index
+             SET indexed_at = ?5, search_metadata = ?6
+             WHERE scope_key = ?1 AND session_id = ?2 AND agent = ?3 AND session_path = ?4",
             params![
+                scope_key.as_str(),
                 session.id,
                 agent,
                 session_path,
@@ -5646,12 +6612,17 @@ fn index_session_search_document(tx: &Transaction<'_>, session: &SessionRecord) 
     }
 
     tx.execute(
-        "DELETE FROM session_search_records
-         WHERE session_id = ?1 AND agent = ?2 AND session_path = ?3",
-        params![session.id, agent, session_path],
+        "DELETE FROM scoped_session_search_records
+         WHERE scope_key = ?1 AND session_id = ?2 AND agent = ?3 AND session_path = ?4",
+        params![scope_key.as_str(), session.id, agent, session_path],
     )?;
-    insert_session_search_record(tx, session, 0, &session_search_metadata_document(session))?;
-
+    insert_scoped_session_search_record(
+        tx,
+        scope_key,
+        session,
+        0,
+        &session_search_metadata_document(session),
+    )?;
     let mut record_order = 1usize;
     let mut insert_error = None;
     let parse_result = transcript::for_each_search_item(&session.path, session.agent, |item| {
@@ -5664,7 +6635,13 @@ fn index_session_search_document(tx: &Transaction<'_>, session: &SessionRecord) 
             "assistant" => document.assistant_text = item.body,
             _ => return,
         }
-        if let Err(error) = insert_session_search_record(tx, session, record_order, &document) {
+        if let Err(error) = insert_scoped_session_search_record(
+            tx,
+            scope_key,
+            session,
+            record_order,
+            &document,
+        ) {
             insert_error = Some(error);
         } else {
             record_order += 1;
@@ -5675,24 +6652,25 @@ fn index_session_search_document(tx: &Transaction<'_>, session: &SessionRecord) 
     }
     if parse_result.is_err() {
         tx.execute(
-            "DELETE FROM session_search_records
-             WHERE session_id = ?1 AND agent = ?2 AND session_path = ?3 AND record_order > 0",
-            params![session.id, agent, session_path],
+            "DELETE FROM scoped_session_search_records
+             WHERE scope_key = ?1 AND session_id = ?2 AND agent = ?3
+               AND session_path = ?4 AND record_order > 0",
+            params![scope_key.as_str(), session.id, agent, session_path],
         )?;
     }
     tx.execute(
-        "INSERT INTO session_search_index (
-            session_id, agent, session_path, file_mtime, file_size, indexed_at,
-            search_metadata, search_index_version
-         )
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
-         ON CONFLICT(session_id, agent, session_path) DO UPDATE SET
+        "INSERT INTO scoped_session_search_index (
+            scope_key, session_id, agent, session_path, file_mtime, file_size,
+            indexed_at, search_metadata, search_index_version
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+         ON CONFLICT(scope_key, session_id, agent, session_path) DO UPDATE SET
             file_mtime = excluded.file_mtime,
             file_size = excluded.file_size,
             indexed_at = excluded.indexed_at,
             search_metadata = excluded.search_metadata,
             search_index_version = excluded.search_index_version",
         params![
+            scope_key.as_str(),
             session.id,
             agent,
             session_path,
@@ -5706,19 +6684,20 @@ fn index_session_search_document(tx: &Transaction<'_>, session: &SessionRecord) 
     Ok(())
 }
 
-fn insert_session_search_record(
+fn insert_scoped_session_search_record(
     tx: &Transaction<'_>,
+    scope_key: &ScopeKey,
     session: &SessionRecord,
     record_order: usize,
     document: &SessionSearchDocument,
 ) -> Result<()> {
     tx.execute(
-        "INSERT INTO session_search_records (
-            session_id, agent, session_path, record_order,
+        "INSERT INTO scoped_session_search_records (
+            scope_key, session_id, agent, session_path, record_order,
             metadata_text, title, project, user_text, assistant_text
-         )
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
         params![
+            scope_key.as_str(),
             session.id,
             agent_label(session.agent),
             session.path.display().to_string(),
@@ -5731,19 +6710,6 @@ fn insert_session_search_record(
         ],
     )?;
     Ok(())
-}
-
-fn index_session_search_document_best_effort(tx: &Transaction<'_>, session: &SessionRecord) {
-    if let Err(err) = index_session_search_document(tx, session) {
-        crate::logging::global().warn(
-            "failed to index session search text",
-            serde_json::json!({
-                "agent": agent_label(session.agent),
-                "session_id": session.id,
-                "error": format!("{err:#}"),
-            }),
-        );
-    }
 }
 
 fn session_search_metadata_document(session: &SessionRecord) -> SessionSearchDocument {
@@ -5932,17 +6898,16 @@ mod tests {
             SessionAnalyticsRecord,
         },
         session_skills::{SessionFileState, SessionSkillLink},
-        sessions::SessionIdentity,
+        runtime_contract::{OperationId, OperationKind, OperationRecord, OperationStatus, Revision, ScopeKey, SourceVersion},
         skills::{
             AgentKind, SkillPath, SkillRoot, SkillSnapshot, SkillSnapshotFile, SkillSourceRecord,
         },
     };
-    use chrono::{Local, TimeZone};
+    use chrono::Local;
     use rusqlite::{Connection, params};
 
     use super::{
-        AppSettings, PromptWrite, SESSION_PAYLOAD_PREVIEWS_MIGRATION_KEY, Store,
-        normalize_repository_url,
+        AppSettings, PromptWrite, Store, normalize_repository_url,
     };
 
     #[test]
@@ -5998,123 +6963,61 @@ mod tests {
     }
 
     #[test]
-    fn session_projects_join_worktrees_and_repository_renames_without_joining_basenames() {
-        let temp = temp_dir("tendi-storage-session-projects");
+    fn scoped_session_search_rebuild_repairs_existing_projection_rows() {
+        let temp = temp_dir("tendi-storage-scoped-search-backfill");
         fs::create_dir_all(&temp).unwrap();
         let store = Store::open(temp.join("tendi.sqlite3")).unwrap();
-        let mut current = session("current", "Current");
-        current.project = Some(PathBuf::from("/Users/test/dev/example/nextop"));
-        current.repository_url = Some("https://github.com/tutti-os/tutti.git".to_string());
-        current.updated_at = Some("2026-06-11T06:52:03Z".to_string());
-        let mut legacy = session("legacy", "Legacy");
-        legacy.project = current.project.clone();
-        legacy.repository_url = Some("https://github.com/nextop-os/nextop.git".to_string());
-        legacy.updated_at = Some("2026-06-11T06:50:19Z".to_string());
-        let mut worktree = session("worktree", "Worktree");
-        worktree.project = Some(PathBuf::from("/Users/test/.codex/worktrees/624a/nextop"));
-        worktree.repository_url = current.repository_url.clone();
-        let mut unrelated = session("unrelated", "Unrelated");
-        unrelated.project = Some(PathBuf::from("/Users/test/dev/other/nextop"));
-        unrelated.repository_url = Some("https://github.com/example/nextop.git".to_string());
-
-        let mut sessions = vec![current, legacy, worktree, unrelated];
-        store.resolve_session_projects(&mut sessions).unwrap();
-
-        let project_id = sessions[0].logical_project_id.clone().unwrap();
-        assert_eq!(sessions[0].logical_project_name.as_deref(), Some("tutti"));
-        assert_eq!(
-            sessions[1].logical_project_id.as_deref(),
-            Some(project_id.as_str())
-        );
-        assert_eq!(
-            sessions[2].logical_project_id.as_deref(),
-            Some(project_id.as_str())
-        );
-        assert_ne!(
-            sessions[3].logical_project_id.as_deref(),
-            Some(project_id.as_str())
-        );
-
-        drop(store);
-        fs::remove_dir_all(temp).unwrap();
-    }
-
-    #[test]
-    fn resolving_projects_normalizes_legacy_codex_chat_workspaces() {
-        let temp = temp_dir("tendi-storage-codex-chat-project");
-        fs::create_dir_all(&temp).unwrap();
-        let store = Store::open(temp.join("tendi.sqlite3")).unwrap();
-        let mut chat = session("chat", "Chat");
-        chat.project = Some(PathBuf::from(
-            "/Users/test/Documents/tutti/session-c98d1ced-5371-43cc-8173-9416c349a776",
-        ));
-
+        let scope = ScopeKey::new("workspace:backfill").unwrap();
+        let path = temp.join("session.jsonl");
+        fs::write(
+            &path,
+            include_str!("../testdata/transcripts/codex.jsonl")
+                .replace("Inspect the fixture parser", "backfill-private-marker"),
+        )
+        .unwrap();
+        let mut record = session("backfill", "Backfill session");
+        record.path = path;
         store
-            .resolve_session_projects(std::slice::from_mut(&mut chat))
+            .save_sessions_at_for_scope(
+                &scope,
+                &SessionScan {
+                    sessions: vec![record],
+                    warnings: Vec::new(),
+                },
+                1,
+            )
             .unwrap();
-
-        assert_eq!(
-            chat.project.as_deref(),
-            Some(Path::new("/Users/test/Documents/tutti"))
-        );
-        assert_eq!(chat.logical_project_name.as_deref(), Some("tutti"));
-
-        drop(store);
-        fs::remove_dir_all(temp).unwrap();
-    }
-
-    #[test]
-    fn resolving_projects_does_not_create_a_blank_project_name() {
-        let temp = temp_dir("tendi-storage-blank-project-name");
-        fs::create_dir_all(&temp).unwrap();
-        let store = Store::open(temp.join("tendi.sqlite3")).unwrap();
-        let mut root_session = session("root", "Root");
-        root_session.project = Some(PathBuf::from("/"));
-
         store
-            .resolve_session_projects(std::slice::from_mut(&mut root_session))
+            .conn
+            .execute(
+                "DELETE FROM scoped_session_search_records WHERE scope_key = ?1",
+                params![scope.as_str()],
+            )
             .unwrap();
 
-        assert_eq!(root_session.logical_project_id, None);
-        assert_eq!(root_session.logical_project_name, None);
-        assert!(store.list_session_projects().unwrap().is_empty());
+        assert!(
+            store
+                .search_sessions_for_scope(&scope, "backfill-private-marker", None)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            store
+                .rebuild_scoped_session_search_for_scope(&scope)
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            store
+                .search_sessions_for_scope(&scope, "backfill-private-marker", None)
+                .unwrap()
+                .len(),
+            1
+        );
 
-        drop(store);
         fs::remove_dir_all(temp).unwrap();
     }
 
-    #[test]
-    fn list_session_projects_marks_missing_workspace_aliases() {
-        let temp = temp_dir("tendi-storage-session-project-summary");
-        fs::create_dir_all(&temp).unwrap();
-        let active_path = temp.join("active");
-        fs::create_dir_all(&active_path).unwrap();
-        let active_path = fs::canonicalize(active_path).unwrap();
-        let missing_path = temp.join("missing");
-        let store = Store::open(temp.join("tendi.sqlite3")).unwrap();
-        let mut active = session("active", "Active");
-        active.project = Some(active_path.clone());
-        let mut missing = session("missing", "Missing");
-        missing.project = Some(missing_path.clone());
-
-        let mut sessions = vec![active, missing];
-        store.resolve_session_projects(&mut sessions).unwrap();
-        let summaries = store.list_session_projects().unwrap();
-
-        let active_summary = summaries
-            .iter()
-            .find(|summary| summary.paths.contains(&active_path))
-            .unwrap();
-        assert!(!active_summary.missing);
-        let missing_summary = summaries
-            .iter()
-            .find(|summary| summary.paths.contains(&missing_path))
-            .unwrap();
-        assert!(missing_summary.missing);
-
-        drop(store);
-        fs::remove_dir_all(temp).unwrap();
-    }
 
     #[test]
     fn app_settings_store_normalized_additional_session_roots() {
@@ -6124,8 +7027,8 @@ mod tests {
         let store = Store::open(&db).unwrap();
         assert_eq!(store.app_settings().unwrap().appearance, "system");
         assert_eq!(store.app_settings().unwrap().font_family, "manrope");
-        assert_eq!(store.app_settings().unwrap().light_theme, "sakura-pop");
-        assert_eq!(store.app_settings().unwrap().dark_theme, "sakura-pop");
+        assert_eq!(store.app_settings().unwrap().light_theme, "vercel");
+        assert_eq!(store.app_settings().unwrap().dark_theme, "vercel");
         assert_eq!(store.app_settings().unwrap().app_icon, "sakura-pop");
         assert_eq!(store.app_settings().unwrap().session_resume_target, "auto");
         assert_eq!(
@@ -6191,59 +7094,31 @@ mod tests {
     }
 
 
+
     #[test]
-    fn save_scan_records_existing_skill_manifest_path() {
-        let temp = temp_dir("tendi-storage-scan-manifest");
+    fn workspace_scan_warning_keeps_the_last_good_canonical_snapshot() {
+        let temp = temp_dir("tendi-storage-scan-warning");
         fs::create_dir_all(&temp).unwrap();
+        let workspace = temp.join("workspace");
+        fs::create_dir_all(&workspace).unwrap();
         let store = Store::open(temp.join("tendi.sqlite3")).unwrap();
-        let report = report_with_skill("manifest-skill", SkillVisibility::Auto);
-        let skill_path = &report.skills.skills[0].paths[0].path;
-        fs::create_dir_all(skill_path).unwrap();
-        fs::write(
-            skill_path.join("SKILL.md"),
-            "---\nname: manifest-skill\n---\n",
-        )
-        .unwrap();
+        let clean = report_with_skill("old", SkillVisibility::Auto);
+        store.save_scan_for_workspace(&workspace, &clean).unwrap();
 
-        store.save_scan(&report).unwrap();
+        let mut failed = report_with_skill("new", SkillVisibility::Manual);
+        failed.skills.warnings.push("partial provider scan".to_string());
+        store.save_scan_for_workspace(&workspace, &failed).unwrap();
 
-        let entries = store
-            .list_fs_manifest_for_root(skill_path.parent().unwrap())
+        let cached = store
+            .list_skills_cached_for_workspace(&workspace)
+            .unwrap()
             .unwrap();
-        assert!(entries.iter().any(|entry| {
-            entry.source_kind == "skill" && entry.path == skill_path.join("SKILL.md")
-        }));
+        assert_eq!(cached.skills[0].name, "old");
 
         drop(store);
         fs::remove_dir_all(temp).unwrap();
     }
 
-    #[test]
-    fn save_scan_replaces_stale_rows_with_latest_file_scan() {
-        let temp = temp_dir("tendi-storage-replace");
-        fs::create_dir_all(&temp).unwrap();
-        let db = temp.join("tendi.sqlite3");
-        let store = Store::open(&db).unwrap();
-
-        store
-            .save_scan(&report_with_skill("old", SkillVisibility::Auto))
-            .unwrap();
-        assert_eq!(count(&store, "skills"), 1);
-        assert_eq!(count(&store, "skill_paths"), 1);
-        assert_eq!(skill_names(&store), vec!["old"]);
-
-        store
-            .save_scan(&report_with_skill("new", SkillVisibility::Manual))
-            .unwrap();
-
-        assert_eq!(count(&store, "skills"), 1);
-        assert_eq!(count(&store, "skill_paths"), 1);
-        assert_eq!(skill_names(&store), vec!["new"]);
-        assert_eq!(skill_visibility(&store, "new"), "manual");
-
-        drop(store);
-        fs::remove_dir_all(temp).unwrap();
-    }
 
 
 
@@ -6512,8 +7387,10 @@ mod tests {
         let workspace = temp.join("workspace");
         let skill_dir = workspace.join(".agents/skills/demo");
         let skill_file = skill_dir.join("SKILL.md");
+        let skills_lock = workspace.join("skills-lock.json");
         fs::create_dir_all(&skill_dir).unwrap();
         fs::write(&skill_file, "old").unwrap();
+        fs::write(&skills_lock, "old lock").unwrap();
 
         let mut scan = report_with_skill("demo", SkillVisibility::Auto).skills;
         scan.roots[0].path = workspace.join(".agents/skills");
@@ -6527,6 +7404,17 @@ mod tests {
                 .list_skills_for_workspace(&workspace)
                 .unwrap()
                 .is_some()
+        );
+        let manifest = store
+            .list_fs_manifest_for_root(&workspace.canonicalize().unwrap())
+            .unwrap();
+        assert!(
+            manifest
+                .iter()
+                .any(|entry| {
+                    entry.source_kind == "skill-candidate"
+                        && entry.path == skills_lock.canonicalize().unwrap()
+                })
         );
 
         store
@@ -6545,6 +7433,15 @@ mod tests {
         store.save_skills_for_workspace(&workspace, &scan).unwrap();
 
         fs::write(&skill_file, "edited skill content").unwrap();
+        assert!(
+            store
+                .list_skills_for_workspace(&workspace)
+                .unwrap()
+                .is_none()
+        );
+        store.save_skills_for_workspace(&workspace, &scan).unwrap();
+
+        fs::write(&skills_lock, "edited lock content").unwrap();
         assert!(
             store
                 .list_skills_for_workspace(&workspace)
@@ -6640,7 +7537,15 @@ mod tests {
                 .sha256,
             "second"
         );
-        assert!(store.list_rules_for_workspace(&first).unwrap().is_none());
+        assert_eq!(
+            store
+                .list_rules_for_workspace(&first)
+                .unwrap()
+                .unwrap()
+                .rules[0]
+                .sha256,
+            "first"
+        );
 
         store
             .save_rules_for_workspace(
@@ -6774,37 +7679,6 @@ mod tests {
 
 
 
-    #[test]
-    fn skill_delta_retains_source_records_as_database_authority() {
-        let temp = temp_dir("tendi-storage-skill-source-delta");
-        fs::create_dir_all(&temp).unwrap();
-        let store = Store::open(temp.join("tendi.sqlite3")).unwrap();
-        let mut report = report_with_skill("demo", SkillVisibility::Auto).skills;
-        let retained_path = report.skills[0].paths[0].path.clone();
-        let stale_path = retained_path.with_file_name("demo-old");
-        let other_path = retained_path.with_file_name("other");
-        let records = [
-            test_skill_source("demo", &retained_path),
-            test_skill_source("demo", &stale_path),
-            test_skill_source("other", &other_path),
-        ];
-        store.upsert_skill_source_records(&records).unwrap();
-
-        store.save_skill_delta(&report.skills, &[]).unwrap();
-
-        assert!(store.skill_source_record(&retained_path).unwrap().is_some());
-        assert!(store.skill_source_record(&stale_path).unwrap().is_some());
-        assert!(store.skill_source_record(&other_path).unwrap().is_some());
-
-        report.skills.clear();
-        store.save_skill_delta(&[], &["demo".to_string()]).unwrap();
-        assert!(store.skill_source_record(&retained_path).unwrap().is_some());
-        assert!(store.skill_source_record(&stale_path).unwrap().is_some());
-        assert!(store.skill_source_record(&other_path).unwrap().is_some());
-
-        drop(store);
-        fs::remove_dir_all(temp).unwrap();
-    }
 
     fn test_skill_source(name: &str, path: &Path) -> SkillSourceRecord {
         SkillSourceRecord {
@@ -6821,40 +7695,152 @@ mod tests {
     }
 
     #[test]
-    fn skill_delta_does_not_overwrite_unrelated_rows() {
-        let temp = temp_dir("tendi-storage-skill-delta");
-        fs::create_dir_all(&temp).unwrap();
+    fn skill_source_records_are_scoped_by_workspace() {
+        let temp = temp_dir("tendi-storage-skill-source-scope");
+        let workspace_a = temp.join("workspace-a");
+        let workspace_b = temp.join("workspace-b");
+        fs::create_dir_all(&workspace_a).unwrap();
+        fs::create_dir_all(&workspace_b).unwrap();
         let store = Store::open(temp.join("tendi.sqlite3")).unwrap();
-        let mut alpha = report_with_skill("alpha", SkillVisibility::Auto).skills;
-        let beta = report_with_skill("beta", SkillVisibility::Auto)
-            .skills
-            .skills
-            .remove(0);
-        alpha.skills.push(beta.clone());
-        store.save_skills(&alpha).unwrap();
+        let source_a = test_skill_source("alpha", &workspace_a.join("skills/alpha"));
+        let source_b = test_skill_source("beta", &workspace_b.join("skills/beta"));
 
-        let mut externally_updated_beta = beta;
-        externally_updated_beta.description = Some("external beta".to_string());
         store
-            .save_skill_delta(&[externally_updated_beta], &[])
+            .upsert_skill_source_records_for_workspace(&workspace_a, std::slice::from_ref(&source_a))
             .unwrap();
-        alpha.skills[0].description = Some("changed alpha".to_string());
-        store.save_skill_delta(&alpha.skills[..1], &[]).unwrap();
+        store
+            .upsert_skill_source_records_for_workspace(&workspace_b, std::slice::from_ref(&source_b))
+            .unwrap();
 
-        let beta_json = store
-            .conn
-            .query_row(
-                "SELECT data_json FROM skills WHERE name = 'beta'",
-                [],
-                |row| row.get::<_, String>(0),
-            )
+        assert_eq!(
+            store
+                .skill_source_records_for_workspace(&workspace_a)
+                .unwrap()
+                .iter()
+                .map(|record| record.skill_name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["alpha"]
+        );
+        assert_eq!(
+            store
+                .skill_source_records_for_workspace(&workspace_b)
+                .unwrap()
+                .iter()
+                .map(|record| record.skill_name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["beta"]
+        );
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn scoped_skill_snapshots_round_trip_without_cross_workspace_merge() {
+        let temp = temp_dir("tendi-storage-scoped-skill-snapshot");
+        let workspace_a = temp.join("workspace-a");
+        let workspace_b = temp.join("workspace-b");
+        fs::create_dir_all(&workspace_a).unwrap();
+        fs::create_dir_all(&workspace_b).unwrap();
+        let store = Store::open(temp.join("tendi.sqlite3")).unwrap();
+        let path = temp.join("shared-path/skill");
+        let snapshot_a = SkillSnapshot {
+            skill_path: path.clone(),
+            source_version: "a".to_string(),
+            files: vec![SkillSnapshotFile {
+                relative_path: "SKILL.md".to_string(),
+                content: b"workspace-a".to_vec(),
+            }],
+        };
+        let snapshot_b = SkillSnapshot {
+            skill_path: path.clone(),
+            source_version: "b".to_string(),
+            files: vec![SkillSnapshotFile {
+                relative_path: "SKILL.md".to_string(),
+                content: b"workspace-b".to_vec(),
+            }],
+        };
+        store
+            .replace_skill_snapshots_for_workspace(&workspace_a, std::slice::from_ref(&snapshot_a))
             .unwrap();
-        let beta_json = serde_json::from_str::<serde_json::Value>(&beta_json).unwrap();
-        assert_eq!(beta_json["description"], "external beta");
+        store
+            .replace_skill_snapshots_for_workspace(&workspace_b, std::slice::from_ref(&snapshot_b))
+            .unwrap();
+
+        let snapshot = store.skill_snapshot(&path).unwrap().unwrap();
+        assert_eq!(snapshot.source_version, "a");
+        assert_eq!(snapshot.files[0].content, b"workspace-a");
 
         drop(store);
         fs::remove_dir_all(temp).unwrap();
     }
+
+    #[test]
+    fn checked_skill_persistence_rejects_a_stale_source_version() {
+        let temp = temp_dir("tendi-storage-stale-skill-source");
+        let workspace = temp.join("workspace");
+        fs::create_dir_all(&workspace).unwrap();
+        let store = Store::open(temp.join("tendi.sqlite3")).unwrap();
+        let path = workspace.join("skills/demo");
+        let mut current = test_skill_source("demo", &path);
+        current.source_version = Some("version-a".to_string());
+        store
+            .upsert_skill_source_records_for_workspace(&workspace, std::slice::from_ref(&current))
+            .unwrap();
+
+        let mut next = current.clone();
+        next.source_version = Some("version-b".to_string());
+        store
+            .persist_skill_update_persistence_for_workspace_checked(
+                &workspace,
+                &[(path.clone(), Some("version-a".to_string()))],
+                std::slice::from_ref(&next),
+                &[],
+            )
+            .unwrap();
+
+        let mut stale = next.clone();
+        stale.source_version = Some("version-c".to_string());
+        let error = store
+            .persist_skill_update_persistence_for_workspace_checked(
+                &workspace,
+                &[(path, Some("version-a".to_string()))],
+                std::slice::from_ref(&stale),
+                &[],
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("changed after the update preview"));
+
+        drop(store);
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn stale_skill_preflight_leaves_filesystem_untouched() {
+        let temp = temp_dir("tendi-storage-stale-skill-preflight");
+        let workspace = temp.join("workspace");
+        let skill_path = workspace.join("skills/demo/SKILL.md");
+        fs::create_dir_all(skill_path.parent().unwrap()).unwrap();
+        fs::write(&skill_path, "before\n").unwrap();
+        let store = Store::open(temp.join("tendi.sqlite3")).unwrap();
+        let source_path = skill_path.parent().unwrap().to_path_buf();
+        let mut current = test_skill_source("demo", &source_path);
+        current.source_version = Some("version-b".to_string());
+        store
+            .upsert_skill_source_records_for_workspace(&workspace, std::slice::from_ref(&current))
+            .unwrap();
+
+        let error = store
+            .validate_skill_source_versions_for_workspace(
+                &workspace,
+                &[(source_path, Some("version-a".to_string()))],
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("changed after the update preview"));
+        assert_eq!(fs::read_to_string(&skill_path).unwrap(), "before\n");
+
+        drop(store);
+        fs::remove_dir_all(temp).unwrap();
+    }
+
 
     fn report_with_skill(name: &str, visibility: SkillVisibility) -> ScanReport {
         let root = PathBuf::from("/tmp/tendi-test/.agents/skills");
@@ -6874,11 +7860,15 @@ mod tests {
                     plugin_enabled: None,
                 }],
                 skills: vec![SkillRecord {
+                    id: name.to_string(),
+                    installation_id: name.to_string(),
                     name: name.to_string(),
                     description: Some("demo".to_string()),
                     tags: Vec::new(),
                     dependencies: Vec::new(),
                     dependents: Vec::new(),
+                    dependency_ids: Vec::new(),
+                    dependent_ids: Vec::new(),
                     visibility,
                     agents: vec![AgentKind::Shared],
                     paths: vec![SkillPath {
@@ -6932,459 +7922,147 @@ mod tests {
         }
     }
 
-    #[test]
-    fn save_sessions_upserts_and_removes_stale_rows() {
-        let temp = temp_dir("tendi-storage-sessions");
-        fs::create_dir_all(&temp).unwrap();
-        let db = temp.join("tendi.sqlite3");
-        let store = Store::open(&db).unwrap();
-
-        store
-            .save_sessions(&SessionScan {
-                sessions: vec![session("one", "First"), session("two", "Second")],
-                warnings: Vec::new(),
-            })
-            .unwrap();
-        assert_eq!(store.list_sessions().unwrap().sessions.len(), 2);
-
-        store
-            .save_sessions(&SessionScan {
-                sessions: vec![session("one", "First updated")],
-                warnings: Vec::new(),
-            })
-            .unwrap();
-        let cached = store.list_sessions().unwrap();
-
-        assert_eq!(cached.sessions.len(), 1);
-        assert_eq!(cached.sessions[0].id, "one");
-        assert_eq!(cached.sessions[0].title.as_deref(), Some("First updated"));
-
-        drop(store);
-        fs::remove_dir_all(temp).unwrap();
-    }
-
 
     #[test]
-    fn session_storage_canonicalizes_titles_and_previews() {
-        let temp = temp_dir("tendi-storage-session-canonicalization");
+    fn scoped_session_projection_keeps_workspaces_isolated() {
+        let temp = temp_dir("tendi-storage-scoped-sessions");
         fs::create_dir_all(&temp).unwrap();
-        let db = temp.join("tendi.sqlite3");
-        let store = Store::open(&db).unwrap();
-        let mut record = session(
-            "canonicalized",
-            "<image name=[Image #1] path=\"/tmp/image.png\"> Cached title",
-        );
-        record.first_user_message =
-            Some("<image name=[Image #1] path=\"/tmp/image.png\">\nFirst question".to_string());
-        record.last_user_message =
-            Some("<image name=[Image #1] path=\"/tmp/image.png\">".to_string());
+        let store = Store::open(temp.join("tendi.sqlite3")).unwrap();
+        let first_scope = ScopeKey::new("workspace:first").unwrap();
+        let second_scope = ScopeKey::new("workspace:second").unwrap();
+        let first_path = temp.join("first.jsonl");
+        let second_path = temp.join("second.jsonl");
+        let transcript = |marker: &str| {
+            include_str!("../testdata/transcripts/codex.jsonl")
+                .replace("Inspect the fixture parser", marker)
+        };
+        fs::write(&first_path, transcript("first-private-marker")).unwrap();
+        fs::write(&second_path, transcript("second-private-marker")).unwrap();
+        let mut first_session = session("shared", "First workspace");
+        first_session.path = first_path;
+        let mut second_session = session("shared", "Second workspace");
+        second_session.path = second_path;
 
         store
-            .save_sessions(&SessionScan {
-                sessions: vec![record.clone()],
-                warnings: Vec::new(),
-            })
-            .unwrap();
-
-        let cached = store.list_sessions().unwrap();
-        assert_eq!(cached.sessions[0].title.as_deref(), Some("Cached title"));
-        assert_eq!(
-            cached.sessions[0].first_user_message.as_deref(),
-            Some("First question")
-        );
-        assert_eq!(
-            cached.sessions[0].last_user_message.as_deref(),
-            None
-        );
-        let stored = store
-            .conn
-            .query_row(
-                "SELECT title, first_user_message, last_user_message, data_json
-                 FROM sessions WHERE id = 'canonicalized'",
-                [],
-                |row| {
-                    Ok((
-                        row.get::<_, Option<String>>(0)?,
-                        row.get::<_, Option<String>>(1)?,
-                        row.get::<_, Option<String>>(2)?,
-                        row.get::<_, String>(3)?,
-                    ))
+            .save_sessions_at_for_scope(
+                &first_scope,
+                &SessionScan {
+                    sessions: vec![first_session],
+                    warnings: Vec::new(),
                 },
+                1,
             )
             .unwrap();
-        assert_eq!(stored.0.as_deref(), Some("Cached title"));
-        assert_eq!(stored.1.as_deref(), Some("First question"));
-        assert_eq!(stored.2.as_deref(), None);
+        store
+            .save_sessions_at_for_scope(
+                &second_scope,
+                &SessionScan {
+                    sessions: vec![second_session],
+                    warnings: Vec::new(),
+                },
+                2,
+            )
+            .unwrap();
+
+        let first = store.list_sessions_for_scope(&first_scope).unwrap();
+        let second = store.list_sessions_for_scope(&second_scope).unwrap();
+        assert_eq!(first.sessions[0].title.as_deref(), Some("First workspace"));
+        assert_eq!(second.sessions[0].title.as_deref(), Some("Second workspace"));
+        assert_eq!(store.sessions_last_scan_at_for_scope(&first_scope).unwrap(), Some(1));
+        assert_eq!(store.sessions_last_scan_at_for_scope(&second_scope).unwrap(), Some(2));
         assert_eq!(
-            serde_json::from_str::<serde_json::Value>(&stored.3)
+            store
+                .search_sessions_for_scope(&first_scope, "first", None)
                 .unwrap()
-                .get("title")
-                .and_then(serde_json::Value::as_str),
-            Some("Cached title")
-        );
-
-        store
-            .conn
-            .execute(
-                "UPDATE sessions
-                 SET title = 'Legacy title', first_user_message = 'legacy preview'
-                 WHERE id = 'canonicalized'",
-                [],
-            )
-            .unwrap();
-        store
-            .save_sessions(&SessionScan {
-                sessions: vec![record],
-                warnings: Vec::new(),
-            })
-            .unwrap();
-        let repaired = store
-            .conn
-            .query_row(
-                "SELECT title, first_user_message FROM sessions WHERE id = 'canonicalized'",
-                [],
-                |row| {
-                    Ok((
-                        row.get::<_, Option<String>>(0)?,
-                        row.get::<_, Option<String>>(1)?,
-                    ))
-                },
-            )
-            .unwrap();
-        assert_eq!(repaired.0.as_deref(), Some("Cached title"));
-        assert_eq!(repaired.1.as_deref(), Some("First question"));
-
-        drop(store);
-        fs::remove_dir_all(temp).unwrap();
-    }
-
-    #[test]
-    fn session_payload_preview_migration_rehydrates_legacy_sources() {
-        let temp = temp_dir("tendi-storage-session-payload-migration");
-        fs::create_dir_all(&temp).unwrap();
-        let db = temp.join("tendi.sqlite3");
-        let store = Store::open(&db).unwrap();
-        let scalar_session = session("legacy-scalar", "Legacy scalar");
-        let search_session = session("legacy-search", "Legacy search");
-
-        store
-            .save_sessions(&SessionScan {
-                sessions: vec![scalar_session.clone(), search_session.clone()],
-                warnings: Vec::new(),
-            })
-            .unwrap();
-        store
-            .conn
-            .execute(
-                "UPDATE sessions
-                 SET first_user_message = ?1,
-                     last_user_message = ?2,
-                     last_assistant_message = ?3
-                 WHERE id = ?4",
-                params![
-                    "scalar first",
-                    "scalar last",
-                    "scalar assistant",
-                    scalar_session.id,
-                ],
-            )
-            .unwrap();
-        store
-            .conn
-            .execute(
-                "INSERT INTO session_search_records (
-                    session_id, agent, session_path, record_order,
-                    metadata_text, title, project, user_text, assistant_text
-                 ) VALUES (?1, ?2, ?3, ?4, '', '', '', ?5, ?6)",
-                params![
-                    search_session.id,
-                    "codex",
-                    search_session.path.display().to_string(),
-                    1,
-                    "search first",
-                    "search assistant one",
-                ],
-            )
-            .unwrap();
-        store
-            .conn
-            .execute(
-                "INSERT INTO session_search_records (
-                    session_id, agent, session_path, record_order,
-                    metadata_text, title, project, user_text, assistant_text
-                 ) VALUES (?1, ?2, ?3, ?4, '', '', '', ?5, ?6)",
-                params![
-                    search_session.id,
-                    "codex",
-                    search_session.path.display().to_string(),
-                    2,
-                    "search last",
-                    "search assistant last",
-                ],
-            )
-            .unwrap();
-        store
-            .conn
-            .execute(
-                "DELETE FROM meta WHERE key = ?1",
-                params![SESSION_PAYLOAD_PREVIEWS_MIGRATION_KEY],
-            )
-            .unwrap();
-        drop(store);
-
-        let reopened = Store::open(&db).unwrap();
-        let cached = reopened.list_sessions().unwrap();
-        let scalar = cached
-            .sessions
-            .iter()
-            .find(|session| session.id == scalar_session.id)
-            .unwrap();
-        assert_eq!(scalar.first_user_message.as_deref(), Some("scalar first"));
-        assert_eq!(scalar.last_user_message.as_deref(), Some("scalar last"));
-        assert_eq!(
-            scalar.last_assistant_message.as_deref(),
-            Some("scalar assistant")
-        );
-        let search = cached
-            .sessions
-            .iter()
-            .find(|session| session.id == search_session.id)
-            .unwrap();
-        assert_eq!(search.first_user_message.as_deref(), Some("search first"));
-        assert_eq!(search.last_user_message.as_deref(), Some("search last"));
-        assert_eq!(
-            search.last_assistant_message.as_deref(),
-            Some("search assistant last")
-        );
-
-        let migrated_data_json = reopened
-            .conn
-            .query_row(
-                "SELECT data_json FROM sessions WHERE id = ?1",
-                params![search_session.id],
-                |row| row.get::<_, String>(0),
-            )
-            .unwrap();
-        let migrated_value: serde_json::Value = serde_json::from_str(&migrated_data_json).unwrap();
-        assert_eq!(
-            migrated_value
-                .get("first_user_message")
-                .and_then(serde_json::Value::as_str),
-            Some("search first")
-        );
-        assert_eq!(
-            reopened
-                .conn
-                .query_row(
-                    "SELECT COUNT(*) FROM meta WHERE key = ?1",
-                    params![SESSION_PAYLOAD_PREVIEWS_MIGRATION_KEY],
-                    |row| row.get::<_, i64>(0),
-                )
-                .unwrap(),
+                .len(),
             1
         );
-
-        drop(reopened);
-        let reopened = Store::open(&db).unwrap();
-        assert_eq!(
-            reopened
-                .list_sessions()
+        assert!(
+            store
+                .search_sessions_for_scope(&second_scope, "first", None)
                 .unwrap()
-                .sessions
-                .iter()
-                .find(|session| session.id == search_session.id)
-                .and_then(|session| session.first_user_message.as_deref()),
-            Some("search first")
+                .is_empty()
         );
-
-        drop(reopened);
-        fs::remove_dir_all(temp).unwrap();
-    }
-
-    #[test]
-    fn session_analytics_cache_skips_unchanged_appends_and_cleans_stale_rows() {
-        use std::{fs::OpenOptions, io::Write};
-
-        let temp = temp_dir("tendi-storage-analytics");
-        fs::create_dir_all(&temp).unwrap();
-        let db = temp.join("tendi.sqlite3");
-        let path = temp.join("rollout-analytics.jsonl");
-        let timestamp = chrono::Local::now().to_rfc3339();
-        fs::write(
-            &path,
-            format!(
-                "{{\"timestamp\":\"{timestamp}\",\"type\":\"event_msg\",\"payload\":{{\"type\":\"token_count\",\"info\":{{\"total_token_usage\":{{\"input_tokens\":10,\"total_tokens\":10}}}}}}}}\n"
-            ),
-        )
-        .unwrap();
-        let store = Store::open(&db).unwrap();
-        let mut record = session("analytics", "Analytics");
-        record.path = path.clone();
-        store
-            .save_sessions(&SessionScan {
-                sessions: vec![record.clone()],
-                warnings: Vec::new(),
-            })
-            .unwrap();
-        let initial_revision = store.analytics_revision().unwrap();
-
-        let first = store
-            .refresh_session_analytics(std::slice::from_ref(&record))
-            .unwrap();
-        assert_eq!((first.parsed, first.skipped, first.failed), (1, 0, 0));
-        let first_revision = store.analytics_revision().unwrap();
-        assert!(first_revision > initial_revision);
-        let unchanged = store
-            .refresh_session_analytics(std::slice::from_ref(&record))
-            .unwrap();
-        assert_eq!((unchanged.parsed, unchanged.skipped), (0, 1));
-        assert_eq!(store.analytics_revision().unwrap(), first_revision);
-
-        store
-            .conn
-            .execute("UPDATE session_analytics SET parser_state_json = '{}'", [])
-            .unwrap();
-        let reparsed = store
-            .refresh_session_analytics(std::slice::from_ref(&record))
-            .unwrap();
         assert_eq!(
-            (reparsed.parsed, reparsed.skipped, reparsed.failed),
-            (1, 0, 0)
-        );
-        let reparsed_revision = store.analytics_revision().unwrap();
-        assert!(reparsed_revision > first_revision);
-
-        let mut file = OpenOptions::new().append(true).open(&path).unwrap();
-        writeln!(
-            file,
-            "{{\"timestamp\":\"{timestamp}\",\"type\":\"event_msg\",\"payload\":{{\"type\":\"token_count\",\"info\":{{\"total_token_usage\":{{\"input_tokens\":25,\"total_tokens\":25}}}}}}}}"
-        )
-        .unwrap();
-        let appended = store
-            .refresh_session_analytics(std::slice::from_ref(&record))
-            .unwrap();
-        assert_eq!((appended.parsed, appended.appended), (1, 1));
-        assert!(store.analytics_revision().unwrap() > reparsed_revision);
-        let overview = store.overview_analytics(None, 1, 1).unwrap();
-        assert_eq!(overview.summary.usage.total_tokens, 25);
-
-        store
-            .save_sessions(&SessionScan {
-                sessions: Vec::new(),
-                warnings: Vec::new(),
-            })
-            .unwrap();
-        assert_eq!(count(&store, "session_analytics"), 0);
-
-        drop(store);
-        fs::remove_dir_all(temp).unwrap();
-    }
-
-
-    #[test]
-    fn overview_filters_json_by_local_day_without_shrinking_full_history_metadata() {
-        let temp = temp_dir("tendi-storage-overview-window");
-        fs::create_dir_all(&temp).unwrap();
-        let store = Store::open(temp.join("tendi.sqlite3")).unwrap();
-        let today = Local::now().date_naive();
-        let yesterday = today.pred_opt().unwrap();
-        let today_timestamp = Local
-            .from_local_datetime(&today.and_hms_opt(12, 0, 0).unwrap())
-            .single()
-            .unwrap()
-            .to_rfc3339();
-        let yesterday_timestamp = Local
-            .from_local_datetime(&yesterday.and_hms_opt(23, 59, 0).unwrap())
-            .single()
-            .unwrap()
-            .to_rfc3339();
-        store
-            .save_session_analytics_records(&[
-                analytics_record("old", AgentKind::Claude, &yesterday_timestamp, 10),
-                analytics_record("current", AgentKind::Codex, &today_timestamp, 25),
-            ])
-            .unwrap();
-        store
-            .conn
-            .execute(
-                "UPDATE session_analytics SET analytics_json = 'not-json' WHERE session_id = 'old'",
-                [],
-            )
-            .unwrap();
-
-        let overview = store.overview_analytics(None, 1, 1).unwrap();
-
-        assert_eq!(overview.summary.usage.total_tokens, 25);
-        assert_eq!(overview.days.len(), 1);
-        assert_eq!(overview.days[0].date, today.to_string());
-        let today = today.to_string();
-        let yesterday = yesterday.to_string();
-        assert_eq!(overview.coverage.first.as_deref(), Some(yesterday.as_str()));
-        assert_eq!(overview.coverage.last.as_deref(), Some(today.as_str()));
-        assert_eq!(overview.coverage.total_sessions, 2);
-        assert_eq!(overview.coverage.analyzed_sessions, 2);
-        assert!(
-            overview
-                .capabilities
-                .iter()
-                .any(|entry| entry.agent == AgentKind::Claude)
+            store
+                .search_sessions_for_scope(&first_scope, "first-private-marker", None)
+                .unwrap()
+                .len(),
+            1
         );
         assert!(
-            overview
-                .capabilities
-                .iter()
-                .any(|entry| entry.agent == AgentKind::Codex)
+            store
+                .search_sessions_for_scope(&second_scope, "first-private-marker", None)
+                .unwrap()
+                .is_empty()
         );
+        let legacy_session_count: i64 = store
+            .conn
+            .query_row("SELECT COUNT(*) FROM sessions", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(legacy_session_count, 0);
 
-        drop(store);
         fs::remove_dir_all(temp).unwrap();
     }
 
     #[test]
-    fn overview_metadata_uses_overview_payload_not_scalar_mirror() {
-        let temp = temp_dir("tendi-storage-overview-authority");
+    fn scoped_analytics_ignores_records_from_another_workspace() {
+        let temp = temp_dir("tendi-storage-scoped-analytics");
         fs::create_dir_all(&temp).unwrap();
         let store = Store::open(temp.join("tendi.sqlite3")).unwrap();
-        let timestamp = Local::now().to_rfc3339();
+        let first_scope = ScopeKey::new("workspace:first").unwrap();
+        let second_scope = ScopeKey::new("workspace:second").unwrap();
+        let mut first_session = session("same", "First");
+        first_session.path = PathBuf::from("/tmp/scope-first.jsonl");
+        let mut second_session = session("same", "Second");
+        second_session.path = PathBuf::from("/tmp/scope-second.jsonl");
         store
-            .save_session_analytics_records(&[analytics_record(
-                "authority",
-                AgentKind::Codex,
-                &timestamp,
-                25,
-            )])
-            .unwrap();
-
-        let expected = store.overview_analytics(None, 1, 1).unwrap();
-        store
-            .conn
-            .execute(
-                "UPDATE session_analytics
-                 SET event_min_date = '2099-01-01', event_max_date = '2099-01-01',
-                     has_activity = 0, capability_token_usage = 0,
-                     capability_reasoning_tokens = 0, capability_explicit_runs = 0,
-                     capability_rate_limit_history = 0",
-                [],
+            .save_sessions_at_for_scope(
+                &first_scope,
+                &SessionScan {
+                    sessions: vec![first_session.clone()],
+                    warnings: Vec::new(),
+                },
+                1,
             )
             .unwrap();
+        store
+            .save_sessions_at_for_scope(
+                &second_scope,
+                &SessionScan {
+                    sessions: vec![second_session.clone()],
+                    warnings: Vec::new(),
+                },
+                1,
+            )
+            .unwrap();
+        let mut first_analytics = analytics_record("same", AgentKind::Codex, "2026-08-28T10:00:00Z", 11);
+        first_analytics.analytics.session_path = first_session.path;
+        let mut second_analytics = analytics_record("same", AgentKind::Codex, "2026-08-28T10:00:00Z", 99);
+        second_analytics.analytics.session_path = second_session.path;
+        store
+            .save_session_analytics_records_for_scope(&first_scope, &[first_analytics])
+            .unwrap();
+        store
+            .save_session_analytics_records_for_scope(&second_scope, &[second_analytics])
+            .unwrap();
 
-        let actual = store.overview_analytics(None, 1, 1).unwrap();
-        assert_eq!(actual.coverage.first, expected.coverage.first);
-        assert_eq!(actual.coverage.last, expected.coverage.last);
-        assert_eq!(actual.coverage.total_sessions, expected.coverage.total_sessions);
-        assert_eq!(
-            actual.coverage.analyzed_sessions,
-            expected.coverage.analyzed_sessions
-        );
-        assert_eq!(actual.capabilities.len(), expected.capabilities.len());
-        for (actual, expected) in actual.capabilities.iter().zip(&expected.capabilities) {
-            assert_eq!(actual.agent, expected.agent);
-            assert_eq!(actual.capabilities, expected.capabilities);
-        }
+        let overview = store
+            .overview_analytics_for_scope(&first_scope, None, 30, 30)
+            .unwrap();
+        assert_eq!(overview.coverage.total_sessions, 1);
+        assert_eq!(overview.summary.usage.total_tokens, 11);
+        assert_eq!(overview.summary.sessions, 1);
 
         drop(store);
         fs::remove_dir_all(temp).unwrap();
     }
+
+
+
+
+
+
 
     #[test]
     fn analytics_overview_index_migrates_old_schema_in_resumable_batches() {
@@ -7517,380 +8195,40 @@ mod tests {
         fs::remove_dir_all(temp).unwrap();
     }
 
-
     #[test]
-    fn search_sessions_matches_indexed_transcript_text() {
-        let temp = temp_dir("tendi-storage-session-search");
+    fn concurrent_writers_complete_one_hundred_rounds_without_sqlite_lock_errors() {
+        let temp = temp_dir("tendi-storage-writer-soak");
         fs::create_dir_all(&temp).unwrap();
         let db = temp.join("tendi.sqlite3");
-        let transcript = temp.join("one.jsonl");
-        fs::write(
-            &transcript,
-            concat!(
-                r#"{"timestamp":"2026-06-23T09:59:00Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"助手也提到脱敏"}]}}"#,
-                "\n",
-                r#"{"timestamp":"2026-06-23T10:00:00Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Find the hidden voltaic marker，确认脱敏逻辑"}]}}"#,
-            ),
-        )
-        .unwrap();
-        let store = Store::open(&db).unwrap();
-        let mut searchable = session("one", "First");
-        searchable.path = transcript;
-
-        store
-            .save_sessions(&SessionScan {
-                sessions: vec![searchable],
-                warnings: Vec::new(),
+        Store::open(&db).unwrap();
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(4));
+        let handles = (0..4)
+            .map(|worker| {
+                let db = db.clone();
+                let barrier = barrier.clone();
+                thread::spawn(move || {
+                    let store = Store::open(&db).unwrap();
+                    let baseline = store.app_settings().unwrap();
+                    barrier.wait();
+                    for round in 0..100 {
+                        let mut settings = baseline.clone();
+                        settings.terminal = format!("worker-{worker}-{round}");
+                        let saved = store
+                            .with_database_write_lock_retry(|| store.save_app_settings(settings.clone()))
+                            .unwrap();
+                        assert_eq!(saved.terminal, format!("worker-{worker}-{round}"));
+                    }
+                })
             })
-            .unwrap();
-
-        let matches = store.search_sessions("voltaic").unwrap();
-        assert_eq!(matches.len(), 1);
-        assert_eq!(matches[0].session.id, "one");
-        assert!(matches[0].search_snippet.contains("⟦voltaic⟧"));
-        let short_matches = store.search_sessions("脱敏").unwrap();
-        assert_eq!(short_matches.len(), 1);
-        assert!(short_matches[0].search_snippet.contains("确认⟦脱敏⟧逻辑"));
-        assert!(store.search_sessions("missing").unwrap().is_empty());
-
-        store
-            .save_sessions(&SessionScan {
-                sessions: Vec::new(),
-                warnings: Vec::new(),
-            })
-            .unwrap();
-        assert!(store.search_sessions("voltaic").unwrap().is_empty());
-        let integrity = store
-            .conn
-            .query_row("PRAGMA integrity_check", [], |row| row.get::<_, String>(0))
-            .unwrap();
-        assert_eq!(integrity, "ok");
-
-        drop(store);
+            .collect::<Vec<_>>();
+        for handle in handles {
+            handle.join().unwrap();
+        }
+        drop(Store::open(&db).unwrap());
         fs::remove_dir_all(temp).unwrap();
     }
 
 
-
-    #[test]
-    fn search_sessions_uses_bm25_field_weights() {
-        let temp = temp_dir("tendi-storage-session-search-rank");
-        fs::create_dir_all(&temp).unwrap();
-        let db = temp.join("tendi.sqlite3");
-        let title_transcript = temp.join("title.jsonl");
-        let body_transcript = temp.join("body.jsonl");
-        let assistant_transcript = temp.join("assistant.jsonl");
-        fs::write(
-            &title_transcript,
-            r#"{"timestamp":"2026-06-23T10:00:00Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Routine release notes"}]}}"#,
-        )
-        .unwrap();
-        fs::write(
-            &body_transcript,
-            r#"{"timestamp":"2026-06-23T10:00:00Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Investigate the voltaic failure"}]}}"#,
-        )
-        .unwrap();
-        fs::write(
-            &assistant_transcript,
-            r#"{"timestamp":"2026-06-23T10:00:00Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Investigate the voltaic failure"}]}}"#,
-        )
-        .unwrap();
-        let store = Store::open(&db).unwrap();
-        let mut title_match = session("title", "Voltaic release");
-        title_match.path = title_transcript;
-        let mut body_match = session("body", "Routine failure");
-        body_match.path = body_transcript;
-        let mut assistant_match = session("assistant", "Routine logs");
-        assistant_match.path = assistant_transcript;
-        store
-            .save_sessions(&SessionScan {
-                sessions: vec![body_match, assistant_match, title_match],
-                warnings: Vec::new(),
-            })
-            .unwrap();
-
-        let matches = store.search_sessions("voltaic").unwrap();
-        assert_eq!(matches.len(), 3);
-        assert_eq!(matches[0].session.id, "body");
-        assert!(matches[0].search_score > matches[2].search_score);
-        assert_eq!(matches[1].session.id, "title");
-        assert_eq!(matches[2].session.id, "assistant");
-        assert_eq!(matches[1].search_snippet, "⟦Voltaic⟧ release");
-
-        drop(store);
-        fs::remove_dir_all(temp).unwrap();
-    }
-
-    #[test]
-    fn search_sessions_refreshes_changed_metadata_without_reparsing() {
-        let temp = temp_dir("tendi-storage-session-search-metadata");
-        fs::create_dir_all(&temp).unwrap();
-        let db = temp.join("tendi.sqlite3");
-        let transcript = temp.join("one.jsonl");
-        fs::write(
-            &transcript,
-            r#"{"timestamp":"2026-06-23T10:00:00Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Routine notes"}]}}"#,
-        )
-        .unwrap();
-        let store = Store::open(&db).unwrap();
-        let mut searchable = session("one", "Original heading");
-        searchable.path = transcript;
-        searchable.mode = Some("alpha".to_string());
-        store
-            .save_sessions(&SessionScan {
-                sessions: vec![searchable.clone()],
-                warnings: Vec::new(),
-            })
-            .unwrap();
-
-        searchable.title = Some("Renamed voltaic heading".to_string());
-        searchable.mode = Some("beta".to_string());
-        store
-            .save_sessions(&SessionScan {
-                sessions: vec![searchable],
-                warnings: Vec::new(),
-            })
-            .unwrap();
-
-        assert!(store.search_sessions("original").unwrap().is_empty());
-        assert!(store.search_sessions("alpha").unwrap().is_empty());
-        assert_eq!(
-            store.search_sessions("voltaic").unwrap()[0].session.id,
-            "one"
-        );
-        assert_eq!(store.search_sessions("beta").unwrap()[0].session.id, "one");
-
-        drop(store);
-        fs::remove_dir_all(temp).unwrap();
-    }
-
-    #[test]
-    fn session_delta_only_returns_changes_and_persists_scan_watermark() {
-        let temp = temp_dir("tendi-storage-session-delta");
-        fs::create_dir_all(&temp).unwrap();
-        let db = temp.join("tendi.sqlite3");
-        let transcript = temp.join("one.jsonl");
-        fs::write(&transcript, "{}\n").unwrap();
-        let store = Store::open(&db).unwrap();
-        let mut record = session("one", "First");
-        record.path = transcript.clone();
-
-        assert_eq!(
-            store.apply_session_delta(&[record.clone()]).unwrap().len(),
-            1
-        );
-        assert!(
-            store
-                .apply_session_delta(&[record.clone()])
-                .unwrap()
-                .is_empty()
-        );
-
-        record.title = Some("Updated".to_string());
-        assert_eq!(
-            store.apply_session_delta(&[record.clone()]).unwrap().len(),
-            1
-        );
-        let mut metadata_update = record.clone();
-        metadata_update.path = temp.join("meta.json");
-        metadata_update.title = Some("Metadata title".to_string());
-        let canonical = store.apply_session_delta(&[metadata_update]).unwrap();
-        assert_eq!(canonical[0].path, transcript);
-        assert_eq!(store.list_sessions().unwrap().sessions.len(), 1);
-        store.index_session_delta(&canonical).unwrap();
-        assert_eq!(
-            store.search_sessions("metadata").unwrap()[0].session.path,
-            transcript
-        );
-        store
-            .save_sessions_at(
-                &SessionScan {
-                    sessions: canonical,
-                    warnings: Vec::new(),
-                },
-                123,
-            )
-            .unwrap();
-        assert_eq!(store.sessions_last_scan_at().unwrap(), Some(123));
-
-        assert_eq!(store.last_scan_at().unwrap(), None);
-        store
-            .conn
-            .execute(
-                "INSERT INTO meta (key, value) VALUES ('last_scan_at', '456')",
-                [],
-            )
-            .unwrap();
-        assert_eq!(store.last_scan_at().unwrap(), Some(456));
-        store
-            .conn
-            .execute(
-                "UPDATE meta SET value = 'invalid' WHERE key = 'last_scan_at'",
-                [],
-            )
-            .unwrap();
-        assert!(store.last_scan_at().is_err());
-
-        let removed = store.remove_sessions_for_paths(&[transcript]).unwrap();
-        assert_eq!(removed.len(), 1);
-        assert!(store.list_sessions().unwrap().sessions.is_empty());
-
-        drop(store);
-        fs::remove_dir_all(temp).unwrap();
-    }
-
-    #[test]
-    fn search_sessions_matches_text_after_previous_record_limit() {
-        let temp = temp_dir("tendi-storage-session-search-long-message");
-        fs::create_dir_all(&temp).unwrap();
-        let db = temp.join("tendi.sqlite3");
-        let transcript = temp.join("one.jsonl");
-        let marker = "after-64k-session-search-marker";
-        let body = format!("{} {marker}", "x".repeat(64 * 1024));
-        let line = format!(
-            r#"{{"timestamp":"2026-06-23T10:00:00Z","type":"response_item","payload":{{"type":"message","role":"user","content":[{{"type":"input_text","text":{}}}]}}}}"#,
-            serde_json::to_string(&body).unwrap(),
-        );
-        fs::write(&transcript, line).unwrap();
-
-        let store = Store::open(&db).unwrap();
-        let mut searchable = session("one", "First");
-        searchable.path = transcript;
-        store
-            .save_sessions(&SessionScan {
-                sessions: vec![searchable.clone()],
-                warnings: Vec::new(),
-            })
-            .unwrap();
-
-        let matches = store.search_sessions(marker).unwrap();
-        assert_eq!(matches.len(), 1);
-        assert_eq!(matches[0].session.id, "one");
-
-        store
-            .conn
-            .execute(
-                "UPDATE session_search_records
-                 SET user_text = 'truncated'
-                 WHERE session_id = 'one' AND record_order = 1",
-                [],
-            )
-            .unwrap();
-        store
-            .conn
-            .execute(
-                "UPDATE session_search_index
-                 SET search_index_version = 1
-                 WHERE session_id = 'one'",
-                [],
-            )
-            .unwrap();
-        assert!(store.search_sessions(marker).unwrap().is_empty());
-
-        store
-            .save_sessions(&SessionScan {
-                sessions: vec![searchable],
-                warnings: Vec::new(),
-            })
-            .unwrap();
-        assert_eq!(store.search_sessions(marker).unwrap().len(), 1);
-
-        drop(store);
-        fs::remove_dir_all(temp).unwrap();
-    }
-
-    #[test]
-    fn search_sessions_keeps_all_query_terms() {
-        let temp = temp_dir("tendi-storage-session-search-query-terms");
-        fs::create_dir_all(&temp).unwrap();
-        let db = temp.join("tendi.sqlite3");
-        let first_transcript = temp.join("first.jsonl");
-        let second_transcript = temp.join("second.jsonl");
-        let terms = [
-            "alpha", "bravo", "charlie", "delta", "echo", "foxtrot", "golf", "hotel", "india",
-        ];
-        let user_line = |body: &str| {
-            format!(
-                r#"{{"timestamp":"2026-06-23T10:00:00Z","type":"response_item","payload":{{"type":"message","role":"user","content":[{{"type":"input_text","text":{}}}]}}}}"#,
-                serde_json::to_string(body).unwrap(),
-            )
-        };
-        fs::write(&first_transcript, user_line(&terms[..8].join(" "))).unwrap();
-        fs::write(&second_transcript, user_line(&terms.join(" "))).unwrap();
-
-        let store = Store::open(&db).unwrap();
-        let mut first = session("first", "First");
-        first.path = first_transcript;
-        let mut second = session("second", "Second");
-        second.path = second_transcript;
-        store
-            .save_sessions(&SessionScan {
-                sessions: vec![first, second],
-                warnings: Vec::new(),
-            })
-            .unwrap();
-
-        let matches = store.search_sessions(&terms.join(" ")).unwrap();
-        assert_eq!(matches.len(), 1);
-        assert_eq!(matches[0].session.id, "second");
-
-        drop(store);
-        fs::remove_dir_all(temp).unwrap();
-    }
-
-    #[test]
-    fn search_sessions_batch_scopes_and_preserves_candidate_order() {
-        let temp = temp_dir("tendi-storage-session-search-batch");
-        fs::create_dir_all(&temp).unwrap();
-        let db = temp.join("tendi.sqlite3");
-        let first_transcript = temp.join("first.jsonl");
-        let second_transcript = temp.join("second.jsonl");
-        let user_line = |body: &str| {
-            format!(
-                r#"{{"timestamp":"2026-06-23T10:00:00Z","type":"response_item","payload":{{"type":"message","role":"user","content":[{{"type":"input_text","text":{}}}]}}}}"#,
-                serde_json::to_string(body).unwrap(),
-            )
-        };
-        fs::write(&first_transcript, user_line("shared needle first")).unwrap();
-        fs::write(&second_transcript, user_line("shared needle second")).unwrap();
-
-        let store = Store::open(&db).unwrap();
-        let mut first = session("first", "First");
-        first.path = first_transcript;
-        let mut second = session("second", "Second");
-        second.path = second_transcript;
-        store
-            .save_sessions(&SessionScan {
-                sessions: vec![first.clone(), second.clone()],
-                warnings: Vec::new(),
-            })
-            .unwrap();
-
-        let candidates = vec![SessionIdentity::from(&second), SessionIdentity::from(&first)];
-        let matches = store.search_sessions_batch("needle", &candidates).unwrap();
-        assert_eq!(
-            matches
-                .iter()
-                .map(|hit| hit.session.id.as_str())
-                .collect::<Vec<_>>(),
-            vec!["second", "first"]
-        );
-
-        let scoped = store
-            .search_sessions_batch("needle", &[SessionIdentity::from(&first)])
-            .unwrap();
-        assert_eq!(scoped.len(), 1);
-        assert_eq!(scoped[0].session.id, "first");
-
-        let short_matches = store
-            .search_sessions_batch("fi", &candidates)
-            .unwrap();
-        assert_eq!(short_matches.len(), 1);
-        assert_eq!(short_matches[0].session.id, "first");
-
-        drop(store);
-        fs::remove_dir_all(temp).unwrap();
-    }
 
 
     #[test]
@@ -7988,97 +8326,6 @@ mod tests {
         fs::remove_dir_all(temp).unwrap();
     }
 
-    #[test]
-    fn session_skill_links_query_both_directions_and_cleanup_stale_sessions() {
-        let temp = temp_dir("tendi-storage-session-skills");
-        fs::create_dir_all(&temp).unwrap();
-        let db = temp.join("tendi.sqlite3");
-        let store = Store::open(&db).unwrap();
-        let mut session_one = session("one", "First");
-        session_one.updated_at = Some("2026-06-23T10:01:00Z".to_string());
-        let mut session_two = session("two", "Second");
-        session_two.updated_at = Some("2026-06-23T10:02:00Z".to_string());
-
-        store
-            .save_sessions(&SessionScan {
-                sessions: vec![session_one.clone(), session_two.clone()],
-                warnings: Vec::new(),
-            })
-            .unwrap();
-        store
-            .replace_session_skill_links(
-                &session_one,
-                &SessionFileState {
-                    file_mtime: 1,
-                    file_size: 10,
-                },
-                &[link(&session_one, "foo")],
-            )
-            .unwrap();
-        store
-            .replace_session_skill_links(
-                &session_two,
-                &SessionFileState {
-                    file_mtime: 1,
-                    file_size: 10,
-                },
-                &[link(&session_two, "foo")],
-            )
-            .unwrap();
-
-        store
-            .conn
-            .execute(
-                "UPDATE sessions
-                 SET title = 'Legacy title', project = '/legacy/project',
-                     started_at = '2099-01-01T00:00:00Z', updated_at = '2099-01-01T00:00:00Z',
-                     message_count = 999
-                 WHERE id = 'one'",
-                [],
-            )
-            .unwrap();
-
-        assert_eq!(
-            store
-                .session_skill_links("one", AgentKind::Codex)
-                .unwrap()
-                .len(),
-            1
-        );
-        let links = store.skill_session_links("foo").unwrap();
-        assert_eq!(links.len(), 2);
-        assert_eq!(links[0].session_id, "two");
-        assert_eq!(links[0].session_title.as_deref(), Some("Second"));
-        assert_eq!(
-            links[0].session_updated_at.as_deref(),
-            Some("2026-06-23T10:02:00Z")
-        );
-        assert_eq!(links[1].session_id, "one");
-        assert_eq!(links[1].session_title.as_deref(), Some("First"));
-        assert_eq!(
-            links[1].session_project,
-            Some(PathBuf::from("/tmp/tendi-test"))
-        );
-        assert_eq!(links[1].session_message_count, Some(3));
-        assert!(
-            store
-                .session_skill_index_is_current(&session_one, 1, 10)
-                .unwrap()
-        );
-
-        store
-            .save_sessions(&SessionScan {
-                sessions: vec![session_one.clone()],
-                warnings: Vec::new(),
-            })
-            .unwrap();
-
-        assert_eq!(store.skill_session_links("foo").unwrap().len(), 1);
-        assert_eq!(count(&store, "session_skill_index"), 1);
-
-        drop(store);
-        fs::remove_dir_all(temp).unwrap();
-    }
 
     fn session(id: &str, title: &str) -> SessionRecord {
         SessionRecord {
@@ -8138,6 +8385,80 @@ mod tests {
         }
     }
 
+    #[test]
+    fn scoped_session_skill_links_do_not_cross_workspace_boundaries() {
+        let temp = temp_dir("tendi-storage-scoped-session-skills");
+        fs::create_dir_all(&temp).unwrap();
+        let db = temp.join("tendi.sqlite3");
+        let transcript = temp.join("same.jsonl");
+        fs::write(&transcript, "{}\n").unwrap();
+        let store = Store::open(&db).unwrap();
+        let first_scope = ScopeKey::new("workspace:/first").unwrap();
+        let second_scope = ScopeKey::new("workspace:/second").unwrap();
+        let mut session = session("same", "Same session");
+        session.path = transcript;
+        let scan = SessionScan {
+            sessions: vec![session.clone()],
+            warnings: Vec::new(),
+        };
+        store
+            .save_sessions_at_for_scope(&first_scope, &scan, 1)
+            .unwrap();
+        store
+            .save_sessions_at_for_scope(&second_scope, &scan, 1)
+            .unwrap();
+        let state = SessionFileState {
+            file_mtime: 1,
+            file_size: 3,
+        };
+
+        store
+            .replace_session_skill_links_for_scope(
+                &first_scope,
+                &session,
+                &state,
+                &[link(&session, "first-skill")],
+            )
+            .unwrap();
+        store
+            .replace_session_skill_links_for_scope(
+                &second_scope,
+                &session,
+                &state,
+                &[link(&session, "second-skill")],
+            )
+            .unwrap();
+
+        assert_eq!(
+            store
+                .skill_session_links_for_scope(&first_scope, "first-skill")
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(store
+            .skill_session_links_for_scope(&first_scope, "second-skill")
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            store
+                .session_skill_index_status_for_scope(&first_scope, false)
+                .unwrap()
+                .indexed,
+            1
+        );
+        assert_eq!(
+            store
+                .session_skill_index_status_for_scope(&second_scope, false)
+                .unwrap()
+                .indexed,
+            1
+        );
+
+        drop(store);
+        fs::remove_dir_all(temp).unwrap();
+    }
+
     fn link(session: &SessionRecord, skill_name: &str) -> SessionSkillLink {
         SessionSkillLink {
             session_id: session.id.clone(),
@@ -8159,36 +8480,108 @@ mod tests {
         }
     }
 
-    fn count(store: &Store, table: &str) -> i64 {
-        store
-            .conn
-            .query_row(&format!("SELECT count(*) FROM {table}"), [], |row| {
-                row.get(0)
-            })
-            .unwrap()
-    }
+    #[test]
+    fn projection_heads_are_monotonic_per_scope_and_domain() {
+        let temp = temp_dir("tendi-projection-head");
+        let store = Store::open(temp.join("tendi.sqlite3")).unwrap();
+        let scope = ScopeKey::new("workspace:/repo").unwrap();
+        let source = SourceVersion::new("sha-1").unwrap();
 
-    fn skill_names(store: &Store) -> Vec<String> {
-        let mut statement = store
-            .conn
-            .prepare("SELECT name FROM skills ORDER BY name")
+        assert!(store.projection_head(&scope, "sessions").unwrap().is_none());
+        let first = store
+            .advance_projection_head(&scope, "sessions", Some(&source), "ready")
             .unwrap();
-        statement
-            .query_map([], |row| row.get::<_, String>(0))
-            .unwrap()
-            .map(Result::unwrap)
-            .collect()
+        let second = store
+            .advance_projection_head(&scope, "sessions", Some(&source), "ready")
+            .unwrap();
+
+        assert_eq!(first.revision, Revision::new(1));
+        assert_eq!(second.revision, Revision::new(2));
+        assert_eq!(
+            store
+                .projection_head(&scope, "sessions")
+                .unwrap()
+                .unwrap()
+                .revision,
+            Revision::new(2)
+        );
     }
 
-    fn skill_visibility(store: &Store, name: &str) -> String {
-        store
-            .conn
-            .query_row(
-                "SELECT visibility FROM skills WHERE name = ?1",
-                [name],
-                |row| row.get(0),
+    #[test]
+    fn operation_journal_round_trips_terminal_state_and_error() {
+        let temp = temp_dir("tendi-operation-journal");
+        let store = Store::open(temp.join("tendi.sqlite3")).unwrap();
+        let operation = OperationRecord {
+            operation_id: OperationId::new("op-1").unwrap(),
+            kind: OperationKind::Scan,
+            scope_key: ScopeKey::new("workspace:/repo").unwrap(),
+            status: OperationStatus::Running,
+            input_revision: Revision::new(4),
+            source_version: Some(SourceVersion::new("sha-1").unwrap()),
+            checkpoint_json: Some("{\"offset\":12}".to_string()),
+            error: None,
+        };
+        store.record_operation(&operation).unwrap();
+        assert_eq!(store.operation(&operation.operation_id).unwrap(), Some(operation.clone()));
+
+        assert!(store
+            .update_operation(
+                &operation.operation_id,
+                OperationStatus::Failed,
+                operation.checkpoint_json.as_deref(),
+                Some("provider failed"),
             )
-            .unwrap()
+            .unwrap());
+        let saved = store.operation(&operation.operation_id).unwrap().unwrap();
+        assert_eq!(saved.status, OperationStatus::Failed);
+        assert_eq!(saved.error.as_deref(), Some("provider failed"));
+    }
+
+    #[test]
+    fn recovery_marks_unfinished_operations_as_failed() {
+        let temp = temp_dir("tendi-operation-recovery");
+        let store = Store::open(temp.join("tendi.sqlite3")).unwrap();
+        let scope = ScopeKey::new("workspace:/repo").unwrap();
+        for (id, status) in [
+            ("queued-op", OperationStatus::Queued),
+            ("running-op", OperationStatus::Running),
+            ("committing-op", OperationStatus::Committing),
+            ("committed-op", OperationStatus::Committed),
+        ] {
+            store
+                .record_operation(&OperationRecord {
+                    operation_id: OperationId::new(id).unwrap(),
+                    kind: OperationKind::Projection,
+                    scope_key: scope.clone(),
+                    status,
+                    input_revision: Revision::ZERO,
+                    source_version: None,
+                    checkpoint_json: None,
+                    error: None,
+                })
+                .unwrap();
+        }
+
+        assert_eq!(store.recover_inflight_operations().unwrap(), 3);
+        for id in ["queued-op", "running-op", "committing-op"] {
+            let operation = store
+                .operation(&OperationId::new(id).unwrap())
+                .unwrap()
+                .unwrap();
+            assert_eq!(operation.status, OperationStatus::Failed);
+            assert_eq!(
+                operation.error.as_deref(),
+                Some("daemon restarted before the operation completed")
+            );
+        }
+        assert_eq!(
+            store
+                .operation(&OperationId::new("committed-op").unwrap())
+                .unwrap()
+                .unwrap()
+                .status,
+            OperationStatus::Committed
+        );
     }
 
     fn temp_dir(prefix: &str) -> PathBuf {

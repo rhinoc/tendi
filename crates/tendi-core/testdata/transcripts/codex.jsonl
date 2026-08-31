@@ -1,0 +1,4 @@
+{"type":"session_meta","payload":{"id":"codex-fixture","cwd":"/tmp/tendi-fixture"}}
+{"type":"response_item","timestamp":"2026-08-28T10:11:12.000Z","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Inspect the fixture parser"}]}}
+{"type":"response_item","timestamp":"2026-08-28T10:11:13.000Z","payload":{"type":"function_call","call_id":"codex-call-1","name":"exec_command","arguments":"{\"cmd\":\"printf fixture\"}"}}
+{"type":"response_item","timestamp":"2026-08-28T10:11:14.000Z","payload":{"type":"function_call_output","call_id":"codex-call-1","output":"fixture"}}

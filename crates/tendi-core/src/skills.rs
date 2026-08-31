@@ -15,7 +15,9 @@ use walkdir::WalkDir;
 
 use crate::fsutil::{atomic_write, atomic_write_bytes, sha256_bytes, sha256_file, sha256_text};
 use crate::git::{self, CommandFailure};
+use crate::runtime_contract::InstallationId;
 use crate::skill_targets::{SkillInstallScope, SkillTarget, skill_target_root};
+use crate::time::compare_timestamps;
 
 const WRAPPER_CATALOG_START: &str = "<catalog>";
 const WRAPPER_CATALOG_END: &str = "</catalog>";
@@ -24,7 +26,7 @@ static GIT_UPDATE_CHECK_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 const KEEP_LOCAL_RESOLUTION: &str = "__tendi_keep_local__";
 const USE_UPDATE_RESOLUTION: &str = "__tendi_use_update__";
 
-#[derive(Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd, Deserialize, Serialize)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd, Hash, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum AgentKind {
     Codex,
@@ -60,7 +62,7 @@ impl SkillVisibility {
     }
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct SkillRoot {
     pub path: PathBuf,
     pub scope: String,
@@ -129,11 +131,20 @@ pub struct SkillSnapshot {
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct SkillRecord {
+    /// Stable installation identity. It is never a display name.
+    #[serde(default)]
+    pub id: String,
+    #[serde(rename = "installationId", default)]
+    pub installation_id: String,
     pub name: String,
     pub description: Option<String>,
     pub tags: Vec<String>,
     pub dependencies: Vec<String>,
     pub dependents: Vec<String>,
+    #[serde(rename = "dependencyIds", default)]
+    pub dependency_ids: Vec<String>,
+    #[serde(rename = "dependentIds", default)]
+    pub dependent_ids: Vec<String>,
     pub visibility: SkillVisibility,
     pub agents: Vec<AgentKind>,
     pub paths: Vec<SkillPath>,
@@ -145,7 +156,7 @@ pub struct SkillRecord {
     pub mtime: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct SkillScan {
     pub roots: Vec<SkillRoot>,
     pub skills: Vec<SkillRecord>,
@@ -268,6 +279,8 @@ pub struct SkillAddApplyReport {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct SkillUpdateReport {
+    #[serde(default)]
+    pub id: String,
     pub name: String,
     pub status: String,
     pub current_version: Option<String>,
@@ -303,10 +316,19 @@ pub struct SkillUpdatePlan {
     pub merge_issues: Vec<SkillMergeIssue>,
 }
 
+impl SkillUpdatePlan {
+    pub fn can_apply(&self) -> bool {
+        !self.file_changes.changes.is_empty()
+            || !self.git_updates.is_empty()
+            || !self.merge_issues.is_empty()
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct SkillUpdatePersistence {
     pub source_records: Vec<SkillSourceRecord>,
     pub snapshots: Vec<SkillSnapshot>,
+    pub expected_source_versions: Vec<(PathBuf, Option<String>)>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -480,7 +502,7 @@ fn scan_skills_with_source_store_for_projects_for_projection(
     store: &crate::storage::Store,
     project_roots: &[PathBuf],
 ) -> Result<SkillScanWithSourceMigrations> {
-    let source_records = store.skill_source_records()?;
+    let source_records = store.skill_source_records_for_workspace(cwd)?;
     let mut provenance_resolver = ProvenanceResolver::managed(cwd, source_records, project_roots);
     let scan =
         scan_skills_with_resolver_for_projects(cwd, &mut provenance_resolver, project_roots)?;
@@ -558,15 +580,7 @@ fn scan_skills_with_resolver_for_projects(
     }
 
     resolve_raw_skill_path_dependencies(&mut raw_skills);
-    let mut by_name: BTreeMap<String, Vec<RawSkill>> = BTreeMap::new();
-    for skill in raw_skills {
-        by_name.entry(skill.name.clone()).or_default().push(skill);
-    }
-
-    let mut skills = by_name
-        .into_iter()
-        .map(|(name, raws)| merge_skill(name, raws))
-        .collect::<Vec<_>>();
+    let mut skills = merge_raw_skills(raw_skills);
     resolve_scanned_skill_relations(&mut skills);
     warnings.append(&mut provenance_resolver.lock_warnings);
 
@@ -604,22 +618,33 @@ pub fn scan_skills_synced(cwd: &Path) -> Result<SkillScan> {
 
 pub fn refresh_skill_scan(
     _cwd: &Path,
-    scan: &SkillScan,
+    mut scan: SkillScan,
     names: &[String],
     extra_skill_dirs: &[PathBuf],
 ) -> Result<SkillScan> {
-    let names = names.iter().cloned().collect::<BTreeSet<_>>();
+    let names = names.iter().map(String::as_str).collect::<BTreeSet<_>>();
     let mut refresh_dirs = extra_skill_dirs.iter().cloned().collect::<BTreeSet<_>>();
     let mut roots_by_dir = BTreeMap::<PathBuf, SkillRoot>::new();
-    let mut remaining = Vec::new();
-
-    for skill in &scan.skills {
-        if names.contains(&skill.name)
+    let mut provenance_resolver = ProvenanceResolver::from_skills(scan.skills.iter().filter(|skill| {
+        names
+            .iter()
+            .any(|name| skill_matches_selector(skill, name))
             || skill
                 .paths
                 .iter()
                 .any(|path| refresh_dirs.contains(&path.path))
-        {
+    }));
+    let mut remaining = Vec::with_capacity(scan.skills.len());
+
+    for skill in std::mem::take(&mut scan.skills) {
+        let refresh = names
+            .iter()
+            .any(|name| skill_matches_selector(&skill, name))
+            || skill
+                .paths
+                .iter()
+                .any(|path| refresh_dirs.contains(&path.path));
+        if refresh {
             for path in &skill.paths {
                 refresh_dirs.insert(path.path.clone());
                 roots_by_dir.insert(
@@ -634,11 +659,10 @@ pub fn refresh_skill_scan(
                 );
             }
         } else {
-            remaining.push(skill.clone());
+            remaining.push(skill);
         }
     }
 
-    let mut provenance_resolver = ProvenanceResolver::from_scan(scan);
     let mut refreshed_raw = Vec::new();
     let known_files = remaining
         .iter()
@@ -663,13 +687,15 @@ pub fn refresh_skill_scan(
                 .max_by_key(|root| root.path.components().count())
                 .cloned()
         });
-        let root = root.unwrap_or_else(|| SkillRoot {
-            path: skill_dir.clone(),
-            scope: "referenced".to_string(),
-            agent: AgentKind::Unknown,
-            plugin_id: None,
-            plugin_enabled: None,
-        });
+        let root = root
+            .or_else(|| infer_skill_root_for_dir(&skill_dir))
+            .unwrap_or_else(|| SkillRoot {
+                path: skill_dir.clone(),
+                scope: "referenced".to_string(),
+                agent: AgentKind::Unknown,
+                plugin_id: None,
+                plugin_enabled: None,
+            });
         let skill = read_skill(&root, &skill_file, &mut provenance_resolver)?;
         refreshed_files.insert(skill_file_key(&skill_file));
         referenced_files.extend(skill.dependency_files.iter().cloned());
@@ -723,19 +749,12 @@ pub fn refresh_skill_scan(
         skill.dependencies = dependencies.into_iter().collect();
     }
 
-    let mut refreshed_by_name = BTreeMap::<String, Vec<RawSkill>>::new();
-    for skill in refreshed_raw {
-        refreshed_by_name
-            .entry(skill.name.clone())
-            .or_default()
-            .push(skill);
-    }
-    remaining.extend(
-        refreshed_by_name
-            .into_iter()
-            .map(|(name, raws)| merge_skill(name, raws)),
-    );
-    remaining.sort_by(|left, right| left.name.cmp(&right.name));
+    remaining.extend(merge_raw_skills(refreshed_raw));
+    remaining.sort_by(|left, right| {
+        left.name
+            .cmp(&right.name)
+            .then_with(|| left.id.cmp(&right.id))
+    });
     resolve_scanned_skill_relations(&mut remaining);
     loop {
         let before_len = remaining.len();
@@ -750,9 +769,9 @@ pub fn refresh_skill_scan(
     }
 
     Ok(SkillScan {
-        roots: scan.roots.clone(),
+        roots: scan.roots,
         skills: remaining,
-        warnings: scan.warnings.clone(),
+        warnings: scan.warnings,
     })
 }
 
@@ -781,15 +800,6 @@ pub fn plan_visibility(
     })
 }
 
-pub fn plan_visibility_many(
-    cwd: &Path,
-    names: &[String],
-    visibility: SkillVisibility,
-) -> Result<ChangeSet> {
-    let scan = scan_skills(cwd)?;
-    plan_visibility_many_for_scan(&scan, names, visibility)
-}
-
 pub fn plan_visibility_many_for_scan(
     scan: &SkillScan,
     names: &[String],
@@ -798,7 +808,7 @@ pub fn plan_visibility_many_for_scan(
     let matches = scan
         .skills
         .iter()
-        .filter(|skill| names.iter().any(|name| name == &skill.name))
+        .filter(|skill| names.iter().any(|name| skill_matches_selector(skill, name)))
         .collect::<Vec<_>>();
     if matches.is_empty() {
         bail!("no skills matched selected names");
@@ -894,17 +904,6 @@ pub fn refresh_wrapper(
     plan_wrapper_for_matches(&scan, name, matches, None, manual_children)
 }
 
-pub fn plan_wrapper_from_names(
-    cwd: &Path,
-    name: &str,
-    names: &[String],
-    description: Option<&str>,
-    manual_children: bool,
-) -> Result<ChangeSet> {
-    let scan = scan_skills(cwd)?;
-    plan_wrapper_from_names_for_scan(&scan, name, names, description, manual_children)
-}
-
 pub fn plan_wrapper_from_names_for_scan(
     scan: &SkillScan,
     name: &str,
@@ -915,20 +914,10 @@ pub fn plan_wrapper_from_names_for_scan(
     let matches = scan
         .skills
         .iter()
-        .filter(|skill| names.iter().any(|selected| selected == &skill.name))
+        .filter(|skill| names.iter().any(|selected| skill_matches_selector(skill, selected)))
         .collect::<Vec<_>>();
     plan_wrapper_for_matches(scan, name, matches, description, manual_children)
 }
-pub fn refresh_wrapper_from_names(
-    cwd: &Path,
-    name: &str,
-    names: &[String],
-    manual_children: bool,
-) -> Result<ChangeSet> {
-    let scan = scan_skills(cwd)?;
-    refresh_wrapper_from_names_for_scan(&scan, name, names, manual_children)
-}
-
 pub fn refresh_wrapper_from_names_for_scan(
     scan: &SkillScan,
     name: &str,
@@ -942,7 +931,7 @@ pub fn refresh_wrapper_from_names_for_scan(
     let matches = scan
         .skills
         .iter()
-        .filter(|skill| skill.name != name && names.iter().any(|selected| selected == &skill.name))
+        .filter(|skill| !skill_matches_selector(skill, name) && names.iter().any(|selected| skill_matches_selector(skill, selected)))
         .collect::<Vec<_>>();
     plan_wrapper_for_matches(&scan, name, matches, None, manual_children)
 }
@@ -959,7 +948,7 @@ pub fn plan_skill_delete_many_for_scan(
     let matches = scan
         .skills
         .iter()
-        .filter(|skill| names.iter().any(|selected| selected == &skill.name))
+        .filter(|skill| names.iter().any(|selected| skill_matches_selector(skill, selected)))
         .collect::<Vec<_>>();
     if matches.is_empty() {
         bail!("no skills matched selected names");
@@ -1110,27 +1099,62 @@ pub fn apply_skill_delete_plan(plan: &SkillDeletePlan) -> Result<()> {
 }
 
 pub fn apply_changes(changeset: &ChangeSet) -> Result<()> {
+    let mut applied = Vec::<(PathBuf, Option<Vec<u8>>)>::new();
     for change in &changeset.changes {
         let current = read_optional(&change.path)?;
         match (&change.before_sha256, &current) {
             (Some(expected), Some(text)) if *expected == sha256_text(text) => {}
-            (Some(_), Some(_)) => bail!(
-                "refusing to overwrite changed file {}",
-                change.path.display()
-            ),
-            (Some(_), None) => bail!(
-                "refusing to overwrite missing file {}",
-                change.path.display()
-            ),
+            (Some(_), Some(_)) => {
+                let error = anyhow::anyhow!(
+                    "refusing to overwrite changed file {}",
+                    change.path.display()
+                );
+                rollback_applied_files(&applied);
+                return Err(error);
+            }
+            (Some(_), None) => {
+                let error = anyhow::anyhow!(
+                    "refusing to overwrite missing file {}",
+                    change.path.display()
+                );
+                rollback_applied_files(&applied);
+                return Err(error);
+            }
             (None, None) => {}
-            (None, Some(_)) => bail!(
-                "refusing to overwrite existing file {}",
-                change.path.display()
-            ),
+            (None, Some(_)) => {
+                let error = anyhow::anyhow!(
+                    "refusing to overwrite existing file {}",
+                    change.path.display()
+                );
+                rollback_applied_files(&applied);
+                return Err(error);
+            }
         }
-        atomic_write(&change.path, &change.after)?;
+        if let Err(error) = atomic_write(&change.path, &change.after) {
+            rollback_applied_files(&applied);
+            return Err(error);
+        }
+        applied.push((
+            change.path.clone(),
+            current.map(|text| text.into_bytes()),
+        ));
     }
     Ok(())
+}
+
+fn rollback_applied_files(applied: &[(PathBuf, Option<Vec<u8>>)]) {
+    for (path, before) in applied.iter().rev() {
+        match before {
+            Some(bytes) => {
+                let _ = atomic_write_bytes(path, bytes);
+            }
+            None => {
+                if path.exists() {
+                    let _ = fs::remove_file(path);
+                }
+            }
+        }
+    }
 }
 
 pub fn materialize_skill_dir(
@@ -1761,10 +1785,8 @@ fn build_skill_add_plan_from_available(
         bail!("no skills found in {}", resolved.display_source);
     }
 
-    let selected = expand_installable_dependencies(
-        &available,
-        select_installable_skills(&available, &options.skills)?,
-    );
+    let (available, selected) = select_installable_skills(available, &options.skills)?;
+    let selected = expand_installable_dependencies(&available, selected);
     let mode = if options.copy { "copy" } else { "symlink" }.to_string();
     let mut operations = Vec::new();
     for skill in &selected {
@@ -1816,11 +1838,12 @@ fn build_skill_add_plan_from_available(
 }
 
 fn select_installable_skills(
-    available: &[InstallableSkill],
+    available: Vec<InstallableSkill>,
     names: &[String],
-) -> Result<Vec<InstallableSkill>> {
+) -> Result<(Vec<InstallableSkill>, Vec<InstallableSkill>)> {
     if names.is_empty() || names.iter().any(|name| name == "*") {
-        return Ok(available.to_vec());
+        let selected = available.clone();
+        return Ok((available, selected));
     }
 
     let mut selected = Vec::new();
@@ -1854,7 +1877,7 @@ fn select_installable_skills(
         );
     }
 
-    Ok(selected)
+    Ok((available, selected))
 }
 
 fn expand_installable_dependencies(
@@ -1866,11 +1889,20 @@ fn expand_installable_dependencies(
         .map(|skill| (skill.name.as_str(), skill))
         .collect::<BTreeMap<_, _>>();
     let mut seen = BTreeSet::new();
-    let mut expanded = Vec::new();
-    let mut stack = selected
-        .into_iter()
-        .map(|skill| skill.name)
-        .collect::<Vec<_>>();
+    let mut expanded = Vec::with_capacity(selected.len());
+    let mut stack = Vec::new();
+
+    for skill in selected {
+        if !seen.insert(skill.name.clone()) {
+            continue;
+        }
+        for dependency in skill.dependencies.iter().rev() {
+            if !seen.contains(dependency) {
+                stack.push(dependency.clone());
+            }
+        }
+        expanded.push(skill);
+    }
 
     while let Some(name) = stack.pop() {
         if !seen.insert(name.clone()) {
@@ -1879,12 +1911,12 @@ fn expand_installable_dependencies(
         let Some(skill) = by_name.get(name.as_str()) else {
             continue;
         };
-        expanded.push((*skill).clone());
         for dependency in skill.dependencies.iter().rev() {
             if !seen.contains(dependency) {
                 stack.push(dependency.clone());
             }
         }
+        expanded.push((*skill).clone());
     }
 
     expanded.sort_by(|left, right| left.name.cmp(&right.name));
@@ -2318,11 +2350,6 @@ pub fn plan_skill_updates_for_scan(scan: &SkillScan, pattern: &str) -> Result<Sk
     plan_skill_updates_for_matches(&scan, matches, &store)
 }
 
-pub fn plan_skill_updates_many(cwd: &Path, names: &[String]) -> Result<SkillUpdatePlan> {
-    let scan = scan_skills(cwd)?;
-    plan_skill_updates_many_for_scan(&scan, names)
-}
-
 pub fn plan_skill_updates_many_for_scan(
     scan: &SkillScan,
     names: &[String],
@@ -2331,7 +2358,7 @@ pub fn plan_skill_updates_many_for_scan(
     let matches = scan
         .skills
         .iter()
-        .filter(|skill| names.iter().any(|selected| selected == &skill.name))
+        .filter(|skill| names.iter().any(|selected| skill_matches_selector(skill, selected)))
         .collect::<Vec<_>>();
     if matches.is_empty() {
         bail!("no skills matched update selection");
@@ -2373,15 +2400,22 @@ fn plan_skill_updates_for_matches(
     let mut skipped = Vec::new();
     let mut source_updates = Vec::new();
     let mut merge_issues = Vec::new();
-    let updates_by_name = check_skill_updates_for_skills(&matches, git::never_cancelled())
+    let mut updates_by_id = check_skill_updates_for_skills(&matches, git::never_cancelled())
         .into_iter()
-        .map(|update| (update.name.clone(), update))
+        .map(|update| {
+            let key = if update.id.is_empty() {
+                update.name.clone()
+            } else {
+                update.id.clone()
+            };
+            (key, update)
+        })
         .collect::<BTreeMap<_, _>>();
 
     for skill in matches {
-        let update = updates_by_name
-            .get(&skill.name)
-            .cloned()
+        let update = updates_by_id
+            .remove(&ensure_skill_record_id(skill))
+            .or_else(|| updates_by_id.remove(&skill.name))
             .context("skill update report missing for selected skill")?;
         if update.status != "update-available" {
             skipped.push(update);
@@ -2465,8 +2499,26 @@ pub fn apply_skill_update_plan_with_store(
     store: &crate::storage::Store,
 ) -> Result<()> {
     let plan = prepare_skill_update_plan_with_resolutions(plan, &BTreeMap::new())?;
-    apply_skill_update_plan_filesystem(&plan)?;
-    persist_skill_update_plan(store, &plan)
+    let expected_source_versions =
+        prepare_skill_update_persistence(store, &plan)?.expected_source_versions;
+    store.validate_skill_source_versions(&expected_source_versions)?;
+    let filesystem = apply_skill_update_plan_filesystem_transaction(&plan)?;
+    let persistence = match prepare_skill_update_persistence(store, &plan) {
+        Ok(persistence) => persistence,
+        Err(error) => return Err(error.context(filesystem.rollback_context()?)),
+    };
+    let result = store.persist_skill_update_persistence_checked(
+        &expected_source_versions,
+        &persistence.source_records,
+        &persistence.snapshots,
+    );
+    match result {
+        Ok(()) => {
+            filesystem.commit();
+            Ok(())
+        }
+        Err(error) => Err(error.context(filesystem.rollback_context()?)),
+    }
 }
 
 pub fn apply_skill_update_plan_with_resolutions(
@@ -2475,8 +2527,26 @@ pub fn apply_skill_update_plan_with_resolutions(
     resolutions: &BTreeMap<String, String>,
 ) -> Result<()> {
     let plan = prepare_skill_update_plan_with_resolutions(plan, resolutions)?;
-    apply_skill_update_plan_filesystem(&plan)?;
-    persist_skill_update_plan(store, &plan)
+    let expected_source_versions =
+        prepare_skill_update_persistence(store, &plan)?.expected_source_versions;
+    store.validate_skill_source_versions(&expected_source_versions)?;
+    let filesystem = apply_skill_update_plan_filesystem_transaction(&plan)?;
+    let persistence = match prepare_skill_update_persistence(store, &plan) {
+        Ok(persistence) => persistence,
+        Err(error) => return Err(error.context(filesystem.rollback_context()?)),
+    };
+    let result = store.persist_skill_update_persistence_checked(
+        &expected_source_versions,
+        &persistence.source_records,
+        &persistence.snapshots,
+    );
+    match result {
+        Ok(()) => {
+            filesystem.commit();
+            Ok(())
+        }
+        Err(error) => Err(error.context(filesystem.rollback_context()?)),
+    }
 }
 
 pub fn prepare_skill_update_plan_with_resolutions(
@@ -2492,9 +2562,192 @@ pub fn prepare_skill_update_plan_with_resolutions(
 }
 
 pub fn apply_skill_update_plan_filesystem(plan: &SkillUpdatePlan) -> Result<()> {
+    let filesystem = apply_skill_update_plan_filesystem_transaction(plan)?;
+    filesystem.commit();
+    Ok(())
+}
+
+pub fn apply_skill_update_plan_filesystem_transaction(
+    plan: &SkillUpdatePlan,
+) -> Result<SkillFilesystemTransaction> {
+    let filesystem = SkillFilesystemTransaction::capture(plan)?;
+    if let Err(error) = apply_skill_update_plan_filesystem_unchecked(plan) {
+        let _ = filesystem.rollback_context();
+        return Err(error);
+    }
+    Ok(filesystem)
+}
+
+fn apply_skill_update_plan_filesystem_unchecked(plan: &SkillUpdatePlan) -> Result<()> {
     apply_changes(&plan.file_changes)?;
     for action in &plan.git_updates {
         apply_git_update_with_store(action, None)?;
+    }
+    Ok(())
+}
+
+#[derive(Debug)]
+pub struct SkillFilesystemTransaction {
+    backups: Vec<(PathBuf, Option<FilesystemBackup>)>,
+    git_heads: Vec<(PathBuf, String)>,
+}
+
+#[derive(Debug)]
+enum FilesystemBackup {
+    File(Vec<u8>),
+    Directory(Vec<(PathBuf, FilesystemBackup)>),
+    Symlink(PathBuf),
+}
+
+impl SkillFilesystemTransaction {
+    fn capture(plan: &SkillUpdatePlan) -> Result<Self> {
+        let mut paths = Vec::new();
+        paths.extend(plan.file_changes.changes.iter().map(|change| change.path.clone()));
+        let mut git_repos = BTreeSet::new();
+        for action in &plan.git_updates {
+            git_repos.insert(action.repo.clone());
+            if action.materialized_targets.is_empty() {
+                paths.extend(
+                    action
+                        .files
+                        .iter()
+                        .map(|file| action.repo.join(&file.path)),
+                );
+            } else {
+                paths.extend(
+                    action
+                        .materialized_targets
+                        .iter()
+                        .map(|target| target.target.clone()),
+                );
+            }
+            paths.extend(action.tendi_settings.iter().flat_map(|setting| {
+                [
+                    setting.skill_dir.join("SKILL.md"),
+                    setting.skill_dir.join("agents/openai.yaml"),
+                ]
+            }));
+        }
+        let paths = dedupe_backup_paths(paths);
+        let backups = paths
+            .into_iter()
+            .map(|path| Ok((path.clone(), capture_filesystem_backup(&path)?)))
+            .collect::<Result<Vec<_>>>()?;
+        let git_heads = git_repos
+            .into_iter()
+            .filter_map(|repo| git_output(&repo, &["rev-parse", "HEAD"]).map(|head| (repo, head)))
+            .collect();
+        Ok(Self { backups, git_heads })
+    }
+
+    pub fn commit(self) {}
+
+    pub fn rollback_context(self) -> Result<String> {
+        let mut failures = Vec::new();
+        for (repo, head) in self.git_heads.iter().rev() {
+            if let Err(error) = run_git(repo, &["reset", "--hard", head]) {
+                failures.push(format!("{}: {error:#}", repo.display()));
+            }
+        }
+        for (path, backup) in self.backups.iter().rev() {
+            if let Err(error) = restore_filesystem_backup(path, backup.as_ref()) {
+                failures.push(format!("{}: {error:#}", path.display()));
+            }
+        }
+        if failures.is_empty() {
+            Ok("filesystem transaction rolled back".to_string())
+        } else {
+            Err(anyhow::anyhow!(
+                "filesystem rollback failed: {}",
+                failures.join("; ")
+            ))
+        }
+    }
+}
+
+fn dedupe_backup_paths(mut paths: Vec<PathBuf>) -> Vec<PathBuf> {
+    paths.sort_by(|left, right| {
+        left.components()
+            .count()
+            .cmp(&right.components().count())
+            .then_with(|| left.cmp(right))
+    });
+    paths.dedup();
+    let mut retained = Vec::new();
+    for path in paths {
+        if retained.iter().any(|parent: &PathBuf| path.starts_with(parent)) {
+            continue;
+        }
+        retained.push(path);
+    }
+    retained
+}
+
+fn capture_filesystem_backup(path: &Path) -> Result<Option<FilesystemBackup>> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    if metadata.is_file() {
+        return Ok(Some(FilesystemBackup::File(fs::read(path)?)));
+    }
+    if metadata.is_dir() {
+        let mut entries = fs::read_dir(path)?
+            .map(|entry| entry.map(|entry| entry.path()))
+            .collect::<std::io::Result<Vec<_>>>()?;
+        entries.sort();
+        let children = entries
+            .into_iter()
+            .map(|child| {
+                let relative = child
+                    .strip_prefix(path)
+                    .map(Path::to_path_buf)
+                    .expect("read directory child is inside parent");
+                Ok((relative, capture_filesystem_backup(&child)?.expect("child exists")))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        return Ok(Some(FilesystemBackup::Directory(children)));
+    }
+    if metadata.file_type().is_symlink() {
+        return Ok(Some(FilesystemBackup::Symlink(fs::read_link(path)?)));
+    }
+    bail!("unsupported filesystem entry {}", path.display())
+}
+
+fn restore_filesystem_backup(path: &Path, backup: Option<&FilesystemBackup>) -> Result<()> {
+    remove_filesystem_entry(path)?;
+    let Some(backup) = backup else {
+        return Ok(());
+    };
+    match backup {
+        FilesystemBackup::File(bytes) => atomic_write_bytes(path, bytes)?,
+        FilesystemBackup::Directory(children) => {
+            fs::create_dir_all(path)?;
+            for (relative, child) in children {
+                restore_filesystem_backup(&path.join(relative), Some(child))?;
+            }
+        }
+        FilesystemBackup::Symlink(target) => {
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            create_symlink(target, path)?;
+        }
+    }
+    Ok(())
+}
+
+fn remove_filesystem_entry(path: &Path) -> Result<()> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.into()),
+    };
+    if metadata.is_dir() {
+        fs::remove_dir_all(path)?;
+    } else {
+        fs::remove_file(path)?;
     }
     Ok(())
 }
@@ -2512,11 +2765,31 @@ pub fn prepare_skill_update_persistence(
     plan: &SkillUpdatePlan,
 ) -> Result<SkillUpdatePersistence> {
     let source_updates = skill_source_updates_for_plan(plan);
-    let source_records = updated_skill_source_records(store, &source_updates)?;
+    let records = store.skill_source_records()?;
+    let expected_source_versions = expected_source_versions(&records, &source_updates);
+    let source_records = updated_skill_source_records_for_records(&records, &source_updates)?;
     let snapshots = capture_skill_snapshots(&source_records)?;
     Ok(SkillUpdatePersistence {
         source_records,
         snapshots,
+        expected_source_versions,
+    })
+}
+
+pub fn prepare_skill_update_persistence_for_workspace(
+    store: &crate::storage::Store,
+    workspace_root: &Path,
+    plan: &SkillUpdatePlan,
+) -> Result<SkillUpdatePersistence> {
+    let source_updates = skill_source_updates_for_plan(plan);
+    let records = store.skill_source_records_for_workspace(workspace_root)?;
+    let expected_source_versions = expected_source_versions(&records, &source_updates);
+    let source_records = updated_skill_source_records_for_records(&records, &source_updates)?;
+    let snapshots = capture_skill_snapshots(&source_records)?;
+    Ok(SkillUpdatePersistence {
+        source_records,
+        snapshots,
+        expected_source_versions,
     })
 }
 
@@ -2524,9 +2797,7 @@ pub fn persist_skill_update_persistence(
     store: &crate::storage::Store,
     persistence: &SkillUpdatePersistence,
 ) -> Result<()> {
-    store.upsert_skill_source_records(&persistence.source_records)?;
-    store.replace_skill_snapshots(&persistence.snapshots)?;
-    Ok(())
+    store.persist_skill_update_persistence(&persistence.source_records, &persistence.snapshots)
 }
 
 fn skill_source_updates_for_plan(plan: &SkillUpdatePlan) -> Vec<SkillSourceUpdate> {
@@ -2548,8 +2819,8 @@ fn skill_source_updates_for_plan(plan: &SkillUpdatePlan) -> Vec<SkillSourceUpdat
     source_updates
 }
 
-fn updated_skill_source_records(
-    store: &crate::storage::Store,
+fn updated_skill_source_records_for_records(
+    records: &[SkillSourceRecord],
     updates: &[SkillSourceUpdate],
 ) -> Result<Vec<SkillSourceRecord>> {
     if updates.is_empty() {
@@ -2560,9 +2831,9 @@ fn updated_skill_source_records(
         .filter(|update| !update.source_version.is_empty())
         .map(|update| (update.skill_path.clone(), update.source_version.clone()))
         .collect::<BTreeMap<_, _>>();
-    let mut records = store
-        .skill_source_records()?
+    let mut records = records
         .into_iter()
+        .cloned()
         .filter_map(|mut record| {
             let version = update_by_path.get(&record.skill_path)?.clone();
             record.source_version = Some(version);
@@ -2572,6 +2843,21 @@ fn updated_skill_source_records(
         .collect::<Vec<_>>();
     records.sort_by(|left, right| left.skill_path.cmp(&right.skill_path));
     Ok(records)
+}
+
+fn expected_source_versions(
+    records: &[SkillSourceRecord],
+    updates: &[SkillSourceUpdate],
+) -> Vec<(PathBuf, Option<String>)> {
+    updates
+        .iter()
+        .filter_map(|update| {
+            records
+                .iter()
+                .find(|record| record.skill_path == update.skill_path)
+                .map(|record| (record.skill_path.clone(), record.source_version.clone()))
+        })
+        .collect()
 }
 
 fn apply_merge_resolutions(
@@ -2717,18 +3003,15 @@ fn plan_wrapper_for_matches(
 }
 
 fn plan_wrapper_sync(scan: &SkillScan) -> Result<ChangeSet> {
-    let skills_by_name = scan
-        .skills
-        .iter()
-        .map(|skill| (skill.name.as_str(), skill))
-        .collect::<BTreeMap<_, _>>();
     let mut changes = Vec::new();
 
-    for wrapper in scan
-        .skills
-        .iter()
-        .filter(|skill| skill.tags.iter().any(|tag| tag == "wrapper"))
-    {
+    for wrapper in &scan.skills {
+        if !wrapper.tags.iter().any(|tag| tag == "wrapper") {
+            continue;
+        }
+        let near_projects = skill_project_roots(wrapper);
+        let near_scopes = skill_scopes(wrapper);
+        let wrapper_name = wrapper.name.clone();
         for path in &wrapper.paths {
             if !path.tags.iter().any(|tag| tag == "wrapper") {
                 continue;
@@ -2743,13 +3026,20 @@ fn plan_wrapper_sync(scan: &SkillScan) -> Result<ChangeSet> {
             }
             let children = child_names
                 .iter()
-                .filter_map(|name| skills_by_name.get(name.as_str()).copied())
-                .filter(|skill| skill.name != wrapper.name)
+                .filter_map(|name| {
+                    prefer_skill_named_near(
+                        &scan.skills,
+                        name,
+                        &near_projects,
+                        &near_scopes,
+                    )
+                })
+                .filter(|skill| skill.name != wrapper_name)
                 .collect::<Vec<_>>();
             if children.is_empty() {
                 continue;
             }
-            let after = render_wrapper_after(&wrapper.name, &children, Some(&before));
+            let after = render_wrapper_after(&wrapper_name, &children, Some(&before));
             changes.push(FileChange {
                 path: wrapper_file,
                 before_sha256: Some(sha256_text(&before)),
@@ -3000,8 +3290,7 @@ fn read_skill(
 }
 
 fn parse_frontmatter(text: &str) -> Option<Value> {
-    let rest = text.strip_prefix("---\n")?;
-    let (yaml, _) = rest.split_once("\n---")?;
+    let (yaml, _, _) = split_frontmatter_raw(text)?;
     serde_yaml::from_str(yaml)
         .ok()
         .or_else(|| parse_frontmatter_lenient(yaml))
@@ -3036,7 +3325,7 @@ fn parse_declared_skill_dependencies(frontmatter: Option<&Value>) -> Vec<String>
 
 fn parse_skill_file_references(text: &str) -> Vec<PathBuf> {
     let body = split_frontmatter_raw(text)
-        .map(|(_, tail)| tail.strip_prefix('\n').unwrap_or(tail))
+        .map(|(_, tail, newline)| tail.strip_prefix(newline).unwrap_or(tail))
         .unwrap_or(text);
     let mut refs = BTreeSet::new();
 
@@ -3312,6 +3601,220 @@ pub(crate) fn combine_skill_visibility(
     SkillVisibility::Auto
 }
 
+fn skill_project_roots(skill: &SkillRecord) -> BTreeSet<PathBuf> {
+    skill
+        .paths
+        .iter()
+        .filter(|path| path.scope == "project")
+        .map(|path| project_root_for_skill_root(&path.root))
+        .collect()
+}
+
+fn skill_scopes(skill: &SkillRecord) -> BTreeSet<String> {
+    skill
+        .paths
+        .iter()
+        .map(|path| path.scope.clone())
+        .collect()
+}
+
+/// Resolve a declared skill name near another skill.
+/// Prefer same project root, then same scope, then a global (`id == name`) copy.
+pub fn prefer_skill_named<'a>(
+    skills: &'a [SkillRecord],
+    name: &str,
+    near: Option<&SkillRecord>,
+) -> Option<&'a SkillRecord> {
+    let near_projects = near.map(skill_project_roots).unwrap_or_default();
+    let near_scopes = near.map(skill_scopes).unwrap_or_default();
+    prefer_skill_named_near(skills, name, &near_projects, &near_scopes)
+}
+
+fn prefer_skill_named_near<'a>(
+    skills: &'a [SkillRecord],
+    name: &str,
+    near_projects: &BTreeSet<PathBuf>,
+    near_scopes: &BTreeSet<String>,
+) -> Option<&'a SkillRecord> {
+    let normalized = normalize_skill_match_name(name);
+    let mut candidates = skills
+        .iter()
+        .filter(|skill| normalize_skill_match_name(&skill.name) == normalized)
+        .collect::<Vec<_>>();
+    if candidates.is_empty() {
+        return None;
+    }
+    if candidates.len() == 1 {
+        return candidates.pop();
+    }
+
+    if !near_projects.is_empty() {
+        if let Some(index) = candidates.iter().position(|skill| {
+            skill_project_roots(skill)
+                .iter()
+                .any(|root| near_projects.contains(root))
+        }) {
+            return Some(candidates.swap_remove(index));
+        }
+    }
+    if !near_scopes.is_empty() {
+        if let Some(index) = candidates.iter().position(|skill| {
+            skill_scopes(skill)
+                .iter()
+                .any(|scope| near_scopes.contains(scope))
+        }) {
+            return Some(candidates.swap_remove(index));
+        }
+    }
+
+    if let Some(index) = candidates
+        .iter()
+        .position(|skill| ensure_skill_record_id(skill) == skill.name)
+    {
+        return Some(candidates.swap_remove(index));
+    }
+    candidates.into_iter().next()
+}
+
+pub fn skill_matches_selector(skill: &SkillRecord, selector: &str) -> bool {
+    ensure_skill_record_id(skill).as_str() == selector || skill.name == selector
+}
+
+pub fn skill_matches_id(skill: &SkillRecord, id: &str) -> bool {
+    !id.trim().is_empty() && ensure_skill_record_id(skill).as_str() == id
+}
+
+pub fn skill_ids_matching_pattern(scan: &SkillScan, pattern: &str) -> Vec<String> {
+    scan.skills
+        .iter()
+        .filter(|skill| matches_pattern(&skill.name, pattern))
+        .map(ensure_skill_record_id)
+        .collect()
+}
+
+fn ensure_skill_record_id(skill: &SkillRecord) -> String {
+    if skill.id.is_empty() {
+        skill_record_id(&skill.name, &skill.paths)
+    } else {
+        skill.id.clone()
+    }
+}
+
+fn merge_raw_skills(raws: Vec<RawSkill>) -> Vec<SkillRecord> {
+    let mut by_group = BTreeMap::<String, Vec<RawSkill>>::new();
+    for raw in raws {
+        by_group
+            .entry(skill_merge_group_key(&raw.name, &raw.path))
+            .or_default()
+            .push(raw);
+    }
+    by_group
+        .into_iter()
+        .map(|(_key, group)| {
+            let name = group
+                .first()
+                .map(|raw| raw.name.clone())
+                .unwrap_or_default();
+            merge_skill(name, group)
+        })
+        .collect()
+}
+
+fn skill_merge_group_key(name: &str, path: &SkillPath) -> String {
+    format!(
+        "{}\0{:?}\0{}\0{}\0{}\0{}\0{name}",
+        path.scope,
+        path.agent,
+        path.plugin_id.as_deref().unwrap_or_default(),
+        path.source_kind,
+        path.source.as_deref().unwrap_or_default(),
+        if path.scope == "project" {
+            project_root_for_skill_root(&path.root)
+                .to_string_lossy()
+                .into_owned()
+        } else {
+            String::new()
+        },
+    )
+}
+
+fn skill_record_id(name: &str, paths: &[SkillPath]) -> String {
+    let Some(path) = paths.first() else {
+        return name.to_string();
+    };
+    if path.scope == "project" {
+        format!(
+            "{name}@project:{}:{}",
+            path.agent.label(),
+            project_root_for_skill_root(&path.root).to_string_lossy()
+        )
+    } else if path.agent == AgentKind::Shared
+        && path.plugin_id.is_none()
+        && path.source_kind == "local"
+        && path.source.is_none()
+        && path.source_ref.is_none()
+    {
+        name.to_string()
+    } else {
+        format!(
+            "{name}@{}:{}:{}:{}",
+            path.agent.label(),
+            path.scope,
+            path.plugin_id.as_deref().unwrap_or("-").replace(':', "%3A"),
+            path.source_ref
+                .as_deref()
+                .or(path.source.as_deref())
+                .unwrap_or(&path.source_kind)
+                .replace(':', "%3A")
+        )
+    }
+}
+
+fn project_root_for_skill_root(root: &Path) -> PathBuf {
+    let file_name = |path: &Path| path.file_name().map(|name| name.to_os_string());
+    if file_name(root).as_deref().and_then(|name| name.to_str()) == Some("skills") {
+        if let Some(agent_dir) = root.parent() {
+            if matches!(
+                file_name(agent_dir)
+                    .as_deref()
+                    .and_then(|name| name.to_str()),
+                Some(".agents" | ".codex" | ".claude" | ".cursor")
+            ) {
+                if let Some(project_root) = agent_dir.parent() {
+                    return project_root.to_path_buf();
+                }
+            }
+        }
+    }
+    root.to_path_buf()
+}
+
+fn infer_skill_root_for_dir(skill_dir: &Path) -> Option<SkillRoot> {
+    let skills_root = skill_dir.parent()?;
+    if skills_root.file_name()?.to_str()? != "skills" {
+        return None;
+    }
+    let agent_dir = skills_root.parent()?;
+    let agent = match agent_dir.file_name()?.to_str()? {
+        ".agents" => AgentKind::Shared,
+        ".claude" => AgentKind::Claude,
+        ".codex" => AgentKind::Codex,
+        ".cursor" => AgentKind::Cursor,
+        _ => return None,
+    };
+    let scope = match dirs::home_dir() {
+        Some(home) if agent_dir.parent().is_some_and(|parent| parent == home) => "global",
+        _ => "project",
+    };
+    Some(SkillRoot {
+        path: skills_root.to_path_buf(),
+        scope: scope.to_string(),
+        agent,
+        plugin_id: None,
+        plugin_enabled: None,
+    })
+}
+
 fn merge_skill(name: String, raws: Vec<RawSkill>) -> SkillRecord {
     let mut agents = BTreeSet::new();
     let mut tags = BTreeSet::new();
@@ -3355,12 +3858,19 @@ fn merge_skill(name: String, raws: Vec<RawSkill>) -> SkillRecord {
         paths.push(raw.path);
     }
 
+    let id = skill_record_id(&name, &paths);
+    let installation_id = InstallationId::new(id.clone())
+        .expect("skill record identity is constructed from a non-empty skill name");
     SkillRecord {
+        id,
+        installation_id: installation_id.to_string(),
         name,
         description,
         tags: tags.into_iter().collect(),
         dependencies: dependencies.into_iter().collect(),
         dependents: Vec::new(),
+        dependency_ids: Vec::new(),
+        dependent_ids: Vec::new(),
         visibility,
         agents: agents.into_iter().collect(),
         paths,
@@ -3425,10 +3935,9 @@ fn update_latest_timestamp(current: &mut Option<String>, candidate: Option<Strin
     let Some(candidate) = candidate else {
         return;
     };
-    if current
-        .as_deref()
-        .is_none_or(|value| candidate.as_str() > value)
-    {
+    if current.as_deref().is_none_or(|value| {
+        compare_timestamps(Some(candidate.as_str()), Some(value)).is_gt()
+    }) {
         *current = Some(candidate);
     }
 }
@@ -3457,38 +3966,65 @@ fn resolve_raw_skill_path_dependencies(skills: &mut [RawSkill]) {
 }
 
 fn resolve_scanned_skill_relations(skills: &mut [SkillRecord]) {
-    let by_normalized_name = skills
+    let known_names = skills
         .iter()
-        .map(|skill| (normalize_skill_match_name(&skill.name), skill.name.clone()))
-        .collect::<BTreeMap<_, _>>();
-    let mut dependents_by_name: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+        .map(|skill| normalize_skill_match_name(&skill.name))
+        .collect::<BTreeSet<_>>();
+    let mut dependents_by_id: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    let mut dependent_ids_by_id: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    let mut resolved_dependencies = Vec::with_capacity(skills.len());
+    let mut resolved_dependency_ids = Vec::with_capacity(skills.len());
 
-    for skill in skills.iter_mut() {
+    for skill in skills.iter() {
+        let near_projects = skill_project_roots(skill);
+        let near_scopes = skill_scopes(skill);
         let own_name = normalize_skill_match_name(&skill.name);
         let mut seen = BTreeSet::new();
-        skill.dependencies = skill
-            .dependencies
-            .iter()
-            .filter_map(|dependency| {
-                let dependency_name =
-                    by_normalized_name.get(&normalize_skill_match_name(dependency))?;
-                (normalize_skill_match_name(dependency_name) != own_name
-                    && seen.insert(dependency_name.clone()))
-                .then(|| dependency_name.clone())
-            })
-            .collect();
+        let mut dependencies = Vec::new();
+        let mut dependency_ids = Vec::new();
         for dependency in &skill.dependencies {
-            dependents_by_name
-                .entry(dependency.clone())
+            let normalized = normalize_skill_match_name(dependency);
+            if normalized == own_name || !known_names.contains(&normalized) {
+                continue;
+            }
+            if !seen.insert(normalized) {
+                continue;
+            }
+            let Some(preferred) =
+                prefer_skill_named_near(skills, dependency, &near_projects, &near_scopes)
+            else {
+                continue;
+            };
+            dependencies.push(preferred.name.clone());
+            let preferred_id = ensure_skill_record_id(preferred);
+            dependency_ids.push(preferred_id.clone());
+            dependents_by_id
+                .entry(preferred_id.clone())
                 .or_default()
                 .insert(skill.name.clone());
+            dependent_ids_by_id
+                .entry(preferred_id)
+                .or_default()
+                .insert(ensure_skill_record_id(skill));
         }
+        resolved_dependencies.push(dependencies);
+        resolved_dependency_ids.push(dependency_ids);
     }
 
-    for skill in skills {
-        skill.dependents = dependents_by_name
-            .remove(&skill.name)
+    for ((skill, dependencies), dependency_ids) in skills
+        .iter_mut()
+        .zip(resolved_dependencies)
+        .zip(resolved_dependency_ids)
+    {
+        skill.dependencies = dependencies;
+        skill.dependency_ids = dependency_ids;
+        skill.dependents = dependents_by_id
+            .remove(&ensure_skill_record_id(skill))
             .map(|names| names.into_iter().collect())
+            .unwrap_or_default();
+        skill.dependent_ids = dependent_ids_by_id
+            .remove(&ensure_skill_record_id(skill))
+            .map(|ids| ids.into_iter().collect())
             .unwrap_or_default();
     }
 }
@@ -3601,10 +4137,9 @@ impl ProvenanceResolver {
         }
     }
 
-    fn from_scan(scan: &SkillScan) -> Self {
-        let source_records = scan
-            .skills
-            .iter()
+    fn from_skills<'a>(skills: impl IntoIterator<Item = &'a SkillRecord>) -> Self {
+        let source_records = skills
+            .into_iter()
             .flat_map(|skill| {
                 skill.paths.iter().map(|path| SkillSourceRecord {
                     skill_name: skill.name.clone(),
@@ -3624,19 +4159,6 @@ impl ProvenanceResolver {
             source_records,
             ..Self::default()
         }
-    }
-
-    #[cfg(test)]
-    fn infer(&mut self, skill_dir: &Path, frontmatter: &Option<Value>) -> Provenance {
-        if let Some(provenance) = frontmatter_provenance(frontmatter) {
-            return provenance;
-        }
-
-        if let Some(repository) = self.repository_for(skill_dir) {
-            return repository_provenance(skill_dir, repository);
-        }
-
-        local_provenance(skill_dir)
     }
 
     fn infer_installed(
@@ -3859,6 +4381,17 @@ fn global_skills_cli_lock_path() -> Option<PathBuf> {
         .map(PathBuf::from)
         .map(|root| root.join("skills/.skill-lock.json"))
         .or_else(|| dirs::home_dir().map(|home| home.join(".agents/.skill-lock.json")))
+}
+
+pub(crate) fn skill_provenance_candidate_files(cwd: &Path) -> Vec<PathBuf> {
+    let mut paths = skill_project_dirs(cwd)
+        .into_iter()
+        .map(|root| root.join("skills-lock.json"))
+        .collect::<Vec<_>>();
+    if let Some(path) = global_skills_cli_lock_path() {
+        paths.push(path);
+    }
+    paths
 }
 
 fn skill_project_dirs(cwd: &Path) -> Vec<PathBuf> {
@@ -4275,6 +4808,7 @@ fn check_skill_update(
 ) -> SkillUpdateReport {
     let Some(path) = select_update_path(skill) else {
         return SkillUpdateReport {
+            id: ensure_skill_record_id(skill),
             name: skill.name.clone(),
             status: "unknown".to_string(),
             current_version: None,
@@ -4290,6 +4824,7 @@ fn check_skill_update(
         }
         "registry" => check_registry_update(skill, path),
         _ => SkillUpdateReport {
+            id: ensure_skill_record_id(skill),
             name: skill.name.clone(),
             status: "local".to_string(),
             current_version: path.source_version.clone(),
@@ -4309,6 +4844,7 @@ fn check_git_update(
 ) -> SkillUpdateReport {
     let Some(source) = path.source.clone() else {
         return SkillUpdateReport {
+            id: ensure_skill_record_id(skill),
             name: skill.name.clone(),
             status: "missing-source".to_string(),
             current_version: path.source_version.clone(),
@@ -4349,6 +4885,7 @@ fn check_git_update(
     };
 
     SkillUpdateReport {
+        id: ensure_skill_record_id(skill),
         name: skill.name.clone(),
         status: status.to_string(),
         current_version: path.source_version.clone(),
@@ -4471,10 +5008,143 @@ fn normalize_skill_manifest_for_visibility(
     text: &str,
     agent: AgentKind,
     visibility: SkillVisibility,
+    provider_visibility: Option<(&str, bool)>,
 ) -> String {
-    crate::providers::agent_provider(agent)
-        .render_skill_frontmatter(text, visibility)
+    let rendered = if let Some((provider_key, provider_visibility)) = provider_visibility {
+        render_skill_frontmatter_with_provider_key_value(
+            text,
+            visibility,
+            Some(provider_key),
+            Some(provider_visibility),
+        )
         .unwrap_or_else(|_| text.to_string())
+    } else {
+        crate::providers::agent_provider(agent)
+            .render_skill_frontmatter(text, visibility)
+            .unwrap_or_else(|_| text.to_string())
+    };
+
+    let canonical_provider_visibility = provider_visibility.or_else(|| {
+        crate::providers::agent_provider(agent)
+            .skill_frontmatter_visibility_key()
+            .map(|provider_key| (provider_key, !matches!(visibility, SkillVisibility::Auto)))
+    });
+    canonical_provider_visibility.map_or(
+        rendered.clone(),
+        |(provider_key, provider_visibility)| {
+            canonicalize_provider_visibility_key(&rendered, provider_key, provider_visibility)
+        },
+    )
+}
+
+fn canonicalize_provider_visibility_key(
+    text: &str,
+    provider_key: &str,
+    provider_visibility: bool,
+) -> String {
+    let Some((yaml, tail, newline)) = split_frontmatter_raw(text) else {
+        return text.to_string();
+    };
+    let mut lines = yaml
+        .lines()
+        .filter(|line| !line.starts_with(&format!("{provider_key}:")))
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    if provider_visibility {
+        lines.push(format!("{provider_key}: true"));
+    }
+    format!(
+        "---{newline}{}{newline}---{tail}",
+        lines.join(newline)
+    )
+}
+
+fn provider_visibility_override(
+    local: Option<&str>,
+    base: Option<&str>,
+    incoming: Option<&str>,
+    agent: AgentKind,
+) -> Option<(&'static str, bool)> {
+    if !matches!(agent, AgentKind::Shared | AgentKind::Unknown) {
+        return None;
+    }
+
+    crate::providers::all_providers()
+        .into_iter()
+        .filter_map(|provider| provider.skill_frontmatter_visibility_key())
+        .find_map(|provider_key| {
+            let has_provider_visibility = [local, base, incoming]
+                .into_iter()
+                .flatten()
+                .any(|text| {
+                    MarkdownDoc::parse_lenient(text)
+                        .ok()
+                        .and_then(|doc| {
+                            doc.meta.get(provider_key).and_then(Value::as_bool)
+                        })
+                        .is_some()
+                });
+            has_provider_visibility.then(|| {
+                (
+                    provider_key,
+                    local
+                        .and_then(|text| {
+                            MarkdownDoc::parse_lenient(text).ok().and_then(|doc| {
+                                doc.meta.get(provider_key).and_then(Value::as_bool)
+                            })
+                        })
+                        .unwrap_or(false),
+                )
+            })
+        })
+}
+
+fn normalize_skill_manifests_for_merge(
+    local: Option<&str>,
+    base: Option<&str>,
+    incoming: Option<&str>,
+    agent: AgentKind,
+    visibility: SkillVisibility,
+) -> (Option<String>, Option<String>, Option<String>) {
+    let provider_visibility = provider_visibility_override(local, base, incoming, agent);
+    let normalize = |text: Option<&str>| {
+        text.map(|text| {
+            normalize_skill_manifest_for_visibility(
+                text,
+                agent,
+                visibility,
+                provider_visibility,
+            )
+        })
+    };
+    (normalize(local), normalize(base), normalize(incoming))
+}
+
+fn normalize_provider_skill_file_for_merge(
+    path: &str,
+    local: Option<&str>,
+    base: Option<&str>,
+    incoming: Option<&str>,
+    visibility: SkillVisibility,
+) -> (Option<String>, Option<String>, Option<String>) {
+    crate::providers::all_providers()
+        .into_iter()
+        .find_map(|provider| {
+            provider.normalize_skill_file_for_merge(
+                path,
+                local,
+                base,
+                incoming,
+                visibility,
+            )
+        })
+        .unwrap_or_else(|| {
+            (
+                local.map(str::to_string),
+                base.map(str::to_string),
+                incoming.map(str::to_string),
+            )
+        })
 }
 
 fn git_files_at_revision(
@@ -4642,9 +5312,6 @@ fn merge_file_maps(
                 .strip_prefix(prefix)
                 .unwrap_or(&path)
                 .trim_start_matches('/');
-            if crate::providers::agent_provider(agent).is_managed_skill_file(path_in_skill) {
-                return None;
-            }
             let before_bytes = local.get(&path);
             let base_bytes = base.get(&path);
             let incoming_bytes = incoming.get(&path);
@@ -4690,15 +5357,27 @@ fn merge_file_maps(
                 });
             }
             let before = before.flatten();
+            let mut local = before.clone();
             let mut base = base_text.flatten();
             let mut incoming = incoming_text.flatten();
             if path_in_skill == "SKILL.md" {
-                base = base
-                    .map(|text| normalize_skill_manifest_for_visibility(&text, agent, visibility));
-                incoming = incoming
-                    .map(|text| normalize_skill_manifest_for_visibility(&text, agent, visibility));
+                (local, base, incoming) = normalize_skill_manifests_for_merge(
+                    local.as_deref(),
+                    base.as_deref(),
+                    incoming.as_deref(),
+                    agent,
+                    visibility,
+                );
+            } else {
+                (local, base, incoming) = normalize_provider_skill_file_for_merge(
+                    path_in_skill,
+                    local.as_deref(),
+                    base.as_deref(),
+                    incoming.as_deref(),
+                    visibility,
+                );
             }
-            let merged = merge_text(base.as_deref(), before.as_deref(), incoming.as_deref());
+            let merged = merge_text(base.as_deref(), local.as_deref(), incoming.as_deref());
             if merged.status == "unchanged" {
                 return None;
             }
@@ -4817,8 +5496,6 @@ fn plan_registry_update(
     };
     let skill_file = path.path.join("SKILL.md");
     let before = read_optional(&skill_file)?.context("SKILL.md does not exist")?;
-    let incoming =
-        normalize_skill_manifest_for_visibility(&incoming, path.agent, path.effective_visibility);
     let snapshot = store.skill_snapshot(&path.path)?;
     let base = snapshot
         .filter(|snapshot| path.source_version.as_deref() == Some(snapshot.source_version.as_str()))
@@ -4842,7 +5519,16 @@ fn plan_registry_update(
             after: String::new(),
         })));
     };
-    let merged = merge_text(Some(&base), Some(&before), Some(&incoming));
+    let (Some(local), Some(base), Some(incoming)) = normalize_skill_manifests_for_merge(
+        Some(&before),
+        Some(&base),
+        Some(&incoming),
+        path.agent,
+        path.effective_visibility,
+    ) else {
+        return Ok(None);
+    };
+    let merged = merge_text(Some(&base), Some(&local), Some(&incoming));
     let merged_status = merged.status.clone();
     let merged_content = merged.content.unwrap_or_default();
     if merged_status == "conflict" {
@@ -4903,20 +5589,32 @@ fn apply_git_update_with_store(
 }
 
 fn apply_update_files(root: &Path, files: &[GitUpdateFile]) -> Result<()> {
+    let mut applied = Vec::<(PathBuf, Option<Vec<u8>>)>::new();
     for file in files {
         let path = root.join(&file.path);
         ensure_path_inside(root, &path)?;
-        validate_update_file(&path, file)?;
-        if file.after_exists {
+        let before = fs::read(&path).ok();
+        if let Err(error) = validate_update_file(&path, file) {
+            rollback_applied_files(&applied);
+            return Err(error);
+        }
+        let result = if file.after_exists {
             if let Some(bytes) = &file.after_bytes {
-                atomic_write_bytes(&path, bytes)?;
+                atomic_write_bytes(&path, bytes)
             } else {
-                atomic_write(&path, &file.after)?;
+                atomic_write(&path, &file.after)
             }
         } else if path.exists() {
             fs::remove_file(&path)
-                .with_context(|| format!("failed to remove {}", path.display()))?;
+                .with_context(|| format!("failed to remove {}", path.display()))
+        } else {
+            Ok(())
+        };
+        if let Err(error) = result {
+            rollback_applied_files(&applied);
+            return Err(error);
         }
+        applied.push((path, before));
     }
     Ok(())
 }
@@ -5210,6 +5908,7 @@ fn git_show_optional_file(repo: &Path, path: &Path) -> Result<Option<String>> {
 fn check_registry_update(skill: &SkillRecord, path: &SkillPath) -> SkillUpdateReport {
     let Some(source) = path.source.clone() else {
         return SkillUpdateReport {
+            id: ensure_skill_record_id(skill),
             name: skill.name.clone(),
             status: "missing-source".to_string(),
             current_version: path.source_version.clone(),
@@ -5231,6 +5930,7 @@ fn check_registry_update(skill: &SkillRecord, path: &SkillPath) -> SkillUpdateRe
     };
 
     SkillUpdateReport {
+        id: ensure_skill_record_id(skill),
         name: skill.name.clone(),
         status: status.to_string(),
         current_version: Some(current),
@@ -5820,24 +6520,36 @@ pub(crate) fn render_skill_frontmatter_with_provider_key(
     visibility: SkillVisibility,
     provider_key: Option<&str>,
 ) -> Result<String> {
+    render_skill_frontmatter_with_provider_key_value(before, visibility, provider_key, None)
+}
+
+fn render_skill_frontmatter_with_provider_key_value(
+    before: &str,
+    visibility: SkillVisibility,
+    provider_key: Option<&str>,
+    provider_value: Option<bool>,
+) -> Result<String> {
     let mut doc = MarkdownDoc::parse_lenient(before)?;
-    if let Some((yaml, tail)) = split_frontmatter_raw(before) {
+    if let Some((yaml, tail, newline)) = split_frontmatter_raw(before) {
         let mut lines = yaml.lines().map(str::to_string).collect::<Vec<_>>();
         if let Some(provider_key) = provider_key {
             set_top_level_bool(
                 &mut lines,
                 provider_key,
-                !matches!(visibility, SkillVisibility::Auto),
+                provider_value.unwrap_or(!matches!(visibility, SkillVisibility::Auto)),
             );
         }
         set_tendi_visibility_lines(&mut lines, visibility);
-        return Ok(format!("---\n{}\n---{}", lines.join("\n"), tail));
+        return Ok(format!(
+            "---{newline}{}{newline}---{tail}",
+            lines.join(newline)
+        ));
     }
 
     set_tendi_visibility(&mut doc.meta, visibility);
     if let Some(provider_key) = provider_key {
         let provider_key = Value::String(provider_key.to_string());
-        if matches!(visibility, SkillVisibility::Auto) {
+        if !provider_value.unwrap_or(!matches!(visibility, SkillVisibility::Auto)) {
             doc.meta.remove(&provider_key);
         } else {
             doc.meta.insert(provider_key, Value::Bool(true));
@@ -5846,9 +6558,17 @@ pub(crate) fn render_skill_frontmatter_with_provider_key(
     doc.render()
 }
 
-fn split_frontmatter_raw(text: &str) -> Option<(&str, &str)> {
-    let rest = text.strip_prefix("---\n")?;
-    rest.split_once("\n---")
+pub(crate) fn split_frontmatter_raw(text: &str) -> Option<(&str, &str, &'static str)> {
+    let (newline, rest) = if let Some(rest) = text.strip_prefix("---\r\n") {
+        ("\r\n", rest)
+    } else if let Some(rest) = text.strip_prefix("---\n") {
+        ("\n", rest)
+    } else {
+        return None;
+    };
+    let closing = format!("{newline}---");
+    let end = rest.find(&closing)?;
+    Some((&rest[..end], &rest[end + closing.len()..], newline))
 }
 
 fn set_top_level_bool(lines: &mut Vec<String>, key: &str, value: bool) {
@@ -5958,13 +6678,11 @@ struct MarkdownDoc {
 
 impl MarkdownDoc {
     fn parse(text: &str) -> Result<Self> {
-        if let Some(rest) = text.strip_prefix("---\n") {
-            if let Some((yaml, body)) = rest.split_once("\n---") {
-                let meta = serde_yaml::from_str::<serde_yaml::Mapping>(yaml)
-                    .context("failed to parse SKILL.md frontmatter")?;
-                let body = body.strip_prefix('\n').unwrap_or(body).to_string();
-                return Ok(Self { meta, body });
-            }
+        if let Some((yaml, body, newline)) = split_frontmatter_raw(text) {
+            let meta = serde_yaml::from_str::<serde_yaml::Mapping>(yaml)
+                .context("failed to parse SKILL.md frontmatter")?;
+            let body = body.strip_prefix(newline).unwrap_or(body).to_string();
+            return Ok(Self { meta, body });
         }
 
         Ok(Self {
@@ -5990,8 +6708,13 @@ impl MarkdownDoc {
     }
 
     fn render(&self) -> Result<String> {
-        let yaml = serde_yaml::to_string(&self.meta)?;
-        Ok(format!("---\n{}---\n{}", yaml, self.body))
+        let newline = if self.body.contains("\r\n") {
+            "\r\n"
+        } else {
+            "\n"
+        };
+        let yaml = serde_yaml::to_string(&self.meta)?.replace('\n', newline);
+        Ok(format!("---{newline}{yaml}---{newline}{}", self.body))
     }
 }
 
@@ -6108,12 +6831,15 @@ fn generated_wrapper_description(name: &str, skills: &[&SkillRecord]) -> String 
 }
 
 fn replace_wrapper_description(text: &str, description: &str) -> String {
-    let Some((yaml, tail)) = split_frontmatter_raw(text) else {
+    let Some((yaml, tail, newline)) = split_frontmatter_raw(text) else {
         return text.to_string();
     };
     let mut lines = yaml.lines().map(str::to_string).collect::<Vec<_>>();
     set_top_level_string(&mut lines, "description", description);
-    format!("---\n{}\n---{}", lines.join("\n"), tail)
+    format!(
+        "---{newline}{}{newline}---{tail}",
+        lines.join(newline)
+    )
 }
 
 fn set_top_level_string(lines: &mut Vec<String>, key: &str, value: &str) {
@@ -6373,20 +7099,24 @@ mod tests {
     use serde_yaml::Value;
 
     use super::{
-        AgentKind, ChangeSet, GitSkillVisibility, GitUpdateAction, GitUpdateFile,
-        MarkdownDoc, MaterializedGitTarget, ResolvedAddSource, SkillDistributionMode,
-        SkillDistributionPlan, SkillPath, SkillRecord, SkillSourceRecord,
-        SkillUpdatePlan, SkillVisibility, WRAPPER_CATALOG_END, WRAPPER_CATALOG_START,
+        AgentKind, ChangeSet, FileChange, GitSkillVisibility, GitUpdateAction, GitUpdateFile,
+        MarkdownDoc, MaterializedGitTarget, RegistryUpdatePlan, ResolvedAddSource,
+        SkillDistributionMode, SkillDistributionPlan, SkillPath, SkillRecord, SkillSnapshot,
+        SkillSnapshotFile, SkillSourceRecord,
+        SkillSourceUpdate, SkillUpdatePlan, SkillVisibility, WRAPPER_CATALOG_END,
+        WRAPPER_CATALOG_START,
         apply_git_update, apply_skill_add_with_target_root, apply_skill_delete_plan,
-        apply_skill_distribution_plan, apply_skill_update_plan_with_store, apply_update_files,
+        apply_skill_distribution_plan, apply_skill_update_plan_filesystem_transaction,
+        apply_skill_update_plan_with_store, apply_update_files,
         build_skill_add_plan_with_target_root, check_skill_updates, clear_tendi_git_changes,
         copy_dir, discover_installable_skills, format_delete_plan,
-        git_materialized_path_files, materialize_skill_dir_to_root, parse_add_source,
-        parse_skill_file_references,
+        git_materialized_path_files, materialize_skill_dir_to_root, merge_file_maps,
+        parse_add_source, parse_skill_file_references,
         parse_tendi_visibility, plan_skill_add, plan_skill_delete_many,
-        render_wrapper_after,
+        prepare_skill_update_persistence,
+        plan_registry_update, render_wrapper_after,
         sanitize_skill_dir_name, scan_skills_without_source_database as scan_skills,
-        select_update_path, sha256_file, skill_backup_exclusion_reason,
+        select_update_path, sha256_file, sha256_text, skill_backup_exclusion_reason,
     };
 
     fn temp_dir(prefix: &str) -> PathBuf {
@@ -6398,6 +7128,34 @@ mod tests {
                 .unwrap()
                 .as_nanos()
         ))
+    }
+
+    #[test]
+    fn skill_update_plan_only_applies_when_it_has_actionable_changes() {
+        let empty = SkillUpdatePlan {
+            file_changes: ChangeSet { changes: Vec::new() },
+            git_updates: Vec::new(),
+            skipped: Vec::new(),
+            source_updates: Vec::new(),
+            merge_issues: Vec::new(),
+        };
+        assert!(!empty.can_apply());
+
+        let actionable = SkillUpdatePlan {
+            file_changes: ChangeSet {
+                changes: vec![super::FileChange {
+                    path: PathBuf::from("SKILL.md"),
+                    before_sha256: None,
+                    before: None,
+                    after: "updated".to_string(),
+                }],
+            },
+            git_updates: Vec::new(),
+            skipped: Vec::new(),
+            source_updates: Vec::new(),
+            merge_issues: Vec::new(),
+        };
+        assert!(actionable.can_apply());
     }
 
     fn run_test_git(repo: &Path, args: &[&str]) -> String {
@@ -6468,6 +7226,141 @@ mod tests {
         let error = apply_update_files(&root, &[file]).unwrap_err();
         assert!(format!("{error:#}").contains("refusing to overwrite changed file"));
         assert_eq!(fs::read_to_string(&path).unwrap(), "edited-after-preview\n");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn apply_changes_rolls_back_previous_files_when_a_later_change_is_stale() {
+        let root = temp_dir("tendi-file-transaction-test");
+        fs::create_dir_all(&root).unwrap();
+        let first = root.join("first.md");
+        let second = root.join("second.md");
+        fs::write(&second, "changed-after-preview\n").unwrap();
+        let changes = ChangeSet {
+            changes: vec![
+                super::FileChange {
+                    path: first.clone(),
+                    before_sha256: None,
+                    before: None,
+                    after: "new\n".to_string(),
+                },
+                super::FileChange {
+                    path: second.clone(),
+                    before_sha256: Some(sha256_text("before\n")),
+                    before: Some("before\n".to_string()),
+                    after: "after\n".to_string(),
+                },
+            ],
+        };
+
+        assert!(super::apply_changes(&changes).is_err());
+        assert!(!first.exists());
+        assert_eq!(fs::read_to_string(&second).unwrap(), "changed-after-preview\n");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn filesystem_transaction_rolls_back_when_persistence_becomes_stale() {
+        let root = temp_dir("tendi-filesystem-transaction-persistence-test");
+        let skill_dir = root.join("skills/demo");
+        let skill_file = skill_dir.join("SKILL.md");
+        fs::create_dir_all(&skill_dir).unwrap();
+        fs::write(&skill_file, "before\n").unwrap();
+        let store = crate::storage::Store::open(root.join("tendi.sqlite3")).unwrap();
+        let source = SkillSourceRecord {
+            skill_name: "demo".to_string(),
+            skill_path: skill_dir.clone(),
+            source_kind: "github".to_string(),
+            source: Some("https://github.com/example/demo.git".to_string()),
+            source_ref: Some("main".to_string()),
+            source_version: Some("version-a".to_string()),
+            source_relative_path: Some("skills/demo".to_string()),
+            update_status: "tracked".to_string(),
+            origin: "test".to_string(),
+        };
+        store.upsert_skill_source_records(std::slice::from_ref(&source)).unwrap();
+        let plan = SkillUpdatePlan {
+            file_changes: ChangeSet {
+                changes: vec![FileChange {
+                    path: skill_file.clone(),
+                    before_sha256: Some(sha256_text("before\n")),
+                    before: Some("before\n".to_string()),
+                    after: "after\n".to_string(),
+                }],
+            },
+            git_updates: Vec::new(),
+            skipped: Vec::new(),
+            source_updates: vec![SkillSourceUpdate {
+                skill_path: skill_dir.clone(),
+                source_version: "version-b".to_string(),
+            }],
+            merge_issues: Vec::new(),
+        };
+        let persistence = prepare_skill_update_persistence(&store, &plan).unwrap();
+        let filesystem = apply_skill_update_plan_filesystem_transaction(&plan).unwrap();
+        let mut externally_updated = source;
+        externally_updated.source_version = Some("version-c".to_string());
+        store
+            .upsert_skill_source_records(std::slice::from_ref(&externally_updated))
+            .unwrap();
+        let after_filesystem = prepare_skill_update_persistence(&store, &plan).unwrap();
+        let error = store
+            .persist_skill_update_persistence_checked(
+                &persistence.expected_source_versions,
+                &after_filesystem.source_records,
+                &after_filesystem.snapshots,
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("changed after the update preview"));
+        filesystem.rollback_context().unwrap();
+        assert_eq!(fs::read_to_string(skill_file).unwrap(), "before\n");
+        drop(store);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn git_update_files_roll_back_previous_files_when_a_later_change_is_stale() {
+        let root = temp_dir("tendi-git-update-transaction-test");
+        fs::create_dir_all(&root).unwrap();
+        let first = root.join("first.md");
+        let second = root.join("second.md");
+        fs::write(&second, "changed-after-preview\n").unwrap();
+        let files = vec![
+            GitUpdateFile {
+                path: "first.md".to_string(),
+                resolution_key: "first".to_string(),
+                before: String::new(),
+                base: String::new(),
+                incoming: "new\n".to_string(),
+                after: "new\n".to_string(),
+                before_bytes: None,
+                incoming_bytes: Some(b"new\n".to_vec()),
+                after_bytes: None,
+                before_exists: false,
+                incoming_exists: true,
+                after_exists: true,
+                status: "remote".to_string(),
+            },
+            GitUpdateFile {
+                path: "second.md".to_string(),
+                resolution_key: "second".to_string(),
+                before: "before\n".to_string(),
+                base: "before\n".to_string(),
+                incoming: "after\n".to_string(),
+                after: "after\n".to_string(),
+                before_bytes: Some(b"before\n".to_vec()),
+                incoming_bytes: Some(b"after\n".to_vec()),
+                after_bytes: None,
+                before_exists: true,
+                incoming_exists: true,
+                after_exists: true,
+                status: "remote".to_string(),
+            },
+        ];
+
+        assert!(apply_update_files(&root, &files).is_err());
+        assert!(!first.exists());
+        assert_eq!(fs::read_to_string(&second).unwrap(), "changed-after-preview\n");
         let _ = fs::remove_dir_all(root);
     }
 
@@ -7491,7 +8384,7 @@ mod tests {
             "interface:\n",
             "  display_name: \"Demo\"\n",
             "policy:\n",
-            "  allow_implicit_invocation: false\n",
+            "  allow_implicit_invocation: true\n",
         );
         fs::write(tracked_skill.join("agents/openai.yaml"), baseline_policy).unwrap();
 
@@ -7977,6 +8870,260 @@ Keep this handmade intro.
     }
 
     #[test]
+    fn visibility_update_preserves_crlf_frontmatter_formatting() {
+        let path = std::env::temp_dir().join(format!(
+            "tendi-crlf-frontmatter-test-{}.md",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let before = "---\r\nname: demo\r\ndescription: \"Demo\"\r\n---\r\n\r\n# demo\r\n";
+        fs::write(&path, before).unwrap();
+
+        let change = crate::providers::cursor::plan_skill_frontmatter(
+            path.clone(),
+            SkillVisibility::Off,
+        )
+        .unwrap();
+
+        assert!(change.after.contains("description: \"Demo\"\r\n"));
+        assert!(change.after.contains("disable-model-invocation: true\r\n"));
+        assert!(change.after.contains("tendi:\r\n  visibility: off\r\n"));
+        assert!(!change.after.replace("\r\n", "").contains('\n'));
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn merge_skill_manifest_prefers_local_visibility_for_remote_visibility_change() {
+        let base = "---\nname: demo\ndescription: Old\ntendi:\n  visibility: auto\n---\n\n# old\n";
+        let local =
+            "---\nname: demo\ndescription: Old\ntendi:\n  visibility: manual\n---\n\n# old\n";
+        let incoming =
+            "---\nname: demo\ndescription: New\ntendi:\n  visibility: off\n---\n\n# new\n";
+        let expected =
+            "---\nname: demo\ndescription: New\ntendi:\n  visibility: manual\n---\n\n# new\n";
+
+        let files = merge_file_maps(
+            Some(BTreeMap::from([(
+                "SKILL.md".to_string(),
+                base.as_bytes().to_vec(),
+            )])),
+            BTreeMap::from([("SKILL.md".to_string(), local.as_bytes().to_vec())]),
+            BTreeMap::from([("SKILL.md".to_string(), incoming.as_bytes().to_vec())]),
+            "",
+            "/tmp/demo",
+            SkillVisibility::Manual,
+            AgentKind::Shared,
+        );
+
+        let file = files.first().expect("merged skill file");
+        assert_eq!(file.status, "remote");
+        assert_eq!(file.after, expected);
+    }
+
+    #[test]
+    fn provider_visibility_is_not_a_skill_content_conflict() {
+        let base = "---\nname: demo\ndescription: Old\ntendi:\n  visibility: auto\n---\n\n# same\n";
+        let local = "---\nname: demo\ndescription: Local\ndisable-model-invocation: true\ntendi:\n  visibility: manual\n---\n\n# same\n";
+        let incoming = "---\nname: demo\ndescription: Remote\ntendi:\n  visibility: off\n---\n\n# same\n";
+
+        let files = merge_file_maps(
+            Some(BTreeMap::from([(
+                "SKILL.md".to_string(),
+                base.as_bytes().to_vec(),
+            )])),
+            BTreeMap::from([("SKILL.md".to_string(), local.as_bytes().to_vec())]),
+            BTreeMap::from([("SKILL.md".to_string(), incoming.as_bytes().to_vec())]),
+            "",
+            "/tmp/demo",
+            SkillVisibility::Manual,
+            AgentKind::Claude,
+        );
+
+        let file = files.first().expect("conflicting skill file");
+        assert_eq!(file.status, "conflict");
+        assert_eq!(
+            file.after.matches("disable-model-invocation: true").count(),
+            1
+        );
+        assert_eq!(file.after.matches("visibility: manual").count(), 1);
+        let conflict_start = file.after.find("<<<<<<< local").expect("conflict start");
+        let conflict_end = file.after.find(">>>>>>> remote").expect("conflict end");
+        let conflict = &file.after[conflict_start..conflict_end];
+        assert!(!conflict.contains("visibility:"));
+        assert!(!conflict.contains("disable-model-invocation:"));
+    }
+
+    #[test]
+    fn shared_provider_visibility_is_not_a_skill_content_conflict() {
+        let base = "---\nname: demo\ndescription: Old\ntendi:\n  visibility: auto\n---\n\n# same\n";
+        let local = "---\nname: demo\ndescription: Local\ndisable-model-invocation: true\ntendi:\n  visibility: auto\n---\n\n# same\n";
+        let incoming = "---\nname: demo\ndescription: Remote\ntendi:\n  visibility: auto\n---\n\n# same\n";
+        for agent in [AgentKind::Shared, AgentKind::Unknown] {
+            let files = merge_file_maps(
+                Some(BTreeMap::from([(
+                    "SKILL.md".to_string(),
+                    base.as_bytes().to_vec(),
+                )])),
+                BTreeMap::from([("SKILL.md".to_string(), local.as_bytes().to_vec())]),
+                BTreeMap::from([("SKILL.md".to_string(), incoming.as_bytes().to_vec())]),
+                "",
+                "/tmp/demo",
+                SkillVisibility::Auto,
+                agent,
+            );
+
+            let file = files.first().expect("conflicting skill file");
+            assert_eq!(file.status, "conflict");
+            assert_eq!(
+                file.after.matches("disable-model-invocation: true").count(),
+                1
+            );
+            let conflict_start = file.after.find("<<<<<<< local").expect("conflict start");
+            let conflict_end = file.after.find(">>>>>>> remote").expect("conflict end");
+            let conflict = &file.after[conflict_start..conflict_end];
+            assert!(!conflict.contains("disable-model-invocation:"));
+        }
+    }
+
+    #[test]
+    fn shared_skill_merge_preserves_provider_file_content_changes() {
+        let base = "interface:\n  display_name: \"Better Typography\"\n  short_description: \"Web typography from fonts to spacing and wrapping\"\npolicy:\n  allow_implicit_invocation: true\n";
+        let local = "interface:\n  display_name: \"Better Typography\"\n  short_description: \"Web typography from fonts to spacing and wrapping\"\npolicy:\n  allow_implicit_invocation: false\n";
+        let incoming = "interface:\n  display_name: \"Better Typography\"\n  short_description: \"Fonts, type scales, spacing and wrapping\"\npolicy:\n  allow_implicit_invocation: true\n";
+
+        let files = merge_file_maps(
+            Some(BTreeMap::from([(
+                "agents/openai.yaml".to_string(),
+                base.as_bytes().to_vec(),
+            )])),
+            BTreeMap::from([("agents/openai.yaml".to_string(), local.as_bytes().to_vec())]),
+            BTreeMap::from([(
+                "agents/openai.yaml".to_string(),
+                incoming.as_bytes().to_vec(),
+            )]),
+            "",
+            "/tmp/demo",
+            SkillVisibility::Manual,
+            AgentKind::Shared,
+        );
+
+        let file = files.first().expect("merged Codex provider file");
+        assert_ne!(file.status, "conflict");
+        assert!(file.after.contains("Fonts, type scales, spacing and wrapping"));
+        assert!(file.after.contains("allow_implicit_invocation: false"));
+    }
+
+    #[test]
+    fn registry_update_prefers_local_visibility_for_remote_visibility_change() {
+        let root = temp_dir("tendi-registry-visibility-merge-test");
+        let skill_dir = root.join("skills/demo");
+        let registry_file = root.join("registry-demo.md");
+        fs::create_dir_all(&skill_dir).unwrap();
+        let base = "---\nname: demo\ndescription: Old\ntendi:\n  visibility: auto\n---\n\n# old\n";
+        let local =
+            "---\nname: demo\ndescription: Old\ntendi:\n  visibility: manual\n---\n\n# old\n";
+        let incoming =
+            "---\nname: demo\ndescription: New\ntendi:\n  visibility: off\n---\n\n# new\n";
+        let expected =
+            "---\nname: demo\ndescription: New\ntendi:\n  visibility: manual\n---\n\n# new\n";
+        fs::write(skill_dir.join("SKILL.md"), local).unwrap();
+        fs::write(&registry_file, incoming).unwrap();
+
+        let store = crate::storage::Store::open(root.join("tendi.sqlite3")).unwrap();
+        store
+            .replace_skill_snapshots(&[SkillSnapshot {
+                skill_path: skill_dir.clone(),
+                source_version: "1".to_string(),
+                files: vec![SkillSnapshotFile {
+                    relative_path: "SKILL.md".to_string(),
+                    content: base.as_bytes().to_vec(),
+                }],
+            }])
+            .unwrap();
+
+        let mut skill = test_skill("demo", "Demo", &skill_dir);
+        let path = &mut skill.paths[0];
+        path.source_kind = "registry".to_string();
+        path.source = Some(format!("file://{}", registry_file.display()));
+        path.source_version = Some("1".to_string());
+        path.tendi_visibility = Some(SkillVisibility::Manual);
+        path.effective_visibility = SkillVisibility::Manual;
+
+        let path = path.clone();
+        let result = plan_registry_update(&skill, &path, &store, "2").unwrap();
+        match result {
+            Some(RegistryUpdatePlan::Change(change, _)) => {
+                assert_eq!(change.after, expected);
+            }
+            Some(RegistryUpdatePlan::Issue(issue)) => {
+                panic!("unexpected merge issue: {}", issue.path.display())
+            }
+            None => panic!("expected registry update"),
+        }
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn registry_provider_visibility_is_not_a_skill_content_conflict() {
+        let root = temp_dir("tendi-registry-provider-visibility-merge-test");
+        let skill_dir = root.join("skills/demo");
+        let registry_file = root.join("registry-demo.md");
+        fs::create_dir_all(&skill_dir).unwrap();
+        let base = "---\nname: demo\ndescription: Old\ntendi:\n  visibility: auto\n---\n\n# same\n";
+        let local = "---\nname: demo\ndescription: Local\ntendi:\n  visibility: manual\n---\n\n# same\n";
+        let incoming = "---\nname: demo\ndescription: Remote\ntendi:\n  visibility: off\n---\n\n# same\n";
+        fs::write(skill_dir.join("SKILL.md"), local).unwrap();
+        fs::write(&registry_file, incoming).unwrap();
+
+        let store = crate::storage::Store::open(root.join("tendi.sqlite3")).unwrap();
+        store
+            .replace_skill_snapshots(&[SkillSnapshot {
+                skill_path: skill_dir.clone(),
+                source_version: "1".to_string(),
+                files: vec![SkillSnapshotFile {
+                    relative_path: "SKILL.md".to_string(),
+                    content: base.as_bytes().to_vec(),
+                }],
+            }])
+            .unwrap();
+
+        let mut skill = test_skill("demo", "Demo", &skill_dir);
+        let path = &mut skill.paths[0];
+        path.agent = AgentKind::Claude;
+        path.source_kind = "registry".to_string();
+        path.source = Some(format!("file://{}", registry_file.display()));
+        path.source_version = Some("1".to_string());
+        path.tendi_visibility = Some(SkillVisibility::Manual);
+        path.effective_visibility = SkillVisibility::Manual;
+
+        let path = path.clone();
+        let result = plan_registry_update(&skill, &path, &store, "2").unwrap();
+        match result {
+            Some(RegistryUpdatePlan::Issue(issue)) => {
+                assert_eq!(issue.status, "conflict");
+                assert_eq!(
+                    issue.after.matches("disable-model-invocation: true").count(),
+                    1
+                );
+                let conflict_start = issue.after.find("<<<<<<< local").expect("conflict start");
+                let conflict_end = issue.after.find(">>>>>>> remote").expect("conflict end");
+                let conflict = &issue.after[conflict_start..conflict_end];
+                assert!(!conflict.contains("visibility:"));
+                assert!(!conflict.contains("disable-model-invocation:"));
+            }
+            Some(RegistryUpdatePlan::Change(_, _)) => {
+                panic!("expected content conflict")
+            }
+            None => panic!("expected registry update"),
+        }
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn scan_reads_tendi_visibility_off() {
         let root = std::env::temp_dir().join(format!(
             "tendi-scan-visibility-test-{}",
@@ -8053,6 +9200,138 @@ Keep this handmade intro.
         assert!(skill.paths.iter().any(|path| {
             path.agent == AgentKind::Codex && path.effective_visibility == SkillVisibility::Off
         }));
+    }
+
+    #[test]
+    fn merge_raw_skills_keeps_project_and_global_same_name_separate() {
+        let mut global = test_skill_path(
+            "/tmp/home/.agents/skills/domain-modeling",
+            AgentKind::Shared,
+            SkillVisibility::Auto,
+            None,
+        );
+        global.root = PathBuf::from("/tmp/home/.agents/skills");
+        global.scope = "global".to_string();
+
+        let mut project = test_skill_path(
+            "/tmp/repos/tutti/.codex/skills/domain-modeling",
+            AgentKind::Codex,
+            SkillVisibility::Manual,
+            None,
+        );
+        project.root = PathBuf::from("/tmp/repos/tutti/.codex/skills");
+        project.scope = "project".to_string();
+
+        let skills = super::merge_raw_skills(vec![
+            super::RawSkill {
+                name: "domain-modeling".to_string(),
+                description: Some("Global".to_string()),
+                tags: Vec::new(),
+                dependencies: Vec::new(),
+                dependency_files: Vec::new(),
+                is_system: false,
+                path: global,
+            },
+            super::RawSkill {
+                name: "domain-modeling".to_string(),
+                description: Some("Project".to_string()),
+                tags: Vec::new(),
+                dependencies: Vec::new(),
+                dependency_files: Vec::new(),
+                is_system: false,
+                path: project,
+            },
+        ]);
+
+        assert_eq!(skills.len(), 2);
+        let global_skill = skills
+            .iter()
+            .find(|skill| skill.paths.iter().all(|path| path.scope == "global"))
+            .unwrap();
+        let project_skill = skills
+            .iter()
+            .find(|skill| skill.paths.iter().all(|path| path.scope == "project"))
+            .unwrap();
+        assert_eq!(global_skill.name, "domain-modeling");
+        assert_eq!(global_skill.id, "domain-modeling");
+        assert_eq!(global_skill.visibility, SkillVisibility::Auto);
+        assert_eq!(project_skill.name, "domain-modeling");
+        assert_eq!(
+            project_skill.id,
+            "domain-modeling@project:codex:/tmp/repos/tutti"
+        );
+        assert_eq!(project_skill.visibility, SkillVisibility::Manual);
+        assert!(skills.iter().all(|skill| skill.visibility != SkillVisibility::Mixed));
+    }
+
+    #[test]
+    fn prefer_skill_named_prefers_same_project_over_global() {
+        let skills = super::merge_raw_skills(vec![
+            super::RawSkill {
+                name: "domain-modeling".to_string(),
+                description: Some("Global".to_string()),
+                tags: Vec::new(),
+                dependencies: Vec::new(),
+                dependency_files: Vec::new(),
+                is_system: false,
+                path: {
+                    let mut path = test_skill_path(
+                        "/tmp/home/.agents/skills/domain-modeling",
+                        AgentKind::Shared,
+                        SkillVisibility::Auto,
+                        None,
+                    );
+                    path.root = PathBuf::from("/tmp/home/.agents/skills");
+                    path.scope = "global".to_string();
+                    path
+                },
+            },
+            super::RawSkill {
+                name: "domain-modeling".to_string(),
+                description: Some("Project".to_string()),
+                tags: Vec::new(),
+                dependencies: Vec::new(),
+                dependency_files: Vec::new(),
+                is_system: false,
+                path: {
+                    let mut path = test_skill_path(
+                        "/tmp/repos/tutti/.codex/skills/domain-modeling",
+                        AgentKind::Codex,
+                        SkillVisibility::Manual,
+                        None,
+                    );
+                    path.root = PathBuf::from("/tmp/repos/tutti/.codex/skills");
+                    path.scope = "project".to_string();
+                    path
+                },
+            },
+            super::RawSkill {
+                name: "wrapper".to_string(),
+                description: Some("Wrapper".to_string()),
+                tags: vec!["wrapper".to_string()],
+                dependencies: vec!["domain-modeling".to_string()],
+                dependency_files: Vec::new(),
+                is_system: false,
+                path: {
+                    let mut path = test_skill_path(
+                        "/tmp/repos/tutti/.codex/skills/wrapper",
+                        AgentKind::Codex,
+                        SkillVisibility::Auto,
+                        None,
+                    );
+                    path.root = PathBuf::from("/tmp/repos/tutti/.codex/skills");
+                    path.scope = "project".to_string();
+                    path
+                },
+            },
+        ]);
+        let wrapper = skills.iter().find(|skill| skill.name == "wrapper").unwrap();
+        let preferred = super::prefer_skill_named(&skills, "domain-modeling", Some(wrapper)).unwrap();
+        assert_eq!(preferred.id, "domain-modeling@project:codex:/tmp/repos/tutti");
+        assert_eq!(preferred.visibility, SkillVisibility::Manual);
+
+        let global_preferred = super::prefer_skill_named(&skills, "domain-modeling", None).unwrap();
+        assert_eq!(global_preferred.id, "domain-modeling");
     }
 
     #[test]
@@ -8455,11 +9734,15 @@ Keep this handmade intro.
 
     fn test_skill(name: &str, description: &str, path: &Path) -> SkillRecord {
         SkillRecord {
+            id: name.to_string(),
+            installation_id: name.to_string(),
             name: name.to_string(),
             description: Some(description.to_string()),
             tags: Vec::new(),
             dependencies: Vec::new(),
             dependents: Vec::new(),
+            dependency_ids: Vec::new(),
+            dependent_ids: Vec::new(),
             visibility: SkillVisibility::Auto,
             agents: vec![AgentKind::Shared],
             paths: vec![SkillPath {

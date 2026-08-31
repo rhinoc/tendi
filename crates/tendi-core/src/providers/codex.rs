@@ -18,8 +18,10 @@ use crate::transcript::{
     InternalContextMarker, TranscriptItem, attach_tool_result,
     collect_message_content_with_markers, compact_time, extract_call_id, extract_duration_ms,
     extract_raw_content_text, extract_thinking_text, extract_tool_command, extract_tool_result,
-    parse_timestamp_ms, push_item, push_tool_item, summarize_tool_call,
+    push_item, push_tool_item, summarize_tool_call,
 };
+
+use crate::time::timestamp_ms;
 
 use super::*;
 
@@ -102,15 +104,15 @@ fn update_mcp_json_server(spec: &mut serde_json::Map<String, Value>, enabled: bo
     true
 }
 
-fn update_mcp_toml_server(spec: &mut toml::map::Map<String, TomlValue>, enabled: bool) -> bool {
+fn update_mcp_toml_server(spec: &mut dyn toml_edit::TableLike, enabled: bool) -> bool {
     let has_disabled = spec.contains_key("disabled");
     let has_enabled = spec.contains_key("enabled");
     if has_disabled {
-        spec.insert("disabled".to_string(), TomlValue::Boolean(!enabled));
+        spec.insert("disabled", toml_edit::value(!enabled));
     } else if has_enabled {
-        spec.insert("enabled".to_string(), TomlValue::Boolean(enabled));
+        spec.insert("enabled", toml_edit::value(enabled));
     } else {
-        spec.insert("enabled".to_string(), TomlValue::Boolean(enabled));
+        spec.insert("enabled", toml_edit::value(enabled));
     }
     true
 }
@@ -535,9 +537,14 @@ pub(crate) fn write_trusted_hash(path: &Path, key: &str, trusted_hash: &str) -> 
         lines.push(header);
         lines.push(format!("trusted_hash = {trusted_hash:?}"));
     }
-    let mut updated = lines.join("\n");
-    if original.ends_with('\n') {
-        updated.push('\n');
+    let newline = if original.contains("\r\n") {
+        "\r\n"
+    } else {
+        "\n"
+    };
+    let mut updated = lines.join(newline);
+    if original.ends_with(newline) {
+        updated.push_str(newline);
     }
     crate::fsutil::atomic_write(path, &updated)
         .with_context(|| format!("failed to write Codex config {}", path.display()))
@@ -744,45 +751,156 @@ fn codex_skill_enabled_for_path(config_path: &Path, skill_file: &Path) -> Option
     })
 }
 
-fn ensure_yaml_mapping_child<'a>(
-    root: &'a mut YamlValue,
-    key: &str,
-) -> &'a mut serde_yaml::Mapping {
-    if !matches!(root, YamlValue::Mapping(_)) {
-        *root = YamlValue::Mapping(Default::default());
-    }
-    let map = root.as_mapping_mut().expect("root was made a mapping");
-    let key = YamlValue::String(key.to_string());
-    if !matches!(map.get(&key), Some(YamlValue::Mapping(_))) {
-        map.insert(key.clone(), YamlValue::Mapping(Default::default()));
-    }
-    map.get_mut(&key)
-        .and_then(YamlValue::as_mapping_mut)
-        .expect("child was made a mapping")
-}
-
 fn render_codex_policy(before: Option<&str>, visibility: SkillVisibility) -> Result<String> {
     if visibility == SkillVisibility::Mixed {
         bail!("mixed visibility is a scan summary and cannot be written to Codex policy");
     }
     let desired = matches!(visibility, SkillVisibility::Auto);
-    let mut root = match before {
-        Some(text) => serde_yaml::from_str::<YamlValue>(text)?,
-        None => YamlValue::Mapping(Default::default()),
+    let Some(before) = before else {
+        return Ok(if desired {
+            String::new()
+        } else {
+            "policy:\n  allow_implicit_invocation: false\n".to_string()
+        });
     };
+    let root = serde_yaml::from_str::<YamlValue>(before)?;
     let current = root
         .get("policy")
         .and_then(|policy| policy.get("allow_implicit_invocation"))
         .and_then(YamlValue::as_bool);
-    if current == Some(desired) || (before.is_none() && desired) {
-        return Ok(before.unwrap_or_default().to_string());
+    if current == Some(desired) {
+        return Ok(before.to_string());
     }
-    let policy = ensure_yaml_mapping_child(&mut root, "policy");
-    policy.insert(
-        YamlValue::String("allow_implicit_invocation".to_string()),
-        YamlValue::Bool(desired),
+    if !matches!(root, YamlValue::Mapping(_)) {
+        bail!("Codex policy document root must be a YAML mapping");
+    }
+    update_codex_policy_text(before, desired)
+}
+
+fn update_codex_policy_text(before: &str, desired: bool) -> Result<String> {
+    let newline = if before.contains("\r\n") {
+        "\r\n"
+    } else {
+        "\n"
+    };
+    let trailing_newline = before.ends_with('\n');
+    let mut lines = before
+        .split('\n')
+        .map(|line| line.strip_suffix('\r').unwrap_or(line).to_string())
+        .collect::<Vec<_>>();
+    if trailing_newline {
+        lines.pop();
+    }
+    if lines.len() == 1 && lines[0].trim().is_empty() {
+        lines.clear();
+    }
+
+    let policy = lines.iter().enumerate().find_map(|(index, line)| {
+        yaml_key_line(line, "policy")
+            .filter(|(indent, _)| *indent == 0)
+            .map(|(_, colon)| (index, colon))
+    });
+    let value = if desired { "true" } else { "false" };
+
+    let Some((policy_index, policy_colon)) = policy else {
+        lines.push("policy:".to_string());
+        lines.push(format!("  allow_implicit_invocation: {value}"));
+        return Ok(render_codex_policy_lines(
+            &lines,
+            newline,
+            trailing_newline || before.is_empty(),
+        ));
+    };
+
+    let policy_tail = lines[policy_index][policy_colon + 1..].trim();
+    if !policy_tail.is_empty() && !policy_tail.starts_with('#') {
+        bail!("Codex policy must use a block YAML mapping");
+    }
+
+    let policy_indent = yaml_key_line(&lines[policy_index], "policy")
+        .map(|(indent, _)| indent)
+        .unwrap_or(0);
+    let section_end = lines
+        .iter()
+        .enumerate()
+        .skip(policy_index + 1)
+        .find(|(_, line)| {
+            let trimmed = line.trim();
+            !trimmed.is_empty()
+                && !trimmed.starts_with('#')
+                && leading_yaml_indent(line) <= policy_indent
+        })
+        .map(|(index, _)| index)
+        .unwrap_or(lines.len());
+
+    for line in lines.iter_mut().take(section_end).skip(policy_index + 1) {
+        let Some((indent, colon)) = yaml_key_line(line, "allow_implicit_invocation") else {
+            continue;
+        };
+        if indent > policy_indent {
+            *line = replace_yaml_bool_value(line, colon, value);
+            return Ok(render_codex_policy_lines(&lines, newline, trailing_newline));
+        }
+    }
+
+    let child_indent = lines
+        .iter()
+        .take(section_end)
+        .skip(policy_index + 1)
+        .find_map(|line| {
+            let trimmed = line.trim();
+            (!trimmed.is_empty() && !trimmed.starts_with('#'))
+                .then(|| leading_yaml_indent(line))
+                .filter(|indent| *indent > policy_indent)
+        })
+        .unwrap_or(policy_indent + 2);
+    lines.insert(
+        section_end,
+        format!(
+            "{}allow_implicit_invocation: {value}",
+            " ".repeat(child_indent)
+        ),
     );
-    Ok(serde_yaml::to_string(&root)?)
+    Ok(render_codex_policy_lines(&lines, newline, trailing_newline))
+}
+
+fn leading_yaml_indent(line: &str) -> usize {
+    line.bytes()
+        .take_while(|byte| matches!(byte, b' ' | b'\t'))
+        .count()
+}
+
+fn yaml_key_line(line: &str, key: &str) -> Option<(usize, usize)> {
+    let indent = leading_yaml_indent(line);
+    let content = &line[indent..];
+    let colon = content.find(':')?;
+    (content[..colon].trim() == key).then_some((indent, indent + colon))
+}
+
+fn replace_yaml_bool_value(line: &str, colon: usize, value: &str) -> String {
+    let suffix = &line[colon + 1..];
+    let comment = suffix.find(" #").unwrap_or(suffix.len());
+    let value_part = &suffix[..comment];
+    let leading = value_part.len() - value_part.trim_start().len();
+    let trailing = value_part.len() - value_part.trim_end().len();
+    let between = &value_part[..leading];
+    let ending = &value_part[value_part.len().saturating_sub(trailing)..];
+    format!(
+        "{}{}{}{}{}",
+        &line[..colon + 1],
+        between,
+        value,
+        ending,
+        &suffix[comment..]
+    )
+}
+
+fn render_codex_policy_lines(lines: &[String], newline: &str, trailing_newline: bool) -> String {
+    let mut rendered = lines.join(newline);
+    if trailing_newline {
+        rendered.push_str(newline);
+    }
+    rendered
 }
 
 fn plan_codex_policy(skill_dir: &Path, visibility: SkillVisibility) -> Result<FileChange> {
@@ -837,7 +955,7 @@ fn render_codex_skill_config(before: &str, skill_file: &Path, enabled: bool) -> 
         config["enabled"] = value(enabled);
         configs.push(config);
     }
-    Ok(doc.to_string())
+    Ok(crate::fsutil::preserve_newline_style(before, doc.to_string()))
 }
 
 fn plan_codex_skill_config(
@@ -1653,7 +1771,7 @@ fn collect_codex_item(value: &Value, items: &mut Vec<TranscriptItem>) {
     let timestamp_ms = value
         .get("timestamp")
         .and_then(Value::as_str)
-        .and_then(parse_timestamp_ms);
+        .and_then(timestamp_ms);
 
     match payload.get("type").and_then(Value::as_str) {
         Some("message") => {
@@ -2121,6 +2239,25 @@ impl super::AgentProvider for CodexProvider {
 
     fn is_managed_skill_file(&self, relative_path: &str) -> bool {
         relative_path == "agents/openai.yaml" || relative_path.ends_with("/agents/openai.yaml")
+    }
+
+    fn normalize_skill_file_for_merge(
+        &self,
+        relative_path: &str,
+        local: Option<&str>,
+        base: Option<&str>,
+        incoming: Option<&str>,
+        visibility: SkillVisibility,
+    ) -> Option<(Option<String>, Option<String>, Option<String>)> {
+        if !self.is_managed_skill_file(relative_path) {
+            return None;
+        }
+        let normalize = |text: Option<&str>| {
+            text.map(|text| render_codex_policy(Some(text), visibility))
+                .transpose()
+                .ok()?
+        };
+        Some((normalize(local), normalize(base), normalize(incoming)))
     }
 
     fn session_scan_priority(&self, root: &Path) -> Option<u8> {
@@ -2725,7 +2862,8 @@ mod tests {
     };
 
     use super::{
-        AgentProvider, CodexProvider, ProviderContext, hook_current_hash, parse_codex_hook_file,
+        hook_current_hash, parse_codex_hook_file, render_codex_policy, AgentProvider,
+        CodexProvider, ProviderContext, SkillVisibility,
     };
 
     fn temp_dir() -> PathBuf {
@@ -2811,4 +2949,66 @@ mod tests {
         let _ = fs::remove_dir_all(root);
     }
 
+    #[test]
+    fn codex_policy_update_preserves_unrelated_yaml_formatting() {
+        let before = "interface:\n  display_name: \"Wait What\"\n  short_description: \"Re-pitch that — simpler, with the context I'm missing\"\npolicy:\n  allow_implicit_invocation: false\n";
+        let expected = "interface:\n  display_name: \"Wait What\"\n  short_description: \"Re-pitch that — simpler, with the context I'm missing\"\npolicy:\n  allow_implicit_invocation: true\n";
+
+        assert_eq!(
+            render_codex_policy(Some(before), SkillVisibility::Auto).unwrap(),
+            expected
+        );
+        assert_eq!(
+            render_codex_policy(Some(expected), SkillVisibility::Manual).unwrap(),
+            before
+        );
+    }
+
+    #[test]
+    fn codex_merge_normalizes_only_visibility_policy() {
+        let base = "interface:\n  display_name: \"Better Typography\"\n  short_description: \"Web typography from fonts to spacing and wrapping\"\npolicy:\n  allow_implicit_invocation: true\n";
+        let local = "interface:\n  display_name: \"Better Typography\"\n  short_description: \"Web typography from fonts to spacing and wrapping\"\npolicy:\n  allow_implicit_invocation: false\n";
+        let incoming = "interface:\n  display_name: \"Better Typography\"\n  short_description: \"Fonts, type scales, spacing and wrapping\"\npolicy:\n  allow_implicit_invocation: true\n";
+
+        let (normalized_local, normalized_base, normalized_incoming) = CodexProvider
+            .normalize_skill_file_for_merge(
+                "agents/openai.yaml",
+                Some(local),
+                Some(base),
+                Some(incoming),
+                SkillVisibility::Manual,
+            )
+            .expect("Codex provider file");
+
+        assert_eq!(normalized_local, normalized_base);
+        let normalized_incoming = normalized_incoming.expect("incoming Codex provider file");
+        assert!(normalized_incoming.contains("Fonts, type scales, spacing and wrapping"));
+        assert!(normalized_incoming.contains("allow_implicit_invocation: false"));
+    }
+
+    #[test]
+    fn codex_policy_update_adds_missing_policy_without_reformatting_existing_yaml() {
+        let before = "interface:\n  display_name: \"Wait What\"\n";
+        let expected = "interface:\n  display_name: \"Wait What\"\npolicy:\n  allow_implicit_invocation: false\n";
+
+        assert_eq!(
+            render_codex_policy(Some(before), SkillVisibility::Manual).unwrap(),
+            expected
+        );
+    }
+
+    #[test]
+    fn codex_skill_config_update_preserves_crlf_line_endings() {
+        let before = "# keep\r\n[other]\r\nvalue = 'keep'\r\n";
+        let after = super::render_codex_skill_config(
+            before,
+            std::path::Path::new("/tmp/demo/SKILL.md"),
+            true,
+        )
+        .unwrap();
+
+        assert!(after.contains("value = 'keep'\r\n"));
+        assert!(after.contains("enabled = true\r\n"));
+        assert!(!after.replace("\r\n", "").contains('\n'));
+    }
 }

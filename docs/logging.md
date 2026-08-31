@@ -9,7 +9,7 @@
 日志行是结构化文本：
 
 ```text
-time=2026-08-18T10:00:00+08:00 level=warn component="tendi-desktop" pid=123 msg="daemon request failed" command="sessions_list"
+time=2026-08-18T10:00:00+08:00 level=warn component="tendi-desktop" pid=123 msg="daemon request failed" command="sessions_snapshot"
 ```
 
 活动文件名固定为 `tendi.log`。跨日期或超过大小上限时轮转为 `tendi.YYYY-MM-DD.log`，并自动清理历史文件。

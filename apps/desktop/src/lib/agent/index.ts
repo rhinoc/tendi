@@ -4,7 +4,8 @@ import { cursorAgent } from "./cursor.ts";
 import { sharedAgent } from "./shared.ts";
 import type { AgentDefinition } from "./types.ts";
 
-export type { AgentDefinition, AgentTranscriptFormat } from "./types.ts";
+export { AgentTranscriptFormat } from "./types.ts";
+export type { AgentDefinition } from "./types.ts";
 
 export const agentDefinitions: readonly AgentDefinition[] = [
   codexAgent,

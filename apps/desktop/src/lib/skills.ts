@@ -12,6 +12,10 @@ import {
   type SourceDetails,
 } from "./sources.ts";
 import { TauriCommand, safeInvoke } from "./tauri.ts";
+import { SkillOperationStatus, SkillUpdateAvailability } from "./skill-status.ts";
+import type { RawDomainRow } from "./raw-domain.ts";
+
+export { SkillOperationStatus, SkillUpdateAvailability } from "./skill-status.ts";
 
 export enum SkillVisibility {
   Auto = "Auto",
@@ -50,6 +54,8 @@ export type NormalizedSkill = {
   tags: string[];
   dependencies: string[];
   dependents: string[];
+  dependencyIds: string[];
+  dependentIds: string[];
   isWrapper: boolean;
   agents: string[];
   visibility: SkillVisibility;
@@ -65,15 +71,7 @@ export type NormalizedSkill = {
   [key: string]: unknown;
 };
 
-export type RawSkillRecord = Record<string, unknown>;
-
-export enum SkillOperationStatus {
-  Planned = "planned",
-  Ready = "ready",
-  AlreadyExists = "already-exists",
-  Replace = "replace",
-  AlreadyInstalled = "already-installed",
-}
+export type RawSkillRecord = RawDomainRow;
 
 export type SkillOperation = {
   name: string;
@@ -98,7 +96,8 @@ export type SkillAddPlan = {
 };
 
 export type SkillInstallResult = {
-  skills: RawSkillRecord[];
+  updated?: RawSkillRecord[];
+  skills?: RawSkillRecord[];
   report: {
     plan: SkillAddPlan;
     results: Array<{ target: string }>;
@@ -107,7 +106,7 @@ export type SkillInstallResult = {
 
 export type WrapperArgs = {
   name: string;
-  names: string[];
+  skillIds: string[];
   description?: string;
   manualChildren: boolean;
   refresh: boolean;
@@ -219,10 +218,18 @@ export function normalizeSkill(skill: Record<string, unknown>): NormalizedSkill 
   const tags = skill.tags.filter((tag): tag is string => typeof tag === "string");
   const dependencies = skill.dependencies.filter((dependency): dependency is string => typeof dependency === "string");
   const dependents = skill.dependents.filter((dependent): dependent is string => typeof dependent === "string");
+  const dependencyIds = Array.isArray(skill.dependencyIds)
+    ? skill.dependencyIds.filter((dependency): dependency is string => typeof dependency === "string")
+    : [];
+  const dependentIds = Array.isArray(skill.dependentIds)
+    ? skill.dependentIds.filter((dependent): dependent is string => typeof dependent === "string")
+    : [];
   if (
     tags.length !== skill.tags.length
     || dependencies.length !== skill.dependencies.length
     || dependents.length !== skill.dependents.length
+    || dependencyIds.length !== (Array.isArray(skill.dependencyIds) ? skill.dependencyIds.length : 0)
+    || dependentIds.length !== (Array.isArray(skill.dependentIds) ? skill.dependentIds.length : 0)
   ) return undefined;
   const visibility = normalizeSkillVisibility(skill.visibility);
   if (!visibility) return undefined;
@@ -249,13 +256,15 @@ export function normalizeSkill(skill: Record<string, unknown>): NormalizedSkill 
   if (installTargets.length !== skill.install_targets.length) return undefined;
   const tone = statusTone({ ...(skill as SkillLike), source, visibility, isSystem } as SkillLike & { visibility?: SkillVisibility; isSystem?: boolean });
   return {
-    id: name,
+    id: typeof skill.id === "string" && skill.id.trim() ? skill.id.trim() : name,
     section: skillSection({ ...(skill as SkillLike & { visibility?: SkillVisibility | string; statusTone?: string; isSystem?: boolean }), source, paths, visibility, statusTone: tone, isSystem }),
     name,
     description: typeof skill.description === "string" ? skill.description : "",
     tags,
     dependencies,
     dependents,
+    dependencyIds,
+    dependentIds,
     isWrapper: tags.includes("wrapper"),
     agents: uniqueAgents,
     visibility,
@@ -264,7 +273,7 @@ export function normalizeSkill(skill: Record<string, unknown>): NormalizedSkill 
     source,
     installTargets,
     trackingStatus: skill.update_status,
-    updateAvailability: "unknown",
+    updateAvailability: SkillUpdateAvailability.Unknown,
     ctime: typeof skill.ctime === "string" ? skill.ctime : undefined,
     mtime: typeof skill.mtime === "string" ? skill.mtime : undefined,
     paths,
@@ -347,100 +356,24 @@ export function skillSourceAction(
   return null;
 }
 
-export enum SkillChangeCommand {
-  Set = "skills_set",
-  UpdateMany = "skills_update_many",
-  DeleteMany = "skills_delete_many",
-  Wrap = "skills_wrap",
-}
+export const SkillChangeCommand = {
+  Set: TauriCommand.SkillsSet,
+  UpdateMany: TauriCommand.SkillsUpdateMany,
+  DeleteMany: TauriCommand.SkillsDeleteMany,
+  Wrap: TauriCommand.SkillsWrap,
+} as const;
+export type SkillChangeCommand = typeof SkillChangeCommand[keyof typeof SkillChangeCommand];
 
-export function applySkillUpdateReports<T extends { skills: NormalizedSkill[] }>(
-  report: T,
-  updates: Array<{ name: string; status: string }> | null | undefined,
-): T {
-  if (!Array.isArray(updates)) return report;
-  const byName = new Map(updates.map((update) => [update.name, update]));
-  return {
-    ...report,
-    skills: report.skills.map((skill) => {
-      const update = byName.get(skill.name);
-      if (!update) return skill;
-      return {
-        ...skill,
-        updateAvailability: update.status,
-        statusTone: update.status === "update-available" ? "warn" : skill.statusTone,
-      };
-    }),
-  };
-}
-
-/** skills_list does not carry update-check results; keep prior update-available badges across refreshes. */
-export function mergeSkillListPreservingUpdates(
-  previous: NormalizedSkill[],
-  next: NormalizedSkill[],
-): NormalizedSkill[] {
-  const previousByName = new Map(previous.map((skill) => [skill.name, skill]));
-  return next.map((skill) => {
-    const prior = previousByName.get(skill.name);
-    if (!prior || prior.updateAvailability !== "update-available") return skill;
-    if (skill.updateAvailability === "update-available") return skill;
-    return {
-      ...skill,
-      updateAvailability: prior.updateAvailability,
-      statusTone: skill.statusTone === "muted" ? skill.statusTone : "warn",
-    };
-  });
-}
-
-export function replaceSkillReportPreservingUpdates<T extends { skills: NormalizedSkill[] }>(
-  previous: T,
-  next: T,
-  clearNames: string[] = [],
-): T {
-  return clearSkillUpdateAvailability(
-    {
-      ...next,
-      skills: mergeSkillListPreservingUpdates(previous.skills, next.skills),
-    },
-    clearNames,
-  );
-}
-
-export function clearSkillUpdateAvailability<T extends { skills: NormalizedSkill[] }>(
-  report: T,
-  names: string[],
-): T {
-  const selected = new Set(names);
-  return {
-    ...report,
-    skills: report.skills.map((skill) => {
-      if (!selected.has(skill.name) || skill.updateAvailability !== "update-available") return skill;
-      return {
-        ...skill,
-        updateAvailability: "up-to-date",
-        statusTone: skill.statusTone === "warn" ? "ok" : skill.statusTone,
-      };
-    }),
-  };
-}
-
-export function applyVisibilityState<T extends { skills: NormalizedSkill[] }>(
-  report: T,
-  names: string[],
-  visibility: SkillVisibility,
-): T {
-  const selected = new Set(names);
-  return {
-    ...report,
-    skills: report.skills.map((skill) => {
-      if (!selected.has(skill.name)) return skill;
-      const nextTone = skill.statusTone === "muted" ? "muted" : visibility === SkillVisibility.Manual ? "warn" : "ok";
-      return {
-        ...skill,
-        visibility,
-        statusTone: nextTone,
-        section: skillSection({ ...skill, visibility, statusTone: nextTone }),
-      };
-    }),
-  };
+export function findSkillBySelector<T extends { id: string; name: string; paths?: Array<{ scope?: string }> }>(
+  skills: T[],
+  selector: string,
+): T | undefined {
+  const trimmed = selector.trim();
+  if (!trimmed) return undefined;
+  const byId = skills.find((skill) => skill.id === trimmed);
+  if (byId) return byId;
+  const byName = skills.filter((skill) => skill.name === trimmed);
+  if (byName.length <= 1) return byName[0];
+  return byName.find((skill) => (skill.paths ?? []).every((path) => path.scope !== "project"))
+    ?? byName[0];
 }

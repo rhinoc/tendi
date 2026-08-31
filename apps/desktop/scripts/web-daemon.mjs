@@ -189,6 +189,14 @@ function sendJson(response, status, value) {
   response.end(body);
 }
 
+function sendRpcError(response, status, kind, message, id = null, code = -32001) {
+  sendJson(response, status, {
+    jsonrpc: "2.0",
+    id,
+    error: { code, message, data: { kind } },
+  });
+}
+
 server = createServer(async (request, response) => {
   if (request.method === "OPTIONS") {
     response.writeHead(204, { "access-control-allow-origin": "*", "access-control-allow-headers": "content-type" });
@@ -279,7 +287,7 @@ server = createServer(async (request, response) => {
     });
     response.end(responseBody);
   } catch (error) {
-    sendJson(response, 502, { ok: false, error: { code: "DAEMON_UNAVAILABLE", message: `${error}` } });
+    sendRpcError(response, 502, "DAEMON_UNAVAILABLE", `${error}`);
   }
 });
 

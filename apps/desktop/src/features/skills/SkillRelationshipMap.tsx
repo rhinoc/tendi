@@ -27,25 +27,57 @@ const GRAPH_LAYOUT = {
   damping: 0.8,
 } as const;
 
+export enum RelationshipGraphKind {
+  Session = "session",
+  SessionParent = "session-parent",
+  SessionChild = "session-child",
+  SkillUsed = "skill-used",
+  Wrapper = "wrapper",
+  Plugin = "plugin",
+  Remote = "remote",
+  System = "system",
+  Local = "local",
+}
+
 const RELATIONSHIP_KIND_LABELS = [
-  { kind: "session-parent", label: "Parent session" },
-  { kind: "session-child", label: "Child session" },
-  { kind: "skill-used", label: "Skill used" },
-  { kind: "wrapper", label: "Wrapper" },
-  { kind: "plugin", label: "Plugin" },
-  { kind: "remote", label: "Remote" },
-  { kind: "system", label: "System" },
-  { kind: "local", label: "Local" },
+  { kind: RelationshipGraphKind.SessionParent, label: "Parent session" },
+  { kind: RelationshipGraphKind.SessionChild, label: "Child session" },
+  { kind: RelationshipGraphKind.SkillUsed, label: "Skill used" },
+  { kind: RelationshipGraphKind.Wrapper, label: "Wrapper" },
+  { kind: RelationshipGraphKind.Plugin, label: "Plugin" },
+  { kind: RelationshipGraphKind.Remote, label: "Remote" },
+  { kind: RelationshipGraphKind.System, label: "System" },
+  { kind: RelationshipGraphKind.Local, label: "Local" },
 ] as const;
 
 export type RelationshipGraphNode = {
+  /** Stable graph identity. Session graphs use a synthetic id. */
+  id?: string;
   name: string;
   label?: string;
   description?: string;
   kind?: string;
   dependencies?: string[];
   dependents?: string[];
+  dependencyIds?: string[];
+  dependentIds?: string[];
 };
+
+function nodeKey(node: { id?: string; name: string }) {
+  return node.id?.trim() || node.name;
+}
+
+function resolveNodeKey(
+  skills: RelationshipGraphNode[],
+  id: string,
+): string | undefined {
+  return skills.find((skill) => nodeKey(skill) === id) ? id : undefined;
+}
+
+function matchesFocus(node: RelationshipGraphNode, focus?: string) {
+  if (!focus) return false;
+  return nodeKey(node) === focus || node.name === focus;
+}
 
 export type RelationshipGraphEdge = {
   from: string;
@@ -106,10 +138,10 @@ function hashString(value: string) {
 }
 
 function relationEdges(skills: RelationshipGraphNode[], explicitEdges?: RelationshipGraphEdge[]) {
-  const names = new Set(skills.map((skill) => skill.name));
+  const keys = new Set(skills.map((skill) => nodeKey(skill)));
   const edges = new Map<string, RelationshipEdge>();
   const addEdge = (from: string, to: string, suppliedKey?: string) => {
-    if (!names.has(from) || !names.has(to) || from === to) return;
+    if (!keys.has(from) || !keys.has(to) || from === to) return;
     const key = `${from}\u0000${to}`;
     if (!edges.has(key)) edges.set(key, { from, to, key: suppliedKey ?? key });
   };
@@ -120,11 +152,18 @@ function relationEdges(skills: RelationshipGraphNode[], explicitEdges?: Relation
   }
 
   for (const skill of skills) {
-    if (skill.dependencies) {
-      for (const dependency of skill.dependencies) addEdge(dependency, skill.name);
+    const selfKey = nodeKey(skill);
+    if (skill.dependencyIds) {
+      for (const dependency of skill.dependencyIds) {
+        const dependencyKey = resolveNodeKey(skills, dependency);
+        if (dependencyKey) addEdge(dependencyKey, selfKey);
+      }
     }
-    if (skill.dependents) {
-      for (const dependent of skill.dependents) addEdge(skill.name, dependent);
+    if (skill.dependentIds) {
+      for (const dependent of skill.dependentIds) {
+        const dependentKey = resolveNodeKey(skills, dependent);
+        if (dependentKey) addEdge(selfKey, dependentKey);
+      }
     }
   }
 
@@ -132,26 +171,27 @@ function relationEdges(skills: RelationshipGraphNode[], explicitEdges?: Relation
 }
 
 function connectedComponents(skills: RelationshipGraphNode[], edges: RelationshipEdge[]) {
-  const neighbors = new Map(skills.map((skill) => [skill.name, new Set<string>()]));
+  const neighbors = new Map(skills.map((skill) => [nodeKey(skill), new Set<string>()]));
   for (const edge of edges) {
     neighbors.get(edge.from)?.add(edge.to);
     neighbors.get(edge.to)?.add(edge.from);
   }
 
-  const byName = new Map(skills.map((skill) => [skill.name, skill]));
+  const byKey = new Map(skills.map((skill) => [nodeKey(skill), skill]));
   const visited = new Set<string>();
   const components: RelationshipGraphNode[][] = [];
   for (const skill of skills) {
-    if (visited.has(skill.name)) continue;
+    const selfKey = nodeKey(skill);
+    if (visited.has(selfKey)) continue;
     const component: RelationshipGraphNode[] = [];
-    const stack = [skill.name];
+    const stack = [selfKey];
     while (stack.length > 0) {
-      const name = stack.pop();
-      if (!name || visited.has(name)) continue;
-      visited.add(name);
-      const item = byName.get(name);
+      const key = stack.pop();
+      if (!key || visited.has(key)) continue;
+      visited.add(key);
+      const item = byKey.get(key);
       if (item) component.push(item);
-      for (const neighbor of neighbors.get(name) ?? []) {
+      for (const neighbor of neighbors.get(key) ?? []) {
         if (!visited.has(neighbor)) stack.push(neighbor);
       }
     }
@@ -170,7 +210,7 @@ function clusterComponents(skills: RelationshipGraphNode[], edges: RelationshipE
 }
 
 function isSessionNodeKind(kind?: string) {
-  return kind === "session" || kind?.startsWith("session-") === true;
+  return kind === RelationshipGraphKind.Session || kind?.startsWith("session-") === true;
 }
 
 function relationshipKindLabel(kind?: string) {
@@ -200,7 +240,7 @@ function buildGraph(
   compact = false,
 ): RelationshipGraph {
   const edges = relationEdges(skills, explicitEdges);
-  const degree = new Map(skills.map((skill) => [skill.name, 0]));
+  const degree = new Map(skills.map((skill) => [nodeKey(skill), 0]));
   for (const edge of edges) {
     degree.set(edge.from, (degree.get(edge.from) ?? 0) + 1);
     degree.set(edge.to, (degree.get(edge.to) ?? 0) + 1);
@@ -221,13 +261,13 @@ function buildGraph(
         y: centerY + Math.sin(angle) * Math.min(218, satelliteRadius * 0.54),
       };
     const ordered = [...cluster].sort((left, right) => {
-      if (left.name === focusName) return -1;
-      if (right.name === focusName) return 1;
-      const degreeDelta = (degree.get(right.name) ?? 0) - (degree.get(left.name) ?? 0);
+      if (matchesFocus(left, focusName)) return -1;
+      if (matchesFocus(right, focusName)) return 1;
+      const degreeDelta = (degree.get(nodeKey(right)) ?? 0) - (degree.get(nodeKey(left)) ?? 0);
       return degreeDelta || left.name.localeCompare(right.name);
     });
     const hub = ordered[0];
-    if (hub) positions.set(hub.name, clusterCenter);
+    if (hub) positions.set(nodeKey(hub), clusterCenter);
     if (ordered.length === 1) return;
 
     const ringRadius = clusterIndex === 0 || clusters.length === 1
@@ -235,9 +275,10 @@ function buildGraph(
       : Math.min(88, 22 + Math.sqrt(ordered.length) * 14);
     const horizontalSpread = compact ? 1.45 : 1.2;
     ordered.slice(1).forEach((skill, index) => {
+      const selfKey = nodeKey(skill);
       const nodeAngle = -Math.PI / 2 + (index / (ordered.length - 1)) * Math.PI * 2;
-      const jitter = 0.9 + (hashString(skill.name) % 15) / 100;
-      positions.set(skill.name, {
+      const jitter = 0.9 + (hashString(selfKey) % 15) / 100;
+      positions.set(selfKey, {
         x: clusterCenter.x + Math.cos(nodeAngle) * ringRadius * horizontalSpread * jitter,
         y: clusterCenter.y + Math.sin(nodeAngle) * ringRadius * jitter,
       });
@@ -245,12 +286,13 @@ function buildGraph(
   });
 
   const nodes = skills.map((skill) => {
-    const nodeDegree = degree.get(skill.name) ?? 0;
-    const position = positions.get(skill.name) ?? { x: centerX, y: centerY };
+    const selfKey = nodeKey(skill);
+    const nodeDegree = degree.get(selfKey) ?? 0;
+    const position = positions.get(selfKey) ?? { x: centerX, y: centerY };
     return {
       ...skill,
       degree: nodeDegree,
-      radius: skill.name === focusName
+      radius: matchesFocus(skill, focusName)
         ? compact
           ? Math.min(24, 13 + Math.sqrt(nodeDegree) * 2.2)
           : Math.min(16, 8 + Math.sqrt(nodeDegree) * 1.6)
@@ -285,7 +327,7 @@ function edgePath(from: LayoutNode, to: LayoutNode, key: string) {
 
 function relaxedNodes(nodes: LayoutNode[], edges: RelationshipEdge[]) {
   const positioned = nodes.map((node) => ({ ...node, velocityX: 0, velocityY: 0 }));
-  const indexByName = new Map(positioned.map((node, index) => [node.name, index]));
+  const indexByKey = new Map(positioned.map((node, index) => [nodeKey(node), index]));
   const maxDegree = Math.max(1, ...positioned.map((node) => node.degree));
   const minX = 34;
   const maxX = VIEWBOX_WIDTH - 34;
@@ -315,8 +357,8 @@ function relaxedNodes(nodes: LayoutNode[], edges: RelationshipEdge[]) {
     }
 
     for (const edge of edges) {
-      const fromIndex = indexByName.get(edge.from);
-      const toIndex = indexByName.get(edge.to);
+      const fromIndex = indexByKey.get(edge.from);
+      const toIndex = indexByKey.get(edge.to);
       if (fromIndex === undefined || toIndex === undefined) continue;
       const from = positioned[fromIndex];
       const to = positioned[toIndex];
@@ -441,11 +483,14 @@ export function SkillRelationshipMap({
     compact,
     focusName: focusName ?? "",
     nodes: graphNodes.map((node) => [
+      nodeKey(node),
       node.name,
       node.label ?? "",
       node.kind ?? "",
       node.dependencies,
       node.dependents,
+      node.dependencyIds,
+      node.dependentIds,
     ]),
     edges: edges?.map((edge) => [edge.from, edge.to, edge.key ?? ""]),
   }), [compact, edges, focusName, graphNodes]);
@@ -453,10 +498,10 @@ export function SkillRelationshipMap({
   const viewBox = useMemo(() => graphViewBox(graph.nodes, compact), [compact, graph.nodes]);
   const pannedViewBox = useMemo(() => zoomedViewBox(viewBox, zoom, pan), [pan, viewBox, zoom]);
   const renderedEdges = useMemo(() => {
-    const nodesByName = new Map(graph.nodes.map((node) => [node.name, node]));
+    const nodesByKey = new Map(graph.nodes.map((node) => [nodeKey(node), node]));
     return graph.edges.flatMap((edge) => {
-      const from = nodesByName.get(edge.from);
-      const to = nodesByName.get(edge.to);
+      const from = nodesByKey.get(edge.from);
+      const to = nodesByKey.get(edge.to);
       return from && to ? [{ key: edge.key, d: edgePath(from, to, edge.key), from: edge.from, to: edge.to }] : [];
     });
   }, [graph.edges, graph.nodes]);
@@ -647,27 +692,29 @@ export function SkillRelationshipMap({
       onOpenSkill(name);
     }
   };
+  const hasGraphNodes = graphNodes.length > 0;
 
   return (
     <section className={`skillRelationshipMap${compact ? " isCompact" : ""}`} aria-label="Skill relationships">
-      {loading && graphNodes.length === 0 ? (
+      {loading && !hasGraphNodes ? (
         <LoadingState label="Loading skill relationships" />
-      ) : error ? (
+      ) : error && !hasGraphNodes ? (
         <LoadErrorState message={error} onRetry={onRetry} />
-      ) : graphNodes.length === 0 ? (
+      ) : !hasGraphNodes ? (
         <div className="skillRelationshipEmpty">No skill relationships found.</div>
       ) : (
-        <div className="skillRelationshipCanvas" onWheel={handleWheel}>
-          <svg
-            className={`skillRelationshipSvg${isPanning ? " isPanning" : ""}`}
-            viewBox={pannedViewBox}
-            role="img"
-            aria-label={`${graphNodes.length} nodes and ${graph.edges.length} relationships`}
-            onPointerCancel={(event) => handlePointerUp(event, false)}
-            onPointerDown={handlePointerDown}
-            onPointerMove={handlePointerMove}
-            onPointerUp={handlePointerUp}
-          >
+        <div className="skillRelationshipContent">
+          <div className="skillRelationshipCanvas" onWheel={handleWheel}>
+            <svg
+              className={`skillRelationshipSvg${isPanning ? " isPanning" : ""}`}
+              viewBox={pannedViewBox}
+              role="img"
+              aria-label={`${graphNodes.length} nodes and ${graph.edges.length} relationships`}
+              onPointerCancel={(event) => handlePointerUp(event, false)}
+              onPointerDown={handlePointerDown}
+              onPointerMove={handlePointerMove}
+              onPointerUp={handlePointerUp}
+            >
             <g className="skillRelationshipEdges" aria-hidden="true">
               {renderedEdges.map((edge) => {
                 const active = !hoveredName || edge.from === hoveredName || edge.to === hoveredName;
@@ -683,8 +730,9 @@ export function SkillRelationshipMap({
             </g>
             <g className="skillRelationshipNodes">
               {renderedNodes.map((node) => {
-                const active = !connectedNames || connectedNames.has(node.name);
-                const labelOpacity = node.name === hoveredName ? 1 : active ? labelOpacityForNode(node, compact) : 0.16;
+                const selfKey = nodeKey(node);
+                const active = !connectedNames || connectedNames.has(selfKey);
+                const labelOpacity = selfKey === hoveredName ? 1 : active ? labelOpacityForNode(node, compact) : 0.16;
                 return (
                   <g
                     aria-label={`${relationshipKindLabel(node.kind) ? `${relationshipKindLabel(node.kind)}: ` : ""}${relationshipNodeLabel(node)}, ${node.degree} relationships`}
@@ -692,12 +740,12 @@ export function SkillRelationshipMap({
                     data-active={active}
                     data-clickable={Boolean(onOpenSkill)}
                     data-kind={node.kind}
-                    data-node-name={node.name}
-                    key={node.name}
+                    data-node-name={selfKey}
+                    key={selfKey}
                     onBlur={() => setHoveredName(null)}
-                    onFocus={() => setHoveredName(node.name)}
-                    onKeyDown={(event) => handleKeyDown(event, node.name)}
-                    onMouseEnter={() => setHoveredName(node.name)}
+                    onFocus={() => setHoveredName(selfKey)}
+                    onKeyDown={(event) => handleKeyDown(event, selfKey)}
+                    onMouseEnter={() => setHoveredName(selfKey)}
                     onMouseLeave={() => setHoveredName(null)}
                     role={onOpenSkill ? "button" : undefined}
                     tabIndex={onOpenSkill ? 0 : undefined}
@@ -718,7 +766,17 @@ export function SkillRelationshipMap({
                 );
               })}
             </g>
-          </svg>
+            </svg>
+          </div>
+          {loading ? (
+            <div className="skillRelationshipStatusOverlay" aria-live="polite">
+              <LoadingState label="Refreshing skill relationships" />
+            </div>
+          ) : error ? (
+            <div className="skillRelationshipStatusOverlay">
+              <LoadErrorState message={error} onRetry={onRetry} />
+            </div>
+          ) : null}
         </div>
       )}
     </section>

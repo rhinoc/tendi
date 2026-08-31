@@ -8,6 +8,7 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use toml::Value as TomlValue;
+use toml_edit::{DocumentMut, Item, Table, TableLike, Value as EditValue};
 use walkdir::WalkDir;
 
 use crate::{
@@ -45,7 +46,7 @@ pub struct McpSetEnabledRequest {
     pub server_path: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct McpScan {
     pub servers: Vec<McpServerRecord>,
     pub warnings: Vec<String>,
@@ -100,6 +101,7 @@ pub(crate) fn set_json_server_enabled(
     }
 
     let mut value = serde_json::from_str::<Value>(&text)?;
+    let before = value.clone();
     let updated = if request.server_path.is_empty() {
         update_json_server(
             &mut value,
@@ -120,7 +122,7 @@ pub(crate) fn set_json_server_enabled(
     if !updated {
         anyhow::bail!("matching MCP server was not found");
     }
-    let after = format!("{}\n", serde_json::to_string_pretty(&value)?);
+    let after = crate::json_edit::patch_json_text(&text, &before, &value)?;
 
     atomic_write(&request.path, &after)
 }
@@ -128,7 +130,7 @@ pub(crate) fn set_json_server_enabled(
 pub(crate) fn set_toml_server_enabled(
     request: &McpSetEnabledRequest,
     server_key: &str,
-    update_server: fn(&mut toml::map::Map<String, TomlValue>, bool) -> bool,
+    update_server: fn(&mut dyn TableLike, bool) -> bool,
 ) -> Result<()> {
     let _mutation = lock_mcp_mutation()?;
     let text = fs::read_to_string(&request.path)?;
@@ -136,7 +138,7 @@ pub(crate) fn set_toml_server_enabled(
         anyhow::bail!("MCP source changed");
     }
 
-    let mut value = toml::from_str::<TomlValue>(&text)?;
+    let mut value = text.parse::<DocumentMut>()?;
     if !update_toml_server(
         &mut value,
         server_key,
@@ -146,7 +148,7 @@ pub(crate) fn set_toml_server_enabled(
     ) {
         anyhow::bail!("matching MCP server was not found");
     }
-    let after = toml::to_string_pretty(&value)?;
+    let after = crate::fsutil::preserve_newline_style(&text, value.to_string());
 
     atomic_write(&request.path, &after)
 }
@@ -170,15 +172,20 @@ pub(crate) fn merge_json_server_entry_at_path(
     name: &str,
     entry: &Value,
 ) -> Result<String> {
-    let mut value = if path.is_file() {
-        serde_json::from_str::<Value>(&fs::read_to_string(path)?)?
+    let (source, mut value) = if path.is_file() {
+        let source = fs::read_to_string(path)?;
+        (Some(source.clone()), serde_json::from_str::<Value>(&source)?)
     } else {
-        Value::Object(serde_json::Map::new())
+        (None, Value::Object(serde_json::Map::new()))
     };
+    let before = value.clone();
     let servers = json_object_at_path_mut_or_create(&mut value, server_path)
         .ok_or_else(|| anyhow::anyhow!("MCP server collection must be a JSON object"))?;
     servers.insert(name.to_string(), entry.clone());
-    Ok(format!("{}\n", serde_json::to_string_pretty(&value)?))
+    match source {
+        Some(source) => crate::json_edit::patch_json_text(&source, &before, &value),
+        None => Ok(format!("{}\n", serde_json::to_string_pretty(&value)?)),
+    }
 }
 
 pub(crate) fn read_toml_server_entry(path: &Path, server_key: &str, name: &str) -> Result<Value> {
@@ -200,25 +207,115 @@ pub(crate) fn merge_toml_server_entry(
     name: &str,
     entry: &Value,
 ) -> Result<String> {
-    let mut value = if path.is_file() {
-        toml::from_str::<TomlValue>(&fs::read_to_string(path)?)?
+    let (source, mut value) = if path.is_file() {
+        let source = fs::read_to_string(path)?;
+        (Some(source.clone()), source.parse::<DocumentMut>()?)
     } else {
-        TomlValue::Table(toml::map::Map::new())
+        (None, DocumentMut::new())
     };
-    let root = value
-        .as_table_mut()
-        .ok_or_else(|| anyhow::anyhow!("MCP source root must be a TOML table"))?;
+    let root = value.as_table_mut();
     let servers = root
-        .entry(server_key.to_string())
-        .or_insert_with(|| TomlValue::Table(toml::map::Map::new()))
-        .as_table_mut()
+        .entry(server_key)
+        .or_insert(Item::Table(Table::new()))
+        .as_table_like_mut()
         .ok_or_else(|| anyhow::anyhow!("MCP server collection must be a TOML table"))?;
-    servers.insert(
-        name.to_string(),
-        TomlValue::try_from(entry.clone())
-            .map_err(|error| anyhow::anyhow!("MCP server entry is not TOML-compatible: {error}"))?,
-    );
-    toml::to_string_pretty(&value).map_err(Into::into)
+    let replacement = toml_edit::ser::to_document(
+        &TomlValue::try_from(entry.clone()).map_err(|error| {
+            anyhow::anyhow!("MCP server entry is not TOML-compatible: {error}")
+        })?,
+    )?
+    .into_item();
+    if let Some(existing) = servers.get_mut(name) {
+        merge_toml_item(existing, &replacement);
+    } else {
+        servers.insert(name, replacement);
+    }
+    Ok(source.map_or_else(|| value.to_string(), |source| {
+        crate::fsutil::preserve_newline_style(&source, value.to_string())
+    }))
+}
+
+fn merge_toml_item(target: &mut Item, replacement: &Item) {
+    if let (Some(target), Some(replacement)) =
+        (target.as_table_like_mut(), replacement.as_table_like())
+    {
+        merge_toml_table_like(target, replacement);
+    } else if !toml_items_equal(target, replacement) {
+        *target = replacement.clone();
+    }
+}
+
+fn merge_toml_table_like(target: &mut dyn TableLike, replacement: &dyn TableLike) {
+    let replacement_items = replacement
+        .iter()
+        .map(|(key, item)| (key.to_string(), item.clone()))
+        .collect::<Vec<_>>();
+    let replacement_keys = replacement_items
+        .iter()
+        .map(|(key, _)| key.as_str())
+        .collect::<std::collections::HashSet<_>>();
+    let existing_keys = target
+        .iter()
+        .map(|(key, _)| key.to_string())
+        .collect::<Vec<_>>();
+    for key in existing_keys {
+        if !replacement_keys.contains(key.as_str()) {
+            target.remove(&key);
+        }
+    }
+    for (key, item) in replacement_items {
+        if let Some(existing) = target.get_mut(&key) {
+            merge_toml_item(existing, &item);
+        } else {
+            target.insert(&key, item);
+        }
+    }
+}
+
+fn toml_items_equal(left: &Item, right: &Item) -> bool {
+    match (left, right) {
+        (Item::Value(left), Item::Value(right)) => toml_values_equal(left, right),
+        (Item::Table(left), Item::Table(right)) => toml_tables_equal(left, right),
+        (Item::ArrayOfTables(left), Item::ArrayOfTables(right)) => {
+            left.len() == right.len()
+                && (0..left.len()).all(|index| {
+                    left.get(index).zip(right.get(index)).is_some_and(|(left, right)| {
+                        toml_tables_equal(left, right)
+                    })
+                })
+        }
+        _ => false,
+    }
+}
+
+fn toml_values_equal(left: &EditValue, right: &EditValue) -> bool {
+    match (left, right) {
+        (EditValue::String(left), EditValue::String(right)) => left.value() == right.value(),
+        (EditValue::Integer(left), EditValue::Integer(right)) => left.value() == right.value(),
+        (EditValue::Float(left), EditValue::Float(right)) => left.value() == right.value(),
+        (EditValue::Boolean(left), EditValue::Boolean(right)) => left.value() == right.value(),
+        (EditValue::Datetime(left), EditValue::Datetime(right)) => left.value() == right.value(),
+        (EditValue::Array(left), EditValue::Array(right)) => {
+            left.len() == right.len()
+                && left
+                    .iter()
+                    .zip(right.iter())
+                    .all(|(left, right)| toml_values_equal(left, right))
+        }
+        (EditValue::InlineTable(left), EditValue::InlineTable(right)) => {
+            toml_tables_equal(left, right)
+        }
+        _ => false,
+    }
+}
+
+fn toml_tables_equal(left: &dyn TableLike, right: &dyn TableLike) -> bool {
+    left.len() == right.len()
+        && left.iter().all(|(key, item)| {
+            right
+                .get(key)
+                .is_some_and(|other| toml_items_equal(item, other))
+        })
 }
 
 fn lock_mcp_mutation() -> Result<MutexGuard<'static, ()>> {
@@ -299,19 +396,20 @@ fn json_object_at_path_mut_or_create<'a>(
 }
 
 fn update_toml_server(
-    value: &mut TomlValue,
+    value: &mut DocumentMut,
     server_key: &str,
     name: &str,
     enabled: bool,
-    update_server: fn(&mut toml::map::Map<String, TomlValue>, bool) -> bool,
+    update_server: fn(&mut dyn TableLike, bool) -> bool,
 ) -> bool {
-    let Some(root) = value.as_table_mut() else {
+    let Some(servers) = value
+        .as_table_mut()
+        .get_mut(server_key)
+        .and_then(Item::as_table_like_mut)
+    else {
         return false;
     };
-    let Some(servers) = root.get_mut(server_key).and_then(TomlValue::as_table_mut) else {
-        return false;
-    };
-    let Some(spec) = servers.get_mut(name).and_then(TomlValue::as_table_mut) else {
+    let Some(spec) = servers.get_mut(name).and_then(Item::as_table_like_mut) else {
         return false;
     };
     update_server(spec, enabled)
@@ -685,7 +783,59 @@ enabled = true
         })
         .expect_err("stale source should be rejected");
         assert!(error.to_string().contains("MCP source changed"));
-        assert!(fs::read_to_string(&path).unwrap().ends_with("\n\n"));
+        let unchanged = fs::read_to_string(&path).unwrap();
+        assert!(unchanged.ends_with('\n'));
+        assert!(!unchanged.ends_with("\n\n"));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn toggles_json_mcp_server_without_reformatting_crlf_source() {
+        let root = temp_root("toggle-json-format");
+        fs::create_dir_all(&root).expect("create temp root");
+        let path = root.join("mcp.json");
+        let source = "{\r\n  \"mcpServers\": {\r\n    \"demo\": { \"command\": \"demo\", \"enabled\": false },\r\n    \"kept\": {\"url\": \"https://example.com\"}\r\n  },\r\n  \"other\": true\r\n}\r\n";
+        fs::write(&path, source).expect("write config");
+
+        set_server_enabled(McpSetEnabledRequest {
+            agent: AgentKind::Claude,
+            path: path.clone(),
+            expected_trust_hash: sha256_text(source),
+            name: "demo".to_string(),
+            enabled: true,
+            server_path: Vec::new(),
+        })
+        .expect("enable MCP server");
+
+        assert_eq!(
+            fs::read_to_string(&path).expect("read updated config"),
+            source.replace("\"enabled\": false", "\"enabled\": true")
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn toggles_toml_mcp_server_without_reformatting_crlf_source() {
+        let root = temp_root("toggle-toml-format");
+        fs::create_dir_all(&root).expect("create temp root");
+        let path = root.join("config.toml");
+        let source = "# keep\r\n[mcp_servers.demo]\r\ncommand = 'demo' # command\r\ndisabled = true\r\n\r\n[other]\r\nvalue = 1\r\n";
+        fs::write(&path, source).expect("write config");
+
+        set_server_enabled(McpSetEnabledRequest {
+            agent: AgentKind::Codex,
+            path: path.clone(),
+            expected_trust_hash: sha256_text(source),
+            name: "demo".to_string(),
+            enabled: true,
+            server_path: Vec::new(),
+        })
+        .expect("enable MCP server");
+
+        assert_eq!(
+            fs::read_to_string(&path).expect("read updated config"),
+            source.replace("disabled = true", "disabled = false")
+        );
         let _ = fs::remove_dir_all(root);
     }
 
@@ -838,6 +988,29 @@ enabled = true
         assert_eq!(
             value["mcp_servers"]["kept"]["url"],
             TomlValue::String("https://example.com/mcp".to_string())
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn merges_toml_mcp_server_without_reformatting_unchanged_fields() {
+        let root = temp_root("merge-toml-format");
+        fs::create_dir_all(&root).expect("create temp root");
+        let path = root.join("config.toml");
+        let source = "# keep\r\n[mcp_servers.selected]\r\ncommand = 'old'\r\ntype = 'stdio' # keep this field\r\n\r\n[mcp_servers.kept]\r\nurl = 'https://example.com/mcp'\r\n";
+        fs::write(&path, source).expect("write config");
+
+        let merged = merge_toml_server_entry(
+            &path,
+            "mcp_servers",
+            "selected",
+            &serde_json::json!({"command": "new", "type": "stdio"}),
+        )
+        .expect("merge selected server");
+
+        assert_eq!(
+            merged,
+            source.replace("command = 'old'", "command = \"new\"")
         );
         let _ = fs::remove_dir_all(root);
     }

@@ -1,72 +1,12 @@
-import { lazy, Suspense, useCallback, useDeferredValue, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { getCurrentWindow } from "@tauri-apps/api/window";
+import { lazy, memo, Suspense, useCallback, useDeferredValue, useEffect, useLayoutEffect, useMemo, useRef, useState, type ComponentProps } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { Group as PanelGroup, Panel, usePanelRef } from "react-resizable-panels";
-import { Accordion, Checkbox, ContextMenu, Dialog, DropdownMenu, Select } from "radix-ui";
-import {
-  ArrowLeft,
-  Bot,
-  Bold,
-  Check,
-  ChevronDown,
-  ChevronLeft,
-  ChevronRight,
-  CircleDot,
-  Code,
-  Code2,
-  Columns3,
-  Copy,
-  ExternalLink,
-  FilePlus,
-  FileText,
-  Folder,
-  FolderOpen,
-  FolderPlus,
-  GitBranch,
-  Globe,
-  Hammer,
-  Heading1,
-  Info,
-  Italic,
-  Link,
-  List,
-  ListOrdered,
-  ListTodo,
-  Minus,
-  MoreHorizontal,
-  PackagePlus,
-  Pencil,
-  PanelLeftClose,
-  PanelLeftOpen,
-  PanelRightClose,
-  PanelRightOpen,
-  Plus,
-  Quote,
-  RefreshCw,
-  Rows3,
-  Search,
-  Save,
-  Settings,
-  Share2,
-  ShieldCheck,
-  Sparkles,
-  Table as TableIcon,
-  TableColumnsSplit,
-  TableRowsSplit,
-  TerminalSquare,
-  Trash2,
-  Unlink,
-  Wrench,
-  X,
-} from "lucide-react";
-import stepfunIcon from "@lobehub/icons-static-svg/icons/stepfun-color.svg";
-import traeIcon from "@lobehub/icons-static-svg/icons/trae-color.svg";
+import { Dialog } from "radix-ui";
 
-import type { ComponentProps } from "react";
-import { applyAppearance, applyFontFamily, listenForSystemAppearanceChange, normalizeAppearance, normalizeFontFamily, normalizeThemePreferences, readCachedAppearance, readCachedFontFamily, readCachedThemePreferences, type Appearance, type ColorTheme, type FontFamily, type ThemePreferences } from "./lib/appearance.ts";
-import { applyAppIcon, normalizeAppIcon, readCachedAppIcon, type AppIcon } from "./lib/app-icon.ts";
-import { COLLAPSED_SIDEBAR_SIZE, DOMAIN_KEYS, SIDEBAR_SIZE, SkillChangeCommand, SkillVisibility, TauriCommand, UPDATE_AVAILABLE_EVENT, agentIdentityKey, applySessionDelta, applyVisibilityState, clearSkillUpdateAvailability, dialogCopy, hookSourcePath, hookTrustHash, invokeCommand, isConcreteAgent, isTauriRuntime, logger, mergeSessionRows, navItems, normalizeConfigProfiles, normalizeDomainRows, normalizeMissingSessionProjectPolicy, normalizePrompt, normalizeSession, normalizeSessionResumeTarget, normalizeSessionSkillLink, normalizeTranscriptLocatorPage, normalizeTranscriptPage, normalizeTranscriptSearchResult, promptTitleFromBody, recomputeSources, replaceSkillReportPreservingUpdates, ruleAgents, safeInvoke, sameAgent, sessionAppDeepLink, sessionIdentity, sessionIdentityRecordKey, sessionLaunchPayload, sessionLogicalIdentity, sessionResumeTargetForAgent, skillChangeActionLabel, skillChangeDescription, skillChangeBusyLabel, skillChangeLoadingCopy, skillChangeTitle, subscribeDaemonEvents } from "./lib/index.ts";
-import type { BundledSkillStatus, CliInstallStatus, DaemonEvent, DesktopUpdateState, DomainKey, HookRecord, McpRecord, MissingSessionProjectPolicy, NormalizedSkill, ProjectSummary, SessionIdentityRecord, SessionProjectSummary, SessionRecord, SessionResumeOutcome, SessionResumeTarget, SessionSkillLinkRecord, SettingsPayload, TranscriptLocatorPage, TranscriptPage, TranscriptSearchResult, TranscriptSearchScopes, UpdateCheckResult } from "./lib/index.ts";
+import { Appearance, applyAppearance, applyFontFamily, listenForSystemAppearanceChange, type ColorTheme, type ThemePreferences } from "./lib/appearance.ts";
+import { applyAppIcon, type AppIcon } from "./lib/app-icon.ts";
+import { AppPage, assertRuntimeEventPayload, AsyncStatus, COLLAPSED_SIDEBAR_SIZE, DOMAIN_KEYS, DesktopUpdateStatus, RuntimeDomainKey, SessionResumeOutcomeStatus, SessionResumeTarget, SIDEBAR_SIZE, SkillChangeCommand, SkillVisibility, TauriCommand, UPDATE_AVAILABLE_EVENT, UpdateCheckStatus, agentIdentityKey, findSkillBySelector, dialogCopy, hookSourcePath, hookTrustHash, isConcreteAgent, isTauriRuntime, logger, navItems, normalizeSessionSkillLink, promptTitleFromBody, sessionAppDeepLink, sessionIdentity, sessionLaunchPayload, sessionSourceExternalKey, sessionResumeTargetForAgent, skillChangeActionLabel, skillChangeDescription, skillChangeLoadingCopy, skillChangeTitle } from "./lib/index.ts";
+import type { BundledSkillStatus, DesktopUpdateState, DomainKey, HookRecord, McpRecord, NormalizedSkill, ProjectSummary, SessionRecord, SessionResumeOutcome, UpdateCheckResult } from "./lib/index.ts";
 import { sortSidebarSources, type OrderedSidebarSource } from "./lib/sidebar-sources.ts";
 import { mcpColumns } from "./lib/tableColumns.tsx";
 import { PlaceholderView } from "./components/shared/PlaceholderView.tsx";
@@ -77,7 +17,7 @@ import { DialogStatefulButton } from "./components/shared/DialogStatefulButton.t
 import { LoadingState } from "./components/shared/LoadingState.tsx";
 import { Sidebar } from "./components/shared/Sidebar.tsx";
 import { Toast } from "./components/shared/Toast.tsx";
-import type { RawSkillRecord, SkillInstallResult, WrapperArgs } from "./lib/index.ts";
+import type { RawDomainRow, RawSkillRecord, SkillInstallResult, WrapperArgs } from "./lib/index.ts";
 import { ConfigView } from "./views/ConfigView.tsx";
 import { DataListView } from "./views/McpView.tsx";
 import { HooksView } from "./views/HooksView.tsx";
@@ -86,21 +26,74 @@ import { RulesView } from "./views/RulesView.tsx";
 import { SessionsView } from "./views/SessionsView.tsx";
 import { SkillsView } from "./views/SkillsView.tsx";
 import { SettingsView } from "./features/settings/SettingsView.tsx";
+import { UpdateNotesDialog } from "./features/settings/UpdateNotesDialog.tsx";
 import { SkillEditorView } from "./features/skills/SkillEditorView.tsx";
 import { OverviewView } from "./views/OverviewView.tsx";
-import { desktopStore, selectCatalogCountErrors, selectCatalogCountLoadedDomains, selectCatalogCounts, selectHookReviewCount, selectSessionListStatus, selectSkillUpdateCount, useDesktopStore, type AgentTargetOption, type SkillIndexStatus, type SkillUpdateReport } from "./store/desktop-store.ts";
+import { desktopStore, selectSessionListStatus, SessionListStatus, useDesktopStore, type AgentTargetOption, type SkillIndexStatus } from "./store/desktop-store.ts";
+import { selectCatalogView } from "./controllers/catalog-controller.ts";
+import { selectOverviewCounts, selectOverviewHookReviewCount, selectOverviewSkillUpdateCount } from "./controllers/overview-controller.ts";
+import { normalizeSessionRows, sessionSearchCandidateRows } from "./controllers/session-controller.ts";
+import {
+  applySkillChangeIfAvailable,
+  checkForUpdates as checkForUpdatesCommand,
+  deleteHook as deleteHookCommand,
+  deleteHooks as deleteHooksCommand,
+  deleteRules as deleteRulesCommand,
+  dismissBundledSkillPrompt as dismissBundledSkillPromptCommand,
+  invokeAgentsList,
+  invokeAnalyticsRevision,
+  invokeDomainList,
+  invokeProjectList,
+  invokeSessionSkillLinks,
+  invokeSessionProjectList,
+  inferSessionResumeTarget,
+  installBundledSkill as installBundledSkillCommand,
+  installCli,
+  installUpdate as installUpdateCommand,
+  loadSessionTranscript,
+  loadSessionTranscriptLocator,
+  openUrl,
+  readBundledSkillStatus,
+  readSkillTargets,
+  readSettings,
+  readSkillIndexStatus as readSkillIndexStatusCommand,
+  runSkillIndex as runSkillIndexCommand,
+  searchSessionTranscript,
+  syncSkillBackup,
+  invokeSessionSearch,
+  previewSkillChange,
+  previewSkillChangeIfAvailable,
+  requestSkillUpdates,
+  resumeSessionInTerminal,
+  SkillUpdateCheckState,
+  reviewHook as reviewHookCommand,
+  savePrompt,
+  setHookEnabled as setHookEnabledCommand,
+  setHooksEnabled as setHooksEnabledCommand,
+  setMcpEnabled as setMcpEnabledCommand,
+  setMcpEnabledMany as setMcpEnabledManyCommand,
+} from "./lib/runtime-gateway.ts";
+import { applySkillChangeAndCommit, commitHookCommandResult, commitMcpCommandResult, commitRuleCommandResult, commitSkillChangeResult, commitSkillRows, createSkillCatalogRuntime } from "./lib/runtime-workflows.ts";
+import type { SkillChangeArgs, SkillChangeResponse } from "./lib/runtime-gateway.ts";
+import { useSessionRuntimeController } from "./controllers/session-runtime-controller.ts";
 
-type ViewId =
-  | "overview"
-  | "skills"
-  | "prompts"
-  | "sessions"
-  | "rules"
-  | "hooks"
-  | "mcp"
-  | "config"
-  | "settings"
-  | "skillDetail";
+const MemoSidebar = memo(Sidebar) as typeof Sidebar;
+const MemoSkillEditorView = memo(SkillEditorView);
+const MemoSkillsView = memo(SkillsView);
+const MemoSessionsView = memo(SessionsView);
+const MemoPromptsView = memo(PromptsView);
+const MemoRulesView = memo(RulesView);
+const MemoHooksView = memo(HooksView);
+const MemoDataListView = memo(DataListView);
+const MemoConfigView = memo(ConfigView);
+const MemoSettingsView = memo(SettingsView);
+
+const searchSessionRecords = async (query: string, candidates: readonly SessionRecord[]): Promise<SessionRecord[]> => {
+  const rows = await invokeSessionSearch(query, sessionSearchCandidateRows(candidates));
+  return normalizeSessionRows(rows);
+};
+
+type ViewId = AppPage;
 
 const loadConfirmSkillChangesDialog = () => import("./features/skills/ConfirmSkillChangesDialog.tsx");
 const loadBundledSkillInstallDialog = () => import("./features/skills/BundledSkillInstallDialog.tsx");
@@ -142,63 +135,37 @@ function SkillChangeDialogFallback({
           </>
         ) : (
           <>
-            <p id="skill-changes-loading-description" className="dialogVisuallyHidden">
-              {skillChangeLoadingCopy.description}
+            <p id="skill-changes-loading-description" className="confirmDialogDescription">
+              {skillChangeDescription(command)}
             </p>
             <LoadingState className="skillUpdatePreviewLoading" label={skillChangeLoadingCopy.previewLabel} />
           </>
         )}
       </div>
-      {isDelete ? (
-        <div className="confirmDialogActions">
-          <DialogActionButton variant="secondary" onClick={() => onOpenChange(false)}>Cancel</DialogActionButton>
-          <DialogStatefulButton state="idle" variant="danger" aria-label={actionLabel} onClick={onConfirm}>
-            {actionLabel}
-          </DialogStatefulButton>
-        </div>
-      ) : null}
+      <div className="confirmDialogActions">
+        <DialogActionButton variant="secondary" onClick={() => onOpenChange(false)}>Cancel</DialogActionButton>
+        <DialogStatefulButton
+          state={AsyncStatus.Idle}
+          variant={isDelete ? "danger" : "primary"}
+          aria-label={actionLabel}
+          onClick={onConfirm}
+          disabled={!isDelete}
+        >
+          {actionLabel}
+        </DialogStatefulButton>
+      </div>
     </DialogShell>
   );
 }
 
-const SESSION_EVENT_FLUSH_MS = 200;
 const AUTO_UPDATE_CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000;
 const AUTO_UPDATE_LAST_CHECK_KEY = "tendi-update-last-check-at";
 
-type SkillPreview = {
-  summary?: string;
-  plan?: Record<string, unknown>;
-  previewId?: string;
-  refreshRequired?: boolean;
-  skills?: RawSkillRecord[];
-};
-type SkillRefreshResult = { skills: RawSkillRecord[]; updateCheck?: string; updates?: SkillUpdateReport[] };
-
-type SkillUpdateCheckEvent = {
-  status: "completed" | "failed";
-  skills: RawSkillRecord[] | null;
-  updates: SkillUpdateReport[];
-  error: string | null;
-};
-
-type SessionScanEvent = {
-  generation: number;
-  phase: "recent" | "backfill" | "watch" | "error";
-  upserts: Array<Record<string, unknown>>;
-  deleted: SessionIdentityRecord[];
-  scanned: number;
-  complete: boolean;
-  error: string | null;
-};
-
-type SessionScanStartResult = {
-  generation: number;
-  started: boolean;
-};
+type SkillPreview = SkillChangeResponse;
 
 type PendingSkillChange = {
   command: SkillChangeCommand;
-  args: Record<string, unknown>;
+  args: SkillChangeArgs;
   names: string[];
   preview?: SkillPreview | null;
   previewError?: string;
@@ -271,27 +238,92 @@ function hookDeleteArgs(hook: HookRecord) {
   };
 }
 
-const domainListCommands: Record<DomainKey, TauriCommand> = {
-  skills: TauriCommand.SkillsList,
-  prompts: TauriCommand.PromptsList,
-  sessions: TauriCommand.SessionsList,
-  rules: TauriCommand.RulesList,
-  hooks: TauriCommand.HooksList,
-  mcp: TauriCommand.McpList,
-};
-
-function isDomainKey(value: string): value is DomainKey {
-  return value in domainListCommands;
+function hookSetEnabledArgs(hook: HookRecord, enabled: boolean) {
+  return {
+    ...hookDeleteArgs(hook),
+    enabled,
+  };
 }
 
-function isDetailView(value: ViewId): value is "skillDetail" {
-  return value === "skillDetail";
+function mcpSetEnabledArgs(server: McpRecord, enabled: boolean) {
+  return {
+    agent: server.agent,
+    path: server.path,
+    expectedTrustHash: server.trust_hash,
+    name: server.name,
+    enabled,
+    serverPath: server.server_path ?? [],
+  };
+}
+
+function isDomainKey(value: string): value is DomainKey {
+  return (DOMAIN_KEYS as readonly string[]).includes(value);
+}
+
+function domainForView(value: ViewId): DomainKey | null {
+  switch (value) {
+    case AppPage.Skills:
+      return RuntimeDomainKey.Skills;
+    case AppPage.Prompts:
+      return RuntimeDomainKey.Prompts;
+    case AppPage.Sessions:
+      return RuntimeDomainKey.Sessions;
+    case AppPage.Rules:
+      return RuntimeDomainKey.Rules;
+    case AppPage.Hooks:
+      return RuntimeDomainKey.Hooks;
+    case AppPage.Mcp:
+      return RuntimeDomainKey.Mcp;
+    case AppPage.SkillDetail:
+      return RuntimeDomainKey.Skills;
+    default:
+      return null;
+  }
+}
+
+function viewForDomain(domain: DomainKey): ViewId {
+  switch (domain) {
+    case RuntimeDomainKey.Skills:
+      return AppPage.Skills;
+    case RuntimeDomainKey.Prompts:
+      return AppPage.Prompts;
+    case RuntimeDomainKey.Sessions:
+      return AppPage.Sessions;
+    case RuntimeDomainKey.Rules:
+      return AppPage.Rules;
+    case RuntimeDomainKey.Hooks:
+      return AppPage.Hooks;
+    case RuntimeDomainKey.Mcp:
+      return AppPage.Mcp;
+  }
+}
+
+function isDetailView(value: ViewId): value is typeof AppPage.SkillDetail {
+  return value === AppPage.SkillDetail;
 }
 
 export function App() {
-  const storeState = useDesktopStore((state) => state);
-  const { catalogs, skillUpdates, sessions, analytics } = storeState;
+  const catalogs = useDesktopStore((state) => state.catalogs);
+  const skillUpdates = useDesktopStore((state) => state.skillUpdates);
+  const sessionRefreshError = useDesktopStore((state) => state.sessions.refreshError);
+  const workspace = useDesktopStore((state) => state.workspace);
+  const appSettings = useDesktopStore((state) => state.settings);
   const data = catalogs.data;
+  const projects = workspace.projects;
+  const sessionProjects = workspace.sessionProjects;
+  const {
+    appearance,
+    themePreferences,
+    fontFamily,
+    appIcon,
+    terminal,
+    editor,
+    additionalSessionRoots,
+    developerMode,
+    configProfiles,
+    missingSessionProjectPolicy,
+    sessionResumeTarget,
+  } = appSettings.values;
   const agentTargets = catalogs.agentTargets;
   const loadingDomains = catalogs.loadingDomains;
   const domainErrors = catalogs.errors;
@@ -299,22 +331,18 @@ export function App() {
   const checkingSkillUpdates = skillUpdates.checking;
   const skillUpdateError = skillUpdates.error;
   const skillIndexStatus = skillUpdates.indexStatus;
-  const analyticsRevision = analytics.revision;
-  const analyticsRevisionReady = analytics.ready;
-  const analyticsRevisionError = analytics.error;
-  const sessionListStatus = selectSessionListStatus(storeState);
-  const sessionListError = sessionListStatus === "error" ? SESSION_LOAD_ERROR : "";
-  const sessionRefreshError = sessions.refreshError;
-  const [view, setView] = useState<ViewId>("overview");
+  const sessionListStatus = useDesktopStore(selectSessionListStatus);
+  const sessionListError = sessionListStatus === SessionListStatus.Error ? SESSION_LOAD_ERROR : "";
+  const [view, setView] = useState<ViewId>(AppPage.Overview);
   const deferredView = useDeferredValue(view);
   const contentView = isDetailView(view)
     ? view
     : isDetailView(deferredView) ? view : deferredView;
-  const [activeSkillName, setActiveSkillName] = useState<string | null>(null);
+  const [activeSkillId, setActiveSkillId] = useState<string | null>(null);
   const activeSkill = useMemo(() => {
-    if (!activeSkillName) return null;
-    return data.skills.find((item) => item.name === activeSkillName) ?? null;
-  }, [activeSkillName, data.skills]);
+    if (!activeSkillId) return null;
+    return findSkillBySelector(data.skills, activeSkillId) ?? null;
+  }, [activeSkillId, data.skills]);
   const [activeSessionKey, setActiveSessionKey] = useState("");
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [agentFilter, setAgentFilter] = useState("All");
@@ -323,97 +351,70 @@ export function App() {
   const [bundledSkillBusy, setBundledSkillBusy] = useState(false);
   const [bundledSkillError, setBundledSkillError] = useState("");
   const [applyingSkillChange, setApplyingSkillChange] = useState(false);
-  const [appearance, setAppearance] = useState<Appearance>(() => readCachedAppearance());
-  const [themePreferences, setThemePreferences] = useState<ThemePreferences>(() => readCachedThemePreferences());
-  const [fontFamily, setFontFamily] = useState<FontFamily>(() => readCachedFontFamily());
-  const [appIcon, setAppIcon] = useState<AppIcon>(() => readCachedAppIcon());
-  const [terminal, setTerminal] = useState("auto");
-  const [editor, setEditor] = useState("vscode");
-  const [additionalSessionRoots, setAdditionalSessionRoots] = useState<string[]>([]);
-  const [developerMode, setDeveloperMode] = useState(false);
-  const [projects, setProjects] = useState<ProjectSummary[]>([]);
-  const [sessionProjects, setSessionProjects] = useState<SessionProjectSummary[]>([]);
-  const [configProfiles, setConfigProfiles] = useState<Record<string, string>>({});
-  const [missingSessionProjectPolicy, setMissingSessionProjectPolicy] = useState<MissingSessionProjectPolicy>("show");
-  const [desktopUpdate, setDesktopUpdate] = useState<DesktopUpdateState>({ status: "idle" });
+  const [desktopUpdate, setDesktopUpdate] = useState<DesktopUpdateState>({ status: DesktopUpdateStatus.Idle });
   const [updateNoticeDismissed, setUpdateNoticeDismissed] = useState(false);
-  const [sessionResumeTarget, setSessionResumeTarget] = useState<SessionResumeTarget>("auto");
-  const [settingsLoading, setSettingsLoading] = useState(true);
-  const [settingsLoadError, setSettingsLoadError] = useState("");
+  const [updateNotesOpen, setUpdateNotesOpen] = useState(false);
   const changeAppIcon = useCallback((nextAppIcon: AppIcon) => {
-    setAppIcon(nextAppIcon);
+    desktopStore.actions.patchSettings({ appIcon: nextAppIcon });
     void applyAppIcon(nextAppIcon);
   }, []);
   const appearanceChangeRevision = useRef(0);
   const domainLoadInFlight = useRef(new Map<DomainKey, Promise<void>>());
-  const promptsRefreshInFlight = useRef<Promise<unknown[]> | null>(null);
-  const sessionsRefreshInFlight = useRef<Promise<unknown> | null>(null);
+  const promptsRefreshInFlight = useRef<Promise<RawDomainRow[]> | null>(null);
   const skillIndexRunInFlight = useRef<Promise<SkillIndexStatus> | null>(null);
   const skillIndexStatusRefreshInFlight = useRef<Promise<SkillIndexStatus | null> | null>(null);
-  const sessionResumeTargetRequests = useRef(new Map<string, Promise<"terminal" | "app">>());
-  const sessionEventReady = useRef<Promise<void>>(Promise.resolve());
-  const sessionEventFlushTimer = useRef<number | undefined>(undefined);
-  const sessionScanGeneration = useRef(0);
-  const completedSessionScans = useRef(new Set<number>());
-  const sessionScanWaiters = useRef(new Map<number, Array<() => void>>());
-  const pendingRecentSessions = useRef(new Map<string, SessionRecord>());
-  const pendingWatchSessions = useRef(new Map<string, SessionRecord>());
-  const pendingDeletedSessions = useRef(new Map<string, SessionIdentityRecord>());
+  const sessionResumeTargetRequests = useRef(new Map<string, Promise<Exclude<SessionResumeTarget, SessionResumeTarget.Auto>>>());
   const updateOperationInFlight = useRef(false);
   const settingsLoadRequest = useRef(0);
   const sidebarPanelRef = usePanelRef();
-  const skillListRevision = useRef(0);
-  const skillListInFlight = useRef<Promise<RawSkillRecord[] | null> | null>(null);
-  const forcedSkillListInFlight = useRef<Promise<RawSkillRecord[] | null> | null>(null);
-  const skillRefreshInFlight = useRef<Promise<SkillRefreshResult | null> | null>(null);
   const skillUpdateCheckRevision = useRef(0);
   const skillUpdateCheckInFlight = useRef<Promise<void> | null>(null);
   const skillUpdateCheckActive = useRef(false);
   const refreshSessionProjects = useCallback(async () => {
-    const result = await safeInvoke<unknown[]>(TauriCommand.SessionProjectsList);
-    if (Array.isArray(result)) setSessionProjects(result as SessionProjectSummary[]);
+    const result = await invokeSessionProjectList();
+    if (result) desktopStore.actions.setSessionProjects(result);
   }, []);
   const refreshProjects = useCallback(async () => {
     const [projectsResult, sessionProjectsResult] = await Promise.all([
-      safeInvoke<unknown[]>(TauriCommand.ProjectsList),
-      safeInvoke<unknown[]>(TauriCommand.SessionProjectsList),
+      invokeProjectList(),
+      invokeSessionProjectList(),
     ]);
-    if (Array.isArray(projectsResult)) setProjects(projectsResult as ProjectSummary[]);
-    if (Array.isArray(sessionProjectsResult)) setSessionProjects(sessionProjectsResult as SessionProjectSummary[]);
+    if (projectsResult) desktopStore.actions.setProjects(projectsResult);
+    if (sessionProjectsResult) desktopStore.actions.setSessionProjects(sessionProjectsResult);
   }, []);
   const applyUpdateCheckResult = useCallback((result: UpdateCheckResult, manual: boolean) => {
-    if (result.status === "available" && result.version) {
+    if (result.status === UpdateCheckStatus.Available && result.version) {
       setDesktopUpdate({
-        status: "available",
+        status: DesktopUpdateStatus.Available,
         version: result.version,
         body: result.body ?? undefined,
       });
       setUpdateNoticeDismissed(false);
       return;
     }
-    if (result.status === "up-to-date") {
-      setDesktopUpdate({ status: manual ? "up-to-date" : "idle" });
+    if (result.status === UpdateCheckStatus.UpToDate) {
+      setDesktopUpdate({ status: manual ? DesktopUpdateStatus.UpToDate : DesktopUpdateStatus.Idle });
       return;
     }
-    if (result.status === "busy" && manual) {
-      setDesktopUpdate({ status: "error", error: "Another update operation is already running." });
+    if (result.status === UpdateCheckStatus.Busy && manual) {
+      setDesktopUpdate({ status: DesktopUpdateStatus.Error, error: "Another update operation is already running." });
     }
   }, []);
   const checkForUpdates = useCallback(async (manual = false) => {
     if (!isTauriRuntime() || updateOperationInFlight.current) return;
     updateOperationInFlight.current = true;
-    if (manual) setDesktopUpdate({ status: "checking" });
+    if (manual) setDesktopUpdate({ status: DesktopUpdateStatus.Checking });
     try {
       try {
         window.localStorage.setItem(AUTO_UPDATE_LAST_CHECK_KEY, `${Date.now()}`);
       } catch (error) {
         logger.warn("automatic desktop update check timestamp write failed", { error });
       }
-      const result = await invokeCommand<UpdateCheckResult>(TauriCommand.CheckForUpdates);
+      const result = await checkForUpdatesCommand();
       applyUpdateCheckResult(result, manual);
     } catch (error) {
       if (manual) {
-        setDesktopUpdate({ status: "error", error: errorMessage(error) });
+        setDesktopUpdate({ status: DesktopUpdateStatus.Error, error: errorMessage(error) });
       } else {
         logger.warn("automatic desktop update check failed", { error });
       }
@@ -422,14 +423,14 @@ export function App() {
     }
   }, [applyUpdateCheckResult]);
   const installUpdate = useCallback(async () => {
-    if (desktopUpdate.status !== "available" || updateOperationInFlight.current) return;
+    if (desktopUpdate.status !== DesktopUpdateStatus.Available || updateOperationInFlight.current) return;
     updateOperationInFlight.current = true;
-    setDesktopUpdate((current) => ({ ...current, status: "installing" }));
+    setDesktopUpdate((current) => ({ ...current, status: DesktopUpdateStatus.Installing }));
     try {
-      const result = await invokeCommand<UpdateCheckResult>(TauriCommand.InstallUpdate);
+      const result = await installUpdateCommand();
       applyUpdateCheckResult(result, true);
     } catch (error) {
-      setDesktopUpdate({ status: "error", error: errorMessage(error) });
+      setDesktopUpdate({ status: DesktopUpdateStatus.Error, error: errorMessage(error) });
     } finally {
       updateOperationInFlight.current = false;
     }
@@ -455,7 +456,12 @@ export function App() {
     let disposed = false;
     let unlisten: (() => void) | undefined;
     void listen<UpdateCheckResult>(UPDATE_AVAILABLE_EVENT, (event) => {
-      if (!disposed) applyUpdateCheckResult(event.payload, false);
+      try {
+        assertRuntimeEventPayload(UPDATE_AVAILABLE_EVENT, event.payload);
+        if (!disposed) applyUpdateCheckResult(event.payload, false);
+      } catch (error) {
+        logger.warn("desktop update event payload validation failed", { error });
+      }
     }).then((cleanup) => {
       if (disposed) cleanup();
       else unlisten = cleanup;
@@ -470,28 +476,19 @@ export function App() {
   const availableSidebarSources = useMemo(
     () => sidebarSources(
       agentTargets,
-      data.sources,
+      catalogs.indexes.sources,
       data.agents,
     ),
-    [agentTargets, data.agents, data.sources],
+    [agentTargets, catalogs.indexes.sources, data.agents],
   );
-  const installedAgentKeys = useMemo(() => {
-    const keys = new Set<string>();
-    for (const agent of data.agents) {
-      if (agent.installed === true) keys.add(agentIdentityKey(agent.name));
-    }
-    for (const source of data.sources) {
-      if (source.count > 0) keys.add(agentIdentityKey(source.label));
-    }
-    return [...keys];
-  }, [data.agents, data.sources]);
+  const installedAgentKeys = catalogs.indexes.installedAgentKeys;
   useEffect(() => {
     if (agentFilter !== "All" && !availableSidebarSources.some((source) => source.label === agentFilter)) {
       setAgentFilter("All");
     }
   }, [agentFilter, availableSidebarSources]);
   useEffect(() => {
-    const syncBackup = () => { void safeInvoke(TauriCommand.SkillsBackupSync); };
+    const syncBackup = () => { void syncSkillBackup(); };
     const syncWhenVisible = () => {
       if (document.visibilityState === "visible") syncBackup();
     };
@@ -502,35 +499,17 @@ export function App() {
       document.removeEventListener("visibilitychange", syncWhenVisible);
     };
   }, []);
-  const filteredData = useMemo(() => {
-    if (agentFilter === "All") return data;
-    return {
-      ...data,
-      skills: data.skills.filter((skill) => {
-        const agents = skill.agents;
-        return Array.isArray(agents) && agents.some((agent) => sameAgent(agent, agentFilter));
-      }),
-      prompts: data.prompts,
-      sessions: data.sessions.filter((session) => sameAgent(session.agent, agentFilter)),
-      rules: data.rules.filter((rule) => ruleAgents(rule).some((agent) => sameAgent(agent, agentFilter))),
-      hooks: data.hooks.filter((hook) => sameAgent(hook.agent, agentFilter)),
-      mcp: data.mcp.filter((server) => sameAgent(server.agent, agentFilter)),
-    };
-  }, [agentFilter, data]);
-
-  const overviewCounts = useMemo(() => selectCatalogCounts(filteredData), [filteredData]);
-  const overviewCountsLoaded = useMemo(
-    () => selectCatalogCountLoadedDomains(storeState),
-    [catalogs.data, catalogs.loadedDomains],
+  const filteredData = useMemo(
+    () => selectCatalogView(data, agentFilter, catalogs.indexes.sources),
+    [agentFilter, catalogs.indexes.sources, data],
   );
-  const overviewCountErrors = useMemo(
-    () => selectCatalogCountErrors(storeState),
-    [catalogs.errors],
-  );
-  const overviewHookReviewCount = selectHookReviewCount(filteredData);
-  const overviewSkillUpdateCount = selectSkillUpdateCount(data, agentFilter);
 
-  const setData = desktopStore.actions.updateData;
+  const overviewCounts = useMemo(() => selectOverviewCounts(filteredData), [filteredData]);
+  const overviewCountsLoaded = catalogs.indexes.loadedDomains;
+  const overviewCountErrors = catalogs.indexes.errorDomains;
+  const overviewHookReviewCount = selectOverviewHookReviewCount(filteredData);
+  const overviewSkillUpdateCount = selectOverviewSkillUpdateCount(data, agentFilter);
+
   const setSkillUpdateError = desktopStore.actions.setSkillUpdateError;
   const setCheckingSkillUpdates = desktopStore.actions.setSkillUpdatesChecking;
   const setSkillIndexStatus = desktopStore.actions.setSkillIndexStatus;
@@ -548,8 +527,8 @@ export function App() {
 
   useEffect(() => {
     applyAppearance(appearance, themePreferences);
-    if (appearance !== "system") return;
-    return listenForSystemAppearanceChange(() => applyAppearance("system", themePreferences));
+    if (appearance !== Appearance.System) return;
+    return listenForSystemAppearanceChange(() => applyAppearance(Appearance.System, themePreferences));
   }, [appearance, themePreferences]);
 
   useEffect(() => {
@@ -559,7 +538,7 @@ export function App() {
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
       if (!(event.metaKey || event.ctrlKey) || event.key.toLowerCase() !== "f") return;
-      if (view === "sessions") return;
+      if (view === AppPage.Sessions) return;
       const target = event.target instanceof Element ? event.target : null;
       const activeElement = document.activeElement;
       const isInLocalFindPane = (element: Element | null) => Boolean(element?.closest(".codePane, .transcriptPanel, [role=\"dialog\"]"));
@@ -577,44 +556,46 @@ export function App() {
   }, [view]);
 
   useEffect(() => {
-    if (view === "skills") void loadConfirmSkillChangesDialog();
+    if (view === AppPage.Skills) void loadConfirmSkillChangesDialog();
   }, [view]);
 
   const changeAppearance = useCallback((nextAppearance: Appearance) => {
     appearanceChangeRevision.current += 1;
-    setAppearance(nextAppearance);
+    desktopStore.actions.patchSettings({ appearance: nextAppearance });
   }, []);
 
   const loadSettings = useCallback(async () => {
     const requestId = ++settingsLoadRequest.current;
     const appearanceRevision = appearanceChangeRevision.current;
-    setSettingsLoading(true);
-    setSettingsLoadError("");
+    desktopStore.actions.setSettingsLoading(true);
+    desktopStore.actions.setSettingsError("");
     try {
-      const settings = await invokeCommand<SettingsPayload>(TauriCommand.SettingsGet);
+      const settings = await readSettings();
       if (requestId !== settingsLoadRequest.current) return;
       if (appearanceRevision === appearanceChangeRevision.current) {
-        setAppearance(normalizeAppearance(settings.appearance));
+        desktopStore.actions.patchSettings({ appearance: settings.appearance });
       }
-      setThemePreferences(normalizeThemePreferences({ light: settings.lightTheme as ColorTheme, dark: settings.darkTheme as ColorTheme }));
-      const normalizedAppIcon = normalizeAppIcon(settings.appIcon);
-      setAppIcon(normalizedAppIcon);
-      void applyAppIcon(normalizedAppIcon);
-      setFontFamily(normalizeFontFamily(settings.fontFamily));
-      setTerminal(typeof settings.terminal === "string" && settings.terminal.trim() ? settings.terminal : "auto");
-      setEditor(typeof settings.editor === "string" && settings.editor.trim() ? settings.editor.trim() : "vscode");
-      setAdditionalSessionRoots(Array.isArray(settings.additionalSessionRoots)
-        ? settings.additionalSessionRoots.filter((root): root is string => typeof root === "string")
-        : []);
-      setDeveloperMode(settings.developerMode === true);
-      setSessionResumeTarget(normalizeSessionResumeTarget(settings.sessionResumeTarget));
-      setMissingSessionProjectPolicy(normalizeMissingSessionProjectPolicy(settings.missingSessionProjectPolicy));
-      setConfigProfiles(normalizeConfigProfiles(settings.configProfiles));
-      setSettingsLoadError("");
+      const themePreferencesForState = {
+        light: settings.lightTheme as ColorTheme,
+        dark: settings.darkTheme as ColorTheme,
+      } satisfies ThemePreferences;
+      void applyAppIcon(settings.appIcon);
+      desktopStore.actions.patchSettings({
+        themePreferences: themePreferencesForState,
+        appIcon: settings.appIcon,
+        fontFamily: settings.fontFamily,
+        terminal: settings.terminal,
+        editor: settings.editor,
+        additionalSessionRoots: settings.additionalSessionRoots,
+        developerMode: settings.developerMode,
+        sessionResumeTarget: settings.sessionResumeTarget,
+        missingSessionProjectPolicy: settings.missingSessionProjectPolicy,
+        configProfiles: settings.configProfiles,
+      });
     } catch (error) {
-      if (requestId === settingsLoadRequest.current) setSettingsLoadError(errorMessage(error));
+      if (requestId === settingsLoadRequest.current) desktopStore.actions.setSettingsError(errorMessage(error));
     } finally {
-      if (requestId === settingsLoadRequest.current) setSettingsLoading(false);
+      if (requestId === settingsLoadRequest.current) desktopStore.actions.setSettingsLoading(false);
     }
   }, []);
 
@@ -622,107 +603,56 @@ export function App() {
     void loadSettings();
   }, [loadSettings]);
 
-  const refreshSkillList = useCallback((force = false): Promise<RawSkillRecord[] | null> => {
-    if (!force && skillListInFlight.current) return skillListInFlight.current;
-    if (force && forcedSkillListInFlight.current) return forcedSkillListInFlight.current;
-    if (force && skillListInFlight.current) {
-      const currentRequest = skillListInFlight.current;
-      const queuedRequest = currentRequest.then(
-        () => refreshSkillList(),
-        () => refreshSkillList(),
-      );
-      forcedSkillListInFlight.current = queuedRequest;
-      void queuedRequest.then(
-        () => {
-          if (forcedSkillListInFlight.current === queuedRequest) forcedSkillListInFlight.current = null;
-        },
-        () => {
-          if (forcedSkillListInFlight.current === queuedRequest) forcedSkillListInFlight.current = null;
-        },
-      );
-      return queuedRequest;
-    }
+  const skillRuntime = useMemo(() => createSkillCatalogRuntime({
+    store: desktopStore,
+    setError: (message) => setDomainError(RuntimeDomainKey.Skills, message),
+    setChecking: setCheckingSkillUpdates,
+    setUpdateCheckActive: (active) => { skillUpdateCheckActive.current = active; },
+    onError: (message, error) => logger.error(message, { error }),
+  }), [setCheckingSkillUpdates, setDomainError]);
+  const {
+    refreshList: refreshSkillList,
+    refreshListAndUpdates: refreshSkillListAndUpdates,
+  } = skillRuntime;
 
-    const revision = ++skillListRevision.current;
-    const request = (async () => {
-      try {
-        const skills = await invokeCommand<RawSkillRecord[]>(TauriCommand.SkillsList);
-        if (revision !== skillListRevision.current) return null;
-        setData((current) => {
-          const normalized = normalizeDomainRows(current, "skills", skills);
-          return replaceSkillReportPreservingUpdates(current, normalized);
-        });
-        desktopStore.actions.markDomainLoaded("skills");
-        setDomainError("skills", "");
-        return skills;
-      } catch (error) {
-        logger.error("skills list refresh failed", { revision, error });
-        if (revision === skillListRevision.current) setDomainError("skills", errorMessage(error));
-        return null;
-      }
-    })();
-    skillListInFlight.current = request;
+  const runSkillIndex = useCallback(() => {
+    if (skillIndexRunInFlight.current) return skillIndexRunInFlight.current;
+    const request = skillRuntime.whenIdle()
+      .then(() => runSkillIndexCommand(false));
+    skillIndexRunInFlight.current = request;
     void request.then(
-      () => {
-        if (skillListInFlight.current === request) skillListInFlight.current = null;
+      (status) => {
+        setSkillIndexStatus(status);
+        if (skillIndexRunInFlight.current === request) skillIndexRunInFlight.current = null;
       },
       () => {
-        if (skillListInFlight.current === request) skillListInFlight.current = null;
+        if (skillIndexRunInFlight.current === request) skillIndexRunInFlight.current = null;
       },
     );
     return request;
-  }, [setDomainError]);
+  }, [skillRuntime]);
 
-  const refreshSkillListAndUpdates = useCallback((): Promise<SkillRefreshResult | null> => {
-    if (skillRefreshInFlight.current) return skillRefreshInFlight.current;
-    const revision = ++skillListRevision.current;
-    setCheckingSkillUpdates(true);
-    const request = (async () => {
-      try {
-        const result = await invokeCommand<SkillRefreshResult>(TauriCommand.SkillsRefresh);
-        if (revision !== skillListRevision.current) return null;
-        setData((current) => {
-          const next = normalizeDomainRows(current, "skills", result.skills);
-          return replaceSkillReportPreservingUpdates(current, next);
-        });
-        if (result.updates) desktopStore.actions.setSkillUpdateReports(result.updates);
-        desktopStore.actions.markDomainLoaded("skills");
-        setDomainError("skills", "");
-        const updateCheckRunning = result.updateCheck === "started" || result.updateCheck === "already-running";
-        skillUpdateCheckActive.current = updateCheckRunning;
-        setCheckingSkillUpdates(updateCheckRunning);
-        return result;
-      } catch (error) {
-        logger.error("skills refresh failed", { revision, error });
-        if (revision === skillListRevision.current) {
-          setDomainError("skills", errorMessage(error));
-          setCheckingSkillUpdates(false);
-        }
-        skillUpdateCheckActive.current = false;
-        return null;
-      }
-    })();
-    skillRefreshInFlight.current = request;
-    void request.then(
-      () => {
-        if (skillRefreshInFlight.current === request) skillRefreshInFlight.current = null;
-      },
-      () => {
-        if (skillRefreshInFlight.current === request) skillRefreshInFlight.current = null;
-      },
-    );
-    return request;
-  }, [setDomainError]);
+  const {
+    refreshSessionsFromScan,
+    resyncSessionSnapshot,
+    whenEventsReady,
+  } = useSessionRuntimeController({
+    refreshSessionProjects,
+    runSkillIndex,
+    setSessionRefreshError,
+    setAnalyticsRevision,
+    setAnalyticsRevisionReady,
+    setAnalyticsRevisionError,
+    setSkillUpdateError,
+    setCheckingSkillUpdates,
+  });
 
-  const applySkillRows = useCallback((skills: RawSkillRecord[]) => {
-    setData((current) => {
-      const next = normalizeDomainRows(current, "skills", skills);
-      return replaceSkillReportPreservingUpdates(current, next);
-    });
+  const applySkillRows = useCallback((skills: RawSkillRecord[], options?: { patch?: boolean; deleted?: string[] }) => {
+    commitSkillRows(desktopStore, skills, options);
   }, []);
 
   const applyInstalledSkills = useCallback((result: SkillInstallResult) => {
-    applySkillRows(result.skills);
+    applySkillRows(result.updated ?? result.skills ?? [], { patch: true });
   }, [applySkillRows]);
 
   const refreshSkillUpdates = useCallback((): Promise<void> => {
@@ -733,10 +663,10 @@ export function App() {
     setSkillUpdateError("");
     const request = (async () => {
       try {
-        await sessionEventReady.current;
-        const result = await invokeCommand<{ updateCheck: string }>(TauriCommand.SkillsUpdates, { check: true });
+        await whenEventsReady();
+        const result = await requestSkillUpdates();
         if (revision !== skillUpdateCheckRevision.current) return;
-        if (result.updateCheck !== "started" && result.updateCheck !== "already-running") {
+        if (result.updateCheck !== SkillUpdateCheckState.Started && result.updateCheck !== SkillUpdateCheckState.AlreadyRunning) {
           throw new Error("Invalid skill update check response");
         }
       } catch (error) {
@@ -758,7 +688,7 @@ export function App() {
       },
     );
     return request;
-  }, []);
+  }, [whenEventsReady]);
 
   const ensureSkillUpdates = useCallback(() => {
     const { skillUpdates: current } = desktopStore.getSnapshot();
@@ -767,30 +697,23 @@ export function App() {
   }, [refreshSkillUpdates]);
 
   const refreshSkills = useCallback(async () => {
-    setDomainLoading("skills", true);
-    setDomainError("skills", "");
+    setDomainLoading(RuntimeDomainKey.Skills, true);
+    setDomainError(RuntimeDomainKey.Skills, "");
     try {
       await refreshSkillListAndUpdates();
     } finally {
-      setDomainLoading("skills", false);
+    setDomainLoading(RuntimeDomainKey.Skills, false);
     }
   }, [refreshSkillListAndUpdates, setDomainError]);
 
-  const setDomainRows = (domain: DomainKey, rows: unknown[]) => {
-    setData((current) => normalizeDomainRows(current, domain, rows));
-    desktopStore.actions.markDomainLoaded(domain);
-    setDomainError(domain, "");
-  };
-
   const refreshPrompts = useCallback(async () => {
-    setDomainLoading("prompts", true);
-    setDomainError("prompts", "");
+    setDomainLoading(RuntimeDomainKey.Prompts, true);
+    setDomainError(RuntimeDomainKey.Prompts, "");
     try {
       if (!promptsRefreshInFlight.current) {
         promptsRefreshInFlight.current = (async () => {
-          const rows = await invokeCommand<unknown[]>(TauriCommand.PromptsList);
-          if (!Array.isArray(rows)) throw new Error("Invalid prompts response");
-          setDomainRows("prompts", rows);
+          const rows = await invokeDomainList(RuntimeDomainKey.Prompts);
+          desktopStore.actions.commitDomainSnapshot(RuntimeDomainKey.Prompts, rows);
           return rows;
         })().finally(() => {
           promptsRefreshInFlight.current = null;
@@ -799,63 +722,50 @@ export function App() {
       return await promptsRefreshInFlight.current;
     } catch (error) {
       logger.error("prompts refresh failed", { error });
-      setDomainError("prompts", errorMessage(error));
+      setDomainError(RuntimeDomainKey.Prompts, errorMessage(error));
       return null;
     } finally {
-      setDomainLoading("prompts", false);
+      setDomainLoading(RuntimeDomainKey.Prompts, false);
     }
   }, []);
 
-  const applyPromptSaved = useCallback((prompt: unknown) => {
-    if (!prompt || typeof prompt !== "object") return;
-    const id = (prompt as Record<string, unknown>).id;
-    if (typeof id !== "string" || !id.trim()) return;
-    const normalized = normalizePrompt(prompt as Record<string, unknown>);
-    if (!normalized) return;
-    setData((current) => ({
-      ...current,
-      prompts: [normalized, ...current.prompts.filter((item) => item.id !== id)],
-    }));
-    desktopStore.actions.markDomainLoaded("prompts");
-  }, []);
+  const applyPromptSaved = desktopStore.actions.applyPromptRecord;
 
   const savePromptFromSession = useCallback(async (body: string) => {
     if (!body.trim()) return false;
-    const prompt = await safeInvoke(TauriCommand.PromptSave, {
+    const prompt = await savePrompt({
       id: null,
       title: promptTitleFromBody(body),
       tags: [],
       body,
     });
     if (!prompt) return false;
-    applyPromptSaved(prompt);
+    desktopStore.actions.applyPromptRecord(prompt, body);
     return true;
-  }, [applyPromptSaved]);
+  }, []);
 
   const removePrompts = useCallback((ids: string[]) => {
-    const deleted = new Set(ids);
-    setData((current) => ({
-      ...current,
-      prompts: current.prompts.filter((prompt) => !deleted.has(prompt.id)),
-    }));
+    desktopStore.actions.removePrompts(ids);
   }, []);
 
   const deleteRules = useCallback(async (paths: string[]) => {
     try {
-      const rows = await invokeCommand(TauriCommand.RuleFileDeleteMany, { paths });
-      if (Array.isArray(rows)) setDomainRows("rules", rows);
-      return rows;
+      const result = await deleteRulesCommand(paths);
+      return commitRuleCommandResult(desktopStore, result);
     } catch (error) {
       logger.warn("tendi command failed", { command: TauriCommand.RuleFileDeleteMany, error });
       return { error: `${error}` };
     }
   }, []);
 
+  const patchRuleSha256 = useCallback((path: string, sha256: string) => {
+    desktopStore.actions.patchRuleSha256(path, sha256);
+  }, []);
+
   const deleteHook = useCallback(async (hook: HookRecord) => {
     try {
-      const rows = await invokeCommand(TauriCommand.HookDelete, hookDeleteArgs(hook));
-      if (Array.isArray(rows)) setDomainRows("hooks", rows);
-      return rows;
+      const result = await deleteHookCommand(hookDeleteArgs(hook));
+      return commitHookCommandResult(desktopStore, result);
     } catch (error) {
       logger.warn("tendi command failed", { command: TauriCommand.HookDelete, error });
       return { error: `${error}` };
@@ -864,11 +774,8 @@ export function App() {
 
   const deleteHooks = useCallback(async (hooks: HookRecord[]) => {
     try {
-      const rows = await invokeCommand(TauriCommand.HookDeleteMany, {
-        requests: hooks.map(hookDeleteArgs),
-      });
-      if (Array.isArray(rows)) setDomainRows("hooks", rows);
-      return rows;
+      const result = await deleteHooksCommand(hooks.map(hookDeleteArgs));
+      return commitHookCommandResult(desktopStore, result);
     } catch (error) {
       logger.warn("tendi command failed", { command: TauriCommand.HookDeleteMany, error });
       return { error: `${error}` };
@@ -877,49 +784,47 @@ export function App() {
 
   const setHookEnabled = useCallback(async (hook: HookRecord, enabled: boolean) => {
     try {
-      const rows = await invokeCommand(TauriCommand.HookSetEnabled, {
-        agent: hook.agent,
-        path: hookSourcePath(hook),
-        expectedTrustHash: hookTrustHash(hook),
-        event: hook.event,
-        matcher: hook.matcher ?? null,
-        hookType: hook.hook_type ?? null,
-        command: hook.command ?? null,
-        url: hook.url ?? null,
-        prompt: hook.prompt ?? null,
-        filter: hook.filter ?? null,
-        statusMessage: hook.status_message ?? null,
-        enabled,
-      });
-      if (Array.isArray(rows)) setDomainRows("hooks", rows);
-      return rows;
+      const result = await setHookEnabledCommand(hookSetEnabledArgs(hook, enabled));
+      return commitHookCommandResult(desktopStore, result);
     } catch (error) {
       logger.warn("tendi command failed", { command: TauriCommand.HookSetEnabled, error });
       return { error: `${error}` };
     }
   }, []);
 
+  const setHooksEnabled = useCallback(async (hooks: HookRecord[], enabled: boolean) => {
+    try {
+      const result = await setHooksEnabledCommand(hooks.map((hook) => hookSetEnabledArgs(hook, enabled)));
+      return commitHookCommandResult(desktopStore, result);
+    } catch (error) {
+      logger.warn("tendi command failed", { command: TauriCommand.HookSetEnabledMany, error });
+      return { error: `${error}` };
+    }
+  }, []);
+
   const setMcpEnabled = useCallback(async (server: McpRecord, enabled: boolean) => {
     try {
-      const rows = await invokeCommand(TauriCommand.McpSetEnabled, {
-        agent: server.agent,
-        path: server.path,
-        expectedTrustHash: server.trust_hash,
-        name: server.name,
-        enabled,
-        serverPath: server.server_path ?? [],
-      });
-      if (Array.isArray(rows)) setDomainRows("mcp", rows);
-      return rows;
+      const result = await setMcpEnabledCommand(mcpSetEnabledArgs(server, enabled));
+      return commitMcpCommandResult(desktopStore, result);
     } catch (error) {
       logger.warn("tendi command failed", { command: TauriCommand.McpSetEnabled, error });
       return { error: `${error}` };
     }
   }, []);
 
+  const setMcpEnabledMany = useCallback(async (servers: McpRecord[], enabled: boolean) => {
+    try {
+      const result = await setMcpEnabledManyCommand(servers.map((server) => mcpSetEnabledArgs(server, enabled)));
+      return commitMcpCommandResult(desktopStore, result);
+    } catch (error) {
+      logger.warn("tendi command failed", { command: TauriCommand.McpSetEnabledMany, error });
+      return { error: `${error}` };
+    }
+  }, []);
+
   const reviewHook = useCallback(async (hook: HookRecord) => {
     try {
-      const rows = await invokeCommand(TauriCommand.HookReview, {
+      const result = await reviewHookCommand({
         agent: hook.agent,
         path: hookSourcePath(hook),
         expectedTrustHash: hookTrustHash(hook),
@@ -932,178 +837,12 @@ export function App() {
         filter: hook.filter ?? null,
         statusMessage: hook.status_message ?? null,
       });
-      if (Array.isArray(rows)) setDomainRows("hooks", rows);
-      return rows;
+      return commitHookCommandResult(desktopStore, result);
     } catch (error) {
       logger.warn("tendi command failed", { command: TauriCommand.HookReview, error });
       return { error: `${error}` };
     }
   }, []);
-
-  const setSessionRows = useCallback((rows: unknown[], { markLoaded = true } = {}) => {
-    setData((current) => {
-      const nextSessions = mergeSessionRows(current.sessions, rows as Array<Record<string, unknown>>);
-      if (nextSessions === current.sessions) return current;
-      return recomputeSources({ ...current, sessions: nextSessions });
-    });
-    if (markLoaded) desktopStore.actions.markDomainLoaded("sessions");
-    desktopStore.actions.setDomainError("sessions", "");
-    setSessionRefreshError("");
-  }, [setSessionRefreshError]);
-
-  const setSessionLoadError = useCallback(() => {
-    const hasRows = desktopStore.getSnapshot().catalogs.data.sessions.length > 0;
-    desktopStore.actions.setDomainError("sessions", hasRows ? "" : SESSION_LOAD_ERROR);
-    setSessionRefreshError(SESSION_REFRESH_ERROR);
-  }, [setSessionRefreshError]);
-
-  const flushSessionEventBuffer = useCallback(() => {
-    const recent = [...pendingRecentSessions.current.values()];
-    const watch = [...pendingWatchSessions.current.values()];
-    const deleted = [...pendingDeletedSessions.current.values()];
-    pendingRecentSessions.current.clear();
-    pendingWatchSessions.current.clear();
-    pendingDeletedSessions.current.clear();
-    sessionEventFlushTimer.current = undefined;
-    if (recent.length === 0 && watch.length === 0 && deleted.length === 0) return;
-    const upserts = new Map<string, SessionRecord>();
-    for (const session of recent) upserts.set(sessionLogicalIdentity(session), session);
-    for (const session of watch) upserts.set(sessionLogicalIdentity(session), session);
-    setData((current) => {
-      const sessions = applySessionDelta(
-        current.sessions,
-        [...upserts.values()] as unknown as Array<Record<string, unknown>>,
-        deleted,
-      );
-      return sessions === current.sessions ? current : recomputeSources({ ...current, sessions });
-    });
-  }, []);
-
-  const scheduleSessionEventFlush = useCallback(() => {
-    if (sessionEventFlushTimer.current !== undefined) return;
-    sessionEventFlushTimer.current = window.setTimeout(flushSessionEventBuffer, SESSION_EVENT_FLUSH_MS);
-  }, [flushSessionEventBuffer]);
-
-  const finishSessionScanWaiters = useCallback((generation: number) => {
-    completedSessionScans.current.add(generation);
-    const waiters = sessionScanWaiters.current.get(generation) ?? [];
-    sessionScanWaiters.current.delete(generation);
-    waiters.forEach((resolve) => resolve());
-  }, []);
-
-  const handleSessionScanEvent = useCallback((event: SessionScanEvent) => {
-    if (event.generation < sessionScanGeneration.current) return;
-    sessionScanGeneration.current = event.generation;
-    const upserts = event.upserts.flatMap((row) => {
-      const session = normalizeSession(row);
-      return session ? [session] : [];
-    });
-    if (event.phase === "recent") {
-      for (const session of upserts) pendingRecentSessions.current.set(sessionLogicalIdentity(session), session);
-    } else if (event.phase === "watch") {
-      for (const session of upserts) pendingWatchSessions.current.set(sessionLogicalIdentity(session), session);
-    }
-    for (const identity of event.deleted) {
-      const key = sessionIdentityRecordKey(identity);
-      if (!key) continue;
-      pendingDeletedSessions.current.set(key, identity);
-    }
-    scheduleSessionEventFlush();
-    if (event.phase === "recent" && event.complete) {
-      setSessionRefreshError("");
-      if (sessionEventFlushTimer.current !== undefined) window.clearTimeout(sessionEventFlushTimer.current);
-      flushSessionEventBuffer();
-    }
-    if (event.phase === "backfill" && event.complete) {
-      void (async () => {
-        try {
-          const rows = await invokeCommand<unknown[]>(TauriCommand.SessionsList);
-          if (!Array.isArray(rows)) throw new Error("Invalid sessions response");
-          setSessionRows(rows);
-          setSessionRefreshError("");
-        } catch (error) {
-          logger.error("sessions backfill finalization failed", {
-            generation: event.generation,
-            phase: event.phase,
-            error,
-          });
-          setSessionRefreshError(SESSION_REFRESH_ERROR);
-          setSessionLoadError();
-        } finally {
-          finishSessionScanWaiters(event.generation);
-        }
-      })();
-    } else if (event.phase === "error") {
-      logger.error("sessions scan failed", {
-        generation: event.generation,
-        phase: event.phase,
-        scanned: event.scanned,
-        complete: event.complete,
-        error: event.error ?? "unknown session scan error",
-      });
-      if (!event.complete) return;
-      setSessionRefreshError(SESSION_REFRESH_ERROR);
-      setSessionLoadError();
-      finishSessionScanWaiters(event.generation);
-    } else if (event.phase === "watch" && event.complete) {
-      if (event.error) {
-        setSessionRefreshError(SESSION_REFRESH_ERROR);
-        setSessionLoadError();
-      } else {
-        setSessionRefreshError("");
-      }
-    }
-  }, [finishSessionScanWaiters, flushSessionEventBuffer, scheduleSessionEventFlush, setSessionLoadError, setSessionRows]);
-
-  useEffect(() => {
-    let disposed = false;
-    let unsubscribe: (() => void) | null = null;
-    const setup = subscribeDaemonEvents((event: DaemonEvent) => {
-      if (disposed) return;
-      if (event.event === "sessions://scan") {
-        handleSessionScanEvent(event.payload as SessionScanEvent);
-      } else if (event.event === "analytics://revision") {
-        const revision = Number((event.payload as { revision?: unknown }).revision);
-        if (Number.isFinite(revision)) {
-          setAnalyticsRevision(revision);
-          setAnalyticsRevisionReady(true);
-          setAnalyticsRevisionError("");
-        }
-      } else if (event.event === "skills://updates") {
-        const payload = event.payload as SkillUpdateCheckEvent;
-        skillUpdateCheckActive.current = false;
-        if (payload.status === "completed") {
-          if (Array.isArray(payload.skills)) {
-            setData((current) => {
-              const next = normalizeDomainRows(current, "skills", payload.skills);
-              return replaceSkillReportPreservingUpdates(current, next);
-            });
-            desktopStore.actions.markDomainLoaded("skills");
-            desktopStore.actions.setDomainError("skills", "");
-          }
-          desktopStore.actions.setSkillUpdateReports(payload.updates);
-          setSkillUpdateError("");
-        } else {
-          setSkillUpdateError(payload.error || "Update check failed");
-        }
-        setCheckingSkillUpdates(false);
-      }
-    });
-    sessionEventReady.current = setup.then((cleanup) => {
-      if (disposed) cleanup();
-      else unsubscribe = cleanup;
-    }).catch((error) => {
-      if (!disposed) logger.warn("daemon event subscription failed", { error });
-    });
-    return () => {
-      disposed = true;
-      unsubscribe?.();
-      if (sessionEventFlushTimer.current !== undefined) {
-        window.clearTimeout(sessionEventFlushTimer.current);
-        sessionEventFlushTimer.current = undefined;
-      }
-    };
-  }, [handleSessionScanEvent]);
 
   useEffect(() => {
     void refreshSkillListAndUpdates();
@@ -1113,7 +852,7 @@ export function App() {
     setAnalyticsRevisionError("");
     setAnalyticsRevisionReady(false);
     try {
-      const revision = await invokeCommand<number>(TauriCommand.AnalyticsRevision);
+      const revision = await invokeAnalyticsRevision();
       setAnalyticsRevision(revision);
       setAnalyticsRevisionReady(true);
     } catch (error) {
@@ -1126,61 +865,11 @@ export function App() {
     void refreshAnalyticsRevision();
   }, [refreshAnalyticsRevision]);
 
-  const runSkillIndex = useCallback(() => {
-    if (skillIndexRunInFlight.current) return skillIndexRunInFlight.current;
-    const request = (skillRefreshInFlight.current ?? Promise.resolve())
-      .then(() => invokeCommand<SkillIndexStatus>(TauriCommand.SessionSkillIndexRun, { force: false }));
-    skillIndexRunInFlight.current = request;
-    void request.then(
-      (status) => {
-        setSkillIndexStatus(status);
-        if (skillIndexRunInFlight.current === request) skillIndexRunInFlight.current = null;
-      },
-      () => {
-        if (skillIndexRunInFlight.current === request) skillIndexRunInFlight.current = null;
-      },
-    );
-    return request;
-  }, []);
-
-  const refreshSessionsFromScan = useCallback(() => {
-    setSessionRefreshError("");
-    desktopStore.actions.setDomainLoading("sessions", true);
-    if (!sessionsRefreshInFlight.current) {
-      sessionsRefreshInFlight.current = sessionEventReady.current
-        .then(() => invokeCommand<SessionScanStartResult>(TauriCommand.SessionsScanStart))
-        .then(async ({ generation, started }) => {
-          sessionScanGeneration.current = Math.max(sessionScanGeneration.current, generation);
-          if (!completedSessionScans.current.has(generation)) {
-            await new Promise<void>((resolve) => {
-              const waiters = sessionScanWaiters.current.get(generation) ?? [];
-              waiters.push(resolve);
-              sessionScanWaiters.current.set(generation, waiters);
-            });
-          }
-          await refreshSessionProjects();
-          if (started) void runSkillIndex();
-          return generation;
-        })
-        .catch((error) => {
-          logger.error("sessions scan start failed", { error });
-          setSessionRefreshError(SESSION_REFRESH_ERROR);
-          setSessionLoadError();
-          return null;
-        })
-        .finally(() => {
-          desktopStore.actions.setDomainLoading("sessions", false);
-          sessionsRefreshInFlight.current = null;
-        });
-    }
-    return sessionsRefreshInFlight.current;
-  }, [refreshSessionProjects, runSkillIndex, setSessionRefreshError]);
-
   const refreshSkillIndexStatus = useCallback(async (): Promise<SkillIndexStatus | null> => {
     const existing = skillIndexStatusRefreshInFlight.current;
     if (existing) return existing;
     const request = (async () => {
-      const status = await safeInvoke<SkillIndexStatus>(TauriCommand.SessionSkillIndexStatus);
+      const status = await readSkillIndexStatusCommand();
       if (status) setSkillIndexStatus(status);
       return status;
     })();
@@ -1206,7 +895,7 @@ export function App() {
   const loadDomainForRetry = useCallback((domain: DomainKey) => {
     desktopStore.actions.markDomainLoaded(domain, false);
     desktopStore.actions.setDomainError(domain, "");
-    if (domain === "sessions") {
+    if (domain === RuntimeDomainKey.Sessions) {
       setSessionRefreshError("");
     }
     setDomainLoading(domain, true);
@@ -1225,9 +914,9 @@ export function App() {
 
   useEffect(() => {
     let cancelled = false;
-    safeInvoke(TauriCommand.AgentsList).then((agents) => {
+    invokeAgentsList().then((agents) => {
       if (!cancelled && Array.isArray(agents)) {
-        setData((current) => normalizeDomainRows(current, "agents", agents));
+        desktopStore.actions.commitDomainSnapshot(RuntimeDomainKey.Agents, agents);
       }
     });
     return () => {
@@ -1237,7 +926,7 @@ export function App() {
 
   useEffect(() => {
     let cancelled = false;
-    safeInvoke<AgentTargetOption[]>(TauriCommand.SkillsTargets).then((targets) => {
+    readSkillTargets().then((targets) => {
       if (!cancelled && Array.isArray(targets)) setAgentTargets(targets);
     });
     return () => {
@@ -1247,7 +936,7 @@ export function App() {
 
   useEffect(() => {
     let cancelled = false;
-    safeInvoke<BundledSkillStatus>(TauriCommand.BundledSkillStatus).then((status) => {
+    readBundledSkillStatus().then((status) => {
       if (!cancelled && status?.shouldPrompt) setBundledSkillPrompt(status);
     });
     return () => {
@@ -1260,7 +949,7 @@ export function App() {
     setBundledSkillBusy(true);
     setBundledSkillError("");
     try {
-      await invokeCommand(TauriCommand.BundledSkillPromptDismiss);
+      await dismissBundledSkillPromptCommand();
       setBundledSkillPrompt(null);
     } catch (error) {
       logger.error("bundled skill prompt dismiss failed", { error });
@@ -1275,13 +964,17 @@ export function App() {
     setBundledSkillBusy(true);
     setBundledSkillError("");
     try {
-      const cliStatus = await invokeCommand<CliInstallStatus>(TauriCommand.CliInstall);
+      const cliStatus = await installCli();
       if (cliStatus.state !== "installed" || !cliStatus.pathConfigured) {
         throw new Error(cliStatus.detail || "The Tendi CLI is not available on PATH.");
       }
-      await invokeCommand(TauriCommand.BundledSkillInstall);
+      const report = await installBundledSkillCommand();
       setBundledSkillPrompt(null);
-      void refreshSkillList(true);
+      if (Array.isArray(report.updated)) {
+        applySkillRows(report.updated, { patch: true });
+      } else {
+        void refreshSkillList(true);
+      }
     } catch (error) {
       logger.error("bundled skill install failed", { error });
       setBundledSkillError(`${error}`);
@@ -1296,7 +989,7 @@ export function App() {
       const existing = domainLoadInFlight.current.get(domain);
       if (existing) {
         await existing;
-        if (domain === "sessions" && view !== "overview" && !desktopStore.getSnapshot().catalogs.loadedDomains.has(domain)) {
+        if (domain === RuntimeDomainKey.Sessions && view !== AppPage.Overview && !desktopStore.getSnapshot().catalogs.loadedDomains.has(domain)) {
           await refreshSessionsFromScan();
         }
         return;
@@ -1305,8 +998,8 @@ export function App() {
         setDomainLoading(domain, true);
         setDomainError(domain, "");
         try {
-          if (domain === "skills") {
-            if (view === "overview") {
+          if (domain === RuntimeDomainKey.Skills) {
+            if (view === AppPage.Overview) {
               await refreshSkillListAndUpdates();
             } else {
               await refreshSkillList();
@@ -1314,34 +1007,24 @@ export function App() {
             }
             return;
           }
-          if (domain === "sessions") {
+          if (domain === RuntimeDomainKey.Sessions) {
             if (desktopStore.getSnapshot().catalogs.data.sessions.length === 0) {
-              try {
-                const cachedRows = await invokeCommand<unknown[]>(TauriCommand.SessionsList);
-                setSessionRows(cachedRows, {
-                  markLoaded: view !== "overview",
-                });
-              } catch (error) {
-                logger.error("sessions cached list load failed", { view, error });
-                setSessionLoadError();
-              }
+              await resyncSessionSnapshot();
             }
             await refreshSessionsFromScan();
             return;
           }
-          if (domain === "prompts") {
+          if (domain === RuntimeDomainKey.Prompts) {
             await refreshPrompts();
             return;
           }
-          const rows = await invokeCommand<unknown[]>(domainListCommands[domain]);
-          if (!Array.isArray(rows)) throw new Error(`Invalid ${domain} response`);
-          setDomainRows(domain, rows);
-    } catch (error) {
-      logger.error("domain load failed", { domain, error });
-      setDomainError(domain, errorMessage(error));
-          if (domain === "sessions") {
+          const rows = await invokeDomainList(domain);
+          desktopStore.actions.commitDomainSnapshot(domain, rows);
+        } catch (error) {
+          logger.error("domain load failed", { domain, error });
+          setDomainError(domain, errorMessage(error));
+          if (domain === RuntimeDomainKey.Sessions) {
             setSessionRefreshError(SESSION_REFRESH_ERROR);
-            setSessionLoadError();
           }
         } finally {
           setDomainLoading(domain, false);
@@ -1357,7 +1040,7 @@ export function App() {
       }
     };
 
-    if (view === "overview") {
+    if (view === AppPage.Overview) {
       let cancelled = false;
       const loadOverviewDomain = async (domain: DomainKey) => {
         await loadOneDomain(domain);
@@ -1370,8 +1053,8 @@ export function App() {
       };
     }
 
-    const domain = view === "skillDetail" ? "skills" : view;
-    if (!isDomainKey(domain)) return;
+    const domain = domainForView(view);
+    if (!domain) return;
     let timer = 0;
     let frame = 0;
     frame = window.requestAnimationFrame(() => {
@@ -1383,7 +1066,7 @@ export function App() {
       window.cancelAnimationFrame(frame);
       window.clearTimeout(timer);
     };
-  }, [domainRetryRevision, ensureSkillUpdates, refreshPrompts, refreshSessionsFromScan, refreshSkillList, refreshSkillListAndUpdates, setDomainError, setSessionLoadError, setSessionRows, view]);
+  }, [domainRetryRevision, ensureSkillUpdates, refreshPrompts, refreshSessionsFromScan, refreshSkillList, refreshSkillListAndUpdates, resyncSessionSnapshot, setDomainError, view]);
 
   useEffect(() => {
     if (typeof window === "undefined") return undefined;
@@ -1409,64 +1092,60 @@ export function App() {
 
   const navigate = useCallback((next: ViewId) => {
     navigateTo(next);
-    setActiveSkillName(null);
+    setActiveSkillId(null);
   }, [navigateTo]);
-
-  const loadTranscript = useCallback(async (session: SessionRecord, cursor?: string, knownSourceVersion?: string): Promise<TranscriptPage> => {
-    const page = await invokeCommand(TauriCommand.SessionTranscript, {
-      path: session.path,
-      agent: session.agent,
-      cursor,
-      limit: 160,
-      knownSourceVersion,
-    });
-    return normalizeTranscriptPage(page);
+  const navigateToDomain = useCallback((domain: DomainKey) => {
+    navigate(viewForDomain(domain));
+  }, [navigate]);
+  const openOverviewSession = useCallback((session: SessionRecord) => {
+    setActiveSessionKey(sessionSourceExternalKey(session));
+    navigate(AppPage.Sessions);
+  }, [navigate]);
+  const backToSkills = useCallback(() => navigate(AppPage.Skills), [navigate]);
+  const saveSkillEditorRows = useCallback((skills?: Parameters<NonNullable<ComponentProps<typeof SkillEditorView>["onSaved"]>>[0]) => {
+    if (!skills) return;
+    desktopStore.actions.patchSkills(skills);
   }, []);
-
-  const loadTranscriptLocator = useCallback(async (session: SessionRecord): Promise<TranscriptLocatorPage> => {
-    const page = await invokeCommand(TauriCommand.SessionTranscriptLocator, {
-      path: session.path,
-      agent: session.agent,
-    });
-    return normalizeTranscriptLocatorPage(page);
-  }, []);
-
-  const searchTranscript = useCallback(async (session: SessionRecord, query: string, scopes: TranscriptSearchScopes): Promise<TranscriptSearchResult | null> => {
-    const result = await invokeCommand(TauriCommand.SessionTranscriptSearch, {
-      path: session.path,
-      agent: session.agent,
-      query,
-      scopes,
-    });
-    return normalizeTranscriptSearchResult(result);
-  }, []);
-
-  const searchSessions = useCallback(async (query: string, candidates: SessionRecord[]) => {
-    try {
-      const searchableCandidates = candidates.filter((session) => agentIdentityKey(session.agent) !== "imported");
-      const rows = await invokeCommand<unknown[]>(TauriCommand.SessionsSearch, {
-        query,
-        candidates: searchableCandidates.map((session) => ({
-          id: session.id,
-          agent: agentIdentityKey(session.agent),
-          path: session.path,
-        })),
-      });
-      if (!Array.isArray(rows)) throw new Error("Invalid session search response");
-      return rows.flatMap((row) => {
-        const session = normalizeSession(row as Record<string, unknown>);
-        return session ? [session] : [];
-      });
-    } catch (error) {
-      logger.error("session search failed", { query, candidateCount: candidates.length, error });
-      throw error;
-    }
+  const refreshPromptsForView = useCallback(() => {
+    void loadDomainForRetry(RuntimeDomainKey.Prompts);
+  }, [loadDomainForRetry]);
+  const retryRulesForView = useCallback(() => {
+    void loadDomainForRetry(RuntimeDomainKey.Rules);
+  }, [loadDomainForRetry]);
+  const retryHooksForView = useCallback(() => {
+    void loadDomainForRetry(RuntimeDomainKey.Hooks);
+  }, [loadDomainForRetry]);
+  const retryMcpForView = useCallback(() => {
+    void loadDomainForRetry(RuntimeDomainKey.Mcp);
+  }, [loadDomainForRetry]);
+  const handleProjectsScanned = useCallback((nextProjects: ProjectSummary[]) => {
+    desktopStore.actions.setProjects(nextProjects);
+    void refreshSessionProjects();
+    retryRulesForView();
+    retryMcpForView();
+    void loadDomainForRetry(RuntimeDomainKey.Skills);
+  }, [loadDomainForRetry, refreshSessionProjects, retryMcpForView, retryRulesForView]);
+  const retryAppSettings = useCallback(() => {
+    void loadSettings();
+  }, [loadSettings]);
+  const checkForUpdatesManually = useCallback(() => {
+    void checkForUpdates(true);
+  }, [checkForUpdates]);
+  const installUpdateManually = useCallback(() => {
+    void installUpdate();
+  }, [installUpdate]);
+  const openUpdateNotes = useCallback(() => setUpdateNotesOpen(true), []);
+  const handleThemeChange = useCallback((
+    mode: Parameters<NonNullable<ComponentProps<typeof SettingsView>["onThemeChange"]>>[0],
+    theme: Parameters<NonNullable<ComponentProps<typeof SettingsView>["onThemeChange"]>>[1],
+  ) => {
+    const current = desktopStore.getSnapshot().settings.values.themePreferences;
+    desktopStore.actions.patchSettings({ themePreferences: { ...current, [mode]: theme } });
   }, []);
 
   const loadSessionSkillLinks = useCallback(async (session: SessionRecord) => {
     await readSkillIndexStatus();
-    const links = await invokeCommand<unknown[]>(TauriCommand.SessionSkillLinks, { sessionId: session.id, agent: session.agent });
-    if (!Array.isArray(links)) throw new Error("Invalid session skill links response");
+    const links = await invokeSessionSkillLinks(session.id, session.agent);
     return links.flatMap((link) => {
       const normalized = normalizeSessionSkillLink(link);
       return normalized ? [normalized] : [];
@@ -1474,76 +1153,78 @@ export function App() {
   }, [readSkillIndexStatus]);
 
   const openSkillByName = useCallback((skillName: string) => {
-    const skill = data.skills.find((item) => item.name === skillName);
-    if (skill) setActiveSkillName(skill.name);
-    navigateTo(skill ? "skillDetail" : "skills");
+    const skill = findSkillBySelector(data.skills, skillName);
+    if (skill) setActiveSkillId(skill.id);
+    navigateTo(skill ? AppPage.SkillDetail : AppPage.Skills);
   }, [data.skills, navigateTo]);
 
   const openSessionFromLink = useCallback((link: DomainRow) => {
     const sessionId = typeof link.session_id === "string" ? link.session_id.trim() : "";
     const agent = typeof link.agent === "string" ? link.agent.trim() : "";
     if (!sessionId || !agent) return;
-    setActiveSessionKey(`${agent}:${sessionId}`);
-    navigateTo("sessions");
+    const path = typeof link.session_path === "string" ? link.session_path.trim() : "";
+    setActiveSessionKey(path
+      ? sessionSourceExternalKey({ agent, id: sessionId, path })
+      : `${agent}:${sessionId}`);
+    navigateTo(AppPage.Sessions);
   }, [navigateTo]);
 
-  const resolveSessionResumeTarget = useCallback(async (session: SessionRecord): Promise<"terminal" | "app"> => {
+  const resolveSessionResumeTarget = useCallback(async (session: SessionRecord): Promise<Exclude<SessionResumeTarget, SessionResumeTarget.Auto>> => {
     const configuredTarget = sessionResumeTargetForAgent(sessionResumeTarget, session.agent);
-    if (configuredTarget !== "auto") return configuredTarget;
+    if (configuredTarget !== SessionResumeTarget.Auto) return configuredTarget;
     const requestKey = sessionIdentity(session);
     const existingRequest = sessionResumeTargetRequests.current.get(requestKey);
     if (existingRequest) return existingRequest;
     const request = (async () => {
       try {
-        const inferredTarget = await invokeCommand<"terminal" | "app">(TauriCommand.SessionResumeTarget, {
-          session: sessionLaunchPayload(session),
-        });
-        return inferredTarget === "app" ? "app" : "terminal";
+        const inferredTarget = await inferSessionResumeTarget(sessionLaunchPayload(session));
+        return inferredTarget === SessionResumeTarget.App ? SessionResumeTarget.App : SessionResumeTarget.Terminal;
       } catch (error) {
         logger.warn("session resume target inference failed; using terminal", { error });
-        return "terminal";
+        return SessionResumeTarget.Terminal;
       }
     })();
     sessionResumeTargetRequests.current.set(requestKey, request);
     return request;
   }, [sessionResumeTarget]);
 
-  const resumeSession = useCallback(async (session: SessionRecord): Promise<SessionResumeOutcome> => {
-    if (await resolveSessionResumeTarget(session) === "app") {
+  const resumeSession = useCallback(async (
+    session: SessionRecord,
+    requestedTarget?: Exclude<SessionResumeTarget, SessionResumeTarget.Auto>,
+  ): Promise<SessionResumeOutcome> => {
+    const target = requestedTarget ?? await resolveSessionResumeTarget(session);
+    if (target === SessionResumeTarget.App) {
       const appUrl = sessionAppDeepLink(session);
       if (appUrl) {
         try {
-          await invokeCommand(TauriCommand.OpenUrl, { url: appUrl });
-          return { status: "launched", target: "app" };
+          await openUrl(appUrl);
+          return { status: SessionResumeOutcomeStatus.Launched, target: SessionResumeTarget.App };
         } catch (error) {
+          if (requestedTarget) throw error;
           logger.warn("session app resume unavailable; using terminal", { agent: session.agent, error });
         }
       }
+      if (requestedTarget && !appUrl) throw new Error(`${session.agent} sessions cannot be resumed in app`);
     }
-    const result = await invokeCommand<
-      | { status: "activeWriter"; lockPath: string }
-      | { status: "launched"; agent: string; terminal: string; commandLine: string }
-    >(TauriCommand.SessionResumeInTerminal, {
-      session: sessionLaunchPayload(session),
-    });
-    if (result.status === "activeWriter") return result;
-    return { status: "launched", target: "terminal", terminal: result.terminal };
+    const result = await resumeSessionInTerminal(sessionLaunchPayload(session));
+    if (result.status === SessionResumeOutcomeStatus.ActiveWriter) return result;
+    return { status: SessionResumeOutcomeStatus.Launched, target: SessionResumeTarget.Terminal, terminal: result.terminal };
   }, [resolveSessionResumeTarget]);
 
   const previewAndApply = useCallback(async (
     command: SkillChangeCommand,
-    args: Record<string, unknown>,
+    args: SkillChangeArgs,
     { onApplied }: { onApplied?: () => void } = {},
   ) => {
     const isUpdate = command === SkillChangeCommand.UpdateMany;
     const isDelete = command === SkillChangeCommand.DeleteMany;
-    const names = Array.isArray(args.names)
-      && args.names.length > 0
-      && args.names.every((name): name is string => typeof name === "string" && name.trim().length > 0)
-      ? args.names
+    const names = Array.isArray(args.skillIds)
+      && args.skillIds.length > 0
+      && args.skillIds.every((skillId): skillId is string => typeof skillId === "string" && skillId.trim().length > 0)
+      ? args.skillIds
       : undefined;
     if ((isUpdate || isDelete) && !names) {
-      const error = "Skill change requires at least one valid skill name.";
+      const error = "Skill change requires at least one valid skill ID.";
       setSkillUpdateError(error);
       return;
     }
@@ -1557,8 +1238,8 @@ export function App() {
     }
     try {
       const preview = isUpdate
-        ? await invokeCommand<SkillPreview>(command, { ...args, dryRun: true })
-        : await safeInvoke(command, { ...args, dryRun: true }) as SkillPreview | null;
+        ? await previewSkillChange(command, args)
+        : await previewSkillChangeIfAvailable(command, args);
       if (!preview) return;
       if (isUpdate) {
         setPendingSkillChange((current) => current?.command === command ? { ...current, preview } : current);
@@ -1572,17 +1253,6 @@ export function App() {
       if (isUpdate) setPendingSkillChange((current) => current?.command === command ? { ...current, previewError: message } : current);
       if (isDelete) setPendingSkillChange((current) => current?.command === command && current.args === args ? { ...current, previewError: message } : current);
     }
-  }, []);
-
-  const applySkillChange = useCallback(async (command: SkillChangeCommand, args: Record<string, unknown>) => {
-    const result = await invokeCommand<SkillPreview>(command, { ...args, dryRun: false });
-    if (result.skills) {
-      setData((current) => {
-        const next = normalizeDomainRows(current, "skills", result.skills);
-        return replaceSkillReportPreservingUpdates(current, next, typeof args.name === "string" ? [args.name] : []);
-      });
-    }
-    return result;
   }, []);
 
   const closeSkillChangeDialog = (open: boolean) => {
@@ -1599,28 +1269,23 @@ export function App() {
       ? pendingSkillChange.preview?.previewId
       : undefined;
     try {
-      const result = await invokeCommand<SkillPreview>(command, {
+      const result = await applySkillChangeAndCommit(desktopStore, command, {
         ...args,
-        dryRun: false,
         ...(command === SkillChangeCommand.UpdateMany ? { previewId, resolutions } : {}),
       });
-      if (result.skills) {
-        setData((current) => {
-          const next = normalizeDomainRows(current, "skills", result.skills);
-          return replaceSkillReportPreservingUpdates(current, next, names);
-        });
+      const nextSkills = result.updated ?? result.skills;
+      if (nextSkills) {
+        if (command === SkillChangeCommand.UpdateMany) {
+          desktopStore.actions.clearSkillUpdates(names);
+        }
       } else if (command === SkillChangeCommand.DeleteMany) {
-        const namesSet = new Set(names);
-        setData((current) => recomputeSources({
-          ...current,
-          skills: current.skills.filter((skill) => !namesSet.has(skill.name)),
-        }));
+        desktopStore.actions.patchSkills([], names);
       } else if (command === SkillChangeCommand.UpdateMany) {
-        setData((current) => clearSkillUpdateAvailability(current, names));
+        desktopStore.actions.clearSkillUpdates(names);
       }
       setPendingSkillChange(null);
       onApplied?.();
-      if (!result.skills && (command !== SkillChangeCommand.DeleteMany || result?.refreshRequired)) {
+      if (!nextSkills && (command !== SkillChangeCommand.DeleteMany || result?.refreshRequired)) {
         void refreshSkillList(true);
       }
     } catch (error) {
@@ -1634,32 +1299,27 @@ export function App() {
   };
 
   const applyVisibility = useCallback(async (names: string[], visibility: SkillVisibility) => {
-    setData((current) => applyVisibilityState(current, names, visibility));
-    const result = await safeInvoke<SkillPreview>(SkillChangeCommand.Set, { names, visibility, dryRun: false });
-    if (result?.skills) {
-      setData((current) => {
-        const next = normalizeDomainRows(current, "skills", result.skills);
-        return replaceSkillReportPreservingUpdates(current, next);
-      });
-    }
+    desktopStore.actions.setSkillVisibility(names, visibility);
+    const result = await applySkillChangeIfAvailable(SkillChangeCommand.Set, { skillIds: names, visibility });
+    if (result) commitSkillChangeResult(desktopStore, result);
     if (!result) await refreshSkillList(true);
   }, [refreshSkillList]);
 
   const applyWrapperSkill = useCallback(
-    (args: WrapperArgs) => applySkillChange(SkillChangeCommand.Wrap, args),
-    [applySkillChange],
+    (args: WrapperArgs) => applySkillChangeAndCommit(desktopStore, SkillChangeCommand.Wrap, args),
+    [],
   );
   const applySkillUpdates = useCallback(
-    (names: string[], onApplied?: () => void) => previewAndApply(SkillChangeCommand.UpdateMany, { names }, { onApplied }),
+    (names: string[], onApplied?: () => void) => previewAndApply(SkillChangeCommand.UpdateMany, { skillIds: names }, { onApplied }),
     [previewAndApply],
   );
   const deleteSkills = useCallback(
-    (names: string[], onApplied?: () => void) => previewAndApply(SkillChangeCommand.DeleteMany, { names }, { onApplied }),
+    (names: string[], onApplied?: () => void) => previewAndApply(SkillChangeCommand.DeleteMany, { skillIds: names }, { onApplied }),
     [previewAndApply],
   );
   const openSkillFromList = useCallback((skill: NormalizedSkill) => {
-    setActiveSkillName(skill.name);
-    navigateTo("skillDetail");
+    setActiveSkillId(skill.id);
+    navigateTo(AppPage.SkillDetail);
   }, [navigateTo]);
 
   const forceSidebarResizeHover =
@@ -1667,17 +1327,23 @@ export function App() {
     new URLSearchParams(window.location.search).get("forceSidebarResizeHover") === "1";
   const sidebarSize = sidebarCollapsed ? COLLAPSED_SIDEBAR_SIZE : SIDEBAR_SIZE;
 
-  const updateToast = desktopUpdate.status === "available" && desktopUpdate.version && !updateNoticeDismissed ? (
+  const updateToast = desktopUpdate.status === DesktopUpdateStatus.Available && desktopUpdate.version && !updateNoticeDismissed ? (
     <Toast
       tone="success"
       message={`Tendi ${desktopUpdate.version} is available.`}
-      action={{ label: "Install", onClick: () => { void installUpdate(); } }}
+      action={{
+        label: desktopUpdate.body?.trim() ? "View notes" : "Install",
+        onClick: () => {
+          if (desktopUpdate.body?.trim()) setUpdateNotesOpen(true);
+          else void installUpdate();
+        },
+      }}
       onDismiss={() => setUpdateNoticeDismissed(true)}
     />
-  ) : desktopUpdate.status === "installing" ? (
+  ) : desktopUpdate.status === DesktopUpdateStatus.Installing ? (
     <Toast tone="info" message="Installing Tendi update…" />
-  ) : desktopUpdate.status === "error" && desktopUpdate.error ? (
-    <Toast tone="error" message={`Update failed: ${desktopUpdate.error}`} onDismiss={() => setDesktopUpdate({ status: "idle" })} />
+  ) : desktopUpdate.status === DesktopUpdateStatus.Error && desktopUpdate.error ? (
+    <Toast tone="error" message={`Update failed: ${desktopUpdate.error}`} onDismiss={() => setDesktopUpdate({ status: DesktopUpdateStatus.Idle })} />
   ) : null;
 
   useLayoutEffect(() => {
@@ -1687,6 +1353,15 @@ export function App() {
   return (
     <main className="appShell">
       {updateToast}
+      {desktopUpdate.status === DesktopUpdateStatus.Available && desktopUpdate.version ? (
+        <UpdateNotesDialog
+          open={updateNotesOpen}
+          version={desktopUpdate.version}
+          body={desktopUpdate.body}
+          onOpenChange={setUpdateNotesOpen}
+          onInstall={() => { void installUpdate(); }}
+        />
+      ) : null}
       {bundledSkillPrompt ? (
         <Suspense fallback={(
           <DialogLoadingFallback
@@ -1694,6 +1369,28 @@ export function App() {
             label="Loading setup dialog"
             descriptionId="bundled-skill-loading-description"
             onOpenChange={(open) => { if (!open && !bundledSkillBusy) void dismissBundledSkillPrompt(); }}
+            description={(
+              <>This registers the <code>tendi</code> command on your shell PATH, then installs the
+                Tendi skill into <span>{bundledSkillPrompt.target}</span>. Coding agents can search local sessions and
+                manage skills; no session data is uploaded.</>
+            )}
+            showLoading={false}
+            actions={(
+              <>
+                <DialogActionButton variant="secondary" disabled={bundledSkillBusy} onClick={() => { void dismissBundledSkillPrompt(); }}>Skip</DialogActionButton>
+                <DialogStatefulButton
+                  className="dialogStatefulButtonWide"
+                  state={bundledSkillBusy ? AsyncStatus.Loading : AsyncStatus.Idle}
+                  loadingLabel="Setting up"
+                  variant="primary"
+                  aria-label="Set up"
+                  disabled={!bundledSkillBusy}
+                  onClick={() => { void installBundledSkill(); }}
+                >
+                  Set up
+                </DialogStatefulButton>
+              </>
+            )}
           />
         )}>
           <BundledSkillInstallDialog
@@ -1743,8 +1440,8 @@ export function App() {
           panelRef={sidebarPanelRef}
           {...({ order: 1 } as Record<string, unknown>)}
         >
-          <Sidebar
-            view={view === "skillDetail" ? "skills" : view}
+          <MemoSidebar
+            view={view === AppPage.SkillDetail ? AppPage.Skills : view}
             setView={navigate}
             sources={availableSidebarSources}
             collapsed={sidebarCollapsed}
@@ -1754,33 +1451,26 @@ export function App() {
           />
         </Panel>
         <Panel className="mainPanel" minSize="520px" {...({ order: 2 } as Record<string, unknown>)}>
-          {contentView === "skillDetail" ? (activeSkill ? (
-            <SkillEditorView
+          {contentView === AppPage.SkillDetail ? (activeSkill ? (
+            <MemoSkillEditorView
               skill={activeSkill}
               skills={data.skills}
-              back={() => navigate("skills")}
+              back={backToSkills}
               onReadSkillIndexStatus={readSkillIndexStatus}
               skillIndexStatus={skillIndexStatus}
               onOpenSession={openSessionFromLink}
               onOpenSkill={openSkillByName}
-              onSaved={(skills) => {
-                if (skills) {
-                  setData((current) => {
-                    const next = normalizeDomainRows(current, "skills", skills);
-                    return replaceSkillReportPreservingUpdates(current, next);
-                  });
-                }
-              }}
+              onSaved={saveSkillEditorRows}
             />
           ) : (
             <PlaceholderView title="Skill unavailable" />
-          )) : contentView === "skills" ? (
-            <SkillsView
+          )) : contentView === AppPage.Skills ? (
+            <MemoSkillsView
               skills={filteredData.skills}
               projects={projects}
               installedAgentKeys={installedAgentKeys}
               targetOptions={agentTargets}
-              loadingSkills={loadingDomains.has("skills")}
+              loadingSkills={loadingDomains.has(RuntimeDomainKey.Skills)}
               loadError={domainErrors.skills ?? ""}
               hasRows={data.skills.length > 0}
               checkingUpdates={checkingSkillUpdates}
@@ -1794,17 +1484,17 @@ export function App() {
               onAddInstalled={applyInstalledSkills}
               openSkill={openSkillFromList}
             />
-          ) : contentView === "sessions" ? (
-            <SessionsView
+          ) : contentView === AppPage.Sessions ? (
+            <MemoSessionsView
               sessions={filteredData.sessions as SessionRecord[]}
               developerMode={developerMode}
-              loadTranscript={loadTranscript}
-              loadTranscriptLocator={loadTranscriptLocator}
-              searchTranscript={searchTranscript}
-              searchSessions={searchSessions}
+              loadTranscript={loadSessionTranscript}
+              loadTranscriptLocator={loadSessionTranscriptLocator}
+              searchTranscript={searchSessionTranscript}
+              searchSessions={searchSessionRecords}
               loadSessionSkillLinks={loadSessionSkillLinks}
               skillIndexStatus={skillIndexStatus}
-              loadingSessions={loadingDomains.has("sessions")}
+              loadingSessions={loadingDomains.has(RuntimeDomainKey.Sessions)}
               sessionListError={sessionListError}
               sessionRefreshError={sessionRefreshError}
               onRefreshSessions={refreshSessionsFromScan}
@@ -1818,26 +1508,26 @@ export function App() {
               activeSessionKey={activeSessionKey}
               onSavePrompt={savePromptFromSession}
             />
-          ) : contentView === "prompts" ? (
-            <PromptsView
+          ) : contentView === AppPage.Prompts ? (
+            <MemoPromptsView
               prompts={filteredData.prompts as ComponentProps<typeof PromptsView>["prompts"]}
-              loadingPrompts={loadingDomains.has("prompts")}
+              loadingPrompts={loadingDomains.has(RuntimeDomainKey.Prompts)}
               loadError={domainErrors.prompts ?? ""}
               hasRows={data.prompts.length > 0}
-              onRefreshPrompts={() => loadDomainForRetry("prompts")}
+              onRefreshPrompts={refreshPromptsForView}
               onPromptSaved={applyPromptSaved}
               onPromptsDeleted={removePrompts}
             />
-          ) : contentView === "rules" ? (
-              <RulesView rows={filteredData.rules} skills={data.skills} projects={projects} loadingRows={loadingDomains.has("rules")} loadError={domainErrors.rules ?? ""} hasRows={data.rules.length > 0} onRetry={() => { void loadDomainForRetry("rules"); }} onOpenSkill={openSkillByName} onDeleteRules={deleteRules} />
-            ) : contentView === "hooks" ? (
-              <HooksView rows={filteredData.hooks} projects={projects} loadingRows={loadingDomains.has("hooks")} loadError={domainErrors.hooks ?? ""} hasRows={data.hooks.length > 0} onRetry={() => { void loadDomainForRetry("hooks"); }} onDeleteHook={deleteHook} onDeleteHooks={deleteHooks} onSetHookEnabled={setHookEnabled} onReviewHook={reviewHook} />
-            ) : contentView === "mcp" ? (
-            <DataListView title="MCP" rows={filteredData.mcp} columns={mcpColumns} projects={projects} loading={loadingDomains.has("mcp")} loadError={domainErrors.mcp ?? ""} hasRows={data.mcp.length > 0} onRetry={() => { void loadDomainForRetry("mcp"); }} onSetMcpEnabled={setMcpEnabled} />
-          ) : contentView === "config" ? (
-            <ConfigView activeProfiles={configProfiles} onActiveProfilesChange={setConfigProfiles} />
-          ) : contentView === "settings" ? (
-            <SettingsView
+          ) : contentView === AppPage.Rules ? (
+              <MemoRulesView rows={filteredData.rules} skills={data.skills} projects={projects} loadingRows={loadingDomains.has(RuntimeDomainKey.Rules)} loadError={domainErrors.rules ?? ""} hasRows={data.rules.length > 0} onRetry={retryRulesForView} onOpenSkill={openSkillByName} onDeleteRules={deleteRules} onRuleSaved={patchRuleSha256} />
+            ) : contentView === AppPage.Hooks ? (
+              <MemoHooksView rows={filteredData.hooks} projects={projects} loadingRows={loadingDomains.has(RuntimeDomainKey.Hooks)} loadError={domainErrors.hooks ?? ""} hasRows={data.hooks.length > 0} onRetry={retryHooksForView} onDeleteHook={deleteHook} onDeleteHooks={deleteHooks} onSetHookEnabled={setHookEnabled} onSetHooksEnabled={setHooksEnabled} onReviewHook={reviewHook} />
+            ) : contentView === AppPage.Mcp ? (
+            <MemoDataListView title="MCP" rows={filteredData.mcp} columns={mcpColumns} projects={projects} loading={loadingDomains.has(RuntimeDomainKey.Mcp)} loadError={domainErrors.mcp ?? ""} hasRows={data.mcp.length > 0} onRetry={retryMcpForView} onSetMcpEnabled={setMcpEnabled} onSetMcpEnabledMany={setMcpEnabledMany} />
+          ) : contentView === AppPage.Config ? (
+            <MemoConfigView activeProfiles={configProfiles} onActiveProfilesChange={(profiles) => desktopStore.actions.patchSettings({ configProfiles: profiles })} />
+          ) : contentView === AppPage.Settings ? (
+            <MemoSettingsView
               appearance={appearance}
               themePreferences={themePreferences}
               fontFamily={fontFamily}
@@ -1850,44 +1540,34 @@ export function App() {
               sessionResumeTarget={sessionResumeTarget}
               missingSessionProjectPolicy={missingSessionProjectPolicy}
               onAppearanceChange={changeAppearance}
-              onFontFamilyChange={setFontFamily}
-              onTerminalChange={setTerminal}
-              onEditorChange={setEditor}
-              onAdditionalSessionRootsChange={setAdditionalSessionRoots}
-              onDeveloperModeChange={setDeveloperMode}
-              onSessionResumeTargetChange={setSessionResumeTarget}
-              onMissingSessionProjectPolicyChange={setMissingSessionProjectPolicy}
+              onFontFamilyChange={(value) => desktopStore.actions.patchSettings({ fontFamily: value })}
+              onTerminalChange={(value) => desktopStore.actions.patchSettings({ terminal: value })}
+              onEditorChange={(value) => desktopStore.actions.patchSettings({ editor: value })}
+              onAdditionalSessionRootsChange={(value) => desktopStore.actions.patchSettings({ additionalSessionRoots: value })}
+              onDeveloperModeChange={(value) => desktopStore.actions.patchSettings({ developerMode: value })}
+              onSessionResumeTargetChange={(value) => desktopStore.actions.patchSettings({ sessionResumeTarget: value })}
+              onMissingSessionProjectPolicyChange={(value) => desktopStore.actions.patchSettings({ missingSessionProjectPolicy: value })}
               onAppIconChange={changeAppIcon}
               projects={projects}
-              onProjectsScanned={(nextProjects) => {
-                setProjects(nextProjects);
-                void refreshSessionProjects();
-                loadDomainForRetry("skills");
-                loadDomainForRetry("rules");
-                loadDomainForRetry("mcp");
-              }}
-              appSettingsLoading={settingsLoading}
-              appSettingsLoadError={settingsLoadError}
-              onRetryAppSettings={() => { void loadSettings(); }}
+              onProjectsScanned={handleProjectsScanned}
+              appSettingsLoading={appSettings.loading}
+              appSettingsLoadError={appSettings.error}
+              onRetryAppSettings={retryAppSettings}
               update={desktopUpdate}
-              onCheckForUpdates={() => { void checkForUpdates(true); }}
-              onInstallUpdate={() => { void installUpdate(); }}
-              onThemeChange={(mode, theme) => {
-                setThemePreferences((current) => ({ ...current, [mode]: theme }));
-              }}
+              onCheckForUpdates={checkForUpdatesManually}
+              onInstallUpdate={installUpdateManually}
+              onViewUpdateNotes={openUpdateNotes}
+              onSkillsUpdated={applySkillRows}
+              installedAgentKeys={installedAgentKeys}
+              targetOptions={agentTargets}
+              onThemeChange={handleThemeChange}
             />
-          ) : contentView === "overview" ? (
+          ) : contentView === AppPage.Overview ? (
             <OverviewView
-              counts={{
-                ...overviewCounts,
-              }}
+              counts={overviewCounts}
               hookReviewCount={overviewHookReviewCount}
-              skills={filteredData.skills}
               sessions={filteredData.sessions as SessionRecord[]}
               skillUpdateCount={overviewSkillUpdateCount}
-              analyticsRevision={analyticsRevision}
-              analyticsRevisionReady={analyticsRevisionReady}
-              analyticsRevisionError={analyticsRevisionError}
               onRetryAnalyticsRevision={refreshAnalyticsRevision}
               agentFilter={agentFilter}
               overviewCountsLoaded={overviewCountsLoaded}
@@ -1895,11 +1575,8 @@ export function App() {
               onRetryCounts={retryCatalogCounts}
               sessionListStatus={sessionListStatus}
               sessionListError={sessionListError}
-              onNavigate={(id: DomainKey) => navigate(id)}
-              onOpenSession={(session) => {
-                setActiveSessionKey(`${session.agent}:${session.id}`);
-                navigate("sessions");
-              }}
+              onNavigate={navigateToDomain}
+              onOpenSession={openOverviewSession}
             />
           ) : (
             <PlaceholderView title={activeNav?.label ?? "Overview"} />

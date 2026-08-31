@@ -3,14 +3,17 @@ pub mod analytics;
 pub mod bundled_skill;
 pub mod config;
 pub mod files;
+pub mod generated;
 mod fsutil;
 mod git;
+mod json_edit;
 pub mod hooks;
 pub mod logging;
 pub mod mcp;
 pub mod projects;
 mod providers;
 pub mod rules;
+pub mod runtime_contract;
 pub mod session_skills;
 pub mod sessions;
 pub mod skill_marketplace;
@@ -20,12 +23,13 @@ mod skill_source;
 pub mod skill_targets;
 pub mod skills;
 pub mod storage;
+mod time;
 pub mod transcript;
 
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 pub use agents::{AgentRecord, AgentScan};
 pub use hooks::{HookRecord, HookScan};
@@ -36,13 +40,18 @@ pub use providers::{
     plan_session_resume, session_root_priority,
 };
 pub use rules::{RuleRecord, RuleScan};
+pub use runtime_contract::{
+    DomainSnapshot, InstallationId, OperationId, OperationKind, OperationRecord, OperationStatus,
+    ProjectionHead, Revision, RevisionDecision, RevisionedEvent, ScopeKey, SessionKey,
+    SourceLocator, SourceRef, SourceVersion, decide_revision,
+};
 pub use sessions::{SessionRecord, SessionScan};
 pub use skill_targets::{SkillInstallScope, SkillTarget};
 pub use skills::{AgentKind, SkillRecord, SkillScan, SkillVisibility};
 pub use storage::SessionSearchHit;
 pub use transcript::{TranscriptItem, TranscriptScan};
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ScanReport {
     pub agents: AgentScan,
     pub skills: SkillScan,
@@ -63,16 +72,11 @@ pub fn scan(cwd: impl AsRef<Path>) -> Result<ScanReport> {
         .into_iter()
         .map(PathBuf::from)
         .collect::<Vec<_>>();
-    let session_scan_cache = store.session_scan_cache()?;
     std::thread::scope(|scope| {
         let agents = scope.spawn(|| agents::scan_agents(&cwd));
         let skills = scope.spawn(|| skills::scan_skills_synced_for_projection(&cwd));
         let sessions = scope.spawn(|| {
-            sessions::scan_sessions_with_additional_roots_cached(
-                &cwd,
-                &additional_session_roots,
-                &session_scan_cache,
-            )
+            sessions::scan_sessions_with_additional_roots(&cwd, &additional_session_roots)
         });
         let rules = scope.spawn(|| rules::scan_rules(&cwd));
         let hooks = scope.spawn(|| hooks::scan_hooks(&cwd));
@@ -92,8 +96,9 @@ pub fn scan(cwd: impl AsRef<Path>) -> Result<ScanReport> {
 }
 
 pub fn scan_and_persist(cwd: impl AsRef<Path>) -> Result<ScanReport> {
+    let cwd = cwd.as_ref();
     let report = scan(cwd)?;
     let store = storage::Store::open_default()?;
-    store.save_scan(&report)?;
+    store.save_scan_for_workspace(cwd, &report)?;
     Ok(report)
 }

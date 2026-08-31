@@ -1,18 +1,20 @@
 import type {
   TokenBreakdownSegment,
+  TokenizerKind,
+  TokenizerWorkerResponseType,
   TranscriptSkillLink,
   TranscriptTokenItem,
 } from "./tokenizer-types.ts";
 
 export type TokenizerWorkerRequest =
   | {
-      kind: "markdown";
+      kind: TokenizerKind.Markdown;
       activePath: string;
       content: string;
       selectionText: string;
     }
   | {
-      kind: "transcript";
+      kind: TokenizerKind.Transcript;
       items: TranscriptTokenItem[];
       skillLinks: TranscriptSkillLink[];
     };
@@ -21,13 +23,13 @@ export type TokenizerWorkerResponse =
   | {
       id: number;
       kind: TokenizerWorkerRequest["kind"];
-      type: "result";
+      type: TokenizerWorkerResponseType.Result;
       segments: TokenBreakdownSegment[];
     }
   | {
       id: number;
       kind: TokenizerWorkerRequest["kind"];
-      type: "error";
+      type: TokenizerWorkerResponseType.Error;
       message: string;
     };
 

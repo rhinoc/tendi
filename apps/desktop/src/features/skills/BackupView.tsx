@@ -12,35 +12,32 @@ import { SelectionCheckbox } from "../../components/shared/SelectionCheckbox.tsx
 import { SelectControl } from "../../components/shared/SelectControl.tsx";
 import { StatefulButton, type StatefulButtonState } from "../../components/shared/StatefulButton.tsx";
 import { Toast } from "../../components/shared/Toast.tsx";
-import { backupDialogLeadingAction } from "../../lib/backup-dialog.ts";
-import { backupConfigurationState } from "../../lib/backup-state.ts";
-import { compactCommand, formatUserPath, revealPathLabel, safeInvoke, TauriCommand, invokeCommand } from "../../lib/index.ts";
+import { BackupDialogLeadingAction, backupDialogLeadingAction } from "../../lib/backup-dialog.ts";
+import { BackupConfigurationState, backupConfigurationState } from "../../lib/backup-state.ts";
+import { compactCommand, formatUserPath, revealPathLabel, safeInvoke, TauriCommand, type RawSkillRecord } from "../../lib/index.ts";
+import { AsyncStatus } from "../../lib/async-status.ts";
+import {
+  configureSkillBackup,
+  disconnectSkillBackup,
+  readSkillBackup,
+  readSkillTargets,
+  restoreSkillBackup,
+  runSkillBackup,
+  SkillScope,
+} from "../../lib/runtime-gateway.ts";
+import type {
+  BackupContents,
+  BackupRestoreOperation,
+  BackupStatusResponse,
+  SkillTargetResponse,
+} from "../../lib/runtime-gateway.ts";
 import { resolveSelectValue } from "../../lib/select-options.ts";
 import "./BackupView.css";
 
-type BackupConfig = {
-  remoteUrl: string;
-  checkoutPath: string;
-  contents: BackupContents;
-};
-
-type BackupCategorySelection = { enabled: boolean; excluded: string[] };
-type BackupContents = {
-  skills: BackupCategorySelection;
-  mcp: BackupCategorySelection;
-  rules: BackupCategorySelection;
-  hooks: BackupCategorySelection;
-};
+type BackupCategorySelection = BackupContents[BackupCategory];
 
 type BackupCategory = keyof BackupContents;
 type BackupCatalogItem = { id: string; label: string; detail: string };
-type BackupCatalog = Record<BackupCategory, BackupCatalogItem[]>;
-
-type BackupStatus = {
-  skillPath: string;
-  state: string;
-  reason?: string | null;
-};
 
 type BackupVersion = {
   id: string;
@@ -48,22 +45,28 @@ type BackupVersion = {
   summary: string;
 };
 
-type BackupStatusResponse = {
-  config: BackupConfig | null;
-  statuses: BackupStatus[];
-  versions: BackupVersion[];
-  catalog: BackupCatalog;
-};
-
-type BackupTarget = { id: string; displayName: string; supportsGlobal: boolean };
+type BackupTarget = SkillTargetResponse;
 
 type BackupRestorePlan = {
   revision: string;
   targetRoot: string;
-  operations: Array<{ id: string; name: string; category: string; target: string; status: string; message?: string | null }>;
+  operations: BackupRestoreOperation[];
 };
 
-type RestoreResolution = "skip" | "replace" | "keep-both";
+enum RestoreResolution {
+  Skip = "skip",
+  Replace = "replace",
+  KeepBoth = "keep-both",
+}
+enum BackupAction {
+  Configure = "configure",
+  Backup = "backup",
+  Disconnect = "disconnect",
+}
+enum BackupRestoreOperationStatus {
+  Conflict = "conflict",
+  Planned = "planned",
+}
 
 function errorMessage(error: unknown) {
   return error instanceof Error ? error.message : `${error}`;
@@ -97,20 +100,24 @@ const backupCategoryDefinitions: Array<{ key: BackupCategory; label: string }> =
   { key: "hooks", label: "Hooks" },
 ];
 
-export function BackupSettings() {
+export function BackupSettings({
+  onSkillsRestored,
+}: {
+  onSkillsRestored?: (skills: RawSkillRecord[], options?: { patch?: boolean }) => void;
+} = {}) {
   const [data, setData] = useState<BackupStatusResponse | null>(null);
   const [repository, setRepository] = useState("");
   const [contents, setContents] = useState<BackupContents>(defaultBackupContents);
   const [loadError, setLoadError] = useState("");
   const [actionError, setActionError] = useState("");
-  const [action, setAction] = useState<"configure" | "backup" | "disconnect" | "">("");
+  const [action, setAction] = useState<BackupAction | null>(null);
   const [targets, setTargets] = useState<BackupTarget[]>([]);
   const [detailsOpen, setDetailsOpen] = useState(false);
   const [contentCategory, setContentCategory] = useState<BackupCategory | null>(null);
   const [restoreOpen, setRestoreOpen] = useState(false);
   const [restoreVersion, setRestoreVersion] = useState<BackupVersion | null>(null);
   const [restoreTarget, setRestoreTarget] = useState("shared");
-  const [restoreScope, setRestoreScope] = useState<"global" | "project">("global");
+  const [restoreScope, setRestoreScope] = useState<SkillScope>(SkillScope.Global);
   const [restorePlan, setRestorePlan] = useState<BackupRestorePlan | null>(null);
   const [restoreSelectedIds, setRestoreSelectedIds] = useState<string[]>([]);
   const [restoreResolutions, setRestoreResolutions] = useState<Record<string, RestoreResolution>>({});
@@ -122,9 +129,10 @@ export function BackupSettings() {
   const load = useCallback(async () => {
     try {
       const [next, targetOptions] = await Promise.all([
-        invokeCommand<BackupStatusResponse>(TauriCommand.SkillsBackupStatus),
-        invokeCommand<BackupTarget[]>(TauriCommand.SkillsTargets),
+        readSkillBackup(),
+        readSkillTargets(),
       ]);
+      if (!targetOptions) throw new Error("Unable to read skill targets");
       setData(next);
       setLoadError("");
       if (next.config) {
@@ -148,10 +156,10 @@ export function BackupSettings() {
 
   const configure = async () => {
     if (!repository.trim()) return;
-    setAction("configure");
+    setAction(BackupAction.Configure);
     setActionError("");
     try {
-      await invokeCommand(TauriCommand.SkillsBackupConfigure, {
+      await configureSkillBackup({
         repository: repository.trim(),
         checkoutPath: backupConfig?.remoteUrl ? backupConfig.checkoutPath : "",
         contents,
@@ -162,33 +170,33 @@ export function BackupSettings() {
     } catch (configureError) {
       setActionError(errorMessage(configureError));
     } finally {
-      setAction("");
+      setAction(null);
     }
   };
 
   const backupNow = async () => {
-    setAction("backup");
+    setAction(BackupAction.Backup);
     setActionError("");
     try {
-      await invokeCommand(TauriCommand.SkillsBackupNow);
+      await runSkillBackup();
       await load();
     } catch (backupError) {
       setActionError(errorMessage(backupError));
     } finally {
-      setAction("");
+      setAction(null);
     }
   };
 
   const disconnect = async () => {
-    setAction("disconnect");
+    setAction(BackupAction.Disconnect);
     setActionError("");
     try {
-      await invokeCommand(TauriCommand.SkillsBackupDisconnect);
+      await disconnectSkillBackup();
       await load();
     } catch (disconnectError) {
       setActionError(errorMessage(disconnectError));
     } finally {
-      setAction("");
+      setAction(null);
     }
   };
 
@@ -196,15 +204,17 @@ export function BackupSettings() {
     setRestoreBusy(true);
     setActionError("");
     try {
-      const plan = await invokeCommand<BackupRestorePlan>(TauriCommand.SkillsBackupRestore, {
+      const plan = await restoreSkillBackup({
         revision: version.id,
         skillIds: [],
         target,
         scope,
         dryRun: true,
       });
-      setRestorePlan(plan);
-      if (resetSelection) setRestoreSelectedIds(plan.operations.map((operation) => operation.id));
+      if (!plan.revision || !plan.targetRoot || !plan.operations) throw new Error("Invalid restore plan response");
+      const nextPlan: BackupRestorePlan = { revision: plan.revision, targetRoot: plan.targetRoot, operations: plan.operations };
+      setRestorePlan(nextPlan);
+      if (resetSelection) setRestoreSelectedIds(nextPlan.operations.map((operation) => operation.id));
     } catch (previewError) {
       setRestorePlan(null);
       setActionError(errorMessage(previewError));
@@ -232,7 +242,7 @@ export function BackupSettings() {
     if (restoreVersion) void previewRestore(restoreVersion, nextTarget, restoreScope);
   };
 
-  const changeRestoreScope = (nextScope: "global" | "project") => {
+  const changeRestoreScope = (nextScope: SkillScope) => {
     setRestoreScope(nextScope);
     setRestoreResolutions({});
     if (restoreVersion) void previewRestore(restoreVersion, resolvedRestoreTarget, nextScope);
@@ -243,7 +253,7 @@ export function BackupSettings() {
     setRestoreBusy(true);
     setActionError("");
     try {
-      await invokeCommand(TauriCommand.SkillsBackupRestore, {
+      const result = await restoreSkillBackup({
         revision: restoreVersion.id,
         skillIds: restoreSelectedIds,
         target: resolvedRestoreTarget,
@@ -252,6 +262,8 @@ export function BackupSettings() {
         resolutions: Object.entries(restoreResolutions).map(([id, action]) => ({ id, action })),
       });
       setRestoreOpen(false);
+      const nextSkills = result.updated ?? result.skills;
+      if (nextSkills) onSkillsRestored?.(nextSkills, { patch: true });
       await load();
     } catch (restoreError) {
       setActionError(errorMessage(restoreError));
@@ -260,10 +272,10 @@ export function BackupSettings() {
     }
   };
 
-  const stateFor = (next: typeof action): StatefulButtonState => action === next ? "loading" : "idle";
+  const stateFor = (next: BackupAction): StatefulButtonState => action === next ? AsyncStatus.Loading : AsyncStatus.Idle;
   const configurationState = backupConfigurationState(data);
-  const loading = configurationState === "loading";
-  const configured = configurationState === "configured";
+  const loading = configurationState === BackupConfigurationState.Loading;
+  const configured = configurationState === BackupConfigurationState.Configured;
   const lastBackup = data?.versions[0] ?? null;
   const catalog = data?.catalog ?? null;
   const activeCategory = backupCategoryDefinitions.find((category) => category.key === contentCategory) ?? null;
@@ -302,7 +314,7 @@ export function BackupSettings() {
   const hasUnresolvedRestoreConflict = Boolean(
     restorePlan?.operations.some((operation) => (
       restoreSelectedIds.includes(operation.id)
-      && operation.status === "conflict"
+      && operation.status === BackupRestoreOperationStatus.Conflict
       && !restoreResolutions[operation.id]
     )),
   );
@@ -325,7 +337,7 @@ export function BackupSettings() {
         <div className={`settingsBackupSummaryActions ${loading ? "isLoading" : configured ? "isConfigured" : "isNotConfigured"}`} aria-busy={loading}>
           <div className="settingsBackupActionStack">
             <div className="settingsBackupPrimaryActions">
-              {loading ? <LoadingInline label="Loading sync" size={14} /> : configured ? <StatefulButton size="sm" variant="primary" state={stateFor("backup")} aria-label="Sync now" width={112} onClick={() => { void backupNow(); }}>Sync now</StatefulButton> : <span className="settingsBackupNotConfigured">Not configured</span>}
+              {loading ? <LoadingInline label="Loading sync" size={14} /> : configured ? <StatefulButton size="sm" variant="primary" state={stateFor(BackupAction.Backup)} aria-label="Sync now" width={112} onClick={() => { void backupNow(); }}>Sync now</StatefulButton> : <span className="settingsBackupNotConfigured">Not configured</span>}
               {!loading ? <IconButton aria-label="Sync settings" onClick={openDetails}><Settings2 size={16} aria-hidden="true" /></IconButton> : null}
             </div>
             {configured ? <span className="settingsBackupLastSync">Last sync: {lastBackup ? backupDate(lastBackup.createdAt) : "Never"}</span> : null}
@@ -413,10 +425,10 @@ export function BackupSettings() {
         </div>
         <DialogActionBar
           onCancel={() => { setContentCategory(null); setDetailsOpen(false); }}
-          cancelDisabled={action !== ""}
-          leading={leadingAction === "back" ? <DialogActionButton variant="secondary" disabled={action !== ""} onClick={() => setContentCategory(null)}>Back</DialogActionButton> : leadingAction === "disconnect" ? <StatefulButton size="sm" variant="danger" state={stateFor("disconnect")} aria-label="Disconnect this device from sync" width={104} onClick={() => { void disconnect(); }}>Disconnect</StatefulButton> : undefined}
+          cancelDisabled={action !== null}
+          leading={leadingAction === BackupDialogLeadingAction.Back ? <DialogActionButton variant="secondary" disabled={action !== null} onClick={() => setContentCategory(null)}>Back</DialogActionButton> : leadingAction === BackupDialogLeadingAction.Disconnect ? <StatefulButton size="sm" variant="danger" state={stateFor(BackupAction.Disconnect)} aria-label="Disconnect this device from sync" width={104} onClick={() => { void disconnect(); }}>Disconnect</StatefulButton> : undefined}
         >
-          <StatefulButton variant="primary" state={stateFor("configure")} aria-label={configured ? "Save sync settings" : "Set up sync"} width={configured ? 112 : 96} disabled={!repository.trim()} onClick={() => { void configure(); }}>{configured ? "Save" : "Set up"}</StatefulButton>
+          <StatefulButton variant="primary" state={stateFor(BackupAction.Configure)} aria-label={configured ? "Save sync settings" : "Set up sync"} width={configured ? 112 : 96} disabled={!repository.trim()} onClick={() => { void configure(); }}>{configured ? "Save" : "Set up"}</StatefulButton>
         </DialogActionBar>
       </DialogShell>
       <DialogShell open={restoreOpen} onOpenChange={setRestoreOpen} className="confirmDialogPanel backupRestoreDialog" descriptionId="backup-restore-description">
@@ -424,12 +436,12 @@ export function BackupSettings() {
         <Dialog.Description id="backup-restore-description" className="dialogVisuallyHidden">Restore a sync version</Dialog.Description>
         <div className="backupRestoreControls">
           <SelectControl label="Agent" value={resolvedRestoreTarget} onValueChange={changeRestoreTarget} options={restoreTargetOptions} />
-          <SelectControl label="Scope" value={restoreScope} onValueChange={(value) => changeRestoreScope(value as "global" | "project")} options={[{ value: "global", label: "Global" }, { value: "project", label: "Project" }]} />
+          <SelectControl label="Scope" value={restoreScope} onValueChange={(value) => changeRestoreScope(value as SkillScope)} options={[{ value: SkillScope.Global, label: "Global" }, { value: SkillScope.Project, label: "Project" }]} />
         </div>
         {restoreBusy && !restorePlan ? <p className="backupDialogHint">Preparing restore plan…</p> : null}
         {!restorePlan && !restoreBusy ? <div className="backupRestoreEmpty"><DialogActionButton variant="secondary" onClick={prepareRestore}>Prepare restore plan</DialogActionButton></div> : null}
-        {restorePlan ? <ul className="backupRestorePlan">{restorePlan.operations.map((operation) => <li key={operation.id} data-status={operation.status}><SelectionCheckbox checked={restoreSelectedIds.includes(operation.id)} label={`Restore ${operation.name}`} disabled={restoreBusy} onChange={(checked) => toggleRestoreSkill(operation.id, checked)} /><span>{operation.name}</span>{operation.status === "conflict" && restoreSelectedIds.includes(operation.id) ? <SelectControl label={`${operation.name} conflict`} value={restoreResolutions[operation.id] ?? ""} onValueChange={(value) => setRestoreResolutions((current) => ({ ...current, [operation.id]: value as RestoreResolution }))} options={[{ value: "keep-both", label: "Keep both" }, { value: "replace", label: "Replace existing" }, { value: "skip", label: "Keep existing" }]} renderValue={(option) => <span className="selectValueText">{option?.label ?? "Choose action"}</span>} /> : <span>{restoreSelectedIds.includes(operation.id) && operation.status === "planned" ? operation.target : operation.message ?? "Not selected"}</span>}</li>)}</ul> : null}
-        <DialogActionBar onCancel={() => setRestoreOpen(false)} cancelDisabled={restoreBusy}><StatefulButton variant="primary" state={restoreBusy ? "loading" : "idle"} aria-label="Restore sync" width={104} disabled={!restorePlan || restoreBusy || restoreSelectedIds.length === 0 || hasUnresolvedRestoreConflict} onClick={() => { void applyRestore(); }}>Restore</StatefulButton></DialogActionBar>
+        {restorePlan ? <ul className="backupRestorePlan">{restorePlan.operations.map((operation) => <li key={operation.id} data-status={operation.status}><SelectionCheckbox checked={restoreSelectedIds.includes(operation.id)} label={`Restore ${operation.name}`} disabled={restoreBusy} onChange={(checked) => toggleRestoreSkill(operation.id, checked)} /><span>{operation.name}</span>{operation.status === BackupRestoreOperationStatus.Conflict && restoreSelectedIds.includes(operation.id) ? <SelectControl label={`${operation.name} conflict`} value={restoreResolutions[operation.id] ?? ""} onValueChange={(value) => setRestoreResolutions((current) => ({ ...current, [operation.id]: value as RestoreResolution }))} options={[{ value: RestoreResolution.KeepBoth, label: "Keep both" }, { value: RestoreResolution.Replace, label: "Replace existing" }, { value: RestoreResolution.Skip, label: "Keep existing" }]} renderValue={(option) => <span className="selectValueText">{option?.label ?? "Choose action"}</span>} /> : <span>{restoreSelectedIds.includes(operation.id) && operation.status === BackupRestoreOperationStatus.Planned ? operation.target : operation.message ?? "Not selected"}</span>}</li>)}</ul> : null}
+        <DialogActionBar onCancel={() => setRestoreOpen(false)} cancelDisabled={restoreBusy}><StatefulButton variant="primary" state={restoreBusy ? AsyncStatus.Loading : AsyncStatus.Idle} aria-label="Restore sync" width={104} disabled={!restorePlan || restoreBusy || restoreSelectedIds.length === 0 || hasUnresolvedRestoreConflict} onClick={() => { void applyRestore(); }}>Restore</StatefulButton></DialogActionBar>
       </DialogShell>
     </div>
   );

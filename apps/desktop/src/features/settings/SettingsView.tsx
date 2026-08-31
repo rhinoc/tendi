@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { CheckCircle2, Monitor, Moon, Sun, Trash2 } from "lucide-react";
 import { DropdownMenu, Popover } from "radix-ui";
-import { actionLabels, compactDateTime, dialogCopy, formatUserPath, logExportLabels, normalizeSettings, remoteRepositoryLabel, TauriCommand, invokeCommand, normalizeMissingSessionProjectPolicy, normalizeSessionResumeTarget, safeInvoke, type BundledSkillInstallReport, type BundledSkillStatus, type CliInstallStatus, type DesktopUpdateState, type MissingSessionProjectPolicy, type ProjectSummary, type SessionResumeTarget, type SettingsPayload, type SettingsState } from "../../lib/index.ts";
-import { type Appearance, type ColorTheme, type FontFamily, type ResolvedAppearance, type ThemePreferences } from "../../lib/appearance.ts";
+import { actionLabels, AsyncStatus, CliInstallState, compactDateTime, DesktopUpdateStatus, formatUserPath, logExportLabels, MissingSessionProjectPolicy, normalizeSettings, remoteRepositoryLabel, TauriCommand, normalizeMissingSessionProjectPolicy, normalizeSessionResumeTarget, safeInvoke, SessionResumeTarget, type BundledSkillStatus, type CliInstallStatus, type DesktopUpdateState, type ProjectSummary, type RawSkillRecord, type SettingsPayload, type SettingsState, type SkillInstallResult } from "../../lib/index.ts";
+import { Appearance, ColorTheme, FontFamily, type ResolvedAppearance, type ThemePreferences } from "../../lib/appearance.ts";
 import { appIconOptions, appIconPreviewDataUrl, type AppIcon } from "../../lib/app-icon.ts";
 import { Button } from "../../components/shared/Button.tsx";
 import { Badge } from "../../components/shared/Badge.tsx";
@@ -21,21 +21,27 @@ import { RowActionsMenu } from "../../components/shared/RowActionsMenu.tsx";
 import { SettingsApplicationPicker, type SettingsApplicationOption } from "./SettingsApplicationPicker.tsx";
 import { SettingsSection } from "./SettingsSection.tsx";
 import { BackupSettings } from "../skills/BackupView.tsx";
-import { codingAgentsAction, isCodingAgentsInstalled } from "./settings-agent-status.ts";
+import { AddSkillDialog } from "../../views/SkillsView.tsx";
+import {
+  exportLogs as exportLogsCommand,
+  installCli as installCliCommand,
+  readBundledSkillStatus,
+  readCliStatus,
+  readProjectScanScopes,
+  readTerminalApps,
+  removeCli as removeCliCommand,
+  saveProjectScanScopes as saveProjectScanScopesCommand,
+  saveSettings,
+  scanProjects as scanProjectsCommand,
+  testEditorApp,
+  testTerminalApp,
+} from "../../lib/runtime-gateway.ts";
 import "./SettingsView.css";
 
 type TerminalApp = {
   id: string;
   label: string;
   available?: boolean;
-};
-
-type ProjectScanScope = {
-  path: string;
-  excluded?: boolean;
-  enabled: boolean;
-  lastScannedAt?: string | null;
-  projectCount: number;
 };
 
 const projectTableColumns: CompactTableColumn<ProjectSummary>[] = [
@@ -138,58 +144,67 @@ type SettingsViewProps = {
   update: DesktopUpdateState;
   onCheckForUpdates: () => void;
   onInstallUpdate: () => void;
+  onViewUpdateNotes: () => void;
+  onSkillsUpdated?: (skills: RawSkillRecord[], options?: { patch?: boolean; deleted?: string[] }) => void;
+  installedAgentKeys: string[];
+  targetOptions: Array<{
+    id: string;
+    displayName: string;
+    supportsGlobal: boolean;
+    globalPath?: string;
+  }>;
 };
 
 const appearanceOptions = [
-  { value: "system", label: "System", icon: Monitor },
-  { value: "light", label: "Light", icon: Sun },
-  { value: "dark", label: "Dark", icon: Moon },
+  { value: Appearance.System, label: "System", icon: Monitor },
+  { value: Appearance.Light, label: "Light", icon: Sun },
+  { value: Appearance.Dark, label: "Dark", icon: Moon },
 ] as const;
 
 const themeOptions = [
-  { value: "sakura-pop", label: "Sakura Pop" },
-  { value: "gruvbox", label: "Gruvbox" },
-  { value: "dracula", label: "Dracula" },
-  { value: "nord", label: "Nord" },
-  { value: "catppuccin", label: "Catppuccin" },
-  { value: "tokyo-night", label: "Tokyo Night" },
-  { value: "vercel", label: "Vercel" },
+  { value: ColorTheme.SakuraPop, label: "Sakura Pop" },
+  { value: ColorTheme.Gruvbox, label: "Gruvbox" },
+  { value: ColorTheme.Dracula, label: "Dracula" },
+  { value: ColorTheme.Nord, label: "Nord" },
+  { value: ColorTheme.Catppuccin, label: "Catppuccin" },
+  { value: ColorTheme.TokyoNight, label: "Tokyo Night" },
+  { value: ColorTheme.Vercel, label: "Vercel" },
 ] as const;
 
 const fontOptions = [
-  { value: "geist", label: "Geist" },
-  { value: "manrope", label: "Manrope" },
-  { value: "inter", label: "Inter" },
-  { value: "ibm-plex-sans", label: "IBM Plex Sans" },
-  { value: "instrument-sans", label: "Instrument Sans" },
-  { value: "plus-jakarta-sans", label: "Plus Jakarta Sans" },
-  { value: "bricolage-grotesque", label: "Bricolage Grotesque" },
+  { value: FontFamily.Geist, label: "Geist" },
+  { value: FontFamily.Manrope, label: "Manrope" },
+  { value: FontFamily.Inter, label: "Inter" },
+  { value: FontFamily.IbmPlexSans, label: "IBM Plex Sans" },
+  { value: FontFamily.InstrumentSans, label: "Instrument Sans" },
+  { value: FontFamily.PlusJakartaSans, label: "Plus Jakarta Sans" },
+  { value: FontFamily.BricolageGrotesque, label: "Bricolage Grotesque" },
 ] as const satisfies ReadonlyArray<{ value: FontFamily; label: string }>;
 
 const themePreviewColors: Record<ResolvedAppearance, Record<ColorTheme, { foreground: string; background: string }>> = {
-  light: {
-    "sakura-pop": { foreground: "#4b2347", background: "#fff4fb" },
-    gruvbox: { foreground: "#282828", background: "#fbf1c7" },
-    dracula: { foreground: "#282a36", background: "#f8f8f2" },
-    nord: { foreground: "#2e3440", background: "#eceff4" },
-    catppuccin: { foreground: "#4c4f69", background: "#eff1f5" },
-    "tokyo-night": { foreground: "#3760bf", background: "#e1e2e7" },
-    vercel: { foreground: "#171717", background: "#ffffff" },
+  [Appearance.Light]: {
+    [ColorTheme.SakuraPop]: { foreground: "#4b2347", background: "#fff4fb" },
+    [ColorTheme.Gruvbox]: { foreground: "#282828", background: "#fbf1c7" },
+    [ColorTheme.Dracula]: { foreground: "#282a36", background: "#f8f8f2" },
+    [ColorTheme.Nord]: { foreground: "#2e3440", background: "#eceff4" },
+    [ColorTheme.Catppuccin]: { foreground: "#4c4f69", background: "#eff1f5" },
+    [ColorTheme.TokyoNight]: { foreground: "#3760bf", background: "#e1e2e7" },
+    [ColorTheme.Vercel]: { foreground: "#171717", background: "#ffffff" },
   },
-  dark: {
-    "sakura-pop": { foreground: "#f8e8f5", background: "#211331" },
-    gruvbox: { foreground: "#ebdbb2", background: "#282828" },
-    dracula: { foreground: "#f8f8f2", background: "#282a36" },
-    nord: { foreground: "#eceff4", background: "#2e3440" },
-    catppuccin: { foreground: "#cdd6f4", background: "#1e1e2e" },
-    "tokyo-night": { foreground: "#c0caf5", background: "#1a1b26" },
-    vercel: { foreground: "#ededed", background: "#000000" },
+  [Appearance.Dark]: {
+    [ColorTheme.SakuraPop]: { foreground: "#f8e8f5", background: "#211331" },
+    [ColorTheme.Gruvbox]: { foreground: "#ebdbb2", background: "#282828" },
+    [ColorTheme.Dracula]: { foreground: "#f8f8f2", background: "#282a36" },
+    [ColorTheme.Nord]: { foreground: "#eceff4", background: "#2e3440" },
+    [ColorTheme.Catppuccin]: { foreground: "#cdd6f4", background: "#1e1e2e" },
+    [ColorTheme.TokyoNight]: { foreground: "#c0caf5", background: "#1a1b26" },
+    [ColorTheme.Vercel]: { foreground: "#ededed", background: "#000000" },
   },
 };
 
 const themeModes = [
-  { value: "light", label: "Light theme", key: "lightTheme" },
-  { value: "dark", label: "Dark theme", key: "darkTheme" },
+  { value: Appearance.Light, label: "Light theme", key: "lightTheme" },
+  { value: Appearance.Dark, label: "Dark theme", key: "darkTheme" },
 ] as const satisfies ReadonlyArray<{ value: ResolvedAppearance; label: string; key: "lightTheme" | "darkTheme" }>;
 
 type ThemeMode = (typeof themeModes)[number];
@@ -259,14 +274,6 @@ function errorMessage(error: unknown): string {
   return `${error}`;
 }
 
-async function readSetting<T>(command: TauriCommand): Promise<{ value?: T; error?: string }> {
-  try {
-    return { value: await invokeCommand<T>(command) };
-  } catch (error) {
-    return { error: errorMessage(error) };
-  }
-}
-
 function SettingsGroup({ title, children }: { title: string; children: ReactNode }) {
   return (
     <section className="settingsGroup">
@@ -276,7 +283,7 @@ function SettingsGroup({ title, children }: { title: string; children: ReactNode
   );
 }
 
-export function SettingsView({ appearance, themePreferences, fontFamily, terminal, editor, additionalSessionRoots, developerMode, sessionResumeTarget, missingSessionProjectPolicy, appIcon, configProfiles, projects, onAppearanceChange, onThemeChange, onFontFamilyChange, onTerminalChange, onEditorChange, onAdditionalSessionRootsChange, onDeveloperModeChange, onSessionResumeTargetChange, onMissingSessionProjectPolicyChange, onAppIconChange, onProjectsScanned, appSettingsLoading, appSettingsLoadError, onRetryAppSettings, update, onCheckForUpdates, onInstallUpdate }: SettingsViewProps) {
+export function SettingsView({ appearance, themePreferences, fontFamily, terminal, editor, additionalSessionRoots, developerMode, sessionResumeTarget, missingSessionProjectPolicy, appIcon, configProfiles, projects, onAppearanceChange, onThemeChange, onFontFamilyChange, onTerminalChange, onEditorChange, onAdditionalSessionRootsChange, onDeveloperModeChange, onSessionResumeTargetChange, onMissingSessionProjectPolicyChange, onAppIconChange, onProjectsScanned, appSettingsLoading, appSettingsLoadError, onRetryAppSettings, update, onCheckForUpdates, onInstallUpdate, onViewUpdateNotes, onSkillsUpdated, installedAgentKeys, targetOptions }: SettingsViewProps) {
   const [terminalInput, setTerminalInput] = useState("auto");
   const [editorInput, setEditorInput] = useState("vscode");
   const [additionalSessionRootsInput, setAdditionalSessionRootsInput] = useState("");
@@ -288,7 +295,7 @@ export function SettingsView({ appearance, themePreferences, fontFamily, termina
   const [editorError, setEditorError] = useState("");
   const [sessionRootsError, setSessionRootsError] = useState("");
   const [projectScanScopesError, setProjectScanScopesError] = useState("");
-  const [projectScanState, setProjectScanState] = useState<"idle" | "loading" | "success" | "error">("idle");
+  const [projectScanState, setProjectScanState] = useState<AsyncStatus>(AsyncStatus.Idle);
   const [projectScanSummary, setProjectScanSummary] = useState("");
   const [appearanceError, setAppearanceError] = useState("");
   const [themeError, setThemeError] = useState("");
@@ -296,15 +303,19 @@ export function SettingsView({ appearance, themePreferences, fontFamily, termina
   const [fontFamilyError, setFontFamilyError] = useState("");
   const [developerModeError, setDeveloperModeError] = useState("");
   const [cliStatus, setCliStatus] = useState<CliInstallStatus | null>(null);
-  const [cliBusy, setCliBusy] = useState<"install" | null>(null);
+  enum CliAction {
+    Install = "install",
+    Remove = "remove",
+  }
+  const [cliBusy, setCliBusy] = useState<CliAction | null>(null);
   const [cliError, setCliError] = useState("");
   const [bundledSkillStatus, setBundledSkillStatus] = useState<BundledSkillStatus | null>(null);
-  const [bundledSkillBusy, setBundledSkillBusy] = useState(false);
   const [bundledSkillError, setBundledSkillError] = useState("");
-  const [confirmRemoveCodingAgents, setConfirmRemoveCodingAgents] = useState(false);
+  const [bundledSkillInstallOpen, setBundledSkillInstallOpen] = useState(false);
+  const [confirmRemoveCli, setConfirmRemoveCli] = useState(false);
   const [settingsLoading, setSettingsLoading] = useState(true);
   const [settingsLoadError, setSettingsLoadError] = useState("");
-  const [logExportState, setLogExportState] = useState<"idle" | "loading" | "success" | "error">("idle");
+  const [logExportState, setLogExportState] = useState<AsyncStatus>(AsyncStatus.Idle);
   const [logExportError, setLogExportError] = useState("");
   const appearanceSaveRequestRef = useRef(0);
   const themeSaveRequestRef = useRef(0);
@@ -338,20 +349,22 @@ export function SettingsView({ appearance, themePreferences, fontFamily, termina
     setSettingsLoading(true);
     setSettingsLoadError("");
     const [apps, nextCliStatus, nextBundledSkillStatus, nextProjectScopes] = await Promise.all([
-      readSetting<TerminalApp[]>(TauriCommand.TerminalAppsList),
-      readSetting<CliInstallStatus>(TauriCommand.CliStatus),
-      readSetting<BundledSkillStatus>(TauriCommand.BundledSkillStatus),
-      readSetting<ProjectScanScope[]>(TauriCommand.ProjectScanScopesList),
+      readTerminalApps(),
+      readCliStatus(),
+      readBundledSkillStatus(),
+      readProjectScanScopes(),
     ]);
-    const errors = [apps, nextCliStatus, nextBundledSkillStatus, nextProjectScopes]
-      .map((result) => result.error)
-      .filter((message): message is string => Boolean(message));
-    if (Array.isArray(apps.value)) setTerminalApps(apps.value);
-    if (nextCliStatus.value) setCliStatus(nextCliStatus.value);
-    if (nextBundledSkillStatus.value) setBundledSkillStatus(nextBundledSkillStatus.value);
-    if (Array.isArray(nextProjectScopes.value)) {
+    const errors = [
+      apps ? "" : "Unable to read terminal applications",
+      nextCliStatus ? "" : "Unable to read CLI status",
+      nextProjectScopes ? "" : "Unable to read project scan scopes",
+    ].filter(Boolean);
+    if (apps) setTerminalApps(apps);
+    if (nextCliStatus) setCliStatus(nextCliStatus);
+    if (nextBundledSkillStatus) setBundledSkillStatus(nextBundledSkillStatus);
+    if (nextProjectScopes) {
       if (inputRevisionRef.current.projectScanScopes === inputRevisions.projectScanScopes) {
-        setProjectScanScopesInput(nextProjectScopes.value
+        setProjectScanScopesInput(nextProjectScopes
           .filter((scope) => scope.enabled)
           .map((scope) => `${scope.excluded ? "!" : ""}${scope.path}`)
           .join("\n"));
@@ -374,7 +387,7 @@ export function SettingsView({ appearance, themePreferences, fontFamily, termina
   }, [additionalSessionRoots, editor, terminal]);
 
   const applySavedSettings = (value: SettingsState, syncedInputs: Partial<SettingsInputRevisions> = {}) => {
-    const savedSettings = normalizeSettings(value);
+    const savedSettings = value;
     if (syncedInputs.terminal === inputRevisionRef.current.terminal) setTerminalInput(savedSettings.terminal);
     if (syncedInputs.editor === inputRevisionRef.current.editor) setEditorInput(savedSettings.editor);
     if (syncedInputs.additionalSessionRoots === inputRevisionRef.current.additionalSessionRoots) {
@@ -384,8 +397,8 @@ export function SettingsView({ appearance, themePreferences, fontFamily, termina
     onEditorChange(savedSettings.editor);
     onAdditionalSessionRootsChange(savedSettings.additionalSessionRoots);
     onAppearanceChange(savedSettings.appearance);
-    onThemeChangeRef.current("light", savedSettings.lightTheme);
-    onThemeChangeRef.current("dark", savedSettings.darkTheme);
+    onThemeChangeRef.current(Appearance.Light, savedSettings.lightTheme);
+    onThemeChangeRef.current(Appearance.Dark, savedSettings.darkTheme);
     onFontFamilyChange(savedSettings.fontFamily);
     onDeveloperModeChange(savedSettings.developerMode);
     onSessionResumeTargetChange(savedSettings.sessionResumeTarget);
@@ -418,10 +431,10 @@ export function SettingsView({ appearance, themePreferences, fontFamily, termina
     appIconSaveRequestRef.current = requestId;
     setAppIconError("");
     onAppIconChange(nextAppIcon);
-    const nextSettings = await safeInvoke(TauriCommand.SettingsSave, buildSettingsPayload({ appIcon: nextAppIcon }));
+    const nextSettings = await saveSettings(buildSettingsPayload({ appIcon: nextAppIcon }));
     if (appIconSaveRequestRef.current !== requestId) return;
     if (nextSettings) {
-      applySavedSettings(nextSettings as SettingsState);
+      applySavedSettings(nextSettings);
     } else {
       onAppIconChange(previousAppIcon);
       setAppIconError(actionLabels.saveFailed);
@@ -434,10 +447,10 @@ export function SettingsView({ appearance, themePreferences, fontFamily, termina
     appearanceSaveRequestRef.current = requestId;
     setAppearanceError("");
     onAppearanceChange(nextAppearance);
-    const nextSettings = await safeInvoke(TauriCommand.SettingsSave, buildSettingsPayload({ appearance: nextAppearance }));
+    const nextSettings = await saveSettings(buildSettingsPayload({ appearance: nextAppearance }));
     if (appearanceSaveRequestRef.current !== requestId) return;
     if (nextSettings) {
-      applySavedSettings(nextSettings as SettingsState);
+      applySavedSettings(nextSettings);
     } else {
       onAppearanceChange(previousAppearance);
       setAppearanceError(actionLabels.saveFailed);
@@ -445,16 +458,16 @@ export function SettingsView({ appearance, themePreferences, fontFamily, termina
   };
 
   const saveTheme = async (mode: ResolvedAppearance, nextTheme: ColorTheme) => {
-    const key = mode === "light" ? "lightTheme" : "darkTheme";
+    const key = mode === Appearance.Light ? "lightTheme" : "darkTheme";
     const previousTheme = themePreferences[mode];
     const requestId = themeSaveRequestRef.current + 1;
     themeSaveRequestRef.current = requestId;
     setThemeError("");
     onThemeChange(mode, nextTheme);
-    const nextSettings = await safeInvoke(TauriCommand.SettingsSave, buildSettingsPayload({ [key]: nextTheme }));
+    const nextSettings = await saveSettings(buildSettingsPayload({ [key]: nextTheme }));
     if (themeSaveRequestRef.current !== requestId) return;
     if (nextSettings) {
-      applySavedSettings(nextSettings as SettingsState);
+      applySavedSettings(nextSettings);
     } else {
       onThemeChange(mode, previousTheme);
       setThemeError(actionLabels.saveFailed);
@@ -467,10 +480,10 @@ export function SettingsView({ appearance, themePreferences, fontFamily, termina
     fontFamilySaveRequestRef.current = requestId;
     setFontFamilyError("");
     onFontFamilyChange(nextFontFamily);
-    const nextSettings = await safeInvoke(TauriCommand.SettingsSave, buildSettingsPayload({ fontFamily: nextFontFamily }));
+    const nextSettings = await saveSettings(buildSettingsPayload({ fontFamily: nextFontFamily }));
     if (fontFamilySaveRequestRef.current !== requestId) return;
     if (nextSettings) {
-      applySavedSettings(nextSettings as SettingsState);
+      applySavedSettings(nextSettings);
     } else {
       onFontFamilyChange(previousFontFamily);
       setFontFamilyError(actionLabels.saveFailed);
@@ -482,9 +495,9 @@ export function SettingsView({ appearance, themePreferences, fontFamily, termina
     const normalized = terminal.trim() || "auto";
     setTerminalInput(normalized);
     if (normalized === terminal) return;
-    const nextSettings = await safeInvoke(TauriCommand.SettingsSave, buildSettingsPayload({ terminal: normalized }));
+    const nextSettings = await saveSettings(buildSettingsPayload({ terminal: normalized }));
     if (nextSettings) {
-      applySavedSettings(nextSettings as SettingsState, { terminal: inputRevision });
+      applySavedSettings(nextSettings, { terminal: inputRevision });
       setTerminalError("");
     } else {
       setTerminalError(actionLabels.saveFailed);
@@ -496,9 +509,9 @@ export function SettingsView({ appearance, themePreferences, fontFamily, termina
     if (normalized === sessionResumeTarget) return;
     const previous = sessionResumeTarget;
     onSessionResumeTargetChange(normalized);
-    const nextSettings = await safeInvoke(TauriCommand.SettingsSave, buildSettingsPayload({ sessionResumeTarget: normalized }));
+    const nextSettings = await saveSettings(buildSettingsPayload({ sessionResumeTarget: normalized }));
     if (nextSettings) {
-      applySavedSettings(nextSettings as SettingsState);
+      applySavedSettings(nextSettings);
       setSessionResumeError("");
     } else {
       onSessionResumeTargetChange(previous);
@@ -511,9 +524,9 @@ export function SettingsView({ appearance, themePreferences, fontFamily, termina
     if (normalized === missingSessionProjectPolicy) return;
     const previous = missingSessionProjectPolicy;
     onMissingSessionProjectPolicyChange(normalized);
-    const nextSettings = await safeInvoke(TauriCommand.SettingsSave, buildSettingsPayload({ missingSessionProjectPolicy: normalized }));
+    const nextSettings = await saveSettings(buildSettingsPayload({ missingSessionProjectPolicy: normalized }));
     if (nextSettings) {
-      applySavedSettings(nextSettings as SettingsState);
+      applySavedSettings(nextSettings);
       setMissingSessionProjectError("");
     } else {
       onMissingSessionProjectPolicyChange(previous);
@@ -526,9 +539,9 @@ export function SettingsView({ appearance, themePreferences, fontFamily, termina
     const normalized = editor.trim() || "vscode";
     setEditorInput(normalized);
     if (normalized === editor) return;
-    const nextSettings = await safeInvoke(TauriCommand.SettingsSave, buildSettingsPayload({ editor: normalized }));
+    const nextSettings = await saveSettings(buildSettingsPayload({ editor: normalized }));
     if (nextSettings) {
-      applySavedSettings(nextSettings as SettingsState, { editor: inputRevision });
+      applySavedSettings(nextSettings, { editor: inputRevision });
       setEditorError("");
     } else {
       setEditorError(actionLabels.saveFailed);
@@ -540,9 +553,9 @@ export function SettingsView({ appearance, themePreferences, fontFamily, termina
     if (nextDeveloperMode === previousDeveloperMode) return;
     setDeveloperModeError("");
     onDeveloperModeChange(nextDeveloperMode);
-    const nextSettings = await safeInvoke(TauriCommand.SettingsSave, buildSettingsPayload({ developerMode: nextDeveloperMode }));
+    const nextSettings = await saveSettings(buildSettingsPayload({ developerMode: nextDeveloperMode }));
     if (nextSettings) {
-      applySavedSettings(nextSettings as SettingsState);
+      applySavedSettings(nextSettings);
     } else {
       onDeveloperModeChange(previousDeveloperMode);
       setDeveloperModeError(actionLabels.saveFailed);
@@ -557,9 +570,9 @@ export function SettingsView({ appearance, themePreferences, fontFamily, termina
       .filter(Boolean);
     setAdditionalSessionRootsInput(roots.join("\n"));
     if (roots.join("\n") === additionalSessionRoots.join("\n")) return;
-    const nextSettings = await safeInvoke(TauriCommand.SettingsSave, buildSettingsPayload({ additionalSessionRoots: roots }));
+    const nextSettings = await saveSettings(buildSettingsPayload({ additionalSessionRoots: roots }));
     if (nextSettings) {
-      applySavedSettings(nextSettings as SettingsState, { additionalSessionRoots: inputRevision });
+      applySavedSettings(nextSettings, { additionalSessionRoots: inputRevision });
       setSessionRootsError("");
     } else {
       setSessionRootsError(`${actionLabels.saveFailed}: use absolute paths`);
@@ -572,7 +585,7 @@ export function SettingsView({ appearance, themePreferences, fontFamily, termina
       .map((path) => path.trim())
       .filter(Boolean);
     setProjectScanScopesInput(paths.join("\n"));
-    const result = await safeInvoke<ProjectScanScope[]>(TauriCommand.ProjectScanScopesSave, { paths });
+    const result = await saveProjectScanScopesCommand(paths);
     if (result) {
       setProjectScanScopesError("");
       setProjectScanSummary(`${result.length} scan scope${result.length === 1 ? "" : "s"} saved`);
@@ -582,182 +595,148 @@ export function SettingsView({ appearance, themePreferences, fontFamily, termina
   };
 
   const scanProjects = async () => {
-    if (projectScanState === "loading") return;
-    setProjectScanState("loading");
+    if (projectScanState === AsyncStatus.Loading) return;
+    setProjectScanState(AsyncStatus.Loading);
     setProjectScanSummary("");
-    const result = await safeInvoke<{ projects?: unknown[] }>(TauriCommand.ProjectsScan);
+    const result = await scanProjectsCommand();
     if (result) {
-      if (Array.isArray(result.projects)) onProjectsScanned?.(result.projects as ProjectSummary[]);
-      setProjectScanState("success");
+      if (Array.isArray(result.projects)) onProjectsScanned?.(result.projects);
+      setProjectScanState(AsyncStatus.Success);
       setProjectScanSummary(`${result.projects?.length ?? 0} projects found`);
     } else {
-      setProjectScanState("error");
+      setProjectScanState(AsyncStatus.Error);
       setProjectScanSummary("Scan failed");
     }
   };
 
   const testTerminal = async (terminal: string) => {
-    return Boolean(await safeInvoke<string>(TauriCommand.TerminalAppTest, { terminal }));
+    return testTerminalApp(terminal);
   };
 
   const testEditor = async (editor: string) => {
-    return Boolean(await safeInvoke<boolean>(TauriCommand.EditorAppTest, { editor }));
+    return testEditorApp(editor);
   };
 
   const exportLogs = async () => {
-    if (logExportState === "loading") return;
-    setLogExportState("loading");
+    if (logExportState === AsyncStatus.Loading) return;
+    setLogExportState(AsyncStatus.Loading);
     setLogExportError("");
     try {
-      const exportPath = await invokeCommand<string>(TauriCommand.LogsExport);
-      await invokeCommand(TauriCommand.RevealInFinder, { path: exportPath });
-      setLogExportState("success");
+      const exportPath = await exportLogsCommand();
+      await safeInvoke(TauriCommand.RevealInFinder, { path: exportPath });
+      setLogExportState(AsyncStatus.Success);
     } catch (error) {
-      setLogExportState("error");
+      setLogExportState(AsyncStatus.Error);
       setLogExportError(errorMessage(error));
     }
   };
 
   const changeCliRegistration = async () => {
     if (cliBusy) return;
-    setCliBusy("install");
+    setCliBusy(CliAction.Install);
     setCliError("");
     try {
-      const nextStatus = await invokeCommand<CliInstallStatus>(
-        TauriCommand.CliInstall,
-      );
+      const nextStatus = await installCliCommand();
       setCliStatus(nextStatus);
     } catch (error) {
       setCliError(`${error}`);
-      const nextStatus = await safeInvoke<CliInstallStatus>(TauriCommand.CliStatus);
+      const nextStatus = await readCliStatus();
       if (nextStatus) setCliStatus(nextStatus);
     } finally {
       setCliBusy(null);
     }
   };
 
-  const removeCodingAgents = async () => {
-    if (bundledSkillBusy || cliBusy) return;
-    setBundledSkillBusy(true);
-    setBundledSkillError("");
+  const removeCli = async () => {
+    if (cliBusy) return;
+    setCliBusy(CliAction.Remove);
     setCliError("");
     try {
-      const nextSkillStatus = await invokeCommand<BundledSkillStatus>(TauriCommand.BundledSkillRemove);
-      setBundledSkillStatus(nextSkillStatus);
-      if (cliStatus?.supported && cliStatus.state === "installed") {
-        const nextCliStatus = await invokeCommand<CliInstallStatus>(TauriCommand.CliRemove);
-        setCliStatus(nextCliStatus);
-      }
+      const nextStatus = await removeCliCommand();
+      setCliStatus(nextStatus);
     } catch (error) {
-      setBundledSkillError(`${error}`);
-      const [nextSkillStatus, nextCliStatus] = await Promise.all([
-        safeInvoke<BundledSkillStatus>(TauriCommand.BundledSkillStatus),
-        safeInvoke<CliInstallStatus>(TauriCommand.CliStatus),
-      ]);
-      if (nextSkillStatus) setBundledSkillStatus(nextSkillStatus);
-      if (nextCliStatus) setCliStatus(nextCliStatus);
+      setCliError(`${error}`);
+      const nextStatus = await readCliStatus();
+      if (nextStatus) setCliStatus(nextStatus);
     } finally {
-      setBundledSkillBusy(false);
-      setConfirmRemoveCodingAgents(false);
+      setCliBusy(null);
+      setConfirmRemoveCli(false);
     }
   };
 
-  const requestRemoveCodingAgents = () => {
-    if (bundledSkillBusy || cliBusy) return;
-    setConfirmRemoveCodingAgents(true);
+  const requestRemoveCli = () => {
+    if (cliBusy) return;
+    setConfirmRemoveCli(true);
   };
 
-  const cliInstalled = cliStatus?.state === "installed";
-  const cliNeedsRepair = cliStatus?.state === "stale";
-  const cliConflict = cliStatus?.state === "conflict";
+  const cliInstalled = cliStatus?.state === CliInstallState.Installed;
+  const cliNeedsRepair = cliStatus?.state === CliInstallState.Stale;
+  const cliConflict = cliStatus?.state === CliInstallState.Conflict;
   const cliPathNeedsAttention = cliInstalled && !cliStatus.pathConfigured;
   const cliHealthy = cliInstalled && cliStatus.pathConfigured;
   const bundledSkillHealthy = bundledSkillStatus?.current === true;
   const bundledSkillConflict = bundledSkillStatus?.installed === true && !bundledSkillHealthy;
-  const codingAgentsActionValue = codingAgentsAction(cliStatus, bundledSkillStatus);
-  const bundledSkillNeedsRepair = bundledSkillStatus?.installed === true && !bundledSkillStatus.current;
-  const canInstallBundledSkill = (codingAgentsActionValue === "install" || codingAgentsActionValue === "repair")
-    && bundledSkillStatus?.current !== true
-    && !cliConflict;
-  const canRegisterCliSeparately = (codingAgentsActionValue === "install" || codingAgentsActionValue === "repair")
-    && !canInstallBundledSkill;
-  const setupReady = isCodingAgentsInstalled(cliStatus, bundledSkillStatus);
-  const setupNeedsAttention = cliConflict || cliPathNeedsAttention || bundledSkillConflict;
   const combinedSettingsLoadError = [appSettingsLoadError, settingsLoadError].filter(Boolean).join("; ");
   const retrySettings = () => {
     if (appSettingsLoadError) onRetryAppSettings();
     if (settingsLoadError) void loadSettings();
   };
-  const setupStatusLabel = appSettingsLoading || settingsLoading
-    ? "Checking…"
-    : combinedSettingsLoadError && (!cliStatus || !bundledSkillStatus)
-      ? "Unable to load status"
-      : !cliStatus || !bundledSkillStatus
-        ? "Status unavailable"
-        : setupNeedsAttention
-          ? "Needs attention"
-          : "";
-
-  const installBundledSkill = async () => {
-    if (bundledSkillBusy || cliBusy) return;
-    setBundledSkillBusy(true);
+  const installBundledSkill = (result: SkillInstallResult) => {
+    onSkillsUpdated?.(result.updated ?? result.skills ?? [], { patch: true });
     setBundledSkillError("");
-    try {
-      let nextCliStatus = cliStatus;
-      if (!cliHealthy && cliStatus?.supported) {
-        nextCliStatus = await invokeCommand<CliInstallStatus>(TauriCommand.CliInstall);
-        setCliStatus(nextCliStatus);
-        if (nextCliStatus.state !== "installed" || !nextCliStatus.pathConfigured) {
-          throw new Error(nextCliStatus.detail || "The Tendi CLI is not available on PATH.");
-        }
-      }
-      const report = await invokeCommand<BundledSkillInstallReport>(
-        TauriCommand.BundledSkillInstall,
-        bundledSkillNeedsRepair ? { overwrite: true } : undefined,
-      );
-      setBundledSkillStatus(report.status);
-    } catch (error) {
-      setBundledSkillError(`${error}`);
-      const [nextSkillStatus, nextCliStatus] = await Promise.all([
-        safeInvoke<BundledSkillStatus>(TauriCommand.BundledSkillStatus),
-        safeInvoke<CliInstallStatus>(TauriCommand.CliStatus),
-      ]);
-      if (nextSkillStatus) setBundledSkillStatus(nextSkillStatus);
-      if (nextCliStatus) setCliStatus(nextCliStatus);
-    } finally {
-      setBundledSkillBusy(false);
-    }
+    setBundledSkillInstallOpen(false);
+    void readBundledSkillStatus().then((status) => {
+      if (status) setBundledSkillStatus(status);
+    });
   };
 
   return (
     <section className="content dataPage settingsPage">
       <DeleteConfirmationDialog
-        open={confirmRemoveCodingAgents}
-        items={["Tendi coding agent setup"]}
-        itemLabel="setup"
-        title={dialogCopy.uninstallCodingAgentTitle}
-        description="Uninstall the Tendi coding-agent skill and CLI integration? This action cannot be undone."
+        open={confirmRemoveCli}
+        items={["Tendi CLI"]}
+        itemLabel="CLI integration"
+        title="Uninstall Tendi CLI integration?"
+        description="The Tendi CLI command will be removed from your shell PATH."
         confirmLabel="Uninstall"
-        loadingLabel={dialogCopy.uninstallCodingAgentLoadingLabel}
-        busy={bundledSkillBusy}
-        onOpenChange={setConfirmRemoveCodingAgents}
-        onConfirm={() => { void removeCodingAgents(); }}
+        loadingLabel="Uninstalling"
+        busy={cliBusy !== null}
+        onOpenChange={setConfirmRemoveCli}
+        onConfirm={() => { void removeCli(); }}
+      />
+      <AddSkillDialog
+        open={bundledSkillInstallOpen}
+        onOpenChange={setBundledSkillInstallOpen}
+        onClose={() => setBundledSkillInstallOpen(false)}
+        onPreviewError={setBundledSkillError}
+        onInstalled={installBundledSkill}
+        onRequestWrapper={() => undefined}
+        installedAgentKeys={installedAgentKeys}
+        targetOptions={targetOptions}
+        initialSource="tendi://bundled"
+        sourceLocked
+        title="Install Tendi skill"
       />
       <ContentTopDragStrip />
       <PageHeader title="Settings">
-        <StatefulButton
-          size="sm"
-          state={update.status === "checking" || update.status === "installing" ? "loading" : update.status === "up-to-date" ? "success" : update.status === "error" ? "error" : "idle"}
-          width={160}
-          minWidth={160}
-          onClick={update.status === "available" ? onInstallUpdate : onCheckForUpdates}
-          aria-label={update.status === "checking" ? "Checking for updates" : update.status === "installing" ? "Installing update" : update.status === "available" && update.version ? `Install update ${update.version}` : update.status === "up-to-date" ? "You're up to date" : update.status === "error" ? "Check for updates again" : "Check for updates"}
-          loadingContent={<LoadingIcon size={16} />}
-          successContent="You're up to date"
-          errorContent="Check failed — try again"
-        >
-          {update.status === "available" && update.version ? `Install ${update.version}` : actionLabels.checkForUpdates}
-        </StatefulButton>
+        <div className="settingsUpdateActions">
+            {update.status === DesktopUpdateStatus.Available && update.version && update.body?.trim() ? (
+            <Button size="sm" onClick={onViewUpdateNotes}>Release notes</Button>
+          ) : null}
+          <StatefulButton
+            size="sm"
+            state={update.status === DesktopUpdateStatus.Checking || update.status === DesktopUpdateStatus.Installing ? AsyncStatus.Loading : update.status === DesktopUpdateStatus.UpToDate ? AsyncStatus.Success : update.status === DesktopUpdateStatus.Error ? AsyncStatus.Error : AsyncStatus.Idle}
+            width={160}
+            minWidth={160}
+            onClick={update.status === DesktopUpdateStatus.Available ? onInstallUpdate : onCheckForUpdates}
+            aria-label={update.status === DesktopUpdateStatus.Checking ? "Checking for updates" : update.status === DesktopUpdateStatus.Installing ? "Installing update" : update.status === DesktopUpdateStatus.Available && update.version ? `Install update ${update.version}` : update.status === DesktopUpdateStatus.UpToDate ? "You're up to date" : update.status === DesktopUpdateStatus.Error ? "Check for updates again" : "Check for updates"}
+            loadingContent={<LoadingIcon size={16} />}
+            successContent="You're up to date"
+            errorContent="Check failed — try again"
+          >
+            {update.status === DesktopUpdateStatus.Available && update.version ? `Install ${update.version}` : actionLabels.checkForUpdates}
+          </StatefulButton>
+        </div>
       </PageHeader>
       {combinedSettingsLoadError ? <LoadErrorState message={combinedSettingsLoadError} onRetry={retrySettings} /> : null}
       <div className="settingsShell">
@@ -882,9 +861,9 @@ export function SettingsView({ appearance, themePreferences, fontFamily, termina
               onValueChange={(value) => { void saveSessionResumeTarget(value); }}
               aria-label="Prefer opening resumed sessions in"
             >
-              <SegmentedControlItem value="auto">Auto</SegmentedControlItem>
-              <SegmentedControlItem value="terminal">Terminal</SegmentedControlItem>
-              <SegmentedControlItem value="app">App</SegmentedControlItem>
+              <SegmentedControlItem value={SessionResumeTarget.Auto}>Auto</SegmentedControlItem>
+              <SegmentedControlItem value={SessionResumeTarget.Terminal}>Terminal</SegmentedControlItem>
+              <SegmentedControlItem value={SessionResumeTarget.App}>App</SegmentedControlItem>
             </SegmentedControl>
             {sessionResumeError ? <Toast tone="error" message={sessionResumeError} /> : null}
           </SettingsSection>
@@ -895,9 +874,9 @@ export function SettingsView({ appearance, themePreferences, fontFamily, termina
               onValueChange={(value) => { void saveMissingSessionProjectPolicy(value); }}
               aria-label="Handle sessions whose project path no longer exists"
             >
-              <SegmentedControlItem value="show">Show</SegmentedControlItem>
-              <SegmentedControlItem value="hide">Hide</SegmentedControlItem>
-              <SegmentedControlItem value="merge-by-name">Merge by name</SegmentedControlItem>
+              <SegmentedControlItem value={MissingSessionProjectPolicy.Show}>Show</SegmentedControlItem>
+              <SegmentedControlItem value={MissingSessionProjectPolicy.Hide}>Hide</SegmentedControlItem>
+              <SegmentedControlItem value={MissingSessionProjectPolicy.MergeByName}>Merge by name</SegmentedControlItem>
             </SegmentedControl>
             {missingSessionProjectError ? <Toast tone="error" message={missingSessionProjectError} /> : null}
           </SettingsSection>
@@ -953,7 +932,7 @@ export function SettingsView({ appearance, themePreferences, fontFamily, termina
                 state={projectScanState}
                 width={112}
                 minWidth={112}
-                aria-label={projectScanState === "loading" ? "Scanning projects" : "Scan projects"}
+                aria-label={projectScanState === AsyncStatus.Loading ? "Scanning projects" : "Scan projects"}
                 loadingContent={<LoadingIcon size={14} />}
                 successContent="Scan now"
                 errorContent="Scan now"
@@ -961,88 +940,87 @@ export function SettingsView({ appearance, themePreferences, fontFamily, termina
               >
                 Scan now
               </StatefulButton>
-              {projects.length > 0 && projectScanState !== "error" ? <ProjectsPopover projects={projects} /> : null}
-              {projectScanSummary && projects.length === 0 && projectScanState !== "error" ? <span className="settingsScanSummary" role="status">{projectScanSummary}</span> : null}
-              {projectScanSummary && projectScanState === "error" ? <Toast tone="error" message={projectScanSummary} /> : null}
+              {projects.length > 0 && projectScanState !== AsyncStatus.Error ? <ProjectsPopover projects={projects} /> : null}
+              {projectScanSummary && projects.length === 0 && projectScanState !== AsyncStatus.Error ? <span className="settingsScanSummary" role="status">{projectScanSummary}</span> : null}
+              {projectScanSummary && projectScanState === AsyncStatus.Error ? <Toast tone="error" message={projectScanSummary} /> : null}
             </div>
             {projectScanScopesError ? <Toast tone="error" message={projectScanScopesError} /> : null}
           </SettingsSection>
           </SettingsGroup>
           <SettingsGroup title="Developer">
             <SettingsSection title="Sync" className="settingsBackupSection">
-              <BackupSettings />
+              <BackupSettings onSkillsRestored={onSkillsUpdated} />
             </SettingsSection>
-          <SettingsSection title="Coding agents">
+          <SettingsSection title="Coding helpers">
+            <div className="settingsAgentRows">
               <div className="settingsAgentRow">
                 <div className="settingsAgentStatus">
-                  {setupReady ? (
-                    <>
-                      <Badge className="settingsAgentInstalled" tone="success" aria-busy={bundledSkillBusy}>
-                        {bundledSkillBusy ? <LoadingIcon size={14} /> : <CheckCircle2 size={14} aria-hidden="true" />}
-                        <span>{bundledSkillBusy ? "Uninstalling" : "Installed"}</span>
-                      </Badge>
-                      {!bundledSkillBusy ? (
-                        <RowActionsMenu ariaLabel="Coding agents actions">
+                  <strong>Tendi CLI</strong>
+                  <div className="settingsAgentControls">
+                    <div className="settingsAgentState">
+                      {(appSettingsLoading || settingsLoading) && !cliStatus ? <span>Checking…</span> : cliHealthy ? (
+                        <Badge className="settingsAgentInstalled" tone="success">
+                          <CheckCircle2 size={14} aria-hidden="true" />
+                          <span>Installed</span>
+                        </Badge>
+                      ) : cliConflict ? <span>Needs attention</span> : cliStatus?.supported === false ? <span>Unsupported</span> : cliStatus ? (
+                        cliPathNeedsAttention || cliNeedsRepair ? <span>{cliPathNeedsAttention ? "Needs attention" : "Needs repair"}</span> : null
+                      ) : <span>Status unavailable</span>}
+                    </div>
+                    <div className="settingsCliActions">
+                      {cliHealthy ? (
+                        <RowActionsMenu ariaLabel="Tendi CLI actions">
                           <DropdownMenu.Item
                             className="skillMenuItem danger"
                             disabled={Boolean(cliBusy)}
-                            onSelect={requestRemoveCodingAgents}
+                            onSelect={requestRemoveCli}
                           >
                             <Trash2 size={14} aria-hidden="true" />
                             Uninstall
                           </DropdownMenu.Item>
                         </RowActionsMenu>
+                      ) : cliStatus?.supported && !cliConflict ? (
+                        <StatefulButton
+                          size="sm"
+                          className="settingsAgentAction"
+                          state={cliBusy === CliAction.Install ? AsyncStatus.Loading : AsyncStatus.Idle}
+                          width={112}
+                          minWidth={112}
+                          disabled={cliBusy !== null}
+                          aria-label={cliBusy === CliAction.Install ? (cliNeedsRepair || cliPathNeedsAttention ? "Repairing CLI" : "Installing CLI") : cliNeedsRepair || cliPathNeedsAttention ? "Repair CLI" : "Install CLI"}
+                          onClick={() => { void changeCliRegistration(); }}
+                          loadingContent={<LoadingIcon size={14} />}
+                        >
+                          {cliNeedsRepair || cliPathNeedsAttention ? "Repair CLI" : "Install CLI"}
+                        </StatefulButton>
                       ) : null}
-                    </>
-                  ) : setupStatusLabel ? <strong>{setupStatusLabel}</strong> : null}
-                  <div className="settingsCliActions">
-                    {canInstallBundledSkill ? (
-                      <StatefulButton
-                        size="sm"
-                        state={bundledSkillBusy ? "loading" : "idle"}
-                        width={112}
-                        minWidth={112}
-                        disabled={cliBusy !== null}
-                        aria-label={bundledSkillNeedsRepair ? "Repair" : "Install"}
-                        onClick={() => { void installBundledSkill(); }}
-                        loadingContent={<LoadingIcon size={14} />}
-                      >
-                        {bundledSkillNeedsRepair ? "Repair" : "Install"}
-                      </StatefulButton>
-                    ) : null}
-                    {canRegisterCliSeparately ? (
-                      <StatefulButton
-                        size="sm"
-                        state={cliBusy === "install" ? "loading" : "idle"}
-                        width={112}
-                        minWidth={112}
-                        disabled={cliBusy !== null}
-                        aria-label={cliBusy === "install" ? (cliNeedsRepair ? "Repairing" : "Installing") : cliNeedsRepair ? "Repair" : "Install"}
-                        onClick={() => { void changeCliRegistration(); }}
-                        loadingContent={<LoadingIcon size={14} />}
-                      >
-                        {cliNeedsRepair ? "Repair" : "Install"}
-                      </StatefulButton>
-                    ) : null}
-                    {!setupReady && codingAgentsActionValue === "remove" ? (
-                      <StatefulButton
-                        size="sm"
-                        state={bundledSkillBusy ? "loading" : "idle"}
-                        width={112}
-                        minWidth={112}
-                        disabled={cliBusy !== null}
-                        aria-label={bundledSkillBusy ? "Removing" : "Remove"}
-                        onClick={requestRemoveCodingAgents}
-                        loadingContent={<LoadingIcon size={14} />}
-                      >
-                        Remove
-                      </StatefulButton>
-                    ) : null}
+                    </div>
                   </div>
-                  {cliError ? <Toast tone="error" message={cliError} /> : null}
-                  {bundledSkillError ? <Toast tone="error" message={bundledSkillError} /> : null}
                 </div>
               </div>
+              <div className="settingsAgentRow">
+                <div className="settingsAgentStatus">
+                  <strong>Tendi skill</strong>
+                  <div className="settingsAgentControls">
+                    <div className="settingsAgentState">
+                      {(appSettingsLoading || settingsLoading) && !bundledSkillStatus ? <span>Checking…</span> : bundledSkillHealthy ? (
+                        <Badge className="settingsAgentInstalled" tone="success">
+                          <CheckCircle2 size={14} aria-hidden="true" />
+                          <span>Installed</span>
+                        </Badge>
+                      ) : bundledSkillConflict ? <span>Needs attention</span> : bundledSkillStatus ? null : <span>Status unavailable</span>}
+                    </div>
+                    <div className="settingsCliActions">
+                      <Button className="settingsAgentAction" size="sm" onClick={() => { setBundledSkillError(""); setBundledSkillInstallOpen(true); }}>
+                        Install skill
+                      </Button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+              {cliError ? <Toast tone="error" message={cliError} /> : null}
+              {bundledSkillError ? <Toast tone="error" message={bundledSkillError} /> : null}
+            </div>
           </SettingsSection>
           <SettingsSection title="Developer mode">
             <div className="settingsCheckboxRow">
@@ -1061,7 +1039,7 @@ export function SettingsView({ appearance, themePreferences, fontFamily, termina
               width={144}
               minWidth={144}
               onClick={() => { void exportLogs(); }}
-              aria-label={logExportState === "loading" ? logExportLabels.loading : logExportState === "success" ? logExportLabels.success : logExportState === "error" ? logExportLabels.retry : logExportLabels.idle}
+              aria-label={logExportState === AsyncStatus.Loading ? logExportLabels.loading : logExportState === AsyncStatus.Success ? logExportLabels.success : logExportState === AsyncStatus.Error ? logExportLabels.retry : logExportLabels.idle}
               loadingContent={<LoadingIcon size={16} />}
               successContent={logExportLabels.success}
               errorContent={logExportLabels.error}

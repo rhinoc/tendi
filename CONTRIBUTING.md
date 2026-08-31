@@ -92,16 +92,21 @@ Release and packaging automation lives in:
 
 - `.github/workflows/ci.yml`
 - `.github/workflows/release.yml`
+- `.changeset/`
 - `scripts/build-release.sh`
 - `scripts/build-dmg.sh`
+- `scripts/render_changesets.sh`
+- `scripts/consume_changesets.sh`
 - `scripts/write-latest-json.sh`
 - `apps/desktop/src-tauri/tauri.conf.json`
 - `apps/desktop/src-tauri/res/dmg-background.png`
 
 Changes to these files should explain how local builds, CI artifacts, DMG layout, background
 assets, updater artifacts, signing, and notarization are affected. The release workflow builds
-Tauri updater archives and DMGs for Apple Silicon and Intel, then publishes them with
-`latest.json` to GitHub Releases.
+Tauri updater archives and DMGs for Apple Silicon, then publishes them with
+`latest.json` to GitHub Releases. Add one English `.changeset/*.md` file for every user-visible
+release change. The release workflow renders those entries into the updater notes and GitHub
+Release body, then removes the consumed entries in its metadata commit.
 
 Tauri updater signing uses a project-specific key. Keep the private key outside the repository.
 Configure these GitHub Actions secrets before publishing:

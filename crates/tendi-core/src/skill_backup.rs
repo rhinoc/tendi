@@ -394,10 +394,11 @@ fn restore_artifact_target(artifact: &BackupArtifact) -> Result<PathBuf> {
 pub fn apply_backup_restore(
     plan: &BackupRestorePlan,
     store: &Store,
+    workspace_root: &Path,
     resolutions: &[BackupRestoreResolution],
 ) -> Result<Vec<BackupRestoreOperation>> {
     let result = apply_backup_restore_without_database(plan, resolutions)?;
-    store.upsert_skill_source_records(&result.source_records)?;
+    store.upsert_skill_source_records_for_workspace(workspace_root, &result.source_records)?;
     Ok(result.operations)
 }
 
@@ -607,11 +608,12 @@ pub struct BackupSkillStatus {
 
 pub fn adopt_skill_for_backup(
     store: &Store,
+    workspace_root: &Path,
     skill_path: &Path,
     name: impl Into<String>,
 ) -> Result<SkillSourceRecord> {
     let record = skill_backup_record_for_adoption(skill_path, name)?;
-    store.upsert_skill_source_records(std::slice::from_ref(&record))?;
+    store.upsert_skill_source_records_for_workspace(workspace_root, std::slice::from_ref(&record))?;
     Ok(record)
 }
 
@@ -642,13 +644,14 @@ pub fn skill_backup_record_for_adoption(
 
 pub fn backup_statuses_for_paths(
     store: &Store,
+    workspace_root: &Path,
     paths: &[PathBuf],
 ) -> Result<Vec<BackupSkillStatus>> {
     let config = store.skill_backup_config()?;
     if config.is_none() {
         return Ok(Vec::new());
     }
-    let records = store.skill_source_records()?;
+    let records = store.skill_source_records_for_workspace(workspace_root)?;
     let records_by_path = records
         .iter()
         .map(|record| (record.skill_path.as_path(), record))
@@ -765,8 +768,9 @@ pub fn backup_catalog(store: &Store, cwd: &Path) -> Result<BackupCatalog> {
 
     catalog.mcp = catalog_entry_items(
         store
-            .list_mcp()?
-            .servers
+            .list_mcp_for_workspace(cwd)?
+            .map(|scan| scan.servers)
+            .unwrap_or_default()
             .into_iter()
             .filter(|server| server.scope == "global" && server.read_only_reason.is_none())
             .map(|server| {
@@ -786,8 +790,9 @@ pub fn backup_catalog(store: &Store, cwd: &Path) -> Result<BackupCatalog> {
     );
     catalog.rules = catalog_source_files(
         store
-            .list_rules()?
-            .rules
+            .list_rules_for_workspace(cwd)?
+            .map(|scan| scan.rules)
+            .unwrap_or_default()
             .into_iter()
             .filter(|rule| rule.scope == "global")
             .filter_map(|rule| {
@@ -804,8 +809,9 @@ pub fn backup_catalog(store: &Store, cwd: &Path) -> Result<BackupCatalog> {
     );
     catalog.hooks = catalog_entry_items(
         store
-            .list_hooks()?
-            .hooks
+            .list_hooks_for_workspace(cwd)?
+            .map(|scan| scan.hooks)
+            .unwrap_or_default()
             .into_iter()
             .filter(|hook| {
                 crate::providers::agent_provider(hook.agent).is_global_hook_path(&hook.path)
@@ -1213,7 +1219,7 @@ pub fn build_backup_manifest(
         .map(|item| item.id.as_str())
         .collect::<BTreeSet<_>>();
     let records = store
-        .skill_source_records()?
+        .skill_source_records_for_workspace(cwd)?
         .into_iter()
         .filter(|record| {
             config.contents.skills.enabled
@@ -2314,10 +2320,11 @@ mod tests {
         write_skill(&skill, "review");
         let store = Store::open(root.join("tendi.sqlite3")).unwrap();
         store
-            .upsert_skill_source_records(&[source("review", &skill)])
+            .upsert_skill_source_records_for_workspace(&root, &[source("review", &skill)])
             .unwrap();
 
-        let statuses = backup_statuses_for_paths(&store, std::slice::from_ref(&skill)).unwrap();
+        let statuses =
+            backup_statuses_for_paths(&store, &root, std::slice::from_ref(&skill)).unwrap();
 
         assert!(statuses.is_empty());
         drop(store);
@@ -2526,7 +2533,7 @@ mod tests {
         write_skill(&skill, "review");
         let store = Store::open(root.join("tendi.sqlite3")).unwrap();
         store
-            .upsert_skill_source_records(&[source("review", &skill)])
+            .upsert_skill_source_records_for_workspace(&root, &[source("review", &skill)])
             .unwrap();
         store
             .save_skill_backup_config(&BackupConfig::new("", checkout.clone()))
@@ -2691,7 +2698,7 @@ mod tests {
 
         let first_store = Store::open(root.join("first.sqlite3")).unwrap();
         first_store
-            .upsert_skill_source_records(&[source("review", &skill)])
+            .upsert_skill_source_records_for_workspace(&root, &[source("review", &skill)])
             .unwrap();
         first_store
             .save_skill_backup_config(&BackupConfig::new(
@@ -2898,7 +2905,7 @@ mod tests {
         let checkout = root.join("checkout");
         let store = Store::open(root.join("tendi.sqlite3")).unwrap();
         store
-            .upsert_skill_source_records(&[source("review", &skill)])
+            .upsert_skill_source_records_for_workspace(&root, &[source("review", &skill)])
             .unwrap();
         store
             .save_skill_backup_config(&BackupConfig::new(
@@ -2942,7 +2949,7 @@ mod tests {
 
         let first_store = Store::open(root.join("first.sqlite3")).unwrap();
         first_store
-            .upsert_skill_source_records(&[source("review", &review)])
+            .upsert_skill_source_records_for_workspace(&root, &[source("review", &review)])
             .unwrap();
         first_store
             .save_skill_backup_config(&BackupConfig::new(
@@ -2954,7 +2961,7 @@ mod tests {
 
         let second_store = Store::open(root.join("second.sqlite3")).unwrap();
         second_store
-            .upsert_skill_source_records(&[source("draft", &draft)])
+            .upsert_skill_source_records_for_workspace(&root, &[source("draft", &draft)])
             .unwrap();
         second_store
             .save_skill_backup_config(&BackupConfig::new(
@@ -3017,14 +3024,14 @@ mod tests {
         );
         let first_store = Store::open(root.join("first.sqlite3")).unwrap();
         first_store
-            .upsert_skill_source_records(&[source("review", &first_skill)])
+            .upsert_skill_source_records_for_workspace(&root, &[source("review", &first_skill)])
             .unwrap();
         first_store.save_skill_backup_config(&first_config).unwrap();
         backup_now(&first_store, &root).unwrap();
 
         let second_store = Store::open(root.join("second.sqlite3")).unwrap();
         second_store
-            .upsert_skill_source_records(&[source("review", &second_skill)])
+            .upsert_skill_source_records_for_workspace(&root, &[source("review", &second_skill)])
             .unwrap();
         second_store
             .save_skill_backup_config(&BackupConfig::new(
@@ -3040,7 +3047,7 @@ mod tests {
         )
         .unwrap();
         let local_only = build_manifest(
-            &first_store.skill_source_records().unwrap(),
+            &first_store.skill_source_records_for_workspace(&root).unwrap(),
             &BackupBuildOptions {
                 device_label: "First Mac".to_string(),
             },
@@ -3073,7 +3080,7 @@ mod tests {
         run_git(&root.join("project"), &["init"]);
         let store = Store::open(root.join("tendi.sqlite3")).unwrap();
 
-        let error = adopt_skill_for_backup(&store, &skill, "demo").unwrap_err();
+        let error = adopt_skill_for_backup(&store, &root, &skill, "demo").unwrap_err();
 
         assert!(error.to_string().contains("project-repository"));
         drop(store);
@@ -3090,7 +3097,7 @@ mod tests {
         run_git(&root, &["init", "--bare", "remote.git"]);
         let store = Store::open(root.join("tendi.sqlite3")).unwrap();
         store
-            .upsert_skill_source_records(&[source("review", &skill)])
+            .upsert_skill_source_records_for_workspace(&root, &[source("review", &skill)])
             .unwrap();
         store
             .save_skill_backup_config(&BackupConfig::new(
@@ -3113,7 +3120,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(plan.operations[0].status, "planned");
-        let operations = super::apply_backup_restore(&plan, &store, &[]).unwrap();
+        let operations = super::apply_backup_restore(&plan, &store, &root, &[]).unwrap();
 
         assert_eq!(operations[0].status, "restored");
         assert!(operations[0].target.join("SKILL.md").is_file());
@@ -3131,7 +3138,7 @@ mod tests {
         run_git(&root, &["init", "--bare", "remote.git"]);
         let store = Store::open(root.join("tendi.sqlite3")).unwrap();
         store
-            .upsert_skill_source_records(&[source("review", &skill)])
+            .upsert_skill_source_records_for_workspace(&root, &[source("review", &skill)])
             .unwrap();
         store
             .save_skill_backup_config(&BackupConfig::new(
@@ -3160,6 +3167,7 @@ mod tests {
         let operations = super::apply_backup_restore(
             &plan,
             &store,
+            &workspace,
             &[super::BackupRestoreResolution {
                 id: plan.operations[0].id.clone(),
                 action: "keep-both".to_string(),

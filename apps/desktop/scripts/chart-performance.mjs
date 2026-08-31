@@ -103,7 +103,7 @@ function runOverviewTrend(groupAnalyticsDays, selectAnalyticsGranularity, buildT
   for (let localIndex = 0; localIndex < renderedPeriods.length; localIndex += 1) {
     const model = buildTrendPeriodModel(renderedPeriods[localIndex], renderedStart + localIndex, "tokens", topCategories, totals.size > topCategories.length, rungUnit);
     renderedRungs += model.rungs.length;
-    checksum = (Math.imul(checksum, 31) + model.rungs.length + model.tooltipSegments.length) >>> 0;
+    checksum = (Math.imul(checksum, 31) + model.rungs.length) >>> 0;
   }
   const computeMs = performance.now() - computeStarted;
   const markup = renderToStaticMarkup(React.createElement(TooltipProvider, null,

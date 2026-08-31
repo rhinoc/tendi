@@ -1,22 +1,12 @@
 import type { RuntimeData } from "./data.ts";
-import { applySkillUpdateReports } from "./skills.ts";
+import { applySkillUpdateReports as applySkillUpdateReportController } from "../controllers/skill-controller.ts";
 
 export type SkillUpdateReport = {
+  id?: string;
   name: string;
   status: string;
 };
 
-function sameAgentLabel(value: unknown, expected: string): boolean {
-  return `${value ?? ""}`.trim().toLowerCase() === expected.trim().toLowerCase();
-}
-
 export function applySkillUpdateReportsToData(data: RuntimeData, updates: SkillUpdateReport[]): RuntimeData {
-  return applySkillUpdateReports(data, updates);
-}
-
-export function countSkillUpdates(data: RuntimeData, agentFilter: string): number {
-  return data.skills.filter((skill) => (
-    skill.updateAvailability === "update-available"
-    && (agentFilter === "All" || skill.agents.some((agent) => sameAgentLabel(agent, agentFilter)))
-  )).length;
+  return applySkillUpdateReportController(data, updates);
 }

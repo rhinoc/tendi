@@ -4,14 +4,16 @@ import { ChevronDown, ChevronRight, FileText, Folder } from "lucide-react";
 import { Group as PanelGroup, Panel } from "react-resizable-panels";
 import { Dialog } from "radix-ui";
 
-import { buildFileTreeRows, displayFileName, formatUserPath, isJsonPath, isYamlPath, skillChangeActionLabel, skillChangeBusyLabel, skillChangeDescription, skillChangeLoadingCopy, skillChangeTitle, SkillChangeCommand } from "../../lib/index.ts";
-import { CodeMirrorFileEditor } from "../../components/shared/CodeMirrorFileEditor.tsx";
+import { buildFileTreeRows, displayFileName, formatUserPath, isJsonPath, isYamlPath, skillChangeActionLabel, skillChangeBusyLabel, skillChangeCanConfirm, skillChangeDescription, skillChangeDisabledReason, skillChangeLoadingCopy, skillChangeTitle, SkillChangeCommand } from "../../lib/index.ts";
+import { CodeMirrorFileEditor, CodeMirrorLanguage } from "../../components/shared/CodeMirrorFileEditor.tsx";
 import { DialogActionButton } from "../../components/shared/DialogActionButton.tsx";
 import { DialogShell } from "../../components/shared/DialogShell.tsx";
 import { DialogStatefulButton } from "../../components/shared/DialogStatefulButton.tsx";
 import { LoadingState } from "../../components/shared/LoadingState.tsx";
 import { ResizeSeparator } from "../../components/shared/ResizeSeparator.tsx";
 import { Toast } from "../../components/shared/Toast.tsx";
+import { AsyncStatus } from "../../lib/async-status.ts";
+import type { SkillChangeResponse } from "../../lib/runtime-gateway.ts";
 
 const KEEP_LOCAL_RESOLUTION = "__tendi_keep_local__";
 const USE_UPDATE_RESOLUTION = "__tendi_use_update__";
@@ -21,7 +23,7 @@ export type ConfirmSkillChangesDialogProps = {
   open: boolean;
   command: SkillChangeCommand | null;
   names?: string[];
-  preview?: Record<string, unknown> | null;
+  preview?: SkillChangeResponse | null;
   previewError?: string;
   applyError?: string;
   busy?: boolean;
@@ -39,66 +41,53 @@ type UpdateFile = {
   status: string;
 };
 
-function normalizeUpdateFile(value: unknown, allowPathResolutionKey: boolean): UpdateFile | null {
-  if (!value || typeof value !== "object") return null;
-  const file = value as {
-    path?: unknown;
-    resolution_key?: unknown;
-    before?: unknown;
-    base?: unknown;
-    incoming?: unknown;
-    after?: unknown;
-    status?: unknown;
-  };
-  const path = `${file.path ?? ""}`;
+type UpdateFileSource = {
+  path: string;
+  resolution_key?: string;
+  before?: string | null;
+  base?: string;
+  incoming?: string;
+  after: string;
+  status?: string;
+};
+
+function normalizeUpdateFile(file: UpdateFileSource, allowPathResolutionKey: boolean): UpdateFile | null {
+  const path = file.path;
   if (!path) return null;
-  const resolutionKey = typeof file.resolution_key === "string"
+  const resolutionKey = file.resolution_key
     ? file.resolution_key
     : allowPathResolutionKey ? path : "";
   if (!resolutionKey) return null;
   return {
     path,
     resolutionKey,
-    before: typeof file.before === "string" ? file.before : "",
-    base: typeof file.base === "string" ? file.base : "",
-    incoming: typeof file.incoming === "string" ? file.incoming : "",
-    after: typeof file.after === "string" ? file.after : "",
-    status: `${file.status ?? ""}`,
+    before: file.before ?? "",
+    base: file.base ?? "",
+    incoming: file.incoming ?? "",
+    after: file.after,
+    status: file.status ?? "",
   };
 }
 
-function updateFiles(preview: Record<string, unknown> | null | undefined): UpdateFile[] {
-  const plan = preview?.plan as Record<string, unknown> | undefined;
-  const updates = plan?.git_updates;
-  const fileChanges = (plan?.file_changes as Record<string, unknown> | undefined)?.changes;
-  const gitFiles = Array.isArray(updates)
-    ? updates.flatMap((update) => {
-      if (!update || typeof update !== "object") return [];
-      const files = (update as { files?: unknown }).files;
-      const targets = (update as { materialized_targets?: unknown }).materialized_targets;
-      const targetFiles = Array.isArray(targets)
-        ? targets.flatMap((target) => {
-          if (!target || typeof target !== "object") return [];
-          const files = (target as { files?: unknown }).files;
-          return Array.isArray(files) ? files : [];
-        })
-        : [];
-      return [...(Array.isArray(files) ? files : []), ...targetFiles];
-    })
-    : [];
-  const mergeIssues = (plan?.merge_issues as unknown);
+function updateFiles(preview: SkillChangeResponse | null | undefined): UpdateFile[] {
+  const plan = preview?.plan;
+  if (!plan) return [];
+  const gitFiles = plan.git_updates.flatMap((update) => [
+    ...update.files,
+    ...update.materialized_targets.flatMap((target) => target.files),
+  ]);
   const files = [
     ...gitFiles.map((file) => normalizeUpdateFile(file, false)),
-    ...(Array.isArray(fileChanges) ? fileChanges : []).map((file) => normalizeUpdateFile(file, true)),
+    ...plan.file_changes.changes.map((file) => normalizeUpdateFile(file, true)),
   ]
     .filter((file): file is UpdateFile => file !== null);
-  const issues = (Array.isArray(mergeIssues) ? mergeIssues : [])
+  const issues = plan.merge_issues
     .map((file) => normalizeUpdateFile(file, false))
     .filter((file): file is UpdateFile => file !== null);
   return [...new Map([...files, ...issues].map((file) => [file.resolutionKey, file])).values()];
 }
 
-function updatePreviewSummary(preview: Record<string, unknown> | null | undefined): string {
+function updatePreviewSummary(preview: SkillChangeResponse | null | undefined): string {
   const summary = preview?.summary;
   return typeof summary === "string" && summary.trim() ? summary : "No applicable updates.";
 }
@@ -109,6 +98,12 @@ function isMergeResolutionStatus(status: string) {
 
 function hasUnresolvedConflictMarkers(content: string) {
   return CONFLICT_MARKER_PATTERN.test(content);
+}
+
+function hasFileDiff(file: UpdateFile) {
+  if (isMergeResolutionStatus(file.status)) return true;
+  if (file.status && file.status !== "unchanged") return true;
+  return file.before !== file.after;
 }
 
 function resolvedUpdateContent(file: UpdateFile, resolutions: Record<string, string>) {
@@ -148,6 +143,10 @@ function SkillUpdateDiffPreview({
     ),
     [collapsedFolders, files],
   );
+  const filesByPath = useMemo(
+    () => new Map(files.map((file) => [file.path, file])),
+    [files],
+  );
   const toggleFolder = (path: string) => {
     setCollapsedFolders((current) => {
       const next = new Set(current);
@@ -171,12 +170,15 @@ function SkillUpdateDiffPreview({
             {rows.map(({ file, depth, isFolder }) => {
               const isCollapsed = collapsedFolders.has(file.name);
               const isActive = !isFolder && file.name === selected.path;
+              const updateFile = isFolder ? undefined : filesByPath.get(file.name);
+              const isChanged = updateFile ? hasFileDiff(updateFile) : false;
+              const needsResolution = updateFile ? isMergeResolutionStatus(updateFile.status) : false;
               return (
                 <Tooltip key={file.name} content={formatUserPath(file.name)} onlyWhenTruncated><button
                   type="button"
                   aria-current={isActive ? "true" : undefined}
                   aria-expanded={isFolder ? !isCollapsed : undefined}
-                  className={`skillUpdateTreeRow ${isFolder ? "folder" : ""} ${isActive ? "active" : ""}`}
+                  className={`skillUpdateTreeRow ${isFolder ? "folder" : ""} ${isChanged ? "changed" : ""} ${needsResolution ? "needsResolution" : ""} ${isActive ? "active" : ""}`}
                   key={file.name}
                   onClick={() => {
                     if (isFolder) toggleFolder(file.name);
@@ -189,6 +191,11 @@ function SkillUpdateDiffPreview({
                   </span>
                   {isFolder ? <Folder size={14} /> : <FileText size={14} />}
                   <span className="skillUpdateTreeName">{formatUserPath(displayFileName(file.name))}</span>
+                  {isChanged ? (
+                    <span className={`skillUpdateFileStatus ${needsResolution ? "needsResolution" : "changed"}`}>
+                      {needsResolution ? "!" : "M"}
+                    </span>
+                  ) : null}
                 </button></Tooltip>
               );
             })}
@@ -199,7 +206,7 @@ function SkillUpdateDiffPreview({
           <div className="skillUpdateDiffEditorBody">
             <CodeMirrorFileEditor
               content={selectedContent}
-              language={isYamlPath(selected.path) ? "yaml" : isJsonPath(selected.path) ? "json" : undefined}
+              language={isYamlPath(selected.path) ? CodeMirrorLanguage.Yaml : isJsonPath(selected.path) ? CodeMirrorLanguage.Json : undefined}
               originalContent={selected.base}
               showDiff={!selectedIsMergeStatus}
               showConflictMarkers={selectedIsMergeStatus && selected.status !== "binary"}
@@ -265,6 +272,20 @@ export function ConfirmSkillChangesDialog({
     return resolutions[file.resolutionKey] === undefined
       || (file.status !== "binary" && hasUnresolvedConflictMarkers(content));
   });
+  const resolutionFiles = files.filter((file) => isMergeResolutionStatus(file.status));
+  const resolvedFiles = resolutionFiles.length - unresolvedFiles.length;
+  const canApply = skillChangeCanConfirm(command, {
+    previewLoading,
+    previewError,
+    canApply: preview?.canApply as boolean | undefined,
+    unresolvedFiles: unresolvedFiles.length,
+  });
+  const applyDisabledReason = skillChangeDisabledReason(command, {
+    previewLoading,
+    previewError,
+    canApply: preview?.canApply as boolean | undefined,
+    unresolvedFiles: unresolvedFiles.length,
+  });
   const emptyPreview = command === SkillChangeCommand.UpdateMany && preview && !previewError && files.length === 0;
   return (
     <DialogShell
@@ -296,16 +317,28 @@ export function ConfirmSkillChangesDialog({
       {dialogError ? <Toast tone="error" message={dialogError} /> : null}
       <div className="confirmDialogActions">
         <DialogActionButton variant="secondary" disabled={busy} onClick={() => onOpenChange(false)}>Cancel</DialogActionButton>
-        <DialogStatefulButton
-          state={busy ? "loading" : "idle"}
-          loadingLabel={busyLabel}
-          variant={command === SkillChangeCommand.DeleteMany ? "danger" : "primary"}
-          aria-label={actionLabel}
-          onClick={() => onConfirm(resolutions)}
-          disabled={previewLoading || Boolean(previewError) || unresolvedFiles.length > 0}
-        >
-          {actionLabel}
-        </DialogStatefulButton>
+        {resolutionFiles.length > 0 ? (
+          <span className="skillUpdateResolutionProgress" role="status" aria-live="polite">
+            {resolvedFiles}/{resolutionFiles.length} resolved
+          </span>
+        ) : null}
+        <Tooltip content={canApply ? "" : applyDisabledReason}>
+          <span
+            className="skillUpdateApplyTooltipTarget"
+            tabIndex={canApply ? undefined : 0}
+          >
+            <DialogStatefulButton
+              state={busy ? AsyncStatus.Loading : AsyncStatus.Idle}
+              loadingLabel={busyLabel}
+              variant={command === SkillChangeCommand.DeleteMany ? "danger" : "primary"}
+              aria-label={actionLabel}
+              onClick={() => onConfirm(resolutions)}
+              disabled={!canApply}
+            >
+              {actionLabel}
+            </DialogStatefulButton>
+          </span>
+        </Tooltip>
       </div>
     </DialogShell>
   );

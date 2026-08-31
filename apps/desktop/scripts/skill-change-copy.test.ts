@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import type { SkillChangeCommand } from "../src/lib/skills.ts";
-import { skillChangeActionLabel, skillChangeBusyLabel, skillChangeDescription, skillChangeLoadingCopy, skillChangeTitle } from "../src/lib/skill-change-copy.ts";
+import { skillChangeActionLabel, skillChangeBusyLabel, skillChangeCanConfirm, skillChangeDescription, skillChangeDisabledReason, skillChangeLoadingCopy, skillChangeTitle } from "../src/lib/skill-change-copy.ts";
 
 const deleteMany = "skills_delete_many" as SkillChangeCommand;
 const updateMany = "skills_update_many" as SkillChangeCommand;
@@ -30,4 +30,34 @@ test("keeps skill change action and loading copy shared", () => {
     description: "Preparing skill change preview.",
     previewLabel: "Preparing update preview",
   });
+});
+
+test("blocks applying an update preview with no applicable changes", () => {
+  assert.equal(skillChangeCanConfirm(updateMany, {
+    previewLoading: false,
+    canApply: false,
+    unresolvedFiles: 0,
+  }), false);
+  assert.equal(skillChangeCanConfirm(updateMany, {
+    previewLoading: false,
+    canApply: true,
+    unresolvedFiles: 0,
+  }), true);
+  assert.equal(skillChangeCanConfirm(deleteMany, {
+    previewLoading: false,
+    unresolvedFiles: 0,
+  }), true);
+});
+
+test("explains why an update preview cannot be applied", () => {
+  assert.equal(skillChangeDisabledReason(updateMany, {
+    previewLoading: false,
+    canApply: true,
+    unresolvedFiles: 2,
+  }), "2 files still need resolution. Resolve them before applying.");
+  assert.equal(skillChangeDisabledReason(updateMany, {
+    previewLoading: false,
+    canApply: false,
+    unresolvedFiles: 0,
+  }), "There are no applicable updates.");
 });

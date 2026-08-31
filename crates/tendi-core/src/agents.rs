@@ -23,7 +23,7 @@ pub struct AgentRecord {
     pub version: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct AgentScan {
     pub agents: Vec<AgentRecord>,
     pub warnings: Vec<String>,

@@ -60,6 +60,9 @@ const thresholds = {
   secondarySessionSearchMs: envNumber("TENDI_PERF_SECONDARY_SESSION_SEARCH_MS", 100),
   secondarySessionSearchRssBytes: envNumber("TENDI_PERF_SECONDARY_SESSION_SEARCH_RSS_MIB", 24) * mib,
   secondarySessionSearchPayloadBytes: envNumber("TENDI_PERF_SECONDARY_SESSION_SEARCH_PAYLOAD_MIB", 0.25) * mib,
+  secondarySession10kSoakMs: envNumber("TENDI_PERF_SECONDARY_SESSION_10K_SOAK_MS", 1_500),
+  secondarySession10kSoakRssBytes: envNumber("TENDI_PERF_SECONDARY_SESSION_10K_SOAK_RSS_MIB", 96) * mib,
+  secondarySession10kSoakPayloadBytes: envNumber("TENDI_PERF_SECONDARY_SESSION_10K_SOAK_PAYLOAD_MIB", 0.125) * mib,
   secondaryLinkedSessionsMs: envNumber("TENDI_PERF_SECONDARY_LINKED_SESSIONS_MS", 25),
   secondaryLinkedSessionsRssBytes: envNumber("TENDI_PERF_SECONDARY_LINKED_SESSIONS_RSS_MIB", 24) * mib,
   secondaryLinkedSessionsPayloadBytes: envNumber("TENDI_PERF_SECONDARY_LINKED_SESSIONS_PAYLOAD_MIB", 0.75) * mib,
@@ -158,6 +161,11 @@ benchmarkCoreScenario("secondary-session-search", {
   maxOperationMs: thresholds.secondarySessionSearchMs,
   maxRssBytes: thresholds.secondarySessionSearchRssBytes,
   maxPayloadBytes: thresholds.secondarySessionSearchPayloadBytes,
+});
+benchmarkCoreScenario("secondary-session-10k-soak", {
+  maxOperationMs: thresholds.secondarySession10kSoakMs,
+  maxRssBytes: thresholds.secondarySession10kSoakRssBytes,
+  maxPayloadBytes: thresholds.secondarySession10kSoakPayloadBytes,
 });
 benchmarkCoreScenario("secondary-linked-sessions", {
   maxOperationMs: thresholds.secondaryLinkedSessionsMs,

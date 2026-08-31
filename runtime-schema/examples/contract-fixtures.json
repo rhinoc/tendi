@@ -1,0 +1,3134 @@
+{
+  "generatedFrom": "runtime-schema/runtime.openrpc.json",
+  "validRequests": {
+    "scan": {},
+    "agents_list": {},
+    "bundled_skill_status": {},
+    "bundled_skill_install": {},
+    "bundled_skill_remove": {},
+    "bundled_skill_prompt_dismiss": {},
+    "skills_list": {},
+    "skills_refresh": {},
+    "sessions_snapshot": {},
+    "sessions_scan_start": {},
+    "sessions_search": {
+      "query": "fixture"
+    },
+    "analytics_overview": {
+      "agent": "fixture",
+      "days": 1,
+      "rankDays": 1,
+      "refreshTranscripts": false
+    },
+    "analytics_revision": {},
+    "session_skill_index_status": {},
+    "session_skill_index_run": {
+      "force": false
+    },
+    "session_skill_links": {
+      "sessionId": "fixture",
+      "agent": "codex"
+    },
+    "skill_session_links": {
+      "skillName": "fixture"
+    },
+    "settings_get": {},
+    "settings_save": {
+      "appearance": "fixture",
+      "fontFamily": "fixture",
+      "lightTheme": "fixture",
+      "darkTheme": "fixture",
+      "appIcon": "fixture",
+      "terminal": "fixture",
+      "sessionResumeTarget": "fixture",
+      "missingSessionProjectPolicy": "fixture",
+      "editor": "fixture",
+      "developerMode": false,
+      "additionalSessionRoots": [
+        "fixture"
+      ],
+      "configProfiles": {}
+    },
+    "session_projects_list": {},
+    "project_scan_scopes_list": {},
+    "project_scan_scopes_save": {
+      "paths": [
+        "fixture"
+      ]
+    },
+    "projects_list": {},
+    "projects_scan": {},
+    "terminal_apps_list": {},
+    "agent_configs_list": {},
+    "agent_config_watch": {
+      "path": "fixture"
+    },
+    "agent_config_read": {
+      "path": "fixture"
+    },
+    "agent_config_save": {
+      "path": "fixture",
+      "expectedSha256": "fixture",
+      "content": "fixture"
+    },
+    "agent_configs_delete_many": {
+      "paths": [
+        "fixture"
+      ]
+    },
+    "config_profile_create": {
+      "agent": "codex",
+      "name": "fixture",
+      "content": "fixture"
+    },
+    "config_profile_set": {
+      "agent": "codex",
+      "profile": "fixture"
+    },
+    "rules_list": {},
+    "rule_file_read": {
+      "path": "fixture"
+    },
+    "rule_file_save": {
+      "path": "fixture",
+      "expectedSha256": "fixture",
+      "content": "fixture"
+    },
+    "rule_file_delete_many": {
+      "paths": [
+        "fixture"
+      ]
+    },
+    "hooks_list": {},
+    "hook_delete": {
+      "agent": "codex",
+      "path": "fixture",
+      "expectedTrustHash": "fixture",
+      "event": "fixture"
+    },
+    "hook_delete_many": {
+      "requests": [
+        {
+          "agent": "codex",
+          "path": "fixture",
+          "expectedTrustHash": "fixture",
+          "event": "fixture"
+        }
+      ]
+    },
+    "hook_set_enabled": {
+      "agent": "codex",
+      "path": "fixture",
+      "expectedTrustHash": "fixture",
+      "event": "fixture",
+      "enabled": false
+    },
+    "hook_set_enabled_many": {
+      "requests": [
+        {
+          "agent": "codex",
+          "path": "fixture",
+          "expectedTrustHash": "fixture",
+          "event": "fixture",
+          "enabled": false
+        }
+      ]
+    },
+    "hook_review": {
+      "agent": "codex",
+      "path": "fixture",
+      "expectedTrustHash": "fixture",
+      "event": "fixture"
+    },
+    "hook_source_read": {
+      "agent": "codex",
+      "path": "fixture"
+    },
+    "mcp_list": {},
+    "mcp_set_enabled": {
+      "agent": "codex",
+      "path": "fixture",
+      "expectedTrustHash": "fixture",
+      "name": "fixture",
+      "enabled": false,
+      "serverPath": [
+        "fixture"
+      ]
+    },
+    "mcp_set_enabled_many": {
+      "requests": [
+        {
+          "agent": "codex",
+          "path": "fixture",
+          "expectedTrustHash": "fixture",
+          "name": "fixture",
+          "enabled": false,
+          "serverPath": [
+            "fixture"
+          ]
+        }
+      ]
+    },
+    "prompts_list": {},
+    "prompt_save": {
+      "id": "fixture",
+      "title": "fixture",
+      "tags": [
+        "fixture"
+      ],
+      "body": "fixture"
+    },
+    "prompts_delete_many": {
+      "ids": [
+        "fixture"
+      ]
+    },
+    "session_transcript": {
+      "path": "fixture",
+      "agent": "codex"
+    },
+    "session_transcript_locator": {
+      "path": "fixture",
+      "agent": "codex"
+    },
+    "session_transcript_search": {
+      "path": "fixture",
+      "agent": "codex",
+      "query": "fixture",
+      "scopes": {
+        "user": false,
+        "assistant": false,
+        "system": false,
+        "tool": false
+      }
+    },
+    "skills_targets": {},
+    "skills_backup_status": {},
+    "skills_backup_configure": {
+      "repository": "fixture"
+    },
+    "skills_backup_sync": {},
+    "skills_backup_now": {},
+    "skills_backup_versions": {},
+    "skills_backup_restore": {
+      "revision": "fixture",
+      "target": "fixture",
+      "scope": "global"
+    },
+    "skills_backup_adopt": {
+      "name": "fixture",
+      "skillPath": "fixture"
+    },
+    "skills_backup_adopt_many": {
+      "skills": [
+        {
+          "name": "fixture",
+          "skillPath": "fixture"
+        }
+      ]
+    },
+    "skills_backup_disconnect": {},
+    "skills_add": {
+      "source": "fixture",
+      "target": "fixture",
+      "scope": "global",
+      "skills": [
+        "fixture"
+      ],
+      "copy": false,
+      "overwrite": false,
+      "visibility": "auto",
+      "dryRun": false
+    },
+    "skills_add_preview_read": {
+      "previewId": "fixture",
+      "skillName": "fixture"
+    },
+    "skills_distribute": {
+      "sourcePaths": [
+        "fixture"
+      ],
+      "scope": "global",
+      "mode": "move"
+    },
+    "skills_remove_locations": {
+      "skillIds": [
+        "fixture"
+      ],
+      "targets": [
+        "fixture"
+      ],
+      "scope": "global"
+    },
+    "skills_set": {
+      "visibility": "auto"
+    },
+    "skills_wrap": {
+      "name": "fixture"
+    },
+    "skills_updates": {},
+    "skills_updates_cancel": {},
+    "skills_update": {},
+    "skills_update_many": {
+      "skillIds": [
+        "fixture"
+      ]
+    },
+    "skills_delete_many": {
+      "skillIds": [
+        "fixture"
+      ]
+    },
+    "skills_marketplace_search": {
+      "query": "fixture"
+    },
+    "skill_files": {
+      "skillId": "fixture"
+    },
+    "skill_file_read": {
+      "skillId": "fixture",
+      "relativePath": "fixture"
+    },
+    "skill_file_save": {
+      "skillId": "fixture",
+      "relativePath": "fixture",
+      "expectedSha256": "fixture",
+      "content": "fixture"
+    },
+    "skill_file_create": {
+      "skillId": "fixture",
+      "relativePath": "fixture"
+    },
+    "skill_folder_create": {
+      "skillId": "fixture",
+      "relativePath": "fixture"
+    },
+    "skill_path_rename": {
+      "skillId": "fixture",
+      "fromRelativePath": "fixture",
+      "toRelativePath": "fixture"
+    },
+    "skill_path_delete": {
+      "skillId": "fixture",
+      "relativePath": "fixture"
+    },
+    "app_icon_set": {
+      "icon": "fixture"
+    },
+    "cli_status": {},
+    "cli_install": {},
+    "cli_remove": {},
+    "terminal_app_test": {
+      "terminal": "fixture"
+    },
+    "editor_app_test": {
+      "editor": "fixture"
+    },
+    "session_resume_target": {
+      "session": {
+        "id": "fixture",
+        "agent": "fixture",
+        "path": "fixture"
+      }
+    },
+    "session_resume_in_terminal": {
+      "session": {
+        "id": "fixture",
+        "agent": "fixture",
+        "path": "fixture"
+      }
+    },
+    "open_in_editor": {
+      "path": "fixture"
+    },
+    "reveal_in_finder": {
+      "path": "fixture"
+    },
+    "logs_export": {},
+    "open_url": {
+      "url": "fixture"
+    },
+    "check_for_updates": {},
+    "install_update": {}
+  },
+  "invalidRequests": {
+    "scan": [],
+    "agents_list": [],
+    "bundled_skill_status": [],
+    "bundled_skill_install": [],
+    "bundled_skill_remove": [],
+    "bundled_skill_prompt_dismiss": [],
+    "skills_list": [],
+    "skills_refresh": [],
+    "sessions_snapshot": [],
+    "sessions_scan_start": [],
+    "sessions_search": [],
+    "analytics_overview": [],
+    "analytics_revision": [],
+    "session_skill_index_status": [],
+    "session_skill_index_run": [],
+    "session_skill_links": [],
+    "skill_session_links": [],
+    "settings_get": [],
+    "settings_save": [],
+    "session_projects_list": [],
+    "project_scan_scopes_list": [],
+    "project_scan_scopes_save": [],
+    "projects_list": [],
+    "projects_scan": [],
+    "terminal_apps_list": [],
+    "agent_configs_list": [],
+    "agent_config_watch": [],
+    "agent_config_read": [],
+    "agent_config_save": [],
+    "agent_configs_delete_many": [],
+    "config_profile_create": [],
+    "config_profile_set": [],
+    "rules_list": [],
+    "rule_file_read": [],
+    "rule_file_save": [],
+    "rule_file_delete_many": [],
+    "hooks_list": [],
+    "hook_delete": [],
+    "hook_delete_many": [],
+    "hook_set_enabled": [],
+    "hook_set_enabled_many": [],
+    "hook_review": [],
+    "hook_source_read": [],
+    "mcp_list": [],
+    "mcp_set_enabled": [],
+    "mcp_set_enabled_many": [],
+    "prompts_list": [],
+    "prompt_save": [],
+    "prompts_delete_many": [],
+    "session_transcript": [],
+    "session_transcript_locator": [],
+    "session_transcript_search": [],
+    "skills_targets": [],
+    "skills_backup_status": [],
+    "skills_backup_configure": [],
+    "skills_backup_sync": [],
+    "skills_backup_now": [],
+    "skills_backup_versions": [],
+    "skills_backup_restore": [],
+    "skills_backup_adopt": [],
+    "skills_backup_adopt_many": [],
+    "skills_backup_disconnect": [],
+    "skills_add": [],
+    "skills_add_preview_read": [],
+    "skills_distribute": [],
+    "skills_remove_locations": [],
+    "skills_set": [],
+    "skills_wrap": [],
+    "skills_updates": [],
+    "skills_updates_cancel": [],
+    "skills_update": [],
+    "skills_update_many": [],
+    "skills_delete_many": [],
+    "skills_marketplace_search": [],
+    "skill_files": [],
+    "skill_file_read": [],
+    "skill_file_save": [],
+    "skill_file_create": [],
+    "skill_folder_create": [],
+    "skill_path_rename": [],
+    "skill_path_delete": [],
+    "app_icon_set": [],
+    "cli_status": [],
+    "cli_install": [],
+    "cli_remove": [],
+    "terminal_app_test": [],
+    "editor_app_test": [],
+    "session_resume_target": [],
+    "session_resume_in_terminal": [],
+    "open_in_editor": [],
+    "reveal_in_finder": [],
+    "logs_export": [],
+    "open_url": [],
+    "check_for_updates": [],
+    "install_update": []
+  },
+  "validResults": {
+    "scan": {
+      "agents": {
+        "agents": [
+          {
+            "kind": "codex",
+            "name": "fixture",
+            "installed": false
+          }
+        ],
+        "warnings": [
+          "fixture"
+        ]
+      },
+      "skills": {
+        "roots": [
+          {
+            "path": "fixture",
+            "scope": "fixture",
+            "agent": "codex",
+            "plugin_id": "fixture",
+            "plugin_enabled": false
+          }
+        ],
+        "skills": [
+          {
+            "id": "fixture",
+            "installationId": "fixture",
+            "name": "fixture",
+            "tags": [
+              "fixture"
+            ],
+            "dependencies": [
+              "fixture"
+            ],
+            "dependents": [
+              "fixture"
+            ],
+            "dependencyIds": [
+              "fixture"
+            ],
+            "dependentIds": [
+              "fixture"
+            ],
+            "visibility": "auto",
+            "agents": [
+              "codex"
+            ],
+            "paths": [
+              {
+                "path": "fixture",
+                "root": "fixture",
+                "scope": "fixture",
+                "agent": "codex",
+                "install_target": "fixture",
+                "source_kind": "fixture",
+                "symlink_status": "fixture",
+                "update_status": "fixture",
+                "sha256": "fixture",
+                "tags": [
+                  "fixture"
+                ],
+                "effective_visibility": "auto"
+              }
+            ],
+            "source_summary": "fixture",
+            "install_targets": [
+              "fixture"
+            ],
+            "update_status": "fixture",
+            "is_system": false
+          }
+        ],
+        "warnings": [
+          "fixture"
+        ]
+      },
+      "sessions": {
+        "sessions": [
+          {
+            "id": "fixture",
+            "agent": "codex",
+            "path": "fixture"
+          }
+        ],
+        "warnings": [
+          "fixture"
+        ]
+      },
+      "rules": {
+        "rules": [
+          {
+            "agents": [
+              "codex"
+            ],
+            "kind": "fixture",
+            "scope": "fixture",
+            "path": "fixture",
+            "order": 0,
+            "sha256": "fixture"
+          }
+        ],
+        "warnings": [
+          "fixture"
+        ]
+      },
+      "hooks": {
+        "hooks": [
+          {
+            "agent": "codex",
+            "event": "fixture",
+            "enabled": false,
+            "path": "fixture",
+            "trust_hash": "fixture",
+            "needs_review": false
+          }
+        ],
+        "warnings": [
+          "fixture"
+        ]
+      },
+      "mcp": {
+        "servers": [
+          {
+            "agent": "codex",
+            "name": "fixture",
+            "scope": "fixture",
+            "transport": "fixture",
+            "enabled": false,
+            "status": "fixture",
+            "path": "fixture",
+            "trust_hash": "fixture"
+          }
+        ],
+        "warnings": [
+          "fixture"
+        ]
+      }
+    },
+    "agents_list": [
+      {
+        "kind": "codex",
+        "name": "fixture",
+        "installed": false
+      }
+    ],
+    "bundled_skill_status": {
+      "name": "fixture",
+      "target": "fixture",
+      "installed": false,
+      "current": false,
+      "promptHandled": false,
+      "shouldPrompt": false
+    },
+    "bundled_skill_install": {
+      "plan": {
+        "name": "fixture",
+        "target": "fixture",
+        "action": "fixture",
+        "requiresOverwrite": false,
+        "changes": {
+          "changes": [
+            {
+              "path": "fixture",
+              "beforeSha256": "fixture",
+              "before": "fixture",
+              "after": "fixture"
+            }
+          ]
+        }
+      },
+      "applied": false,
+      "status": {
+        "name": "fixture",
+        "target": "fixture",
+        "installed": false,
+        "current": false,
+        "promptHandled": false,
+        "shouldPrompt": false
+      }
+    },
+    "bundled_skill_remove": {
+      "name": "fixture",
+      "target": "fixture",
+      "installed": false,
+      "current": false,
+      "promptHandled": false,
+      "shouldPrompt": false
+    },
+    "bundled_skill_prompt_dismiss": {},
+    "skills_list": [
+      {
+        "id": "fixture",
+        "installationId": "fixture",
+        "name": "fixture",
+        "tags": [
+          "fixture"
+        ],
+        "dependencies": [
+          "fixture"
+        ],
+        "dependents": [
+          "fixture"
+        ],
+        "dependencyIds": [
+          "fixture"
+        ],
+        "dependentIds": [
+          "fixture"
+        ],
+        "visibility": "auto",
+        "agents": [
+          "codex"
+        ],
+        "paths": [
+          {
+            "path": "fixture",
+            "root": "fixture",
+            "scope": "fixture",
+            "agent": "codex",
+            "install_target": "fixture",
+            "source_kind": "fixture",
+            "symlink_status": "fixture",
+            "update_status": "fixture",
+            "sha256": "fixture",
+            "tags": [
+              "fixture"
+            ],
+            "effective_visibility": "auto"
+          }
+        ],
+        "source_summary": "fixture",
+        "install_targets": [
+          "fixture"
+        ],
+        "update_status": "fixture",
+        "is_system": false
+      }
+    ],
+    "skills_refresh": {
+      "skills": [
+        {
+          "id": "fixture",
+          "installationId": "fixture",
+          "name": "fixture",
+          "tags": [
+            "fixture"
+          ],
+          "dependencies": [
+            "fixture"
+          ],
+          "dependents": [
+            "fixture"
+          ],
+          "dependencyIds": [
+            "fixture"
+          ],
+          "dependentIds": [
+            "fixture"
+          ],
+          "visibility": "auto",
+          "agents": [
+            "codex"
+          ],
+          "paths": [
+            {
+              "path": "fixture",
+              "root": "fixture",
+              "scope": "fixture",
+              "agent": "codex",
+              "install_target": "fixture",
+              "source_kind": "fixture",
+              "symlink_status": "fixture",
+              "update_status": "fixture",
+              "sha256": "fixture",
+              "tags": [
+                "fixture"
+              ],
+              "effective_visibility": "auto"
+            }
+          ],
+          "source_summary": "fixture",
+          "install_targets": [
+            "fixture"
+          ],
+          "update_status": "fixture",
+          "is_system": false
+        }
+      ],
+      "updateCheck": "fixture"
+    },
+    "sessions_snapshot": {
+      "scopeKey": "fixture",
+      "domain": "sessions",
+      "revision": 0,
+      "schemaVersion": 1,
+      "snapshotId": "fixture",
+      "payload": [
+        {
+          "id": "fixture",
+          "agent": "codex",
+          "path": "fixture"
+        }
+      ]
+    },
+    "sessions_scan_start": {
+      "generation": 0,
+      "started": false
+    },
+    "sessions_search": [
+      {
+        "id": "fixture",
+        "agent": "codex",
+        "path": "fixture",
+        "search_score": 0,
+        "search_snippet": "fixture"
+      }
+    ],
+    "analytics_overview": {
+      "revision": 0,
+      "generatedAt": "fixture",
+      "daysRequested": 1,
+      "rankDays": 1,
+      "coverage": {
+        "first": "fixture",
+        "last": "fixture",
+        "totalSessions": 0,
+        "analyzedSessions": 0,
+        "indexingSessions": 0
+      },
+      "capabilities": [
+        {
+          "agent": "codex",
+          "tokenUsage": false,
+          "reasoningTokens": false,
+          "explicitRuns": false,
+          "rateLimitHistory": false
+        }
+      ],
+      "summary": {
+        "usage": {
+          "inputTokens": 0,
+          "cachedInputTokens": 0,
+          "cacheWriteInputTokens": 0,
+          "outputTokens": 0,
+          "reasoningOutputTokens": 0,
+          "totalTokens": 0
+        },
+        "responses": 0,
+        "sessions": 0,
+        "runs": {
+          "started": 0,
+          "completed": 0,
+          "unclosed": 0,
+          "totalMs": 0,
+          "maxMs": 0
+        },
+        "aborted": 0,
+        "abortedRate": 0,
+        "compacted": 0,
+        "compactedSessions": 0
+      },
+      "days": [
+        {
+          "date": "fixture",
+          "usage": {
+            "inputTokens": 0,
+            "cachedInputTokens": 0,
+            "cacheWriteInputTokens": 0,
+            "outputTokens": 0,
+            "reasoningOutputTokens": 0,
+            "totalTokens": 0
+          },
+          "responses": 0,
+          "sessions": 0,
+          "sessionsByAgent": {},
+          "runs": {
+            "started": 0,
+            "completed": 0,
+            "unclosed": 0,
+            "totalMs": 0,
+            "maxMs": 0
+          },
+          "aborted": 0,
+          "compacted": 0,
+          "models": [
+            {
+              "model": "fixture",
+              "totalTokens": 0
+            }
+          ],
+          "tools": [
+            {
+              "name": "fixture",
+              "server": "fixture",
+              "calls": 0
+            }
+          ],
+          "skills": [
+            {
+              "name": "fixture",
+              "server": "fixture",
+              "calls": 0
+            }
+          ],
+          "rateLimits": {}
+        }
+      ],
+      "tools": [
+        {
+          "name": "fixture",
+          "server": "fixture",
+          "calls": 0,
+          "sessions": 0,
+          "share": 0
+        }
+      ],
+      "skills": [
+        {
+          "name": "fixture",
+          "server": "fixture",
+          "calls": 0,
+          "sessions": 0,
+          "share": 0
+        }
+      ],
+      "warnings": [
+        "fixture"
+      ]
+    },
+    "analytics_revision": 0,
+    "session_skill_index_status": {
+      "total": 0,
+      "indexed": 0,
+      "pending": 0,
+      "failed": 0,
+      "running": false,
+      "last_indexed_at": "fixture"
+    },
+    "session_skill_index_run": {
+      "total": 0,
+      "indexed": 0,
+      "pending": 0,
+      "failed": 0,
+      "running": false,
+      "last_indexed_at": "fixture"
+    },
+    "session_skill_links": [
+      {
+        "session_id": "fixture",
+        "agent": "codex",
+        "session_path": "fixture",
+        "session_title": "fixture",
+        "session_project": "fixture",
+        "session_started_at": "fixture",
+        "session_updated_at": "fixture",
+        "session_message_count": 0,
+        "skill_name": "fixture",
+        "skill_path": "fixture",
+        "skill_agent": "codex",
+        "skill_scope": "fixture",
+        "evidence_kind": "fixture",
+        "evidence_text": "fixture",
+        "evidence_time": "fixture",
+        "confidence": "fixture"
+      }
+    ],
+    "skill_session_links": [
+      {
+        "session_id": "fixture",
+        "agent": "codex",
+        "session_path": "fixture",
+        "session_title": "fixture",
+        "session_project": "fixture",
+        "session_started_at": "fixture",
+        "session_updated_at": "fixture",
+        "session_message_count": 0,
+        "skill_name": "fixture",
+        "skill_path": "fixture",
+        "skill_agent": "codex",
+        "skill_scope": "fixture",
+        "evidence_kind": "fixture",
+        "evidence_text": "fixture",
+        "evidence_time": "fixture",
+        "confidence": "fixture"
+      }
+    ],
+    "settings_get": {
+      "appearance": "fixture",
+      "fontFamily": "fixture",
+      "lightTheme": "fixture",
+      "darkTheme": "fixture",
+      "appIcon": "fixture",
+      "terminal": "fixture",
+      "sessionResumeTarget": "fixture",
+      "missingSessionProjectPolicy": "fixture",
+      "editor": "fixture",
+      "developerMode": false,
+      "additionalSessionRoots": [
+        "fixture"
+      ],
+      "configProfiles": {}
+    },
+    "settings_save": {
+      "appearance": "fixture",
+      "fontFamily": "fixture",
+      "lightTheme": "fixture",
+      "darkTheme": "fixture",
+      "appIcon": "fixture",
+      "terminal": "fixture",
+      "sessionResumeTarget": "fixture",
+      "missingSessionProjectPolicy": "fixture",
+      "editor": "fixture",
+      "developerMode": false,
+      "additionalSessionRoots": [
+        "fixture"
+      ],
+      "configProfiles": {}
+    },
+    "session_projects_list": [
+      {
+        "id": "fixture",
+        "name": "fixture",
+        "missing": false,
+        "paths": [
+          "fixture"
+        ]
+      }
+    ],
+    "project_scan_scopes_list": [
+      {
+        "id": "fixture",
+        "path": "fixture",
+        "excluded": false,
+        "enabled": false,
+        "lastScannedAt": "fixture",
+        "projectCount": 0
+      }
+    ],
+    "project_scan_scopes_save": [
+      {
+        "id": "fixture",
+        "path": "fixture",
+        "excluded": false,
+        "enabled": false,
+        "lastScannedAt": "fixture",
+        "projectCount": 0
+      }
+    ],
+    "projects_list": [
+      {
+        "id": "fixture",
+        "name": "fixture",
+        "rootPath": "fixture",
+        "scopeId": "fixture",
+        "status": "fixture",
+        "lastScannedAt": "fixture"
+      }
+    ],
+    "projects_scan": {
+      "projects": [
+        {
+          "id": "fixture",
+          "name": "fixture",
+          "rootPath": "fixture",
+          "scopeId": "fixture",
+          "status": "fixture",
+          "lastScannedAt": "fixture"
+        }
+      ],
+      "scopes": [
+        {
+          "id": "fixture",
+          "path": "fixture",
+          "excluded": false,
+          "enabled": false,
+          "lastScannedAt": "fixture",
+          "projectCount": 0
+        }
+      ],
+      "warnings": [
+        "fixture"
+      ]
+    },
+    "terminal_apps_list": [
+      {
+        "id": "fixture",
+        "label": "fixture",
+        "available": false
+      }
+    ],
+    "agent_configs_list": [
+      {
+        "agent": "codex",
+        "label": "fixture",
+        "path": "fixture",
+        "format": "json",
+        "exists": false
+      }
+    ],
+    "agent_config_watch": {
+      "path": "fixture"
+    },
+    "agent_config_read": {
+      "path": "fixture",
+      "content": "fixture",
+      "sha256": "fixture",
+      "exists": false
+    },
+    "agent_config_save": {
+      "path": "fixture",
+      "sha256": "fixture",
+      "exists": false
+    },
+    "agent_configs_delete_many": {
+      "configs": [
+        {
+          "agent": "codex",
+          "label": "fixture",
+          "path": "fixture",
+          "format": "json",
+          "exists": false
+        }
+      ],
+      "deleted": [
+        "fixture"
+      ],
+      "configProfiles": {}
+    },
+    "config_profile_create": {
+      "agent": "codex",
+      "label": "fixture",
+      "path": "fixture",
+      "format": "json",
+      "exists": false
+    },
+    "config_profile_set": {
+      "appearance": "fixture",
+      "fontFamily": "fixture",
+      "lightTheme": "fixture",
+      "darkTheme": "fixture",
+      "appIcon": "fixture",
+      "terminal": "fixture",
+      "sessionResumeTarget": "fixture",
+      "missingSessionProjectPolicy": "fixture",
+      "editor": "fixture",
+      "developerMode": false,
+      "additionalSessionRoots": [
+        "fixture"
+      ],
+      "configProfiles": {}
+    },
+    "rules_list": [
+      {
+        "agents": [
+          "codex"
+        ],
+        "kind": "fixture",
+        "scope": "fixture",
+        "path": "fixture",
+        "order": 0,
+        "sha256": "fixture"
+      }
+    ],
+    "rule_file_read": {
+      "path": "fixture",
+      "content": "fixture",
+      "sha256": "fixture"
+    },
+    "rule_file_save": {
+      "path": "fixture",
+      "sha256": "fixture"
+    },
+    "rule_file_delete_many": {
+      "deleted": [
+        "fixture"
+      ]
+    },
+    "hooks_list": [
+      {
+        "agent": "codex",
+        "event": "fixture",
+        "enabled": false,
+        "path": "fixture",
+        "trust_hash": "fixture",
+        "needs_review": false
+      }
+    ],
+    "hook_delete": {
+      "updated": [
+        {
+          "agent": "codex",
+          "event": "fixture",
+          "enabled": false,
+          "path": "fixture",
+          "trust_hash": "fixture",
+          "needs_review": false
+        }
+      ],
+      "deleted": [
+        {
+          "agent": "codex",
+          "event": "fixture",
+          "enabled": false,
+          "path": "fixture",
+          "trust_hash": "fixture",
+          "needs_review": false
+        }
+      ]
+    },
+    "hook_delete_many": {
+      "updated": [
+        {
+          "agent": "codex",
+          "event": "fixture",
+          "enabled": false,
+          "path": "fixture",
+          "trust_hash": "fixture",
+          "needs_review": false
+        }
+      ],
+      "deleted": [
+        {
+          "agent": "codex",
+          "event": "fixture",
+          "enabled": false,
+          "path": "fixture",
+          "trust_hash": "fixture",
+          "needs_review": false
+        }
+      ]
+    },
+    "hook_set_enabled": {
+      "updated": [
+        {
+          "agent": "codex",
+          "event": "fixture",
+          "enabled": false,
+          "path": "fixture",
+          "trust_hash": "fixture",
+          "needs_review": false
+        }
+      ],
+      "deleted": [
+        {
+          "agent": "codex",
+          "event": "fixture",
+          "enabled": false,
+          "path": "fixture",
+          "trust_hash": "fixture",
+          "needs_review": false
+        }
+      ]
+    },
+    "hook_set_enabled_many": {
+      "updated": [
+        {
+          "agent": "codex",
+          "event": "fixture",
+          "enabled": false,
+          "path": "fixture",
+          "trust_hash": "fixture",
+          "needs_review": false
+        }
+      ],
+      "deleted": [
+        {
+          "agent": "codex",
+          "event": "fixture",
+          "enabled": false,
+          "path": "fixture",
+          "trust_hash": "fixture",
+          "needs_review": false
+        }
+      ]
+    },
+    "hook_review": {
+      "updated": [
+        {
+          "agent": "codex",
+          "event": "fixture",
+          "enabled": false,
+          "path": "fixture",
+          "trust_hash": "fixture",
+          "needs_review": false
+        }
+      ],
+      "deleted": [
+        {
+          "agent": "codex",
+          "event": "fixture",
+          "enabled": false,
+          "path": "fixture",
+          "trust_hash": "fixture",
+          "needs_review": false
+        }
+      ]
+    },
+    "hook_source_read": {
+      "path": "fixture",
+      "content": "fixture",
+      "sha256": "fixture",
+      "source_type": "fixture",
+      "preview_scope": "fixture",
+      "source_line": 0,
+      "read_only_reason": "fixture",
+      "supports_delete": false,
+      "size_bytes": 0,
+      "truncated": false
+    },
+    "mcp_list": [
+      {
+        "agent": "codex",
+        "name": "fixture",
+        "scope": "fixture",
+        "transport": "fixture",
+        "enabled": false,
+        "status": "fixture",
+        "path": "fixture",
+        "trust_hash": "fixture"
+      }
+    ],
+    "mcp_set_enabled": {
+      "updated": [
+        {
+          "agent": "codex",
+          "name": "fixture",
+          "scope": "fixture",
+          "transport": "fixture",
+          "enabled": false,
+          "status": "fixture",
+          "path": "fixture",
+          "trust_hash": "fixture"
+        }
+      ]
+    },
+    "mcp_set_enabled_many": {
+      "updated": [
+        {
+          "agent": "codex",
+          "name": "fixture",
+          "scope": "fixture",
+          "transport": "fixture",
+          "enabled": false,
+          "status": "fixture",
+          "path": "fixture",
+          "trust_hash": "fixture"
+        }
+      ]
+    },
+    "prompts_list": [
+      {
+        "id": "fixture",
+        "title": "fixture",
+        "tags": [
+          "fixture"
+        ],
+        "body": "fixture",
+        "created_at": "fixture",
+        "updated_at": "fixture"
+      }
+    ],
+    "prompt_save": {
+      "id": "fixture",
+      "title": "fixture",
+      "tags": [
+        "fixture"
+      ],
+      "created_at": "fixture",
+      "updated_at": "fixture"
+    },
+    "prompts_delete_many": {
+      "deleted": [
+        "fixture"
+      ]
+    },
+    "session_transcript": {
+      "items": [
+        {
+          "kind": "fixture",
+          "body": "fixture",
+          "tag": "fixture",
+          "time": "fixture"
+        }
+      ],
+      "locatorItems": [
+        {
+          "index": 0,
+          "label": "fixture",
+          "response": "fixture"
+        }
+      ],
+      "warnings": [
+        "fixture"
+      ],
+      "nextCursor": "fixture",
+      "done": false,
+      "sourceVersion": "fixture",
+      "restartRequired": false,
+      "unchanged": false
+    },
+    "session_transcript_locator": {
+      "locatorItems": [
+        {
+          "index": 0,
+          "label": "fixture",
+          "response": "fixture"
+        }
+      ],
+      "warnings": [
+        "fixture"
+      ],
+      "sourceVersion": "fixture"
+    },
+    "session_transcript_search": {
+      "hits": [
+        {
+          "groupIndex": 0
+        }
+      ],
+      "warnings": [
+        "fixture"
+      ],
+      "sourceVersion": "fixture"
+    },
+    "skills_targets": [
+      {
+        "id": "fixture",
+        "displayName": "fixture",
+        "supportsGlobal": false,
+        "globalPath": "fixture"
+      }
+    ],
+    "skills_backup_status": {
+      "config": {
+        "remoteUrl": "fixture",
+        "checkoutPath": "fixture",
+        "contents": {
+          "skills": {
+            "enabled": false,
+            "excluded": [
+              "fixture"
+            ]
+          },
+          "mcp": {
+            "enabled": false,
+            "excluded": [
+              "fixture"
+            ]
+          },
+          "rules": {
+            "enabled": false,
+            "excluded": [
+              "fixture"
+            ]
+          },
+          "hooks": {
+            "enabled": false,
+            "excluded": [
+              "fixture"
+            ]
+          }
+        }
+      },
+      "statuses": [
+        {
+          "skillPath": "fixture",
+          "state": "fixture"
+        }
+      ],
+      "versions": [
+        {
+          "id": "fixture",
+          "createdAt": 0,
+          "summary": "fixture"
+        }
+      ],
+      "catalog": {
+        "skills": [
+          {
+            "id": "fixture",
+            "label": "fixture",
+            "detail": "fixture"
+          }
+        ],
+        "mcp": [
+          {
+            "id": "fixture",
+            "label": "fixture",
+            "detail": "fixture"
+          }
+        ],
+        "rules": [
+          {
+            "id": "fixture",
+            "label": "fixture",
+            "detail": "fixture"
+          }
+        ],
+        "hooks": [
+          {
+            "id": "fixture",
+            "label": "fixture",
+            "detail": "fixture"
+          }
+        ]
+      }
+    },
+    "skills_backup_configure": {
+      "remoteUrl": "fixture",
+      "checkoutPath": "fixture",
+      "contents": {
+        "skills": {
+          "enabled": false,
+          "excluded": [
+            "fixture"
+          ]
+        },
+        "mcp": {
+          "enabled": false,
+          "excluded": [
+            "fixture"
+          ]
+        },
+        "rules": {
+          "enabled": false,
+          "excluded": [
+            "fixture"
+          ]
+        },
+        "hooks": {
+          "enabled": false,
+          "excluded": [
+            "fixture"
+          ]
+        }
+      }
+    },
+    "skills_backup_sync": {
+      "scheduled": false
+    },
+    "skills_backup_now": {
+      "manifest": {
+        "version": 0,
+        "device_label": "fixture",
+        "skills": [
+          {
+            "id": "fixture",
+            "name": "fixture",
+            "source": {
+              "kind": "fixture",
+              "origin": "fixture"
+            },
+            "files": [
+              {
+                "path": "fixture",
+                "sha256": "fixture",
+                "size": 0
+              }
+            ]
+          }
+        ],
+        "artifacts": [
+          {
+            "id": "fixture",
+            "category": "fixture",
+            "name": "fixture",
+            "agent": "fixture",
+            "sourceRelativePath": "fixture",
+            "entryKey": "fixture",
+            "files": [
+              {
+                "path": "fixture",
+                "sha256": "fixture",
+                "size": 0
+              }
+            ]
+          }
+        ],
+        "excluded": [
+          {
+            "name": "fixture",
+            "reason": "fixture"
+          }
+        ]
+      },
+      "commit": "fixture",
+      "pushed": false
+    },
+    "skills_backup_versions": [
+      {
+        "id": "fixture",
+        "createdAt": 0,
+        "summary": "fixture"
+      }
+    ],
+    "skills_backup_restore": {
+      "operations": [
+        {
+          "id": "fixture",
+          "name": "fixture",
+          "category": "fixture",
+          "target": "fixture",
+          "status": "fixture"
+        }
+      ]
+    },
+    "skills_backup_adopt": {
+      "records": [
+        {
+          "skill_name": "fixture",
+          "skill_path": "fixture",
+          "source_kind": "fixture",
+          "source": "fixture",
+          "source_ref": "fixture",
+          "source_version": "fixture",
+          "source_relative_path": "fixture",
+          "update_status": "fixture",
+          "origin": "fixture"
+        }
+      ],
+      "updated": [
+        {
+          "id": "fixture",
+          "installationId": "fixture",
+          "name": "fixture",
+          "tags": [
+            "fixture"
+          ],
+          "dependencies": [
+            "fixture"
+          ],
+          "dependents": [
+            "fixture"
+          ],
+          "dependencyIds": [
+            "fixture"
+          ],
+          "dependentIds": [
+            "fixture"
+          ],
+          "visibility": "auto",
+          "agents": [
+            "codex"
+          ],
+          "paths": [
+            {
+              "path": "fixture",
+              "root": "fixture",
+              "scope": "fixture",
+              "agent": "codex",
+              "install_target": "fixture",
+              "source_kind": "fixture",
+              "symlink_status": "fixture",
+              "update_status": "fixture",
+              "sha256": "fixture",
+              "tags": [
+                "fixture"
+              ],
+              "effective_visibility": "auto"
+            }
+          ],
+          "source_summary": "fixture",
+          "install_targets": [
+            "fixture"
+          ],
+          "update_status": "fixture",
+          "is_system": false
+        }
+      ],
+      "skills": [
+        {
+          "id": "fixture",
+          "installationId": "fixture",
+          "name": "fixture",
+          "tags": [
+            "fixture"
+          ],
+          "dependencies": [
+            "fixture"
+          ],
+          "dependents": [
+            "fixture"
+          ],
+          "dependencyIds": [
+            "fixture"
+          ],
+          "dependentIds": [
+            "fixture"
+          ],
+          "visibility": "auto",
+          "agents": [
+            "codex"
+          ],
+          "paths": [
+            {
+              "path": "fixture",
+              "root": "fixture",
+              "scope": "fixture",
+              "agent": "codex",
+              "install_target": "fixture",
+              "source_kind": "fixture",
+              "symlink_status": "fixture",
+              "update_status": "fixture",
+              "sha256": "fixture",
+              "tags": [
+                "fixture"
+              ],
+              "effective_visibility": "auto"
+            }
+          ],
+          "source_summary": "fixture",
+          "install_targets": [
+            "fixture"
+          ],
+          "update_status": "fixture",
+          "is_system": false
+        }
+      ]
+    },
+    "skills_backup_adopt_many": {
+      "records": [
+        {
+          "skill_name": "fixture",
+          "skill_path": "fixture",
+          "source_kind": "fixture",
+          "source": "fixture",
+          "source_ref": "fixture",
+          "source_version": "fixture",
+          "source_relative_path": "fixture",
+          "update_status": "fixture",
+          "origin": "fixture"
+        }
+      ],
+      "updated": [
+        {
+          "id": "fixture",
+          "installationId": "fixture",
+          "name": "fixture",
+          "tags": [
+            "fixture"
+          ],
+          "dependencies": [
+            "fixture"
+          ],
+          "dependents": [
+            "fixture"
+          ],
+          "dependencyIds": [
+            "fixture"
+          ],
+          "dependentIds": [
+            "fixture"
+          ],
+          "visibility": "auto",
+          "agents": [
+            "codex"
+          ],
+          "paths": [
+            {
+              "path": "fixture",
+              "root": "fixture",
+              "scope": "fixture",
+              "agent": "codex",
+              "install_target": "fixture",
+              "source_kind": "fixture",
+              "symlink_status": "fixture",
+              "update_status": "fixture",
+              "sha256": "fixture",
+              "tags": [
+                "fixture"
+              ],
+              "effective_visibility": "auto"
+            }
+          ],
+          "source_summary": "fixture",
+          "install_targets": [
+            "fixture"
+          ],
+          "update_status": "fixture",
+          "is_system": false
+        }
+      ],
+      "skills": [
+        {
+          "id": "fixture",
+          "installationId": "fixture",
+          "name": "fixture",
+          "tags": [
+            "fixture"
+          ],
+          "dependencies": [
+            "fixture"
+          ],
+          "dependents": [
+            "fixture"
+          ],
+          "dependencyIds": [
+            "fixture"
+          ],
+          "dependentIds": [
+            "fixture"
+          ],
+          "visibility": "auto",
+          "agents": [
+            "codex"
+          ],
+          "paths": [
+            {
+              "path": "fixture",
+              "root": "fixture",
+              "scope": "fixture",
+              "agent": "codex",
+              "install_target": "fixture",
+              "source_kind": "fixture",
+              "symlink_status": "fixture",
+              "update_status": "fixture",
+              "sha256": "fixture",
+              "tags": [
+                "fixture"
+              ],
+              "effective_visibility": "auto"
+            }
+          ],
+          "source_summary": "fixture",
+          "install_targets": [
+            "fixture"
+          ],
+          "update_status": "fixture",
+          "is_system": false
+        }
+      ]
+    },
+    "skills_backup_disconnect": {
+      "disconnected": false
+    },
+    "skills_add": {
+      "applied": false,
+      "plan": {
+        "source": "fixture",
+        "source_kind": "fixture",
+        "source_root": "fixture",
+        "target": "fixture",
+        "scope": "fixture",
+        "mode": "fixture",
+        "available": [
+          {
+            "name": "fixture",
+            "description": "fixture",
+            "path": "fixture",
+            "relative_path": "fixture",
+            "dependencies": [
+              "fixture"
+            ]
+          }
+        ],
+        "selected": [
+          {
+            "name": "fixture",
+            "description": "fixture",
+            "path": "fixture",
+            "relative_path": "fixture",
+            "dependencies": [
+              "fixture"
+            ]
+          }
+        ],
+        "operations": [
+          {
+            "name": "fixture",
+            "source": "fixture",
+            "target": "fixture",
+            "mode": "fixture",
+            "status": "fixture",
+            "message": "fixture"
+          }
+        ]
+      }
+    },
+    "skills_add_preview_read": {
+      "name": "fixture",
+      "relativePath": "fixture",
+      "content": "fixture"
+    },
+    "skills_distribute": {
+      "applied": false,
+      "plans": [
+        {
+          "name": "fixture",
+          "source": "fixture",
+          "destination": "fixture",
+          "mode": "move",
+          "source_symlink": false,
+          "destination_exists": false,
+          "source_sha256": "fixture",
+          "status": "fixture",
+          "message": "fixture"
+        }
+      ]
+    },
+    "skills_remove_locations": {
+      "summary": "fixture",
+      "applied": false,
+      "plan": {
+        "targets": [
+          {
+            "name": "fixture",
+            "path": "fixture",
+            "kind": "fixture"
+          }
+        ],
+        "dependencies": [
+          {
+            "name": "fixture",
+            "related": [
+              "fixture"
+            ]
+          }
+        ],
+        "dependents": [
+          {
+            "name": "fixture",
+            "related": [
+              "fixture"
+            ]
+          }
+        ]
+      },
+      "updated": [
+        {
+          "id": "fixture",
+          "installationId": "fixture",
+          "name": "fixture",
+          "tags": [
+            "fixture"
+          ],
+          "dependencies": [
+            "fixture"
+          ],
+          "dependents": [
+            "fixture"
+          ],
+          "dependencyIds": [
+            "fixture"
+          ],
+          "dependentIds": [
+            "fixture"
+          ],
+          "visibility": "auto",
+          "agents": [
+            "codex"
+          ],
+          "paths": [
+            {
+              "path": "fixture",
+              "root": "fixture",
+              "scope": "fixture",
+              "agent": "codex",
+              "install_target": "fixture",
+              "source_kind": "fixture",
+              "symlink_status": "fixture",
+              "update_status": "fixture",
+              "sha256": "fixture",
+              "tags": [
+                "fixture"
+              ],
+              "effective_visibility": "auto"
+            }
+          ],
+          "source_summary": "fixture",
+          "install_targets": [
+            "fixture"
+          ],
+          "update_status": "fixture",
+          "is_system": false
+        }
+      ],
+      "deleted": [
+        "fixture"
+      ]
+    },
+    "skills_set": {
+      "summary": "fixture",
+      "applied": false,
+      "updated": [
+        {
+          "id": "fixture",
+          "installationId": "fixture",
+          "name": "fixture",
+          "tags": [
+            "fixture"
+          ],
+          "dependencies": [
+            "fixture"
+          ],
+          "dependents": [
+            "fixture"
+          ],
+          "dependencyIds": [
+            "fixture"
+          ],
+          "dependentIds": [
+            "fixture"
+          ],
+          "visibility": "auto",
+          "agents": [
+            "codex"
+          ],
+          "paths": [
+            {
+              "path": "fixture",
+              "root": "fixture",
+              "scope": "fixture",
+              "agent": "codex",
+              "install_target": "fixture",
+              "source_kind": "fixture",
+              "symlink_status": "fixture",
+              "update_status": "fixture",
+              "sha256": "fixture",
+              "tags": [
+                "fixture"
+              ],
+              "effective_visibility": "auto"
+            }
+          ],
+          "source_summary": "fixture",
+          "install_targets": [
+            "fixture"
+          ],
+          "update_status": "fixture",
+          "is_system": false
+        }
+      ]
+    },
+    "skills_wrap": {
+      "summary": "fixture",
+      "applied": false,
+      "updated": [
+        {
+          "id": "fixture",
+          "installationId": "fixture",
+          "name": "fixture",
+          "tags": [
+            "fixture"
+          ],
+          "dependencies": [
+            "fixture"
+          ],
+          "dependents": [
+            "fixture"
+          ],
+          "dependencyIds": [
+            "fixture"
+          ],
+          "dependentIds": [
+            "fixture"
+          ],
+          "visibility": "auto",
+          "agents": [
+            "codex"
+          ],
+          "paths": [
+            {
+              "path": "fixture",
+              "root": "fixture",
+              "scope": "fixture",
+              "agent": "codex",
+              "install_target": "fixture",
+              "source_kind": "fixture",
+              "symlink_status": "fixture",
+              "update_status": "fixture",
+              "sha256": "fixture",
+              "tags": [
+                "fixture"
+              ],
+              "effective_visibility": "auto"
+            }
+          ],
+          "source_summary": "fixture",
+          "install_targets": [
+            "fixture"
+          ],
+          "update_status": "fixture",
+          "is_system": false
+        }
+      ]
+    },
+    "skills_updates": [
+      {
+        "id": "fixture",
+        "installationId": "fixture",
+        "name": "fixture",
+        "tags": [
+          "fixture"
+        ],
+        "dependencies": [
+          "fixture"
+        ],
+        "dependents": [
+          "fixture"
+        ],
+        "dependencyIds": [
+          "fixture"
+        ],
+        "dependentIds": [
+          "fixture"
+        ],
+        "visibility": "auto",
+        "agents": [
+          "codex"
+        ],
+        "paths": [
+          {
+            "path": "fixture",
+            "root": "fixture",
+            "scope": "fixture",
+            "agent": "codex",
+            "install_target": "fixture",
+            "source_kind": "fixture",
+            "symlink_status": "fixture",
+            "update_status": "fixture",
+            "sha256": "fixture",
+            "tags": [
+              "fixture"
+            ],
+            "effective_visibility": "auto"
+          }
+        ],
+        "source_summary": "fixture",
+        "install_targets": [
+          "fixture"
+        ],
+        "update_status": "fixture",
+        "is_system": false
+      }
+    ],
+    "skills_updates_cancel": {
+      "status": "cancellation-requested"
+    },
+    "skills_update": {
+      "summary": "fixture",
+      "applied": false,
+      "canApply": false,
+      "plan": {
+        "file_changes": {
+          "changes": [
+            {
+              "path": "fixture",
+              "beforeSha256": "fixture",
+              "before": "fixture",
+              "after": "fixture"
+            }
+          ]
+        },
+        "git_updates": [
+          {
+            "name": "fixture",
+            "skill_names": [
+              "fixture"
+            ],
+            "repo": "fixture",
+            "source": "fixture",
+            "diff": "fixture",
+            "files": [
+              {
+                "path": "fixture",
+                "resolution_key": "fixture",
+                "before": "fixture",
+                "base": "fixture",
+                "incoming": "fixture",
+                "after": "fixture",
+                "before_exists": false,
+                "incoming_exists": false,
+                "after_exists": false,
+                "status": "fixture"
+              }
+            ],
+            "tendi_settings": [
+              {
+                "skill_dir": "fixture",
+                "agent": "codex",
+                "visibility": "auto"
+              }
+            ],
+            "materialized_targets": [
+              {
+                "name": "fixture",
+                "target": "fixture",
+                "agent": "codex",
+                "visibility": "auto",
+                "uses_shared_layout": false,
+                "files": [
+                  {
+                    "path": "fixture",
+                    "resolution_key": "fixture",
+                    "before": "fixture",
+                    "base": "fixture",
+                    "incoming": "fixture",
+                    "after": "fixture",
+                    "before_exists": false,
+                    "incoming_exists": false,
+                    "after_exists": false,
+                    "status": "fixture"
+                  }
+                ]
+              }
+            ]
+          }
+        ],
+        "skipped": [
+          {
+            "id": "fixture",
+            "name": "fixture",
+            "status": "fixture",
+            "source_kind": "fixture"
+          }
+        ],
+        "source_updates": [
+          {
+            "skill_path": "fixture",
+            "source_version": "fixture"
+          }
+        ],
+        "merge_issues": [
+          {
+            "name": "fixture",
+            "path": "fixture",
+            "resolution_key": "fixture",
+            "status": "fixture",
+            "before": "fixture",
+            "base": "fixture",
+            "incoming": "fixture",
+            "after": "fixture"
+          }
+        ]
+      },
+      "updated": [
+        {
+          "id": "fixture",
+          "installationId": "fixture",
+          "name": "fixture",
+          "tags": [
+            "fixture"
+          ],
+          "dependencies": [
+            "fixture"
+          ],
+          "dependents": [
+            "fixture"
+          ],
+          "dependencyIds": [
+            "fixture"
+          ],
+          "dependentIds": [
+            "fixture"
+          ],
+          "visibility": "auto",
+          "agents": [
+            "codex"
+          ],
+          "paths": [
+            {
+              "path": "fixture",
+              "root": "fixture",
+              "scope": "fixture",
+              "agent": "codex",
+              "install_target": "fixture",
+              "source_kind": "fixture",
+              "symlink_status": "fixture",
+              "update_status": "fixture",
+              "sha256": "fixture",
+              "tags": [
+                "fixture"
+              ],
+              "effective_visibility": "auto"
+            }
+          ],
+          "source_summary": "fixture",
+          "install_targets": [
+            "fixture"
+          ],
+          "update_status": "fixture",
+          "is_system": false
+        }
+      ]
+    },
+    "skills_update_many": {
+      "summary": "fixture",
+      "applied": false,
+      "canApply": false,
+      "plan": {
+        "file_changes": {
+          "changes": [
+            {
+              "path": "fixture",
+              "beforeSha256": "fixture",
+              "before": "fixture",
+              "after": "fixture"
+            }
+          ]
+        },
+        "git_updates": [
+          {
+            "name": "fixture",
+            "skill_names": [
+              "fixture"
+            ],
+            "repo": "fixture",
+            "source": "fixture",
+            "diff": "fixture",
+            "files": [
+              {
+                "path": "fixture",
+                "resolution_key": "fixture",
+                "before": "fixture",
+                "base": "fixture",
+                "incoming": "fixture",
+                "after": "fixture",
+                "before_exists": false,
+                "incoming_exists": false,
+                "after_exists": false,
+                "status": "fixture"
+              }
+            ],
+            "tendi_settings": [
+              {
+                "skill_dir": "fixture",
+                "agent": "codex",
+                "visibility": "auto"
+              }
+            ],
+            "materialized_targets": [
+              {
+                "name": "fixture",
+                "target": "fixture",
+                "agent": "codex",
+                "visibility": "auto",
+                "uses_shared_layout": false,
+                "files": [
+                  {
+                    "path": "fixture",
+                    "resolution_key": "fixture",
+                    "before": "fixture",
+                    "base": "fixture",
+                    "incoming": "fixture",
+                    "after": "fixture",
+                    "before_exists": false,
+                    "incoming_exists": false,
+                    "after_exists": false,
+                    "status": "fixture"
+                  }
+                ]
+              }
+            ]
+          }
+        ],
+        "skipped": [
+          {
+            "id": "fixture",
+            "name": "fixture",
+            "status": "fixture",
+            "source_kind": "fixture"
+          }
+        ],
+        "source_updates": [
+          {
+            "skill_path": "fixture",
+            "source_version": "fixture"
+          }
+        ],
+        "merge_issues": [
+          {
+            "name": "fixture",
+            "path": "fixture",
+            "resolution_key": "fixture",
+            "status": "fixture",
+            "before": "fixture",
+            "base": "fixture",
+            "incoming": "fixture",
+            "after": "fixture"
+          }
+        ]
+      },
+      "previewId": "fixture",
+      "skills": null
+    },
+    "skills_delete_many": {
+      "summary": "fixture",
+      "applied": true,
+      "plan": {
+        "targets": [
+          {
+            "name": "fixture",
+            "path": "fixture",
+            "kind": "fixture"
+          }
+        ],
+        "dependencies": [
+          {
+            "name": "fixture",
+            "related": [
+              "fixture"
+            ]
+          }
+        ],
+        "dependents": [
+          {
+            "name": "fixture",
+            "related": [
+              "fixture"
+            ]
+          }
+        ]
+      },
+      "previewId": "fixture",
+      "refreshRequired": false,
+      "deleted": [
+        "fixture"
+      ]
+    },
+    "skills_marketplace_search": {
+      "items": [
+        {
+          "id": "fixture",
+          "name": "fixture",
+          "description": "fixture",
+          "source": "fixture",
+          "version": "fixture",
+          "metric": 0,
+          "metricLabel": "fixture",
+          "trustLabel": "fixture",
+          "kind": "skill"
+        }
+      ],
+      "warnings": [
+        "fixture"
+      ]
+    },
+    "skill_files": [
+      {
+        "path": "fixture",
+        "relative_path": "fixture",
+        "kind": "fixture",
+        "sha256": "fixture"
+      }
+    ],
+    "skill_file_read": {
+      "path": "fixture",
+      "relative_path": "fixture",
+      "content": "fixture",
+      "sha256": "fixture"
+    },
+    "skill_file_save": {
+      "path": "fixture",
+      "relative_path": "fixture",
+      "sha256": "fixture"
+    },
+    "skill_file_create": {
+      "files": [
+        {
+          "path": "fixture",
+          "relative_path": "fixture",
+          "kind": "fixture",
+          "sha256": "fixture"
+        }
+      ]
+    },
+    "skill_folder_create": {
+      "files": [
+        {
+          "path": "fixture",
+          "relative_path": "fixture",
+          "kind": "fixture",
+          "sha256": "fixture"
+        }
+      ]
+    },
+    "skill_path_rename": {
+      "files": [
+        {
+          "path": "fixture",
+          "relative_path": "fixture",
+          "kind": "fixture",
+          "sha256": "fixture"
+        }
+      ]
+    },
+    "skill_path_delete": {
+      "files": [
+        {
+          "path": "fixture",
+          "relative_path": "fixture",
+          "kind": "fixture",
+          "sha256": "fixture"
+        }
+      ]
+    },
+    "app_icon_set": {},
+    "cli_status": {
+      "state": "installed",
+      "supported": false,
+      "commandPath": "fixture",
+      "bundledPath": "fixture",
+      "pathConfigured": false,
+      "currentTarget": "fixture",
+      "detail": "fixture"
+    },
+    "cli_install": {
+      "state": "installed",
+      "supported": false,
+      "commandPath": "fixture",
+      "bundledPath": "fixture",
+      "pathConfigured": false,
+      "currentTarget": "fixture",
+      "detail": "fixture"
+    },
+    "cli_remove": {
+      "state": "installed",
+      "supported": false,
+      "commandPath": "fixture",
+      "bundledPath": "fixture",
+      "pathConfigured": false,
+      "currentTarget": "fixture",
+      "detail": "fixture"
+    },
+    "terminal_app_test": "fixture",
+    "editor_app_test": false,
+    "session_resume_target": "app",
+    "session_resume_in_terminal": {
+      "status": "activeWriter"
+    },
+    "open_in_editor": {},
+    "reveal_in_finder": {},
+    "logs_export": "fixture",
+    "open_url": {},
+    "check_for_updates": {
+      "status": "up-to-date"
+    },
+    "install_update": {
+      "status": "up-to-date"
+    }
+  },
+  "invalidResponses": {
+    "scan": {
+      "jsonrpc": "1.0",
+      "id": "invalid",
+      "result": null
+    },
+    "agents_list": {
+      "jsonrpc": "1.0",
+      "id": "invalid",
+      "result": null
+    },
+    "bundled_skill_status": {
+      "jsonrpc": "1.0",
+      "id": "invalid",
+      "result": null
+    },
+    "bundled_skill_install": {
+      "jsonrpc": "1.0",
+      "id": "invalid",
+      "result": null
+    },
+    "bundled_skill_remove": {
+      "jsonrpc": "1.0",
+      "id": "invalid",
+      "result": null
+    },
+    "bundled_skill_prompt_dismiss": {
+      "jsonrpc": "1.0",
+      "id": "invalid",
+      "result": null
+    },
+    "skills_list": {
+      "jsonrpc": "1.0",
+      "id": "invalid",
+      "result": null
+    },
+    "skills_refresh": {
+      "jsonrpc": "1.0",
+      "id": "invalid",
+      "result": null
+    },
+    "sessions_snapshot": {
+      "jsonrpc": "1.0",
+      "id": "invalid",
+      "result": null
+    },
+    "sessions_scan_start": {
+      "jsonrpc": "1.0",
+      "id": "invalid",
+      "result": null
+    },
+    "sessions_search": {
+      "jsonrpc": "1.0",
+      "id": "invalid",
+      "result": null
+    },
+    "analytics_overview": {
+      "jsonrpc": "1.0",
+      "id": "invalid",
+      "result": null
+    },
+    "analytics_revision": {
+      "jsonrpc": "1.0",
+      "id": "invalid",
+      "result": null
+    },
+    "session_skill_index_status": {
+      "jsonrpc": "1.0",
+      "id": "invalid",
+      "result": null
+    },
+    "session_skill_index_run": {
+      "jsonrpc": "1.0",
+      "id": "invalid",
+      "result": null
+    },
+    "session_skill_links": {
+      "jsonrpc": "1.0",
+      "id": "invalid",
+      "result": null
+    },
+    "skill_session_links": {
+      "jsonrpc": "1.0",
+      "id": "invalid",
+      "result": null
+    },
+    "settings_get": {
+      "jsonrpc": "1.0",
+      "id": "invalid",
+      "result": null
+    },
+    "settings_save": {
+      "jsonrpc": "1.0",
+      "id": "invalid",
+      "result": null
+    },
+    "session_projects_list": {
+      "jsonrpc": "1.0",
+      "id": "invalid",
+      "result": null
+    },
+    "project_scan_scopes_list": {
+      "jsonrpc": "1.0",
+      "id": "invalid",
+      "result": null
+    },
+    "project_scan_scopes_save": {
+      "jsonrpc": "1.0",
+      "id": "invalid",
+      "result": null
+    },
+    "projects_list": {
+      "jsonrpc": "1.0",
+      "id": "invalid",
+      "result": null
+    },
+    "projects_scan": {
+      "jsonrpc": "1.0",
+      "id": "invalid",
+      "result": null
+    },
+    "terminal_apps_list": {
+      "jsonrpc": "1.0",
+      "id": "invalid",
+      "result": null
+    },
+    "agent_configs_list": {
+      "jsonrpc": "1.0",
+      "id": "invalid",
+      "result": null
+    },
+    "agent_config_watch": {
+      "jsonrpc": "1.0",
+      "id": "invalid",
+      "result": null
+    },
+    "agent_config_read": {
+      "jsonrpc": "1.0",
+      "id": "invalid",
+      "result": null
+    },
+    "agent_config_save": {
+      "jsonrpc": "1.0",
+      "id": "invalid",
+      "result": null
+    },
+    "agent_configs_delete_many": {
+      "jsonrpc": "1.0",
+      "id": "invalid",
+      "result": null
+    },
+    "config_profile_create": {
+      "jsonrpc": "1.0",
+      "id": "invalid",
+      "result": null
+    },
+    "config_profile_set": {
+      "jsonrpc": "1.0",
+      "id": "invalid",
+      "result": null
+    },
+    "rules_list": {
+      "jsonrpc": "1.0",
+      "id": "invalid",
+      "result": null
+    },
+    "rule_file_read": {
+      "jsonrpc": "1.0",
+      "id": "invalid",
+      "result": null
+    },
+    "rule_file_save": {
+      "jsonrpc": "1.0",
+      "id": "invalid",
+      "result": null
+    },
+    "rule_file_delete_many": {
+      "jsonrpc": "1.0",
+      "id": "invalid",
+      "result": null
+    },
+    "hooks_list": {
+      "jsonrpc": "1.0",
+      "id": "invalid",
+      "result": null
+    },
+    "hook_delete": {
+      "jsonrpc": "1.0",
+      "id": "invalid",
+      "result": null
+    },
+    "hook_delete_many": {
+      "jsonrpc": "1.0",
+      "id": "invalid",
+      "result": null
+    },
+    "hook_set_enabled": {
+      "jsonrpc": "1.0",
+      "id": "invalid",
+      "result": null
+    },
+    "hook_set_enabled_many": {
+      "jsonrpc": "1.0",
+      "id": "invalid",
+      "result": null
+    },
+    "hook_review": {
+      "jsonrpc": "1.0",
+      "id": "invalid",
+      "result": null
+    },
+    "hook_source_read": {
+      "jsonrpc": "1.0",
+      "id": "invalid",
+      "result": null
+    },
+    "mcp_list": {
+      "jsonrpc": "1.0",
+      "id": "invalid",
+      "result": null
+    },
+    "mcp_set_enabled": {
+      "jsonrpc": "1.0",
+      "id": "invalid",
+      "result": null
+    },
+    "mcp_set_enabled_many": {
+      "jsonrpc": "1.0",
+      "id": "invalid",
+      "result": null
+    },
+    "prompts_list": {
+      "jsonrpc": "1.0",
+      "id": "invalid",
+      "result": null
+    },
+    "prompt_save": {
+      "jsonrpc": "1.0",
+      "id": "invalid",
+      "result": null
+    },
+    "prompts_delete_many": {
+      "jsonrpc": "1.0",
+      "id": "invalid",
+      "result": null
+    },
+    "session_transcript": {
+      "jsonrpc": "1.0",
+      "id": "invalid",
+      "result": null
+    },
+    "session_transcript_locator": {
+      "jsonrpc": "1.0",
+      "id": "invalid",
+      "result": null
+    },
+    "session_transcript_search": {
+      "jsonrpc": "1.0",
+      "id": "invalid",
+      "result": null
+    },
+    "skills_targets": {
+      "jsonrpc": "1.0",
+      "id": "invalid",
+      "result": null
+    },
+    "skills_backup_status": {
+      "jsonrpc": "1.0",
+      "id": "invalid",
+      "result": null
+    },
+    "skills_backup_configure": {
+      "jsonrpc": "1.0",
+      "id": "invalid",
+      "result": null
+    },
+    "skills_backup_sync": {
+      "jsonrpc": "1.0",
+      "id": "invalid",
+      "result": null
+    },
+    "skills_backup_now": {
+      "jsonrpc": "1.0",
+      "id": "invalid",
+      "result": null
+    },
+    "skills_backup_versions": {
+      "jsonrpc": "1.0",
+      "id": "invalid",
+      "result": null
+    },
+    "skills_backup_restore": {
+      "jsonrpc": "1.0",
+      "id": "invalid",
+      "result": null
+    },
+    "skills_backup_adopt": {
+      "jsonrpc": "1.0",
+      "id": "invalid",
+      "result": null
+    },
+    "skills_backup_adopt_many": {
+      "jsonrpc": "1.0",
+      "id": "invalid",
+      "result": null
+    },
+    "skills_backup_disconnect": {
+      "jsonrpc": "1.0",
+      "id": "invalid",
+      "result": null
+    },
+    "skills_add": {
+      "jsonrpc": "1.0",
+      "id": "invalid",
+      "result": null
+    },
+    "skills_add_preview_read": {
+      "jsonrpc": "1.0",
+      "id": "invalid",
+      "result": null
+    },
+    "skills_distribute": {
+      "jsonrpc": "1.0",
+      "id": "invalid",
+      "result": null
+    },
+    "skills_remove_locations": {
+      "jsonrpc": "1.0",
+      "id": "invalid",
+      "result": null
+    },
+    "skills_set": {
+      "jsonrpc": "1.0",
+      "id": "invalid",
+      "result": null
+    },
+    "skills_wrap": {
+      "jsonrpc": "1.0",
+      "id": "invalid",
+      "result": null
+    },
+    "skills_updates": {
+      "jsonrpc": "1.0",
+      "id": "invalid",
+      "result": null
+    },
+    "skills_updates_cancel": {
+      "jsonrpc": "1.0",
+      "id": "invalid",
+      "result": null
+    },
+    "skills_update": {
+      "jsonrpc": "1.0",
+      "id": "invalid",
+      "result": null
+    },
+    "skills_update_many": {
+      "jsonrpc": "1.0",
+      "id": "invalid",
+      "result": null
+    },
+    "skills_delete_many": {
+      "jsonrpc": "1.0",
+      "id": "invalid",
+      "result": null
+    },
+    "skills_marketplace_search": {
+      "jsonrpc": "1.0",
+      "id": "invalid",
+      "result": null
+    },
+    "skill_files": {
+      "jsonrpc": "1.0",
+      "id": "invalid",
+      "result": null
+    },
+    "skill_file_read": {
+      "jsonrpc": "1.0",
+      "id": "invalid",
+      "result": null
+    },
+    "skill_file_save": {
+      "jsonrpc": "1.0",
+      "id": "invalid",
+      "result": null
+    },
+    "skill_file_create": {
+      "jsonrpc": "1.0",
+      "id": "invalid",
+      "result": null
+    },
+    "skill_folder_create": {
+      "jsonrpc": "1.0",
+      "id": "invalid",
+      "result": null
+    },
+    "skill_path_rename": {
+      "jsonrpc": "1.0",
+      "id": "invalid",
+      "result": null
+    },
+    "skill_path_delete": {
+      "jsonrpc": "1.0",
+      "id": "invalid",
+      "result": null
+    },
+    "app_icon_set": {
+      "jsonrpc": "1.0",
+      "id": "invalid",
+      "result": null
+    },
+    "cli_status": {
+      "jsonrpc": "1.0",
+      "id": "invalid",
+      "result": null
+    },
+    "cli_install": {
+      "jsonrpc": "1.0",
+      "id": "invalid",
+      "result": null
+    },
+    "cli_remove": {
+      "jsonrpc": "1.0",
+      "id": "invalid",
+      "result": null
+    },
+    "terminal_app_test": {
+      "jsonrpc": "1.0",
+      "id": "invalid",
+      "result": null
+    },
+    "editor_app_test": {
+      "jsonrpc": "1.0",
+      "id": "invalid",
+      "result": null
+    },
+    "session_resume_target": {
+      "jsonrpc": "1.0",
+      "id": "invalid",
+      "result": null
+    },
+    "session_resume_in_terminal": {
+      "jsonrpc": "1.0",
+      "id": "invalid",
+      "result": null
+    },
+    "open_in_editor": {
+      "jsonrpc": "1.0",
+      "id": "invalid",
+      "result": null
+    },
+    "reveal_in_finder": {
+      "jsonrpc": "1.0",
+      "id": "invalid",
+      "result": null
+    },
+    "logs_export": {
+      "jsonrpc": "1.0",
+      "id": "invalid",
+      "result": null
+    },
+    "open_url": {
+      "jsonrpc": "1.0",
+      "id": "invalid",
+      "result": null
+    },
+    "check_for_updates": {
+      "jsonrpc": "1.0",
+      "id": "invalid",
+      "result": null
+    },
+    "install_update": {
+      "jsonrpc": "1.0",
+      "id": "invalid",
+      "result": null
+    }
+  },
+  "validEvents": {
+    "sessions://scan": {
+      "id": 1,
+      "event": "sessions://scan",
+      "payload": {
+        "generation": 0,
+        "phase": "recent",
+        "upserts": [
+          {
+            "id": "fixture",
+            "agent": "codex",
+            "path": "fixture"
+          }
+        ],
+        "deleted": [
+          {
+            "id": "fixture",
+            "agent": "codex",
+            "path": "fixture"
+          }
+        ],
+        "scanned": 0,
+        "complete": false,
+        "error": "fixture"
+      },
+      "baseRevision": 0,
+      "revision": 1
+    },
+    "analytics://progress": {
+      "id": 1,
+      "event": "analytics://progress",
+      "payload": {
+        "phase": "fixture",
+        "completed": 0,
+        "total": 0,
+        "running": false,
+        "error": "fixture"
+      }
+    },
+    "analytics://revision": {
+      "id": 1,
+      "event": "analytics://revision",
+      "payload": {
+        "scopeKey": "fixture",
+        "revision": 0
+      },
+      "baseRevision": 0,
+      "revision": 1
+    },
+    "skills://updates": {
+      "id": 1,
+      "event": "skills://updates",
+      "payload": {
+        "status": "completed",
+        "skills": [
+          {
+            "id": "fixture",
+            "installationId": "fixture",
+            "name": "fixture",
+            "tags": [
+              "fixture"
+            ],
+            "dependencies": [
+              "fixture"
+            ],
+            "dependents": [
+              "fixture"
+            ],
+            "dependencyIds": [
+              "fixture"
+            ],
+            "dependentIds": [
+              "fixture"
+            ],
+            "visibility": "auto",
+            "agents": [
+              "codex"
+            ],
+            "paths": [
+              {
+                "path": "fixture",
+                "root": "fixture",
+                "scope": "fixture",
+                "agent": "codex",
+                "install_target": "fixture",
+                "source_kind": "fixture",
+                "symlink_status": "fixture",
+                "update_status": "fixture",
+                "sha256": "fixture",
+                "tags": [
+                  "fixture"
+                ],
+                "effective_visibility": "auto"
+              }
+            ],
+            "source_summary": "fixture",
+            "install_targets": [
+              "fixture"
+            ],
+            "update_status": "fixture",
+            "is_system": false
+          }
+        ],
+        "updates": [
+          {
+            "id": "fixture",
+            "name": "fixture",
+            "status": "fixture",
+            "source_kind": "fixture"
+          }
+        ],
+        "error": "fixture"
+      }
+    },
+    "config://changed": {
+      "id": 1,
+      "event": "config://changed",
+      "payload": {
+        "path": "fixture",
+        "content": "fixture",
+        "sha256": "fixture",
+        "exists": false
+      }
+    },
+    "tendi://update-available": {
+      "id": 1,
+      "event": "tendi://update-available",
+      "payload": {
+        "status": "up-to-date"
+      }
+    }
+  },
+  "invalidEvents": {
+    "sessions://scan": {
+      "id": "invalid",
+      "event": "sessions://scan",
+      "payload": {}
+    },
+    "analytics://progress": {
+      "id": "invalid",
+      "event": "analytics://progress",
+      "payload": {}
+    },
+    "analytics://revision": {
+      "id": "invalid",
+      "event": "analytics://revision",
+      "payload": {}
+    },
+    "skills://updates": {
+      "id": "invalid",
+      "event": "skills://updates",
+      "payload": {}
+    },
+    "config://changed": {
+      "id": "invalid",
+      "event": "config://changed",
+      "payload": {}
+    },
+    "tendi://update-available": {
+      "id": "invalid",
+      "event": "tendi://update-available",
+      "payload": {}
+    }
+  }
+}

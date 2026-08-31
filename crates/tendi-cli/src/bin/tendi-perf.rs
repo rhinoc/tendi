@@ -8,7 +8,7 @@ use anyhow::{Context, Result, bail};
 use chrono::{Duration, Local};
 use serde_json::{Value, json};
 use tendi_core::{
-    AgentKind, SessionRecord, SessionScan,
+    AgentKind, ScopeKey, SessionRecord, SessionScan,
     hooks::{HookDeleteRequest, delete_hooks, read_hook_source_at_path, scan_hooks},
     rules::read_rule_file_at_path,
     session_skills::{SessionFileState, SessionSkillLink},
@@ -27,18 +27,18 @@ const HOOK_DELETE_COUNT: usize = 100;
 const PROMPT_COUNT: usize = 500;
 const SESSION_SEARCH_SESSIONS: usize = 512;
 const SESSION_SEARCH_CANDIDATES: usize = 100;
+const SESSION_SOAK_COUNT: usize = 10_000;
 
 fn main() -> Result<()> {
     let scenario = env::args().nth(1).context("usage: tendi-perf <scenario>")?;
     let result = match scenario.as_str() {
         "primary-overview" => primary_overview(),
-        "primary-overview-default" => primary_overview_default(),
-        "primary-overview-default-backfilled" => primary_overview_default_backfilled(),
         "primary-prompts" => primary_prompts(),
         "primary-config" => primary_config(),
         "primary-settings" => primary_settings(),
         "secondary-session-page" => secondary_session_page(),
         "secondary-session-search" => secondary_session_search(),
+        "secondary-session-10k-soak" => secondary_session_10k_soak(),
         "secondary-linked-sessions" => secondary_linked_sessions(),
         "secondary-skill-files" => secondary_skill_files(),
         "secondary-rule-detail" => secondary_rule_detail(),
@@ -75,11 +75,18 @@ fn primary_overview() -> Result<Value> {
         sessions.push(session(index, path, index % 32));
     }
     let store = Store::open(scratch.path().join("overview.sqlite3"))?;
-    store.save_sessions(&SessionScan {
-        sessions: sessions.clone(),
-        warnings: Vec::new(),
-    })?;
-    let refreshed = store.refresh_session_analytics(&sessions)?;
+    let scope_key = ScopeKey::new(scratch.path().display().to_string())
+        .map_err(|error| anyhow::anyhow!(error))?;
+    store.save_sessions_at_for_scope(
+        &scope_key,
+        &SessionScan {
+            sessions: sessions.clone(),
+            warnings: Vec::new(),
+        },
+        1,
+    )?;
+    let refreshed = store
+        .refresh_session_analytics_for_scope_with_progress(&scope_key, &sessions, |_| {})?;
     if refreshed.failed != 0 || refreshed.parsed != OVERVIEW_SESSIONS {
         bail!(
             "overview fixture analytics incomplete: parsed {}, failed {}",
@@ -89,41 +96,10 @@ fn primary_overview() -> Result<Value> {
     }
 
     measured(|| {
-        let overview = store.overview_analytics(None, 365, 365)?;
+        let overview = store.overview_analytics_for_scope(&scope_key, None, 365, 365)?;
         let count = overview.days.len();
         Ok((overview, count))
     })
-}
-
-fn primary_overview_default() -> Result<Value> {
-    let store = performance_store()?;
-    measured(|| {
-        let overview = store.overview_analytics(None, 30, 30)?;
-        let count = overview.days.len();
-        Ok((overview, count))
-    })
-}
-
-fn primary_overview_default_backfilled() -> Result<Value> {
-    let store = performance_store()?;
-    loop {
-        let report = store.backfill_session_analytics_overview_batch(32)?;
-        if report.remaining == 0 || (report.processed == 0 && report.failed > 0) {
-            break;
-        }
-    }
-    measured(|| {
-        let overview = store.overview_analytics(None, 30, 30)?;
-        let count = overview.days.len();
-        Ok((overview, count))
-    })
-}
-
-fn performance_store() -> Result<Store> {
-    match env::var_os("TENDI_PERF_DB") {
-        Some(path) => Store::open(PathBuf::from(path)),
-        None => Store::open_default(),
-    }
 }
 
 fn primary_prompts() -> Result<Value> {
@@ -204,10 +180,16 @@ fn secondary_session_search() -> Result<Value> {
     }
 
     let store = Store::open(scratch.path().join("session-search.sqlite3"))?;
-    store.save_sessions(&SessionScan {
-        sessions: sessions.clone(),
-        warnings: Vec::new(),
-    })?;
+    let scope_key = ScopeKey::new(scratch.path().display().to_string())
+        .map_err(|error| anyhow::anyhow!(error))?;
+    store.save_sessions_at_for_scope(
+        &scope_key,
+        &SessionScan {
+            sessions: sessions.clone(),
+            warnings: Vec::new(),
+        },
+        1,
+    )?;
     let candidates = sessions
         .iter()
         .take(SESSION_SEARCH_CANDIDATES)
@@ -215,7 +197,7 @@ fn secondary_session_search() -> Result<Value> {
         .collect::<Vec<_>>();
 
     measured(|| {
-        let hits = store.search_sessions_batch("needle", &candidates)?;
+        let hits = store.search_sessions_for_scope(&scope_key, "needle", Some(&candidates))?;
         if hits.len() != SESSION_SEARCH_CANDIDATES {
             bail!("unexpected session search hit count: {}", hits.len());
         }
@@ -231,9 +213,63 @@ fn secondary_session_search() -> Result<Value> {
     })
 }
 
+fn secondary_session_10k_soak() -> Result<Value> {
+    let scratch = Scratch::new("session-10k-soak")?;
+    let store = Store::open(scratch.path().join("session-10k.sqlite3"))?;
+    let scope_key = ScopeKey::new(scratch.path().display().to_string())
+        .map_err(|error| anyhow::anyhow!(error))?;
+    let sessions = (0..SESSION_SOAK_COUNT)
+        .map(|index| {
+            session(
+                index,
+                scratch.path().join(format!("transcripts/session-{index:05}.jsonl")),
+                index % 128,
+            )
+        })
+        .collect::<Vec<_>>();
+    store.save_sessions_at_for_scope(
+        &scope_key,
+        &SessionScan {
+            sessions: sessions.clone(),
+            warnings: Vec::new(),
+        },
+        1,
+    )?;
+
+    let candidates = sessions
+        .iter()
+        .step_by(100)
+        .map(SessionIdentity::from)
+        .collect::<Vec<_>>();
+    measured(|| {
+        let listed = store.list_sessions_for_scope(&scope_key)?.sessions;
+        if listed.len() != SESSION_SOAK_COUNT {
+            bail!("unexpected 10k session count: {}", listed.len());
+        }
+        let hits = store.search_sessions_for_scope(
+            &scope_key,
+            "performance session",
+            Some(&candidates),
+        )?;
+        if hits.len() != candidates.len() {
+            bail!("unexpected 10k session search hit count: {}", hits.len());
+        }
+        Ok((
+            json!({
+                "listed": listed.len(),
+                "searched": hits.len(),
+                "scopeKey": scope_key,
+            }),
+            listed.len(),
+        ))
+    })
+}
+
 fn secondary_linked_sessions() -> Result<Value> {
     let scratch = Scratch::new("linked-sessions")?;
     let store = Store::open(scratch.path().join("links.sqlite3"))?;
+    let scope_key = ScopeKey::new(scratch.path().display().to_string())
+        .map_err(|error| anyhow::anyhow!(error))?;
     let skill_path = scratch.path().join("perf-linked-skill");
     fs::create_dir_all(&skill_path)?;
     let sessions = (0..LINKED_SESSIONS)
@@ -245,10 +281,14 @@ fn secondary_linked_sessions() -> Result<Value> {
             )
         })
         .collect::<Vec<_>>();
-    store.save_sessions(&SessionScan {
-        sessions: sessions.clone(),
-        warnings: Vec::new(),
-    })?;
+    store.save_sessions_at_for_scope(
+        &scope_key,
+        &SessionScan {
+            sessions: sessions.clone(),
+            warnings: Vec::new(),
+        },
+        1,
+    )?;
     for session in &sessions {
         let link = SessionSkillLink {
             session_id: session.id.clone(),
@@ -268,7 +308,8 @@ fn secondary_linked_sessions() -> Result<Value> {
             evidence_time: session.updated_at.clone(),
             confidence: "observed".to_string(),
         };
-        store.replace_session_skill_links(
+        store.replace_session_skill_links_for_scope(
+            &scope_key,
             session,
             &SessionFileState {
                 file_mtime: 1,
@@ -279,7 +320,7 @@ fn secondary_linked_sessions() -> Result<Value> {
     }
 
     measured(|| {
-        let links = store.skill_session_links("perf-linked-skill")?;
+        let links = store.skill_session_links_for_scope(&scope_key, "perf-linked-skill")?;
         let count = links.len();
         if count != LINKED_SESSIONS {
             bail!("unexpected linked session count: {count}");
@@ -432,7 +473,7 @@ fn tertiary_skill_save() -> Result<Value> {
             "references/perf-renamed.md",
             Some(&skill_dir),
         )?;
-        let refreshed = refresh_skill_scan(scratch.path(), &scan, &[target_name.to_string()], &[])?;
+        let refreshed = refresh_skill_scan(scratch.path(), scan, &[target_name.to_string()], &[])?;
         let target = refreshed
             .skills
             .iter()
@@ -609,11 +650,15 @@ fn seed_prompts(store: &Store) -> Result<Vec<String>> {
 fn fixture_skill(root: &Path, index: usize) -> SkillRecord {
     let name = format!("perf-gate-skill-{index:03}");
     SkillRecord {
+        id: name.clone(),
+        installation_id: name.clone(),
         name: name.clone(),
         description: Some(format!("original {index}")),
         tags: Vec::new(),
         dependencies: Vec::new(),
         dependents: Vec::new(),
+        dependency_ids: Vec::new(),
+        dependent_ids: Vec::new(),
         visibility: SkillVisibility::Auto,
         agents: vec![AgentKind::Shared],
         paths: vec![SkillPath {

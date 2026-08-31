@@ -61,10 +61,31 @@
   flex: 1;
 }
 
+.ruleEditorContent {
+  position: relative;
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+}
+
+.ruleEditorContent > .codePane {
+  flex: 1;
+}
+
 .ruleEditorLoading {
   flex: 1;
   display: grid;
   place-items: center;
+}
+
+.ruleEditorStatusOverlay {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  display: grid;
+  place-items: center;
+  background: color-mix(in srgb, var(--editor-bg) 82%, transparent);
 }
 
 .threadHeader {

@@ -14,8 +14,15 @@ export type AnalyticsCapabilities = {
   rateLimitHistory: boolean;
 };
 
+export enum AnalyticsRefreshPhase {
+  Overview = "overview",
+  Recent = "recent",
+  Backfill = "backfill",
+  Watch = "watch",
+}
+
 export type AnalyticsRefreshProgress = {
-  phase: "overview" | "recent" | "backfill" | "watch";
+  phase: AnalyticsRefreshPhase;
   total: number;
   completed: number;
   parsed: number;
@@ -92,20 +99,24 @@ export type OverviewAnalytics = {
   warnings: string[];
 };
 
-export type AnalyticsGranularity = "day" | "week" | "month";
+export enum AnalyticsGranularity {
+  Day = "day",
+  Week = "week",
+  Month = "month",
+}
 
 export function selectAnalyticsGranularity(dayCount: number): AnalyticsGranularity {
   const span = Math.max(1, Math.ceil(dayCount));
-  if (span <= 60) return "day";
-  if (span <= 365) return "week";
-  return "month";
+  if (span <= 60) return AnalyticsGranularity.Day;
+  if (span <= 365) return AnalyticsGranularity.Week;
+  return AnalyticsGranularity.Month;
 }
 
 export function stepAnalyticsGranularity(
   granularity: AnalyticsGranularity,
   direction: -1 | 1,
 ): AnalyticsGranularity {
-  const granularities: AnalyticsGranularity[] = ["day", "week", "month"];
+  const granularities: AnalyticsGranularity[] = [AnalyticsGranularity.Day, AnalyticsGranularity.Week, AnalyticsGranularity.Month];
   const currentIndex = granularities.indexOf(granularity);
   const nextIndex = Math.max(0, Math.min(granularities.length - 1, currentIndex + direction));
   return granularities[nextIndex];
@@ -160,8 +171,8 @@ function sortedCallUsage(calls: Iterable<AnalyticsCallUsage>): AnalyticsCallUsag
 }
 
 function periodKey(date: string, granularity: AnalyticsGranularity): string {
-  if (granularity === "day") return date;
-  if (granularity === "month") return date.slice(0, 7);
+  if (granularity === AnalyticsGranularity.Day) return date;
+  if (granularity === AnalyticsGranularity.Month) return date.slice(0, 7);
   const value = new Date(`${date}T00:00:00`);
   const day = (value.getDay() + 6) % 7;
   value.setDate(value.getDate() - day);
@@ -169,7 +180,7 @@ function periodKey(date: string, granularity: AnalyticsGranularity): string {
 }
 
 function periodLabel(key: string, granularity: AnalyticsGranularity): string {
-  if (granularity === "month") {
+  if (granularity === AnalyticsGranularity.Month) {
     const [year, month] = key.split("-");
     return `${year}-${month}`;
   }

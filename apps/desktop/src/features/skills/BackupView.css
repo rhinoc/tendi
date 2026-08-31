@@ -28,14 +28,18 @@
 
 .settingsBackupActionStack {
   display: grid;
+  grid-template-rows: var(--control-height) var(--leading-ui);
   justify-items: start;
   gap: 3px;
+  align-content: start;
+  min-height: calc(var(--control-height) + 3px + var(--leading-ui));
 }
 
 .settingsBackupPrimaryActions {
   display: flex;
   align-items: center;
   gap: 8px;
+  height: var(--control-height);
 }
 
 .settingsBackupNotConfigured,

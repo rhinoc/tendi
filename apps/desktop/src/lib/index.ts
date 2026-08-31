@@ -3,6 +3,7 @@ export { mcpCopy } from "./mcp-copy.ts";
 
 export {
   navItems,
+  AppPage,
   SIDEBAR_SIZE,
   COLLAPSED_SIDEBAR_SIZE,
   SESSION_FREEZE_COLUMN,
@@ -15,6 +16,8 @@ export {
   MARQUEE_AUTO_SCROLL_MAX_SPEED,
 } from "./constants.ts";
 export type { NavItem, FreezeColumnConfig } from "./constants.ts";
+export { AsyncStatus } from "./async-status.ts";
+export { SortDirection } from "./sort.ts";
 
 export { agentDefinition, agentDefinitions } from "./agent/index.ts";
 
@@ -36,10 +39,23 @@ export {
   compactCommand,
   formatUserPath,
   compactDateTime,
+  formatRelativeTime,
   dayGroupKey,
   formatDayGroupLabel,
   formatDuration,
 } from "./strings.ts";
+export { compareTimestamps, timestampMs } from "./time.ts";
+export { decideRevision, snapshotRevision } from "./runtime-contract.ts";
+export type {
+  DomainSnapshot,
+  InstallationId,
+  Revision,
+  RevisionDecision,
+  RevisionedEvent,
+  SessionKey,
+  SourceLocator,
+  ScopeKey,
+} from "./runtime-contract.ts";
 
 export {
   friendlySource,
@@ -75,6 +91,7 @@ export {
   allSkillVisibilities,
   normalizeSkill,
   normalizeSkillVisibility,
+  findSkillBySelector,
   primarySkillPath,
   skillTargets,
   targetLabel,
@@ -83,35 +100,34 @@ export {
   skillSourceActionLabels,
   skillSourceAction,
   SkillChangeCommand,
-  applySkillUpdateReports,
-  mergeSkillListPreservingUpdates,
-  replaceSkillReportPreservingUpdates,
-  clearSkillUpdateAvailability,
-  applyVisibilityState,
 } from "./skills.ts";
 export type { AvailableSkill, NormalizedSkill, NormalizedSkillPath, RawSkillRecord, SkillAddPlan, SkillInstallResult, SkillOperation, WrapperArgs } from "./skills.ts";
-export { SkillOperationStatus } from "./skills.ts";
+export { SkillOperationStatus, SkillUpdateAvailability } from "./skills.ts";
 
 export { suppressNextClick } from "./dom.ts";
 
-export { skillChangeActionLabel, skillChangeBusyLabel, skillChangeDescription, skillChangeLoadingCopy, skillChangeTitle } from "./skill-change-copy.ts";
+export { skillChangeActionLabel, skillChangeBusyLabel, skillChangeCanConfirm, skillChangeDescription, skillChangeDisabledReason, skillChangeLoadingCopy, skillChangeTitle } from "./skill-change-copy.ts";
 
 export { dialogCopy } from "./dialog-copy.ts";
 
-export { DOMAIN_KEYS } from "./domain.ts";
-export { RUNTIME_DOMAIN_KEYS } from "./domain.ts";
-export type { DomainKey, RuntimeDomainKey } from "./domain.ts";
+export { DOMAIN_KEYS, RUNTIME_DOMAIN_KEYS, RuntimeDomainKey } from "./domain.ts";
+export type { DomainKey } from "./domain.ts";
 
 export { normalizeConfigProfiles, normalizeSettings } from "./settings.ts";
 export type { SettingsPayload, SettingsState } from "./settings.ts";
 
 export { logger } from "./logger.ts";
-export type { LogFields, LogLevel } from "./logger.ts";
+export { LogLevel } from "./logger.ts";
+export type { LogFields } from "./logger.ts";
 
-export { normalizeMissingSessionProjectPolicy, projectForPath, scopeColumn, scopeNameForPath } from "./projects.ts";
-export type { MissingSessionProjectPolicy, ProjectSummary, SessionProjectSummary } from "./projects.ts";
+export { MissingSessionProjectPolicy, normalizeMissingSessionProjectPolicy, projectForPath, scopeColumn, scopeNameForPath } from "./projects.ts";
+export type { ProjectSummary, SessionProjectSummary } from "./projects.ts";
 
 export {
+  SessionKind,
+  SessionSortKey,
+  SessionResumeOutcomeStatus,
+  SessionResumeTarget,
   normalizeSession,
   normalizeSessionSkillLink,
   normalizeSessionResumeTarget,
@@ -131,30 +147,26 @@ export {
   sessionProjectOption,
   sessionKind,
   sessionCacheRate,
-  sessionSnapshot,
-  mergeSessionRows,
-  applySessionDelta,
   sortValue,
   compareSessions,
   sessionTimeMs,
 } from "./sessions.ts";
-export { sessionResumeErrorMessage, sessionResumeLabel, sessionResumeTargetForMenu } from "./session-resume.ts";
+export { sessionResumeErrorMessage, sessionResumeLabel, sessionResumeTargetForMenu, sessionResumeTargetsForMenu } from "./session-resume.ts";
 export type { SessionResumeState } from "./session-resume.ts";
-export { sessionExternalKey, resolveInitialSession, resolveInitialSessionId } from "./session-selection.ts";
-export type { SessionIdentityRecord, SessionResumeOutcome, SessionResumeTarget, SessionSkillLinkRecord } from "./sessions.ts";
-export type { SessionKind, SessionRecord, SessionTokenUsage } from "./sessions.ts";
+export { sessionExternalKey, sessionSourceExternalKey, resolveInitialSession, resolveInitialSessionId } from "./session-selection.ts";
+export type { SessionIdentityRecord, SessionResumeOutcome, SessionSkillLinkRecord } from "./sessions.ts";
+export type { SessionRecord, SessionTokenUsage } from "./sessions.ts";
 
 export { summarizeSessionUsage } from "./overview.ts";
 export { formatSessionTitle, formatTranscriptPreview, summarizeSessionPreviewRecord } from "./session-preview.ts";
 export type { RecentSessionPreview } from "./session-preview.ts";
 export type { SessionUsageSummary, TokenMix } from "./overview.ts";
 
-export { groupAnalyticsDays } from "./analytics.ts";
+export { AnalyticsGranularity, AnalyticsRefreshPhase, groupAnalyticsDays } from "./analytics.ts";
 export type {
   AnalyticsCallUsage,
   AnalyticsCapabilities,
   AnalyticsDay,
-  AnalyticsGranularity,
   AnalyticsPeriod,
   AnalyticsRankItem,
   AnalyticsTokenUsage,
@@ -178,21 +190,21 @@ export {
   ruleSearchText,
   ruleSortValue,
   compareRules,
+  RuleScope,
 } from "./rules.ts";
 export type { RuleRecord, RuleRow } from "./rules.ts";
 
-export { readRuleFile } from "./rule-file.ts";
-export type { RuleFileResult } from "./rule-file.ts";
 
 export {
   configSelectionActionIds,
   hookSelectionActionIds,
   mcpSelectionActionIds,
   promptSelectionActionIds,
+  TableSelectionActionId,
   ruleSelectionActionIds,
   visibleSelectionActionCount,
 } from "./table-selection-actions.ts";
-export type { TableSelectionActionId } from "./table-selection-actions.ts";
+export { SkillActionId, skillActionIds } from "./skill-actions.ts";
 
 export {
   normalizeHook,
@@ -205,11 +217,12 @@ export {
   hookSearchText,
   hookSourcePath,
   hookDeleteDisabledReason,
+  isHookMutationDelta,
 } from "./hooks.ts";
-export type { HookRecord } from "./hooks.ts";
+export type { HookRecord, HookMutationDelta } from "./hooks.ts";
 
-export { mcpRowKey, mcpSourcePath, normalizeMcp } from "./mcp.ts";
-export type { McpRecord } from "./mcp.ts";
+export { mcpRowKey, mcpSourcePath, normalizeMcp, isMcpMutationDelta } from "./mcp.ts";
+export type { McpRecord, McpMutationDelta } from "./mcp.ts";
 
 export {
   createLatestRequestAuthority,
@@ -220,9 +233,10 @@ export {
   normalizeTranscriptPage,
   normalizeTranscriptSearchResult,
   transcriptItemType,
+  TranscriptGroupType,
   groupTranscriptItems,
 } from "./transcript.ts";
-export { parseJsonlTranscript } from "./agent/transcript.ts";
+export { parseJsonlTranscriptForProvider } from "./agent/transcript.ts";
 export type {
   JsonlTranscriptParseResult,
   TranscriptItem,
@@ -236,14 +250,42 @@ export type {
 } from "./transcript.ts";
 
 
-export {
-  emptyRuntimeData,
-  initialData,
-  normalizeDomainRows,
-  normalizeReport,
-  recomputeSources,
-} from "./data.ts";
+export { emptyRuntimeData } from "./data.ts";
 export type { RuntimeData } from "./data.ts";
+
+export { selectOverviewCounts, selectOverviewHookReviewCount, selectOverviewSkillUpdateCount } from "../controllers/overview-controller.ts";
+export type { OverviewCounts } from "../controllers/overview-controller.ts";
+
+export {
+  applyDomainSnapshot,
+  applyRuleCommandResult,
+  buildCatalogIndexes,
+  reconcileCollection,
+  selectCatalogView,
+} from "../controllers/catalog-controller.ts";
+export type { CatalogIndexes, CatalogSource, DomainRows, RawDomainRow, RawDomainRows } from "../controllers/controller-types.ts";
+export {
+  applySkillPatch,
+  applySkillSnapshot,
+  applySkillUpdateReports as applySkillUpdateReportsController,
+  applySkillVisibility,
+  clearSkillUpdateAvailability as clearSkillUpdateAvailabilityFromController,
+  expandSkillDependencies,
+  partitionSkillOperations,
+} from "../controllers/skill-controller.ts";
+export {
+  buildGroupedSessionPages,
+  projectSearchRank,
+  sessionPageForRow,
+  selectSessionListView,
+  selectSessionRelationships,
+  sessionPageContextKey,
+  sessionMatchesQuery,
+  sessionTableRowId,
+} from "../controllers/session-controller.ts";
+export type { GroupedSessionPage, ProjectSearchRank, SessionListControllerInput, SessionListView, SessionProjectOption, SessionRelationshipView } from "../controllers/session-controller.ts";
+export { selectRuleListView } from "../controllers/rule-controller.ts";
+export type { RuleListItem, RuleListView, RuleTableItem } from "../controllers/rule-controller.ts";
 
 export {
   buildFileTreeRows,
@@ -293,10 +335,11 @@ export {
 } from "./window-drag.ts";
 
 export { DaemonCommandError, TauriCommand, UPDATE_AVAILABLE_EVENT, invokeCommand, isTauriRuntime, safeInvoke, subscribeDaemonEvents, copyText } from "./tauri.ts";
+export { CliInstallState, DesktopUpdateStatus, UpdateCheckStatus } from "./tauri.ts";
+export { assertRuntimeEventPayload } from "./generated/runtime-events.ts";
 export type {
   BundledSkillInstallReport,
   BundledSkillStatus,
-  CliInstallState,
   CliInstallStatus,
   DaemonEvent,
   DesktopUpdateState,

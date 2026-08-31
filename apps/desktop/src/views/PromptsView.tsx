@@ -24,7 +24,7 @@ import { DialogShell } from "../components/shared/DialogShell.tsx";
 import { DialogTextField } from "../components/shared/DialogTextField.tsx";
 import { EmptyState } from "../components/shared/EmptyState.tsx";
 import { IconButton } from "../components/shared/IconButton.tsx";
-import { LoadingInline } from "../components/shared/LoadingInline.tsx";
+import { LoadingIcon } from "../components/shared/LoadingIcon.tsx";
 import { LoadingState } from "../components/shared/LoadingState.tsx";
 import { LoadErrorState } from "../components/shared/LoadErrorState.tsx";
 import { PageHeader } from "../components/shared/PageHeader.tsx";
@@ -32,10 +32,13 @@ import { RowActionsMenu } from "../components/shared/RowActionsMenu.tsx";
 import { SearchField } from "../components/shared/SearchField.tsx";
 import { Tooltip } from "../components/shared/Tooltip.tsx";
 import { Toast } from "../components/shared/Toast.tsx";
+import { AsyncStatus } from "../lib/async-status.ts";
 import { DataTable } from "../components/DataTable.tsx";
-import type { ColumnDef } from "../components/DataTable.types";
+import { ColumnDataType, type ColumnDef } from "../components/DataTable.types";
 import type { DataTableMenuComponents } from "../components/shared/DataTableMenus.tsx";
-import { actionLabels, copiedValueLabel, copyValueLabel, promptActionLabels, selectionCopiedLabel, selectionCopyLabel, selectionDeleteLabel, TauriCommand, compactDateTime, normalizePromptTags, promptPreview, promptSelectionActionIds, promptTagsLabel, safeInvoke, suppressNextClick, type PromptRecord } from "../lib/index.ts";
+import { actionLabels, copiedValueLabel, copyValueLabel, promptActionLabels, selectionCopiedLabel, selectionCopyLabel, selectionDeleteLabel, TableSelectionActionId, compactDateTime, normalizePromptTags, promptPreview, promptSelectionActionIds, promptTagsLabel, suppressNextClick, type PromptRecord } from "../lib/index.ts";
+import { deletePrompts, savePrompt as savePromptCommand } from "../lib/runtime-gateway.ts";
+import type { RawDomainRow } from "../controllers/controller-types.ts";
 
 const PromptBodyEditor = lazy(() => import("../features/prompts/PromptBodyEditor.tsx").then(({ PromptBodyEditor: component }) => ({ default: component })));
 
@@ -168,9 +171,9 @@ export function PromptDialog({ open, prompt, busy, error, onOpenChange, onSave }
       </div>
       <DialogActionBar cancelDisabled={busy} onCancel={() => onOpenChange(false)}>
         <DialogStatefulButton
-          state={busy ? "loading" : "idle"}
+          state={busy ? AsyncStatus.Loading : AsyncStatus.Idle}
           loadingLabel={promptActionLabels.saving}
-          loadingContent={<LoadingInline size={16} gap={6} label="Save" />}
+          loadingContent={<LoadingIcon size={16} />}
           variant="primary"
           className="dialogAdvanceButton"
           aria-label={promptActionLabels.save}
@@ -207,7 +210,7 @@ type PromptsViewProps = {
   loadError?: string;
   hasRows?: boolean;
   onRefreshPrompts: () => void | Promise<void>;
-  onPromptSaved?: (prompt: unknown) => void;
+  onPromptSaved?: (prompt: RawDomainRow) => void;
   onPromptsDeleted?: (ids: string[]) => void;
 };
 
@@ -244,7 +247,7 @@ export function PromptsView({ prompts, loadingPrompts = false, loadError = "", h
     if (saving) return;
     setSaving(true);
     setDialogError("");
-    const result = await safeInvoke(TauriCommand.PromptSave, {
+    const result = await savePromptCommand({
       id: draft.id ?? null,
       title: draft.title,
       tags: normalizePromptTags(draft.tags),
@@ -256,7 +259,7 @@ export function PromptsView({ prompts, loadingPrompts = false, loadError = "", h
       return;
     }
     setDialogOpen(false);
-    onPromptSaved?.(result);
+    onPromptSaved?.(result && typeof result.body !== "string" ? { ...result, body: draft.body } : result);
   };
   const copyPrompts = useCallback(async (items: PromptRecord[]) => {
     const text = items.map((prompt) => prompt.body).filter(Boolean).join("\n\n");
@@ -270,7 +273,7 @@ export function PromptsView({ prompts, loadingPrompts = false, loadError = "", h
     if (pendingIds.length === 0) return;
     setDeletingPromptIds((current) => Array.from(new Set([...current, ...pendingIds])));
     try {
-      const result = await safeInvoke(TauriCommand.PromptsDeleteMany, { ids: pendingIds });
+      const result = await deletePrompts(pendingIds);
       if (!result) return;
       setSelected((current) => current.filter((id) => !pendingIds.includes(id)));
       onPromptsDeleted?.(pendingIds);
@@ -298,20 +301,20 @@ export function PromptsView({ prompts, loadingPrompts = false, loadError = "", h
     const copyLabel = selectionCopyLabel("prompt", selectedRows.length);
     const copiedLabel = selectionCopiedLabel("prompt", selectedRows.length);
     const actions: Record<string, DataTableSelectionActionDefinition> = {
-      copy: {
-        id: "copy",
+      [TableSelectionActionId.Copy]: {
+        id: TableSelectionActionId.Copy,
         direct: <CopyButton copyLabel={copyLabel} copiedLabel={copiedLabel} iconSize={15} onCopy={() => copyPrompts(selectedRows)}>{actionLabels.copy}</CopyButton>,
         menu: <Menu.Item className="skillMenuItem" onSelect={() => { void copyPrompts(selectedRows); }}><Copy size={14} />{copyLabel}</Menu.Item>,
         measure: <><Copy size={15} /><span>{actionLabels.copy}</span></>,
       },
-      edit: {
-        id: "edit",
+      [TableSelectionActionId.Edit]: {
+        id: TableSelectionActionId.Edit,
         direct: <Button size="sm" variant="ghost" aria-label="Edit prompt" onClick={() => prompt && openEditPrompt(prompt)}><Pencil size={15} /><span>Edit</span></Button>,
         menu: <Menu.Item className="skillMenuItem" disabled={!prompt} onSelect={() => prompt && openEditPrompt(prompt)}><Pencil size={14} />Edit prompt</Menu.Item>,
         measure: <><Pencil size={15} /><span>Edit</span></>,
       },
-      delete: {
-        id: "delete",
+      [TableSelectionActionId.Delete]: {
+        id: TableSelectionActionId.Delete,
         direct: <button type="button" className="danger" aria-label={deleteLabel} disabled={isDeleting} onClick={() => requestDeletePrompts(selectedRows)}><Trash2 size={15} /><span>{deleteLabel}</span></button>,
         menu: <DeleteMenuItem Menu={Menu} label={deleteLabel} disabled={isDeleting} onSelect={() => requestDeletePrompts(selectedRows)} />,
         measure: <><Trash2 size={15} /><span>{deleteLabel}</span></>,
@@ -324,7 +327,7 @@ export function PromptsView({ prompts, loadingPrompts = false, loadError = "", h
     {
       key: "title",
       header: "Prompt",
-      type: "text",
+      type: ColumnDataType.Text,
       sortValue: (prompt) => prompt.title.toLowerCase(),
       width: "minmax(300px, 1fr)",
       render: (prompt) => (
@@ -339,7 +342,7 @@ export function PromptsView({ prompts, loadingPrompts = false, loadError = "", h
     {
       key: "tags",
       header: "Tags",
-      type: "enum",
+      type: ColumnDataType.Enum,
       groupBy: (prompt) => promptTagsLabel(prompt),
       sortValue: (prompt) => promptTagsLabel(prompt).toLowerCase(),
       width: "160px",
@@ -352,7 +355,7 @@ export function PromptsView({ prompts, loadingPrompts = false, loadError = "", h
     {
       key: "updatedAt",
       header: "Updated",
-      type: "date",
+      type: ColumnDataType.Date,
       sortValue: (prompt) => prompt.updatedAt,
       width: "116px",
       value: (prompt) => compactDateTime(prompt.updatedAt),

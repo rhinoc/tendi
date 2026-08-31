@@ -16,7 +16,12 @@ const codeMirrorBasicSetup = {
   syntaxHighlighting: false,
 };
 
-export type CodeMirrorLanguage = "json" | "markdown" | "toml" | "yaml";
+export enum CodeMirrorLanguage {
+  Json = "json",
+  Markdown = "markdown",
+  Toml = "toml",
+  Yaml = "yaml",
+}
 
 async function loadCodeMirrorModules(
   activeLanguage: CodeMirrorLanguage | undefined,
@@ -27,22 +32,22 @@ async function loadCodeMirrorModules(
   const { codeMirrorBaseTheme, codeMirrorHighlightStyle, syntaxHighlighting } = await import("../../lib/codemirror-theme.ts");
   let languageExtension: Extension | undefined;
   let promptXmlTagExtension: Extension | undefined;
-  if (activeLanguage === "markdown") {
+  if (activeLanguage === CodeMirrorLanguage.Markdown) {
     const [{ codeMirrorMarkdown }, { codeMirrorPromptXmlTagExtension }] = await Promise.all([
       import("../../lib/codemirror-markdown.ts"),
       import("../../lib/prompt-codemirror.ts"),
     ]);
     languageExtension = codeMirrorMarkdown();
     promptXmlTagExtension = codeMirrorPromptXmlTagExtension();
-  } else if (activeLanguage === "json") {
+  } else if (activeLanguage === CodeMirrorLanguage.Json) {
     languageExtension = (await import("../../lib/codemirror-json.ts")).codeMirrorJson();
-  } else if (activeLanguage === "toml") {
+  } else if (activeLanguage === CodeMirrorLanguage.Toml) {
     const [{ StreamLanguage }, { toml }] = await Promise.all([
       import("@codemirror/language"),
       import("@codemirror/legacy-modes/mode/toml"),
     ]);
     languageExtension = StreamLanguage.define(toml);
-  } else if (activeLanguage === "yaml") {
+  } else if (activeLanguage === CodeMirrorLanguage.Yaml) {
     const [{ StreamLanguage }, { yaml }] = await Promise.all([
       import("@codemirror/language"),
       import("@codemirror/legacy-modes/mode/yaml"),
@@ -126,11 +131,9 @@ export function CodeMirrorFileEditor({
   const handleUpdate = useCallback((update: ViewUpdate) => {
     if (update.selectionSet || update.docChanged) emitSelection(update.view);
   }, [emitSelection]);
-  const activeLanguage = language ?? (markdown ? "markdown" : undefined);
+  const activeLanguage = language ?? (markdown ? CodeMirrorLanguage.Markdown : undefined);
   useEffect(() => {
     let cancelled = false;
-    editorViewRef.current = null;
-    setLoadedModules(null);
     void loadCodeMirrorModules(activeLanguage, showDiff, showConflictMarkers, handleConflictResolve).then((next) => {
       if (!cancelled) setLoadedModules(next);
     });
@@ -193,12 +196,7 @@ export function CodeMirrorFileEditor({
     return () => window.cancelAnimationFrame(frame);
   }, [content, searchIndex, searchQuery]);
 
-  if (
-    !loadedModules
-    || loadedModules.activeLanguage !== activeLanguage
-    || loadedModules.showConflictMarkers !== showConflictMarkers
-    || loadedModules.showDiff !== showDiff
-  ) {
+  if (!loadedModules) {
     return <EditorStatePlaceholder label="Loading file" />;
   }
 

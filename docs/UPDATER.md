@@ -28,7 +28,9 @@ This produces the DMG, `tendi-<version>-<arch>.app.tar.gz`, and its `.sig` file 
 
 `.github/workflows/release.yml` builds the Apple Silicon artifact, publishes the DMG to a GitHub
 Release, and uploads the updater archive, signature, and `latest.json` to the same release. The
-app checks:
+The release workflow renders the pending `.changeset/*.md` files into Markdown and writes the same
+content to `latest.json.notes` and the GitHub Release body. It then consumes those files in an
+automatic metadata commit, so each release only contains its own notes. The app checks:
 
 ```text
 https://github.com/rhinoc/tendi/releases/latest/download/latest.json
@@ -45,10 +47,11 @@ The updater manifest includes Apple Silicon entries (`darwin-aarch64` and
 ## Application behavior
 
 After startup, Tendi silently checks for updates at most once per day. If a signed update is found,
-it shows a non-blocking notification with the available version; it does not download or install
-the update automatically. Choose **Install** in the notification, or open **Settings → Check for
-Updates** and install it from there. Tendi downloads the signed package, installs it, and restarts
-into the new version only after that action.
+it shows a non-blocking notification with the available version and a **View notes** action when
+release notes are available. The dialog renders the release notes and lets you install the update.
+Tendi does not download or install the update automatically. You can also open **Settings → Release
+notes** or install it from the Settings header. Tendi downloads the signed package, installs it,
+and restarts into the new version only after that action.
 
 Manual checks bypass the daily cooldown. Automatic check failures stay silent; manual failures are
 shown in the settings action.

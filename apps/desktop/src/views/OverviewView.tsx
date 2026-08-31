@@ -1,4 +1,5 @@
 import {
+  memo,
   useCallback,
   useEffect,
   useMemo,
@@ -23,11 +24,10 @@ import { SelectControl } from "../components/shared/SelectControl.tsx";
 import { Tooltip } from "../components/shared/Tooltip.tsx";
 import { SessionTitleText, TranscriptLinkText } from "../components/shared/TranscriptLinkText.tsx";
 import { SKILL_BADGE_TONES } from "../features/skills/skill-badge-tones.ts";
-import { tokenToneClass } from "../lib/token-style.ts";
-import { formatTokenCount } from "../lib/token-format.ts";
 import { sessionProject, type SessionRecord } from "../lib/sessions.ts";
 import { summarizeSessionUsage } from "../lib/overview.ts";
 import { formatSessionTitle, summarizeSessionPreviewRecord } from "../lib/session-preview.ts";
+import { formatRelativeTime } from "../lib/strings.ts";
 import { dialogCopy } from "../lib/dialog-copy.ts";
 import {
   type AnalyticsGranularity,
@@ -35,22 +35,23 @@ import {
   type OverviewAnalytics,
   selectAnalyticsGranularity,
 } from "../lib/analytics.ts";
-import { TauriCommand, safeInvoke } from "../lib/tauri.ts";
+import { invokeAnalyticsOverview } from "../lib/runtime-gateway.ts";
 import { OpenInEditorMenuItem } from "../components/shared/DataTableMenus.tsx";
-import { OverviewTrendChart, type OverviewOlderLoadReason, type OverviewUsageMetric } from "./OverviewTrendChart.tsx";
-import { desktopStore, selectAnalyticsValue, useDesktopStore } from "../store/desktop-store.ts";
-import type { DomainKey, NormalizedSkill } from "../lib/index.ts";
-import type { SessionListStatus } from "../store/desktop-store.ts";
+import {
+  OverviewOlderLoadReason,
+  OverviewTrendChart,
+  OverviewUsageMetric,
+} from "./OverviewTrendChart.tsx";
+import { desktopStore, selectAnalyticsDisplayValue, selectAnalyticsValue, useDesktopStore } from "../store/desktop-store.ts";
+import { RuntimeDomainKey } from "../lib/index.ts";
+import type { DomainKey } from "../lib/index.ts";
+import { SessionListStatus } from "../store/desktop-store.ts";
 import "./OverviewView.css";
 
 export type OverviewViewProps = {
   counts: Record<DomainKey, number>;
   hookReviewCount?: number;
-  skills: NormalizedSkill[];
   sessions: SessionRecord[];
-  analyticsRevision: number;
-  analyticsRevisionReady: boolean;
-  analyticsRevisionError?: string;
   onRetryAnalyticsRevision?: () => void | Promise<void>;
   agentFilter: string;
   overviewCountsLoaded: ReadonlySet<DomainKey>;
@@ -66,15 +67,22 @@ export type OverviewViewProps = {
 const ANALYTICS_LOAD_STEPS = [30, 90, 182, 365] as const;
 const MAX_ANALYTICS_DAYS = 365;
 let retainedAnalyticsRange = 30;
-let retainedUsageMetric: OverviewUsageMetric = "tokens";
-const USAGE_METRICS = ["sessions", "turns", "tokens", "cache", "tools", "skills"] as const satisfies ReadonlyArray<OverviewUsageMetric>;
+let retainedUsageMetric: OverviewUsageMetric = OverviewUsageMetric.Tokens;
+const USAGE_METRICS = [
+  OverviewUsageMetric.Sessions,
+  OverviewUsageMetric.Turns,
+  OverviewUsageMetric.Tokens,
+  OverviewUsageMetric.Cache,
+  OverviewUsageMetric.Tools,
+  OverviewUsageMetric.Skills,
+] as const satisfies ReadonlyArray<OverviewUsageMetric>;
 const USAGE_METRIC_LABELS: Record<OverviewUsageMetric, string> = {
-  sessions: "Sessions",
-  turns: "Turns",
-  tokens: "Tokens",
-  cache: "Cache",
-  tools: "Tools",
-  skills: "Skills",
+  [OverviewUsageMetric.Sessions]: "Sessions",
+  [OverviewUsageMetric.Turns]: "Turns",
+  [OverviewUsageMetric.Tokens]: "Tokens",
+  [OverviewUsageMetric.Cache]: "Cache",
+  [OverviewUsageMetric.Tools]: "Tools",
+  [OverviewUsageMetric.Skills]: "Skills",
 };
 const overviewAnalyticsQueries = new Map<string, Promise<OverviewAnalytics | null>>();
 
@@ -121,14 +129,10 @@ function SessionsLoadingState() {
   );
 }
 
-export function OverviewView({
+export const OverviewView = memo(function OverviewView({
   counts,
   hookReviewCount = 0,
-  skills,
   sessions,
-  analyticsRevision,
-  analyticsRevisionReady,
-  analyticsRevisionError = "",
   onRetryAnalyticsRevision,
   agentFilter,
   overviewCountsLoaded,
@@ -142,12 +146,15 @@ export function OverviewView({
 }: OverviewViewProps) {
   const usage = useMemo(() => summarizeSessionUsage(sessions), [sessions]);
   const [analyticsRange, setAnalyticsRange] = useState<number>(retainedAnalyticsRange);
+  const analyticsRevision = useDesktopStore((state) => state.analytics.revision);
+  const analyticsRevisionReady = useDesktopStore((state) => state.analytics.ready);
+  const analyticsRevisionError = useDesktopStore((state) => state.analytics.error);
   const analyticsRangeKey = useMemo(() => ({
     agent: agentFilter,
     range: analyticsRange,
     revision: analyticsRevision,
   }), [agentFilter, analyticsRange, analyticsRevision]);
-  const analytics = useDesktopStore((state) => selectAnalyticsValue(state, analyticsRangeKey));
+  const analytics = useDesktopStore((state) => selectAnalyticsDisplayValue(state, analyticsRangeKey));
   const [analyticsLoading, setAnalyticsLoading] = useState(!analytics);
   const [analyticsProgress, setAnalyticsProgress] = useState<AnalyticsRefreshProgress | null>(null);
   const [analyticsError, setAnalyticsError] = useState("");
@@ -173,7 +180,7 @@ export function OverviewView({
   );
   const loadOlderAnalytics = useCallback((reason: OverviewOlderLoadReason) => {
     if (analyticsRange >= analyticsTargetRange) return;
-    if (reason === "auto") setPreparingAnalyticsRange(true);
+    if (reason === OverviewOlderLoadReason.Auto) setPreparingAnalyticsRange(true);
     setAnalyticsRange((current) => {
       if (current >= analyticsTargetRange) return current;
       const step = ANALYTICS_LOAD_STEPS.find((days) => days > current);
@@ -195,8 +202,6 @@ export function OverviewView({
     }
     if (refreshTranscripts) {
       overviewAnalyticsQueries.clear();
-      desktopStore.actions.setAnalyticsValue(null, null);
-      analyticsRef.current = null;
     }
     if (showLoading) {
       setAnalyticsLoading(true);
@@ -211,7 +216,7 @@ export function OverviewView({
     };
     let query = refreshTranscripts ? undefined : overviewAnalyticsQueries.get(cacheKey);
     if (!query) {
-      query = safeInvoke<OverviewAnalytics>(TauriCommand.AnalyticsOverview, args);
+      query = invokeAnalyticsOverview(args);
       if (!refreshTranscripts) {
         const pendingQuery = query;
         overviewAnalyticsQueries.set(cacheKey, pendingQuery);
@@ -243,6 +248,9 @@ export function OverviewView({
   const showAnalyticsLoading = !analyticsRevisionError && (
     preparingAnalyticsRange || (analyticsLoading && !analytics)
   );
+  const analyticsRefreshing = analyticsLoading
+    || preparingAnalyticsRange
+    || (analytics?.coverage.indexingSessions ?? 0) > 0;
   useEffect(() => {
     setGranularityOverride(null);
   }, [automaticGranularity]);
@@ -255,12 +263,12 @@ export function OverviewView({
   const updateSkillCount = skillUpdateCount;
 
   const inventory: Array<{ id: DomainKey; label: string }> = [
-    { id: "skills", label: "Skills" },
-    { id: "sessions", label: "Sessions" },
-    { id: "prompts", label: "Prompts" },
-    { id: "rules", label: "Rules" },
-    { id: "hooks", label: "Hooks" },
-    { id: "mcp", label: "MCP" },
+    { id: RuntimeDomainKey.Skills, label: "Skills" },
+    { id: RuntimeDomainKey.Sessions, label: "Sessions" },
+    { id: RuntimeDomainKey.Prompts, label: "Prompts" },
+    { id: RuntimeDomainKey.Rules, label: "Rules" },
+    { id: RuntimeDomainKey.Hooks, label: "Hooks" },
+    { id: RuntimeDomainKey.Mcp, label: "MCP" },
   ];
   const overviewCountErrorLabels = inventory
     .filter((item) => overviewCountErrors.has(item.id))
@@ -284,7 +292,7 @@ export function OverviewView({
               <span>
                 <span className="overviewInventoryLabelRow">
                   <span className="overviewInventoryLabel">{item.label}</span>
-                  {item.id === "skills" && updateSkillCount > 0 ? (
+                  {item.id === RuntimeDomainKey.Skills && updateSkillCount > 0 ? (
                     <Badge tone={SKILL_BADGE_TONES.update}>
                       {updateSkillCount} {updateSkillCount === 1 ? "update" : "updates"}
                     </Badge>
@@ -330,8 +338,8 @@ export function OverviewView({
                 options={USAGE_METRICS.map((value) => ({ value, label: USAGE_METRIC_LABELS[value] }))}
                 align="end"
               />
-              <IconButton type="button" onClick={() => void loadAnalytics(true)} disabled={analyticsLoading || preparingAnalyticsRange} aria-label="Refresh analytics" aria-busy={analyticsLoading || preparingAnalyticsRange}>
-                {analyticsLoading || preparingAnalyticsRange ? <LoadingIcon size={15} /> : <RefreshCw size={15} />}
+              <IconButton type="button" onClick={() => void loadAnalytics(true)} disabled={analyticsRefreshing} aria-label="Refresh analytics" aria-busy={analyticsRefreshing}>
+                {analyticsRefreshing ? <LoadingIcon size={15} /> : <RefreshCw size={15} />}
               </IconButton>
             </div>
           </div>
@@ -366,11 +374,6 @@ export function OverviewView({
                 onGranularityChange={setGranularityOverride}
               />
               {analytics.warnings.length ? <p className="overviewAnalyticsWarning">{analytics.warnings.length} transcript files could not be fully analyzed.</p> : null}
-              {analytics.coverage.indexingSessions > 0 ? (
-                <p className="overviewAnalyticsWarning">
-                  Indexing {analytics.coverage.indexingSessions.toLocaleString()} older sessions in the background.
-                </p>
-              ) : null}
             </>
           ) : analyticsRevisionError ? null : showAnalyticsLoading ? null : (
             <>
@@ -396,12 +399,12 @@ export function OverviewView({
           <section className="overviewPane" aria-labelledby="overview-sessions-title">
             <div className="overviewPaneHeader">
               <h2 id="overview-sessions-title" className="overviewPaneTitle">{dialogCopy.recentSessionsLabel}</h2>
-              <button type="button" className="overviewPaneAction" onClick={() => onNavigate("sessions")}>
+              <button type="button" className="overviewPaneAction" onClick={() => onNavigate(RuntimeDomainKey.Sessions)}>
                 Open sessions
               </button>
             </div>
 
-            {sessionListStatus === "loading" && usage.recentSessions.length === 0 ? (
+            {sessionListStatus === SessionListStatus.Loading && usage.recentSessions.length === 0 ? (
               <SessionsLoadingState />
             ) : usage.recentSessions.length > 0 ? (
               <div className="overviewSessionGrid" aria-label={dialogCopy.recentSessionsLabel}>
@@ -424,15 +427,18 @@ export function OverviewView({
                                 <span className="overviewSessionRowTitle"><SessionTitleText interactive={false} value={displayTitle} /></span>
                               </Tooltip>
                             </span>
-                            <span className="overviewSessionProject">{sessionProject(session)}</span>
+                            <span className="overviewSessionUpdated">{formatRelativeTime(session.updatedAt) || "—"}</span>
                           </span>
                           <span className="overviewSessionMessage">
                             <span className="overviewSessionMessageLabel" role="img" aria-label="User message"><ArrowRight size={13} aria-hidden="true" /></span>
                             <span className="overviewSessionMessageText"><TranscriptLinkText interactive={false} value={preview?.userLast ?? "—"} /></span>
                           </span>
-                          <span className="overviewSessionMessage">
-                            <span className="overviewSessionMessageLabel" role="img" aria-label="Agent reply"><ArrowLeft size={13} aria-hidden="true" /></span>
-                            <span className="overviewSessionMessageText"><TranscriptLinkText interactive={false} value={preview?.assistantLast ?? "—"} /></span>
+                          <span className="overviewSessionFooter">
+                            <span className="overviewSessionMessage">
+                              <span className="overviewSessionMessageLabel" role="img" aria-label="Agent reply"><ArrowLeft size={13} aria-hidden="true" /></span>
+                              <span className="overviewSessionMessageText"><TranscriptLinkText interactive={false} value={preview?.assistantLast ?? "—"} /></span>
+                            </span>
+                            <span className="overviewSessionProject">{sessionProject(session)}</span>
                           </span>
                         </button>
                       </ContextMenu.Trigger>
@@ -445,7 +451,7 @@ export function OverviewView({
                   );
                 })}
               </div>
-            ) : sessionListStatus === "error" ? (
+            ) : sessionListStatus === SessionListStatus.Error ? (
               <Toast tone="error" message={sessionListError || "Could not load sessions. Try again."} />
             ) : (
               <p className="overviewQuiet">No sessions found for this agent.</p>
@@ -455,4 +461,4 @@ export function OverviewView({
       </div>
     </section>
   );
-}
+});

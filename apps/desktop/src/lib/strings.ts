@@ -1,3 +1,5 @@
+import { timestampMs } from "./time.ts";
+
 export function basename(value: unknown): string {
   return `${value ?? ""}`.split("/").filter(Boolean).pop() ?? "";
 }
@@ -63,6 +65,28 @@ export function compactDateTime(value: unknown, options: { year?: boolean } = {}
   if (!text) return "";
   const normalized = text.replace(/,\s+/g, " ");
   return normalized.length > 16 ? normalized.slice(0, 16) : normalized;
+}
+
+export function formatRelativeTime(value: unknown, now = Date.now()): string {
+  const timestamp = timestampMs(value);
+  if (timestamp === undefined || !Number.isFinite(now)) return "";
+
+  const elapsedSeconds = Math.round((timestamp - now) / 1000);
+  const absoluteSeconds = Math.abs(elapsedSeconds);
+  if (absoluteSeconds < 60) return "now";
+
+  const units = [
+    [60 * 60 * 24 * 365, "y"],
+    [60 * 60 * 24 * 30, "mo"],
+    [60 * 60 * 24 * 7, "w"],
+    [60 * 60 * 24, "d"],
+    [60 * 60, "h"],
+    [60, "m"],
+  ] as const;
+  const [unitSeconds, unitLabel] = units.find(([seconds]) => absoluteSeconds >= seconds) ?? [60, "m"];
+  const amount = Math.round(absoluteSeconds / unitSeconds);
+  const label = `${amount}${unitLabel}`;
+  return elapsedSeconds < 0 ? `${label} ago` : `in ${label}`;
 }
 
 export function dayGroupKey(value: unknown): string {

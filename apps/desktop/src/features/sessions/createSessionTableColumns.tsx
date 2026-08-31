@@ -1,8 +1,8 @@
 import { Tooltip } from "../../components/shared/Tooltip.tsx";
 import { AlertCircle, ArrowLeft, ArrowRight, Check } from "lucide-react";
 
-import type { ColumnDef } from "../../components/DataTable.types";
-import { friendlyAgent, sessionCacheRate, sessionKind, sessionProject, sessionProjectGroupKey, sessionProjectGroupLabel, sessionResumeLabel, sessionResumeTargetForAgent, sessionResumeTargetForMenu, sortValue, summarizeSessionPreviewRecord, type SessionRecord, type SessionResumeTarget, type SessionResumeState } from "../../lib/index.ts";
+import { ColumnCellVariant, ColumnDataType, type ColumnDef } from "../../components/DataTable.types";
+import { AsyncStatus, friendlyAgent, sessionCacheRate, SessionKind, sessionKind, sessionProject, sessionProjectGroupKey, sessionProjectGroupLabel, sessionResumeLabel, sessionResumeTargetForAgent, sessionResumeTargetForMenu, SessionResumeTarget, SessionSortKey, sortValue, summarizeSessionPreviewRecord, type SessionRecord, type SessionResumeState } from "../../lib/index.ts";
 import { cacheRateTone } from "../../lib/token-style.ts";
 import { AgentBadge } from "../../components/shared/AgentBadge.tsx";
 import { Badge } from "../../components/shared/Badge.tsx";
@@ -41,7 +41,7 @@ export type CreateSessionTableColumnsOptions<T extends SessionTableRow = Session
   resumeSession?: (session: T) => void | Promise<void>;
   resumeState?: (session: T) => SessionResumeState;
   resumeTarget?: SessionResumeTarget;
-  resumeTargetForSession?: (session: T) => Exclude<SessionResumeTarget, "auto"> | undefined;
+  resumeTargetForSession?: (session: T) => Exclude<SessionResumeTarget, SessionResumeTarget.Auto> | undefined;
   keys?: string[];
   widths?: Partial<Record<string, string>>;
 };
@@ -50,7 +50,7 @@ export function createSessionTableColumns<T extends SessionTableRow = SessionTab
   normalizedQuery = "",
   resumeSession,
   resumeState,
-  resumeTarget = "auto",
+  resumeTarget = SessionResumeTarget.Auto,
   resumeTargetForSession,
   keys,
   widths = {},
@@ -58,12 +58,12 @@ export function createSessionTableColumns<T extends SessionTableRow = SessionTab
   const canResume = typeof resumeSession === "function";
   const columns: ColumnDef<T>[] = [
     {
-      key: "title",
+      key: SessionSortKey.Title,
       header: "Session",
-      type: "text",
+      type: ColumnDataType.Text,
       sticky: true,
       sortable: true,
-      sortValue: (session) => sortValue(session as SessionRecord, "title"),
+      sortValue: (session) => sortValue(session as SessionRecord, SessionSortKey.Title),
       width: widths.title ?? "var(--data-freeze-column-width, 360px)",
       render: (session) => {
         const preview = summarizeSessionPreviewRecord(session as SessionRecord);
@@ -75,7 +75,7 @@ export function createSessionTableColumns<T extends SessionTableRow = SessionTab
               <Tooltip content={tooltipTitle} onlyWhenTruncated>
                 <span className="sessionTitleText"><SessionTitleText interactive={false} value={displayTitle} /></span>
               </Tooltip>
-              {sessionKind(session as SessionRecord) === "child" ? <Badge tone="warning" uppercase>Child</Badge> : null}
+              {sessionKind(session as SessionRecord) === SessionKind.Child ? <Badge tone="warning" uppercase>Child</Badge> : null}
             </span>
             {normalizedQuery && session.searchSnippet ? (
               <span className="dataCellSubLine">
@@ -100,12 +100,12 @@ export function createSessionTableColumns<T extends SessionTableRow = SessionTab
       },
     },
     {
-      key: "agent",
+      key: SessionSortKey.Agent,
       header: "Agent",
-      type: "enum",
+      type: ColumnDataType.Enum,
       groupBy: (session) => friendlyAgent(session.agent),
       sortable: true,
-      sortValue: (session) => sortValue(session as SessionRecord, "agent"),
+      sortValue: (session) => sortValue(session as SessionRecord, SessionSortKey.Agent),
       width: widths.agent ?? "78px",
       render: (session) => {
         if (!canResume) {
@@ -115,7 +115,7 @@ export function createSessionTableColumns<T extends SessionTableRow = SessionTab
             </span>
           );
         }
-        const state = resumeState?.(session as T) ?? "idle";
+        const state = resumeState?.(session as T) ?? AsyncStatus.Idle;
         const configuredTarget = sessionResumeTargetForAgent(resumeTarget, session.agent);
         const resolvedTarget = sessionResumeTargetForMenu(configuredTarget, resumeTargetForSession?.(session as T));
         const label = sessionResumeLabel(state, resolvedTarget);
@@ -127,11 +127,11 @@ export function createSessionTableColumns<T extends SessionTableRow = SessionTab
             className="sessionAgentCell sessionAgentButton"
             state={state}
             aria-label={label}
-            aria-disabled={state === "loading" || undefined}
+            aria-disabled={state === AsyncStatus.Loading || undefined}
             data-no-row-click
             onClick={(event) => {
               event.stopPropagation();
-              if (state === "loading") return;
+              if (state === AsyncStatus.Loading) return;
               resumeSession?.(session as T);
             }}
             onKeyDown={(event) => event.stopPropagation()}
@@ -145,63 +145,63 @@ export function createSessionTableColumns<T extends SessionTableRow = SessionTab
       },
     },
     {
-      key: "project",
+      key: SessionSortKey.Project,
       header: "Project",
-      type: "enum",
+      type: ColumnDataType.Enum,
       groupBy: (session) => sessionProjectGroupKey(session as SessionRecord),
       sortable: true,
-      sortValue: (session) => sortValue(session as SessionRecord, "project"),
+      sortValue: (session) => sortValue(session as SessionRecord, SessionSortKey.Project),
       width: widths.project ?? "202px",
       value: (session) => sessionProject(session as SessionRecord),
       groupLabel: sessionProjectGroupLabel,
     },
     {
-      key: "startedAt",
+      key: SessionSortKey.StartedAt,
       header: "Started",
-      type: "date",
+      type: ColumnDataType.Date,
       sortable: true,
-      sortValue: (session) => sortValue(session as SessionRecord, "startedAt"),
+      sortValue: (session) => sortValue(session as SessionRecord, SessionSortKey.StartedAt),
       width: widths.startedAt ?? "104px",
       value: (session) => session.startedLabel,
       title: (session) => session.startedAt,
     },
     {
-      key: "updatedAt",
+      key: SessionSortKey.UpdatedAt,
       header: "Updated",
-      type: "date",
+      type: ColumnDataType.Date,
       sortable: true,
-      sortValue: (session) => sortValue(session as SessionRecord, "updatedAt"),
+      sortValue: (session) => sortValue(session as SessionRecord, SessionSortKey.UpdatedAt),
       width: widths.updatedAt ?? "104px",
       value: (session) => session.updatedLabel,
       title: (session) => session.updatedAt,
     },
     {
-      key: "messages",
+      key: SessionSortKey.Messages,
       header: "Msgs",
-      type: "text",
+      type: ColumnDataType.Text,
       sortable: true,
-      sortValue: (session) => sortValue(session as SessionRecord, "messages"),
+      sortValue: (session) => sortValue(session as SessionRecord, SessionSortKey.Messages),
       width: widths.messages ?? "70px",
-      cell: "number",
+      cell: ColumnCellVariant.Number,
     },
     {
-      key: "turns",
+      key: SessionSortKey.Turns,
       header: "Turns",
-      type: "text",
+      type: ColumnDataType.Text,
       sortable: true,
-      sortValue: (session) => sortValue(session as SessionRecord, "turns"),
+      sortValue: (session) => sortValue(session as SessionRecord, SessionSortKey.Turns),
       width: widths.turns ?? "70px",
-      cell: "number",
+      cell: ColumnCellVariant.Number,
       value: (session) => session.turnCount,
     },
     {
-      key: "cacheRate",
+      key: SessionSortKey.CacheRate,
       header: "Cache",
-      type: "text",
+      type: ColumnDataType.Text,
       sortable: true,
-      sortValue: (session) => sortValue(session as SessionRecord, "cacheRate"),
+      sortValue: (session) => sortValue(session as SessionRecord, SessionSortKey.CacheRate),
       width: widths.cacheRate ?? "70px",
-      cell: "number",
+      cell: ColumnCellVariant.Number,
       render: (session) => {
         const record = session as SessionRecord;
         const rate = sessionCacheRate(record);

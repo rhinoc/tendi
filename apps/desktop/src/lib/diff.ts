@@ -1,13 +1,30 @@
+export enum DiffLineKind {
+  Unchanged = "",
+  Removed = "removed",
+  Added = "added",
+}
+
 export type DiffSegment = { text: string; changed: boolean };
 
 export type DiffLine = {
-  kind: "" | "removed" | "added";
+  kind: DiffLineKind;
   text: string;
   segments?: DiffSegment[];
 };
 
+enum SequenceEditKind {
+  Equal = "equal",
+  Removed = "removed",
+  Added = "added",
+}
+
+enum MergeHunkSource {
+  Local = "local",
+  Incoming = "incoming",
+}
+
 type SequenceEdit<T> = {
-  kind: "equal" | "removed" | "added";
+  kind: SequenceEditKind;
   value: T;
 };
 
@@ -46,7 +63,7 @@ function commonSuffixLength<T>(
 
 function appendEqual<T>(edits: SequenceEdit<T>[], values: readonly T[], start: number, end: number) {
   for (let index = start; index < end; index += 1) {
-    edits.push({ kind: "equal", value: values[index] });
+    edits.push({ kind: SequenceEditKind.Equal, value: values[index] });
   }
 }
 
@@ -54,15 +71,15 @@ function normalizeChangedEditOrder<T>(edits: SequenceEdit<T>[]) {
   const normalized: SequenceEdit<T>[] = [];
   let index = 0;
   while (index < edits.length) {
-    if (edits[index].kind === "equal") {
+    if (edits[index].kind === SequenceEditKind.Equal) {
       normalized.push(edits[index]);
       index += 1;
       continue;
     }
     let end = index;
-    while (end < edits.length && edits[end].kind !== "equal") end += 1;
-    normalized.push(...edits.slice(index, end).filter((edit) => edit.kind === "removed"));
-    normalized.push(...edits.slice(index, end).filter((edit) => edit.kind === "added"));
+    while (end < edits.length && edits[end].kind !== SequenceEditKind.Equal) end += 1;
+    normalized.push(...edits.slice(index, end).filter((edit) => edit.kind === SequenceEditKind.Removed));
+    normalized.push(...edits.slice(index, end).filter((edit) => edit.kind === SequenceEditKind.Added));
     index = end;
   }
   return normalized;
@@ -77,10 +94,10 @@ function coarseSequenceDiff<T>(
   const edits: SequenceEdit<T>[] = [];
   appendEqual(edits, before, 0, prefixLength);
   for (let index = prefixLength; index < before.length - suffixLength; index += 1) {
-    edits.push({ kind: "removed", value: before[index] });
+    edits.push({ kind: SequenceEditKind.Removed, value: before[index] });
   }
   for (let index = prefixLength; index < after.length - suffixLength; index += 1) {
-    edits.push({ kind: "added", value: after[index] });
+    edits.push({ kind: SequenceEditKind.Added, value: after[index] });
   }
   appendEqual(edits, before, before.length - suffixLength, before.length);
   return { edits, bounded: true };
@@ -94,10 +111,10 @@ function sequenceDiff<T>(
 ): SequenceDiffResult<T> {
   if (before.length === 0 && after.length === 0) return { edits: [], bounded: false };
   if (before.length === 0) {
-    return { edits: after.map((value) => ({ kind: "added", value })), bounded: false };
+    return { edits: after.map((value) => ({ kind: SequenceEditKind.Added, value })), bounded: false };
   }
   if (after.length === 0) {
-    return { edits: before.map((value) => ({ kind: "removed", value })), bounded: false };
+    return { edits: before.map((value) => ({ kind: SequenceEditKind.Removed, value })), bounded: false };
   }
 
   const prefixLength = commonPrefixLength(before, after, equals);
@@ -165,29 +182,29 @@ function sequenceDiff<T>(
     const previousX = previous[offset + previousDiagonal];
     const previousY = previousX - previousDiagonal;
     while (x > previousX && y > previousY) {
-      middleEdits.push({ kind: "equal", value: before[prefixLength + x - 1] });
+      middleEdits.push({ kind: SequenceEditKind.Equal, value: before[prefixLength + x - 1] });
       x -= 1;
       y -= 1;
     }
     if (x === previousX) {
-      middleEdits.push({ kind: "added", value: after[prefixLength + y - 1] });
+      middleEdits.push({ kind: SequenceEditKind.Added, value: after[prefixLength + y - 1] });
       y -= 1;
     } else {
-      middleEdits.push({ kind: "removed", value: before[prefixLength + x - 1] });
+      middleEdits.push({ kind: SequenceEditKind.Removed, value: before[prefixLength + x - 1] });
       x -= 1;
     }
   }
   while (x > 0 && y > 0) {
-    middleEdits.push({ kind: "equal", value: before[prefixLength + x - 1] });
+    middleEdits.push({ kind: SequenceEditKind.Equal, value: before[prefixLength + x - 1] });
     x -= 1;
     y -= 1;
   }
   while (x > 0) {
-    middleEdits.push({ kind: "removed", value: before[prefixLength + x - 1] });
+    middleEdits.push({ kind: SequenceEditKind.Removed, value: before[prefixLength + x - 1] });
     x -= 1;
   }
   while (y > 0) {
-    middleEdits.push({ kind: "added", value: after[prefixLength + y - 1] });
+    middleEdits.push({ kind: SequenceEditKind.Added, value: after[prefixLength + y - 1] });
     y -= 1;
   }
   middleEdits.reverse();
@@ -211,8 +228,6 @@ export function inlineDiffSegments(before: string, after: string): { removed: Di
   const afterChars = [...after];
   const removed: DiffSegment[] = [];
   const added: DiffSegment[] = [];
-  let beforeIndex = 0;
-  let afterIndex = 0;
   const pushSegment = (segments: DiffSegment[], text: string, changed: boolean) => {
     if (!text) return;
     const last = segments[segments.length - 1];
@@ -220,10 +235,10 @@ export function inlineDiffSegments(before: string, after: string): { removed: Di
     else segments.push({ text, changed });
   };
   for (const edit of sequenceDiff(beforeChars, afterChars, Object.is, MAX_INLINE_DIFF_WORK).edits) {
-    if (edit.kind === "equal") {
+    if (edit.kind === SequenceEditKind.Equal) {
       pushSegment(removed, edit.value, false);
       pushSegment(added, edit.value, false);
-    } else if (edit.kind === "removed") {
+    } else if (edit.kind === SequenceEditKind.Removed) {
       pushSegment(removed, edit.value, true);
     } else {
       pushSegment(added, edit.value, true);
@@ -270,8 +285,8 @@ export function addInlineDiffSegments(lines: DiffLine[]): DiffLine[] {
     let cursor = index;
     while (result[cursor]?.kind) cursor += 1;
     const hunk = result.slice(index, cursor);
-    const removedLines = hunk.filter((line) => line.kind === "removed");
-    const unmatchedAddedLines = hunk.filter((line) => line.kind === "added");
+    const removedLines = hunk.filter((line) => line.kind === DiffLineKind.Removed);
+    const unmatchedAddedLines = hunk.filter((line) => line.kind === DiffLineKind.Added);
 
     for (const removedLine of removedLines) {
       let bestMatch: DiffLine | null = null;
@@ -304,11 +319,11 @@ export function addInlineDiffSegments(lines: DiffLine[]): DiffLine[] {
 export function diffPreview(before: string, after: string): DiffLine[] {
   const beforeLines = before.split("\n");
   const afterLines = after.split("\n");
-  if (before === after) return afterLines.map((text) => ({ kind: "", text }));
+  if (before === after) return afterLines.map((text) => ({ kind: DiffLineKind.Unchanged, text }));
 
   const result = sequenceDiff(beforeLines, afterLines, Object.is);
   const lines = result.edits.map((edit) => ({
-    kind: edit.kind === "equal" ? "" : edit.kind === "removed" ? "removed" : "added",
+    kind: edit.kind === SequenceEditKind.Equal ? DiffLineKind.Unchanged : edit.kind === SequenceEditKind.Removed ? DiffLineKind.Removed : DiffLineKind.Added,
     text: edit.value,
   } as DiffLine));
   return result.bounded ? markChangedLines(lines) : addInlineDiffSegments(lines);
@@ -322,7 +337,7 @@ export function currentLineDiffMap(before: string, after: string) {
   let pendingRemoved: DiffLine[] = [];
 
   for (const line of diffLines) {
-    if (line.kind === "removed") {
+    if (line.kind === DiffLineKind.Removed) {
       pendingRemoved.push(line);
       continue;
     }
@@ -368,10 +383,10 @@ function changedHunks(base: string[], variant: string): MergeHunk[] {
     replacement = [];
   };
   for (const line of diffPreview(base.join("\n"), variant)) {
-    if (line.kind === "") {
+    if (line.kind === DiffLineKind.Unchanged) {
       finish();
       baseIndex += 1;
-    } else if (line.kind === "removed") {
+    } else if (line.kind === DiffLineKind.Removed) {
       if (start < 0) start = baseIndex;
       baseIndex += 1;
     } else {
@@ -392,8 +407,8 @@ function hunksOverlap(left: MergeHunk, right: MergeHunk) {
 
 function mergeHunkGroups(local: MergeHunk[], incoming: MergeHunk[]) {
   const all = [
-    ...local.map((hunk) => ({ ...hunk, source: "local" as const })),
-    ...incoming.map((hunk) => ({ ...hunk, source: "incoming" as const })),
+    ...local.map((hunk) => ({ ...hunk, source: MergeHunkSource.Local })),
+    ...incoming.map((hunk) => ({ ...hunk, source: MergeHunkSource.Incoming })),
   ].sort((left, right) => left.start - right.start || left.end - right.end);
   const groups: typeof all[number][][] = [];
   for (const hunk of all) {
@@ -439,14 +454,14 @@ export function mergeThreeWay(baseContent: string, localContent: string, incomin
     const start = Math.min(...group.map((hunk) => hunk.start));
     const end = Math.max(...group.map((hunk) => hunk.end));
     merged.push(...base.slice(cursor, start));
-    const belongsToGroup = (hunk: MergeHunk, source: "local" | "incoming") => group.some(
+    const belongsToGroup = (hunk: MergeHunk, source: MergeHunkSource) => group.some(
       (member) => member.source === source
         && member.start === hunk.start
         && member.end === hunk.end
         && member.replacement.join("\n") === hunk.replacement.join("\n"),
     );
-    const local = renderHunks(base, start, end, localHunks.filter((hunk) => belongsToGroup(hunk, "local")));
-    const incoming = renderHunks(base, start, end, incomingHunks.filter((hunk) => belongsToGroup(hunk, "incoming")));
+    const local = renderHunks(base, start, end, localHunks.filter((hunk) => belongsToGroup(hunk, MergeHunkSource.Local)));
+    const incoming = renderHunks(base, start, end, incomingHunks.filter((hunk) => belongsToGroup(hunk, MergeHunkSource.Incoming)));
     const original = base.slice(start, end);
     if (local.join("\n") === incoming.join("\n")) {
       merged.push(...local);

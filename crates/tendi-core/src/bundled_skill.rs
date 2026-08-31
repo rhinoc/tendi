@@ -14,6 +14,7 @@ use crate::{
 };
 
 const SKILL_NAME: &str = "tendi";
+pub const INSTALL_SOURCE: &str = "tendi://bundled";
 const SKILL_MARKDOWN: &str = include_str!("../../../skills/tendi/SKILL.md");
 const GUIDE_MARKDOWN: &str = include_str!("../../../skill-guides/tendi.md");
 const PROMPT_MARKER: &str = "bundled-skill-prompt-v1";
@@ -49,6 +50,19 @@ pub struct BundledSkillInstallReport {
 
 pub fn guide_markdown() -> &'static str {
     GUIDE_MARKDOWN
+}
+
+pub fn install_source_path() -> Result<PathBuf> {
+    let db = default_db_path()?;
+    let parent = db.parent().context("Tendi data directory is unavailable")?;
+    let source = parent.join("sources/tendi-bundled");
+    for (relative, content) in desired_files(AgentKind::Shared) {
+        let path = source.join(relative);
+        if read_optional(&path)?.is_none() {
+            atomic_write(&path, content)?;
+        }
+    }
+    Ok(source)
 }
 
 pub fn status(agent: AgentKind) -> Result<BundledSkillStatus> {

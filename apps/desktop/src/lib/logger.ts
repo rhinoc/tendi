@@ -1,6 +1,11 @@
 import { invoke } from "@tauri-apps/api/core";
 
-export type LogLevel = "debug" | "info" | "warn" | "error";
+export enum LogLevel {
+  Debug = "debug",
+  Info = "info",
+  Warn = "warn",
+  Error = "error",
+}
 export type LogFields = Record<string, unknown>;
 
 type TauriWindow = Window & {
@@ -20,16 +25,16 @@ let pending = Promise.resolve();
 
 export const logger = {
   debug(message: string, fields?: LogFields): void {
-    enqueue({ level: "debug", message, fields: fields ?? {} });
+    enqueue({ level: LogLevel.Debug, message, fields: fields ?? {} });
   },
   info(message: string, fields?: LogFields): void {
-    enqueue({ level: "info", message, fields: fields ?? {} });
+    enqueue({ level: LogLevel.Info, message, fields: fields ?? {} });
   },
   warn(message: string, fields?: LogFields): void {
-    enqueue({ level: "warn", message, fields: fields ?? {} });
+    enqueue({ level: LogLevel.Warn, message, fields: fields ?? {} });
   },
   error(message: string, fields?: LogFields): void {
-    enqueue({ level: "error", message, fields: fields ?? {} });
+    enqueue({ level: LogLevel.Error, message, fields: fields ?? {} });
   },
 };
 

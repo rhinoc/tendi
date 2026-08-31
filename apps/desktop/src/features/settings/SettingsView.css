@@ -63,6 +63,12 @@
   padding-inline: 16px;
 }
 
+.settingsUpdateActions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
 .settingsApplicationPair {
   display: grid;
   grid-template-columns: minmax(0, 1fr);
@@ -306,25 +312,48 @@
 }
 
 .settingsAgentRow {
-  display: flex;
+  display: grid;
+  grid-template-columns: 120px minmax(0, 1fr);
   align-items: center;
-  gap: 8px;
+  column-gap: 10px;
+}
+
+.settingsAgentRows {
+  display: grid;
+  gap: 10px;
 }
 
 .settingsAgentStatus {
   min-width: 0;
-  flex: 1;
-  display: flex;
-  align-items: center;
-  justify-content: flex-start;
-  gap: 10px;
+  display: contents;
   color: var(--muted);
 }
 
 .settingsAgentStatus strong {
-  flex: 0 0 92px;
+  grid-column: 1;
+  grid-row: 1;
   color: var(--text);
   font-size: var(--text-sm);
+}
+
+.settingsAgentControls {
+  grid-column: 2;
+  grid-row: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.settingsAgentState {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  color: var(--muted);
+}
+
+.settingsAgentState:empty {
+  display: none;
 }
 
 .settingsAgentInstalled {
@@ -336,8 +365,14 @@
   display: flex;
   flex-wrap: wrap;
   align-items: center;
+  justify-content: center;
   gap: 8px;
   flex: 0 0 auto;
+}
+
+.settingsAgentAction {
+  width: 112px;
+  min-width: 112px;
 }
 
 .settingsProjectScanActions {
@@ -374,6 +409,7 @@
 }
 
 .settingsProjectsPopoverHeader {
+  flex: 0 0 auto;
   display: flex;
   align-items: center;
   justify-content: space-between;

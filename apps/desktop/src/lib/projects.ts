@@ -1,4 +1,4 @@
-import type { ColumnDef } from "../components/DataTable.types";
+import { ColumnDataType, type ColumnDef } from "../components/DataTable.types";
 import { logger } from "./logger.ts";
 
 export type ProjectSummary = {
@@ -10,7 +10,11 @@ export type ProjectSummary = {
   lastScannedAt?: string | null;
 };
 
-export type MissingSessionProjectPolicy = "show" | "hide" | "merge-by-name";
+export enum MissingSessionProjectPolicy {
+  Show = "show",
+  Hide = "hide",
+  MergeByName = "merge-by-name",
+}
 
 export type SessionProjectSummary = {
   id: string;
@@ -20,9 +24,9 @@ export type SessionProjectSummary = {
 };
 
 export function normalizeMissingSessionProjectPolicy(value: unknown): MissingSessionProjectPolicy {
-  if (value === "hide") return "hide";
-  if (value === "merge-by-name") return "merge-by-name";
-  return "show";
+  if (value === MissingSessionProjectPolicy.Hide) return MissingSessionProjectPolicy.Hide;
+  if (value === MissingSessionProjectPolicy.MergeByName) return MissingSessionProjectPolicy.MergeByName;
+  return MissingSessionProjectPolicy.Show;
 }
 
 export function sessionProjectOptionForPaths(
@@ -41,8 +45,8 @@ export function sessionProjectOptionForPaths(
   const summary = sessionProjects.find((project) => (
     session.logicalProjectId && project.id.trim() === session.logicalProjectId.trim()
   ) || (session.workspacePath && (project.paths ?? []).some((path) => normalizedPath(path) === normalizedPath(session.workspacePath ?? ""))));
-  if (summary?.missing && policy === "hide") return null;
-  if (policy !== "merge-by-name") return { key: session.key, label: session.label, title: session.title };
+  if (summary?.missing && policy === MissingSessionProjectPolicy.Hide) return null;
+  if (policy !== MissingSessionProjectPolicy.MergeByName) return { key: session.key, label: session.label, title: session.title };
 
   const normalizedName = session.label.trim().toLocaleLowerCase();
   const sameNameProjects = projects.filter((project) => {
@@ -109,7 +113,7 @@ export function scopeColumn<TRow>(projects: readonly ProjectSummary[], getPath: 
     key: "scope",
     header: "Scope",
     label: "Scope",
-    type: "enum",
+    type: ColumnDataType.Enum,
     width: "128px",
     sortable: true,
     sortValue: (row) => scopeNameForPath(getPath(row), projects).toLowerCase(),

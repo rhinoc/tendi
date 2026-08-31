@@ -37,6 +37,17 @@ pub struct AgentConfigContent {
     pub updated_at: Option<String>,
 }
 
+/// Successful saves omit echoed content; callers already hold the bytes.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentConfigWriteResult {
+    pub path: PathBuf,
+    pub sha256: String,
+    pub exists: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub updated_at: Option<String>,
+}
+
 #[derive(Debug)]
 pub struct ConfigChangedError {
     pub current: AgentConfigContent,
@@ -65,7 +76,7 @@ pub fn save_agent_config(
     path: &Path,
     expected_sha256: &str,
     content: &str,
-) -> Result<AgentConfigContent> {
+) -> Result<AgentConfigWriteResult> {
     let home = dirs::home_dir().context("home directory is unavailable")?;
     let config = resolve_config_for_path(&home, path)?;
     save_config(&config, expected_sha256, content)
@@ -80,7 +91,7 @@ pub fn create_config_profile(
     agent: AgentKind,
     name: &str,
     content: &str,
-) -> Result<AgentConfigContent> {
+) -> Result<AgentConfigFile> {
     let home = dirs::home_dir().context("home directory is unavailable")?;
     create_profile_for_roots(agent, &home, name, content)
 }
@@ -104,11 +115,6 @@ pub fn validate_profile_name(name: &str) -> Result<()> {
         bail!("invalid config profile name; use letters, numbers, hyphens, or underscores");
     }
     Ok(())
-}
-
-#[cfg(test)]
-fn configs_for_home(home: &Path) -> Vec<AgentConfigFile> {
-    configs_for_roots(home)
 }
 
 fn configs_for_environment(home: &Path) -> Vec<AgentConfigFile> {
@@ -232,7 +238,7 @@ fn save_config_from_home(
     path: &Path,
     expected_sha256: &str,
     content: &str,
-) -> Result<AgentConfigContent> {
+) -> Result<AgentConfigWriteResult> {
     let config = resolve_config_for_path(home, path)?;
     save_config(&config, expected_sha256, content)
 }
@@ -241,7 +247,7 @@ fn save_config(
     config: &AgentConfigFile,
     expected_sha256: &str,
     content: &str,
-) -> Result<AgentConfigContent> {
+) -> Result<AgentConfigWriteResult> {
     let current = if config.path.is_file() {
         fs::read_to_string(&config.path)
             .with_context(|| format!("failed to read {}", config.path.display()))?
@@ -257,9 +263,8 @@ fn save_config(
     validate_config(&config.format, content)?;
     atomic_write(&config.path, content)?;
     let updated_at = file_updated_at(&config.path);
-    Ok(AgentConfigContent {
+    Ok(AgentConfigWriteResult {
         path: config.path.clone(),
-        content: content.to_string(),
         sha256: sha256_text(content),
         exists: true,
         updated_at,
@@ -288,7 +293,7 @@ fn create_profile_for_roots(
     home: &Path,
     name: &str,
     content: &str,
-) -> Result<AgentConfigContent> {
+) -> Result<AgentConfigFile> {
     let format = crate::providers::agent_provider(agent)
         .config_profile_format()
         .ok_or_else(|| anyhow::anyhow!("config profiles are not supported for this agent"))?;
@@ -298,14 +303,10 @@ fn create_profile_for_roots(
         bail!("config profile already exists: {name}");
     }
     atomic_write(&path, content)?;
-    let updated_at = file_updated_at(&path);
-    Ok(AgentConfigContent {
-        path,
-        content: content.to_string(),
-        sha256: sha256_text(content),
-        exists: true,
-        updated_at,
-    })
+    let mut config = resolve_config_for_path(home, &path)?;
+    config.exists = true;
+    config.updated_at = file_updated_at(&config.path);
+    Ok(config)
 }
 
 fn file_updated_at(path: &Path) -> Option<String> {
@@ -479,7 +480,11 @@ mod tests {
         let content = "# profile comment\nmodel = \"one\"\n";
         let created = create_profile_for_roots(AgentKind::Codex, &home, "deep-review", content)
             .expect("valid profile should be created");
-        assert_eq!(created.content, content);
+        assert_eq!(
+            created.path,
+            codex_home.join("deep-review.config.toml")
+        );
+        assert!(created.exists);
         assert_eq!(
             fs::read_to_string(codex_home.join("deep-review.config.toml"))
                 .expect("profile should be readable"),

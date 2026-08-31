@@ -16,7 +16,6 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tauri::{
     ActivationPolicy, Emitter, Manager, RunEvent,
@@ -26,6 +25,7 @@ use tauri::{
 use tauri::{LogicalPosition, TitleBarStyle};
 use tauri_plugin_updater::UpdaterExt;
 use tendi_core::AgentKind;
+use tendi_core::generated::runtime_contract as runtime_schema;
 
 struct DaemonState {
     daemon: Arc<tendi_daemon::Daemon>,
@@ -37,6 +37,13 @@ const UPDATE_AVAILABLE_EVENT: &str = "tendi://update-available";
 
 struct UpdateState {
     operation_in_flight: Arc<AtomicBool>,
+}
+
+fn runtime_cli_status(
+    status: cli_registration::CliInstallStatus,
+) -> Result<runtime_schema::CliInstallStatus, String> {
+    serde_json::from_value(serde_json::to_value(status).map_err(|error| error.to_string())?)
+        .map_err(|error| error.to_string())
 }
 
 impl Default for UpdateState {
@@ -66,20 +73,13 @@ fn begin_update_operation(operation_in_flight: Arc<AtomicBool>) -> Option<Update
         })
 }
 
-#[derive(Clone, Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct UpdateCheckResult {
-    status: &'static str,
-    version: Option<String>,
-    body: Option<String>,
-}
-
 #[tauri::command]
-async fn cli_status() -> Result<cli_registration::CliInstallStatus, String> {
-    tauri::async_runtime::spawn_blocking(cli_registration::status)
+async fn cli_status() -> Result<runtime_schema::CliInstallStatus, String> {
+    let status = tauri::async_runtime::spawn_blocking(cli_registration::status)
         .await
         .map_err(|error| error.to_string())?
-        .map_err(|error| error.to_string())
+        .map_err(|error| error.to_string())?;
+    runtime_cli_status(status)
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -125,43 +125,45 @@ fn app_icon_set(app: tauri::AppHandle, icon: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-async fn cli_install() -> Result<cli_registration::CliInstallStatus, String> {
-    tauri::async_runtime::spawn_blocking(cli_registration::install)
+async fn cli_install() -> Result<runtime_schema::CliInstallStatus, String> {
+    let status = tauri::async_runtime::spawn_blocking(cli_registration::install)
         .await
         .map_err(|error| error.to_string())?
-        .map_err(|error| error.to_string())
+        .map_err(|error| error.to_string())?;
+    runtime_cli_status(status)
 }
 
 #[tauri::command]
-async fn cli_remove() -> Result<cli_registration::CliInstallStatus, String> {
-    tauri::async_runtime::spawn_blocking(cli_registration::remove)
+async fn cli_remove() -> Result<runtime_schema::CliInstallStatus, String> {
+    let status = tauri::async_runtime::spawn_blocking(cli_registration::remove)
         .await
         .map_err(|error| error.to_string())?
-        .map_err(|error| error.to_string())
+        .map_err(|error| error.to_string())?;
+    runtime_cli_status(status)
 }
 
 async fn check_for_updates_inner(
     app: tauri::AppHandle,
     operation_in_flight: Arc<AtomicBool>,
-) -> Result<UpdateCheckResult, String> {
+) -> Result<runtime_schema::UpdateCheckResult, String> {
     let Some(_operation) = begin_update_operation(operation_in_flight) else {
-        return Ok(UpdateCheckResult {
-            status: "busy",
+        return Ok(runtime_schema::UpdateCheckResult {
+            status: "busy".to_string(),
             version: None,
             body: None,
         });
     };
     let updater = app.updater().map_err(|error| error.to_string())?;
     let Some(update) = updater.check().await.map_err(|error| error.to_string())? else {
-        return Ok(UpdateCheckResult {
-            status: "up-to-date",
+        return Ok(runtime_schema::UpdateCheckResult {
+            status: "up-to-date".to_string(),
             version: None,
             body: None,
         });
     };
 
-    Ok(UpdateCheckResult {
-        status: "available",
+    Ok(runtime_schema::UpdateCheckResult {
+        status: "available".to_string(),
         version: Some(update.version),
         body: update.body,
     })
@@ -171,7 +173,7 @@ async fn check_for_updates_inner(
 async fn check_for_updates(
     app: tauri::AppHandle,
     state: tauri::State<'_, UpdateState>,
-) -> Result<UpdateCheckResult, String> {
+) -> Result<runtime_schema::UpdateCheckResult, String> {
     check_for_updates_inner(app, state.operation_in_flight.clone()).await
 }
 
@@ -179,18 +181,18 @@ async fn check_for_updates(
 async fn install_update(
     app: tauri::AppHandle,
     state: tauri::State<'_, UpdateState>,
-) -> Result<UpdateCheckResult, String> {
+) -> Result<runtime_schema::UpdateCheckResult, String> {
     let Some(_operation) = begin_update_operation(state.operation_in_flight.clone()) else {
-        return Ok(UpdateCheckResult {
-            status: "busy",
+        return Ok(runtime_schema::UpdateCheckResult {
+            status: "busy".to_string(),
             version: None,
             body: None,
         });
     };
     let updater = app.updater().map_err(|error| error.to_string())?;
     let Some(update) = updater.check().await.map_err(|error| error.to_string())? else {
-        return Ok(UpdateCheckResult {
-            status: "up-to-date",
+        return Ok(runtime_schema::UpdateCheckResult {
+            status: "up-to-date".to_string(),
             version: None,
             body: None,
         });
@@ -260,7 +262,7 @@ async fn daemon_invoke(
     state: tauri::State<'_, DaemonState>,
 ) -> Result<serde_json::Value, String> {
     let daemon = Arc::clone(&state.daemon);
-    tauri::async_runtime::spawn_blocking(move || Ok(daemon.handle_json(request)))
+    tauri::async_runtime::spawn_blocking(move || Ok(daemon.handle_json_rpc(request)))
         .await
         .map_err(|error| format!("daemon request failed: {error}"))?
 }
@@ -321,59 +323,43 @@ fn daemon_unsubscribe_events(
     Ok(())
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct SessionResumeRequest {
-    id: String,
-    agent: String,
-    title: Option<String>,
-    project: Option<String>,
-    path: String,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(tag = "status", rename_all = "camelCase")]
-enum SessionResumeResponse {
-    ActiveWriter {
-        lock_path: String,
-    },
-    Launched {
-        agent: AgentKind,
-        terminal: String,
-        command_line: String,
-    },
-}
-
 #[tauri::command(rename_all = "camelCase")]
-async fn session_resume_target(session: SessionResumeRequest) -> Result<String, String> {
+async fn session_resume_target(
+    session: runtime_schema::SessionResumeRequest,
+) -> Result<runtime_schema::SessionResumeTargetResponse, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let agent = parse_agent_result(&session.agent)?;
         let target =
             tendi_core::sessions::infer_session_resume_target(&PathBuf::from(session.path), agent)
                 .unwrap_or("terminal");
-        Ok(target.to_string())
+        Ok(match target {
+            "app" => runtime_schema::SessionResumeTargetResponse::App,
+            _ => runtime_schema::SessionResumeTargetResponse::Terminal,
+        })
     })
     .await
     .map_err(|error| format!("background task failed: {error}"))?
 }
 
 #[tauri::command(rename_all = "camelCase")]
-async fn terminal_app_test(terminal: String) -> Result<serde_json::Value, String> {
+async fn terminal_app_test(
+    terminal: String,
+) -> Result<runtime_schema::TerminalAppTestResponse, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let terminal = terminals::resolve_terminal(&terminal);
         let app_name = terminals::terminal_application_name(&terminal);
         terminals::open_terminal_application(&app_name)?;
-        serde_json::to_value(app_name).map_err(|error| error.to_string())
+        Ok(app_name)
     })
     .await
     .map_err(|error| format!("background task failed: {error}"))?
 }
 
 #[tauri::command(rename_all = "camelCase")]
-async fn editor_app_test(editor: String) -> Result<serde_json::Value, String> {
+async fn editor_app_test(editor: String) -> Result<runtime_schema::EditorAppTestResponse, String> {
     tauri::async_runtime::spawn_blocking(move || {
         test_editor_command(&editor)?;
-        Ok(serde_json::json!(true))
+        Ok(true)
     })
     .await
     .map_err(|error| format!("background task failed: {error}"))?
@@ -381,8 +367,8 @@ async fn editor_app_test(editor: String) -> Result<serde_json::Value, String> {
 
 #[tauri::command(rename_all = "camelCase")]
 async fn session_resume_in_terminal(
-    session: SessionResumeRequest,
-) -> Result<serde_json::Value, String> {
+    session: runtime_schema::SessionResumeRequest,
+) -> Result<runtime_schema::SessionResumeResponse, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let agent = parse_agent_result(&session.agent)?;
         let path = PathBuf::from(session.path);
@@ -415,10 +401,13 @@ async fn session_resume_in_terminal(
         if let Some(writer) =
             tendi_core::active_session_writer(&record).map_err(|error| format!("{error:#}"))?
         {
-            return serde_json::to_value(SessionResumeResponse::ActiveWriter {
-                lock_path: writer.lock_path.display().to_string(),
-            })
-            .map_err(|error| error.to_string());
+            return Ok(runtime_schema::SessionResumeResponse {
+                status: "activeWriter".to_string(),
+                lock_path: Some(writer.lock_path.display().to_string()),
+                agent: None,
+                terminal: None,
+                command_line: None,
+            });
         }
         let mut plan =
             tendi_core::plan_session_resume(&record).map_err(|error| format!("{error:#}"))?;
@@ -434,12 +423,13 @@ async fn session_resume_in_terminal(
         }
         let terminal = terminals::resolve_terminal(&settings.terminal);
         let command_line = terminals::launch_command_in_terminal(&plan.command, &terminal)?;
-        serde_json::to_value(SessionResumeResponse::Launched {
-            agent: plan.agent,
-            terminal,
-            command_line,
+        Ok(runtime_schema::SessionResumeResponse {
+            status: "launched".to_string(),
+            lock_path: None,
+            agent: Some(plan.agent.label().to_string()),
+            terminal: Some(terminal),
+            command_line: Some(command_line),
         })
-        .map_err(|error| error.to_string())
     })
     .await
     .map_err(|error| format!("background task failed: {error}"))?
@@ -571,7 +561,7 @@ fn reveal_in_finder(path: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn logs_export() -> Result<String, String> {
+fn logs_export() -> Result<runtime_schema::LogsExportResponse, String> {
     match export_logs_archive() {
         Ok((path, file_count)) => {
             tendi_core::logging::global().info(
@@ -849,27 +839,7 @@ pub fn run() {
                 });
             }
         })
-        .invoke_handler(tauri::generate_handler![
-            daemon_invoke,
-            daemon_subscribe_events,
-            daemon_next_event,
-            daemon_unsubscribe_events,
-            cli_status,
-            cli_install,
-            cli_remove,
-            log_event,
-            app_icon_set,
-            terminal_app_test,
-            editor_app_test,
-            session_resume_target,
-            session_resume_in_terminal,
-            logs_export,
-            reveal_in_finder,
-            open_in_editor,
-            open_url,
-            check_for_updates,
-            install_update
-        ])
+        .invoke_handler(include!("generated/tauri_handler.rs"))
         .build(tauri::generate_context!())
         .expect("error while building tendi desktop");
     app.set_activation_policy(ActivationPolicy::Regular);
@@ -879,6 +849,11 @@ pub fn run() {
                 let _ = window.show();
                 activate_native_window(&window);
                 let _ = window.set_focus();
+            }
+        }
+        RunEvent::Exit => {
+            if let Some(state) = app.try_state::<DaemonState>() {
+                state.daemon.shutdown();
             }
         }
         _ => {}

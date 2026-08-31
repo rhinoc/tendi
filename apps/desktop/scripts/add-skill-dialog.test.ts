@@ -4,11 +4,45 @@ import test from "node:test";
 import {
   captureSkillSourcePage,
   isSkillSourceActionReady,
+  normalizeSkillAddPlan,
   resolveSkillInstallTarget,
   restoreSkillSourcePage,
   shouldShowSkillQuickSelect,
   skillSourceErrorMessage,
 } from "../src/lib/add-skill-dialog.ts";
+
+test("keeps a root-level skill whose relative path is empty", () => {
+  const rootSkill = {
+    name: "tendi",
+    description: "Bundled Tendi skill",
+    path: "/tmp/tendi-bundled",
+    relative_path: "",
+    dependencies: [],
+  };
+  const normalized = normalizeSkillAddPlan({
+    source: "/tmp/tendi-bundled",
+    source_kind: "local",
+    source_ref: null,
+    source_root: "/tmp/tendi-bundled",
+    target: "shared",
+    scope: "global",
+    mode: "symlink",
+    available: [rootSkill],
+    selected: [rootSkill],
+    operations: [{
+      name: "tendi",
+      source: "/tmp/tendi-bundled",
+      target: "/tmp/.agents/skills/tendi",
+      mode: "symlink",
+      status: "planned",
+      message: null,
+    }],
+  });
+
+  assert.deepEqual(normalized?.available.map((skill) => skill.name), ["tendi"]);
+  assert.deepEqual(normalized?.selected.map((skill) => skill.name), ["tendi"]);
+  assert.equal(normalized?.available[0]?.relative_path, "");
+});
 
 test("hides the skill quick-select when there are no existing skills", () => {
   assert.equal(shouldShowSkillQuickSelect(7, 0), false);

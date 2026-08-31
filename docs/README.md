@@ -4,7 +4,7 @@ Project documentation is split between user-facing setup and focused implementat
 
 ## User and contributor documentation
 
-- [Project README](../README.md): features, requirements, CLI usage, local data, and validation.
+- [Project README](../README.md): features, requirements, installation, CLI usage, and local data.
 - [Contributing guide](../CONTRIBUTING.md): development setup, checks, coding rules, and pull
   request expectations.
 - [Security policy](../SECURITY.md): private vulnerability reporting and security scope.
@@ -23,7 +23,7 @@ Project documentation is split between user-facing setup and focused implementat
 - [Logging](logging.md): persistent desktop and Rust logs, rotation, environment overrides, and
   the frontend logging rule.
 - [Tauri updater](UPDATER.md): signing keys, release artifacts, `latest.json`, and update behavior.
-- The local DMG workflow is documented in the [project README](../README.md#build-a-macos-dmg)
+- The local DMG workflow is documented in the [contributing guide](../CONTRIBUTING.md#development-setup)
   and implemented by `scripts/build-release.sh` and `scripts/build-dmg.sh`.
 
 The design and audit notes describe current or proposed implementation details. When they differ

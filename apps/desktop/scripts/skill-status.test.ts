@@ -8,7 +8,7 @@ import {
   normalizeSkill,
   type NormalizedSkill,
 } from "../src/lib/skills.ts";
-import { applySkillUpdateReportsToData, countSkillUpdates } from "../src/lib/skill-updates.ts";
+import { applySkillUpdateReportsToData } from "../src/lib/skill-updates.ts";
 import type { RuntimeData } from "../src/lib/data.ts";
 
 function rawSkill(trackingStatus = "checkable"): Record<string, unknown> {
@@ -85,7 +85,7 @@ test("clearing an update changes availability without changing tracking status",
   assert.equal("meta" in cleared.skills[0], false);
 });
 
-test("update count uses remote availability, not tracking status", () => {
+test("update application preserves tracking status", () => {
   const available = applySkillUpdateReports(
     { skills: [normalizedSkill("checkable")] },
     [{ name: "demo", status: "update-available" }],
@@ -100,8 +100,6 @@ test("update count uses remote availability, not tracking status", () => {
     mcp: [],
     sources: [],
   } as RuntimeData;
-
-  assert.equal(countSkillUpdates(data, "All"), 1);
 
   const applied = applySkillUpdateReportsToData(data, [{ name: "local-only", status: "up-to-date" }]);
   assert.equal(applied.skills[1].trackingStatus, "update-available");

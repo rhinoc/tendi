@@ -84,7 +84,7 @@
   z-index: 1;
   display: grid;
   place-items: center;
-  background: var(--editor-bg);
+  background: color-mix(in srgb, var(--editor-bg) 82%, transparent);
 }
 
 .configEditorHeader {

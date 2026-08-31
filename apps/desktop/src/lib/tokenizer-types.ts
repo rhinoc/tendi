@@ -2,6 +2,27 @@ export const TOKENIZER_LABEL = "OpenAI o200k_base";
 export const TOKENIZER_PACKAGE = "gpt-tokenizer";
 export const TOKENIZER_URL = "https://github.com/niieani/gpt-tokenizer";
 
+export enum TokenizerKind {
+  Markdown = "markdown",
+  Transcript = "transcript",
+}
+
+export enum TokenizerWorkerResponseType {
+  Result = "result",
+  Error = "error",
+}
+
+export enum TokenUsageSource {
+  Estimated = "estimated",
+  Reported = "reported",
+}
+
+export enum TokenEstimateStatus {
+  Loading = "loading",
+  Ready = "ready",
+  Error = "error",
+}
+
 export type MarkdownTokenStats = {
   file: number;
   selection: number;

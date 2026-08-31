@@ -12,6 +12,7 @@ use serde_json::Value;
 
 use crate::{
     sessions::SessionRecord,
+    runtime_contract::ScopeKey,
     skills::{AgentKind, SkillScan},
     storage::Store,
 };
@@ -85,7 +86,11 @@ pub(crate) struct Evidence {
     pub(crate) time: Option<String>,
 }
 
-pub fn run_index(cwd: &Path, force: bool) -> Result<SessionSkillIndexReport> {
+pub fn run_index_for_scope(
+    cwd: &Path,
+    scope_key: &ScopeKey,
+    force: bool,
+) -> Result<SessionSkillIndexReport> {
     let store = Store::open_default()?;
     let (skill_scan, source_migrations, persist_skill_scan) =
         if let Some(skill_scan) = store.list_skills_for_workspace(cwd)? {
@@ -94,16 +99,19 @@ pub fn run_index(cwd: &Path, force: bool) -> Result<SessionSkillIndexReport> {
             let scanned = crate::skills::scan_skills_synced_for_projection(cwd)?;
             (scanned.scan, scanned.source_migrations, true)
         };
-    let session_scan = store.list_sessions()?;
+    let session_scan = store.list_sessions_for_scope(scope_key)?;
 
     store.with_database_write_lock_retry(|| {
         if persist_skill_scan {
             store.insert_skill_source_records_if_missing(&source_migrations)?;
-            store.save_skills(&skill_scan)?;
+            store.save_skills_for_workspace(cwd, &skill_scan)?;
         }
-        store.ensure_session_skill_index_version(SESSION_SKILL_INDEX_VERSION)?;
+        store.ensure_session_skill_index_version_for_scope(
+            scope_key,
+            SESSION_SKILL_INDEX_VERSION,
+        )?;
         if force {
-            store.clear_session_skill_index()?;
+            store.clear_session_skill_index_for_scope(scope_key)?;
         }
         Ok(())
     })?;
@@ -119,7 +127,8 @@ pub fn run_index(cwd: &Path, force: bool) -> Result<SessionSkillIndexReport> {
             Err(err) => {
                 failed += 1;
                 store.with_database_write_lock_retry(|| {
-                    store.mark_session_skill_index_failed(
+                    store.mark_session_skill_index_failed_for_scope(
+                        scope_key,
                         session,
                         0,
                         0,
@@ -131,7 +140,12 @@ pub fn run_index(cwd: &Path, force: bool) -> Result<SessionSkillIndexReport> {
         };
 
         if !force
-            && store.session_skill_index_is_current(session, state.file_mtime, state.file_size)?
+            && store.session_skill_index_is_current_for_scope(
+                scope_key,
+                session,
+                state.file_mtime,
+                state.file_size,
+            )?
         {
             skipped += 1;
             continue;
@@ -140,14 +154,15 @@ pub fn run_index(cwd: &Path, force: bool) -> Result<SessionSkillIndexReport> {
         match extract_session_skill_links(session, &lookup) {
             Ok(links) => {
                 store.with_database_write_lock_retry(|| {
-                    store.replace_session_skill_links(session, &state, &links)
+                    store.replace_session_skill_links_for_scope(scope_key, session, &state, &links)
                 })?;
                 parsed += 1;
             }
             Err(err) => {
                 failed += 1;
                 store.with_database_write_lock_retry(|| {
-                    store.mark_session_skill_index_failed(
+                    store.mark_session_skill_index_failed_for_scope(
+                        scope_key,
                         session,
                         state.file_mtime,
                         state.file_size,
@@ -158,7 +173,7 @@ pub fn run_index(cwd: &Path, force: bool) -> Result<SessionSkillIndexReport> {
         }
     }
 
-    let status = store.session_skill_index_status(false)?;
+    let status = store.session_skill_index_status_for_scope(scope_key, false)?;
     Ok(SessionSkillIndexReport {
         status,
         parsed,
@@ -790,11 +805,15 @@ mod tests {
             roots: Vec::new(),
             warnings: Vec::new(),
             skills: vec![SkillRecord {
+                id: name.to_string(),
+                installation_id: name.to_string(),
                 name: name.to_string(),
                 description: None,
                 tags: Vec::new(),
                 dependencies: Vec::new(),
                 dependents: Vec::new(),
+                dependency_ids: Vec::new(),
+                dependent_ids: Vec::new(),
                 visibility: SkillVisibility::Auto,
                 agents: vec![agent],
                 paths: vec![SkillPath {

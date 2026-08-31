@@ -9,6 +9,7 @@ use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use toml::Value as TomlValue;
+use toml_edit::{ArrayOfTables, DocumentMut, Item, Table, TableLike, Value as EditValue};
 
 use crate::{
     fsutil::{atomic_write, sha256_file, sha256_text},
@@ -46,7 +47,7 @@ pub struct HookRecord {
     pub(crate) provider_current_hash: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct HookScan {
     pub hooks: Vec<HookRecord>,
     pub warnings: Vec<String>,
@@ -254,17 +255,17 @@ pub fn delete_hooks(requests: Vec<HookDeleteRequest>) -> Result<()> {
     }
 
     let mut committed = Vec::new();
-    for (path, before, after) in &writes {
-        let current = fs::read_to_string(path)?;
-        if current != *before {
+    for (path, before, after) in writes {
+        let current = fs::read_to_string(&path)?;
+        if current != before {
             rollback_hook_writes(&committed)?;
             bail!("hook source changed");
         }
-        if let Err(error) = atomic_write(path, after) {
+        if let Err(error) = atomic_write(&path, &after) {
             rollback_hook_writes(&committed)?;
             return Err(error);
         }
-        committed.push((path.clone(), before.clone()));
+        committed.push((path, before));
     }
     Ok(())
 }
@@ -278,16 +279,76 @@ fn rollback_hook_writes(committed: &[(PathBuf, String)]) -> Result<()> {
 }
 
 pub fn set_hook_enabled(request: HookSetEnabledRequest) -> Result<()> {
+    set_hooks_enabled(vec![request])
+}
+
+pub fn set_hooks_enabled(requests: Vec<HookSetEnabledRequest>) -> Result<()> {
+    if requests.is_empty() {
+        return Ok(());
+    }
     let _mutation = lock_hook_mutation()?;
-    ensure_deletable_hook_path(request.agent, &request.path)?;
-    let text = fs::read_to_string(&request.path)?;
-    if sha256_text(&text) != request.expected_trust_hash {
-        bail!("hook source changed");
+    let mut requests_by_path = HashMap::<PathBuf, Vec<HookSetEnabledRequest>>::new();
+    for request in requests {
+        ensure_deletable_hook_path(request.agent, &request.path)?;
+        requests_by_path
+            .entry(request.path.clone())
+            .or_default()
+            .push(request);
     }
 
-    let after =
-        crate::providers::agent_provider(request.agent).set_hook_enabled(&request, &text)?;
-    atomic_write(&request.path, &after)
+    let mut committed = Vec::new();
+    for (path, path_requests) in requests_by_path {
+        let before = fs::read_to_string(&path)
+            .with_context(|| format!("failed to read hook source {}", path.display()))?;
+        let current_hash = sha256_text(&before);
+        for request in &path_requests {
+            if request.expected_trust_hash != current_hash {
+                if let Err(error) = rollback_hook_writes(&committed) {
+                    bail!(
+                        "hook source changed for {}; also failed to roll back prior writes: {error:#}",
+                        path.display()
+                    );
+                }
+                bail!("hook source changed");
+            }
+        }
+
+        let mut after = before.clone();
+        for request in &path_requests {
+            after = crate::providers::agent_provider(request.agent)
+                .set_hook_enabled(request, &after)
+                .map_err(|error| {
+                    let _ = rollback_hook_writes(&committed);
+                    error
+                })?;
+        }
+        atomic_write(&path, &after).map_err(|error| {
+            let _ = rollback_hook_writes(&committed);
+            error
+        })?;
+        committed.push((path, before));
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct HookMutationDelta {
+    pub updated: Vec<HookRecord>,
+    pub deleted: Vec<HookRecord>,
+}
+
+pub fn hooks_matching_delete_requests<'a>(
+    hooks: &'a [HookRecord],
+    requests: &[HookDeleteRequest],
+) -> Vec<&'a HookRecord> {
+    hooks
+        .iter()
+        .filter(|hook| {
+            requests
+                .iter()
+                .any(|request| hook_matches_delete_request(hook, request))
+        })
+        .collect()
 }
 
 fn hook_matches_delete_request(hook: &HookRecord, request: &HookDeleteRequest) -> bool {
@@ -303,9 +364,8 @@ fn hook_matches_delete_request(hook: &HookRecord, request: &HookDeleteRequest) -
         && hook.status_message == request.status_message
 }
 
-fn hook_matches_set_enabled_request(hook: &HookRecord, request: &HookSetEnabledRequest) -> bool {
+fn hook_matches_set_enabled_identity(hook: &HookRecord, request: &HookSetEnabledRequest) -> bool {
     hook.path == request.path
-        && hook.trust_hash == request.expected_trust_hash
         && hook.event == request.event
         && hook.matcher == request.matcher
         && hook.hook_type == request.hook_type
@@ -381,20 +441,36 @@ pub fn refresh_hook_scan_after_delete(
 
 pub fn refresh_hook_scan_after_set_enabled(
     cwd: &Path,
-    mut scan: HookScan,
+    scan: HookScan,
     request: &HookSetEnabledRequest,
 ) -> Result<HookScan> {
-    let mut matched = false;
-    for hook in &mut scan.hooks {
-        if hook_matches_set_enabled_request(hook, request) {
-            hook.enabled = request.enabled;
-            matched = true;
+    refresh_hook_scan_after_set_enabled_many(cwd, scan, std::slice::from_ref(request))
+}
+
+pub fn refresh_hook_scan_after_set_enabled_many(
+    cwd: &Path,
+    mut scan: HookScan,
+    requests: &[HookSetEnabledRequest],
+) -> Result<HookScan> {
+    for request in requests {
+        let mut matched = false;
+        for hook in &mut scan.hooks {
+            if hook_matches_set_enabled_identity(hook, request) {
+                hook.enabled = request.enabled;
+                matched = true;
+            }
+        }
+        if !matched {
+            bail!("matching hook was not found");
         }
     }
-    if !matched {
-        bail!("matching hook was not found");
-    }
-    refresh_hook_hashes(cwd, &mut scan.hooks, std::slice::from_ref(&request.path))?;
+    let paths = requests
+        .iter()
+        .map(|request| request.path.clone())
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    refresh_hook_hashes(cwd, &mut scan.hooks, &paths)?;
     Ok(scan)
 }
 
@@ -795,13 +871,7 @@ pub(crate) fn scan_hook_file(
             return;
         }
     };
-    let trust_hash = match sha256_file(path) {
-        Ok(hash) => hash,
-        Err(err) => {
-            warnings.push(format!("{}: {err:#}", path.display()));
-            return;
-        }
-    };
+    let trust_hash = sha256_text(&text);
     if crate::providers::agent_provider(agent).parse_hook_file(path, &trust_hash, hooks, warnings) {
         return;
     }
@@ -819,22 +889,23 @@ pub(crate) fn scan_hook_file(
 
 pub(crate) fn delete_json_hooks(requests: &[HookDeleteRequest], source: &str) -> Result<String> {
     let mut value = serde_json::from_str::<Value>(source)?;
+    let before = value.clone();
     for request in requests {
         if !remove_json_hook_from_value(&mut value, request) {
             bail!("matching hook was not found");
         }
     }
-    Ok(format!("{}\n", serde_json::to_string_pretty(&value)?))
+    crate::json_edit::patch_json_text(source, &before, &value)
 }
 
 pub(crate) fn delete_toml_hooks(requests: &[HookDeleteRequest], source: &str) -> Result<String> {
-    let mut value = toml::from_str::<TomlValue>(source)?;
+    let mut value = source.parse::<DocumentMut>()?;
     for request in requests {
-        if !remove_toml_hook_from_value(&mut value, request) {
+        if !remove_toml_hook_from_document(&mut value, request) {
             bail!("matching hook was not found");
         }
     }
-    Ok(toml::to_string_pretty(&value)?)
+    Ok(crate::fsutil::preserve_newline_style(source, value.to_string()))
 }
 
 pub(crate) fn set_json_hook_enabled(
@@ -842,21 +913,22 @@ pub(crate) fn set_json_hook_enabled(
     source: &str,
 ) -> Result<String> {
     let mut value = serde_json::from_str::<Value>(source)?;
+    let before = value.clone();
     if !set_json_hook_enabled_in_value(&mut value, request) {
         bail!("matching hook was not found");
     }
-    Ok(format!("{}\n", serde_json::to_string_pretty(&value)?))
+    crate::json_edit::patch_json_text(source, &before, &value)
 }
 
 pub(crate) fn set_toml_hook_enabled(
     request: &HookSetEnabledRequest,
     source: &str,
 ) -> Result<String> {
-    let mut value = toml::from_str::<TomlValue>(source)?;
-    if !set_toml_hook_enabled_in_value(&mut value, request) {
+    let mut value = source.parse::<DocumentMut>()?;
+    if !set_toml_hook_enabled_in_document(&mut value, request) {
         bail!("matching hook was not found");
     }
-    Ok(toml::to_string_pretty(&value)?)
+    Ok(crate::fsutil::preserve_newline_style(source, value.to_string()))
 }
 
 pub(crate) fn read_hook_entry(path: &Path, identity: &HookSourceMatch) -> Result<Value> {
@@ -865,7 +937,7 @@ pub(crate) fn read_hook_entry(path: &Path, identity: &HookSourceMatch) -> Result
         Some("json") => serde_json::from_str::<Value>(&text)?,
         Some("toml") => serde_json::to_value(toml::from_str::<TomlValue>(&text)?)?,
         Some("md") => {
-            let (frontmatter, _) = split_yaml_frontmatter(&text)?;
+            let (frontmatter, _, _) = split_yaml_frontmatter(&text)?;
             serde_json::to_value(serde_yaml::from_str::<serde_yaml::Value>(frontmatter)?)?
         }
         _ => bail!("unsupported hook source format"),
@@ -885,22 +957,32 @@ pub(crate) fn merge_hook_entry(
     entry: &Value,
 ) -> Result<String> {
     let extension = path.extension().and_then(|value| value.to_str());
-    let (mut value, body) = match extension {
+    match extension {
         Some("json") => {
-            let value = if path.is_file() {
-                serde_json::from_str::<Value>(&fs::read_to_string(path)?)?
+            let (source, mut value) = if path.is_file() {
+                let source = fs::read_to_string(path)?;
+                (Some(source.clone()), serde_json::from_str::<Value>(&source)?)
             } else {
-                Value::Object(serde_json::Map::new())
+                (None, Value::Object(serde_json::Map::new()))
             };
-            (value, None)
+            let before = value.clone();
+            merge_json_hook_entry(&mut value, identity, entry)?;
+            match source {
+                Some(source) => crate::json_edit::patch_json_text(&source, &before, &value),
+                None => Ok(format!("{}\n", serde_json::to_string_pretty(&value)?)),
+            }
         }
         Some("toml") => {
-            let value = if path.is_file() {
-                serde_json::to_value(toml::from_str::<TomlValue>(&fs::read_to_string(path)?)?)?
+            let (source, mut value) = if path.is_file() {
+                let source = fs::read_to_string(path)?;
+                (Some(source.clone()), source.parse::<DocumentMut>()?)
             } else {
-                Value::Object(serde_json::Map::new())
+                (None, DocumentMut::new())
             };
-            (value, None)
+            merge_toml_hook_entry(&mut value, identity, entry)?;
+            Ok(source.map_or_else(|| value.to_string(), |source| {
+                crate::fsutil::preserve_newline_style(&source, value.to_string())
+            }))
         }
         Some("md") => {
             let text = if path.is_file() {
@@ -908,36 +990,59 @@ pub(crate) fn merge_hook_entry(
             } else {
                 "---\n{}\n---\n".to_string()
             };
-            let (frontmatter, body) = split_yaml_frontmatter(&text)?;
-            let value = serde_json::to_value(serde_yaml::from_str::<serde_yaml::Value>(frontmatter)?)?;
-            (value, Some(body.to_string()))
-        }
-        _ => bail!("unsupported hook source format"),
-    };
-    merge_json_hook_entry(&mut value, identity, entry)?;
-    match extension {
-        Some("json") => Ok(format!("{}\n", serde_json::to_string_pretty(&value)?)),
-        Some("toml") => {
-            let value = TomlValue::try_from(value)
-                .map_err(|error| anyhow::anyhow!("hook entry is not TOML-compatible: {error}"))?;
-            Ok(toml::to_string_pretty(&value)?)
-        }
-        Some("md") => {
-            let yaml = serde_yaml::to_string(&value)?;
-            Ok(format!("---\n{yaml}---{}", body.unwrap_or_default()))
+            let (frontmatter, body, newline) = split_yaml_frontmatter(&text)?;
+            let mut value = serde_json::to_value(serde_yaml::from_str::<serde_yaml::Value>(
+                frontmatter,
+            )?)?;
+            merge_json_hook_entry(&mut value, identity, entry)?;
+            let frontmatter = replace_yaml_hooks_block(frontmatter, &value, newline)?;
+            Ok(format!("---{newline}{frontmatter}{newline}---{body}"))
         }
         _ => unreachable!(),
     }
 }
 
-fn split_yaml_frontmatter(text: &str) -> Result<(&str, &str)> {
-    let rest = text
-        .strip_prefix("---\n")
+fn split_yaml_frontmatter(text: &str) -> Result<(&str, &str, &'static str)> {
+    let (frontmatter, body, newline) = crate::skills::split_frontmatter_raw(text)
         .context("hook markdown source has no YAML frontmatter")?;
-    let end = rest
-        .find("\n---")
-        .context("hook markdown source has an unterminated YAML frontmatter")?;
-    Ok((&rest[..end], &rest[end + 4..]))
+    Ok((frontmatter, body, newline))
+}
+
+fn replace_yaml_hooks_block(
+    frontmatter: &str,
+    value: &Value,
+    newline: &str,
+) -> Result<String> {
+    let rendered = serde_yaml::to_string(&json!({
+        "hooks": value.get("hooks").cloned().unwrap_or(Value::Null),
+    }))?
+    .trim_end_matches('\n')
+    .replace('\n', newline);
+    let lines = frontmatter.split(newline).collect::<Vec<_>>();
+    let mut output = Vec::new();
+    if let Some(start) = lines
+        .iter()
+        .position(|line| {
+            !line.starts_with(' ') && !line.starts_with('\t') && line.starts_with("hooks:")
+        })
+    {
+        output.extend_from_slice(&lines[..start]);
+        let mut end = start + 1;
+        while end < lines.len()
+            && (lines[end].is_empty()
+                || lines[end].starts_with(' ')
+                || lines[end].starts_with('\t'))
+        {
+            end += 1;
+        }
+        output.extend(rendered.split(newline));
+        output.extend_from_slice(&lines[end..]);
+        Ok(output.join(newline))
+    } else if frontmatter.is_empty() {
+        Ok(rendered)
+    } else {
+        Ok(format!("{frontmatter}{newline}{rendered}"))
+    }
 }
 
 fn merge_json_hook_entry(
@@ -990,6 +1095,310 @@ fn merge_json_hook_entry(
         },
     }
     Ok(())
+}
+
+fn merge_toml_hook_entry(
+    document: &mut DocumentMut,
+    identity: &HookSourceMatch,
+    entry: &Value,
+) -> Result<()> {
+    let hook = entry
+        .get("hook")
+        .cloned()
+        .context("hook sync entry is missing its hook payload")?;
+    if !hook.is_object() {
+        bail!("hook sync entry payload must be an object");
+    }
+    let hook_item = toml_item_from_json(&hook)?;
+    let hooks = document
+        .as_table_mut()
+        .entry("hooks")
+        .or_insert(Item::Table(Table::new()))
+        .as_table_like_mut()
+        .context("hook collection must be a TOML table")?;
+    if let Some(specs) = hooks.get_mut(&identity.event) {
+        let lookup = HookSourceMatch {
+            enabled: None,
+            ..identity.clone()
+        };
+        if replace_toml_event_hook(specs, &lookup, None, &hook_item) {
+            return Ok(());
+        }
+    }
+
+    let mut group = Table::new();
+    if let Some(matcher) = &identity.matcher {
+        group.insert("matcher", toml_edit::value(matcher.as_str()));
+    }
+    if identity.enabled == Some(false) && hook.get("enabled").is_none() {
+        group.insert("enabled", toml_edit::value(false));
+    }
+    match hooks.get_mut(&identity.event) {
+        Some(Item::ArrayOfTables(events)) => {
+            group.insert("hooks", Item::ArrayOfTables(single_hook_array(hook_item)?));
+            events.push(group);
+        }
+        Some(Item::Value(EditValue::Array(events))) => {
+            let hook_value = hook_item.into_value().map_err(|_| {
+                anyhow::anyhow!("hook sync entry payload must be a TOML value")
+            })?;
+            let mut hook_values = toml_edit::Array::new();
+            hook_values.push_formatted(hook_value);
+            group.insert("hooks", Item::Value(EditValue::Array(hook_values)));
+            events.push_formatted(EditValue::InlineTable(group.into_inline_table()));
+        }
+        Some(Item::Table(previous)) => {
+            let previous = std::mem::replace(previous, Table::new());
+            let mut events = ArrayOfTables::new();
+            events.push(previous);
+            group.insert("hooks", Item::ArrayOfTables(single_hook_array(hook_item)?));
+            events.push(group);
+            *hooks
+                .get_mut(&identity.event)
+                .expect("TOML event remains present") = Item::ArrayOfTables(events);
+        }
+        Some(item) => {
+            let previous = std::mem::replace(item, Item::None)
+                .into_table()
+                .map_err(|_| anyhow::anyhow!("TOML hook event must be a table or array"))?;
+            let mut events = ArrayOfTables::new();
+            events.push(previous);
+            group.insert("hooks", Item::ArrayOfTables(single_hook_array(hook_item)?));
+            events.push(group);
+            *hooks
+                .get_mut(&identity.event)
+                .expect("TOML event remains present") = Item::ArrayOfTables(events);
+        }
+        None => {
+            group.insert("hooks", Item::ArrayOfTables(single_hook_array(hook_item)?));
+            let mut events = ArrayOfTables::new();
+            events.push(group);
+            hooks.insert(&identity.event, Item::ArrayOfTables(events));
+        }
+    }
+    Ok(())
+}
+
+fn single_hook_array(hook_item: Item) -> Result<ArrayOfTables> {
+    let mut hooks = ArrayOfTables::new();
+    hooks.push(hook_item.into_table().map_err(|_| {
+        anyhow::anyhow!("hook sync entry payload must be a TOML table")
+    })?);
+    Ok(hooks)
+}
+
+fn toml_item_from_json(value: &Value) -> Result<Item> {
+    let value = TomlValue::try_from(value.clone())
+        .map_err(|error| anyhow::anyhow!("hook entry is not TOML-compatible: {error}"))?;
+    Ok(toml_edit::ser::to_document(&value)?.into_item())
+}
+
+fn replace_toml_event_hook(
+    specs: &mut Item,
+    identity: &HookSourceMatch,
+    matcher: Option<String>,
+    replacement: &Item,
+) -> bool {
+    if let Some(array) = specs.as_array_mut() {
+        return array.iter_mut().any(|item| {
+            replace_toml_event_hook_value(item, identity, matcher.clone(), replacement)
+        });
+    }
+    if let Some(array) = specs.as_array_of_tables_mut() {
+        return array.iter_mut().any(|table| {
+            replace_toml_event_hook_table(table, identity, matcher.clone(), replacement)
+        });
+    }
+    let Some(table) = specs.as_table_like_mut() else {
+        return false;
+    };
+    replace_toml_event_hook_table(table, identity, matcher, replacement)
+}
+
+fn replace_toml_event_hook_value(
+    specs: &mut EditValue,
+    identity: &HookSourceMatch,
+    matcher: Option<String>,
+    replacement: &Item,
+) -> bool {
+    if let Some(array) = specs.as_array_mut() {
+        return array.iter_mut().any(|item| {
+            replace_toml_event_hook_value(item, identity, matcher.clone(), replacement)
+        });
+    }
+    let Some(table) = specs.as_inline_table_mut() else {
+        return false;
+    };
+    replace_toml_event_hook_table(table, identity, matcher, replacement)
+}
+
+fn replace_toml_event_hook_table(
+    table: &mut dyn TableLike,
+    identity: &HookSourceMatch,
+    matcher: Option<String>,
+    replacement: &Item,
+) -> bool {
+    let next_matcher = table
+        .get("matcher")
+        .and_then(Item::as_str)
+        .map(str::to_string)
+        .or(matcher);
+    if let Some(nested) = table.get_mut("hooks") {
+        return replace_toml_event_hook(nested, identity, next_matcher, replacement);
+    }
+    if !hook_table_matches_source_request(next_matcher.as_deref(), table, identity) {
+        return false;
+    }
+    let Some(replacement) = replacement.as_table_like() else {
+        return false;
+    };
+    let replacement_items = replacement
+        .iter()
+        .map(|(key, item)| (key.to_string(), item.clone()))
+        .collect::<Vec<_>>();
+    let replacement_keys = replacement_items
+        .iter()
+        .map(|(key, _)| key.as_str())
+        .collect::<HashSet<_>>();
+    let existing_keys = table
+        .iter()
+        .map(|(key, _)| key.to_string())
+        .collect::<Vec<_>>();
+    for key in existing_keys {
+        if !replacement_keys.contains(key.as_str()) {
+            table.remove(&key);
+        }
+    }
+    for (key, item) in replacement_items {
+        if let Some(existing) = table.get_mut(&key) {
+            if let (Some(existing), Some(replacement)) =
+                (existing.as_table_like_mut(), item.as_table_like())
+            {
+                replace_toml_table_like(existing, replacement);
+            } else if !toml_edit_items_equal(existing, &item) {
+                *existing = item;
+            }
+        } else {
+            table.insert(&key, item);
+        }
+    }
+    true
+}
+
+fn replace_toml_table_like(target: &mut dyn TableLike, replacement: &dyn TableLike) {
+    let replacement_items = replacement
+        .iter()
+        .map(|(key, item)| (key.to_string(), item.clone()))
+        .collect::<Vec<_>>();
+    let replacement_keys = replacement_items
+        .iter()
+        .map(|(key, _)| key.as_str())
+        .collect::<HashSet<_>>();
+    let existing_keys = target
+        .iter()
+        .map(|(key, _)| key.to_string())
+        .collect::<Vec<_>>();
+    for key in existing_keys {
+        if !replacement_keys.contains(key.as_str()) {
+            target.remove(&key);
+        }
+    }
+    for (key, item) in replacement_items {
+        if let Some(existing) = target.get_mut(&key) {
+            if let (Some(existing), Some(replacement)) =
+                (existing.as_table_like_mut(), item.as_table_like())
+            {
+                replace_toml_table_like(existing, replacement);
+            } else if !toml_edit_items_equal(existing, &item) {
+                *existing = item;
+            }
+        } else {
+            target.insert(&key, item);
+        }
+    }
+}
+
+fn toml_edit_items_equal(left: &Item, right: &Item) -> bool {
+    match (left, right) {
+        (Item::Value(left), Item::Value(right)) => toml_edit_values_equal(left, right),
+        (Item::Table(left), Item::Table(right)) => toml_edit_tables_equal(left, right),
+        (Item::ArrayOfTables(left), Item::ArrayOfTables(right)) => {
+            left.len() == right.len()
+                && (0..left.len()).all(|index| {
+                    left.get(index).zip(right.get(index)).is_some_and(|(left, right)| {
+                        toml_edit_tables_equal(left, right)
+                    })
+                })
+        }
+        _ => false,
+    }
+}
+
+fn toml_edit_values_equal(left: &EditValue, right: &EditValue) -> bool {
+    match (left, right) {
+        (EditValue::String(left), EditValue::String(right)) => left.value() == right.value(),
+        (EditValue::Integer(left), EditValue::Integer(right)) => left.value() == right.value(),
+        (EditValue::Float(left), EditValue::Float(right)) => left.value() == right.value(),
+        (EditValue::Boolean(left), EditValue::Boolean(right)) => left.value() == right.value(),
+        (EditValue::Datetime(left), EditValue::Datetime(right)) => left.value() == right.value(),
+        (EditValue::Array(left), EditValue::Array(right)) => {
+            left.len() == right.len()
+                && left
+                    .iter()
+                    .zip(right.iter())
+                    .all(|(left, right)| toml_edit_values_equal(left, right))
+        }
+        (EditValue::InlineTable(left), EditValue::InlineTable(right)) => {
+            toml_edit_tables_equal(left, right)
+        }
+        _ => false,
+    }
+}
+
+fn toml_edit_tables_equal(left: &dyn TableLike, right: &dyn TableLike) -> bool {
+    left.len() == right.len()
+        && left.iter().all(|(key, item)| {
+            right
+                .get(key)
+                .is_some_and(|other| toml_edit_items_equal(item, other))
+        })
+}
+
+fn hook_table_matches_source_request(
+    matcher: Option<&str>,
+    table: &dyn TableLike,
+    request: &HookSourceMatch,
+) -> bool {
+    let command = table
+        .get("command")
+        .or_else(|| table.get("script"))
+        .and_then(Item::as_str);
+    let url = table.get("url").and_then(Item::as_str);
+    let prompt = table.get("prompt").and_then(Item::as_str);
+    let hook_type = table.get("type").and_then(Item::as_str).or_else(|| {
+        if command.is_some() {
+            Some("command")
+        } else if url.is_some() {
+            Some("http")
+        } else if prompt.is_some() {
+            Some("prompt")
+        } else {
+            None
+        }
+    });
+    let filter = table.get("if").and_then(Item::as_str);
+    let status_message = table
+        .get("statusMessage")
+        .or_else(|| table.get("status_message"))
+        .and_then(Item::as_str);
+
+    request.matcher.as_deref() == matcher
+        && request.hook_type.as_deref() == hook_type
+        && request.command.as_deref() == command
+        && request.url.as_deref() == url
+        && request.prompt.as_deref() == prompt
+        && request.filter.as_deref() == filter
+        && request.status_message.as_deref() == status_message
 }
 
 fn replace_json_event_hook(
@@ -1252,22 +1661,31 @@ fn hook_object_matches_enabled_request(
         && request.status_message.as_deref() == status_message
 }
 
-fn remove_toml_hook_from_value(value: &mut TomlValue, request: &HookDeleteRequest) -> bool {
-    let Some(hook_map) = value.get_mut("hooks").and_then(TomlValue::as_table_mut) else {
+fn remove_toml_hook_from_document(value: &mut DocumentMut, request: &HookDeleteRequest) -> bool {
+    let Some(hook_map) = value
+        .as_table_mut()
+        .get_mut("hooks")
+        .and_then(Item::as_table_like_mut)
+    else {
         return false;
     };
     let Some(specs) = hook_map.get_mut(&request.event) else {
         return false;
     };
     let removed = remove_toml_event_hook(specs, request, None, true);
-    if toml_is_empty_hook_specs(specs) {
+    if removed
+        && (toml_is_empty_hook_specs_value(specs)
+            || specs
+                .as_table_like()
+                .is_some_and(|table| !table.contains_key("hooks")))
+    {
         hook_map.remove(&request.event);
     }
     removed
 }
 
 fn remove_toml_event_hook(
-    specs: &mut TomlValue,
+    specs: &mut Item,
     request: &HookDeleteRequest,
     matcher: Option<String>,
     group_enabled: bool,
@@ -1275,13 +1693,16 @@ fn remove_toml_event_hook(
     if let Some(array) = specs.as_array_mut() {
         let mut index = 0;
         while index < array.len() {
-            let removed =
-                remove_toml_event_hook(&mut array[index], request, matcher.clone(), group_enabled);
-            let remove_current = toml_is_empty_hook_specs(&array[index])
-                || (removed
-                    && !array[index]
-                        .as_table()
-                        .is_some_and(|table| table.contains_key("hooks")));
+            let removed = {
+                let item = array
+                    .get_mut(index)
+                    .expect("TOML array item exists while iterating");
+                remove_toml_event_hook_value(item, request, matcher.clone(), group_enabled)
+            };
+            let remove_current = removed
+                || array
+                    .get(index)
+                    .is_some_and(toml_is_empty_hook_specs_edit_value);
             if remove_current {
                 array.remove(index);
             } else {
@@ -1294,42 +1715,129 @@ fn remove_toml_event_hook(
         return false;
     }
 
-    let Some(table) = specs.as_table_mut() else {
+    if let Some(array) = specs.as_array_of_tables_mut() {
+        let mut index = 0;
+        while index < array.len() {
+            let removed = {
+                let table = array
+                    .get_mut(index)
+                    .expect("TOML array-of-tables item exists while iterating");
+                remove_toml_event_hook_table(table, request, matcher.clone(), group_enabled)
+            };
+            if removed || array.get(index).is_none_or(|table| table.is_empty()) {
+                array.remove(index);
+            } else {
+                index += 1;
+            }
+            if removed {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    let Some(table) = specs.as_table_like_mut() else {
         return false;
     };
+    remove_toml_event_hook_table(table, request, matcher, group_enabled)
+}
+
+fn remove_toml_event_hook_value(
+    specs: &mut EditValue,
+    request: &HookDeleteRequest,
+    matcher: Option<String>,
+    group_enabled: bool,
+) -> bool {
+    if let Some(array) = specs.as_array_mut() {
+        let mut index = 0;
+        while index < array.len() {
+            let removed = {
+                let value = array
+                    .get_mut(index)
+                    .expect("TOML array value exists while iterating");
+                remove_toml_event_hook_value(value, request, matcher.clone(), group_enabled)
+            };
+            let remove_current = removed
+                || array
+                    .get(index)
+                    .is_some_and(toml_is_empty_hook_specs_edit_value);
+            if remove_current {
+                array.remove(index);
+            } else {
+                index += 1;
+            }
+            if removed {
+                return true;
+            }
+        }
+        return false;
+    }
+    let Some(table) = specs.as_inline_table_mut() else {
+        return false;
+    };
+    remove_toml_event_hook_table(table, request, matcher, group_enabled)
+}
+
+fn remove_toml_event_hook_table(
+    table: &mut dyn TableLike,
+    request: &HookDeleteRequest,
+    matcher: Option<String>,
+    group_enabled: bool,
+) -> bool {
     let next_matcher = table
         .get("matcher")
-        .and_then(TomlValue::as_str)
+        .and_then(Item::as_str)
         .map(str::to_string)
         .or(matcher);
     let next_enabled = group_enabled
         && table
             .get("enabled")
-            .and_then(TomlValue::as_bool)
+            .and_then(Item::as_bool)
             .unwrap_or(true);
 
     if let Some(nested) = table.get_mut("hooks") {
         let removed = remove_toml_event_hook(nested, request, next_matcher.clone(), next_enabled);
-        if toml_is_empty_hook_specs(nested) {
+        let remove_nested = toml_is_empty_hook_specs_value(nested)
+            || (removed
+                && !nested
+                    .as_table_like()
+                    .is_some_and(|nested| nested.contains_key("hooks")));
+        if remove_nested {
             table.remove("hooks");
         }
         return removed;
     }
 
-    hook_object_matches_toml(
+    if hook_object_matches_toml(
         &request.event,
         next_matcher.as_deref(),
         next_enabled,
         table,
         request,
-    )
+    ) {
+        table.clear();
+        true
+    } else {
+        false
+    }
 }
 
-fn toml_is_empty_hook_specs(value: &TomlValue) -> bool {
+fn toml_is_empty_hook_specs_edit_value(value: &EditValue) -> bool {
+    value.as_array().is_some_and(|items| items.is_empty())
+        || value.as_inline_table().is_some_and(|table| {
+            TableLike::get(table, "hooks")
+                .is_some_and(toml_is_empty_hook_specs_value)
+        })
+}
+
+fn toml_is_empty_hook_specs_value(value: &Item) -> bool {
     match value {
-        TomlValue::Array(items) => items.is_empty(),
-        TomlValue::Table(table) => table.get("hooks").is_some_and(toml_is_empty_hook_specs),
-        _ => false,
+        Item::Value(value) => toml_is_empty_hook_specs_edit_value(value),
+        Item::Table(table) => table
+            .get("hooks")
+            .is_some_and(toml_is_empty_hook_specs_value),
+        Item::ArrayOfTables(items) => items.is_empty(),
+        Item::None => true,
     }
 }
 
@@ -1337,16 +1845,16 @@ fn hook_object_matches_toml(
     event: &str,
     matcher: Option<&str>,
     group_enabled: bool,
-    table: &toml::map::Map<String, TomlValue>,
+    table: &dyn TableLike,
     request: &HookDeleteRequest,
 ) -> bool {
     let command = table
         .get("command")
         .or_else(|| table.get("script"))
-        .and_then(TomlValue::as_str);
-    let url = table.get("url").and_then(TomlValue::as_str);
-    let prompt = table.get("prompt").and_then(TomlValue::as_str);
-    let hook_type = table.get("type").and_then(TomlValue::as_str).or_else(|| {
+        .and_then(Item::as_str);
+    let url = table.get("url").and_then(Item::as_str);
+    let prompt = table.get("prompt").and_then(Item::as_str);
+    let hook_type = table.get("type").and_then(Item::as_str).or_else(|| {
         if command.is_some() {
             Some("command")
         } else if url.is_some() {
@@ -1357,15 +1865,15 @@ fn hook_object_matches_toml(
             None
         }
     });
-    let filter = table.get("if").and_then(TomlValue::as_str);
+    let filter = table.get("if").and_then(Item::as_str);
     let status_message = table
         .get("statusMessage")
         .or_else(|| table.get("status_message"))
-        .and_then(TomlValue::as_str);
+        .and_then(Item::as_str);
     let enabled = group_enabled
         && table
             .get("enabled")
-            .and_then(TomlValue::as_bool)
+            .and_then(Item::as_bool)
             .unwrap_or(true);
 
     request.event == event
@@ -1379,8 +1887,15 @@ fn hook_object_matches_toml(
         && enabled
 }
 
-fn set_toml_hook_enabled_in_value(value: &mut TomlValue, request: &HookSetEnabledRequest) -> bool {
-    let Some(hook_map) = value.get_mut("hooks").and_then(TomlValue::as_table_mut) else {
+fn set_toml_hook_enabled_in_document(
+    value: &mut DocumentMut,
+    request: &HookSetEnabledRequest,
+) -> bool {
+    let Some(hook_map) = value
+        .as_table_mut()
+        .get_mut("hooks")
+        .and_then(Item::as_table_like_mut)
+    else {
         return false;
     };
     let Some(specs) = hook_map.get_mut(&request.event) else {
@@ -1390,22 +1905,50 @@ fn set_toml_hook_enabled_in_value(value: &mut TomlValue, request: &HookSetEnable
 }
 
 fn set_toml_event_hook_enabled(
-    specs: &mut TomlValue,
+    specs: &mut Item,
     request: &HookSetEnabledRequest,
     matcher: Option<String>,
 ) -> bool {
     if let Some(array) = specs.as_array_mut() {
         return array
             .iter_mut()
-            .any(|item| set_toml_event_hook_enabled(item, request, matcher.clone()));
+            .any(|item| set_toml_event_hook_enabled_value(item, request, matcher.clone()));
     }
-
-    let Some(table) = specs.as_table_mut() else {
+    if let Some(array) = specs.as_array_of_tables_mut() {
+        return array
+            .iter_mut()
+            .any(|table| set_toml_event_hook_enabled_table(table, request, matcher.clone()));
+    }
+    let Some(table) = specs.as_table_like_mut() else {
         return false;
     };
+    set_toml_event_hook_enabled_table(table, request, matcher)
+}
+
+fn set_toml_event_hook_enabled_value(
+    specs: &mut EditValue,
+    request: &HookSetEnabledRequest,
+    matcher: Option<String>,
+) -> bool {
+    if let Some(array) = specs.as_array_mut() {
+        return array
+            .iter_mut()
+            .any(|item| set_toml_event_hook_enabled_value(item, request, matcher.clone()));
+    }
+    let Some(table) = specs.as_inline_table_mut() else {
+        return false;
+    };
+    set_toml_event_hook_enabled_table(table, request, matcher)
+}
+
+fn set_toml_event_hook_enabled_table(
+    table: &mut dyn TableLike,
+    request: &HookSetEnabledRequest,
+    matcher: Option<String>,
+) -> bool {
     let next_matcher = table
         .get("matcher")
-        .and_then(TomlValue::as_str)
+        .and_then(Item::as_str)
         .map(str::to_string)
         .or(matcher);
 
@@ -1416,22 +1959,22 @@ fn set_toml_event_hook_enabled(
     if !hook_table_matches_enabled_request(next_matcher.as_deref(), table, request) {
         return false;
     }
-    table.insert("enabled".to_string(), TomlValue::Boolean(request.enabled));
+    table.insert("enabled", toml_edit::value(request.enabled));
     true
 }
 
 fn hook_table_matches_enabled_request(
     matcher: Option<&str>,
-    table: &toml::map::Map<String, TomlValue>,
+    table: &dyn TableLike,
     request: &HookSetEnabledRequest,
 ) -> bool {
     let command = table
         .get("command")
         .or_else(|| table.get("script"))
-        .and_then(TomlValue::as_str);
-    let url = table.get("url").and_then(TomlValue::as_str);
-    let prompt = table.get("prompt").and_then(TomlValue::as_str);
-    let hook_type = table.get("type").and_then(TomlValue::as_str).or_else(|| {
+        .and_then(Item::as_str);
+    let url = table.get("url").and_then(Item::as_str);
+    let prompt = table.get("prompt").and_then(Item::as_str);
+    let hook_type = table.get("type").and_then(Item::as_str).or_else(|| {
         if command.is_some() {
             Some("command")
         } else if url.is_some() {
@@ -1442,11 +1985,11 @@ fn hook_table_matches_enabled_request(
             None
         }
     });
-    let filter = table.get("if").and_then(TomlValue::as_str);
+    let filter = table.get("if").and_then(Item::as_str);
     let status_message = table
         .get("statusMessage")
         .or_else(|| table.get("status_message"))
-        .and_then(TomlValue::as_str);
+        .and_then(Item::as_str);
 
     request.matcher.as_deref() == matcher
         && request.hook_type.as_deref() == hook_type
@@ -1881,6 +2424,109 @@ mod tests {
             value["hooks"]["PreToolUse"][1]["hooks"][0]["command"],
             "two"
         );
+        assert_eq!(
+            merged,
+            r#"{
+  "other": true,
+  "hooks": {
+    "PreToolUse": [
+      {"matcher": "Bash", "hooks": [{"type": "command", "command": "updated"}]},
+      {"matcher": "Read", "hooks": [{"type": "command", "command": "two"}]}
+    ]
+  }
+}"#
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn syncs_one_toml_hook_without_reformatting_other_entries() {
+        let root = std::env::temp_dir().join(format!(
+            "tendi-hooks-sync-toml-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("system time before epoch")
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).expect("create temp root");
+        let path = root.join("config.toml");
+        let source = "# keep\r\n[[hooks.PreToolUse]]\r\nmatcher = 'Bash'\r\n\r\n[[hooks.PreToolUse.hooks]]\r\ntype = 'command'\r\ncommand = 'one'\r\n\r\n[[hooks.PreToolUse]]\r\nmatcher = 'Read'\r\n\r\n[[hooks.PreToolUse.hooks]]\r\ntype = 'command'\r\ncommand = 'two'\r\n";
+        fs::write(&path, source).expect("write hooks");
+        let identity = HookSourceMatch {
+            event: "PreToolUse".to_string(),
+            matcher: Some("Bash".to_string()),
+            hook_type: Some("command".to_string()),
+            command: Some("one".to_string()),
+            url: None,
+            prompt: None,
+            filter: None,
+            status_message: None,
+            enabled: Some(true),
+        };
+
+        let merged = merge_hook_entry(
+            &path,
+            &identity,
+            &serde_json::json!({
+                "event": "PreToolUse",
+                "matcher": "Bash",
+                "enabled": true,
+                "hook": {"type": "command", "command": "updated"}
+            }),
+        )
+        .expect("merge selected hook");
+
+        assert_eq!(
+            merged,
+            source.replace("command = 'one'", "command = \"updated\"")
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn syncs_markdown_hook_without_reformatting_unrelated_frontmatter() {
+        let root = std::env::temp_dir().join(format!(
+            "tendi-hooks-sync-markdown-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("system time before epoch")
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).expect("create temp root");
+        let path = root.join("hooks.md");
+        let source = "---\r\nname: demo\r\ndescription: \"keep this\"\r\nother: [one, two]\r\nhooks:\r\n  PreToolUse:\r\n    - matcher: Bash\r\n      hooks:\r\n        - type: command\r\n          command: one\r\n---\r\n\r\n# body\r\n";
+        fs::write(&path, source).expect("write hooks");
+        let identity = HookSourceMatch {
+            event: "PreToolUse".to_string(),
+            matcher: Some("Bash".to_string()),
+            hook_type: Some("command".to_string()),
+            command: Some("one".to_string()),
+            url: None,
+            prompt: None,
+            filter: None,
+            status_message: None,
+            enabled: Some(true),
+        };
+
+        let merged = merge_hook_entry(
+            &path,
+            &identity,
+            &serde_json::json!({
+                "event": "PreToolUse",
+                "matcher": "Bash",
+                "enabled": true,
+                "hook": {"type": "command", "command": "updated"}
+            }),
+        )
+        .expect("merge markdown hook");
+
+        assert!(merged.contains("name: demo\r\ndescription: \"keep this\""));
+        assert!(merged.contains("other: [one, two]"));
+        assert!(merged.contains("command: updated"));
+        assert!(merged.contains("---\r\n\r\n# body\r\n"));
+        assert!(!merged.replace("\r\n", "").contains('\n'));
         let _ = fs::remove_dir_all(root);
     }
 
@@ -1954,6 +2600,37 @@ mod tests {
         let text = fs::read_to_string(&path).expect("read config");
         assert!(text.contains("trusted_hash = \"sha256:new\""));
         assert!(text.contains("[notice]\nhide = true"));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn writes_codex_trusted_hash_without_changing_crlf_line_endings() {
+        let root = std::env::temp_dir().join(format!(
+            "tendi-codex-crlf-state-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("system time before epoch")
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).expect("create temp root");
+        let path = root.join("config.toml");
+        fs::write(
+            &path,
+            "[hooks.state.\"/tmp/hooks.json:pre_tool_use:0:0\"]\r\ntrusted_hash = \"sha256:old\"\r\n\r\n[notice]\r\nhide = true\r\n",
+        )
+        .expect("write config");
+
+        crate::providers::codex::write_trusted_hash(
+            &path,
+            "/tmp/hooks.json:pre_tool_use:0:0",
+            "sha256:new",
+        )
+        .expect("write trusted hash");
+        let text = fs::read_to_string(&path).expect("read config");
+        assert!(text.contains("trusted_hash = \"sha256:new\"\r\n"));
+        assert!(text.contains("[notice]\r\nhide = true\r\n"));
+        assert!(!text.replace("\r\n", "").contains('\n'));
         let _ = fs::remove_dir_all(root);
     }
 
@@ -2426,9 +3103,7 @@ command = "/bin/echo delete-me"
         ));
         fs::create_dir_all(&root).expect("create temp root");
         let path = root.join("hooks.json");
-        fs::write(
-            &path,
-            r#"{
+        let source = r#"{
   "hooks": {
     "PreToolUse": [
       {
@@ -2437,9 +3112,8 @@ command = "/bin/echo delete-me"
       }
     ]
   }
-}"#,
-        )
-        .expect("write hooks");
+}"#;
+        fs::write(&path, source).expect("write hooks");
         let trust_hash = super::sha256_file(&path).expect("hash");
 
         super::set_hook_enabled(super::HookSetEnabledRequest {
@@ -2457,6 +3131,14 @@ command = "/bin/echo delete-me"
             enabled: false,
         })
         .expect("toggle hook");
+
+        assert_eq!(
+            fs::read_to_string(&path).expect("read updated hooks"),
+            source.replace(
+                "        \"command\": \"/bin/echo toggle-me\"",
+                "        \"command\": \"/bin/echo toggle-me\",\n        \"enabled\": false",
+            )
+        );
 
         let mut hooks = Vec::new();
         let mut warnings = Vec::new();
@@ -2479,9 +3161,7 @@ command = "/bin/echo delete-me"
         ));
         fs::create_dir_all(&root).expect("create temp root");
         let path = root.join("config.toml");
-        fs::write(
-            &path,
-            r#"
+        let source = r#"
 [[hooks.PreToolUse]]
 matcher = "Bash"
 
@@ -2489,9 +3169,8 @@ matcher = "Bash"
 type = "command"
 command = "/bin/echo toggle-me"
 enabled = false
-"#,
-        )
-        .expect("write hooks");
+"#;
+        fs::write(&path, source).expect("write hooks");
         let trust_hash = super::sha256_file(&path).expect("hash");
 
         super::set_hook_enabled(super::HookSetEnabledRequest {
@@ -2509,6 +3188,11 @@ enabled = false
             enabled: true,
         })
         .expect("toggle hook");
+
+        assert_eq!(
+            fs::read_to_string(&path).expect("read updated hooks"),
+            source.replace("enabled = false", "enabled = true")
+        );
 
         let mut hooks = Vec::new();
         let mut warnings = Vec::new();

@@ -1,7 +1,30 @@
-export const DOMAIN_KEYS = ["skills", "prompts", "sessions", "rules", "hooks", "mcp"] as const;
+export enum RuntimeDomainKey {
+  Agents = "agents",
+  Skills = "skills",
+  Prompts = "prompts",
+  Sessions = "sessions",
+  Rules = "rules",
+  Hooks = "hooks",
+  Mcp = "mcp",
+}
 
-export type DomainKey = (typeof DOMAIN_KEYS)[number];
+export const DOMAIN_KEYS = [
+  RuntimeDomainKey.Skills,
+  RuntimeDomainKey.Prompts,
+  RuntimeDomainKey.Sessions,
+  RuntimeDomainKey.Rules,
+  RuntimeDomainKey.Hooks,
+  RuntimeDomainKey.Mcp,
+] as const;
 
-export const RUNTIME_DOMAIN_KEYS = ["agents", ...DOMAIN_KEYS] as const;
+export const RUNTIME_DOMAIN_KEYS = [
+  RuntimeDomainKey.Agents,
+  RuntimeDomainKey.Skills,
+  RuntimeDomainKey.Prompts,
+  RuntimeDomainKey.Sessions,
+  RuntimeDomainKey.Rules,
+  RuntimeDomainKey.Hooks,
+  RuntimeDomainKey.Mcp,
+] as const;
 
-export type RuntimeDomainKey = (typeof RUNTIME_DOMAIN_KEYS)[number];
+export type DomainKey = Exclude<RuntimeDomainKey, RuntimeDomainKey.Agents>;

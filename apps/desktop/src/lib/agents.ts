@@ -3,6 +3,7 @@ import { Share2 } from "lucide-react";
 import { titleValue } from "./strings.ts";
 import { agentDefinition } from "./agent/index.ts";
 import { agentIcons } from "./agent/catalog.ts";
+import type { AgentKind } from "./generated/runtime-types.ts";
 
 export { agentIcons } from "./agent/catalog.ts";
 
@@ -20,6 +21,16 @@ export function agentIdentityKey(agent: unknown): string {
 export function isConcreteAgent(agent: unknown): boolean {
   const key = normalizedAgentKey(agent);
   return key !== "" && key !== "shared" && key !== "universal";
+}
+
+export function isRuntimeAgentKind(agent: unknown): boolean {
+  return ["codex", "cursor", "claude", "shared", "unknown"].includes(normalizedAgentKey(agent));
+}
+
+export function runtimeAgentKind(agent: unknown): AgentKind {
+  const normalized = normalizedAgentKey(agent);
+  if (isRuntimeAgentKind(normalized)) return normalized as AgentKind;
+  throw new Error("Invalid runtime agent");
 }
 
 export function agentClassName(agent: unknown): string {

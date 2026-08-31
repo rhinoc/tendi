@@ -1,4 +1,4 @@
-import { FilePlus, FileText, FolderOpen, FolderPlus, Pencil, Trash2 } from "lucide-react";
+import { FilePlus, FolderOpen, FolderPlus, Pencil, Trash2 } from "lucide-react";
 import type { ComponentType, ReactNode } from "react";
 
 import { actionLabels } from "../../lib/action-labels.ts";

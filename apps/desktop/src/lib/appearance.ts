@@ -1,19 +1,42 @@
-export const appearances = ["system", "light", "dark"] as const;
-export const colorThemes = ["sakura-pop", "gruvbox", "dracula", "nord", "catppuccin", "tokyo-night", "vercel"] as const;
+export enum Appearance {
+  System = "system",
+  Light = "light",
+  Dark = "dark",
+}
+
+export enum ColorTheme {
+  SakuraPop = "sakura-pop",
+  Gruvbox = "gruvbox",
+  Dracula = "dracula",
+  Nord = "nord",
+  Catppuccin = "catppuccin",
+  TokyoNight = "tokyo-night",
+  Vercel = "vercel",
+}
+
+export enum FontFamily {
+  Geist = "geist",
+  Manrope = "manrope",
+  Inter = "inter",
+  IbmPlexSans = "ibm-plex-sans",
+  InstrumentSans = "instrument-sans",
+  PlusJakartaSans = "plus-jakarta-sans",
+  BricolageGrotesque = "bricolage-grotesque",
+}
+
+export const appearances = [Appearance.System, Appearance.Light, Appearance.Dark] as const;
+export const colorThemes = [ColorTheme.SakuraPop, ColorTheme.Gruvbox, ColorTheme.Dracula, ColorTheme.Nord, ColorTheme.Catppuccin, ColorTheme.TokyoNight, ColorTheme.Vercel] as const;
 export const fontFamilies = [
-  "geist",
-  "manrope",
-  "inter",
-  "ibm-plex-sans",
-  "instrument-sans",
-  "plus-jakarta-sans",
-  "bricolage-grotesque",
+  FontFamily.Geist,
+  FontFamily.Manrope,
+  FontFamily.Inter,
+  FontFamily.IbmPlexSans,
+  FontFamily.InstrumentSans,
+  FontFamily.PlusJakartaSans,
+  FontFamily.BricolageGrotesque,
 ] as const;
 
-export type Appearance = (typeof appearances)[number];
-export type ResolvedAppearance = Exclude<Appearance, "system">;
-export type ColorTheme = (typeof colorThemes)[number];
-export type FontFamily = (typeof fontFamilies)[number];
+export type ResolvedAppearance = Exclude<Appearance, Appearance.System>;
 export type ThemePreferences = {
   light: ColorTheme;
   dark: ColorTheme;
@@ -37,15 +60,15 @@ function suppressThemeTransitions(root: HTMLElement): void {
 }
 
 export function normalizeAppearance(value: unknown): Appearance {
-  return appearances.includes(value as Appearance) ? value as Appearance : "system";
+  return appearances.includes(value as Appearance) ? value as Appearance : Appearance.System;
 }
 
 export function normalizeColorTheme(value: unknown): ColorTheme {
-  return colorThemes.includes(value as ColorTheme) ? value as ColorTheme : "sakura-pop";
+  return colorThemes.includes(value as ColorTheme) ? value as ColorTheme : ColorTheme.Vercel;
 }
 
 export function normalizeFontFamily(value: unknown): FontFamily {
-  return fontFamilies.includes(value as FontFamily) ? value as FontFamily : "manrope";
+  return fontFamilies.includes(value as FontFamily) ? value as FontFamily : FontFamily.Manrope;
 }
 
 export function normalizeThemePreferences(value: Partial<ThemePreferences> | null | undefined): ThemePreferences {
@@ -59,7 +82,7 @@ export function readCachedAppearance(): Appearance {
   try {
     return normalizeAppearance(window.localStorage.getItem(APPEARANCE_CACHE_KEY));
   } catch {
-    return "system";
+    return Appearance.System;
   }
 }
 
@@ -76,7 +99,7 @@ export function readCachedFontFamily(): FontFamily {
   try {
     return normalizeFontFamily(window.localStorage.getItem(FONT_FAMILY_CACHE_KEY));
   } catch {
-    return "manrope";
+    return FontFamily.Manrope;
   }
 }
 
@@ -91,8 +114,8 @@ export function applyFontFamily(fontFamily: FontFamily): void {
 }
 
 export function resolveAppearance(appearance: Appearance): ResolvedAppearance {
-  if (appearance !== "system") return appearance;
-  return window.matchMedia(SYSTEM_DARK_QUERY).matches ? "dark" : "light";
+  if (appearance !== Appearance.System) return appearance;
+  return window.matchMedia(SYSTEM_DARK_QUERY).matches ? Appearance.Dark : Appearance.Light;
 }
 
 export function resolveColorTheme(appearance: Appearance, preferences: ThemePreferences): ColorTheme {

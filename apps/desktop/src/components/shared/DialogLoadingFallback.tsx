@@ -1,3 +1,4 @@
+import type { ReactNode } from "react";
 import { Dialog } from "radix-ui";
 
 import { LoadingState } from "./LoadingState.tsx";
@@ -9,6 +10,9 @@ export type DialogLoadingFallbackProps = {
   descriptionId: string;
   onOpenChange: (open: boolean) => void;
   className?: string;
+  description?: ReactNode;
+  actions?: ReactNode;
+  showLoading?: boolean;
 };
 
 export function DialogLoadingFallback({
@@ -17,6 +21,9 @@ export function DialogLoadingFallback({
   descriptionId,
   onOpenChange,
   className,
+  description,
+  actions,
+  showLoading = true,
 }: DialogLoadingFallbackProps) {
   return (
     <DialogShell
@@ -26,10 +33,11 @@ export function DialogLoadingFallback({
       descriptionId={descriptionId}
     >
       <Dialog.Title className="confirmDialogTitle">{title}</Dialog.Title>
-      <Dialog.Description id={descriptionId} className="dialogVisuallyHidden">
-        {label}
+      <Dialog.Description id={descriptionId} className={description !== undefined ? "confirmDialogDescription" : "dialogVisuallyHidden"}>
+        {description ?? label}
       </Dialog.Description>
-      <LoadingState className="loadingStateCompact" label={label} />
+      {showLoading ? <LoadingState className="loadingStateCompact" label={label} /> : null}
+      {actions ? <div className="confirmDialogActions">{actions}</div> : null}
     </DialogShell>
   );
 }

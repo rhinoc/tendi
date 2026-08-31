@@ -81,13 +81,13 @@ function buildReport() {
     created_at: `2026-06-0${i + 1}T09:00:00`,
     updated_at: `2026-06-2${i}T10:00:00`,
   }));
-  const sessions = Array.from({ length: 12 }, (_, i) => ({
+  const sessions = Array.from({ length: 100 }, (_, i) => ({
     id: `session-${i + 1}`,
     title: `Session number ${i + 1}`,
     agent: ["cursor", "codex"][i % 2],
     project: `/Users/dev/project-${i + 1}`,
-    started_at: `2026-06-2${i}T09:00:00`,
-    updated_at: `2026-06-2${i}T18:00:00`,
+    started_at: `2026-06-${String((i % 28) + 1).padStart(2, "0")}T09:00:00`,
+    updated_at: `2026-06-${String((i % 28) + 1).padStart(2, "0")}T18:00:00`,
     path: `/tmp/session-${i + 1}.jsonl`,
     message_count: 10 + i,
     turn_count: 3 + i,
@@ -232,6 +232,50 @@ async function runOverviewChecks(page) {
   );
 }
 
+async function runBadgePaddingChecks(page) {
+  const metrics = await page.evaluate(() => {
+    const badge = document.createElement("span");
+    badge.className = "badge";
+    badge.style.position = "fixed";
+    badge.style.top = "0";
+    badge.style.left = "0";
+    badge.style.opacity = "0.02";
+    badge.innerHTML = `
+      <i aria-hidden="true" style="width:14px;height:14px;flex:0 0 14px;border-radius:999px;background:currentColor"></i>
+      <span>Installed</span>
+    `;
+    document.body.appendChild(badge);
+
+    const icon = badge.querySelector("i");
+    const badgeBox = badge.getBoundingClientRect();
+    const iconBox = icon.getBoundingClientRect();
+    const style = getComputedStyle(badge);
+    const result = {
+      paddingTop: parseFloat(style.paddingTop),
+      paddingRight: parseFloat(style.paddingRight),
+      paddingBottom: parseFloat(style.paddingBottom),
+      paddingLeft: parseFloat(style.paddingLeft),
+      iconTop: iconBox.top - badgeBox.top,
+      iconLeft: iconBox.left - badgeBox.left,
+    };
+    badge.remove();
+    return result;
+  });
+  const padding = [metrics.paddingTop, metrics.paddingRight, metrics.paddingBottom, metrics.paddingLeft];
+  check(
+    "shared-badge",
+    "padding-uniform",
+    new Set(padding).size === 1,
+    `top ${metrics.paddingTop}px right ${metrics.paddingRight}px bottom ${metrics.paddingBottom}px left ${metrics.paddingLeft}px`,
+  );
+  check(
+    "shared-badge",
+    "circular-icon-inset",
+    Math.abs(metrics.iconTop - metrics.iconLeft) <= TOLERANCE,
+    `icon top ${metrics.iconTop}px vs left ${metrics.iconLeft}px`,
+  );
+}
+
 async function runOverviewUsageChecks(page) {
   const loadingChart = page.locator('section.chartFrame[aria-label="Loading usage chart"]');
   await loadingChart.waitFor({ state: "visible", timeout: 5000 });
@@ -248,6 +292,21 @@ async function runOverviewUsageChecks(page) {
   await page.evaluate(() => window.__releaseAnalyticsOverview?.());
   const loadedChart = page.locator('section.chartFrame[aria-label="tokens trend"]');
   await loadedChart.waitFor({ state: "visible", timeout: 5000 });
+  const refreshState = await page.getByRole("button", { name: "Refresh analytics" }).evaluate((button) => ({
+    ariaBusy: button.getAttribute("aria-busy"),
+    disabled: button.disabled,
+    hasLoadingIcon: Boolean(button.querySelector(".loadingIcon")),
+    hasInternalIndexingCopy: document.querySelector(".overviewAnalytics")?.textContent?.includes("older sessions") ?? false,
+  }));
+  check(
+    "overview",
+    "background-analytics-refresh-indicator",
+    refreshState.ariaBusy === "true"
+      && refreshState.disabled
+      && refreshState.hasLoadingIcon
+      && !refreshState.hasInternalIndexingCopy,
+    `busy ${refreshState.ariaBusy}, disabled ${refreshState.disabled}, loading icon ${refreshState.hasLoadingIcon}, internal copy ${refreshState.hasInternalIndexingCopy}`,
+  );
   const loadedMetrics = await loadedChart.evaluate((node) => {
     const legend = node.querySelector(".chartLegend");
     const plot = node.querySelector(".overviewTrendPlotLayout");
@@ -1572,12 +1631,20 @@ try {
     let analyticsOverviewReleased = false;
     const analyticsOverviewWaiters = [];
     const navigationEntry = performance.getEntriesByType("navigation")[0];
-    let sessionsListReleased = navigationEntry?.type === "reload";
-    const sessionsListWaiters = [];
-    window.__releaseSessionsList = () => {
-      sessionsListReleased = true;
-      const waiters = sessionsListWaiters.splice(0);
-      waiters.forEach((resolve) => resolve(report.sessions.sessions));
+    let sessionsSnapshotReleased = navigationEntry?.type === "reload";
+    const sessionsSnapshotWaiters = [];
+    const sessionSnapshot = () => ({
+      scopeKey: "workspace:/alignment-e2e",
+      domain: "sessions",
+      revision: 0,
+      schemaVersion: 1,
+      snapshotId: "sessions:alignment-e2e:0",
+      payload: report.sessions.sessions,
+    });
+    window.__releaseSessionsSnapshot = () => {
+      sessionsSnapshotReleased = true;
+      const waiters = sessionsSnapshotWaiters.splice(0);
+      waiters.forEach((resolve) => resolve(sessionSnapshot()));
     };
     window.__releaseAnalyticsOverview = () => {
       analyticsOverviewReleased = true;
@@ -1647,9 +1714,9 @@ try {
           coverage: {
             first: "2026-06-29",
             last: "2026-06-29",
-            totalSessions: 1,
+            totalSessions: 124,
             analyzedSessions: 1,
-            indexingSessions: 0,
+            indexingSessions: 123,
           },
           capabilities: [{
             agent: "codex",
@@ -1761,9 +1828,9 @@ try {
         ];
       }
       if (command === "prompts_list") return report.prompts.prompts;
-      if (command === "sessions_list") {
-        if (sessionsListReleased) return report.sessions.sessions;
-        return new Promise((resolve) => sessionsListWaiters.push(resolve));
+      if (command === "sessions_snapshot") {
+        if (sessionsSnapshotReleased) return sessionSnapshot();
+        return new Promise((resolve) => sessionsSnapshotWaiters.push(resolve));
       }
       if (command === "sessions_scan_start") {
         queueMicrotask(() => {
@@ -1810,6 +1877,9 @@ try {
           warnings: [],
           sourceVersion: "",
         };
+      }
+      if (command === "session_transcript_search") {
+        return { hits: [], warnings: [], sourceVersion: "" };
       }
       if (command === "sessions_search") {
         return report.sessions.sessions.map((session, index) => ({
@@ -1916,6 +1986,8 @@ try {
   await runReq8NonFrozenFixture(page);
   writeStdout("\n== frozen hover parity fixture ==");
   await runFrozenNativeHoverParityFixture(page);
+  writeStdout("\n== shared badge padding ==");
+  await runBadgePaddingChecks(page);
 
   for (const tab of tabs) {
     writeStdout(`\n== ${tab.heading} ==`);
@@ -1935,7 +2007,7 @@ try {
         initialDetailPanels === 0,
         `${initialDetailPanels} detail panels before sessions load`,
       );
-      await page.evaluate(() => window.__releaseSessionsList?.());
+      await page.evaluate(() => window.__releaseSessionsSnapshot?.());
     }
     await page.locator(".dataRow").first().waitFor();
 
@@ -1943,6 +2015,46 @@ try {
       const searchInput = page.getByPlaceholder("Search sessions");
       await searchInput.fill("session");
       await page.locator(".sessionSearchSnippet").first().waitFor();
+      const activeSearchRow = page.locator(".dataTableFrozenPane .dataRow[data-row-id]").first();
+      const activeSearchRowId = await activeSearchRow.getAttribute("data-row-id");
+      await activeSearchRow.locator(".sessionTitleText").click();
+      const searchScroller = page.locator(".dataTableBodyScroll");
+      await searchScroller.evaluate((node) => {
+        node.scrollTop = node.scrollHeight;
+        node.dispatchEvent(new Event("scroll"));
+      });
+      const listLocator = page.getByRole("button", { name: "Locate session in list" });
+      await listLocator.waitFor();
+      const targetUnmountedBeforeLocate = await searchScroller.evaluate((node, rowId) => (
+        ![...node.querySelectorAll("[data-row-id]")]
+          .some((row) => row.dataset.rowId === rowId)
+      ), activeSearchRowId);
+      await listLocator.click();
+      await page.waitForFunction((rowId) => {
+        const scroll = document.querySelector(".dataTableBodyScroll");
+        const row = [...(scroll?.querySelectorAll("[data-row-id]") ?? [])]
+          .find((candidate) => candidate.dataset.rowId === rowId);
+        if (!scroll || !row) return false;
+        const viewport = scroll.getBoundingClientRect();
+        const bounds = row.getBoundingClientRect();
+        return bounds.top >= viewport.top - 1 && bounds.bottom <= viewport.bottom + 1;
+      }, activeSearchRowId);
+      const locateState = {
+        query: await searchInput.inputValue(),
+        snippets: await page.locator(".sessionSearchSnippet").count(),
+        locatorVisible: await listLocator.isVisible().catch(() => false),
+      };
+      check(
+        tab.id,
+        "bug-session-list-locator-preserves-search",
+        Boolean(activeSearchRowId)
+          && targetUnmountedBeforeLocate
+          && locateState.query === "session"
+          && locateState.snippets > 0
+          && locateState.locatorVisible === false,
+        `row ${activeSearchRowId || "missing"}, unmounted ${targetUnmountedBeforeLocate}, query ${locateState.query}, snippets ${locateState.snippets}, locator visible ${locateState.locatorVisible}`,
+      );
+      await page.getByRole("button", { name: "Collapse session detail", exact: true }).click();
       const workspaceSortButton = page.locator('.dataHeaderCell[data-column="project"] [aria-label="Sort by Project"]');
       const workspaceGroupButton = page.locator('.dataHeaderCell[data-column="project"] [aria-label="Group by Project"]');
       const workspaceSortEnabled = await workspaceSortButton.count() === 1;
@@ -2315,6 +2427,97 @@ try {
           check(tab.id, "req5-header-pin", false, "table body should scroll for header pin check");
         }
       }
+    }
+
+    if (tab.id === "sessions") {
+      const pageSize = page.getByRole("combobox", { name: "Rows per page" });
+      await pageSize.click();
+      await page.getByRole("option", { name: "100", exact: true }).click();
+      await page.waitForFunction(() => document.querySelector(".sessionPagerInfo")?.textContent?.includes("1-100"));
+      const scroller = page.locator(".dataTableBodyScroll");
+      await scroller.hover({ force: true });
+      await page.mouse.wheel(0, 100_000);
+      await page.waitForFunction(() => {
+        const node = document.querySelector(".dataTableBodyScroll");
+        return node && node.scrollHeight - node.clientHeight - node.scrollTop <= 1;
+      });
+      await pageSize.click();
+      await page.getByRole("option", { name: "50", exact: true }).click();
+      await page.waitForFunction(() => document.querySelector(".sessionPagerInfo")?.textContent?.includes("1-50"));
+      const virtualScrollEnd = await page.evaluate(async (tolerance) => {
+        await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+        const node = document.querySelector(".dataTableBodyScroll");
+        const seek = document.querySelector(".dataTableVirtualSeek");
+        const rows = [...document.querySelectorAll(".dataTableFrozenPane .dataRow[data-row-id]")];
+        const firstRow = rows[0];
+        if (!node || !seek || !firstRow) return { missing: true };
+        const viewport = node.getBoundingClientRect();
+        const row = firstRow.getBoundingClientRect();
+        return {
+          missing: false,
+          scrollTop: node.scrollTop,
+          seekVisible: seek.classList.contains("dataTableVirtualSeek--visible"),
+          renderedRows: rows.length,
+          firstRowVisible: row.top >= viewport.top - tolerance && row.top < viewport.bottom,
+        };
+      }, TOLERANCE);
+      check(
+        tab.id,
+        "bug22-paged-virtual-scroll-resets-after-page-shrink",
+        !virtualScrollEnd.missing
+          && virtualScrollEnd.scrollTop <= 1
+          && virtualScrollEnd.seekVisible === false
+          && virtualScrollEnd.renderedRows > 0
+          && virtualScrollEnd.firstRowVisible === true,
+        virtualScrollEnd.missing
+          ? "missing session virtual scroller, seek layer, or first row"
+          : `scroll top ${virtualScrollEnd.scrollTop}, seek visible ${virtualScrollEnd.seekVisible}, rendered rows ${virtualScrollEnd.renderedRows}, first row visible ${virtualScrollEnd.firstRowVisible}`,
+      );
+
+      await page.getByRole("button", { name: "Next page" }).click();
+      await page.waitForFunction(() => document.querySelector(".sessionPagerInfo")?.textContent?.includes("51-100"));
+      await page.evaluate(() => {
+        window.__sessionPaginationInvalidFrame = false;
+        const capturePaginationState = () => {
+          const controls = document.querySelector(".sessionPagerControls")?.textContent ?? "";
+          const rowCount = document.querySelectorAll(".dataTableFrozenPane .dataRow[data-row-id]").length;
+          if (controls.includes("2 / 1") || (controls.includes("1 / 1") && rowCount === 0)) {
+            window.__sessionPaginationInvalidFrame = true;
+          }
+        };
+        window.__sessionPaginationObserver = new MutationObserver(capturePaginationState);
+        window.__sessionPaginationObserver.observe(document.querySelector(".sessionListPane") ?? document.body, {
+          childList: true,
+          subtree: true,
+          characterData: true,
+        });
+        const samplePaginationFrame = () => {
+          capturePaginationState();
+          window.__sessionPaginationFrame = requestAnimationFrame(samplePaginationFrame);
+        };
+        window.__sessionPaginationFrame = requestAnimationFrame(samplePaginationFrame);
+      });
+      const searchInput = page.getByPlaceholder("Search sessions");
+      await searchInput.fill("Session number 1");
+      await page.waitForFunction(() => document.querySelector(".sessionPagerControls")?.textContent?.includes("1 / 1"));
+      const paginationInvalidFrame = await page.evaluate(async () => {
+        await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+        window.__sessionPaginationObserver?.disconnect();
+        cancelAnimationFrame(window.__sessionPaginationFrame);
+        const invalidFrameObserved = window.__sessionPaginationInvalidFrame === true;
+        delete window.__sessionPaginationObserver;
+        delete window.__sessionPaginationFrame;
+        delete window.__sessionPaginationInvalidFrame;
+        return invalidFrameObserved;
+      });
+      check(
+        tab.id,
+        "bug22-filter-never-projects-an-invalid-page",
+        paginationInvalidFrame === false,
+        `invalid pagination frame observed ${paginationInvalidFrame}`,
+      );
+      await searchInput.fill("");
+      await page.waitForFunction(() => document.querySelector(".sessionPagerInfo")?.textContent?.includes("1-50"));
     }
 
     if (!tab.selectable) {

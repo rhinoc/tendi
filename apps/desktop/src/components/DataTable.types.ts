@@ -1,8 +1,19 @@
 import type { ReactNode } from "react";
 
-export type ColumnCellVariant = "text" | "title" | "number";
-export type ColumnDataType = "text" | "date" | "enum";
-export type SortDirection = "asc" | "desc";
+import type { SortDirection } from "../lib/sort.ts";
+
+export enum ColumnCellVariant {
+  Text = "text",
+  Title = "title",
+  Number = "number",
+}
+
+export enum ColumnDataType {
+  Text = "text",
+  Date = "date",
+  Enum = "enum",
+}
+export type { SortDirection } from "../lib/sort.ts";
 
 export type SortState = {
   key: string;
@@ -62,6 +73,7 @@ export type DataTableProps<TRow> = {
   onSortChange?: (sort: SortState) => void;
   manualSorting?: boolean;
   rowHeight?: number;
+  scrollResetKey?: string;
   scrollToRowId?: string;
   onScrollToRowComplete?: (rowId: string) => void;
   freezeColumn?: FreezeColumnConfig;

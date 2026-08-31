@@ -1,0 +1,44 @@
+.updateNotesDialogPanel {
+  width: min(680px, calc(100vw - 48px));
+  max-height: min(720px, calc(100vh - 48px));
+  display: flex;
+  flex-direction: column;
+}
+
+.updateNotesDialogBody {
+  height: min(56vh, 520px);
+  min-height: 180px;
+  max-height: min(56vh, 520px);
+  display: flex;
+  min-width: 0;
+  margin: 0 22px 20px;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--inset-fill);
+}
+
+.updateNotesDialogBody .tiptapEditorShell,
+.updateNotesDialogBody .tiptapEditorHost,
+.updateNotesDialogBody .tiptapEditor {
+  min-height: 0;
+}
+
+.updateNotesDialogBody .tiptapEditor .ProseMirror {
+  padding: 16px 18px 28px;
+  font-size: var(--text-ui);
+}
+
+.updateNotesDialogPlaintext,
+.updateNotesDialogEmpty {
+  width: 100%;
+  height: 100%;
+  box-sizing: border-box;
+  margin: 0;
+  padding: 18px;
+  overflow: auto;
+  color: var(--muted);
+  font-size: var(--text-ui);
+  line-height: var(--leading-body);
+  white-space: pre-wrap;
+}

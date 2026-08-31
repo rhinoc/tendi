@@ -3,6 +3,7 @@ import { SelectControl } from "../../components/shared/SelectControl.tsx";
 import "./Visibility.css";
 
 export type VisibilitySkill = {
+  id?: string;
   name: string;
   visibility?: SkillVisibility | string;
 };
@@ -19,11 +20,12 @@ export function Visibility({ value, skill, onSetVisibility, readOnly = false }: 
   const options = value === SkillVisibility.Mixed
     ? [{ value: SkillVisibility.Mixed, label: SkillVisibility.Mixed }]
     : editableSkillVisibilities.map((option) => ({ value: option, label: option }));
+  const selector = skill.id?.trim() || skill.name;
 
   return <SelectControl
     value={value}
     onValueChange={(nextValue) => {
-      if (!disabled) onSetVisibility?.([skill.name], nextValue as SkillVisibility);
+      if (!disabled) onSetVisibility?.([selector], nextValue as SkillVisibility);
     }}
     label="Visibility"
     options={options}

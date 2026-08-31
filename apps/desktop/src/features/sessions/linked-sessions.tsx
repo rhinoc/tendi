@@ -2,49 +2,22 @@ import { useMemo } from "react";
 import { Waypoints, X } from "lucide-react";
 import { Dialog } from "radix-ui";
 
+import { LoadingIcon } from "../../components/shared/LoadingIcon.tsx";
 import { LoadingState } from "../../components/shared/LoadingState.tsx";
 import { LoadErrorState } from "../../components/shared/LoadErrorState.tsx";
 import { IconButton } from "../../components/shared/IconButton.tsx";
-import { dialogCopy, formatSessionTitle, normalizeSession, sessionProject, sessionProjectGroupKey, type SessionSkillLinkRecord } from "../../lib/index.ts";
+import { compareTimestamps, dialogCopy, formatSessionTitle, sessionProject, sessionProjectGroupKey, type SessionSkillLinkRecord } from "../../lib/index.ts";
+import { linkedSessionToSession, type LinkedSessionRow } from "../../controllers/session-controller.ts";
 import { SkillSessionProjectChart, type SkillSessionProjectItem } from "./SkillSessionProjectChart.tsx";
 import "../../components/shared/confirm-dialog.css";
 import "./linked-sessions.css";
 
 export type LinkedSessionLink = SessionSkillLinkRecord;
 
-export type LinkedSessionRow = NonNullable<ReturnType<typeof linkedSessionToSession>>;
-
 function linkedSessionId(link: LinkedSessionLink): string | undefined {
   const id = link.session_id.trim();
   return id || undefined;
 }
-
-export function linkedSessionToSession(link: LinkedSessionLink) {
-  const id = linkedSessionId(link);
-  if (!id) return undefined;
-  const sessionPath = link.session_path.trim();
-  const agent = link.agent.trim();
-  if (!sessionPath || !agent) return undefined;
-  const project = typeof link.session_project === "string" ? link.session_project.trim() : "";
-  const normalized = normalizeSession({
-    id,
-    agent,
-    title: link.session_title,
-    project,
-    path: sessionPath,
-    started_at: link.session_started_at,
-    updated_at: link.session_updated_at,
-    message_count: link.session_message_count,
-  });
-  if (!normalized) return undefined;
-  return {
-    ...normalized,
-    projectPath: project,
-    path: sessionPath,
-    linkedSessionLink: link,
-  };
-}
-
 
 export type LinkedSessionsIndexStatus = {
   indexed?: number;
@@ -80,11 +53,11 @@ export function LinkedSessionsSummary({ links, loading, status, onOpen }: Linked
     <section className="linkedSessionsSummary">
       <div>
         <span>{dialogCopy.recentSessionsLabel}</span>
-        <strong>{loading ? "..." : links.length}</strong>
+        <strong>{loading && links.length === 0 ? "..." : links.length}</strong>
       </div>
       <div className="linkedSessionsMeta">
         {total > 0 ? <span>{indexed}/{total} indexed</span> : <span>No indexed sessions</span>}
-        {indexing ? <span>Indexing</span> : null}
+        {indexing ? <span role="status" aria-label="Indexing"><LoadingIcon size={14} /></span> : null}
         {failed > 0 ? <span>{failed} failed</span> : null}
       </div>
       <IconButton onClick={onOpen} aria-label="Open recent sessions chart">
@@ -98,7 +71,7 @@ export function LinkedSessionsDrawer({ open, onOpenChange, links, loading, error
   const visibleRows = useMemo(
     () => [...links]
       .filter((link) => linkedSessionId(link))
-      .sort((left, right) => linkedSessionUpdatedAt(right) - linkedSessionUpdatedAt(left))
+      .sort((left, right) => compareTimestamps(right.session_updated_at, left.session_updated_at))
       .slice(0, 50)
       .map((link) => linkedSessionToSession(link))
       .filter((session): session is LinkedSessionRow => Boolean(session)),
@@ -121,6 +94,7 @@ export function LinkedSessionsDrawer({ open, onOpenChange, links, loading, error
     }),
     [visibleRows],
   );
+  const hasChartItems = chartItems.length > 0;
   return (
     <Dialog.Root open={open} onOpenChange={onOpenChange} modal={false}>
       <Dialog.Portal>
@@ -142,11 +116,11 @@ export function LinkedSessionsDrawer({ open, onOpenChange, links, loading, error
               </Dialog.Close>
             </div>
           </div>
-          {loading ? (
+          {loading && !hasChartItems ? (
             <LoadingState className="linkedSessionsDrawerEmpty" label={dialogCopy.linkedSessionsLoadingLabel} />
-          ) : error ? (
+          ) : error && !hasChartItems ? (
             <LoadErrorState message={error} onRetry={onRetry} />
-          ) : chartItems.length > 0 ? (
+          ) : hasChartItems ? (
             <div className="linkedSessionsDrawerChart">
               <SkillSessionProjectChart
                 items={chartItems}
@@ -157,14 +131,19 @@ export function LinkedSessionsDrawer({ open, onOpenChange, links, loading, error
                   if (session) onOpenSession(session.linkedSessionLink);
                 } : undefined}
               />
+              {loading ? (
+                <div className="linkedSessionsDrawerStatusOverlay" aria-live="polite">
+                  <LoadingState label={dialogCopy.linkedSessionsLoadingLabel} />
+                </div>
+              ) : error ? (
+                <div className="linkedSessionsDrawerStatusOverlay">
+                  <LoadErrorState message={error} onRetry={onRetry} />
+                </div>
+              ) : null}
             </div>
           ) : <div className="linkedSessionsDrawerEmpty">No recent sessions. Sessions appear when this skill is used.</div>}
         </Dialog.Content>
       </Dialog.Portal>
     </Dialog.Root>
   );
-}
-
-function linkedSessionUpdatedAt(link: LinkedSessionLink): number {
-  return Date.parse(`${link.session_updated_at ?? ""}`) || 0;
 }

@@ -169,6 +169,28 @@
   color: var(--text);
 }
 
+.skillUpdateTreeRow.changed .skillUpdateTreeName {
+  color: var(--tone-info);
+  font-weight: 600;
+}
+
+.skillUpdateTreeRow.needsResolution .skillUpdateTreeName {
+  color: var(--danger-text);
+}
+
+.skillUpdateFileStatus {
+  flex: 0 0 auto;
+  font-weight: 700;
+}
+
+.skillUpdateFileStatus.changed {
+  color: var(--tone-info);
+}
+
+.skillUpdateFileStatus.needsResolution {
+  color: var(--danger-text);
+}
+
 .skillUpdateTreeRow.folder {
   color: var(--faint);
 }
@@ -252,7 +274,7 @@
 }
 
 .skillUpdatePreviewEmpty {
-  min-height: min(18vh, 180px);
+  min-height: 64px;
   margin: -4px 22px 20px;
   padding: 20px;
   display: grid;
@@ -264,6 +286,23 @@
   line-height: var(--leading-body);
   text-align: center;
   white-space: pre-wrap;
+}
+
+.skillUpdateResolutionProgress {
+  margin-right: auto;
+  color: var(--muted);
+  font-size: var(--text-xs);
+  font-variant-numeric: tabular-nums;
+}
+
+.skillUpdateApplyTooltipTarget {
+  display: inline-flex;
+}
+
+.skillUpdateApplyTooltipTarget:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 3px;
+  border-radius: var(--radius-sm);
 }
 
 .confirmDialogActions {
@@ -281,5 +320,5 @@
   color: var(--muted);
   font-size: var(--text-ui);
   line-height: var(--leading-body);
-  text-wrap: pretty;
+  text-wrap: wrap;
 }

@@ -6,10 +6,10 @@ use crate::transcript::TranscriptItem;
 pub(super) struct SharedProvider;
 
 pub(super) fn parse_transcript(value: &Value, items: &mut Vec<TranscriptItem>) {
-    crate::transcript::collect_generic_item(value, items);
+    crate::transcript::collect_shared_item(value, items);
 }
 
-pub(crate) fn generic_tool_payloads(value: &Value) -> Vec<(&Value, Evidence)> {
+pub(crate) fn shared_tool_payloads(value: &Value) -> Vec<(&Value, Evidence)> {
     let content = value
         .pointer("/message/content")
         .or_else(|| value.get("content"))

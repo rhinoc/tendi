@@ -4,6 +4,7 @@ import { DialogActionButton } from "./DialogActionButton.tsx";
 import { DialogShell } from "./DialogShell.tsx";
 import { DialogStatefulButton } from "./DialogStatefulButton.tsx";
 import { deleteConfirmationDescription, selectionDeleteLoadingLabel } from "../../lib/action-labels.ts";
+import { AsyncStatus } from "../../lib/async-status.ts";
 
 export function DeleteConfirmationDialog({
   open,
@@ -49,7 +50,7 @@ export function DeleteConfirmationDialog({
       <div className="confirmDialogActions">
         <DialogActionButton variant="secondary" disabled={busy} onClick={() => onOpenChange(false)}>Cancel</DialogActionButton>
         <DialogStatefulButton
-          state={busy ? "loading" : "idle"}
+          state={busy ? AsyncStatus.Loading : AsyncStatus.Idle}
           loadingLabel={loadingLabel ?? selectionDeleteLoadingLabel(itemLabel, items.length)}
           variant="danger"
           aria-label={actionLabel}

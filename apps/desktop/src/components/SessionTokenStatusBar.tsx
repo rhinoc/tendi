@@ -7,25 +7,25 @@ import {
   createTokenizerWorker,
   type TokenizerWorkerClient,
 } from "../lib/tokenizer-client.ts";
-import type { TranscriptSkillLink, TranscriptTokenItem } from "../lib/tokenizer-types.ts";
+import { TokenEstimateStatus, TokenUsageSource, TokenizerKind, TokenizerWorkerResponseType, type TranscriptSkillLink, type TranscriptTokenItem } from "../lib/tokenizer-types.ts";
 
 export type SessionTokenStatusBarProps = {
   items: TranscriptTokenItem[];
   skillLinks: TranscriptSkillLink[];
   reportedSegments: TokenSegmentProps[] | null;
   metrics: TokenMetricProps[];
-  usageSource: "estimated" | "reported";
+  usageSource: TokenUsageSource;
 };
 
 type EstimateState = {
-  status: "loading" | "ready" | "error";
+  status: TokenEstimateStatus;
   segments: TokenSegmentProps[] | null;
 };
 
 const emptySegments: TokenSegmentProps[] = [];
 
 export function SessionTokenStatusBar({ items, skillLinks, reportedSegments, metrics, usageSource }: SessionTokenStatusBarProps) {
-  const [estimate, setEstimate] = useState<EstimateState>({ status: "loading", segments: null });
+  const [estimate, setEstimate] = useState<EstimateState>({ status: TokenEstimateStatus.Loading, segments: null });
   const workerRef = useRef<TokenizerWorkerClient | null>(null);
   const latestRequestRef = useRef(0);
 
@@ -33,18 +33,18 @@ export function SessionTokenStatusBar({ items, skillLinks, reportedSegments, met
     if (reportedSegments) {
       workerRef.current?.dispose();
       workerRef.current = null;
-      setEstimate({ status: "ready", segments: null });
+      setEstimate({ status: TokenEstimateStatus.Ready, segments: null });
       return;
     }
 
-    setEstimate({ status: "loading", segments: null });
+    setEstimate((current) => ({ ...current, status: TokenEstimateStatus.Loading }));
     const worker = createTokenizerWorker(
       (response) => {
         if (response.id !== latestRequestRef.current) return;
-        if (response.type === "result") setEstimate({ status: "ready", segments: response.segments });
-        else setEstimate({ status: "error", segments: null });
+        if (response.type === TokenizerWorkerResponseType.Result) setEstimate({ status: TokenEstimateStatus.Ready, segments: response.segments });
+        else setEstimate((current) => ({ ...current, status: TokenEstimateStatus.Error }));
       },
-      () => setEstimate({ status: "error", segments: null }),
+      () => setEstimate((current) => ({ ...current, status: TokenEstimateStatus.Error })),
     );
     workerRef.current = worker;
 
@@ -56,9 +56,9 @@ export function SessionTokenStatusBar({ items, skillLinks, reportedSegments, met
 
   useEffect(() => {
     if (reportedSegments || !workerRef.current) return;
-    setEstimate({ status: "loading", segments: null });
+    setEstimate((current) => ({ ...current, status: TokenEstimateStatus.Loading }));
     latestRequestRef.current = workerRef.current.request({
-      kind: "transcript",
+      kind: TokenizerKind.Transcript,
       items: compactTranscriptTokenItems(items),
       skillLinks: compactTranscriptSkillLinks(skillLinks),
     });
