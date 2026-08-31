@@ -5,9 +5,11 @@ use std::{
 
 use anyhow::Result;
 use chrono::Local;
-use ignore::gitignore::{Gitignore, GitignoreBuilder};
+use ignore::{
+    DirEntry, WalkBuilder,
+    gitignore::{Gitignore, GitignoreBuilder},
+};
 use serde::{Deserialize, Serialize};
-use walkdir::{DirEntry, WalkDir};
 
 use crate::{fsutil::sha256_text, git};
 
@@ -156,15 +158,28 @@ pub fn scan_scope(
         return (Vec::new(), warnings);
     }
 
-    let entries = WalkDir::new(scope)
+    let exclusion_matcher = exclusion_matcher.clone();
+    let mut walker = WalkBuilder::new(scope);
+    walker
+        .hidden(false)
+        .ignore(false)
+        .git_ignore(true)
+        .git_global(false)
+        .git_exclude(false)
         .follow_links(false)
-        .into_iter()
-        .filter_entry(|entry| {
+        .filter_entry(move |entry| {
+            let is_dir = entry
+                .file_type()
+                .is_some_and(|file_type| file_type.is_dir());
             !should_skip_directory(entry)
-                && !path_is_excluded(exclusion_matcher, entry.path(), entry.file_type().is_dir())
+                && !path_is_excluded(&exclusion_matcher, entry.path(), is_dir)
         });
+    let entries = walker.build();
     for entry in entries.filter_map(Result::ok) {
-        if !entry.file_type().is_dir() {
+        if !entry
+            .file_type()
+            .is_some_and(|file_type| file_type.is_dir())
+        {
             continue;
         }
         let path = entry.path();
@@ -229,7 +244,9 @@ fn scan_project(root: &Path, scope_id: &str, scanned_at: &str) -> Option<Project
 }
 
 fn should_skip_directory(entry: &DirEntry) -> bool {
-    entry.file_type().is_dir()
+    entry
+        .file_type()
+        .is_some_and(|file_type| file_type.is_dir())
         && entry.depth() > 0
         && entry
             .file_name()
@@ -240,6 +257,7 @@ fn should_skip_directory(entry: &DirEntry) -> bool {
 #[cfg(test)]
 mod tests {
     use std::{
+        collections::BTreeSet,
         fs,
         process::Command,
         time::{SystemTime, UNIX_EPOCH},
@@ -281,6 +299,38 @@ mod tests {
         assert_eq!(projects.len(), 1);
         assert_eq!(projects[0].name, "demo");
         assert_eq!(projects[0].scope_id, "scope-test");
+
+        fs::remove_dir_all(root).expect("remove temp root");
+    }
+
+    #[test]
+    fn scan_scope_respects_repository_gitignore() {
+        let root = temp_root("gitignore");
+        let repo = root.join("mailia");
+        let ignored_repo = repo.join(".build/checkouts/SwiftSoup");
+        let visible_repo = repo.join("packages/Visible");
+        fs::create_dir_all(&ignored_repo).expect("create ignored checkout");
+        fs::create_dir_all(&visible_repo).expect("create visible checkout");
+        git(&repo, &["init", "--quiet"]);
+        git(&ignored_repo, &["init", "--quiet"]);
+        git(&visible_repo, &["init", "--quiet"]);
+        fs::write(repo.join(".gitignore"), ".build/\n").expect("write gitignore");
+
+        let exclusions = build_exclusion_matcher(&[]).expect("build exclusions");
+        let (projects, warnings) = scan_scope(&root, "scope-test", &exclusions);
+        let project_roots = projects
+            .iter()
+            .map(|project| project.root_path.clone())
+            .collect::<BTreeSet<_>>();
+
+        assert!(warnings.is_empty(), "unexpected warnings: {warnings:?}");
+        assert!(project_roots.contains(&repo.canonicalize().expect("canonical repo")));
+        assert!(
+            project_roots.contains(&visible_repo.canonicalize().expect("canonical visible repo"))
+        );
+        assert!(
+            !project_roots.contains(&ignored_repo.canonicalize().expect("canonical ignored repo"))
+        );
 
         fs::remove_dir_all(root).expect("remove temp root");
     }

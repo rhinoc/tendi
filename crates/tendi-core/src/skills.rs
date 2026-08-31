@@ -8,6 +8,7 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 use chrono::{SecondsFormat, TimeZone, Utc};
+use ignore::WalkBuilder;
 use serde::{Deserialize, Serialize};
 use serde_yaml::Value;
 use sha2::{Digest, Sha256};
@@ -2181,13 +2182,26 @@ fn discover_installable_skills(root: &Path) -> Result<Vec<InstallableSkill>> {
     }
 
     if skills.is_empty() {
-        for entry in WalkDir::new(&root)
+        let mut walker = WalkBuilder::new(&root);
+        walker
+            .hidden(false)
+            .ignore(false)
+            .git_ignore(true)
+            .git_global(false)
+            .git_exclude(false)
             .follow_links(false)
-            .max_depth(5)
+            .max_depth(Some(5))
+            .filter_entry(|entry| !is_skipped_skill_search_entry(entry.path()));
+        for entry in walker
+            .build()
             .into_iter()
-            .filter_entry(|entry| !is_skipped_skill_search_entry(entry.path()))
             .filter_map(Result::ok)
-            .filter(|entry| entry.file_type().is_file() && entry.file_name() == "SKILL.md")
+            .filter(|entry| {
+                entry
+                    .file_type()
+                    .is_some_and(|file_type| file_type.is_file())
+                    && entry.file_name() == "SKILL.md"
+            })
         {
             let Some(skill_dir) = entry.path().parent() else {
                 continue;
@@ -7573,6 +7587,36 @@ mod tests {
             .map(|skill| skill.name.as_str())
             .collect::<Vec<_>>();
         assert_eq!(names, vec!["alpha", "beta"]);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn discover_installable_skills_respects_repository_gitignore() {
+        let root = temp_dir("tendi-discover-add-skills-gitignore-test");
+        let ignored = root.join(".build/checkouts/ignored");
+        let visible = root.join("other/visible");
+        fs::create_dir_all(&ignored).unwrap();
+        fs::create_dir_all(&visible).unwrap();
+        run_test_git(&root, &["init", "--quiet"]);
+        fs::write(root.join(".gitignore"), ".build/\n").unwrap();
+        fs::write(
+            ignored.join("SKILL.md"),
+            "---\nname: ignored\ndescription: Ignored skill\n---\n\n# ignored\n",
+        )
+        .unwrap();
+        fs::write(
+            visible.join("SKILL.md"),
+            "---\nname: visible\ndescription: Visible skill\n---\n\n# visible\n",
+        )
+        .unwrap();
+
+        let skills = discover_installable_skills(&root).unwrap();
+        let names = skills
+            .iter()
+            .map(|skill| skill.name.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(names, vec!["visible"]);
 
         let _ = fs::remove_dir_all(root);
     }
