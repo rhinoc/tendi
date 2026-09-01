@@ -29,7 +29,7 @@ export function resolveInitialSession<T extends SessionSelectionRecord>(
   sessions: T[],
   activeSessionKey?: string,
 ): T | undefined {
-  const requestedKey = `${activeSessionKey ?? ""}`.toLowerCase();
+  const requestedKey = `${activeSessionKey ?? ""}`.trim();
   if (requestedKey) {
     const requested = sessions.find((session) => (
       (session.path && sessionSourceExternalKey(session) === requestedKey)

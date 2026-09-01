@@ -95,7 +95,7 @@ function buildRealAnalytics(sessions) {
     if (model) {
       const modelEntry = day.models.find((entry) => entry.model === model);
       if (modelEntry) modelEntry.totalTokens += usageValue("totalTokens", "total_tokens");
-      else day.models.push({ model, totalTokens: usageValue("totalTokens", "total_tokens") });
+      else day.models.push({ model, totalTokens: usageValue("totalTokens", "total_tokens"), totalMs: 0, completedRuns: 0 });
     }
     days.set(date, day);
   }

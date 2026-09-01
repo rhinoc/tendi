@@ -31,7 +31,6 @@ import { formatRelativeTime } from "../lib/strings.ts";
 import { dialogCopy } from "../lib/dialog-copy.ts";
 import {
   type AnalyticsGranularity,
-  type AnalyticsRefreshProgress,
   type OverviewAnalytics,
   selectAnalyticsGranularity,
 } from "../lib/analytics.ts";
@@ -73,6 +72,7 @@ const USAGE_METRICS = [
   OverviewUsageMetric.Turns,
   OverviewUsageMetric.Tokens,
   OverviewUsageMetric.Cache,
+  OverviewUsageMetric.Time,
   OverviewUsageMetric.Tools,
   OverviewUsageMetric.Skills,
 ] as const satisfies ReadonlyArray<OverviewUsageMetric>;
@@ -81,6 +81,7 @@ const USAGE_METRIC_LABELS: Record<OverviewUsageMetric, string> = {
   [OverviewUsageMetric.Turns]: "Turns",
   [OverviewUsageMetric.Tokens]: "Tokens",
   [OverviewUsageMetric.Cache]: "Cache",
+  [OverviewUsageMetric.Time]: "Time",
   [OverviewUsageMetric.Tools]: "Tools",
   [OverviewUsageMetric.Skills]: "Skills",
 };
@@ -102,7 +103,7 @@ function overviewAnalyticsCacheKey(agent: string, days: number, analyticsRevisio
 function AnalyticsLoadingState({
   progress,
 }: {
-  progress: AnalyticsRefreshProgress | null;
+  progress: { completed: number; total: number } | null;
 }) {
   const completed = progress?.completed ?? 0;
   const total = progress?.total ?? 0;
@@ -156,7 +157,7 @@ export const OverviewView = memo(function OverviewView({
   }), [agentFilter, analyticsRange, analyticsRevision]);
   const analytics = useDesktopStore((state) => selectAnalyticsDisplayValue(state, analyticsRangeKey));
   const [analyticsLoading, setAnalyticsLoading] = useState(!analytics);
-  const [analyticsProgress, setAnalyticsProgress] = useState<AnalyticsRefreshProgress | null>(null);
+  const analyticsProgress = useDesktopStore((state) => state.analytics.progress);
   const [analyticsError, setAnalyticsError] = useState("");
   const [preparingAnalyticsRange, setPreparingAnalyticsRange] = useState(false);
   const automaticGranularity = selectAnalyticsGranularity(analytics?.days.length ?? analyticsRange);
@@ -205,7 +206,7 @@ export const OverviewView = memo(function OverviewView({
     }
     if (showLoading) {
       setAnalyticsLoading(true);
-      setAnalyticsProgress(null);
+      desktopStore.actions.setAnalyticsProgress(null);
     }
     setAnalyticsError("");
     const args = {
@@ -250,7 +251,7 @@ export const OverviewView = memo(function OverviewView({
   );
   const analyticsRefreshing = analyticsLoading
     || preparingAnalyticsRange
-    || (analytics?.coverage.indexingSessions ?? 0) > 0;
+    || analyticsProgress?.running === true;
   useEffect(() => {
     setGranularityOverride(null);
   }, [automaticGranularity]);

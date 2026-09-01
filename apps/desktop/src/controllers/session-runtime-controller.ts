@@ -233,6 +233,8 @@ export function useSessionRuntimeController(
         setAnalyticsRevision(event.payload.revision);
         setAnalyticsRevisionReady(true);
         setAnalyticsRevisionError("");
+      } else if (event.event === RuntimeEventName.AnalyticsProgress) {
+        desktopStore.actions.setAnalyticsProgress(event.payload);
       } else if (event.event === RuntimeEventName.SkillsUpdates) {
         const payload = event.payload;
         if (payload.status === SkillUpdateEventStatus.Completed) {

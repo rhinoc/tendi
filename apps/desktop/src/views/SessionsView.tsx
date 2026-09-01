@@ -34,7 +34,7 @@ import { SearchClearButton } from "../components/shared/SearchClearButton.tsx";
 import { SelectControl } from "../components/shared/SelectControl.tsx";
 import { StatefulButton } from "../components/shared/StatefulButton.tsx";
 import { Toast } from "../components/shared/Toast.tsx";
-import { useElementSize } from "../components/shared/useElementSize.ts";
+import { useVirtualViewport } from "../components/shared/useVirtualViewport.ts";
 import { findTextRanges } from "../components/shared/text-ranges.ts";
 import { RelationshipGraphKind, SkillRelationshipMap } from "../features/skills/SkillRelationshipMap.tsx";
 import { createSessionTableColumns } from "../features/sessions/createSessionTableColumns.tsx";
@@ -65,6 +65,7 @@ import {
   mergeTranscriptItems,
   promptActionLabels,
   revealPathLabel,
+  sessionExternalKey,
   resolveInitialSession,
   safeInvoke,
   sessionCacheRate,
@@ -426,13 +427,18 @@ function transcriptRangeForViewport(
 
 function useTranscriptVirtualizer(items: TranscriptItemRecord[], rootRef: { current: HTMLDivElement | null }, resetKey: string) {
   const virtualized = items.length >= TRANSCRIPT_VIRTUAL_THRESHOLD;
-  const [renderScrollTop, setRenderScrollTop] = useState(0);
-  const { size: viewportSize } = useElementSize<HTMLDivElement>(
+  const {
+    scrollOffset,
+    scrollOffsetRef,
+    readViewportSize,
+    syncScrollPosition,
+    scheduleScrollSync,
+  } = useVirtualViewport<HTMLDivElement>(
     { width: 0, height: 720 },
     {
       ref: rootRef,
       enabled: virtualized,
-      refreshKey: virtualized,
+      refreshKey: items,
       readSize: (element) => ({ width: element.clientWidth, height: element.clientHeight }),
       isValidSize: ({ height }) => height > 0,
       isEqual: (current, next) => current.height === next.height,
@@ -442,9 +448,7 @@ function useTranscriptVirtualizer(items: TranscriptItemRecord[], rootRef: { curr
   const measuredHeightsRef = useRef(new Map<number, number>());
   const measuredNodesRef = useRef(new Map<number, HTMLElement>());
   const resizeObserverRef = useRef<ResizeObserver | null>(null);
-  const scrollTopRef = useRef(0);
   const stickToBottomRef = useRef(false);
-  const renderRangeRef = useRef({ start: 0, end: items.length });
 
   const offsets = useMemo(() => {
     const next = new Array<number>(items.length + 1).fill(0);
@@ -460,15 +464,7 @@ function useTranscriptVirtualizer(items: TranscriptItemRecord[], rootRef: { curr
     () => offsets.slice(0, -1).map((end, index) => end - offsets[index]),
     [offsets],
   );
-  const measuredRef = useRef(measured);
-  measuredRef.current = measured;
-  const updateRenderRange = useCallback((nextScrollTop: number) => {
-    const next = transcriptRangeForViewport(items.length, offsetsRef.current, measuredRef.current, nextScrollTop, viewportSize.height, virtualized);
-    const current = renderRangeRef.current;
-    if (current.start === next.start && current.end === next.end) return;
-    renderRangeRef.current = next;
-    setRenderScrollTop(nextScrollTop);
-  }, [items.length, virtualized, viewportSize.height]);
+  const viewportHeight = readViewportSize();
 
   useLayoutEffect(() => {
     if (!stickToBottomRef.current) return;
@@ -477,44 +473,35 @@ function useTranscriptVirtualizer(items: TranscriptItemRecord[], rootRef: { curr
     const nextScrollTop = Math.max(0, root.scrollHeight - root.clientHeight);
     if (Math.abs(root.scrollTop - nextScrollTop) <= 1) return;
     root.scrollTop = nextScrollTop;
-    scrollTopRef.current = nextScrollTop;
-    updateRenderRange(nextScrollTop);
-  }, [items.length, offsets, rootRef, updateRenderRange, viewportSize.height]);
+    syncScrollPosition();
+  }, [items.length, offsets, rootRef, syncScrollPosition, viewportHeight]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     measuredHeightsRef.current.clear();
-    scrollTopRef.current = 0;
     stickToBottomRef.current = false;
-    renderRangeRef.current = { start: 0, end: items.length };
-    setRenderScrollTop(0);
     if (rootRef.current) rootRef.current.scrollTop = 0;
+    syncScrollPosition();
     setMeasurementVersion((current) => current + 1);
-  }, [resetKey, rootRef]);
+  }, [resetKey, rootRef, syncScrollPosition]);
 
   useEffect(() => {
     if (!virtualized) return undefined;
     const root = rootRef.current;
     if (!root) return undefined;
-    let frame = 0;
-    const updateScrollTop = () => {
-      frame = 0;
-      const nextScrollTop = root.scrollTop;
-      scrollTopRef.current = nextScrollTop;
-      if (Math.abs(nextScrollTop - Math.max(0, root.scrollHeight - root.clientHeight)) > 2) {
-        stickToBottomRef.current = false;
-      }
-      updateRenderRange(nextScrollTop);
-    };
-    const onScroll = () => {
-      if (frame === 0) frame = window.requestAnimationFrame(updateScrollTop);
-    };
-    updateScrollTop();
+    const onScroll = () => scheduleScrollSync();
+    syncScrollPosition();
     root.addEventListener("scroll", onScroll, { passive: true });
-    return () => {
-      root.removeEventListener("scroll", onScroll);
-      if (frame !== 0) window.cancelAnimationFrame(frame);
-    };
-  }, [rootRef, updateRenderRange, virtualized]);
+    return () => root.removeEventListener("scroll", onScroll);
+  }, [rootRef, scheduleScrollSync, syncScrollPosition, virtualized]);
+
+  useEffect(() => {
+    if (!virtualized) return;
+    const root = rootRef.current;
+    if (!root) return;
+    if (Math.abs(scrollOffset - Math.max(0, root.scrollHeight - root.clientHeight)) > 2) {
+      stickToBottomRef.current = false;
+    }
+  }, [rootRef, scrollOffset, virtualized]);
 
   useEffect(() => {
     if (!virtualized || typeof ResizeObserver === "undefined") return undefined;
@@ -532,11 +519,12 @@ function useTranscriptVirtualizer(items: TranscriptItemRecord[], rootRef: { curr
         if (Math.abs(previousHeight - nextHeight) < 1) continue;
         measuredHeightsRef.current.set(index, nextHeight);
         changed = true;
-        if (layout[index] < scrollTopRef.current) anchorDelta += nextHeight - previousHeight;
+        if (layout[index] < scrollOffsetRef.current) anchorDelta += nextHeight - previousHeight;
       }
       if (!changed) return;
       const root = rootRef.current;
       if (root && anchorDelta !== 0) root.scrollTop += anchorDelta;
+      syncScrollPosition();
       setMeasurementVersion((current) => current + 1);
     });
     resizeObserverRef.current = observer;
@@ -545,7 +533,7 @@ function useTranscriptVirtualizer(items: TranscriptItemRecord[], rootRef: { curr
       observer.disconnect();
       resizeObserverRef.current = null;
     };
-  }, [items, rootRef, virtualized]);
+  }, [items, rootRef, syncScrollPosition, virtualized, scrollOffsetRef]);
 
   const measureItem = useCallback((index: number, node: HTMLElement | null) => {
     const previous = measuredNodesRef.current.get(index);
@@ -560,12 +548,8 @@ function useTranscriptVirtualizer(items: TranscriptItemRecord[], rootRef: { curr
   }, []);
 
   const range = useMemo(() => {
-    return transcriptRangeForViewport(items.length, offsets, measured, renderScrollTop, viewportSize.height, virtualized);
-  }, [items.length, measured, offsets, renderScrollTop, viewportSize.height, virtualized]);
-
-  useEffect(() => {
-    renderRangeRef.current = range;
-  }, [range.start, range.end]);
+    return transcriptRangeForViewport(items.length, offsets, measured, scrollOffset, viewportHeight, virtualized);
+  }, [items.length, measured, offsets, scrollOffset, viewportHeight, virtualized]);
 
   const scrollToIndex = useCallback((index: number, behavior: ScrollBehavior = "auto") => {
     const root = rootRef.current;
@@ -574,10 +558,8 @@ function useTranscriptVirtualizer(items: TranscriptItemRecord[], rootRef: { curr
     stickToBottomRef.current = false;
     const top = offsetsRef.current[index] ?? 0;
     root.scrollTo({ top, behavior });
-    scrollTopRef.current = top;
-    renderRangeRef.current = transcriptRangeForViewport(items.length, offsetsRef.current, measuredRef.current, top, viewportSize.height, virtualized);
-    setRenderScrollTop(top);
-  }, [items.length, rootRef, viewportSize.height, virtualized]);
+    syncScrollPosition();
+  }, [items.length, rootRef, syncScrollPosition]);
 
   const scrollToBottom = useCallback((behavior: ScrollBehavior = "auto") => {
     const root = rootRef.current;
@@ -585,10 +567,8 @@ function useTranscriptVirtualizer(items: TranscriptItemRecord[], rootRef: { curr
     stickToBottomRef.current = true;
     const top = Math.max(0, root.scrollHeight - root.clientHeight);
     root.scrollTo({ top, behavior });
-    scrollTopRef.current = top;
-    updateRenderRange(top);
-    setRenderScrollTop(top);
-  }, [rootRef, updateRenderRange]);
+    syncScrollPosition();
+  }, [rootRef, syncScrollPosition]);
 
   return {
     virtualized,
@@ -1611,17 +1591,21 @@ const SessionLocator = memo(function SessionLocator({
 }) {
   const [visibleKeys, setVisibleKeys] = useState<Set<string>>(() => new Set());
   const [previewKey, setPreviewKey] = useState("");
-  const { ref: locatorListRef, size: locatorSize } = useElementSize<HTMLDivElement>(
+  const locatorListRef = useRef<HTMLDivElement | null>(null);
+  const {
+    scrollOffset: locatorScrollTop,
+    readViewportSize,
+    scheduleScrollSync,
+  } = useVirtualViewport<HTMLDivElement>(
     { width: 0, height: 640 },
     {
-      refreshKey: items.length,
+      ref: locatorListRef,
+      refreshKey: items,
       readSize: (element) => ({ width: element.clientWidth, height: element.clientHeight }),
       isValidSize: ({ height }) => height > 0,
       isEqual: (current, next) => current.height === next.height,
     },
   );
-  const locatorScrollFrameRef = useRef(0);
-  const [locatorScrollTop, setLocatorScrollTop] = useState(0);
   const dragRef = useRef<{ pointerId: number; key: string; moved: boolean } | null>(null);
   const suppressClickRef = useRef(false);
   const itemKeySet = useMemo(() => new Set(items.map((item) => item.key)), [items]);
@@ -1633,13 +1617,11 @@ const SessionLocator = memo(function SessionLocator({
     }
     onSelect(key);
   }, [onSelect]);
-  useEffect(() => () => {
-    if (locatorScrollFrameRef.current !== 0) window.cancelAnimationFrame(locatorScrollFrameRef.current);
-  }, []);
+  const locatorViewportHeight = readViewportSize();
   const { start: locatorStart, end: locatorEnd } = fixedVirtualRange(
     items.length,
     locatorScrollTop,
-    locatorSize.height,
+    locatorViewportHeight,
     SESSION_LOCATOR_ROW_HEIGHT,
     SESSION_LOCATOR_OVERSCAN,
   );
@@ -1702,13 +1684,8 @@ const SessionLocator = memo(function SessionLocator({
       <div
           ref={locatorListRef}
           className="sessionLocatorList"
-          onScroll={(event) => {
-            if (locatorScrollFrameRef.current !== 0) return;
-            const nextScrollTop = event.currentTarget.scrollTop;
-            locatorScrollFrameRef.current = window.requestAnimationFrame(() => {
-              locatorScrollFrameRef.current = 0;
-              setLocatorScrollTop(nextScrollTop);
-            });
+          onScroll={() => {
+            scheduleScrollSync();
           }}
           onPointerDown={(event) => {
             if (event.button !== 0) return;
@@ -1967,11 +1944,11 @@ function SessionRelationsConvergence({
   sessionTree: SessionRecord[];
   onOpenSession: (session: SessionRecord) => void;
 }) {
-  const currentName = `session:${sessionKey(session)}`;
+  const currentName = `session:${sessionExternalKey(session)}`;
   const relatedSessions = new Map<string, SessionRecord>();
-  const treeByKey = new Map(sessionTree.map((treeSession) => [sessionKey(treeSession).toLowerCase(), treeSession]));
+  const treeByKey = new Map(sessionTree.map((treeSession) => [sessionExternalKey(treeSession), treeSession]));
   const nodes = sessionTree.map((treeSession) => {
-    const name = `session:${sessionKey(treeSession)}`;
+    const name = `session:${sessionExternalKey(treeSession)}`;
     if (name !== currentName) relatedSessions.set(name, treeSession);
     return {
       name,
@@ -1982,12 +1959,12 @@ function SessionRelationsConvergence({
   const edges: Array<{ from: string; to: string }> = [];
   for (const treeSession of sessionTree) {
     if (!treeSession.parentSessionId) continue;
-    const parentKey = `${friendlyAgent(treeSession.agent)}:${treeSession.parentSessionId}`.toLowerCase();
+    const parentKey = sessionExternalKey({ agent: treeSession.agent, id: treeSession.parentSessionId });
     const parent = treeByKey.get(parentKey);
     if (parent) {
       edges.push({
-        from: `session:${sessionKey(parent)}`,
-        to: `session:${sessionKey(treeSession)}`,
+        from: `session:${sessionExternalKey(parent)}`,
+        to: `session:${sessionExternalKey(treeSession)}`,
       });
     }
   }
@@ -2477,7 +2454,7 @@ export function ToolCallGroup({
     >
       <summary className="toolCallGroupSummary">
         <span>Ran {tools.length} {tools.length === 1 ? "command" : "commands"}</span>
-        {duration ? <Badge tone="neutral" mono>{duration}</Badge> : null}
+        {duration ? <Badge tone="neutral" className="toolCallDuration">{duration}</Badge> : null}
         <ChevronRightIcon className="toolCallChevron" size={14} />
       </summary>
       {open ? <div className="toolCallGroupDetails">
@@ -2541,7 +2518,7 @@ export function ToolCall({
         >
           {item.tag ? <Badge tone="neutral" mono>{item.tag}</Badge> : null}
           <AppTooltip content={command} onlyWhenTruncated><code>{highlightTranscriptText(command || "—", searchQuery)}</code></AppTooltip>
-          {duration ? <Badge tone="neutral" mono>{duration}</Badge> : null}
+          {duration ? <Badge tone="neutral" className="toolCallDuration">{duration}</Badge> : null}
           <ChevronRightIcon className="toolCallChevron" size={14} />
         </button>
         {item.linkedSessionId && onOpenLinkedSession ? (
@@ -2573,7 +2550,7 @@ export function ToolCall({
 function sessionKey(session: SessionRecord | null | undefined) {
   if (!session) return "";
   return sessionSourceExternalKey({
-    agent: friendlyAgent(session.agent).toLowerCase(),
+    agent: session.agent,
     id: session.id,
     path: session.path,
   });
@@ -2882,7 +2859,7 @@ export function SessionsView({
     return () => {
       cancelled = true;
     };
-  }, [normalizedQuery, searchCandidates, searchRequestKey, searchSessions, showSessionError]);
+  }, [normalizedQuery, searchRequestKey, searchSessions, showSessionError]);
   useEffect(() => {
     if (sessionListError && !sessionRefreshError && sessionItems.length === 0) {
       showSessionError("Could not load sessions. Try again.");
@@ -3015,13 +2992,13 @@ export function SessionsView({
     if (activeRowId && !allSessionItems.some((session) => sessionTableRowId(session) === activeRowId)) setActiveRowId("");
   }, [activeRowId, allSessionItems]);
   useEffect(() => {
-    const normalizedKey = `${activeSessionKey ?? ""}`.toLowerCase();
+    const normalizedKey = `${activeSessionKey ?? ""}`.trim();
     if (!normalizedKey) {
       handledExternalSessionKeyRef.current = "";
       return;
     }
     if (handledExternalSessionKeyRef.current === normalizedKey) return;
-    const next = allSessionItems.find((session) => sessionKey(session) === normalizedKey);
+    const next = resolveInitialSession(allSessionItems, normalizedKey);
     if (next) {
       handledExternalSessionKeyRef.current = normalizedKey;
       locateSessionInList(next);
@@ -3244,7 +3221,7 @@ export function SessionsView({
   ), [activeSession?.messages, activeSession?.updatedAt, activeSessionTranscriptKey]);
   const activeSessionLinkKey = useMemo(() => (
     activeSession ? sessionKey(activeSession) : ""
-  ), [activeSession?.agent, activeSession?.id]);
+  ), [activeSession?.agent, activeSession?.id, activeSession?.path]);
   const activeSessionSkillLinksKey = useMemo(() => {
     if (!activeSession) return "";
     return [
@@ -3855,6 +3832,7 @@ export function SessionsView({
               onSortChange={handleSortChange}
               manualSorting
               rowHeight={SESSION_TABLE_ROW_HEIGHT}
+              enableVirtualization={false}
               scrollResetKey={`${pageContextKey}\u0000${boundedCurrentPage}`}
               scrollToRowId={sessionLocatorRequest}
               onScrollToRowComplete={completeSessionLocator}

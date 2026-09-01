@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import test, { mock } from "node:test";
 
 if (typeof mock.module !== "function") {
@@ -31,6 +32,7 @@ if (typeof mock.module !== "function") {
   } = await import("../src/controllers/skill-controller.ts");
   const {
     reconcileCollection,
+    applyDomainSnapshot,
     applyHookCommandResult,
     applyMcpCommandResult,
   } = await import("../src/controllers/catalog-controller.ts");
@@ -40,6 +42,7 @@ if (typeof mock.module !== "function") {
   const {
     applySessionDelta,
     coalesceSessionEventBuffer,
+    selectSessionRelationships,
     selectSessionListView,
   } = await import("../src/controllers/session-controller.ts");
 
@@ -53,6 +56,28 @@ if (typeof mock.module !== "function") {
     );
     assert.equal(next[0], first);
     assert.notEqual(next[1], second);
+  });
+
+  test("deduplicates repeated incoming catalog rows", () => {
+    const next = reconcileCollection(
+      [],
+      [{ id: "one", value: "old" }, { id: "one", value: "new" }],
+      (row) => row.id,
+    );
+    assert.deepEqual(next, [{ id: "one", value: "new" }]);
+  });
+
+  test("deduplicates repeated session rows in a snapshot", () => {
+    const next = applyDomainSnapshot(
+      emptyRuntimeData(),
+      "sessions",
+      toRawDomainRows([
+        { id: "one", agent: "cursor", path: "/sessions/one.jsonl", title: "One" },
+        { id: "one", agent: "cursor", path: "/sessions/one/meta.json", title: "One" },
+      ], "duplicate session rows"),
+    );
+    assert.equal(next.sessions.length, 1);
+    assert.equal(next.sessions[0].path, "/sessions/one/meta.json");
   });
 
   test("expands skill dependencies once without looping on cycles", () => {
@@ -110,6 +135,42 @@ if (typeof mock.module !== "function") {
     assert.equal(view.pageCount, 1);
   });
 
+  test("keeps remote session search stable when its result rows are committed", async () => {
+    const base = [
+      { id: "one", agent: "codex", title: "one", path: "/one", projectPath: "/repo", updatedAt: "2026-08-29T00:00:00Z" },
+      { id: "two", agent: "codex", title: "two", path: "/two", projectPath: "/repo", updatedAt: "2026-08-28T00:00:00Z" },
+    ];
+    const input = {
+      sessions: base,
+      query: "needle",
+      remoteSearch: true,
+      sort: { key: "updatedAt", direction: "desc" },
+      pageSize: 50,
+      groupBy: null,
+      showChildSessions: false,
+      selectedProjectKeys: [],
+      projectFilterQuery: "",
+      missingSessionProjectPolicy: "show",
+      projects: [],
+      sessionProjects: [],
+    } as const;
+    const initial = selectSessionListView({ ...input, searchRows: undefined, searchRowsKey: "" });
+    const loading = selectSessionListView({ ...input, searchRows: [], searchRowsKey: initial.searchRequestKey });
+    const result = selectSessionListView({ ...input, searchRows: [base[1]], searchRowsKey: initial.searchRequestKey });
+
+    assert.equal(loading.searchRequestKey, result.searchRequestKey);
+    assert.notEqual(loading.searchCandidates, result.searchCandidates);
+    assert.deepEqual(result.tableSessions.map((session) => session.id), ["two"]);
+
+    const source = await readFile(new URL("../src/views/SessionsView.tsx", import.meta.url), "utf8");
+    const effectStart = source.indexOf("  useEffect(() => {\n    if (!normalizedQuery || !searchSessions)");
+    const effectEnd = source.indexOf("\n  useEffect(() => {", effectStart + 1);
+    assert.ok(effectStart >= 0 && effectEnd > effectStart);
+    const dependencyList = source.slice(effectStart, effectEnd).slice(source.slice(effectStart, effectEnd).lastIndexOf("  }, ["));
+    assert.match(dependencyList, /searchRequestKey/);
+    assert.doesNotMatch(dependencyList, /searchCandidates/);
+  });
+
   test("keeps raw session rows until the controller write boundary", () => {
     const raw = toRawDomainRows([{
       id: " session-1 ",
@@ -155,6 +216,43 @@ if (typeof mock.module !== "function") {
     assert.equal(next[0].messages, 12);
     assert.equal(next[1].id, "incoming");
     assert.equal(next[1].updatedAt, "2026-08-30T00:00:00Z");
+  });
+
+  test("replaces a session when its provider path changes", () => {
+    const current = [{
+      id: "same-session",
+      agent: "cursor",
+      title: "Same session",
+      path: "/sessions/same-session/meta.json",
+    }];
+    const next = applySessionDelta(current, toRawDomainRows([{
+      id: "same-session",
+      agent: "cursor",
+      title: "Same session",
+      path: "/sessions/same-session/same-session.jsonl",
+    }], "migrated session row"));
+    assert.deepEqual(next.map((session) => session.path), ["/sessions/same-session/same-session.jsonl"]);
+  });
+
+  test("preserves native session id casing when resolving relationships", () => {
+    const active = {
+      id: "child",
+      agent: "codex",
+      title: "Child",
+      path: "/sessions/child.jsonl",
+      parentSessionId: "Parent-A",
+    };
+    const differentlyCasedParent = {
+      id: "parent-a",
+      agent: "codex",
+      title: "Parent",
+      path: "/sessions/parent.jsonl",
+    };
+
+    const relationships = selectSessionRelationships([active, differentlyCasedParent], active);
+
+    assert.deepEqual(relationships.childSessions, []);
+    assert.deepEqual(relationships.tree.map((session) => session.id), ["child"]);
   });
 
   test("keeps canonical hook rows while applying a typed mutation result", () => {

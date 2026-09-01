@@ -5,11 +5,54 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail};
+use ignore::WalkBuilder;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
-use walkdir::WalkDir;
 
 use crate::fsutil::{atomic_write, sha256_text};
+
+const SKIPPED_SKILL_PATH_COMPONENTS: &[&str] = &[
+    ".git",
+    ".gitignore",
+    ".gitattributes",
+    ".gitmodules",
+    ".DS_Store",
+    "Thumbs.db",
+    "desktop.ini",
+    "node_modules",
+    ".pnpm-store",
+    ".yarn",
+    ".npm",
+    "out",
+    ".build",
+    "_build",
+    ".next",
+    ".nuxt",
+    ".svelte-kit",
+    ".turbo",
+    ".cache",
+    ".parcel-cache",
+    ".vite",
+    "__pycache__",
+    ".pytest_cache",
+    ".mypy_cache",
+    ".ruff_cache",
+    ".tox",
+    ".nox",
+    ".hypothesis",
+    ".pytype",
+    ".venv",
+    "venv",
+    "env",
+    ".eggs",
+    ".gradle",
+    ".bundle",
+    ".idea",
+    ".vscode",
+    "tmp",
+    "temp",
+];
+const SKIPPED_SKILL_PATH_SUFFIXES: &[&str] = &[".pyc", ".pyo", ".class", ".egg-info"];
 
 #[derive(Debug, Clone, Serialize)]
 pub struct SkillFileEntry {
@@ -47,11 +90,22 @@ pub fn list_skill_files(
 ) -> Result<Vec<SkillFileEntry>> {
     let skill_dir = resolve_skill_dir(cwd, skill_name, cached_skill_dir)?;
     let mut entries = Vec::new();
-
-    for entry in WalkDir::new(&skill_dir)
+    let skill_dir_for_filter = skill_dir.clone();
+    let mut walker = WalkBuilder::new(&skill_dir);
+    walker
+        .hidden(false)
+        .parents(true)
+        .ignore(false)
+        .git_ignore(true)
+        .git_global(false)
+        .git_exclude(false)
+        .require_git(false)
         .follow_links(true)
-        .max_depth(4)
-        .into_iter()
+        .max_depth(Some(4))
+        .filter_entry(move |entry| !should_skip_skill_path(&skill_dir_for_filter, entry.path()));
+
+    for entry in walker
+        .build()
         .filter_map(Result::ok)
         .filter(|entry| entry.path() != skill_dir)
     {
@@ -84,6 +138,24 @@ pub fn list_skill_files(
             .then_with(|| a.relative_path.cmp(&b.relative_path))
     });
     Ok(entries)
+}
+
+fn should_skip_skill_path(root: &Path, path: &Path) -> bool {
+    path.strip_prefix(root).ok().is_some_and(|relative| {
+        relative.components().any(|component| {
+            component
+                .as_os_str()
+                .to_str()
+                .is_some_and(should_skip_skill_path_component)
+        })
+    })
+}
+
+fn should_skip_skill_path_component(name: &str) -> bool {
+    SKIPPED_SKILL_PATH_COMPONENTS.contains(&name)
+        || SKIPPED_SKILL_PATH_SUFFIXES
+            .iter()
+            .any(|suffix| name.ends_with(suffix))
 }
 
 pub fn read_skill_file(
@@ -312,9 +384,118 @@ mod tests {
     };
 
     use super::{
-        create_skill_file, create_skill_folder, delete_skill_path, read_skill_file,
-        rename_skill_path, save_skill_file,
+        create_skill_file, create_skill_folder, delete_skill_path, list_skill_files,
+        read_skill_file, rename_skill_path, save_skill_file,
     };
+
+    #[test]
+    fn list_skill_files_skips_metadata_and_generated_entries() {
+        let root = std::env::temp_dir().join(format!(
+            "tendi-list-skill-files-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("system time before epoch")
+                .as_nanos()
+        ));
+        let skill_dir = root.join(".agents/skills/demo");
+        fs::create_dir_all(skill_dir.join("references")).expect("create skill files");
+        fs::write(skill_dir.join("SKILL.md"), "# Demo\n").expect("write skill");
+        fs::write(skill_dir.join("references/guide.md"), "guide\n").expect("write guide");
+        fs::write(root.join(".gitignore"), "ancestor-ignored.md\n")
+            .expect("write ancestor gitignore");
+        fs::write(
+            skill_dir.join(".gitignore"),
+            "local-generated/\nlocal-ignored.md\n",
+        )
+        .expect("write skill gitignore");
+        fs::create_dir_all(skill_dir.join("local-generated/nested"))
+            .expect("create locally generated dir");
+        fs::write(
+            skill_dir.join("local-generated/nested/ignored.txt"),
+            "ignored\n",
+        )
+        .expect("write locally generated file");
+        fs::write(root.join("ancestor-ignored.md"), "ignored\n")
+            .expect("write ancestor ignored file");
+        fs::write(skill_dir.join("local-ignored.md"), "ignored\n")
+            .expect("write local ignored file");
+        fs::write(skill_dir.join("module.pyc"), "ignored\n").expect("write Python artifact");
+        fs::write(skill_dir.join("Example.class"), "ignored\n").expect("write Java artifact");
+        fs::create_dir_all(skill_dir.join("package.egg-info"))
+            .expect("create Python package artifact");
+
+        for name in [
+            ".DS_Store",
+            ".gitattributes",
+            ".gitmodules",
+            "Thumbs.db",
+            "desktop.ini",
+        ] {
+            fs::write(skill_dir.join(name), "ignored\n").expect("write metadata");
+        }
+        for name in [
+            ".git",
+            "node_modules",
+            "__pycache__",
+            ".pytest_cache",
+            ".venv",
+            ".gradle",
+            ".next",
+            ".turbo",
+            ".cache",
+            "tmp",
+            "temp",
+        ] {
+            fs::create_dir_all(skill_dir.join(name).join("nested")).expect("create generated dir");
+            fs::write(skill_dir.join(name).join("nested/ignored.txt"), "ignored\n")
+                .expect("write generated file");
+        }
+
+        let entries = list_skill_files(&root, "demo", Some(&skill_dir)).expect("list skill files");
+        let paths = entries
+            .iter()
+            .map(|entry| entry.relative_path.as_str())
+            .collect::<std::collections::BTreeSet<_>>();
+
+        assert!(paths.contains("SKILL.md"));
+        assert!(paths.contains("references"));
+        assert!(paths.contains("references/guide.md"));
+        for name in [
+            ".DS_Store",
+            ".gitignore",
+            ".gitattributes",
+            ".gitmodules",
+            "Thumbs.db",
+            "desktop.ini",
+            ".git",
+            "node_modules",
+            "ancestor-ignored.md",
+            "local-generated",
+            "local-generated/nested/ignored.txt",
+            "local-ignored.md",
+            "module.pyc",
+            "Example.class",
+            "package.egg-info",
+            "__pycache__",
+            ".pytest_cache",
+            ".venv",
+            ".gradle",
+            ".next",
+            ".turbo",
+            ".cache",
+            "tmp",
+            "temp",
+        ] {
+            assert!(
+                !paths
+                    .iter()
+                    .any(|path| *path == name || path.starts_with(&format!("{name}/")))
+            );
+        }
+
+        let _ = fs::remove_dir_all(root);
+    }
 
     #[test]
     fn save_skill_file_checks_hash_before_atomic_write() {
@@ -448,5 +629,4 @@ mod tests {
 
         let _ = fs::remove_dir_all(root);
     }
-
 }

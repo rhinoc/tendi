@@ -7,14 +7,14 @@ use std::{
 };
 
 use anyhow::{Context, Result};
-use chrono::{DateTime, Duration, Local, NaiveDate};
+use chrono::{DateTime, Duration, Local, NaiveDate, TimeZone};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 use crate::{sessions::SessionRecord, skills::AgentKind, time::parse_timestamp};
 
-const ANALYTICS_PARSER_VERSION: u32 = 3;
+const ANALYTICS_PARSER_VERSION: u32 = 11;
 
 #[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -50,6 +50,8 @@ pub struct AnalyticsCapabilities {
     pub token_usage: bool,
     pub reasoning_tokens: bool,
     pub explicit_runs: bool,
+    #[serde(default)]
+    pub duration: bool,
     pub rate_limit_history: bool,
 }
 
@@ -72,9 +74,26 @@ pub struct AnalyticsResponseUsage {
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct AnalyticsRun {
+    #[serde(default)]
+    pub model: String,
     pub start: String,
     pub end: String,
     pub completed: bool,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct AnalyticsRunContribution {
+    #[serde(flatten)]
+    run: AnalyticsRun,
+    #[serde(default)]
+    duration_ms: Option<u64>,
+    #[serde(default = "default_true")]
+    counted: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -146,9 +165,14 @@ impl SessionAnalytics {
         let mut runs = self.runs.clone();
         if let Some(start) = state.open_run.as_ref() {
             runs.push(AnalyticsRun {
+                model: if state.open_run_model.is_empty() {
+                    state.current_model.clone()
+                } else {
+                    state.open_run_model.clone()
+                },
                 start: start.clone(),
                 end: state.last_timestamp.clone(),
-                completed: state.approximate_runs,
+                completed: false,
             });
         }
         runs
@@ -204,25 +228,26 @@ pub(crate) fn overview_record(record: &SessionAnalyticsRecord) -> SessionAnalyti
         day.usage.add_assign(response.usage);
         day.responses += 1;
         day.has_response_or_run = true;
-        let model = response.model.clone();
-        let model_usage = day.models.entry(model).or_default();
-        if model_usage.model.is_empty() {
-            model_usage.model = response.model.clone();
+        if !response.model.trim().is_empty() {
+            let model = response.model.trim().to_string();
+            let model_usage = day.models.entry(model.clone()).or_default();
+            if model_usage.model.is_empty() {
+                model_usage.model = model;
+            }
+            model_usage.total_tokens = model_usage
+                .total_tokens
+                .saturating_add(response.usage.total_tokens);
+            model_usage.responses += 1;
         }
-        model_usage.total_tokens = model_usage
-            .total_tokens
-            .saturating_add(response.usage.total_tokens);
-        model_usage.responses += 1;
     }
 
     for run in analytics.snapshot_runs(&record.state) {
         update_coverage(&run.start, &mut first, &mut last);
-        let Some(date) = analytics_date(&run.start).map(|date| date.to_string()) else {
-            continue;
-        };
-        let day = days.entry(date).or_default();
-        day.runs.push(run);
-        day.has_response_or_run = true;
+        for (date, contribution) in run_day_contributions(&run) {
+            let day = days.entry(date.to_string()).or_default();
+            day.runs.push(contribution);
+            day.has_response_or_run = true;
+        }
     }
 
     for timestamp in &analytics.aborts {
@@ -305,7 +330,7 @@ pub(crate) fn overview_record(record: &SessionAnalyticsRecord) -> SessionAnalyti
 struct SessionAnalyticsOverviewDayAccumulator {
     usage: AnalyticsTokenUsage,
     responses: u64,
-    runs: Vec<AnalyticsRun>,
+    runs: Vec<AnalyticsRunContribution>,
     aborted: u64,
     compacted: u64,
     models: BTreeMap<String, SessionAnalyticsOverviewModel>,
@@ -365,11 +390,12 @@ pub(crate) struct AnalyticsParserState {
     pub(crate) cumulative_usage: AnalyticsTokenUsage,
     pub(crate) current_model: String,
     pub(crate) open_run: Option<String>,
+    #[serde(default)]
+    pub(crate) open_run_model: String,
     pub(crate) last_timestamp: String,
     seen_usage_ids: BTreeSet<String>,
     seen_tool_ids: BTreeSet<String>,
     pub(crate) response_index: u64,
-    approximate_runs: bool,
     #[serde(default)]
     source_device: u64,
     #[serde(default)]
@@ -407,7 +433,7 @@ pub(crate) struct SessionAnalyticsOverviewRecord {
 pub(crate) struct SessionAnalyticsOverviewDay {
     pub usage: AnalyticsTokenUsage,
     pub responses: u64,
-    pub runs: Vec<AnalyticsRun>,
+    pub runs: Vec<AnalyticsRunContribution>,
     pub aborted: u64,
     pub compacted: u64,
     pub models: Vec<SessionAnalyticsOverviewModel>,
@@ -454,6 +480,8 @@ pub struct AnalyticsRunSummary {
     pub unclosed: u64,
     pub total_ms: u64,
     pub max_ms: u64,
+    #[serde(default)]
+    pub timed_completed: u64,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -461,6 +489,8 @@ pub struct AnalyticsRunSummary {
 pub struct AnalyticsModelUsage {
     pub model: String,
     pub total_tokens: u64,
+    pub total_ms: u64,
+    pub completed_runs: u64,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -552,12 +582,19 @@ struct DayAccumulator {
     runs: AnalyticsRunSummary,
     aborted: u64,
     compacted: u64,
-    models: BTreeMap<String, u64>,
+    models: BTreeMap<String, ModelUsageAccumulator>,
     tools: BTreeMap<(String, String), u64>,
     skills: BTreeMap<String, u64>,
     rate_limits: BTreeMap<u32, f64>,
     sessions: BTreeSet<String>,
     sessions_by_agent: BTreeMap<AgentKind, BTreeSet<String>>,
+}
+
+#[derive(Default)]
+struct ModelUsageAccumulator {
+    total_tokens: u64,
+    total_ms: u64,
+    completed_runs: u64,
 }
 
 #[derive(Default)]
@@ -624,22 +661,28 @@ pub(crate) fn aggregate_overview(
             slot.usage.add_assign(response.usage);
             slot.responses += 1;
             record_session(slot, analytics.agent, &identity);
-            *slot
-                .models
-                .entry(response.model.clone())
-                .or_default() += response.usage.total_tokens;
+            if !response.model.trim().is_empty() {
+                slot.models
+                    .entry(response.model.trim().to_string())
+                    .or_default()
+                    .total_tokens += response.usage.total_tokens;
+            }
         }
         for run in analytics.snapshot_runs(&record.state) {
             update_coverage(&run.start, &mut first, &mut last);
-            let Some(date) = analytics_date(&run.start) else {
-                continue;
-            };
-            if date < since {
-                continue;
+            for (date, contribution) in run_day_contributions(&run) {
+                if date < since {
+                    continue;
+                }
+                let slot = by_day.entry(date.to_string()).or_default();
+                record_session(slot, analytics.agent, &identity);
+                add_run(&mut slot.runs, &contribution, analytics.capabilities().duration);
+                add_model_run(
+                    &mut slot.models,
+                    &contribution,
+                    analytics.capabilities().duration,
+                );
             }
-            let slot = by_day.entry(date.to_string()).or_default();
-            record_session(slot, analytics.agent, &identity);
-            add_run(&mut slot.runs, &run);
         }
         for timestamp in &analytics.aborts {
             update_coverage(timestamp, &mut first, &mut last);
@@ -744,14 +787,7 @@ pub(crate) fn aggregate_overview(
             runs: slot.runs,
             aborted: slot.aborted,
             compacted: slot.compacted,
-            models: slot
-                .models
-                .into_iter()
-                .map(|(model, total_tokens)| AnalyticsModelUsage {
-                    model,
-                    total_tokens,
-                })
-                .collect(),
+            models: slot.models.into_iter().map(finish_model_usage).collect(),
             tools: slot
                 .tools
                 .into_iter()
@@ -875,7 +911,8 @@ pub(crate) fn aggregate_overview_records(
         }
         capabilities
             .entry(record.agent)
-            .or_insert(record.capabilities);
+            .or_insert_with(|| AnalyticsCapabilities::for_agent(record.agent));
+        let duration_supported = AnalyticsCapabilities::for_agent(record.agent).duration;
         analyzed_sessions += usize::from(record.has_activity);
         let identity = format!(
             "{}\0{}\0{}",
@@ -904,10 +941,16 @@ pub(crate) fn aggregate_overview_records(
                 record_session(slot, record.agent, &identity);
             }
             for model in &contribution.models {
-                *slot.models.entry(model.model.clone()).or_default() += model.total_tokens;
+                if !model.model.trim().is_empty() {
+                    slot.models
+                        .entry(model.model.trim().to_string())
+                        .or_default()
+                        .total_tokens += model.total_tokens;
+                }
             }
             for run in &contribution.runs {
-                add_run(&mut slot.runs, run);
+                add_run(&mut slot.runs, run, duration_supported);
+                add_model_run(&mut slot.models, run, duration_supported);
             }
             slot.aborted += contribution.aborted;
             slot.compacted += contribution.compacted;
@@ -966,14 +1009,7 @@ pub(crate) fn aggregate_overview_records(
             runs: slot.runs,
             aborted: slot.aborted,
             compacted: slot.compacted,
-            models: slot
-                .models
-                .into_iter()
-                .map(|(model, total_tokens)| AnalyticsModelUsage {
-                    model,
-                    total_tokens,
-                })
-                .collect(),
+            models: slot.models.into_iter().map(finish_model_usage).collect(),
             tools: slot
                 .tools
                 .into_iter()
@@ -1064,19 +1100,147 @@ fn record_session(slot: &mut DayAccumulator, agent: AgentKind, identity: &str) {
         .insert(identity.to_string());
 }
 
-fn add_run(summary: &mut AnalyticsRunSummary, run: &AnalyticsRun) {
-    summary.started += 1;
-    if !run.completed {
-        summary.unclosed += 1;
+fn finish_model_usage((model, usage): (String, ModelUsageAccumulator)) -> AnalyticsModelUsage {
+    AnalyticsModelUsage {
+        model: model.trim().to_string(),
+        total_tokens: usage.total_tokens,
+        total_ms: usage.total_ms,
+        completed_runs: usage.completed_runs,
+    }
+}
+
+fn add_model_run(
+    models: &mut BTreeMap<String, ModelUsageAccumulator>,
+    contribution: &AnalyticsRunContribution,
+    duration_supported: bool,
+) {
+    if !contribution.run.completed {
         return;
     }
-    summary.completed += 1;
-    let elapsed = analytics_timestamp(&run.start)
-        .zip(analytics_timestamp(&run.end))
-        .map(|(start, end)| end.signed_duration_since(start).num_milliseconds().max(0) as u64)
-        .unwrap_or(0);
+    if contribution.run.model.trim().is_empty() {
+        return;
+    }
+    if !duration_supported {
+        return;
+    }
+    let Some(elapsed) = contribution
+        .duration_ms
+        .or_else(|| measured_run_elapsed_ms(&contribution.run))
+    else {
+        return;
+    };
+    let model = models
+        .entry(contribution.run.model.trim().to_string())
+        .or_default();
+    model.total_ms = model.total_ms.saturating_add(elapsed);
+    if contribution.counted {
+        model.completed_runs = model.completed_runs.saturating_add(1);
+    }
+}
+
+fn add_run(
+    summary: &mut AnalyticsRunSummary,
+    contribution: &AnalyticsRunContribution,
+    duration_supported: bool,
+) {
+    if contribution.counted {
+        summary.started += 1;
+    }
+    if !contribution.run.completed {
+        if contribution.counted {
+            summary.unclosed += 1;
+        }
+        return;
+    }
+    if contribution.counted {
+        summary.completed += 1;
+    }
+    if !duration_supported {
+        return;
+    }
+    if contribution.run.model.trim().is_empty() {
+        return;
+    }
+    let Some(elapsed) = contribution
+        .duration_ms
+        .or_else(|| measured_run_elapsed_ms(&contribution.run))
+    else {
+        return;
+    };
     summary.total_ms = summary.total_ms.saturating_add(elapsed);
-    summary.max_ms = summary.max_ms.max(elapsed);
+    if contribution.counted {
+        summary.timed_completed = summary.timed_completed.saturating_add(1);
+        if let Some(full_elapsed) = measured_run_elapsed_ms(&contribution.run) {
+            summary.max_ms = summary.max_ms.max(full_elapsed);
+        }
+    }
+}
+
+fn measured_run_elapsed_ms(run: &AnalyticsRun) -> Option<u64> {
+    if !run.completed {
+        return None;
+    }
+    analytics_timestamp(&run.start)
+        .zip(analytics_timestamp(&run.end))
+        .map(|(start, end)| end.signed_duration_since(start).num_milliseconds())
+        .filter(|elapsed| *elapsed >= 0)
+        .map(|elapsed| elapsed as u64)
+}
+
+fn run_day_contributions(run: &AnalyticsRun) -> Vec<(NaiveDate, AnalyticsRunContribution)> {
+    let Some(start) = analytics_timestamp(&run.start) else {
+        return Vec::new();
+    };
+    let start = start.with_timezone(&Local);
+    let start_date = start.date_naive();
+    let base = |date: NaiveDate, duration_ms: Option<u64>, counted: bool| {
+        (
+            date,
+            AnalyticsRunContribution {
+                run: run.clone(),
+                duration_ms,
+                counted,
+            },
+        )
+    };
+
+    let Some(end) = analytics_timestamp(&run.end).map(|value| value.with_timezone(&Local)) else {
+        return vec![base(start_date, None, true)];
+    };
+    if !run.completed || end < start {
+        return vec![base(start_date, None, true)];
+    }
+    let full_elapsed = end.signed_duration_since(start).num_milliseconds();
+    if full_elapsed < 0 {
+        return vec![base(start_date, None, true)];
+    }
+
+    let end_date = end.date_naive();
+    let mut date = start_date;
+    let mut contributions = Vec::new();
+    while date <= end_date {
+        let day_start = Local
+            .from_local_datetime(&date.and_hms_opt(0, 0, 0).expect("midnight is valid"))
+            .single()
+            .unwrap_or(start);
+        let day_end = day_start + Duration::days(1);
+        let overlap_start = start.max(day_start);
+        let overlap_end = end.min(day_end);
+        let duration_ms = overlap_end
+            .signed_duration_since(overlap_start)
+            .num_milliseconds()
+            .max(0) as u64;
+        contributions.push(base(date, Some(duration_ms), date == start_date));
+        let Some(next_date) = date.succ_opt() else {
+            break;
+        };
+        date = next_date;
+    }
+    if contributions.is_empty() {
+        vec![base(start_date, Some(full_elapsed as u64), true)]
+    } else {
+        contributions
+    }
 }
 
 fn add_run_summary(target: &mut AnalyticsRunSummary, source: &AnalyticsRunSummary) {
@@ -1085,6 +1249,7 @@ fn add_run_summary(target: &mut AnalyticsRunSummary, source: &AnalyticsRunSummar
     target.unclosed += source.unclosed;
     target.total_ms = target.total_ms.saturating_add(source.total_ms);
     target.max_ms = target.max_ms.max(source.max_ms);
+    target.timed_completed += source.timed_completed;
 }
 
 fn finalize_rank(values: BTreeMap<String, RankAccumulator>) -> Vec<AnalyticsRankItem> {
@@ -1208,7 +1373,6 @@ pub(crate) fn analyze_session(
         empty_record(session, file_mtime, file_size)
     };
     record.analytics.capabilities = Some(AnalyticsCapabilities::for_agent(session.agent));
-    record.state.approximate_runs = !record.analytics.capabilities().explicit_runs;
 
     let offset = if can_append {
         record.file_size as u64
@@ -1243,20 +1407,13 @@ pub(crate) fn analyze_session(
     let (source_prefix_hash, source_boundary_hash) =
         analytics_source_hashes(&mut file, indexed_size.max(0) as u64)?;
 
-    if record.state.current_model.is_empty()
-        && let Some(model) = session
-            .model
-            .as_deref()
-            .filter(|model| !model.trim().is_empty())
-    {
-        set_model(&mut record, model);
-    }
     record.file_mtime = file_mtime;
     record.file_size = indexed_size;
     record.state.source_device = source_device;
     record.state.source_inode = source_inode;
     record.state.source_prefix_hash = source_prefix_hash;
     record.state.source_boundary_hash = source_boundary_hash;
+    resolve_single_model_runs(&mut record.analytics);
     Ok(record)
 }
 
@@ -1266,6 +1423,9 @@ fn empty_record(
     file_size: i64,
 ) -> SessionAnalyticsRecord {
     let capabilities = AnalyticsCapabilities::for_agent(session.agent);
+    let model_hint = crate::providers::agent_provider(session.agent)
+        .analytics_model_hint(session)
+        .unwrap_or_default();
     SessionAnalyticsRecord {
         analytics: SessionAnalytics {
             session_id: session.id.clone(),
@@ -1276,17 +1436,43 @@ fn empty_record(
         },
         state: AnalyticsParserState {
             parser_version: ANALYTICS_PARSER_VERSION,
-            current_model: session.model.clone().unwrap_or_default(),
             last_timestamp: session
                 .started_at
                 .clone()
                 .or_else(|| session.updated_at.clone())
                 .unwrap_or_default(),
-            approximate_runs: !capabilities.explicit_runs,
+            current_model: model_hint,
             ..AnalyticsParserState::default()
         },
         file_mtime,
         file_size,
+    }
+}
+
+fn resolve_single_model_runs(analytics: &mut SessionAnalytics) {
+    let mut models = analytics
+        .runs
+        .iter()
+        .filter_map(|run| {
+            (!run.model.trim().is_empty()).then_some(run.model.trim().to_string())
+        })
+        .chain(analytics.responses.iter().filter_map(|response| {
+            (!response.model.trim().is_empty()).then_some(response.model.trim().to_string())
+        }))
+        .collect::<BTreeSet<String>>();
+    if models.len() != 1 {
+        return;
+    }
+    let model = models.pop_first().expect("single model was collected");
+    for run in &mut analytics.runs {
+        if run.model.trim().is_empty() {
+            run.model = model.clone();
+        }
+    }
+    for response in &mut analytics.responses {
+        if response.model.trim().is_empty() {
+            response.model = model.clone();
+        }
     }
 }
 
@@ -1372,8 +1558,10 @@ pub(crate) fn parse_message_line_with_timestamp(
     }
     let entry_type = value
         .get("type")
-        .or_else(|| value.get("role"))
         .and_then(Value::as_str)
+        .filter(|entry_type| *entry_type != "message")
+        .or_else(|| value.get("role").and_then(Value::as_str))
+        .or_else(|| value.pointer("/message/role").and_then(Value::as_str))
         .unwrap_or("");
     if entry_type == "user" {
         if value
@@ -1403,7 +1591,7 @@ pub(crate) fn parse_message_line_with_timestamp(
             };
             close_open_run(record, end, true);
             if !timestamp.is_empty() {
-                record.state.open_run = Some(timestamp);
+                start_open_run(record, timestamp);
             }
         }
         return;
@@ -1460,6 +1648,9 @@ pub(crate) fn set_model(record: &mut SessionAnalyticsRecord, model: &str) {
         return;
     }
     record.state.current_model = model.to_string();
+    if record.state.open_run.is_some() && record.state.open_run_model.is_empty() {
+        record.state.open_run_model = model.to_string();
+    }
     for response in record
         .analytics
         .responses
@@ -1470,11 +1661,27 @@ pub(crate) fn set_model(record: &mut SessionAnalyticsRecord, model: &str) {
     }
 }
 
+pub(crate) fn start_open_run(record: &mut SessionAnalyticsRecord, start: String) {
+    record.state.open_run_model = record.state.current_model.clone();
+    record.state.open_run = Some(start);
+}
+
+pub(crate) fn discard_open_run(record: &mut SessionAnalyticsRecord) {
+    record.state.open_run = None;
+    record.state.open_run_model.clear();
+}
+
 pub(crate) fn close_open_run(record: &mut SessionAnalyticsRecord, end: &str, completed: bool) {
     let Some(start) = record.state.open_run.take() else {
         return;
     };
+    let model = std::mem::take(&mut record.state.open_run_model);
     record.analytics.runs.push(AnalyticsRun {
+        model: if model.is_empty() {
+            record.state.current_model.clone()
+        } else {
+            model
+        },
         start,
         end: end.to_string(),
         completed,
@@ -1644,12 +1851,9 @@ fn message_usage(value: &Value) -> AnalyticsTokenUsage {
 }
 
 fn is_real_user_prompt(value: &Value, content: &Value, text: &str) -> bool {
-    if value
-        .get("isSidechain")
-        .or_else(|| value.get("isCompactSummary"))
-        .or_else(|| value.get("isMeta"))
-        .and_then(Value::as_bool)
-        .unwrap_or(false)
+    if ["isSidechain", "isCompactSummary", "isMeta"]
+        .into_iter()
+        .any(|key| value.get(key).and_then(Value::as_bool).unwrap_or(false))
         || text.trim().is_empty()
         || text.contains("Request interrupted")
     {
@@ -1922,8 +2126,132 @@ mod tests {
         assert_eq!(parsed.analytics.responses[1].usage.total_tokens, 100);
         assert_eq!(parsed.analytics.runs.len(), 1);
         assert!(parsed.analytics.runs[0].completed);
+        assert_eq!(parsed.analytics.runs[0].model, "gpt-one");
+        let overview = aggregate_overview(std::slice::from_ref(&parsed), 365, 30, Vec::new());
+        let day = overview
+            .days
+            .iter()
+            .find(|day| day.date == "2026-08-01")
+            .expect("fixture date is included in the overview");
+        let model = day
+            .models
+            .iter()
+            .find(|model| model.model == "gpt-one")
+            .expect("run model is included in the overview");
+        assert_eq!(model.total_ms, 6_000);
+        assert_eq!(model.completed_runs, 1);
         assert_eq!(parsed.analytics.compactions.len(), 1);
         assert_eq!(parsed.analytics.limit_samples[0].window_minutes, 10080);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn codex_orchestration_parent_task_is_not_a_model_run() {
+        let root = temp_dir("tendi-analytics-codex-orchestration-parent");
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("rollout-session-1.jsonl");
+        fs::write(
+            &path,
+            concat!(
+                "{\"timestamp\":\"2026-08-01T01:00:00Z\",\"type\":\"session_meta\",\"payload\":{\"source\":\"cli\",\"thread_source\":\"user\",\"model_provider\":\"openai\"}}\n",
+                "{\"timestamp\":\"2026-08-01T01:00:01Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\",\"turn_id\":\"parent-turn\",\"model_context_window\":258400}}\n",
+                "{\"timestamp\":\"2026-08-01T01:00:10Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"task_complete\",\"turn_id\":\"parent-turn\",\"last_agent_message\":null,\"duration_ms\":9000}}\n"
+            ),
+        )
+        .unwrap();
+
+        let parsed = analyze_session(&session(&path, AgentKind::Codex), None).unwrap();
+
+        assert!(parsed.analytics.runs.is_empty());
+        assert!(parsed.state.open_run.is_none());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn codex_does_not_use_session_last_model_for_an_earlier_run() {
+        let root = temp_dir("tendi-analytics-codex-model-order");
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("rollout-session-1.jsonl");
+        fs::write(
+            &path,
+            concat!(
+                "{\"timestamp\":\"2026-08-01T01:00:00Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\"}}\n",
+                "{\"timestamp\":\"2026-08-01T01:00:01Z\",\"type\":\"turn_context\",\"payload\":{\"model\":\"gpt-first\"}}\n",
+                "{\"timestamp\":\"2026-08-01T01:00:02Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"task_complete\"}}\n"
+            ),
+        )
+        .unwrap();
+        let mut codex_session = session(&path, AgentKind::Codex);
+        codex_session.model = Some("gpt-last".to_string());
+
+        let parsed = analyze_session(&codex_session, None).unwrap();
+
+        assert_eq!(parsed.analytics.runs.len(), 1);
+        assert_eq!(parsed.analytics.runs[0].model, "gpt-first");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn codex_uses_session_provenance_model_when_turn_context_is_absent() {
+        let root = temp_dir("tendi-analytics-codex-provenance-model");
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("rollout-session-1.jsonl");
+        fs::write(
+            &path,
+            concat!(
+                "{\"timestamp\":\"2026-08-01T01:00:00Z\",\"type\":\"session_meta\",\"payload\":{\"base_instructions\":{\"provenance\":{\"model\":\"gpt-provenance\"}}}}\n",
+                "{\"timestamp\":\"2026-08-01T01:00:01Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\"}}\n",
+                "{\"timestamp\":\"2026-08-01T01:00:02Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"task_complete\"}}\n"
+            ),
+        )
+        .unwrap();
+        let mut codex_session = session(&path, AgentKind::Codex);
+        codex_session.model = Some("gpt-last".to_string());
+
+        let parsed = analyze_session(&codex_session, None).unwrap();
+
+        assert_eq!(parsed.analytics.runs.len(), 1);
+        assert_eq!(parsed.analytics.runs[0].model, "gpt-provenance");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn fills_unlabeled_runs_when_the_session_has_one_observed_model() {
+        let root = temp_dir("tendi-analytics-single-model");
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("rollout-session-1.jsonl");
+        fs::write(
+            &path,
+            concat!(
+                "{\"timestamp\":\"2026-08-01T01:00:00Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\"}}\n",
+                "{\"timestamp\":\"2026-08-01T01:00:01Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\",\"info\":{\"total_token_usage\":{\"input_tokens\":1,\"total_tokens\":1}}}}\n",
+                "{\"timestamp\":\"2026-08-01T01:00:02Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"task_complete\"}}\n",
+                "{\"timestamp\":\"2026-08-01T01:00:03Z\",\"type\":\"turn_context\",\"payload\":{\"model\":\"gpt-only\"}}\n",
+                "{\"timestamp\":\"2026-08-01T01:00:04Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\"}}\n",
+                "{\"timestamp\":\"2026-08-01T01:00:05Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\",\"info\":{\"total_token_usage\":{\"input_tokens\":2,\"total_tokens\":2}}}}\n",
+                "{\"timestamp\":\"2026-08-01T01:00:06Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"task_complete\"}}\n"
+            ),
+        )
+        .unwrap();
+
+        let parsed = analyze_session(&session(&path, AgentKind::Codex), None).unwrap();
+
+        assert_eq!(parsed.analytics.runs.len(), 2);
+        assert_eq!(
+            parsed
+                .analytics
+                .runs
+                .iter()
+                .map(|run| run.model.as_str())
+                .collect::<Vec<_>>(),
+            vec!["gpt-only", "gpt-only"]
+        );
+        assert_eq!(parsed.analytics.responses.len(), 2);
+        assert!(parsed
+            .analytics
+            .responses
+            .iter()
+            .all(|response| response.model == "gpt-only"));
         let _ = fs::remove_dir_all(root);
     }
 
@@ -1937,7 +2265,9 @@ mod tests {
             concat!(
                 "{\"timestamp\":\"2026-08-01T01:00:00Z\",\"type\":\"user\",\"message\":{\"content\":\"do it\"}}\n",
                 "{\"timestamp\":\"2026-08-01T01:00:01Z\",\"type\":\"assistant\",\"message\":{\"id\":\"m1\",\"model\":\"claude-one\",\"usage\":{\"input_tokens\":10,\"cache_read_input_tokens\":20,\"cache_creation_input_tokens\":5,\"output_tokens\":2},\"content\":[{\"type\":\"tool_use\",\"id\":\"t1\",\"name\":\"Read\",\"input\":{\"path\":\"/tmp/skills/foo-1.2.3/SKILL.md\"}}]}}\n",
-                "{\"timestamp\":\"2026-08-01T01:00:02Z\",\"type\":\"assistant\",\"message\":{\"id\":\"m1\",\"model\":\"claude-one\",\"usage\":{\"input_tokens\":10,\"cache_read_input_tokens\":20,\"cache_creation_input_tokens\":5,\"output_tokens\":2},\"content\":[{\"type\":\"tool_use\",\"id\":\"t2\",\"name\":\"Shell\",\"input\":{\"command\":\"true\"}}]}}\n"
+                "{\"timestamp\":\"2026-08-01T01:00:02Z\",\"type\":\"assistant\",\"message\":{\"id\":\"m1\",\"model\":\"claude-one\",\"stop_reason\":\"end_turn\",\"usage\":{\"input_tokens\":10,\"cache_read_input_tokens\":20,\"cache_creation_input_tokens\":5,\"output_tokens\":2},\"content\":[{\"type\":\"tool_use\",\"id\":\"t2\",\"name\":\"Shell\",\"input\":{\"command\":\"true\"}}]}}\n",
+                "{\"type\":\"queue-operation\",\"timestamp\":\"2026-08-18T14:17:04Z\"}\n",
+                "{\"timestamp\":\"2026-08-18T14:17:05Z\",\"type\":\"user\",\"message\":{\"content\":\"another turn\"}}\n"
             ),
         )
         .unwrap();
@@ -1948,11 +2278,38 @@ mod tests {
         assert_eq!(parsed.analytics.responses[0].usage.total_tokens, 37);
         assert_eq!(parsed.analytics.tools.len(), 2);
         assert_eq!(parsed.analytics.skills[0].name, "foo");
+        assert_eq!(parsed.analytics.runs.len(), 1);
+        assert_eq!(parsed.analytics.runs[0].end, "2026-08-01T01:00:02Z");
         let _ = fs::remove_dir_all(root);
     }
 
     #[test]
-    fn cursor_role_records_use_session_time_for_approximate_runs_and_tools() {
+    fn claude_synthetic_responses_are_not_model_runs() {
+        let root = temp_dir("tendi-analytics-claude-synthetic");
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("session-1.jsonl");
+        fs::write(
+            &path,
+            concat!(
+                "{\"timestamp\":\"2026-08-01T01:00:00Z\",\"type\":\"user\",\"message\":{\"content\":\"invalid model\"}}\n",
+                "{\"timestamp\":\"2026-08-01T01:00:00Z\",\"type\":\"user\",\"isSidechain\":false,\"isMeta\":true,\"message\":{\"content\":\"metadata\"}}\n",
+                "{\"timestamp\":\"2026-08-01T01:00:01Z\",\"type\":\"assistant\",\"message\":{\"model\":\"<synthetic>\",\"stop_reason\":\"stop_sequence\",\"usage\":{\"input_tokens\":0,\"output_tokens\":0},\"content\":[{\"type\":\"text\",\"text\":\"model unavailable\"}]}}\n",
+                "{\"timestamp\":\"2026-08-01T01:00:02Z\",\"type\":\"user\",\"message\":{\"content\":\"valid model\"}}\n",
+                "{\"timestamp\":\"2026-08-01T01:00:03Z\",\"type\":\"message\",\"message\":{\"role\":\"assistant\",\"model\":\"claude-real\",\"stop_reason\":\"end_turn\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1},\"content\":[]}}\n"
+            ),
+        )
+        .unwrap();
+
+        let parsed = analyze_session(&session(&path, AgentKind::Claude), None).unwrap();
+
+        assert_eq!(parsed.analytics.runs.len(), 1);
+        assert_eq!(parsed.analytics.runs[0].model, "claude-real");
+        assert!(!serde_json::to_string(&parsed).unwrap().contains("<synthetic>"));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn cursor_role_records_keep_turn_and_tool_timestamps() {
         let root = temp_dir("tendi-analytics-cursor");
         fs::create_dir_all(&root).unwrap();
         let path = root.join("session-1.jsonl");
@@ -1971,7 +2328,7 @@ mod tests {
         assert_eq!(parsed.analytics.tools[0].timestamp, "2026-08-01T01:00:00Z");
         assert_eq!(parsed.analytics.skills[0].name, "foo");
         assert_eq!(parsed.analytics.snapshot_runs(&parsed.state).len(), 1);
-        assert!(parsed.analytics.snapshot_runs(&parsed.state)[0].completed);
+        assert!(!parsed.analytics.snapshot_runs(&parsed.state)[0].completed);
         let _ = fs::remove_dir_all(root);
     }
 
@@ -2008,7 +2365,122 @@ mod tests {
         assert_eq!(runs[0].end, "2026-08-27T23:59:00+08:00");
         assert_eq!(runs[1].start, "2026-08-28T00:01:00+08:00");
         assert_eq!(runs[1].end, "2026-08-28T00:01:00+08:00");
+        let overview = aggregate_overview(std::slice::from_ref(&parsed), 365, 1, Vec::new());
+        let first_day = overview
+            .days
+            .iter()
+            .find(|day| day.date == "2026-08-27")
+            .expect("first Cursor timestamp is included");
+        assert_eq!(first_day.runs.completed, 1);
+        assert_eq!(first_day.runs.total_ms, 0);
+        assert_eq!(first_day.runs.timed_completed, 0);
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn overview_splits_timed_run_across_local_calendar_days() {
+        let local = Local::now().offset().fix();
+        let start = local
+            .from_local_datetime(
+                &(Local::now().date_naive() - Duration::days(1))
+                    .and_hms_opt(23, 59, 0)
+                    .unwrap(),
+            )
+            .single()
+            .unwrap();
+        let end = local
+            .from_local_datetime(&Local::now().date_naive().and_hms_opt(0, 1, 0).unwrap())
+            .single()
+            .unwrap();
+        let record = SessionAnalyticsRecord {
+            analytics: SessionAnalytics {
+                session_id: "cross-day".to_string(),
+                agent: AgentKind::Codex,
+                session_path: PathBuf::from("/tmp/cross-day.jsonl"),
+                runs: vec![AnalyticsRun {
+                    model: "gpt-cross-day".to_string(),
+                    start: start.to_rfc3339(),
+                    end: end.to_rfc3339(),
+                    completed: true,
+                }],
+                ..SessionAnalytics::default()
+            },
+            state: AnalyticsParserState::default(),
+            file_mtime: 0,
+            file_size: 0,
+        };
+
+        let overview = aggregate_overview(std::slice::from_ref(&record), 2, 1, Vec::new());
+        let previous = overview
+            .days
+            .iter()
+            .find(|day| day.date == (Local::now().date_naive() - Duration::days(1)).to_string())
+            .unwrap();
+        let current = overview
+            .days
+            .iter()
+            .find(|day| day.date == Local::now().date_naive().to_string())
+            .unwrap();
+        assert_eq!(previous.runs.started, 1);
+        assert_eq!(previous.runs.completed, 1);
+        assert_eq!(previous.runs.total_ms, 60_000);
+        assert_eq!(current.runs.started, 0);
+        assert_eq!(current.runs.completed, 0);
+        assert_eq!(current.runs.total_ms, 60_000);
+        assert_eq!(overview.summary.runs.timed_completed, 1);
+        assert_eq!(overview.summary.runs.total_ms, 120_000);
+
+        let projected = aggregate_overview_records(
+            &[overview_record(&record)],
+            2,
+            1,
+            Vec::new(),
+        );
+        assert_eq!(
+            serde_json::to_value(&overview.days).unwrap(),
+            serde_json::to_value(&projected.days).unwrap()
+        );
+        assert_eq!(overview.summary.runs.total_ms, projected.summary.runs.total_ms);
+    }
+
+    #[test]
+    fn overview_excludes_unattributed_runs_from_timing_and_model_breakdown() {
+        let start = Local::now();
+        let record = SessionAnalyticsRecord {
+            analytics: SessionAnalytics {
+                session_id: "unattributed".to_string(),
+                agent: AgentKind::Codex,
+                session_path: PathBuf::from("/tmp/unattributed.jsonl"),
+                runs: vec![AnalyticsRun {
+                    model: String::new(),
+                    start: start.to_rfc3339(),
+                    end: (start + Duration::seconds(9)).to_rfc3339(),
+                    completed: true,
+                }],
+                ..SessionAnalytics::default()
+            },
+            state: AnalyticsParserState::default(),
+            file_mtime: 0,
+            file_size: 0,
+        };
+
+        let overview = aggregate_overview(std::slice::from_ref(&record), 1, 1, Vec::new());
+        let day = &overview.days[0];
+
+        assert_eq!(day.runs.completed, 1);
+        assert_eq!(day.runs.total_ms, 0);
+        assert_eq!(day.runs.timed_completed, 0);
+        assert!(day.models.is_empty());
+        assert_eq!(overview.summary.runs.total_ms, 0);
+
+        let projected = aggregate_overview_records(
+            &[overview_record(&record)],
+            1,
+            1,
+            Vec::new(),
+        );
+        assert!(projected.days[0].models.is_empty());
+        assert_eq!(projected.days[0].runs.total_ms, 0);
     }
 
     #[test]

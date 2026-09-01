@@ -77,7 +77,12 @@ function runOverviewTrend(groupAnalyticsDays, selectAnalyticsGranularity, buildT
       runs: { started: 10 + index % 7, completed: 8 + index % 5, unclosed: index % 2, totalMs: 1000, maxMs: 5000 },
       aborted: index % 3,
       compacted: index % 4,
-      models: Array.from({ length: 6 }, (_, modelIndex) => ({ model: `model-${modelIndex}`, totalTokens: 10_000 + index * (modelIndex + 1) })),
+      models: Array.from({ length: 6 }, (_, modelIndex) => ({
+        model: `model-${modelIndex}`,
+        totalTokens: 10_000 + index * (modelIndex + 1),
+        totalMs: 0,
+        completedRuns: 0,
+      })),
       tools: Array.from({ length: 10 }, (_, toolIndex) => ({ name: `tool-${toolIndex}`, server: `server-${toolIndex % 2}`, calls: 1 + ((index + toolIndex) % 9) })),
       skills: Array.from({ length: 8 }, (_, skillIndex) => ({ name: `skill-${skillIndex}`, server: "local", calls: 1 + ((index + skillIndex) % 7) })),
       rateLimits: {},

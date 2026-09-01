@@ -96,7 +96,7 @@ function collectCodexItem(value: JsonObject, items: TranscriptParseContext["item
     return;
   }
   if (payloadType === "web_search_call" || payloadType === "image_generation_call") {
-    pushItem(items, "tool", "", payloadType, time);
+    pushItem(items, "tool", summarizeToolCall(payload), payloadType, time, extractToolCommand(payload), undefined, durationMs(payload), callId(payload), timestampMs(value.timestamp));
   }
 }
 

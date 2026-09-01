@@ -12,6 +12,7 @@ if (typeof mock.module !== "function") {
   });
 
   const { compareSessions, normalizeSession, sessionIdentity, sessionLogicalIdentity } = await import("../src/lib/sessions.ts");
+  const { resolveInitialSession, sessionExternalKey, sessionSourceExternalKey } = await import("../src/lib/session-selection.ts");
 
   test("keeps the canonical agent key in normalized session records", () => {
     const normalized = normalizeSession({
@@ -54,5 +55,17 @@ if (typeof mock.module !== "function") {
 
     assert.equal(sessionLogicalIdentity(metadata), sessionLogicalIdentity(transcript));
     assert.notEqual(sessionIdentity(metadata), sessionIdentity(transcript));
+  });
+
+  test("matches external session selections without lowercasing native ids or source paths", () => {
+    const session = {
+      id: "ABC-123",
+      agent: "codex",
+      title: "Case-sensitive session",
+      path: "/Users/Ryan/.codex/sessions/ABC-123.jsonl",
+    };
+
+    assert.equal(resolveInitialSession([session], sessionExternalKey(session)), session);
+    assert.equal(resolveInitialSession([session], sessionSourceExternalKey(session)), session);
   });
 }

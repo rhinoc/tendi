@@ -3,6 +3,7 @@
   "openrpc": "1.3.2",
   "protocolVersion": 2,
   "schemaVersion": 1,
+  "contractFingerprint": "ae1f371d0cbd1f43cda682fa5ec5d3c39b123fe00de9c6df399b3744c55d39f9",
   "methods": [
     {
       "name": "scan",
@@ -37,7 +38,8 @@
       "owner": "daemon",
       "wire": "jsonrpc",
       "clients": [
-        "desktop"
+        "desktop",
+        "cli"
       ],
       "execution": "write"
     },

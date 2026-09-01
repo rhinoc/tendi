@@ -8,7 +8,7 @@ use std::{
 
 use anyhow::Result;
 use clap::{ArgAction, Parser, Subcommand, ValueEnum};
-use tendi_core::generated::runtime_contract::JsonRpcRequest;
+use tendi_core::generated::runtime_contract::{AgentKind as RuntimeAgentKind, JsonRpcRequest};
 
 #[path = "generated/runtime_client.rs"]
 mod runtime_client;
@@ -291,6 +291,16 @@ impl From<AgentArg> for tendi_core::AgentKind {
             AgentArg::Claude => tendi_core::AgentKind::Claude,
             AgentArg::Shared => tendi_core::AgentKind::Shared,
         }
+    }
+}
+
+fn runtime_agent_kind(agent: tendi_core::AgentKind) -> RuntimeAgentKind {
+    match agent {
+        tendi_core::AgentKind::Codex => RuntimeAgentKind::Codex,
+        tendi_core::AgentKind::Cursor => RuntimeAgentKind::Cursor,
+        tendi_core::AgentKind::Claude => RuntimeAgentKind::Claude,
+        tendi_core::AgentKind::Shared => RuntimeAgentKind::Shared,
+        tendi_core::AgentKind::Unknown => RuntimeAgentKind::Unknown,
     }
 }
 
@@ -1470,23 +1480,26 @@ fn main() -> Result<()> {
                 json,
             } => {
                 let agent = to.into();
-                if let Some(value) = try_daemon_request(
-                    &cwd,
-                    |runtime_client| Ok(runtime_client.bundled_skill_install(
-                        tendi_core::generated::runtime_contract::BundledSkillInstallRequest {
-                            overwrite: Some(overwrite),
-                        },
-                    )),
-                    RuntimeClient::decode_bundled_skill_install_response,
-                )? {
-                    if json {
-                        println!("{}", serde_json::to_string_pretty(&value)?);
-                    } else if value.applied {
-                        println!("installed");
-                    } else {
-                        println!("up to date");
+                if !dry_run {
+                    if let Some(value) = try_daemon_request(
+                        &cwd,
+                        |runtime_client| Ok(runtime_client.bundled_skill_install(
+                            tendi_core::generated::runtime_contract::BundledSkillInstallRequest {
+                                agent: Some(runtime_agent_kind(agent)),
+                                overwrite: Some(overwrite),
+                            },
+                        )),
+                        RuntimeClient::decode_bundled_skill_install_response,
+                    )? {
+                        if json {
+                            println!("{}", serde_json::to_string_pretty(&value)?);
+                        } else if value.applied {
+                            println!("installed");
+                        } else {
+                            println!("up to date");
+                        }
+                        return Ok(());
                     }
-                    return Ok(());
                 }
                 let plan = tendi_core::bundled_skill::plan_install(agent)?;
                 if dry_run {

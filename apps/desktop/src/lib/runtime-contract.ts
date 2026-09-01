@@ -1,8 +1,26 @@
-import type { JsonValue, RuntimeEventEnvelope } from "./generated/runtime-types.ts";
+import type { JsonValue, RuntimeEventEnvelope, SkillVisibility as RuntimeSkillVisibility } from "./generated/runtime-types.ts";
 
 export type ScopeKey = string;
 export type Revision = number;
 export type InstallationId = string;
+
+export function omitUndefinedProperties(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(omitUndefinedProperties);
+  if (value !== null && typeof value === "object") {
+    const result: Record<string, unknown> = {};
+    for (const [key, nested] of Object.entries(value)) {
+      if (nested !== undefined) result[key] = omitUndefinedProperties(nested);
+    }
+    return result;
+  }
+  return value;
+}
+
+export function normalizeRuntimeSkillVisibility(value: string): RuntimeSkillVisibility {
+  const normalized = value.trim().toLowerCase();
+  if (normalized === "auto" || normalized === "manual" || normalized === "off" || normalized === "mixed") return normalized;
+  throw new Error("Invalid skill visibility");
+}
 
 export type SessionKey = {
   provider: string;

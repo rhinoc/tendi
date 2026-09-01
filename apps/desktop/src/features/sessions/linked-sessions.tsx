@@ -84,7 +84,7 @@ export function LinkedSessionsDrawer({ open, onOpenChange, links, loading, error
       const project = sessionProject(session);
       const projectKey = sessionProjectGroupKey(session);
       return {
-        key: `${session.agent}-${session.id}-${session.path}`,
+        key: JSON.stringify([session.agent, session.id, session.path, link.skill_name, link.skill_path]),
         skillKey: link.skill_name,
         skillLabel: link.skill_name,
         sessionLabel: displayedTitle,

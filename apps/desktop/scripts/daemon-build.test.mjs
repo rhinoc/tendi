@@ -74,3 +74,19 @@ test("detects nested Rust source changes", () => {
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+test("detects runtime schema changes", () => {
+  const { root, cargoToml, source, binary } = fixture();
+  const schema = join(root, "runtime-schema", "runtime.openrpc.json");
+  try {
+    mkdirSync(join(root, "runtime-schema"), { recursive: true });
+    writeFileSync(schema, "{}\n");
+    setMtime(cargoToml, 10);
+    setMtime(source, 10);
+    setMtime(schema, 30);
+    setMtime(binary, 20);
+    assert.equal(daemonNeedsBuild(root, binary), true);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});

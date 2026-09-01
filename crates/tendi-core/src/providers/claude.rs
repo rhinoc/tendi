@@ -102,7 +102,7 @@ pub(super) fn matches_name(normalized: &str) -> bool {
 }
 
 fn extract_model(value: &Value) -> Option<String> {
-    if value.get("type").and_then(Value::as_str) != Some("assistant") {
+    if !is_assistant_message(value) {
         return None;
     }
     value
@@ -113,8 +113,26 @@ fn extract_model(value: &Value) -> Option<String> {
         .map(str::to_string)
 }
 
+fn is_assistant_message(value: &Value) -> bool {
+    value.get("type").and_then(Value::as_str) == Some("assistant")
+        || (value.get("type").and_then(Value::as_str) == Some("message")
+            && value.pointer("/message/role").and_then(Value::as_str) == Some("assistant"))
+}
+
+fn is_completed_turn(value: &Value) -> bool {
+    is_assistant_message(value)
+        && value
+            .pointer("/message/stop_reason")
+            .and_then(Value::as_str)
+            == Some("end_turn")
+}
+
+fn is_synthetic_response(value: &Value) -> bool {
+    extract_model(value).as_deref() == Some("<synthetic>")
+}
+
 fn extract_token_usage(value: &Value) -> Option<(String, crate::sessions::SessionTokenUsage)> {
-    if value.get("type").and_then(Value::as_str) != Some("assistant") {
+    if !is_assistant_message(value) {
         return None;
     }
     let message = value.get("message")?;
@@ -645,6 +663,10 @@ impl super::AgentProvider for ClaudeProvider {
         root.to_string_lossy().contains("/.claude/").then_some(2)
     }
 
+    fn session_requires_rescan(&self, session: &SessionRecord) -> Option<bool> {
+        (session.model.as_deref() == Some("<synthetic>")).then_some(true)
+    }
+
     fn skill_roots(&self, ctx: &ProviderContext) -> Vec<SkillRoot> {
         let mut roots = Vec::new();
         if let Some(home) = &ctx.home {
@@ -795,7 +817,7 @@ impl super::AgentProvider for ClaudeProvider {
         meta: &mut crate::sessions::SessionMetadata,
         deduplicated_usage: &mut BTreeMap<String, crate::sessions::SessionTokenUsage>,
     ) {
-        if let Some(model) = extract_model(value) {
+        if let Some(model) = extract_model(value).filter(|model| model.as_str() != "<synthetic>") {
             meta.model = Some(model);
         }
         if let Some((message_id, token_usage)) = extract_token_usage(value) {
@@ -824,7 +846,7 @@ impl super::AgentProvider for ClaudeProvider {
     }
 
     fn recognizes_transcript(&self, value: &Value) -> bool {
-        (value.get("type").and_then(Value::as_str) == Some("assistant")
+        (is_assistant_message(value)
             && value.get("message").is_some())
             || (value.get("type").and_then(Value::as_str) == Some("user")
                 && value.get("sessionId").is_some()
@@ -836,12 +858,23 @@ impl super::AgentProvider for ClaudeProvider {
             token_usage: true,
             reasoning_tokens: false,
             explicit_runs: false,
+            duration: true,
             rate_limit_history: false,
         }
     }
 
     fn parse_analytics_line(&self, line: &str, record: &mut SessionAnalyticsRecord) {
+        let value = serde_json::from_str::<Value>(line).ok();
+        if value.as_ref().is_some_and(is_synthetic_response) {
+            crate::analytics::discard_open_run(record);
+            return;
+        }
+        let completed_turn = value.as_ref().is_some_and(is_completed_turn);
         crate::analytics::parse_message_line(line, record);
+        if completed_turn {
+            let end = record.state.last_timestamp.clone();
+            crate::analytics::close_open_run(record, &end, true);
+        }
     }
 
     fn extract_skill_tool_payloads<'a>(&self, value: &'a Value) -> Vec<(&'a Value, Evidence)> {
@@ -1047,6 +1080,7 @@ impl super::AgentProvider for ClaudeProvider {
 #[cfg(test)]
 mod tests {
     use std::{
+        collections::BTreeMap,
         fs,
         path::PathBuf,
         time::{SystemTime, UNIX_EPOCH},
@@ -1181,9 +1215,28 @@ mod tests {
                 token_usage: true,
                 reasoning_tokens: false,
                 explicit_runs: false,
+                duration: true,
                 rate_limit_history: false,
             }
         );
+    }
+
+    #[test]
+    fn ignores_synthetic_model_in_session_metadata() {
+        let value = serde_json::json!({
+            "type": "assistant",
+            "message": { "model": "<synthetic>" }
+        });
+        let mut metadata = crate::sessions::SessionMetadata::default();
+        let mut deduplicated_usage = BTreeMap::new();
+
+        ClaudeProvider.update_session_metadata(
+            &value,
+            &mut metadata,
+            &mut deduplicated_usage,
+        );
+
+        assert_eq!(metadata.model, None);
     }
 
 }

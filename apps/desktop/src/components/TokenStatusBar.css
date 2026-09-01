@@ -167,7 +167,7 @@
   right: 0;
   bottom: calc(100% + 8px);
   z-index: var(--z-drawer);
-  width: 100%;
+  width: min(360px, calc(100vw - 32px));
   max-height: min(320px, calc(100vh - 96px));
   display: grid;
   grid-template-rows: auto minmax(0, 1fr) auto;
@@ -196,7 +196,7 @@
   position: absolute;
   right: 0;
   bottom: -10px;
-  width: 100%;
+  width: min(360px, calc(100vw - 32px));
   height: 10px;
 }
 

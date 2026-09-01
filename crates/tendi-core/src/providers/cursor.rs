@@ -1,4 +1,8 @@
-use std::{fs, path::{Path, PathBuf}};
+use std::{
+    collections::HashSet,
+    fs,
+    path::{Path, PathBuf},
+};
 
 use anyhow::Result;
 use anyhow::bail;
@@ -283,6 +287,46 @@ pub(super) fn append_transcript_metadata_from_store(
     let models = cursor_sessions::cursor_store_models_for_path(path);
     insert_cursor_model_configs(items, &models);
     Ok(())
+}
+
+pub(super) fn enrich_transcript_tools_from_store(
+    path: &Path,
+    items: &mut Vec<TranscriptItem>,
+) -> Result<()> {
+    let tool_calls = cursor_sessions::cursor_store_tool_calls_for_path(path);
+    if tool_calls.is_empty() {
+        return Ok(());
+    }
+    let mut used = HashSet::new();
+    for item in items.iter_mut().filter(|item| item.kind == "tool") {
+        let Some(command) = item.command.as_deref() else {
+            continue;
+        };
+        let Some((index, tool_call)) = tool_calls.iter().enumerate().find(|(index, tool_call)| {
+            !used.contains(index)
+                && (item.call_id.as_deref() == Some(tool_call.id.as_str())
+                    || (item.tag.as_deref() == Some(tool_call.name.as_str())
+                        && cursor_tool_call_matches(command, &tool_call.args)))
+        }) else {
+            continue;
+        };
+        used.insert(index);
+        item.call_id = Some(tool_call.id.clone());
+        if let Some(result) = &tool_call.result {
+            item.result = Some(result.clone());
+        }
+    }
+    Ok(())
+}
+
+fn cursor_tool_call_matches(command: &str, args: &Value) -> bool {
+    if serde_json::from_str::<Value>(command).ok().as_ref() == Some(args) {
+        return true;
+    }
+    args.get("command")
+        .or_else(|| args.get("cmd"))
+        .and_then(Value::as_str)
+        == Some(command)
 }
 
 #[cfg(test)]
@@ -780,6 +824,14 @@ impl super::AgentProvider for CursorProvider {
         append_transcript_metadata_from_store(path, items)
     }
 
+    fn enrich_transcript_tools_from_store(
+        &self,
+        path: &Path,
+        items: &mut Vec<TranscriptItem>,
+    ) -> Result<()> {
+        enrich_transcript_tools_from_store(path, items)
+    }
+
     fn transcript_metadata_store_path(&self, path: &Path) -> Option<PathBuf> {
         find_cursor_store_db(path)
     }
@@ -798,6 +850,20 @@ impl super::AgentProvider for CursorProvider {
 
     fn session_supports_append_cache(&self) -> bool {
         true
+    }
+
+    fn analytics_model_hint(&self, session: &SessionRecord) -> Option<String> {
+        let models = cursor_sessions::cursor_store_models_for_path(&session.path);
+        if models.is_empty() {
+            return session
+                .model
+                .as_deref()
+                .map(str::trim)
+                .filter(|model| !model.is_empty())
+                .map(str::to_string);
+        }
+        let first = models.first()?.trim();
+        (models.iter().all(|model| model.trim() == first)).then(|| first.to_string())
     }
 
     fn parse_analytics_line(&self, line: &str, record: &mut SessionAnalyticsRecord) {
@@ -837,6 +903,10 @@ impl super::AgentProvider for CursorProvider {
         } else {
             SessionPathRole::Other
         }
+    }
+
+    fn session_scan_source_paths(&self, path: &Path) -> Vec<PathBuf> {
+        cursor_sessions::session_scan_source_paths(path)
     }
 
     fn session_project_aliases(&self, path: &str) -> Vec<String> {
@@ -1050,6 +1120,7 @@ mod tests {
         AgentProvider, CursorProvider, ProviderContext, cursor_event_timestamp, parse_transcript,
     };
     use crate::skills::AgentKind;
+    use rusqlite::Connection;
     use serde_json::json;
 
     fn temp_dir() -> PathBuf {
@@ -1186,6 +1257,136 @@ mod tests {
         assert_eq!(servers[0].name, "global-server");
         assert_eq!(servers[0].scope, "global");
         assert_eq!(servers[0].path, path);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn enriches_cursor_tool_items_with_store_arguments_and_results() {
+        let root = temp_dir();
+        fs::create_dir_all(&root).expect("create Cursor store directory");
+        let store_path = root.join("store.db");
+        let connection = Connection::open(&store_path).expect("open Cursor store");
+        connection
+            .execute_batch(
+                "CREATE TABLE blobs (data BLOB); \
+                 CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT);",
+            )
+            .expect("create Cursor store tables");
+
+        let read_args = json!({ "path": "/tmp/example.txt" });
+        let replace_args = json!({
+            "path": "/tmp/example.txt",
+            "old_string": "before",
+            "new_string": "after"
+        });
+        let blobs = [
+            json!({
+                "role": "assistant",
+                "content": [{
+                    "type": "tool-call",
+                    "toolCallId": "read-call",
+                    "toolName": "Read",
+                    "args": read_args
+                }]
+            }),
+            json!({
+                "role": "tool",
+                "content": [{
+                    "type": "tool-result",
+                    "toolCallId": "read-call",
+                    "toolName": "Read",
+                    "result": "file contents"
+                }]
+            }),
+            json!({
+                "role": "assistant",
+                "content": [{
+                    "type": "tool-call",
+                    "toolCallId": "replace-call",
+                    "toolName": "StrReplace",
+                    "args": replace_args
+                }]
+            }),
+            json!({
+                "role": "tool",
+                "content": [{
+                    "type": "tool-result",
+                    "toolCallId": "replace-call",
+                    "toolName": "StrReplace",
+                    "result": "file updated"
+                }]
+            }),
+        ];
+        for blob in blobs {
+            let data = blob.to_string();
+            connection
+                .execute("INSERT INTO blobs (data) VALUES (?1)", [data.as_bytes()])
+                .expect("insert Cursor store blob");
+        }
+        drop(connection);
+
+        let transcript = json!({
+            "role": "assistant",
+            "message": {
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": "read-call",
+                        "name": "Read",
+                        "input": { "path": "/tmp/example.txt" }
+                    },
+                    {
+                        "type": "tool_use",
+                        "id": "replace-call",
+                        "name": "StrReplace",
+                        "input": {
+                            "path": "/tmp/example.txt",
+                            "old_string": "before",
+                            "new_string": "after"
+                        }
+                    }
+                ]
+            }
+        });
+        let mut items = Vec::new();
+        parse_transcript(&transcript, &mut items);
+
+        assert_eq!(items.len(), 2);
+        assert!(items.iter().all(|item| item.command.is_some()));
+        let stored_tool_calls =
+            crate::providers::cursor_sessions::cursor_store_tool_calls_for_path(&store_path);
+        assert_eq!(
+            stored_tool_calls
+                .iter()
+                .map(|call| (call.id.as_str(), call.result.as_deref()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("read-call", Some("file contents")),
+                ("replace-call", Some("file updated")),
+            ]
+        );
+        super::enrich_transcript_tools_from_store(&store_path, &mut items)
+            .expect("enrich Cursor tool items");
+
+        assert_eq!(items[0].call_id.as_deref(), Some("read-call"));
+        assert_eq!(items[0].result.as_deref(), Some("file contents"));
+        assert_eq!(items[1].call_id.as_deref(), Some("replace-call"));
+        assert_eq!(items[1].result.as_deref(), Some("file updated"));
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(items[0].command.as_deref().unwrap())
+                .expect("Read arguments JSON"),
+            json!({ "path": "/tmp/example.txt" })
+        );
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(items[1].command.as_deref().unwrap())
+                .expect("StrReplace arguments JSON"),
+            json!({
+                "path": "/tmp/example.txt",
+                "old_string": "before",
+                "new_string": "after"
+            })
+        );
 
         let _ = fs::remove_dir_all(root);
     }

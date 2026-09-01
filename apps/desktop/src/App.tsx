@@ -5,7 +5,7 @@ import { Dialog } from "radix-ui";
 
 import { Appearance, applyAppearance, applyFontFamily, listenForSystemAppearanceChange, type ColorTheme, type ThemePreferences } from "./lib/appearance.ts";
 import { applyAppIcon, type AppIcon } from "./lib/app-icon.ts";
-import { AppPage, assertRuntimeEventPayload, AsyncStatus, COLLAPSED_SIDEBAR_SIZE, DOMAIN_KEYS, DesktopUpdateStatus, RuntimeDomainKey, SessionResumeOutcomeStatus, SessionResumeTarget, SIDEBAR_SIZE, SkillChangeCommand, SkillVisibility, TauriCommand, UPDATE_AVAILABLE_EVENT, UpdateCheckStatus, agentIdentityKey, findSkillBySelector, dialogCopy, hookSourcePath, hookTrustHash, isConcreteAgent, isTauriRuntime, logger, navItems, normalizeSessionSkillLink, promptTitleFromBody, sessionAppDeepLink, sessionIdentity, sessionLaunchPayload, sessionSourceExternalKey, sessionResumeTargetForAgent, skillChangeActionLabel, skillChangeDescription, skillChangeLoadingCopy, skillChangeTitle } from "./lib/index.ts";
+import { AppPage, assertRuntimeEventPayload, AsyncStatus, COLLAPSED_SIDEBAR_SIZE, DOMAIN_KEYS, DesktopUpdateStatus, RuntimeDomainKey, SessionResumeOutcomeStatus, SessionResumeTarget, SIDEBAR_SIZE, SkillChangeCommand, SkillVisibility, TauriCommand, UPDATE_AVAILABLE_EVENT, UpdateCheckStatus, agentIdentityKey, findSkillBySelector, dialogCopy, hookSourcePath, hookTrustHash, isConcreteAgent, isTauriRuntime, logger, navItems, normalizeSessionSkillLink, promptTitleFromBody, sessionAppDeepLink, sessionExternalKey, sessionIdentity, sessionLaunchPayload, sessionSourceExternalKey, sessionResumeTargetForAgent, skillChangeActionLabel, skillChangeDescription, skillChangeLoadingCopy, skillChangeTitle } from "./lib/index.ts";
 import type { BundledSkillStatus, DesktopUpdateState, DomainKey, HookRecord, McpRecord, NormalizedSkill, ProjectSummary, SessionRecord, SessionResumeOutcome, UpdateCheckResult } from "./lib/index.ts";
 import { sortSidebarSources, type OrderedSidebarSource } from "./lib/sidebar-sources.ts";
 import { mcpColumns } from "./lib/tableColumns.tsx";
@@ -1098,7 +1098,7 @@ export function App() {
     navigate(viewForDomain(domain));
   }, [navigate]);
   const openOverviewSession = useCallback((session: SessionRecord) => {
-    setActiveSessionKey(sessionSourceExternalKey(session));
+    setActiveSessionKey(sessionExternalKey(session));
     navigate(AppPage.Sessions);
   }, [navigate]);
   const backToSkills = useCallback(() => navigate(AppPage.Skills), [navigate]);
@@ -1165,7 +1165,7 @@ export function App() {
     const path = typeof link.session_path === "string" ? link.session_path.trim() : "";
     setActiveSessionKey(path
       ? sessionSourceExternalKey({ agent, id: sessionId, path })
-      : `${agent}:${sessionId}`);
+      : sessionExternalKey({ agent, id: sessionId }));
     navigateTo(AppPage.Sessions);
   }, [navigateTo]);
 

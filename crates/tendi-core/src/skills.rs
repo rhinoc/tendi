@@ -6471,21 +6471,19 @@ pub(crate) fn plan_skill_frontmatter_for_agent(
     agent: AgentKind,
     visibility: SkillVisibility,
 ) -> Result<FileChange> {
+    plan_skill_frontmatter_for_agents(path, &[agent], visibility)
+}
+
+fn plan_skill_frontmatter_for_agents(
+    path: PathBuf,
+    agents: &[AgentKind],
+    visibility: SkillVisibility,
+) -> Result<FileChange> {
     if visibility == SkillVisibility::Mixed {
         bail!("mixed visibility is a scan summary and cannot be written to SKILL.md");
     }
     let before = read_optional(&path)?.context("SKILL.md does not exist")?;
-    let doc = MarkdownDoc::parse_lenient(&before)?;
-    let provider = crate::providers::agent_provider(agent);
-    if provider.skill_frontmatter_satisfies(&doc.meta, visibility) {
-        return Ok(FileChange {
-            path,
-            before_sha256: Some(sha256_text(&before)),
-            before: Some(before.clone()),
-            after: before,
-        });
-    }
-    let after = provider.render_skill_frontmatter(&before, visibility)?;
+    let after = render_skill_frontmatter_for_agents(&before, agents, visibility)?;
     Ok(FileChange {
         path,
         before_sha256: Some(sha256_text(&before)),
@@ -6494,17 +6492,58 @@ pub(crate) fn plan_skill_frontmatter_for_agent(
     })
 }
 
+fn render_skill_frontmatter_for_agents(
+    before: &str,
+    agents: &[AgentKind],
+    visibility: SkillVisibility,
+) -> Result<String> {
+    if visibility == SkillVisibility::Mixed {
+        bail!("mixed visibility is a scan summary and cannot be written to SKILL.md");
+    }
+    let mut after = before.to_string();
+    let mut applied_agents = BTreeSet::new();
+    for agent in agents {
+        if !applied_agents.insert(*agent) {
+            continue;
+        }
+        let doc = MarkdownDoc::parse_lenient(&after)?;
+        let provider = crate::providers::agent_provider(*agent);
+        if !provider.skill_frontmatter_satisfies(&doc.meta, visibility) {
+            after = provider.render_skill_frontmatter(&after, visibility)?;
+        }
+    }
+    Ok(after)
+}
+
+fn skill_visibility_frontmatter_agents(agent: AgentKind) -> Vec<AgentKind> {
+    let mut agents = vec![agent];
+    if matches!(
+        agent,
+        AgentKind::Codex | AgentKind::Cursor | AgentKind::Claude | AgentKind::Shared
+    ) {
+        agents.extend([AgentKind::Claude, AgentKind::Cursor]);
+    }
+    agents
+}
+
 fn plan_skill_visibility_at_path(
     skill_dir: &Path,
     agent: AgentKind,
     visibility: SkillVisibility,
     update_provider_config: bool,
 ) -> Result<Vec<FileChange>> {
-    let mut changes = vec![plan_skill_frontmatter_for_agent(
-        skill_dir.join("SKILL.md"),
-        agent,
-        visibility,
-    )?];
+    let frontmatter_agents = skill_visibility_frontmatter_agents(agent);
+    let portable_agent = frontmatter_agents.len() > 1;
+    let frontmatter_change = if portable_agent {
+        plan_skill_frontmatter_for_agents(
+            skill_dir.join("SKILL.md"),
+            &frontmatter_agents,
+            visibility,
+        )?
+    } else {
+        plan_skill_frontmatter_for_agent(skill_dir.join("SKILL.md"), agent, visibility)?
+    };
+    let mut changes = vec![frontmatter_change];
     changes.extend(
         crate::providers::agent_provider(agent).plan_skill_visibility(
             skill_dir,
@@ -6512,6 +6551,18 @@ fn plan_skill_visibility_at_path(
             update_provider_config,
         )?,
     );
+    if matches!(
+        agent,
+        AgentKind::Cursor | AgentKind::Claude | AgentKind::Shared
+    ) {
+        changes.extend(
+            crate::providers::agent_provider(AgentKind::Codex).plan_skill_visibility(
+                skill_dir,
+                visibility,
+                update_provider_config,
+            )?,
+        );
+    }
     Ok(changes)
 }
 
@@ -6521,12 +6572,11 @@ fn render_skill_frontmatter_for_visibility(
     agent: AgentKind,
     visibility: SkillVisibility,
 ) -> Result<String> {
-    let doc = MarkdownDoc::parse_lenient(before)?;
-    let provider = crate::providers::agent_provider(agent);
-    if provider.skill_frontmatter_satisfies(&doc.meta, visibility) {
-        return Ok(before.to_string());
-    }
-    provider.render_skill_frontmatter(before, visibility)
+    render_skill_frontmatter_for_agents(
+        before,
+        &skill_visibility_frontmatter_agents(agent),
+        visibility,
+    )
 }
 
 pub(crate) fn render_skill_frontmatter_with_provider_key(
@@ -7121,14 +7171,14 @@ mod tests {
         WRAPPER_CATALOG_START,
         apply_git_update, apply_skill_add_with_target_root, apply_skill_delete_plan,
         apply_skill_distribution_plan, apply_skill_update_plan_filesystem_transaction,
-        apply_skill_update_plan_with_store, apply_update_files,
+        apply_skill_update_plan_with_store, apply_changes, apply_update_files,
         build_skill_add_plan_with_target_root, check_skill_updates, clear_tendi_git_changes,
         copy_dir, discover_installable_skills, format_delete_plan,
         git_materialized_path_files, materialize_skill_dir_to_root, merge_file_maps,
         parse_add_source, parse_skill_file_references,
         parse_tendi_visibility, plan_skill_add, plan_skill_delete_many,
         prepare_skill_update_persistence,
-        plan_registry_update, render_wrapper_after,
+        plan_registry_update, plan_skill_visibility_at_path, render_wrapper_after,
         sanitize_skill_dir_name, scan_skills_without_source_database as scan_skills,
         select_update_path, sha256_file, sha256_text, skill_backup_exclusion_reason,
     };
@@ -7688,7 +7738,11 @@ mod tests {
         let frontmatter = fs::read_to_string(installed_skill).unwrap();
         assert!(frontmatter.contains("disable-model-invocation: true"));
         assert!(frontmatter.contains("visibility: manual"));
-        assert!(!target_root.join("demo/agents/openai.yaml").exists());
+        assert!(
+            fs::read_to_string(target_root.join("demo/agents/openai.yaml"))
+                .unwrap()
+                .contains("allow_implicit_invocation: false")
+        );
         assert_eq!(report.results.len(), 1);
         let source_records = super::skill_source_records_for_add(&report);
         assert_eq!(source_records.len(), 1);
@@ -7700,6 +7754,74 @@ mod tests {
             Some("skills/demo")
         );
         assert_eq!(source_records[0].origin, "tendi-install");
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn manual_visibility_survives_move_between_provider_locations() {
+        let root = temp_dir("tendi-portable-visibility-move-test");
+        let source = root.join(".codex/skills/demo");
+        let destination = root.join(".claude/skills/demo");
+        fs::create_dir_all(&source).unwrap();
+        fs::write(
+            source.join("SKILL.md"),
+            "---\nname: demo\ndescription: Demo skill\n---\n\n# demo\n",
+        )
+        .unwrap();
+
+        let changes = plan_skill_visibility_at_path(
+            &source,
+            AgentKind::Codex,
+            SkillVisibility::Manual,
+            false,
+        )
+        .unwrap();
+        apply_changes(&ChangeSet { changes }).unwrap();
+
+        let source_frontmatter = fs::read_to_string(source.join("SKILL.md")).unwrap();
+        assert!(source_frontmatter.contains("disable-model-invocation: true"));
+        assert!(source_frontmatter.contains("visibility: manual"));
+        assert!(
+            fs::read_to_string(source.join("agents/openai.yaml"))
+                .unwrap()
+                .contains("allow_implicit_invocation: false")
+        );
+
+        let source_record = SkillSourceRecord {
+            skill_name: "demo".to_string(),
+            skill_path: source.clone(),
+            source_kind: "local".to_string(),
+            source: None,
+            source_ref: None,
+            source_relative_path: None,
+            source_version: None,
+            update_status: "local".to_string(),
+            origin: "test".to_string(),
+        };
+        let move_plan = SkillDistributionPlan {
+            name: "demo".to_string(),
+            source: source.clone(),
+            destination: destination.clone(),
+            mode: SkillDistributionMode::Move,
+            source_symlink: false,
+            destination_exists: false,
+            source_sha256: sha256_file(&source.join("SKILL.md")).unwrap(),
+            status: "ready".to_string(),
+            message: None,
+            source_record,
+        };
+        apply_skill_distribution_plan(&move_plan).unwrap();
+
+        assert!(!source.exists());
+        let destination_frontmatter = fs::read_to_string(destination.join("SKILL.md")).unwrap();
+        assert!(destination_frontmatter.contains("disable-model-invocation: true"));
+        assert!(destination_frontmatter.contains("visibility: manual"));
+        assert!(
+            fs::read_to_string(destination.join("agents/openai.yaml"))
+                .unwrap()
+                .contains("allow_implicit_invocation: false")
+        );
 
         let _ = fs::remove_dir_all(root);
     }

@@ -33,7 +33,8 @@ use crate::{
     session_skills::{SessionFileState, SessionSkillIndexStatus, SessionSkillLink},
     sessions::{
         SESSION_PREVIEW_MAX_CHARS, SessionIdentity, SessionRecord, SessionScan, SessionScanCache,
-        SessionScanCacheEntry, bound_session_preview, clean_session_title, normalize_session_projects,
+        SessionScanCacheEntry, SessionScanSourceState, bound_session_preview, clean_session_title,
+        normalize_session_projects,
     },
     skills::{
         AgentKind, SkillScan, SkillSnapshot, SkillSnapshotFile, SkillSourceRecord,
@@ -50,17 +51,75 @@ struct ProjectState {
 }
 
 const SESSION_ANALYTICS_BATCH_SIZE: usize = 64;
+const STORAGE_SCHEMA_VERSION: i64 = 1;
 const SESSION_SEARCH_INDEX_VERSION: i64 = 2;
 const PROJECTION_PARSER_VERSION: &str = "scan-v5";
 const SESSION_PAYLOAD_PREVIEWS_MIGRATION_KEY: &str = "session_payload_previews_backfilled_v1";
 const DATABASE_WRITE_LOCK_ATTEMPTS: usize = 100;
 const DATABASE_WRITE_LOCK_RETRY: Duration = Duration::from_millis(50);
+const DATABASE_READ_LOCK_ATTEMPTS: usize = 100;
+const DATABASE_READ_LOCK_RETRY: Duration = Duration::from_millis(50);
 const SCOPED_SESSION_TABLE: &str = "scoped_sessions";
+const SCOPED_SESSION_SCAN_SOURCE_TABLE: &str = "scoped_session_scan_sources";
+const SESSION_SCAN_CACHE_PARSER_VERSION: &str = "scan-v7";
+const SESSION_SEARCH_CANDIDATE_TABLE: &str = "tendi_session_search_candidates";
+const SESSION_SEARCH_MATCH_TABLE: &str = "tendi_session_search_matches";
 const DEFAULT_SCOPE_KEY: &str = "installation:default";
 const NORMALIZED_SNAPSHOT_TABLE: &str = "normalized_snapshots";
 const SCOPED_PROJECTION_CONTEXT_TABLE: &str = "scoped_projection_contexts";
 
 const PROJECTION_DOMAINS: [&str; 5] = ["agents", "skills", "rules", "hooks", "mcp"];
+
+fn is_database_lock_error(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        cause
+            .downcast_ref::<rusqlite::Error>()
+            .is_some_and(|error| {
+                matches!(
+                    error,
+                    rusqlite::Error::SqliteFailure(code, _)
+                        if code.code == rusqlite::ErrorCode::DatabaseBusy
+                            || code.code == rusqlite::ErrorCode::DatabaseLocked
+                )
+            })
+    })
+}
+
+fn with_database_read_lock_retry<T, F>(mut read: F) -> Result<T>
+where
+    F: FnMut() -> Result<T>,
+{
+    for attempt in 0..DATABASE_READ_LOCK_ATTEMPTS {
+        match read() {
+            Ok(value) => return Ok(value),
+            Err(error)
+                if attempt + 1 < DATABASE_READ_LOCK_ATTEMPTS
+                    && is_database_lock_error(&error) =>
+            {
+                std::thread::sleep(DATABASE_READ_LOCK_RETRY);
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    unreachable!("database read retry loop always returns");
+}
+
+fn session_scan_source_states(session: &SessionRecord) -> Vec<SessionScanSourceState> {
+    crate::providers::agent_provider(session.agent)
+        .session_scan_source_paths(&session.path)
+        .into_iter()
+        .map(|path| {
+            let (file_mtime, file_size) = crate::session_skills::session_file_state(&path)
+                .map(|state| (state.file_mtime, state.file_size))
+                .unwrap_or((0, 0));
+            SessionScanSourceState {
+                path,
+                file_mtime,
+                file_size,
+            }
+        })
+        .collect()
+}
 
 fn workspace_scope_key(workspace_root: &Path) -> Result<ScopeKey> {
     ScopeKey::new(format!(
@@ -296,25 +355,20 @@ impl Store {
             .with_context(|| format!("failed to open sqlite database {}", path.display()))?;
         conn.busy_timeout(Duration::from_secs(30))?;
         let store = Self { conn, path };
-        for attempt in 0..5 {
-            match store.init() {
-                Ok(()) => break,
-                Err(error)
-                    if attempt < 4
-                        && error
-                            .downcast_ref::<rusqlite::Error>()
-                            .is_some_and(|error| {
-                                matches!(
-                                    error,
-                                    rusqlite::Error::SqliteFailure(code, _)
-                                        if code.code == rusqlite::ErrorCode::DatabaseBusy
-                                            || code.code == rusqlite::ErrorCode::DatabaseLocked
-                                )
-                            }) =>
-                {
-                    std::thread::yield_now();
+        // Schema setup is a migration boundary, not part of every RPC open.
+        // Re-running it made read requests contend with active scan writers.
+        let schema_version = store
+            .conn
+            .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))?;
+        if schema_version != STORAGE_SCHEMA_VERSION {
+            for attempt in 0..5 {
+                match store.init() {
+                    Ok(()) => break,
+                    Err(error) if attempt < 4 && is_database_lock_error(&error) => {
+                        std::thread::yield_now();
+                    }
+                    Err(error) => return Err(error),
                 }
-                Err(error) => return Err(error),
             }
         }
         Ok(store)
@@ -359,6 +413,10 @@ impl Store {
     }
 
     pub fn app_settings(&self) -> Result<AppSettings> {
+        with_database_read_lock_retry(|| self.app_settings_once())
+    }
+
+    fn app_settings_once(&self) -> Result<AppSettings> {
         let appearance = self
             .conn
             .query_row(
@@ -605,6 +663,10 @@ impl Store {
     }
 
     pub fn project_scan_scopes(&self) -> Result<Vec<ProjectScanScope>> {
+        with_database_read_lock_retry(|| self.project_scan_scopes_once())
+    }
+
+    fn project_scan_scopes_once(&self) -> Result<Vec<ProjectScanScope>> {
         let mut statement = self.conn.prepare(
             "SELECT id, path, enabled, last_scanned_at
              FROM project_scan_scopes
@@ -656,6 +718,10 @@ impl Store {
     }
 
     pub fn list_projects(&self) -> Result<Vec<ProjectRecord>> {
+        with_database_read_lock_retry(|| self.list_projects_once())
+    }
+
+    fn list_projects_once(&self) -> Result<Vec<ProjectRecord>> {
         let mut statement = self.conn.prepare(
             "SELECT data_json FROM projects
              WHERE status = 'ready'
@@ -1232,6 +1298,14 @@ impl Store {
         scope_key: &ScopeKey,
         domain: &str,
     ) -> Result<Option<T>> {
+        with_database_read_lock_retry(|| self.read_normalized_snapshot_once(scope_key, domain))
+    }
+
+    fn read_normalized_snapshot_once<T: for<'de> Deserialize<'de>>(
+        &self,
+        scope_key: &ScopeKey,
+        domain: &str,
+    ) -> Result<Option<T>> {
         self.conn
             .query_row(
                 &format!("SELECT payload_json FROM {NORMALIZED_SNAPSHOT_TABLE}
@@ -1275,6 +1349,10 @@ impl Store {
     }
 
     pub fn list_sessions_for_scope(&self, scope_key: &ScopeKey) -> Result<SessionScan> {
+        with_database_read_lock_retry(|| self.list_sessions_for_scope_once(scope_key))
+    }
+
+    fn list_sessions_for_scope_once(&self, scope_key: &ScopeKey) -> Result<SessionScan> {
         if let Some(snapshot) = self.read_normalized_snapshot(scope_key, "sessions")? {
             return Ok(snapshot);
         }
@@ -1329,6 +1407,13 @@ impl Store {
     /// summary is a workspace snapshot; the old global project tables are only
     /// consulted to enrich paths for the migration period.
     pub fn list_session_projects_for_scope(
+        &self,
+        scope_key: &ScopeKey,
+    ) -> Result<Vec<SessionProjectSummary>> {
+        with_database_read_lock_retry(|| self.list_session_projects_for_scope_once(scope_key))
+    }
+
+    fn list_session_projects_for_scope_once(
         &self,
         scope_key: &ScopeKey,
     ) -> Result<Vec<SessionProjectSummary>> {
@@ -2265,28 +2350,45 @@ impl Store {
         )?;
         let mut overview =
             analytics::aggregate_overview_records(&records, days, rank_days, warnings);
-        let mut first = None;
-        let mut last = None;
         let mut capabilities = BTreeMap::<AgentKind, AnalyticsCapabilities>::new();
         for record in &records {
-            if let Some(value) = record.first.as_ref()
-                && first.as_ref().is_none_or(|current| value < current)
-            {
-                first = Some(value.clone());
-            }
-            if let Some(value) = record.last.as_ref()
-                && last.as_ref().is_none_or(|current| value > current)
-            {
-                last = Some(value.clone());
-            }
-            let entry = capabilities.entry(record.agent).or_insert(record.capabilities);
-            entry.token_usage |= record.capabilities.token_usage;
-            entry.reasoning_tokens |= record.capabilities.reasoning_tokens;
-            entry.explicit_runs |= record.capabilities.explicit_runs;
-            entry.rate_limit_history |= record.capabilities.rate_limit_history;
+            let provider_capabilities = AnalyticsCapabilities::for_agent(record.agent);
+            let entry = capabilities
+                .entry(record.agent)
+                .or_insert(provider_capabilities);
+            entry.token_usage |= provider_capabilities.token_usage;
+            entry.reasoning_tokens |= provider_capabilities.reasoning_tokens;
+            entry.explicit_runs |= provider_capabilities.explicit_runs;
+            entry.duration |= provider_capabilities.duration;
+            entry.rate_limit_history |= provider_capabilities.rate_limit_history;
         }
         let total_sessions = allowed.len();
-        let analyzed_sessions = records.iter().filter(|record| record.has_activity).count();
+        let agent_value = agent.map(agent_label);
+        let (first, last, indexed_sessions, analyzed_sessions) = self.conn.query_row(
+            "SELECT MIN(overview.event_min_date),
+                    MAX(overview.event_max_date),
+                    COUNT(*),
+                    COALESCE(SUM(CASE WHEN overview.has_activity THEN 1 ELSE 0 END), 0)
+             FROM scoped_session_analytics_overview AS overview
+             WHERE overview.scope_key = ?1
+               AND (?2 IS NULL OR overview.agent = ?2)
+               AND EXISTS (
+                   SELECT 1 FROM scoped_sessions AS session
+                   WHERE session.scope_key = overview.scope_key
+                     AND session.id = overview.session_id
+                     AND session.agent = overview.agent
+                     AND session.path = overview.session_path
+               )",
+            params![scope_key.as_str(), agent_value],
+            |row| {
+                Ok((
+                    row.get::<_, Option<String>>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, i64>(2)? as usize,
+                    row.get::<_, i64>(3)? as usize,
+                ))
+            },
+        )?;
         overview.revision = self
             .projection_head(scope_key, "analytics")?
             .map(|head| head.revision.value())
@@ -2296,7 +2398,7 @@ impl Store {
             last,
             total_sessions,
             analyzed_sessions,
-            indexing_sessions: total_sessions.saturating_sub(records.len()),
+            indexing_sessions: total_sessions.saturating_sub(indexed_sessions),
         };
         overview.capabilities = capabilities
             .into_iter()
@@ -2379,6 +2481,10 @@ impl Store {
     }
 
     pub fn analytics_revision(&self) -> Result<u64> {
+        with_database_read_lock_retry(|| self.analytics_revision_once())
+    }
+
+    fn analytics_revision_once(&self) -> Result<u64> {
         self.conn
             .query_row(
                 "SELECT value FROM meta WHERE key = 'analytics_revision'",
@@ -2595,12 +2701,60 @@ impl Store {
 
     pub fn session_scan_cache_for_scope(&self, scope_key: &ScopeKey) -> Result<SessionScanCache> {
         let sessions = self.list_sessions_for_scope(scope_key)?.sessions;
+        let mut source_states_by_session: HashMap<
+            (String, String, String),
+            Vec<SessionScanSourceState>,
+        > = HashMap::new();
+        let mut statement = self.conn.prepare(&format!(
+            "SELECT session_id, agent, session_path, source_path, file_mtime, file_size,
+                    parser_version
+             FROM {SCOPED_SESSION_SCAN_SOURCE_TABLE}
+             WHERE scope_key = ?1"
+        ))?;
+        let rows = statement.query_map([scope_key.as_str()], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                SessionScanSourceState {
+                    path: PathBuf::from(row.get::<_, String>(3)?),
+                    file_mtime: row.get(4)?,
+                    file_size: row.get(5)?,
+                },
+                row.get::<_, String>(6)?,
+            ))
+        })?;
+        for row in rows {
+            let (session_id, agent, session_path, source, parser_version) = row?;
+            if parser_version != SESSION_SCAN_CACHE_PARSER_VERSION {
+                continue;
+            }
+            source_states_by_session
+                .entry((session_id, agent, session_path))
+                .or_default()
+                .push(source);
+        }
+        drop(statement);
+
         let entries = sessions.into_iter().filter_map(|session| {
-            let state = crate::session_skills::session_file_state(&session.path).ok()?;
+            let key = (
+                session.id.clone(),
+                agent_label(session.agent).to_string(),
+                session.path.display().to_string(),
+            );
+            let source_states = source_states_by_session.remove(&key)?;
+            let session_path = session.path.clone();
+            let primary = source_states.iter().find(|source| source.path == session_path)?;
+            let file_mtime = primary.file_mtime;
+            let file_size = primary.file_size;
             Some(SessionScanCacheEntry {
                 session,
-                file_mtime: state.file_mtime,
-                file_size: state.file_size,
+                file_mtime,
+                file_size,
+                additional_file_states: source_states
+                    .into_iter()
+                    .filter(|source| source.path != session_path)
+                    .collect(),
             })
         });
         Ok(SessionScanCache::from_entries(entries))
@@ -2865,6 +3019,7 @@ impl Store {
             advance_projection_head_in_tx(&tx, scope_key, "sessions", None, "ready")?;
         }
         cleanup_stale_scoped_session_skill_rows(&tx, scope_key)?;
+        cleanup_stale_scoped_session_scan_source_rows(&tx, scope_key)?;
         tx.commit()?;
         self.refresh_scoped_session_snapshot(scope_key)?;
         Ok(changed)
@@ -2891,6 +3046,7 @@ impl Store {
             advance_projection_head_in_tx(&tx, scope_key, "sessions", None, "ready")?;
         }
         cleanup_stale_scoped_session_skill_rows(&tx, scope_key)?;
+        cleanup_stale_scoped_session_scan_source_rows(&tx, scope_key)?;
         tx.commit()?;
         self.refresh_scoped_session_snapshot(scope_key)?;
         Ok(changed)
@@ -2943,6 +3099,7 @@ impl Store {
             advance_projection_head_in_tx(&tx, scope_key, "sessions", None, "ready")?;
         }
         cleanup_stale_scoped_session_skill_rows(&tx, scope_key)?;
+        cleanup_stale_scoped_session_scan_source_rows(&tx, scope_key)?;
         tx.commit()?;
         self.refresh_scoped_session_snapshot(scope_key)?;
         Ok((
@@ -3036,6 +3193,7 @@ impl Store {
                     && current.7 == last_user_message
                     && current.8 == last_assistant_message
             }) {
+                replace_scoped_session_scan_sources(tx, scope_key, &canonical)?;
                 continue;
             }
             tx.execute(
@@ -3073,6 +3231,7 @@ impl Store {
                     data_json,
                 ],
             )?;
+            replace_scoped_session_scan_sources(tx, scope_key, &canonical)?;
             changed.push(canonical);
         }
         Ok(changed)
@@ -3187,6 +3346,7 @@ impl Store {
             )?;
         }
         cleanup_stale_scoped_session_skill_rows(&tx, scope_key)?;
+        cleanup_stale_scoped_session_scan_source_rows(&tx, scope_key)?;
         cleanup_stale_scoped_session_search_rows(&tx, scope_key)?;
         advance_projection_head_in_tx(&tx, scope_key, "sessions", None, "ready")?;
         tx.commit()?;
@@ -3201,6 +3361,17 @@ impl Store {
     /// Search the workspace-owned session projection through its own scoped
     /// FTS index. The legacy global FTS tables are never consulted here.
     pub fn search_sessions_for_scope(
+        &self,
+        scope_key: &ScopeKey,
+        query: &str,
+        candidates: Option<&[SessionIdentity]>,
+    ) -> Result<Vec<SessionSearchHit>> {
+        with_database_read_lock_retry(|| {
+            self.search_sessions_for_scope_once(scope_key, query, candidates)
+        })
+    }
+
+    fn search_sessions_for_scope_once(
         &self,
         scope_key: &ScopeKey,
         query: &str,
@@ -3223,53 +3394,56 @@ impl Store {
         candidates: Option<&[SessionIdentity]>,
     ) -> Result<Vec<SessionSearchHit>> {
         let query = session_search_query(terms);
-        let mut sql_params = vec![SqlValue::Text(scope_key.as_str().to_string()), SqlValue::Text(query)];
-        let candidate_filter = candidates
-            .map(|candidates| {
-                format!(
-                    " AND {}",
-                    Self::session_search_candidate_clause("search", candidates, &mut sql_params)
-                )
-            })
-            .unwrap_or_default();
+        self.session_search_matches(&query)?;
+        let sql_params = vec![SqlValue::Text(scope_key.as_str().to_string())];
+        let candidate_join = self.session_search_candidate_join(candidates)?;
         let mut stmt = self.conn.prepare(&format!(
-            "SELECT
+            "WITH matched AS (
+                SELECT
+                    search.scope_key,
+                    search.session_id,
+                    search.agent,
+                    search.session_path,
+                    MIN(search.id) AS record_id
+                FROM temp.{SESSION_SEARCH_MATCH_TABLE} AS matches
+                JOIN scoped_session_search_records AS search ON search.id = matches.record_id
+                {candidate_join}
+                WHERE search.scope_key = ?1
+                GROUP BY search.scope_key, search.session_id, search.agent, search.session_path
+            )
+            SELECT
                 sessions.data_json,
-                bm25(scoped_session_search_fts, 0.5, 10.0, 5.0, 6.0, 3.0) AS score,
-                CASE
-                    WHEN instr(highlight(scoped_session_search_fts, 1, '⟦', '⟧'), '⟦') > 0
-                        THEN highlight(scoped_session_search_fts, 1, '⟦', '⟧')
-                    WHEN instr(snippet(scoped_session_search_fts, 3, '⟦', '⟧', ' … ', 32), '⟦') > 0
-                        THEN snippet(scoped_session_search_fts, 3, '⟦', '⟧', ' … ', 32)
-                    WHEN instr(snippet(scoped_session_search_fts, 4, '⟦', '⟧', ' … ', 32), '⟦') > 0
-                        THEN snippet(scoped_session_search_fts, 4, '⟦', '⟧', ' … ', 32)
-                    WHEN instr(highlight(scoped_session_search_fts, 2, '⟦', '⟧'), '⟦') > 0
-                        THEN highlight(scoped_session_search_fts, 2, '⟦', '⟧')
-                    ELSE highlight(scoped_session_search_fts, 0, '⟦', '⟧')
-                END AS snippet
-             FROM scoped_session_search_fts
+                search.metadata_text,
+                search.title,
+                search.project,
+                search.user_text,
+                search.assistant_text
+             FROM matched
              JOIN scoped_session_search_records AS search
-               ON search.id = scoped_session_search_fts.rowid
-              AND search.scope_key = ?1
+               ON search.id = matched.record_id
              JOIN scoped_sessions AS sessions
-               ON sessions.scope_key = search.scope_key
-              AND sessions.id = search.session_id
-              AND sessions.agent = search.agent
-              AND sessions.path = search.session_path
-             WHERE scoped_session_search_fts MATCH ?2{candidate_filter}"
+               ON sessions.scope_key = matched.scope_key
+              AND sessions.id = matched.session_id
+              AND sessions.agent = matched.agent
+              AND sessions.path = matched.session_path"
         ))?;
         let rows = stmt.query_map(params_from_iter(sql_params.iter()), |row| {
             Ok((
                 row.get::<_, String>(0)?,
-                row.get::<_, f64>(1)?,
-                row.get::<_, String>(2)?,
+                SessionSearchDocument {
+                    metadata_text: row.get(1)?,
+                    title: row.get(2)?,
+                    project: row.get(3)?,
+                    user_text: row.get(4)?,
+                    assistant_text: row.get(5)?,
+                },
             ))
         })?;
         let candidate_order = candidates.map(Self::session_search_candidate_order);
         let mut hits: Vec<SessionSearchHit> = Vec::new();
         let mut seen = HashSet::new();
         for row in rows {
-            let (data_json, raw_score, snippet) = row?;
+            let (data_json, document) = row?;
             let session = Self::normalize_cached_session(
                 serde_json::from_str::<SessionRecord>(&data_json)
                     .context("invalid cached scoped session search row")?,
@@ -3279,8 +3453,8 @@ impl Store {
             }
             hits.push(SessionSearchHit {
                 session,
-                search_score: -raw_score,
-                search_snippet: compact_search_snippet(&snippet),
+                search_score: contains_search_score(&document, terms),
+                search_snippet: contains_search_snippet(&document, terms),
             });
         }
         if let Some(candidate_order) = candidate_order {
@@ -3321,29 +3495,36 @@ impl Store {
                 .iter()
                 .map(|term| SqlValue::Text(format!("%{}%", escape_like(term)))),
         );
-        let candidate_filter = candidates
-            .map(|candidates| {
-                format!(
-                    " AND {}",
-                    Self::session_search_candidate_clause("search", candidates, &mut sql_params)
-                )
-            })
-            .unwrap_or_default();
+        let candidate_join = self.session_search_candidate_join(candidates)?;
         let sql = format!(
-            "SELECT
+            "WITH matched AS (
+                SELECT
+                    search.scope_key,
+                    search.session_id,
+                    search.agent,
+                    search.session_path,
+                    MIN(search.id) AS record_id
+                FROM scoped_session_search_records AS search
+                {candidate_join}
+                WHERE search.scope_key = ?1 AND {where_clause}
+                GROUP BY search.scope_key, search.session_id, search.agent, search.session_path
+            )
+            SELECT
                 sessions.data_json,
                 search.metadata_text,
                 search.title,
                 search.project,
                 search.user_text,
                 search.assistant_text
-             FROM scoped_session_search_records AS search
+             FROM matched
+             JOIN scoped_session_search_records AS search
+               ON search.id = matched.record_id
              JOIN scoped_sessions AS sessions
                ON sessions.scope_key = search.scope_key
               AND sessions.id = search.session_id
               AND sessions.agent = search.agent
               AND sessions.path = search.session_path
-             WHERE search.scope_key = ?1 AND {where_clause}{candidate_filter}"
+             "
         );
         let mut stmt = self.conn.prepare(&sql)?;
         let rows = stmt.query_map(params_from_iter(sql_params.iter()), |row| {
@@ -3408,23 +3589,69 @@ impl Store {
     }
 
 
-    fn session_search_candidate_clause(
-        alias: &str,
-        candidates: &[SessionIdentity],
-        sql_params: &mut Vec<SqlValue>,
-    ) -> String {
-        let conditions = candidates
-            .iter()
-            .map(|candidate| {
-                sql_params.push(SqlValue::Text(candidate.id.clone()));
-                sql_params.push(SqlValue::Text(agent_label(candidate.agent).to_owned()));
-                sql_params.push(SqlValue::Text(candidate.path.display().to_string()));
-                format!(
-                    "({alias}.session_id = ? AND {alias}.agent = ? AND {alias}.session_path = ?)"
-                )
-            })
-            .collect::<Vec<_>>();
-        format!("({})", conditions.join(" OR "))
+    fn session_search_candidate_join(
+        &self,
+        candidates: Option<&[SessionIdentity]>,
+    ) -> Result<String> {
+        // Keep the large candidate set indexed on this connection. A JSON
+        // CTE would avoid SQLite's expression-depth limit but scan every
+        // candidate for every FTS hit.
+        let Some(candidates) = candidates else {
+            return Ok(String::new());
+        };
+        self.conn.execute_batch(&format!(
+            "CREATE TEMP TABLE IF NOT EXISTS {SESSION_SEARCH_CANDIDATE_TABLE} (
+                session_id TEXT NOT NULL,
+                agent TEXT NOT NULL,
+                session_path TEXT NOT NULL,
+                PRIMARY KEY (session_id, agent, session_path)
+            )"
+        ))?;
+        self.conn.execute(
+            &format!("DELETE FROM temp.{SESSION_SEARCH_CANDIDATE_TABLE}"),
+            [],
+        )?;
+        let candidates_json = serde_json::to_string(candidates)
+            .context("serialize session search candidates")?;
+        self.conn.execute(
+            &format!(
+                "INSERT OR IGNORE INTO temp.{SESSION_SEARCH_CANDIDATE_TABLE}
+                 SELECT
+                    json_extract(value, '$.id'),
+                    json_extract(value, '$.agent'),
+                    json_extract(value, '$.path')
+                 FROM json_each(?1)"
+            ),
+            [candidates_json],
+        )?;
+        Ok(format!(
+            "JOIN temp.{SESSION_SEARCH_CANDIDATE_TABLE} AS candidate
+               ON candidate.session_id = search.session_id
+              AND candidate.agent = search.agent
+              AND candidate.session_path = search.session_path"
+        ))
+    }
+
+    fn session_search_matches(&self, query: &str) -> Result<()> {
+        self.conn.execute_batch(&format!(
+            "CREATE TEMP TABLE IF NOT EXISTS {SESSION_SEARCH_MATCH_TABLE} (
+                record_id INTEGER PRIMARY KEY
+            )"
+        ))?;
+        self.conn.execute(
+            &format!("DELETE FROM temp.{SESSION_SEARCH_MATCH_TABLE}"),
+            [],
+        )?;
+        self.conn.execute(
+            &format!(
+                "INSERT INTO temp.{SESSION_SEARCH_MATCH_TABLE}(record_id)
+                 SELECT rowid
+                 FROM scoped_session_search_fts
+                 WHERE scoped_session_search_fts MATCH ?1"
+            ),
+            [query],
+        )?;
+        Ok(())
     }
 
     fn session_search_candidate_order(
@@ -3468,6 +3695,86 @@ impl Store {
     /// Rebuild the derived scoped search index from the canonical session
     /// projection. The index is disposable; search itself never falls back to
     /// another workspace or treats stale index rows as session data.
+    pub fn ensure_scoped_session_search_for_scope(&self, scope_key: &ScopeKey) -> Result<bool> {
+        let mut statement = self.conn.prepare(
+            "SELECT sessions.data_json
+             FROM scoped_sessions AS sessions
+             WHERE sessions.scope_key = ?1
+               AND (
+                    NOT EXISTS (
+                        SELECT 1
+                        FROM scoped_session_search_index AS search_index
+                        WHERE search_index.scope_key = sessions.scope_key
+                          AND search_index.session_id = sessions.id
+                          AND search_index.agent = sessions.agent
+                          AND search_index.session_path = sessions.path
+                          AND search_index.search_index_version = ?2
+                    )
+                    OR NOT EXISTS (
+                        SELECT 1
+                        FROM scoped_session_search_records AS records
+                        WHERE records.scope_key = sessions.scope_key
+                          AND records.session_id = sessions.id
+                          AND records.agent = sessions.agent
+                          AND records.session_path = sessions.path
+                          AND records.record_order = 0
+                    )
+               )",
+        )?;
+        let missing_sessions = statement
+            .query_map(
+                params![scope_key.as_str(), SESSION_SEARCH_INDEX_VERSION],
+                |row| row.get::<_, String>(0),
+            )?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        drop(statement);
+        let stale_rows: i64 = self.conn.query_row(
+            "SELECT
+                (SELECT COUNT(*)
+                 FROM scoped_session_search_records AS records
+                 WHERE records.scope_key = ?1
+                   AND NOT EXISTS (
+                        SELECT 1
+                        FROM scoped_sessions AS sessions
+                        WHERE sessions.scope_key = records.scope_key
+                          AND sessions.id = records.session_id
+                          AND sessions.agent = records.agent
+                          AND sessions.path = records.session_path
+                   ))
+                +
+                (SELECT COUNT(*)
+                 FROM scoped_session_search_index AS search_index
+                 WHERE search_index.scope_key = ?1
+                   AND NOT EXISTS (
+                        SELECT 1
+                        FROM scoped_sessions AS sessions
+                        WHERE sessions.scope_key = search_index.scope_key
+                          AND sessions.id = search_index.session_id
+                          AND sessions.agent = search_index.agent
+                          AND sessions.path = search_index.session_path
+                   ))",
+            params![scope_key.as_str()],
+            |row| row.get(0),
+        )?;
+        if missing_sessions.is_empty() && stale_rows == 0 {
+            return Ok(false);
+        }
+        let tx = self.conn.unchecked_transaction()?;
+        for data_json in missing_sessions {
+            let Ok(session) = serde_json::from_str::<SessionRecord>(&data_json) else {
+                continue;
+            };
+            index_scoped_session_search_document(
+                &tx,
+                scope_key,
+                &Self::normalize_cached_session(session),
+            )?;
+        }
+        cleanup_stale_scoped_session_search_rows(&tx, scope_key)?;
+        tx.commit()?;
+        Ok(true)
+    }
+
     pub fn rebuild_scoped_session_search_for_scope(&self, scope_key: &ScopeKey) -> Result<usize> {
         let sessions = self.list_sessions_from_table(scope_key)?;
         let tx = self.conn.unchecked_transaction()?;
@@ -3570,6 +3877,7 @@ impl Store {
                     data_json,
                 ],
             )?;
+            replace_scoped_session_scan_sources(&tx, scope_key, session)?;
             index_scoped_session_search_document_best_effort(&tx, scope_key, session);
         }
 
@@ -3588,6 +3896,7 @@ impl Store {
                 params![scope_key.as_str()],
             )?;
             cleanup_stale_scoped_session_skill_rows(&tx, scope_key)?;
+            cleanup_stale_scoped_session_scan_source_rows(&tx, scope_key)?;
             cleanup_stale_scoped_session_search_rows(&tx, scope_key)?;
         }
         tx.execute("DELETE FROM current_sessions", [])?;
@@ -3788,45 +4097,47 @@ impl Store {
         scope_key: &ScopeKey,
         running: bool,
     ) -> Result<SessionSkillIndexStatus> {
-        let total = self
-            .conn
-            .query_row(
-                "SELECT COUNT(*) FROM scoped_sessions WHERE scope_key = ?1",
-                [scope_key.as_str()],
-                |row| row.get::<_, i64>(0),
-            )?
-            .max(0) as usize;
-        let indexed = self
-            .conn
-            .query_row(
-                "SELECT COUNT(*) FROM scoped_session_skill_index
+        with_database_read_lock_retry(|| {
+            let total = self
+                .conn
+                .query_row(
+                    "SELECT COUNT(*) FROM scoped_sessions WHERE scope_key = ?1",
+                    [scope_key.as_str()],
+                    |row| row.get::<_, i64>(0),
+                )?
+                .max(0) as usize;
+            let indexed = self
+                .conn
+                .query_row(
+                    "SELECT COUNT(*) FROM scoped_session_skill_index
+                     WHERE scope_key = ?1 AND status = 'indexed'",
+                    [scope_key.as_str()],
+                    |row| row.get::<_, i64>(0),
+                )?
+                .max(0) as usize;
+            let failed = self
+                .conn
+                .query_row(
+                    "SELECT COUNT(*) FROM scoped_session_skill_index
+                     WHERE scope_key = ?1 AND status = 'failed'",
+                    [scope_key.as_str()],
+                    |row| row.get::<_, i64>(0),
+                )?
+                .max(0) as usize;
+            let last_indexed_at = self.conn.query_row(
+                "SELECT MAX(indexed_at) FROM scoped_session_skill_index
                  WHERE scope_key = ?1 AND status = 'indexed'",
                 [scope_key.as_str()],
-                |row| row.get::<_, i64>(0),
-            )?
-            .max(0) as usize;
-        let failed = self
-            .conn
-            .query_row(
-                "SELECT COUNT(*) FROM scoped_session_skill_index
-                 WHERE scope_key = ?1 AND status = 'failed'",
-                [scope_key.as_str()],
-                |row| row.get::<_, i64>(0),
-            )?
-            .max(0) as usize;
-        let last_indexed_at = self.conn.query_row(
-            "SELECT MAX(indexed_at) FROM scoped_session_skill_index
-             WHERE scope_key = ?1 AND status = 'indexed'",
-            [scope_key.as_str()],
-            |row| row.get::<_, Option<String>>(0),
-        )?;
-        Ok(SessionSkillIndexStatus {
-            total,
-            indexed,
-            pending: total.saturating_sub(indexed + failed),
-            failed,
-            running,
-            last_indexed_at,
+                |row| row.get::<_, Option<String>>(0),
+            )?;
+            Ok(SessionSkillIndexStatus {
+                total,
+                indexed,
+                pending: total.saturating_sub(indexed + failed),
+                failed,
+                running,
+                last_indexed_at,
+            })
         })
     }
 
@@ -3837,12 +4148,12 @@ impl Store {
         session_id: &str,
         agent: AgentKind,
     ) -> Result<Vec<SessionSkillLink>> {
-        self.query_session_skill_links_from(
+        with_database_read_lock_retry(|| self.query_session_skill_links_from(
             "scoped_session_skill_links",
             "scoped_sessions",
             "WHERE links.scope_key = ?1 AND links.session_id = ?2 AND links.agent = ?3",
             params![scope_key.as_str(), session_id, agent_label(agent)],
-        )
+        ))
     }
 
     pub fn skill_session_links_for_scope(
@@ -3850,12 +4161,12 @@ impl Store {
         scope_key: &ScopeKey,
         skill_name: &str,
     ) -> Result<Vec<SessionSkillLink>> {
-        self.query_session_skill_links_from(
+        with_database_read_lock_retry(|| self.query_session_skill_links_from(
             "scoped_session_skill_links",
             "scoped_sessions",
             "WHERE links.scope_key = ?1 AND links.skill_name = ?2",
             params![scope_key.as_str(), skill_name],
-        )
+        ))
     }
 
 
@@ -4748,6 +5059,10 @@ impl Store {
 
 
     pub fn list_prompts(&self) -> Result<Vec<PromptRecord>> {
+        with_database_read_lock_retry(|| self.list_prompts_once())
+    }
+
+    fn list_prompts_once(&self) -> Result<Vec<PromptRecord>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, title, tags_json, body, created_at, updated_at
              FROM prompts
@@ -5030,6 +5345,19 @@ impl Store {
                 ON scoped_sessions(agent, updated_at DESC, id ASC);
             CREATE INDEX IF NOT EXISTS idx_scoped_sessions_path
                 ON scoped_sessions(path);
+            CREATE TABLE IF NOT EXISTS scoped_session_scan_sources (
+                scope_key TEXT NOT NULL,
+                session_id TEXT NOT NULL,
+                agent TEXT NOT NULL,
+                session_path TEXT NOT NULL,
+                source_path TEXT NOT NULL,
+                file_mtime INTEGER NOT NULL,
+                file_size INTEGER NOT NULL,
+                parser_version TEXT NOT NULL,
+                PRIMARY KEY (scope_key, session_id, agent, session_path, source_path)
+            );
+            CREATE INDEX IF NOT EXISTS idx_scoped_session_scan_sources_source
+                ON scoped_session_scan_sources(scope_key, source_path);
             CREATE TABLE IF NOT EXISTS session_projects (
                 scope_key TEXT NOT NULL DEFAULT 'installation:default',
                 id TEXT NOT NULL,
@@ -5307,10 +5635,13 @@ impl Store {
         self.ensure_skill_source_ref_column()?;
         self.ensure_session_preview_columns()?;
         self.ensure_session_payload_previews()?;
+        self.ensure_session_scan_source_version_column()?;
         self.ensure_session_analytics_overview_columns()?;
         self.ensure_session_search_index_version_column()?;
         self.ensure_storage_indexes()?;
         self.ensure_session_search_fts()?;
+        self.conn
+            .execute_batch(&format!("PRAGMA user_version = {STORAGE_SCHEMA_VERSION};"))?;
         Ok(())
     }
 
@@ -5547,6 +5878,24 @@ impl Store {
             ))?;
         }
         tx.commit()?;
+        Ok(())
+    }
+
+    fn ensure_session_scan_source_version_column(&self) -> Result<()> {
+        let mut statement = self
+            .conn
+            .prepare("PRAGMA table_info(scoped_session_scan_sources)")?;
+        let columns = statement
+            .query_map([], |row| row.get::<_, String>(1))?
+            .collect::<Result<Vec<_>, _>>()?;
+        drop(statement);
+        if !columns.iter().any(|column| column == "parser_version") {
+            self.conn.execute(
+                "ALTER TABLE scoped_session_scan_sources
+                 ADD COLUMN parser_version TEXT NOT NULL DEFAULT ''",
+                [],
+            )?;
+        }
         Ok(())
     }
 
@@ -6462,6 +6811,62 @@ fn cleanup_stale_scoped_session_skill_rows(
     Ok(())
 }
 
+fn replace_scoped_session_scan_sources(
+    conn: &rusqlite::Transaction<'_>,
+    scope_key: &ScopeKey,
+    session: &SessionRecord,
+) -> Result<()> {
+    conn.execute(
+        &format!(
+            "DELETE FROM {SCOPED_SESSION_SCAN_SOURCE_TABLE}
+             WHERE scope_key = ?1 AND session_id = ?2 AND agent = ?3"
+        ),
+        params![scope_key.as_str(), session.id, agent_label(session.agent)],
+    )?;
+    let session_path = session.path.display().to_string();
+    for source in session_scan_source_states(session) {
+        conn.execute(
+            &format!(
+                "INSERT INTO {SCOPED_SESSION_SCAN_SOURCE_TABLE}
+                 (scope_key, session_id, agent, session_path, source_path, file_mtime, file_size, parser_version)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)"
+            ),
+            params![
+                scope_key.as_str(),
+                session.id,
+                agent_label(session.agent),
+                session_path,
+                source.path.display().to_string(),
+                source.file_mtime,
+                source.file_size,
+                SESSION_SCAN_CACHE_PARSER_VERSION,
+            ],
+        )?;
+    }
+    Ok(())
+}
+
+fn cleanup_stale_scoped_session_scan_source_rows(
+    conn: &rusqlite::Transaction<'_>,
+    scope_key: &ScopeKey,
+) -> Result<()> {
+    conn.execute(
+        &format!(
+            "DELETE FROM {SCOPED_SESSION_SCAN_SOURCE_TABLE}
+             WHERE scope_key = ?1
+               AND NOT EXISTS (
+                SELECT 1 FROM scoped_sessions
+                WHERE scoped_sessions.scope_key = {SCOPED_SESSION_SCAN_SOURCE_TABLE}.scope_key
+                  AND scoped_sessions.id = {SCOPED_SESSION_SCAN_SOURCE_TABLE}.session_id
+                  AND scoped_sessions.agent = {SCOPED_SESSION_SCAN_SOURCE_TABLE}.agent
+                  AND scoped_sessions.path = {SCOPED_SESSION_SCAN_SOURCE_TABLE}.session_path
+             )"
+        ),
+        [scope_key.as_str()],
+    )?;
+    Ok(())
+}
+
 
 fn cleanup_stale_scoped_session_search_rows(
     conn: &rusqlite::Transaction<'_>,
@@ -6552,7 +6957,16 @@ fn index_scoped_session_search_document(
     };
     let current = tx
         .query_row(
-            "SELECT file_mtime, file_size, search_metadata, search_index_version
+            "SELECT file_mtime, file_size, search_metadata, search_index_version,
+                    EXISTS (
+                        SELECT 1
+                        FROM scoped_session_search_records AS records
+                        WHERE records.scope_key = ?1
+                          AND records.session_id = ?2
+                          AND records.agent = ?3
+                          AND records.session_path = ?4
+                          AND records.record_order = 0
+                    )
              FROM scoped_session_search_index
              WHERE scope_key = ?1 AND session_id = ?2 AND agent = ?3 AND session_path = ?4",
             params![scope_key.as_str(), session.id, agent, session_path],
@@ -6562,6 +6976,7 @@ fn index_scoped_session_search_document(
                     row.get::<_, i64>(1)?,
                     row.get::<_, String>(2)?,
                     row.get::<_, i64>(3)?,
+                    row.get::<_, bool>(4)?,
                 ))
             },
         )
@@ -6571,6 +6986,7 @@ fn index_scoped_session_search_document(
             && current.1 == state.file_size
             && current.2 == search_metadata
             && current.3 == SESSION_SEARCH_INDEX_VERSION
+            && current.4
     }) {
         return Ok(());
     }
@@ -6578,6 +6994,7 @@ fn index_scoped_session_search_document(
         current.0 == state.file_mtime
             && current.1 == state.file_size
             && current.3 == SESSION_SEARCH_INDEX_VERSION
+            && current.4
     }) {
         let document = session_search_metadata_document(session);
         tx.execute(
@@ -6887,7 +7304,7 @@ mod tests {
         path::{Path, PathBuf},
         sync::mpsc,
         thread,
-        time::{SystemTime, UNIX_EPOCH},
+        time::{Duration, SystemTime, UNIX_EPOCH},
     };
 
     use crate::{
@@ -6898,6 +7315,7 @@ mod tests {
             SessionAnalyticsRecord,
         },
         session_skills::{SessionFileState, SessionSkillLink},
+        sessions::SessionIdentity,
         runtime_contract::{OperationId, OperationKind, OperationRecord, OperationStatus, Revision, ScopeKey, SourceVersion},
         skills::{
             AgentKind, SkillPath, SkillRoot, SkillSnapshot, SkillSnapshotFile, SkillSourceRecord,
@@ -6907,7 +7325,7 @@ mod tests {
     use rusqlite::{Connection, params};
 
     use super::{
-        AppSettings, PromptWrite, Store, normalize_repository_url,
+        AppSettings, PromptWrite, SESSION_SEARCH_CANDIDATE_TABLE, Store, normalize_repository_url,
     };
 
     #[test]
@@ -6924,6 +7342,69 @@ mod tests {
             normalize_repository_url("ssh://git@github.com/tutti-os/tutti.git"),
             Some("github.com/tutti-os/tutti".to_string())
         );
+    }
+
+    #[test]
+    fn session_scan_cache_uses_persisted_source_state() {
+        let temp = temp_dir("tendi-session-scan-source-state");
+        fs::create_dir_all(&temp).unwrap();
+        let transcript = temp.join("session.jsonl");
+        fs::write(&transcript, "initial\n").unwrap();
+        let store = Store::open(temp.join("tendi.sqlite3")).unwrap();
+        let scope = ScopeKey::new("workspace:/repo").unwrap();
+        let session = SessionRecord {
+            id: "session-id".to_string(),
+            agent: AgentKind::Codex,
+            title: Some("Session".to_string()),
+            project: None,
+            repository: None,
+            repository_url: None,
+            logical_project_id: None,
+            logical_project_name: None,
+            path: transcript.clone(),
+            started_at: None,
+            updated_at: None,
+            message_count: Some(1),
+            first_user_message: Some("initial".to_string()),
+            last_user_message: Some("initial".to_string()),
+            last_assistant_message: Some("answer".to_string()),
+            turn_count: Some(1),
+            model: None,
+            mode: None,
+            approval_mode: None,
+            is_run_everything: None,
+            parent_session_id: None,
+            token_usage: None,
+        };
+
+        store
+            .apply_session_delta_for_scope(&scope, std::slice::from_ref(&session))
+            .unwrap();
+        let cache = store.session_scan_cache_for_scope(&scope).unwrap();
+        assert!(cache.session_if_current(AgentKind::Codex, &transcript).is_some());
+
+        fs::write(&transcript, "changed source\n").unwrap();
+        let cache = store.session_scan_cache_for_scope(&scope).unwrap();
+        assert!(cache.session_if_current(AgentKind::Codex, &transcript).is_none());
+
+        store
+            .conn
+            .execute(
+                "UPDATE scoped_session_scan_sources SET parser_version = 'legacy'",
+                [],
+            )
+            .unwrap();
+        fs::write(&transcript, "initial\n").unwrap();
+        let cache = store.session_scan_cache_for_scope(&scope).unwrap();
+        assert!(cache.session_if_current(AgentKind::Codex, &transcript).is_none());
+
+        store
+            .apply_session_delta_for_scope(&scope, std::slice::from_ref(&session))
+            .unwrap();
+        let cache = store.session_scan_cache_for_scope(&scope).unwrap();
+        assert!(cache.session_if_current(AgentKind::Codex, &transcript).is_some());
+
+        let _ = fs::remove_dir_all(temp);
     }
 
     #[test]
@@ -6977,6 +7458,14 @@ mod tests {
         .unwrap();
         let mut record = session("backfill", "Backfill session");
         record.path = path;
+        let candidate = SessionIdentity::from(&record);
+        let candidates = std::iter::once(candidate.clone())
+            .chain((0..1_199).map(|index| SessionIdentity {
+                id: format!("unrelated-{index}"),
+                agent: AgentKind::Codex,
+                path: PathBuf::from(format!("/tmp/unrelated-{index}.jsonl")),
+            }))
+            .collect::<Vec<_>>();
         store
             .save_sessions_at_for_scope(
                 &scope,
@@ -6987,6 +7476,9 @@ mod tests {
                 1,
             )
             .unwrap();
+        assert!(!store
+            .ensure_scoped_session_search_for_scope(&scope)
+            .unwrap());
         store
             .conn
             .execute(
@@ -7002,20 +7494,119 @@ mod tests {
                 .is_empty()
         );
         assert_eq!(
-            store
-                .rebuild_scoped_session_search_for_scope(&scope)
-                .unwrap(),
-            1
+            store.ensure_scoped_session_search_for_scope(&scope).unwrap(),
+            true
         );
         assert_eq!(
             store
-                .search_sessions_for_scope(&scope, "backfill-private-marker", None)
+                .search_sessions_for_scope(
+                    &scope,
+                    "backfill-private-marker",
+                    Some(&candidates),
+                )
                 .unwrap()
                 .len(),
             1
         );
 
         fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn session_search_candidate_table_handles_large_and_empty_sets() {
+        let candidates = (0..1_200)
+            .map(|index| SessionIdentity {
+                id: format!("session-{index}"),
+                agent: AgentKind::Codex,
+                path: PathBuf::from(format!("/tmp/session-{index}.jsonl")),
+            })
+            .collect::<Vec<_>>();
+        let temp = temp_dir("tendi-storage-session-search-candidates");
+        fs::create_dir_all(&temp).unwrap();
+        let store = Store::open(temp.join("tendi.sqlite3")).unwrap();
+
+        let join = store
+            .session_search_candidate_join(Some(&candidates))
+            .unwrap();
+        assert!(join.contains(SESSION_SEARCH_CANDIDATE_TABLE));
+        let matched: i64 = store
+            .conn
+            .query_row(
+                &format!("SELECT COUNT(*) FROM temp.{SESSION_SEARCH_CANDIDATE_TABLE}"),
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(matched, 1_200);
+
+        store.session_search_candidate_join(Some(&[])).unwrap();
+        let matched_empty: i64 = store
+            .conn
+            .query_row(
+                &format!("SELECT COUNT(*) FROM temp.{SESSION_SEARCH_CANDIDATE_TABLE}"),
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(matched_empty, 0);
+
+        drop(store);
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn session_skill_reads_retry_transient_database_lock() {
+        let temp = temp_dir("tendi-session-skill-read-lock");
+        fs::create_dir_all(&temp).unwrap();
+        let db = temp.join("tendi.sqlite3");
+        let store = Store::open(&db).unwrap();
+        store
+            .conn
+            .execute_batch("PRAGMA journal_mode = DELETE;")
+            .unwrap();
+        store.conn.busy_timeout(Duration::ZERO).unwrap();
+
+        let scope = ScopeKey::new("workspace:session-skill-read-lock").unwrap();
+        let status = read_after_transient_exclusive_lock(&db, || {
+            store.session_skill_index_status_for_scope(&scope, false)
+        });
+        assert_eq!(status.total, 0);
+
+        let settings = read_after_transient_exclusive_lock(&db, || store.app_settings());
+        assert_eq!(settings.appearance, "system");
+        let _ = read_after_transient_exclusive_lock(&db, || store.project_scan_scopes());
+        let _ = read_after_transient_exclusive_lock(&db, || store.list_projects());
+        let _ = read_after_transient_exclusive_lock(&db, || store.list_sessions_for_scope(&scope));
+        let _ = read_after_transient_exclusive_lock(&db, || {
+            store.list_session_projects_for_scope(&scope)
+        });
+        let _ = read_after_transient_exclusive_lock(&db, || store.analytics_revision());
+        let _ = read_after_transient_exclusive_lock(&db, || {
+            store.search_sessions_for_scope(&scope, "session", None)
+        });
+        let _ = read_after_transient_exclusive_lock(&db, || store.list_prompts());
+
+        drop(store);
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    fn read_after_transient_exclusive_lock<T>(
+        db: &Path,
+        read: impl FnOnce() -> anyhow::Result<T>,
+    ) -> T {
+        let blocker = Connection::open(db).unwrap();
+        blocker.busy_timeout(Duration::ZERO).unwrap();
+        blocker
+            .execute_batch("PRAGMA journal_mode = DELETE; BEGIN EXCLUSIVE;")
+            .unwrap();
+        let release = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(125));
+            blocker.execute_batch("ROLLBACK;").unwrap();
+        });
+
+        let value = read().unwrap();
+        release.join().unwrap();
+        value
     }
 
 
@@ -8052,6 +8643,61 @@ mod tests {
             .unwrap();
         assert_eq!(overview.coverage.total_sessions, 1);
         assert_eq!(overview.summary.usage.total_tokens, 11);
+        assert_eq!(overview.summary.sessions, 1);
+
+        drop(store);
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn scoped_analytics_indexing_count_ignores_sessions_outside_requested_range() {
+        let temp = temp_dir("tendi-storage-analytics-coverage");
+        fs::create_dir_all(&temp).unwrap();
+        let store = Store::open(temp.join("tendi.sqlite3")).unwrap();
+        let scope = ScopeKey::new("workspace:coverage").unwrap();
+        let mut recent_session = session("recent", "Recent");
+        recent_session.path = PathBuf::from("/tmp/scope-recent.jsonl");
+        let mut old_session = session("old", "Old");
+        old_session.path = PathBuf::from("/tmp/scope-old.jsonl");
+        store
+            .save_sessions_at_for_scope(
+                &scope,
+                &SessionScan {
+                    sessions: vec![recent_session.clone(), old_session.clone()],
+                    warnings: Vec::new(),
+                },
+                1,
+            )
+            .unwrap();
+
+        let mut recent_analytics = analytics_record(
+            "recent",
+            AgentKind::Codex,
+            &Local::now().to_rfc3339(),
+            11,
+        );
+        recent_analytics.analytics.session_path = recent_session.path;
+        let mut old_analytics = analytics_record(
+            "old",
+            AgentKind::Codex,
+            "2020-01-01T10:00:00Z",
+            99,
+        );
+        old_analytics.analytics.session_path = old_session.path;
+        store
+            .save_session_analytics_records_for_scope(
+                &scope,
+                &[recent_analytics, old_analytics],
+            )
+            .unwrap();
+
+        let overview = store
+            .overview_analytics_for_scope(&scope, None, 30, 30)
+            .unwrap();
+        assert_eq!(overview.coverage.total_sessions, 2);
+        assert_eq!(overview.coverage.first.as_deref(), Some("2020-01-01"));
+        assert_eq!(overview.coverage.analyzed_sessions, 2);
+        assert_eq!(overview.coverage.indexing_sessions, 0);
         assert_eq!(overview.summary.sessions, 1);
 
         drop(store);

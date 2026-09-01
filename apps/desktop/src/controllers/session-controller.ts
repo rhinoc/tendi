@@ -7,6 +7,7 @@ import {
   normalizeSession,
   sessionIdentity,
   sessionIdentityRecordKey,
+  sessionLogicalIdentity,
   SessionKind,
   sessionKind,
   sessionProject,
@@ -198,34 +199,34 @@ export function selectSessionRelationships(
   activeSession: SessionRecord | null | undefined,
 ): SessionRelationshipView {
   if (!activeSession) return { childSessions: [], tree: [] };
-  const agent = friendlyAgent(activeSession.agent).toLowerCase();
-  const sameAgentSessions = sessions.filter((session) => friendlyAgent(session.agent).toLowerCase() === agent);
-  const byId = new Map(sameAgentSessions.map((session) => [session.id.toLowerCase(), session]));
-  const childSessions = sameAgentSessions.filter((session) => session.parentSessionId?.toLowerCase() === activeSession.id.toLowerCase());
+  const agent = agentIdentityKey(activeSession.agent);
+  const sameAgentSessions = sessions.filter((session) => agentIdentityKey(session.agent) === agent);
+  const byId = new Map(sameAgentSessions.map((session) => [session.id, session]));
+  const childSessions = sameAgentSessions.filter((session) => session.parentSessionId === activeSession.id);
   let rootSession = activeSession;
   const visited = new Set<string>();
-  while (rootSession.parentSessionId && !visited.has(rootSession.id.toLowerCase())) {
-    visited.add(rootSession.id.toLowerCase());
-    const parent = byId.get(rootSession.parentSessionId.toLowerCase());
+  while (rootSession.parentSessionId && !visited.has(rootSession.id)) {
+    visited.add(rootSession.id);
+    const parent = byId.get(rootSession.parentSessionId);
     if (!parent) break;
     rootSession = parent;
   }
   const childrenByParent = new Map<string, SessionRecord[]>();
   for (const session of sameAgentSessions) {
     if (!session.parentSessionId) continue;
-    const children = childrenByParent.get(session.parentSessionId.toLowerCase()) ?? [];
+    const children = childrenByParent.get(session.parentSessionId) ?? [];
     children.push(session);
-    childrenByParent.set(session.parentSessionId.toLowerCase(), children);
+    childrenByParent.set(session.parentSessionId, children);
   }
   const tree: SessionRecord[] = [];
   const pending = [rootSession];
   const treeIds = new Set<string>();
   while (pending.length > 0) {
     const session = pending.shift();
-    if (!session || treeIds.has(session.id.toLowerCase())) continue;
-    treeIds.add(session.id.toLowerCase());
+    if (!session || treeIds.has(session.id)) continue;
+    treeIds.add(session.id);
     tree.push(session);
-    pending.push(...(childrenByParent.get(session.id.toLowerCase()) ?? []));
+    pending.push(...(childrenByParent.get(session.id) ?? []));
   }
   return { childSessions, tree };
 }
@@ -455,15 +456,33 @@ export function applySessionDelta(
   deleted: readonly SessionIdentityRecord[] = [],
 ): SessionRecord[] {
   const byIdentity = new Map(current.map((session) => [sessionIdentity(session), session]));
+  const identityByLogical = new Map<string, string>();
+  for (const session of current) {
+    const identity = sessionIdentity(session);
+    const logical = sessionLogicalIdentity(session);
+    const previousIdentity = identityByLogical.get(logical);
+    if (previousIdentity && previousIdentity !== identity) byIdentity.delete(previousIdentity);
+    identityByLogical.set(logical, identity);
+  }
   for (const row of deleted) {
     const agent = typeof row.agent === "string" ? row.agent.trim() : "";
     const id = typeof row.id === "string" ? row.id.trim() : "";
     const path = typeof row.path === "string" ? row.path.trim() : "";
-    if (agent && id && path) byIdentity.delete(`${agent}\0${id}\0${path}`);
+    if (!agent || !id || !path) continue;
+    const identity = sessionIdentity({ agent: agentIdentityKey(agent), id, path });
+    byIdentity.delete(identity);
+    const logical = sessionLogicalIdentity({ agent: agentIdentityKey(agent), id });
+    if (identityByLogical.get(logical) === identity) identityByLogical.delete(logical);
   }
   for (const row of upserts) {
     const session = normalizeSession(row);
-    if (session) byIdentity.set(sessionIdentity(session), session);
+    if (!session) continue;
+    const identity = sessionIdentity(session);
+    const logical = sessionLogicalIdentity(session);
+    const previousIdentity = identityByLogical.get(logical);
+    if (previousIdentity && previousIdentity !== identity) byIdentity.delete(previousIdentity);
+    byIdentity.set(identity, session);
+    identityByLogical.set(logical, identity);
   }
   const next = [...byIdentity.values()];
   if (next.length === current.length && next.every((session, index) => session === current[index])) return current as SessionRecord[];

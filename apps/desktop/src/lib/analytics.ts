@@ -11,6 +11,7 @@ export type AnalyticsCapabilities = {
   tokenUsage: boolean;
   reasoningTokens: boolean;
   explicitRuns: boolean;
+  duration: boolean;
   rateLimitHistory: boolean;
 };
 
@@ -22,13 +23,9 @@ export enum AnalyticsRefreshPhase {
 }
 
 export type AnalyticsRefreshProgress = {
-  phase: AnalyticsRefreshPhase;
+  phase: string;
   total: number;
   completed: number;
-  parsed: number;
-  appended: number;
-  skipped: number;
-  failed: number;
   running: boolean;
   error?: string | null;
 };
@@ -39,6 +36,7 @@ export type AnalyticsRunSummary = {
   unclosed: number;
   totalMs: number;
   maxMs: number;
+  timedCompleted: number;
 };
 
 export type AnalyticsCallUsage = {
@@ -56,7 +54,7 @@ export type AnalyticsDay = {
   runs: AnalyticsRunSummary;
   aborted: number;
   compacted: number;
-  models: Array<{ model: string; totalTokens: number }>;
+  models: Array<{ model: string; totalTokens: number; totalMs: number; completedRuns: number }>;
   tools: AnalyticsCallUsage[];
   skills: AnalyticsCallUsage[];
   rateLimits: Record<string, number>;
@@ -134,17 +132,19 @@ export type AnalyticsPeriod = {
   sessionPeakDate: string;
   runs: number;
   completedRuns: number;
+  timedCompletedRuns: number;
   unclosedRuns: number;
+  totalRunMs: number;
   maxRunMs: number;
   aborted: number;
   compacted: number;
-  models: Array<{ model: string; totalTokens: number }>;
+  models: Array<{ model: string; totalTokens: number; totalMs: number; completedRuns: number }>;
   tools: AnalyticsCallUsage[];
   skills: AnalyticsCallUsage[];
 };
 
 type AnalyticsPeriodAccumulator = AnalyticsPeriod & {
-  modelMap: Map<string, number>;
+  modelMap: Map<string, { model: string; totalTokens: number; totalMs: number; completedRuns: number }>;
   toolMap: Map<string, AnalyticsCallUsage>;
   skillMap: Map<string, AnalyticsCallUsage>;
 };
@@ -210,14 +210,16 @@ export function groupAnalyticsDays(
       sessionPeakDate: "",
       runs: 0,
       completedRuns: 0,
+      timedCompletedRuns: 0,
       unclosedRuns: 0,
+      totalRunMs: 0,
       maxRunMs: 0,
       aborted: 0,
       compacted: 0,
       models: [],
       tools: [],
       skills: [],
-      modelMap: new Map<string, number>(),
+      modelMap: new Map<string, { model: string; totalTokens: number; totalMs: number; completedRuns: number }>(),
       toolMap: new Map<string, AnalyticsCallUsage>(),
       skillMap: new Map<string, AnalyticsCallUsage>(),
     };
@@ -235,12 +237,23 @@ export function groupAnalyticsDays(
     }
     period.runs += day.runs.started;
     period.completedRuns += day.runs.completed;
+    period.timedCompletedRuns += day.runs.timedCompleted;
     period.unclosedRuns += day.runs.unclosed;
+    period.totalRunMs += day.runs.totalMs;
     period.maxRunMs = Math.max(period.maxRunMs, day.runs.maxMs);
     period.aborted += day.aborted;
     period.compacted += day.compacted;
     for (const model of day.models) {
-      period.modelMap.set(model.model, (period.modelMap.get(model.model) ?? 0) + model.totalTokens);
+      const current = period.modelMap.get(model.model) ?? {
+        model: model.model,
+        totalTokens: 0,
+        totalMs: 0,
+        completedRuns: 0,
+      };
+      current.totalTokens += model.totalTokens;
+      current.totalMs += model.totalMs;
+      current.completedRuns += model.completedRuns;
+      period.modelMap.set(model.model, current);
     }
     addCallUsage(period.toolMap, day.tools);
     addCallUsage(period.skillMap, day.skills);
@@ -248,8 +261,7 @@ export function groupAnalyticsDays(
   }
   return [...grouped.values()].map(({ modelMap, toolMap, skillMap, ...period }) => ({
     ...period,
-    models: [...modelMap]
-      .map(([model, totalTokens]) => ({ model, totalTokens }))
+    models: [...modelMap.values()]
       .sort((left, right) => right.totalTokens - left.totalTokens),
     tools: sortedCallUsage(toolMap.values()),
     skills: sortedCallUsage(skillMap.values()),

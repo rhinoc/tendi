@@ -1,5 +1,5 @@
-import { randomBytes } from "node:crypto";
-import { existsSync } from "node:fs";
+import { createHash, randomBytes } from "node:crypto";
+import { existsSync, readFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { Readable } from "node:stream";
 import { join, resolve } from "node:path";
@@ -14,6 +14,7 @@ const repoDir = resolve(desktopDir, "../..");
 const bridgePort = Number(process.env.TENDI_WEB_BRIDGE_PORT || 5188);
 const daemonPort = Number(process.env.TENDI_DAEMON_PORT || bridgePort + 1);
 const workspace = resolve(process.env.TENDI_CWD || desktopDir);
+const runtimeSchemaPath = resolve(repoDir, "runtime-schema/runtime.openrpc.json");
 // Browser dev may run alongside a Tauri build. Keep daemon builds separate so
 // the web daemon cannot rewrite artifacts while Tauri builds the desktop.
 const cargoTargetDir = resolveDaemonTargetDir(repoDir, process.env.TENDI_DAEMON_TARGET_DIR);
@@ -156,17 +157,52 @@ async function daemonFetch(path, init = {}) {
   });
 }
 
+function expectedRuntimeContract() {
+  const schemaText = readFileSync(runtimeSchemaPath, "utf8");
+  const schema = JSON.parse(schemaText);
+  const versions = schema["x-tendi"] || {};
+  return {
+    protocolVersion: versions.protocolVersion,
+    schemaVersion: versions.schemaVersion,
+    contractFingerprint: createHash("sha256").update(schemaText, "utf8").digest("hex"),
+  };
+}
+
+async function verifyDaemonHealth() {
+  const response = await daemonFetch("/health");
+  const body = await response.json();
+  if (!response.ok || body?.ok !== true) {
+    throw new Error(`daemon health check failed: ${body?.error?.message || response.status}`);
+  }
+  const expected = expectedRuntimeContract();
+  const actual = {
+    protocolVersion: body.protocolVersion,
+    schemaVersion: body.schemaVersion,
+    contractFingerprint: body.contractFingerprint,
+  };
+  if (actual.protocolVersion !== expected.protocolVersion
+      || actual.schemaVersion !== expected.schemaVersion
+      || actual.contractFingerprint !== expected.contractFingerprint) {
+    throw new Error(`daemon runtime contract mismatch: expected ${JSON.stringify(expected)}, got ${JSON.stringify(actual)}`);
+  }
+  return body;
+}
+
 async function waitForDaemon() {
   for (let attempt = 0; attempt < 200; attempt += 1) {
     try {
-      const response = await daemonFetch("/health");
-      if (response.ok) return;
+      return await verifyDaemonHealth();
     } catch {
       // The Rust daemon is still starting.
     }
     await new Promise((resolveWait) => setTimeout(resolveWait, 50));
   }
   throw new Error(`Timed out waiting for Rust daemon on port ${daemonPort}`);
+}
+
+async function ensureDaemonReady() {
+  await ensureDaemonFresh();
+  return verifyDaemonHealth();
 }
 
 function readBody(request) {
@@ -205,11 +241,8 @@ server = createServer(async (request, response) => {
   }
   if (request.method === "GET" && request.url === "/health") {
     try {
-      await ensureDaemonFresh();
-      const daemonResponse = await daemonFetch("/health");
-      const body = await daemonResponse.text();
-      response.writeHead(daemonResponse.status, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" });
-      response.end(body);
+      const health = await ensureDaemonReady();
+      sendJson(response, 200, health);
     } catch (error) {
       sendJson(response, 503, { ok: false, error: { code: "DAEMON_UNAVAILABLE", message: `${error}` } });
     }
@@ -222,7 +255,7 @@ server = createServer(async (request, response) => {
     response.once("close", abortUpstream);
     response.once("error", abortUpstream);
     try {
-      await ensureDaemonFresh();
+      await ensureDaemonReady();
       const daemonResponse = await daemonFetch("/v1/events", { signal: controller.signal });
       response.writeHead(daemonResponse.status, {
         "content-type": daemonResponse.headers.get("content-type") || "text/event-stream; charset=utf-8",
@@ -248,7 +281,7 @@ server = createServer(async (request, response) => {
   }
   if (request.method === "POST" && request.url === "/__tendi/log") {
     try {
-      await ensureDaemonFresh();
+      await ensureDaemonReady();
       const body = await readBody(request);
       const daemonResponse = await daemonFetch("/v1/log", {
         method: "POST",
@@ -272,7 +305,7 @@ server = createServer(async (request, response) => {
     return;
   }
   try {
-    await ensureDaemonFresh();
+    await ensureDaemonReady();
     const body = await readBody(request);
     const daemonResponse = await daemonFetch("/v1/rpc", {
       method: "POST",

@@ -739,12 +739,12 @@ impl Daemon {
         &self,
         request: runtime_schema::BundledSkillInstallRequest,
     ) -> Result<runtime_schema::BundledSkillInstallResponse, DaemonError> {
+        let agent = bundled_skill_agent(request.agent);
         let overwrite = request.overwrite.unwrap_or(false);
         let _authority = self.lock_authority()?;
         let before = self.skill_projection_for_mutation()?;
         let report =
-            tendi_core::bundled_skill::install(tendi_core::AgentKind::Shared, overwrite, false)
-                .map_err(core_error)?;
+            tendi_core::bundled_skill::install(agent, overwrite, false).map_err(core_error)?;
         let name = report.status.name.to_string();
         let skill_path = PathBuf::from(&report.status.target);
         let refresh_names = [name.clone()];
@@ -4044,7 +4044,7 @@ fn run_session_scan(
         .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
         .is_ok()
     {
-        if let Err(error) = store.rebuild_scoped_session_search_for_scope(&scope_key) {
+        if let Err(error) = store.ensure_scoped_session_search_for_scope(&scope_key) {
             daemon
                 .state
                 .scoped_search_rebuilt
@@ -4671,7 +4671,23 @@ fn refresh_session_analytics_serialized(
         ))),
     };
     match result {
-        Ok(report) => Ok(report),
+        Ok(report) => {
+            let final_progress = last_progress
+                .lock()
+                .map(|progress| *progress)
+                .unwrap_or(initial);
+            daemon.emit_event(
+                ANALYTICS_PROGRESS_EVENT,
+                runtime_event(ANALYTICS_PROGRESS_EVENT, json!({
+                    "phase": phase,
+                    "completed": final_progress.total,
+                    "total": final_progress.total,
+                    "running": false,
+                    "error": Value::Null,
+                })),
+            );
+            Ok(report)
+        }
         Err(error) => {
             let message = error.message.clone();
             let last_progress = last_progress
@@ -5023,6 +5039,12 @@ fn agent_kind_from_request(value: runtime_schema::AgentKind) -> tendi_core::Agen
     }
 }
 
+fn bundled_skill_agent(value: Option<runtime_schema::AgentKind>) -> tendi_core::AgentKind {
+    value
+        .map(agent_kind_from_request)
+        .unwrap_or(tendi_core::AgentKind::Shared)
+}
+
 fn session_identity_from_request(
     value: runtime_schema::SessionIdentity,
 ) -> tendi_core::sessions::SessionIdentity {
@@ -5245,6 +5267,9 @@ fn handle_connection(
     daemon: &Daemon,
     token: Option<&str>,
 ) -> std::io::Result<()> {
+    // The listener is nonblocking so accept can poll for shutdown. Accepted
+    // sockets must block while write_all drains large RPC responses.
+    stream.set_nonblocking(false)?;
     let mut reader = BufReader::new(stream.try_clone()?);
     let mut request_line = String::new();
     reader.read_line(&mut request_line)?;
@@ -5274,6 +5299,7 @@ fn handle_connection(
                 "cwd": daemon.cwd(),
                 "protocolVersion": runtime_schema::PROTOCOL_VERSION,
                 "schemaVersion": runtime_schema::SCHEMA_VERSION,
+                "contractFingerprint": runtime_schema::RUNTIME_CONTRACT_FINGERPRINT,
             }))
                 .expect("health serializes"),
         );
@@ -5370,9 +5396,8 @@ fn handle_event_stream(
     daemon: &Daemon,
     last_event_id: Option<u64>,
 ) -> std::io::Result<()> {
-    write!(
-        stream,
-        "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream; charset=utf-8\r\ncache-control: no-cache\r\naccess-control-allow-origin: *\r\naccess-control-allow-headers: content-type, authorization\r\nconnection: keep-alive\r\n\r\n"
+    stream.write_all(
+        b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream; charset=utf-8\r\ncache-control: no-cache\r\naccess-control-allow-origin: *\r\naccess-control-allow-headers: content-type, authorization\r\nconnection: keep-alive\r\n\r\n",
     )?;
     stream.flush()?;
     let subscription = daemon.state.events.subscribe_from(last_event_id);
@@ -5383,15 +5408,12 @@ fn handle_event_stream(
         match subscription.recv_timeout(Duration::from_secs(15)) {
             Ok(event) => {
                 let payload = serde_json::to_string(&event).expect("event serializes");
-                write!(
-                    stream,
-                    "id: {}\nevent: {}\ndata: {}\n\n",
-                    event.id, event.event, payload
-                )?;
+                let event = format!("id: {}\nevent: {}\ndata: {}\n\n", event.id, event.event, payload);
+                stream.write_all(event.as_bytes())?;
                 stream.flush()?;
             }
             Err(RecvTimeoutError::Timeout) => {
-                write!(stream, ": keep-alive\n\n")?;
+                stream.write_all(b": keep-alive\n\n")?;
                 stream.flush()?;
             }
             Err(RecvTimeoutError::Disconnected) => return Ok(()),
@@ -5399,7 +5421,7 @@ fn handle_event_stream(
     }
 }
 
-fn write_http(stream: &mut TcpStream, status: u16, body: &str) -> std::io::Result<()> {
+fn write_http<W: Write>(stream: &mut W, status: u16, body: &str) -> std::io::Result<()> {
     let reason = match status {
         200 => "OK",
         204 => "No Content",
@@ -5408,11 +5430,12 @@ fn write_http(stream: &mut TcpStream, status: u16, body: &str) -> std::io::Resul
         413 => "Payload Too Large",
         _ => "Error",
     };
-    write!(
-        stream,
-        "HTTP/1.1 {status} {reason}\r\ncontent-type: application/json; charset=utf-8\r\ncontent-length: {}\r\ncache-control: no-store\r\naccess-control-allow-origin: *\r\naccess-control-allow-headers: content-type, authorization\r\nconnection: close\r\n\r\n{body}",
+    let headers = format!(
+        "HTTP/1.1 {status} {reason}\r\ncontent-type: application/json; charset=utf-8\r\ncontent-length: {}\r\ncache-control: no-store\r\naccess-control-allow-origin: *\r\naccess-control-allow-headers: content-type, authorization\r\nconnection: close\r\n\r\n",
         body.len()
-    )?;
+    );
+    stream.write_all(headers.as_bytes())?;
+    stream.write_all(body.as_bytes())?;
     stream.flush()
 }
 
@@ -5425,6 +5448,23 @@ mod tests {
     };
 
     static TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    struct ShortWriter {
+        bytes: Vec<u8>,
+        max_write: usize,
+    }
+
+    impl Write for ShortWriter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            let written = bytes.len().min(self.max_write);
+            self.bytes.extend_from_slice(&bytes[..written]);
+            Ok(written)
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
 
     fn temp_workspace() -> PathBuf {
         let root = std::env::temp_dir().join(format!(
@@ -5483,6 +5523,22 @@ mod tests {
             "missing or empty argument: title"
         );
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn bundled_skill_install_uses_requested_agent_and_defaults_to_shared() {
+        assert_eq!(
+            bundled_skill_agent(Some(runtime_schema::AgentKind::Claude)),
+            tendi_core::AgentKind::Claude
+        );
+        assert_eq!(
+            bundled_skill_agent(Some(runtime_schema::AgentKind::Codex)),
+            tendi_core::AgentKind::Codex
+        );
+        assert_eq!(
+            bundled_skill_agent(None),
+            tendi_core::AgentKind::Shared
+        );
     }
 
     #[test]
@@ -5679,10 +5735,57 @@ mod tests {
         let mut response = String::new();
         stream.read_to_string(&mut response).unwrap();
         assert!(response.contains("\"ok\":true"));
+        assert!(response.contains(&format!(
+            "\"contractFingerprint\":\"{}\"",
+            runtime_schema::RUNTIME_CONTRACT_FINGERPRINT
+        )));
 
         daemon.shutdown();
         server.join().unwrap().unwrap();
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn accepted_http_connections_switch_back_to_blocking_mode() {
+        let _test_lock = TEST_LOCK.lock().unwrap();
+        let root = temp_workspace();
+        let daemon = Daemon::new(root.clone());
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server_daemon = daemon.clone();
+        let server = thread::spawn(move || run_http(server_daemon, listener, None));
+
+        let mut stream = TcpStream::connect(address).unwrap();
+        stream
+            .write_all(b"GET /health HTTP/1.1\r\n")
+            .unwrap();
+        thread::sleep(Duration::from_millis(50));
+        stream
+            .write_all(b"Host: localhost\r\nConnection: close\r\n\r\n")
+            .unwrap();
+
+        let mut response = String::new();
+        stream.read_to_string(&mut response).unwrap();
+        assert!(response.contains("\"ok\":true"));
+
+        daemon.shutdown();
+        server.join().unwrap().unwrap();
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn http_response_writes_all_bytes_after_short_writes() {
+        let body = "x".repeat(1024 * 1024);
+        let mut writer = ShortWriter {
+            bytes: Vec::new(),
+            max_write: 3,
+        };
+
+        write_http(&mut writer, 200, &body).unwrap();
+
+        let response = String::from_utf8(writer.bytes).unwrap();
+        assert!(response.ends_with(&body));
+        assert!(response.contains(&format!("content-length: {}", body.len())));
     }
 
     #[test]
@@ -6031,6 +6134,16 @@ mod tests {
             fs::read_to_string(skill_dir.join("SKILL.md"))
                 .unwrap()
                 .contains("visibility: manual")
+        );
+        assert!(
+            fs::read_to_string(skill_dir.join("SKILL.md"))
+                .unwrap()
+                .contains("disable-model-invocation: true")
+        );
+        assert!(
+            fs::read_to_string(skill_dir.join("agents/openai.yaml"))
+                .unwrap()
+                .contains("allow_implicit_invocation: false")
         );
 
         let _folder = run_method_ok(

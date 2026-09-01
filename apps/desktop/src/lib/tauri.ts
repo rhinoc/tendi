@@ -4,7 +4,7 @@ import { COMMAND_METADATA, TauriCommand as GeneratedTauriCommand, isDaemonComman
 import { RuntimeClient, RuntimeRemoteError } from "./generated/runtime-client.ts";
 import { RuntimeContractError, validateEvent, validateRequest, validateResult } from "./generated/runtime-validators.ts";
 import { RuntimeEventName } from "./generated/runtime-events.ts";
-import type { DaemonEvent as RuntimeDaemonEvent } from "./runtime-contract.ts";
+import { omitUndefinedProperties, type DaemonEvent as RuntimeDaemonEvent } from "./runtime-contract.ts";
 
 import type { RawSkillRecord } from "./skills.ts";
 import { logger } from "./logger.ts";
@@ -120,9 +120,10 @@ const runtimeClient = new RuntimeClient({ request: requestDaemon });
 
 export async function invokeCommand<C extends CommandName>(command: C, args?: RequestFor<C>): Promise<ResponseFor<C>> {
   try {
+    const request = (args === undefined ? {} : omitUndefinedProperties(args)) as RequestFor<C>;
     if (isDaemonCommand(command)) {
       const method = commandName(command);
-      const result = await runtimeClient.call(method, (args ?? {}) as RequestFor<C>);
+      const result = await runtimeClient.call(method, request);
       return result as ResponseFor<C>;
     }
     if (!isTauriRuntime()) {
@@ -132,9 +133,8 @@ export async function invokeCommand<C extends CommandName>(command: C, args?: Re
       throw new Error(`Command ${command} is not exposed by the shared daemon API`);
     }
     const method = commandName(command);
-    const request = (args ?? {}) as RequestFor<CommandName>;
-    validateRequest(method, request);
-    const result = await invoke<ResponseFor<C>>(command, args);
+    validateRequest(method, request as RequestFor<CommandName>);
+    const result = await invoke<ResponseFor<C>>(command, args === undefined ? undefined : request);
     validateResult(method, result);
     return result;
   } catch (error) {

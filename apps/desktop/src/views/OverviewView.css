@@ -213,7 +213,7 @@
   min-width: 0;
 }
 
-.overviewTrendPlotLayout.hasTokensPerResponse {
+.overviewTrendPlotLayout.hasSecondaryMetric {
   grid-template-columns: 48px minmax(0, 1fr) 68px;
 }
 
@@ -471,6 +471,9 @@
 .overviewTrendRung.categoryOther,
 .chartLegendSwatch.categoryOther { background: var(--chart-other, var(--faint)); }
 .chartLegendSwatch.tokensPerResponse { background: var(--chart-line); }
+.chartLegendSwatch.averageTurnTime { background: var(--chart-line); }
+.overviewTrendRung.duration,
+.chartLegendSwatch.duration { background: var(--chart-hero); }
 .overviewTrendTooltipValues {
   display: flex;
   flex-direction: column;

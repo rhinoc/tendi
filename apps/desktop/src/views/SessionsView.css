@@ -851,6 +851,10 @@
   border-radius: var(--radius-sm);
 }
 
+.transcriptPanel .toolCallDuration {
+  font-size: var(--text-icon);
+}
+
 .toolCall.nested {
   margin: 0;
   border-radius: var(--transcript-nested-radius);
@@ -927,7 +931,7 @@
   transform: rotate(90deg);
 }
 
-.toolCallGroupSummary span:first-of-type {
+.toolCallGroupSummary > span:first-of-type {
   min-width: 0;
   flex: 1 1 auto;
   overflow: hidden;

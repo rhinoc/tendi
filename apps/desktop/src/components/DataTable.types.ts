@@ -73,6 +73,7 @@ export type DataTableProps<TRow> = {
   onSortChange?: (sort: SortState) => void;
   manualSorting?: boolean;
   rowHeight?: number;
+  enableVirtualization?: boolean;
   scrollResetKey?: string;
   scrollToRowId?: string;
   onScrollToRowComplete?: (rowId: string) => void;

@@ -1,5 +1,5 @@
 use std::{
-    collections::VecDeque,
+    collections::{HashMap, VecDeque},
     fs,
     path::{Path, PathBuf},
     sync::{LazyLock, Mutex},
@@ -214,6 +214,31 @@ fn is_cursor_transcript_path(path: &Path) -> bool {
             .any(|component| component.as_os_str() == "agent-transcripts")
 }
 
+pub(crate) fn session_scan_source_paths(path: &Path) -> Vec<PathBuf> {
+    let mut paths = vec![path.to_path_buf()];
+    let store_path = match path.file_name().and_then(|name| name.to_str()) {
+        Some("store.db") => Some(path.to_path_buf()),
+        Some("meta.json") => path.parent().map(|parent| parent.join("store.db")),
+        _ => find_cursor_store_db(path),
+    };
+    if let Some(store_path) = store_path {
+        if !paths.contains(&store_path) {
+            paths.push(store_path.clone());
+        }
+        let meta_path = store_path.with_file_name("meta.json");
+        if !paths.contains(&meta_path) {
+            paths.push(meta_path);
+        }
+        for suffix in ["-wal", "-shm", "-journal"] {
+            let sidecar = cursor_store_sidecar(&store_path, suffix);
+            if !paths.contains(&sidecar) {
+                paths.push(sidecar);
+            }
+        }
+    }
+    paths
+}
+
 const CURSOR_STORE_CACHE_MAX_ENTRIES: usize = 128;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -232,6 +257,15 @@ pub(crate) struct CursorStoreMeta {
     pub(crate) approval_mode: Option<String>,
     pub(crate) is_run_everything: Option<bool>,
     pub(crate) parent_session_id: Option<String>,
+    pub(crate) tool_calls: Vec<CursorToolCall>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CursorToolCall {
+    pub(crate) id: String,
+    pub(crate) name: String,
+    pub(crate) args: Value,
+    pub(crate) result: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -425,6 +459,8 @@ pub(crate) fn scan_cursor_store_db(path: Option<PathBuf>) -> CursorStoreMeta {
     let mut last_user_message = None;
     let mut last_assistant_message = None;
     let mut models = Vec::new();
+    let mut tool_calls = Vec::new();
+    let mut pending_tool_results = HashMap::new();
     if let Ok(mut statement) = connection.prepare("select data from blobs") {
         if let Ok(rows) = statement.query_map([], |row| row.get::<_, Vec<u8>>(0)) {
             for bytes in rows.filter_map(Result::ok) {
@@ -460,6 +496,59 @@ pub(crate) fn scan_cursor_store_db(path: Option<PathBuf>) -> CursorStoreMeta {
                         }
                     }
                 }
+                if let Some(content) = value.get("content").and_then(Value::as_array) {
+                    for item in content {
+                        match item.get("type").and_then(Value::as_str) {
+                            Some("tool-call") => {
+                                let Some(id) = item
+                                    .get("toolCallId")
+                                    .or_else(|| item.get("tool_call_id"))
+                                    .and_then(Value::as_str)
+                                    .filter(|id| !id.trim().is_empty())
+                                else {
+                                    continue;
+                                };
+                                let Some(name) = item
+                                    .get("toolName")
+                                    .or_else(|| item.get("tool_name"))
+                                    .and_then(Value::as_str)
+                                    .filter(|name| !name.trim().is_empty())
+                                else {
+                                    continue;
+                                };
+                                tool_calls.push(CursorToolCall {
+                                    id: id.to_string(),
+                                    name: name.to_string(),
+                                    args: item.get("args").cloned().unwrap_or(Value::Null),
+                                    result: pending_tool_results.remove(id),
+                                });
+                            }
+                            Some("tool-result") => {
+                                let Some(id) = item
+                                    .get("toolCallId")
+                                    .or_else(|| item.get("tool_call_id"))
+                                    .and_then(Value::as_str)
+                                    .filter(|id| !id.trim().is_empty())
+                                else {
+                                    continue;
+                                };
+                                let Some(result) = cursor_store_result_text(
+                                    item.get("result").or_else(|| item.get("content")),
+                                ) else {
+                                    continue;
+                                };
+                                if let Some(call) =
+                                    tool_calls.iter_mut().rev().find(|call| call.id == id)
+                                {
+                                    call.result = Some(result);
+                                } else {
+                                    pending_tool_results.insert(id.to_string(), result);
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
             }
         }
     }
@@ -479,6 +568,7 @@ pub(crate) fn scan_cursor_store_db(path: Option<PathBuf>) -> CursorStoreMeta {
         approval_mode,
         is_run_everything,
         parent_session_id,
+        tool_calls,
     };
     cursor_store_cache_put(&path, version, meta.clone());
     meta
@@ -492,6 +582,20 @@ pub(crate) fn cursor_store_models_for_path(path: &Path) -> Vec<String> {
     store_path
         .map(|store_path| scan_cursor_store_db(Some(store_path)).models)
         .unwrap_or_default()
+}
+
+pub(crate) fn cursor_store_tool_calls_for_path(path: &Path) -> Vec<CursorToolCall> {
+    scan_cursor_store_db(Some(path.to_path_buf())).tool_calls
+}
+
+fn cursor_store_result_text(value: Option<&Value>) -> Option<String> {
+    let value = value?;
+    let text = match value {
+        Value::String(text) => text.trim().to_string(),
+        Value::Object(_) | Value::Array(_) => serde_json::to_string_pretty(value).ok()?,
+        _ => value.to_string(),
+    };
+    (!text.is_empty()).then_some(text)
 }
 
 pub(crate) fn cursor_store_model(value: &Value) -> Option<String> {

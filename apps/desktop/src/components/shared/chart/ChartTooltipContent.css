@@ -65,6 +65,7 @@
 .chartTooltipDetailSwatch.category2 { background: var(--chart-category-2); }
 .chartTooltipDetailSwatch.category3 { background: var(--chart-category-3); }
 .chartTooltipDetailSwatch.categoryOther { background: var(--faint); }
+.chartTooltipDetailSwatch.duration { background: var(--chart-hero, var(--accent)); }
 .chartTooltipDetailSwatch.agentCodex { background: var(--agent-codex, var(--chart-category-0)); }
 .chartTooltipDetailSwatch.agentClaude { background: var(--agent-claude, var(--chart-category-1)); }
 .chartTooltipDetailSwatch.agentCursor { background: var(--agent-cursor, var(--chart-category-2)); }

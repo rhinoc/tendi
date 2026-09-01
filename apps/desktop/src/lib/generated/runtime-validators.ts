@@ -2234,6 +2234,9 @@ const SCHEMAS: Record<string, Record<string, unknown>> = {
   "BundledSkillInstallRequest": {
     "type": "object",
     "properties": {
+      "agent": {
+        "$ref": "#/components/schemas/AgentKind"
+      },
       "overwrite": {
         "type": "boolean"
       }
@@ -5143,6 +5146,9 @@ const SCHEMAS: Record<string, Record<string, unknown>> = {
       "explicitRuns": {
         "type": "boolean"
       },
+      "duration": {
+        "type": "boolean"
+      },
       "rateLimitHistory": {
         "type": "boolean"
       }
@@ -5151,6 +5157,7 @@ const SCHEMAS: Record<string, Record<string, unknown>> = {
       "tokenUsage",
       "reasoningTokens",
       "explicitRuns",
+      "duration",
       "rateLimitHistory"
     ],
     "additionalProperties": false
@@ -5182,6 +5189,11 @@ const SCHEMAS: Record<string, Record<string, unknown>> = {
         "type": "integer",
         "minimum": 0,
         "maximum": 9007199254740991
+      },
+      "timedCompleted": {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 9007199254740991
       }
     },
     "required": [
@@ -5189,7 +5201,8 @@ const SCHEMAS: Record<string, Record<string, unknown>> = {
       "completed",
       "unclosed",
       "totalMs",
-      "maxMs"
+      "maxMs",
+      "timedCompleted"
     ],
     "additionalProperties": false
   },
@@ -5203,11 +5216,23 @@ const SCHEMAS: Record<string, Record<string, unknown>> = {
         "type": "integer",
         "minimum": 0,
         "maximum": 9007199254740991
+      },
+      "totalMs": {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 9007199254740991
+      },
+      "completedRuns": {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 9007199254740991
       }
     },
     "required": [
       "model",
-      "totalTokens"
+      "totalTokens",
+      "totalMs",
+      "completedRuns"
     ],
     "additionalProperties": false
   },
@@ -5361,6 +5386,9 @@ const SCHEMAS: Record<string, Record<string, unknown>> = {
       "explicitRuns": {
         "type": "boolean"
       },
+      "duration": {
+        "type": "boolean"
+      },
       "rateLimitHistory": {
         "type": "boolean"
       }
@@ -5370,6 +5398,7 @@ const SCHEMAS: Record<string, Record<string, unknown>> = {
       "tokenUsage",
       "reasoningTokens",
       "explicitRuns",
+      "duration",
       "rateLimitHistory"
     ],
     "additionalProperties": false

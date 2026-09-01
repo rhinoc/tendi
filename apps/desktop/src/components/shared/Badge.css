@@ -6,6 +6,7 @@
   max-width: 100%;
   min-height: var(--badge-height);
   display: inline-flex;
+  flex: 0 0 auto;
   align-items: center;
   justify-content: center;
   gap: 4px;

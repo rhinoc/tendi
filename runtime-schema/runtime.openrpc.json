@@ -14,7 +14,7 @@
     { "name": "scan", "params": [], "result": { "name": "result", "schema": { "$ref": "#/components/schemas/ScanResponse" } }, "x-tendi": { "owner": "daemon", "wire": "jsonrpc", "clients": ["cli"], "execution": "write", "internal": true } },
     { "name": "agents_list", "params": [], "result": { "name": "result", "schema": { "$ref": "#/components/schemas/AgentRecordList" } }, "x-tendi": { "owner": "daemon", "wire": "jsonrpc", "clients": ["desktop", "cli"], "execution": "read", "serializedWrite": true, "typedHandler": true } },
     { "name": "bundled_skill_status", "params": [], "result": { "name": "result", "schema": { "$ref": "#/components/schemas/BundledSkillStatus" } }, "x-tendi": { "owner": "daemon", "wire": "jsonrpc", "clients": ["desktop"], "execution": "read" } },
-    { "name": "bundled_skill_install", "params": [{ "name": "request", "required": true, "schema": { "$ref": "#/components/schemas/BundledSkillInstallRequest" } }], "result": { "name": "result", "schema": { "$ref": "#/components/schemas/BundledSkillInstallReport" } }, "x-tendi": { "owner": "daemon", "wire": "jsonrpc", "clients": ["desktop"], "execution": "write" } },
+    { "name": "bundled_skill_install", "params": [{ "name": "request", "required": true, "schema": { "$ref": "#/components/schemas/BundledSkillInstallRequest" } }], "result": { "name": "result", "schema": { "$ref": "#/components/schemas/BundledSkillInstallReport" } }, "x-tendi": { "owner": "daemon", "wire": "jsonrpc", "clients": ["desktop", "cli"], "execution": "write" } },
     { "name": "bundled_skill_remove", "params": [], "result": { "name": "result", "schema": { "$ref": "#/components/schemas/BundledSkillStatus" } }, "x-tendi": { "owner": "daemon", "wire": "jsonrpc", "clients": ["desktop"], "execution": "write" } },
     { "name": "bundled_skill_prompt_dismiss", "params": [], "result": { "name": "result", "schema": { "$ref": "#/components/schemas/Unit" } }, "x-tendi": { "owner": "daemon", "wire": "jsonrpc", "clients": ["desktop"], "execution": "write" } },
     { "name": "skills_list", "params": [], "result": { "name": "result", "schema": { "$ref": "#/components/schemas/SkillRecordList" } }, "x-tendi": { "owner": "daemon", "wire": "jsonrpc", "clients": ["desktop", "cli"], "execution": "read", "serializedWrite": true, "typedHandler": true } },
@@ -672,7 +672,7 @@
       },
       "BundledSkillInstallRequest": {
         "type": "object",
-        "properties": { "overwrite": { "type": "boolean" } },
+        "properties": { "agent": { "$ref": "#/components/schemas/AgentKind" }, "overwrite": { "type": "boolean" } },
         "additionalProperties": false
       },
       "RuleFileReadRequest": {
@@ -1610,9 +1610,10 @@
           "tokenUsage": { "type": "boolean" },
           "reasoningTokens": { "type": "boolean" },
           "explicitRuns": { "type": "boolean" },
+          "duration": { "type": "boolean" },
           "rateLimitHistory": { "type": "boolean" }
         },
-        "required": ["tokenUsage", "reasoningTokens", "explicitRuns", "rateLimitHistory"],
+        "required": ["tokenUsage", "reasoningTokens", "explicitRuns", "duration", "rateLimitHistory"],
         "additionalProperties": false
       },
       "AnalyticsRunSummary": {
@@ -1622,18 +1623,21 @@
           "completed": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
           "unclosed": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
           "totalMs": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
-          "maxMs": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 }
+          "maxMs": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
+          "timedCompleted": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 }
         },
-        "required": ["started", "completed", "unclosed", "totalMs", "maxMs"],
+        "required": ["started", "completed", "unclosed", "totalMs", "maxMs", "timedCompleted"],
         "additionalProperties": false
       },
       "AnalyticsModelUsage": {
         "type": "object",
         "properties": {
           "model": { "type": "string" },
-          "totalTokens": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 }
+          "totalTokens": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
+          "totalMs": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
+          "completedRuns": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 }
         },
-        "required": ["model", "totalTokens"],
+        "required": ["model", "totalTokens", "totalMs", "completedRuns"],
         "additionalProperties": false
       },
       "AnalyticsCallUsage": {
@@ -1684,9 +1688,10 @@
           "tokenUsage": { "type": "boolean" },
           "reasoningTokens": { "type": "boolean" },
           "explicitRuns": { "type": "boolean" },
+          "duration": { "type": "boolean" },
           "rateLimitHistory": { "type": "boolean" }
         },
-        "required": ["agent", "tokenUsage", "reasoningTokens", "explicitRuns", "rateLimitHistory"],
+        "required": ["agent", "tokenUsage", "reasoningTokens", "explicitRuns", "duration", "rateLimitHistory"],
         "additionalProperties": false
       },
       "AnalyticsOverviewSummary": {

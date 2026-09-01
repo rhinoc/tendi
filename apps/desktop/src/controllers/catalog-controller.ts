@@ -3,7 +3,7 @@ import { hookDeleteIdentity, isHookMutationDelta, normalizeHook, type HookRecord
 import { isMcpMutationDelta, mcpRowKey, normalizeMcp, type McpRecord } from "../lib/mcp.ts";
 import { normalizePrompt, type PromptRecord } from "../lib/prompt-model.ts";
 import { normalizeRule, ruleAgents, type RuleRecord } from "../lib/rules.ts";
-import { normalizeSession, sessionIdentity, type SessionRecord } from "../lib/sessions.ts";
+import { normalizeSession, sessionLogicalIdentity, type SessionRecord } from "../lib/sessions.ts";
 import { normalizeSkill, type NormalizedSkill } from "../lib/skills.ts";
 import { DOMAIN_KEYS, RuntimeDomainKey, type DomainKey } from "../lib/domain.ts";
 import type { RuntimeData } from "../lib/data.ts";
@@ -62,7 +62,7 @@ function applyNormalizedRows<K extends RuntimeDomainKey>(
 }
 
 function recordKey(domain: RuntimeDomainKey, row: Record<string, unknown>): string {
-  if (domain === RuntimeDomainKey.Sessions) return sessionIdentity(row as Pick<SessionRecord, "agent" | "id" | "path">);
+  if (domain === RuntimeDomainKey.Sessions) return sessionLogicalIdentity(row as Pick<SessionRecord, "agent" | "id">);
   if (domain === RuntimeDomainKey.Skills) return `${row.id ?? row.name ?? ""}`;
   if (domain === RuntimeDomainKey.Agents) return `${row.id ?? row.name ?? row.path ?? ""}`;
   if (domain === RuntimeDomainKey.Prompts) return `${row.id ?? ""}`;
@@ -83,7 +83,9 @@ export function reconcileCollection<T extends Record<string, unknown>>(
   equal: (left: T, right: T) => boolean = sameRecord,
 ): T[] {
   const previous = new Map(current.map((row) => [key(row), row]));
-  const next = incoming.map((row) => {
+  const uniqueIncoming = new Map<string, T>();
+  for (const row of incoming) uniqueIncoming.set(key(row), row);
+  const next = [...uniqueIncoming.values()].map((row) => {
     const old = previous.get(key(row));
     return old && equal(old, row) ? old : row;
   });

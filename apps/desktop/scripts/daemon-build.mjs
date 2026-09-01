@@ -50,6 +50,7 @@ export function latestDaemonInputMtimeMs(repoDir) {
   const inputs = [
     join(repoDir, "Cargo.toml"),
     join(repoDir, "Cargo.lock"),
+    join(repoDir, "runtime-schema", "runtime.openrpc.json"),
     ...daemonCrates.map((crate) => join(repoDir, "crates", crate)),
   ];
   return inputs.reduce((latest, input) => Math.max(latest, latestMtimeMs(input)), 0);

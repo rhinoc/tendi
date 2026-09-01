@@ -46,11 +46,9 @@ impl SkillTarget {
         if matches!(self.0.as_str(), "shared" | "universal") {
             return Ok(AgentKind::Shared);
         }
-        crate::providers::all_providers()
-            .into_iter()
-            .find(|provider| provider.storage_key() == self.0)
-            .map(|provider| provider.kind())
-            .with_context(|| format!("unknown skill target `{}`", self.0))
+        target_config(self)?
+            .provider
+            .with_context(|| format!("skill target `{}` is not provider-owned", self.0))
     }
 }
 
@@ -706,6 +704,11 @@ mod tests {
         let claude_alias: SkillTarget = "claude".parse().unwrap();
         assert_eq!(claude_alias.id(), "claude");
         assert_eq!(target_config(&claude_alias).unwrap().id, "claude-code");
+        assert_eq!(claude_alias.agent_kind().unwrap(), AgentKind::Claude);
+        assert_eq!(
+            "claude-code".parse::<SkillTarget>().unwrap().agent_kind().unwrap(),
+            AgentKind::Claude
+        );
     }
 
     #[test]

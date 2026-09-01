@@ -4,6 +4,8 @@ pub use serde_json::Value;
 
 pub const PROTOCOL_VERSION: u64 = 2;
 pub const SCHEMA_VERSION: u64 = 1;
+pub const RUNTIME_CONTRACT_FINGERPRINT: &str =
+    "ae1f371d0cbd1f43cda682fa5ec5d3c39b123fe00de9c6df399b3744c55d39f9";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -702,6 +704,8 @@ pub struct SkillRefreshResponse {
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BundledSkillInstallRequest {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent: Option<AgentKind>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub overwrite: Option<bool>,
 }
@@ -1670,6 +1674,7 @@ pub struct AnalyticsCapabilities {
     pub reasoning_tokens: bool,
     #[serde(rename = "explicitRuns")]
     pub explicit_runs: bool,
+    pub duration: bool,
     #[serde(rename = "rateLimitHistory")]
     pub rate_limit_history: bool,
 }
@@ -1682,12 +1687,18 @@ pub struct AnalyticsRunSummary {
     pub total_ms: u64,
     #[serde(rename = "maxMs")]
     pub max_ms: u64,
+    #[serde(rename = "timedCompleted")]
+    pub timed_completed: u64,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AnalyticsModelUsage {
     pub model: String,
     #[serde(rename = "totalTokens")]
     pub total_tokens: u64,
+    #[serde(rename = "totalMs")]
+    pub total_ms: u64,
+    #[serde(rename = "completedRuns")]
+    pub completed_runs: u64,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AnalyticsCallUsage {
@@ -1729,6 +1740,7 @@ pub struct AnalyticsProviderCapability {
     pub reasoning_tokens: bool,
     #[serde(rename = "explicitRuns")]
     pub explicit_runs: bool,
+    pub duration: bool,
     #[serde(rename = "rateLimitHistory")]
     pub rate_limit_history: bool,
 }

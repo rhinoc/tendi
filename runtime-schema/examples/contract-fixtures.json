@@ -784,6 +784,7 @@
           "tokenUsage": false,
           "reasoningTokens": false,
           "explicitRuns": false,
+          "duration": false,
           "rateLimitHistory": false
         }
       ],
@@ -803,7 +804,8 @@
           "completed": 0,
           "unclosed": 0,
           "totalMs": 0,
-          "maxMs": 0
+          "maxMs": 0,
+          "timedCompleted": 0
         },
         "aborted": 0,
         "abortedRate": 0,
@@ -829,14 +831,17 @@
             "completed": 0,
             "unclosed": 0,
             "totalMs": 0,
-            "maxMs": 0
+            "maxMs": 0,
+            "timedCompleted": 0
           },
           "aborted": 0,
           "compacted": 0,
           "models": [
             {
               "model": "fixture",
-              "totalTokens": 0
+              "totalTokens": 0,
+              "totalMs": 0,
+              "completedRuns": 0
             }
           ],
           "tools": [

@@ -857,7 +857,7 @@ export function AddSkillDialog({ open, onOpenChange, trigger, onClose, onPreview
         skills: [],
         copy,
         overwrite: false,
-        visibility: visibility.toLowerCase(),
+        visibility,
         dryRun: true,
       });
       if (!response?.plan || !response.previewId) {
@@ -1009,7 +1009,7 @@ export function AddSkillDialog({ open, onOpenChange, trigger, onClose, onPreview
         skills: selected,
         copy,
         overwrite: replaceExisting,
-        visibility: visibility.toLowerCase(),
+        visibility,
         dryRun: true,
       });
       if (!previewResponse?.plan || !previewResponse.previewId) {
@@ -1034,7 +1034,7 @@ export function AddSkillDialog({ open, onOpenChange, trigger, onClose, onPreview
         skills: selected,
         copy,
         overwrite: replaceExisting,
-        visibility: visibility.toLowerCase(),
+        visibility,
         previewId: previewResponse.previewId,
         dryRun: false,
       });

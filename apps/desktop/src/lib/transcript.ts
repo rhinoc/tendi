@@ -1,3 +1,5 @@
+import { timestampMs } from "./time.ts";
+
 export type TranscriptItem = {
   type: string;
   body: string;
@@ -306,6 +308,23 @@ export function collectCursorItemWithTimestamp(value: JsonObject, items: Transcr
   }
   if (kind !== "user" && kind !== "assistant") return;
   collectMessageContent(content, items, time, kind);
+  if (Array.isArray(content)) {
+    for (const item of content) {
+      if (!isJsonObject(item) || item.type !== "tool_use") continue;
+      pushItem(
+        items,
+        "tool",
+        summarizeToolCall(item),
+        stringValue(item.name) || undefined,
+        time,
+        extractToolCommand(item),
+        undefined,
+        durationMs(item),
+        stringValue(item.id),
+        timestampMs(timestamp),
+      );
+    }
+  }
 }
 
 export function pushItem(
@@ -423,7 +442,7 @@ export function extractThinkingText(value: unknown): string {
 }
 
 function cleanBody(value: string) {
-  let text = splitInternalContextSegments(value)
+  let text = splitInternalContextSegments(value.replace(/<timestamp>[\s\S]*?<\/timestamp>/g, ""))
     .filter((segment) => !segment.label)
     .map((segment) => segment.body)
     .join("\n")
@@ -516,13 +535,33 @@ export function extractToolCommand(value: JsonObject) {
     stringAt(value, ["input", "command"]) ||
     stringAt(value, ["input", "cmd"]);
   if (command) return truncateText(command.trim(), 4_000);
-  if (typeof value.arguments !== "string") return "";
-  try {
-    const parsed = JSON.parse(value.arguments);
-    return isJsonObject(parsed) ? truncateText((stringValue(parsed.cmd) || stringValue(parsed.command)).trim(), 4_000) : "";
-  } catch {
-    return "";
+  if (value.arguments !== undefined) {
+    if (typeof value.arguments === "string") {
+      try {
+        const parsed = JSON.parse(value.arguments);
+        if (isJsonObject(parsed)) {
+          const command = stringValue(parsed.cmd) || stringValue(parsed.command);
+          if (command) return truncateText(command.trim(), 4_000);
+        }
+      } catch {
+        // Keep the raw argument below when it is not JSON.
+      }
+    }
+    const argumentsText = serializeToolInput(value.arguments);
+    if (argumentsText) return truncateText(argumentsText, 4_000);
   }
+
+  const actionText = serializeToolInput(value.action);
+  if (actionText) return truncateText(actionText, 4_000);
+  const inputText = serializeToolInput(value.input);
+  return inputText ? truncateText(inputText, 4_000) : "";
+}
+
+function serializeToolInput(value: unknown) {
+  if (typeof value === "string") return value.trim();
+  if (value === null || value === undefined) return "";
+  if (isJsonObject(value) || Array.isArray(value)) return JSON.stringify(value);
+  return `${value}`;
 }
 
 export function extractToolResult(value: JsonObject) {

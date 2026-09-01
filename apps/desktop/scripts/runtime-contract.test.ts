@@ -1,10 +1,12 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 
-import { decideRevision } from "../src/lib/runtime-contract.ts";
+import { decideRevision, normalizeRuntimeSkillVisibility, omitUndefinedProperties } from "../src/lib/runtime-contract.ts";
 import { RuntimeContractError, validateEvent, validateRequest, validateResponse, validateResult } from "../src/lib/generated/runtime-validators.ts";
 import { RuntimeClient } from "../src/lib/generated/runtime-client.ts";
+import { RUNTIME_CONTRACT_FINGERPRINT } from "../src/lib/generated/runtime-types.ts";
 import type { CommandName } from "../src/lib/generated/runtime-types.ts";
 
 test("drops duplicate and stale revisioned events", () => {
@@ -61,6 +63,14 @@ test("generated validators enforce empty request and safe revision fields", () =
   }), RuntimeContractError);
 });
 
+test("generated runtime contract fingerprint matches the source schema", () => {
+  const schema = readFileSync(new URL("../../../runtime-schema/runtime.openrpc.json", import.meta.url));
+  assert.equal(
+    RUNTIME_CONTRACT_FINGERPRINT,
+    createHash("sha256").update(schema).digest("hex"),
+  );
+});
+
 test("generated client sends one JSON-RPC envelope and validates its result", async () => {
   const requests: unknown[] = [];
   const client = new RuntimeClient({
@@ -90,6 +100,34 @@ test("generated client sends one JSON-RPC envelope and validates its result", as
     params: {},
   });
   assert.match(request.id, /^desktop-\d+$/);
+});
+
+test("omits undefined request properties before runtime validation", () => {
+  const requests = [
+    ["session_transcript", { path: "fixture", agent: "codex", cursor: undefined, limit: 160, knownSourceVersion: undefined }],
+    ["skills_backup_restore", { revision: "fixture", target: "fixture", scope: "global", dryRun: undefined, confirmed: true, resolutions: undefined }],
+    ["skills_add", { source: "fixture", target: "fixture", scope: "global", skills: [], copy: false, overwrite: false, visibility: "auto", dryRun: true, previewId: undefined }],
+    ["open_in_editor", { path: "fixture", line: undefined }],
+  ] as const;
+  for (const [command, input] of requests) {
+    const request = omitUndefinedProperties(input);
+    assert.doesNotThrow(() => validateRequest(command, request));
+  }
+  assert.deepEqual(omitUndefinedProperties({ nested: { keep: true, omit: undefined }, values: [{ keep: "yes", omit: undefined }] }), {
+    nested: { keep: true },
+    values: [{ keep: "yes" }],
+  });
+});
+
+test("normalizes UI skill visibility values for the runtime contract", () => {
+  assert.equal(normalizeRuntimeSkillVisibility("Auto"), "auto");
+  assert.equal(normalizeRuntimeSkillVisibility("Manual"), "manual");
+  assert.equal(normalizeRuntimeSkillVisibility("Off"), "off");
+  assert.equal(normalizeRuntimeSkillVisibility("mixed"), "mixed");
+  assert.equal(normalizeRuntimeSkillVisibility("  Manual  "), "manual");
+  validateRequest("skills_set", { visibility: "manual" });
+  assert.throws(() => validateRequest("skills_set", { visibility: "Manual" }), RuntimeContractError);
+  assert.throws(() => normalizeRuntimeSkillVisibility("visible"), /Invalid skill visibility/);
 });
 
 test("generated event validator rejects an invalid event envelope", () => {

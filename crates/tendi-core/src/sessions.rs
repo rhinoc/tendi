@@ -119,6 +119,14 @@ pub struct SessionScanCacheEntry {
     pub session: SessionRecord,
     pub file_mtime: i64,
     pub file_size: i64,
+    pub additional_file_states: Vec<SessionScanSourceState>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionScanSourceState {
+    pub path: PathBuf,
+    pub file_mtime: i64,
+    pub file_size: i64,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -138,6 +146,14 @@ impl SessionScanCache {
                     .entries_by_file
                     .insert((entry.session.agent, identity), entry.session.path.clone());
             }
+            #[cfg(unix)]
+            for source in &entry.additional_file_states {
+                if let Some(identity) = session_file_identity(&source.path) {
+                    cache
+                        .entries_by_file
+                        .insert((entry.session.agent, identity), entry.session.path.clone());
+                }
+            }
             cache
                 .entries
                 .insert((entry.session.agent, entry.session.path.clone()), entry);
@@ -154,8 +170,9 @@ impl SessionScanCache {
         let (file_mtime, file_size) = file_state(path)?;
         (entry.file_mtime == file_mtime
             && entry.file_size == file_size
+            && self.additional_file_states_current(entry)
             && !session_requires_rescan(&entry.session))
-        .then(|| entry.session.clone())
+            .then(|| entry.session.clone())
     }
 
     pub(crate) fn session_if_current_id(
@@ -170,8 +187,9 @@ impl SessionScanCache {
             let (file_mtime, file_size) = file_state(&entry.session.path)?;
             (entry.file_mtime == file_mtime
                 && entry.file_size == file_size
+                && self.additional_file_states_current(entry)
                 && !session_requires_rescan(&entry.session))
-            .then(|| entry.session.clone())
+                .then(|| entry.session.clone())
         })
     }
 
@@ -187,6 +205,7 @@ impl SessionScanCache {
         if current_size <= cached_size
             || file_mtime < entry.file_mtime
             || !is_line_boundary(path, cached_size)
+            || !self.additional_file_states_current(entry)
             || session_requires_rescan(&entry.session)
         {
             return None;
@@ -206,13 +225,24 @@ impl SessionScanCache {
         None
     }
 
+    fn additional_file_states_current(&self, entry: &SessionScanCacheEntry) -> bool {
+        entry.additional_file_states.iter().all(|source| {
+            file_state(&source.path).unwrap_or((0, 0)) == (source.file_mtime, source.file_size)
+        })
+    }
+
     pub fn changed_sessions(&self, sessions: &[SessionRecord]) -> Vec<SessionRecord> {
         sessions
             .iter()
             .filter(|session| {
                 self.entries
                     .get(&(session.agent, session.path.clone()))
-                    .is_none_or(|entry| entry.session != **session)
+                    .is_none_or(|entry| {
+                        entry.session != **session
+                            || file_state(&session.path).unwrap_or((0, 0))
+                                != (entry.file_mtime, entry.file_size)
+                            || !self.additional_file_states_current(entry)
+                    })
             })
             .cloned()
             .collect()
@@ -1726,7 +1756,7 @@ mod tests {
         fs,
         path::{Path, PathBuf},
         process::Command,
-        time::{SystemTime, UNIX_EPOCH},
+        time::{Duration, SystemTime, UNIX_EPOCH},
     };
 
     use rusqlite::Connection;
@@ -1741,8 +1771,9 @@ mod tests {
 
     use super::{
         SESSION_PREVIEW_MAX_CHARS, SessionRecord, SessionRepositoryResolver, SessionScanCache,
-        SessionScanCacheEntry, clean_preview_text, clean_title, extract_session_title, file_state,
-        compare_timestamps, infer_session_project, infer_session_resume_target,
+        SessionScanCacheEntry, SessionScanSourceState, clean_preview_text, clean_title,
+        extract_session_title, file_state, compare_timestamps, infer_session_project,
+        infer_session_resume_target,
         is_session_candidate_path,
         merge_sessions, normalize_session_projects,
         repository_from_git_snapshot, scan_additional_session_roots, scan_jsonl_meta_for_agent,
@@ -2124,6 +2155,7 @@ mod tests {
             },
             file_mtime,
             file_size,
+            additional_file_states: Vec::new(),
         }]);
 
         let mut sessions = Vec::new();
@@ -2204,6 +2236,7 @@ mod tests {
             session: first_scan[0].clone(),
             file_mtime,
             file_size,
+            additional_file_states: Vec::new(),
         }]);
 
         let mut reused_scan = Vec::new();
@@ -2223,6 +2256,42 @@ mod tests {
         let mut invalidated_scan = Vec::new();
         scan_codex_jsonl(&root, &mut invalidated_scan, Some(&cache));
         assert_eq!(invalidated_scan[0].message_count, Some(2));
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn session_scan_cache_invalidates_when_an_additional_source_changes() {
+        let root = temp_dir("tendi-session-scan-additional-source-test");
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("rollout-12345678-1234-1234-1234-123456789012.jsonl");
+        let additional = root.join("metadata.json");
+        fs::write(
+            &path,
+            r#"{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Question"}]}}"#,
+        )
+        .unwrap();
+        fs::write(&additional, "initial metadata").unwrap();
+
+        let mut sessions = Vec::new();
+        scan_codex_jsonl(&root, &mut sessions, None);
+        let session = sessions.into_iter().next().unwrap();
+        let (file_mtime, file_size) = file_state(&path).unwrap();
+        let (additional_mtime, additional_size) = file_state(&additional).unwrap();
+        let cache = SessionScanCache::from_entries([SessionScanCacheEntry {
+            session: session.clone(),
+            file_mtime,
+            file_size,
+            additional_file_states: vec![SessionScanSourceState {
+                path: additional.clone(),
+                file_mtime: additional_mtime,
+                file_size: additional_size,
+            }],
+        }]);
+
+        assert!(cache.session_if_current(AgentKind::Codex, &path).is_some());
+        fs::write(&additional, "updated metadata with a changed size").unwrap();
+        assert!(cache.session_if_current(AgentKind::Codex, &path).is_none());
 
         fs::remove_dir_all(root).unwrap();
     }
@@ -2268,6 +2337,7 @@ mod tests {
             session: cached_session.clone(),
             file_mtime,
             file_size,
+            additional_file_states: Vec::new(),
         }]);
 
         assert_eq!(
@@ -2483,6 +2553,7 @@ mod tests {
             session: cached_session,
             file_mtime,
             file_size,
+            additional_file_states: Vec::new(),
         }]);
 
         let mut rescanned = Vec::new();
@@ -2525,6 +2596,7 @@ mod tests {
             session: cached_session,
             file_mtime,
             file_size,
+            additional_file_states: Vec::new(),
         }]);
 
         let mut rescanned = Vec::new();
@@ -2573,6 +2645,7 @@ mod tests {
             session: cached_session,
             file_mtime,
             file_size,
+            additional_file_states: Vec::new(),
         }]);
 
         let mut rescanned = Vec::new();
@@ -2797,6 +2870,95 @@ mod tests {
         assert_eq!(
             sessions[0].path,
             transcript_dir.join(format!("{child_id}.jsonl"))
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn cursor_store_changes_invalidate_cached_subagent_metadata() {
+        let root = temp_dir("tendi-cursor-subagent-cache-test");
+        let session_dir = root.join("session-id");
+        fs::create_dir_all(&session_dir).unwrap();
+        let meta_path = session_dir.join("meta.json");
+        let store_path = session_dir.join("store.db");
+        fs::write(&meta_path, r#"{"schemaVersion":1,"name":"New Agent"}"#).unwrap();
+
+        let connection = Connection::open(&store_path).unwrap();
+        connection
+            .execute_batch("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT);")
+            .unwrap();
+        let initial_metadata = json!({
+            "agentId": "session-id",
+            "name": "New Agent",
+            "createdAt": 1785420350441_i64
+        })
+        .to_string();
+        let encoded = initial_metadata
+            .as_bytes()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        connection
+            .execute(
+                "INSERT INTO meta (key, value) VALUES ('0', ?1)",
+                [&encoded],
+            )
+            .unwrap();
+        drop(connection);
+
+        let mut sessions = Vec::new();
+        cursor_sessions::scan_cursor_meta_file(
+            &meta_path,
+            &mut sessions,
+            AgentKind::Cursor,
+            None,
+        );
+        let session = sessions.pop().unwrap();
+        assert_eq!(session.parent_session_id, None);
+        let (file_mtime, file_size) = file_state(&meta_path).unwrap();
+        let (store_mtime, store_size) = file_state(&store_path).unwrap();
+        let cache = SessionScanCache::from_entries([SessionScanCacheEntry {
+            session,
+            file_mtime,
+            file_size,
+            additional_file_states: vec![SessionScanSourceState {
+                path: store_path.clone(),
+                file_mtime: store_mtime,
+                file_size: store_size,
+            }],
+        }]);
+
+        std::thread::sleep(Duration::from_millis(2));
+        let connection = Connection::open(&store_path).unwrap();
+        let updated_metadata = json!({
+            "agentId": "session-id",
+            "name": "New Agent",
+            "createdAt": 1785420350441_i64,
+            "subagentInfo": { "parentAgentId": "parent-session" }
+        })
+        .to_string();
+        let encoded = updated_metadata
+            .as_bytes()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        connection
+            .execute("UPDATE meta SET value = ?1 WHERE key = '0'", [&encoded])
+            .unwrap();
+        drop(connection);
+
+        let mut rescanned = Vec::new();
+        cursor_sessions::scan_cursor_meta_file(
+            &meta_path,
+            &mut rescanned,
+            AgentKind::Cursor,
+            Some(&cache),
+        );
+        assert_eq!(rescanned.len(), 1);
+        assert_eq!(
+            rescanned[0].parent_session_id.as_deref(),
+            Some("parent-session")
         );
 
         let _ = fs::remove_dir_all(root);

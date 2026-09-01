@@ -1,6 +1,6 @@
 import { useCallback, useRef, useSyncExternalStore } from "react";
 
-import type { OverviewAnalytics } from "../lib/analytics.ts";
+import type { AnalyticsRefreshProgress, OverviewAnalytics } from "../lib/analytics.ts";
 import { Appearance, readCachedAppearance, readCachedFontFamily, readCachedThemePreferences, type FontFamily, type ThemePreferences } from "../lib/appearance.ts";
 import { readCachedAppIcon, type AppIcon } from "../lib/app-icon.ts";
 import { emptyRuntimeData, type RuntimeData } from "../lib/data.ts";
@@ -118,6 +118,7 @@ export type DesktopStoreState = {
     revision: number;
     ready: boolean;
     error: string;
+    progress: AnalyticsRefreshProgress | null;
     value: OverviewAnalytics | null;
     valueQueryKey: AnalyticsQueryKey | null;
   };
@@ -170,6 +171,7 @@ function createInitialState(): DesktopStoreState {
       revision: 0,
       ready: false,
       error: "",
+      progress: null,
       value: null,
       valueQueryKey: null,
     },
@@ -288,6 +290,7 @@ export type DesktopStoreActions = {
   setAnalyticsRevision: (revision: number) => void;
   setAnalyticsReady: (ready: boolean) => void;
   setAnalyticsError: (message: string) => void;
+  setAnalyticsProgress: (progress: AnalyticsRefreshProgress | null) => void;
   setAnalyticsValue: (value: OverviewAnalytics | null, queryKey: AnalyticsQueryKey | null) => void;
 };
 
@@ -568,6 +571,11 @@ export class DesktopStore {
       this.update((current) => current.analytics.error === message
         ? current
         : { ...current, analytics: { ...current.analytics, error: message } });
+    },
+    setAnalyticsProgress: (progress) => {
+      this.update((current) => current.analytics.progress === progress
+        ? current
+        : { ...current, analytics: { ...current.analytics, progress } });
     },
     setAnalyticsValue: (value, valueQueryKey) => {
       if (value !== null && valueQueryKey === null) {

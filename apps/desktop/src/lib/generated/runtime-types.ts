@@ -490,6 +490,7 @@ export type SkillRefreshResponse = {
   updateCheck: string;
 };
 export type BundledSkillInstallRequest = {
+  agent?: AgentKind;
   overwrite?: boolean;
 };
 export type RuleFileReadRequest = {
@@ -1082,6 +1083,7 @@ export type AnalyticsCapabilities = {
   tokenUsage: boolean;
   reasoningTokens: boolean;
   explicitRuns: boolean;
+  duration: boolean;
   rateLimitHistory: boolean;
 };
 export type AnalyticsRunSummary = {
@@ -1090,10 +1092,13 @@ export type AnalyticsRunSummary = {
   unclosed: number;
   totalMs: number;
   maxMs: number;
+  timedCompleted: number;
 };
 export type AnalyticsModelUsage = {
   model: string;
   totalTokens: number;
+  totalMs: number;
+  completedRuns: number;
 };
 export type AnalyticsCallUsage = {
   name: string;
@@ -1126,6 +1131,7 @@ export type AnalyticsProviderCapability = {
   tokenUsage: boolean;
   reasoningTokens: boolean;
   explicitRuns: boolean;
+  duration: boolean;
   rateLimitHistory: boolean;
 };
 export type AnalyticsOverviewSummary = {
@@ -1761,7 +1767,7 @@ export const COMMAND_METADATA = {
   "scan": { owner: "daemon", wire: "jsonrpc", clients: ["cli"], execution: "write", serializedWrite: true, internal: true, deprecated: false },
   "agents_list": { owner: "daemon", wire: "jsonrpc", clients: ["desktop","cli"], execution: "read", serializedWrite: true, internal: false, deprecated: false },
   "bundled_skill_status": { owner: "daemon", wire: "jsonrpc", clients: ["desktop"], execution: "read", serializedWrite: false, internal: false, deprecated: false },
-  "bundled_skill_install": { owner: "daemon", wire: "jsonrpc", clients: ["desktop"], execution: "write", serializedWrite: true, internal: false, deprecated: false },
+  "bundled_skill_install": { owner: "daemon", wire: "jsonrpc", clients: ["desktop","cli"], execution: "write", serializedWrite: true, internal: false, deprecated: false },
   "bundled_skill_remove": { owner: "daemon", wire: "jsonrpc", clients: ["desktop"], execution: "write", serializedWrite: true, internal: false, deprecated: false },
   "bundled_skill_prompt_dismiss": { owner: "daemon", wire: "jsonrpc", clients: ["desktop"], execution: "write", serializedWrite: true, internal: false, deprecated: false },
   "skills_list": { owner: "daemon", wire: "jsonrpc", clients: ["desktop","cli"], execution: "read", serializedWrite: true, internal: false, deprecated: false },
@@ -1863,4 +1869,5 @@ export function isDesktopCommand(command: string): command is CommandName {
 }
 export const PROTOCOL_VERSION = 2;
 export const SCHEMA_VERSION = 1;
+export const RUNTIME_CONTRACT_FINGERPRINT = "ae1f371d0cbd1f43cda682fa5ec5d3c39b123fe00de9c6df399b3744c55d39f9";
 export const RUNTIME_ERROR_CODES = {"INVALID_REQUEST":-32600,"METHOD_NOT_FOUND":-32601,"INVALID_PARAMS":-32602,"INVALID_ARGUMENT":-32602,"INTERNAL":-32603,"CORE_ERROR":-32603,"CONFLICT":-32002,"UNAUTHORIZED":-32003,"UNSUPPORTED_TRANSPORT":-32004,"CONTRACT_VIOLATION":-32005,"DAEMON_ERROR":-32001} as const;

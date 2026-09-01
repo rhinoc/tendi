@@ -144,6 +144,10 @@ pub(crate) trait AgentProvider: Sync {
         }
     }
 
+    fn session_scan_source_paths(&self, path: &Path) -> Vec<PathBuf> {
+        vec![path.to_path_buf()]
+    }
+
     fn skill_visibility_metadata(
         &self,
         _skill_dir: &Path,
@@ -416,6 +420,14 @@ pub(crate) trait AgentProvider: Sync {
         self.append_transcript_metadata(path, items)
     }
 
+    fn enrich_transcript_tools_from_store(
+        &self,
+        _path: &Path,
+        _items: &mut Vec<TranscriptItem>,
+    ) -> Result<()> {
+        Ok(())
+    }
+
     fn transcript_metadata_store_path(&self, _path: &Path) -> Option<PathBuf> {
         None
     }
@@ -476,8 +488,13 @@ pub(crate) trait AgentProvider: Sync {
             token_usage: false,
             reasoning_tokens: false,
             explicit_runs: false,
+            duration: false,
             rate_limit_history: false,
         }
+    }
+
+    fn analytics_model_hint(&self, _session: &SessionRecord) -> Option<String> {
+        None
     }
 
     fn parse_analytics_line(&self, _line: &str, _record: &mut SessionAnalyticsRecord) {}
@@ -698,9 +715,14 @@ pub(crate) fn skill_target_uses_shared_layout(target: &str) -> bool {
     if matches!(target, "shared" | "universal") {
         return true;
     }
+    let canonical = canonical_skill_target_alias(target).unwrap_or(target);
     all_providers()
         .into_iter()
-        .find(|provider| provider.storage_key() == target)
+        .find(|provider| {
+            provider
+                .skill_target()
+                .is_some_and(|skill_target| skill_target.id == canonical)
+        })
         .is_some_and(|provider| provider.uses_shared_skill_layout())
 }
 

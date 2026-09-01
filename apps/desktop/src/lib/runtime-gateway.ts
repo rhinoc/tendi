@@ -29,13 +29,14 @@ import type {
   SkillsUpdateManyResponse as GeneratedSkillsUpdateManyResponse,
   SkillsWrapResponse as GeneratedSkillsWrapResponse,
   SkillsUpdatesEvent,
+  AnalyticsProgressEvent,
   AnalyticsRevisionEvent,
   SkillVisibility as GeneratedSkillVisibility,
 } from "./generated/runtime-types.ts";
 import type { RawDomainRow } from "../controllers/controller-types.ts";
 import { toRawDomainRow, toRawDomainRows } from "./raw-domain.ts";
 import type { SkillAddPlan, SkillInstallResult } from "./skills.ts";
-import { SkillChangeCommand } from "./skills.ts";
+import { SkillChangeCommand, type SkillVisibility } from "./skills.ts";
 import type { SkillUpdateReport } from "./skill-updates.ts";
 import { isRuntimeAgentKind, runtimeAgentKind } from "./agents.ts";
 import { normalizeSkillFileEntries, type SkillFileEntry } from "./file-tree.ts";
@@ -43,7 +44,8 @@ import { readRuleFile, type RuleFileResult } from "./rule-file.ts";
 import { SessionResumeOutcomeStatus, SessionResumeTarget, type SessionIdentityRecord, type SessionRecord } from "./sessions.ts";
 import { normalizeConfigProfiles, normalizeSettings, type SettingsPayload } from "./settings.ts";
 import type { ProjectSummary, SessionProjectSummary } from "./projects.ts";
-import type { OverviewAnalytics } from "./analytics.ts";
+import type { AnalyticsRefreshProgress, OverviewAnalytics } from "./analytics.ts";
+import { normalizeRuntimeSkillVisibility } from "./runtime-contract.ts";
 import {
   normalizeTranscriptLocatorPage,
   normalizeTranscriptPage,
@@ -107,7 +109,7 @@ export type SkillAddRequest = {
   skills: string[];
   copy: boolean;
   overwrite: boolean;
-  visibility: string;
+  visibility: SkillVisibility;
   dryRun: boolean;
   previewId?: string;
 };
@@ -143,7 +145,7 @@ export type SkillChangeResponse = {
 };
 
 export type SkillChangeArgs =
-  | (Omit<GeneratedSkillsSetRequest, "visibility"> & { visibility: string })
+  | (Omit<GeneratedSkillsSetRequest, "visibility"> & { visibility: SkillVisibility })
   | GeneratedSkillsUpdateManyRequest
   | GeneratedSkillsDeleteManyRequest
   | GeneratedSkillsWrapRequest;
@@ -291,9 +293,11 @@ export type RuntimeSkillUpdateEvent = Omit<SkillsUpdatesEvent, "skills" | "updat
 };
 
 export type RuntimeAnalyticsRevisionEvent = AnalyticsRevisionEvent;
+export type RuntimeAnalyticsProgressEvent = AnalyticsRefreshProgress;
 
 export type RuntimeEvent =
   | (DaemonEvent<RuntimeSessionScanEvent> & { event: typeof RuntimeEventName.SessionsScan })
+  | (DaemonEvent<RuntimeAnalyticsProgressEvent> & { event: typeof RuntimeEventName.AnalyticsProgress })
   | (DaemonEvent<RuntimeSkillUpdateEvent> & { event: typeof RuntimeEventName.SkillsUpdates })
   | (DaemonEvent<RuntimeAnalyticsRevisionEvent> & { event: typeof RuntimeEventName.AnalyticsRevision });
 
@@ -328,9 +332,8 @@ function runtimeDistributionMode(value: SkillDistributionMode): "move" | "symlin
   return value;
 }
 
-function runtimeVisibility(value: string): GeneratedSkillVisibility {
-  if (value === "auto" || value === "manual" || value === "off" || value === "mixed") return value;
-  throw new Error("Invalid skill visibility");
+function runtimeVisibility(value: SkillVisibility): GeneratedSkillVisibility {
+  return normalizeRuntimeSkillVisibility(value);
 }
 
 function runtimeSkillAddRequest(request: SkillAddRequest): GeneratedSkillsAddRequest {
@@ -411,6 +414,16 @@ function parseAnalyticsRevisionEvent(value: AnalyticsRevisionEvent): RuntimeAnal
   return value;
 }
 
+function parseAnalyticsProgressEvent(value: AnalyticsProgressEvent): RuntimeAnalyticsProgressEvent {
+  return {
+    phase: value.phase,
+    completed: value.completed,
+    total: value.total,
+    running: value.running,
+    error: value.error,
+  };
+}
+
 export async function subscribeRuntimeEvents(handler: (event: RuntimeEvent) => void): Promise<() => void> {
   return subscribeDaemonEvents((event) => {
     try {
@@ -421,6 +434,9 @@ export async function subscribeRuntimeEvents(handler: (event: RuntimeEvent) => v
     if (event.event === RuntimeEventName.SessionsScan) {
       const payload = parseSessionScanEvent(event.payload);
       if (payload) handler({ ...event, event: RuntimeEventName.SessionsScan, payload });
+    } else if (event.event === RuntimeEventName.AnalyticsProgress) {
+      const payload = parseAnalyticsProgressEvent(event.payload);
+      handler({ ...event, event: RuntimeEventName.AnalyticsProgress, payload });
     } else if (event.event === RuntimeEventName.SkillsUpdates) {
       const payload = parseSkillUpdateEvent(event.payload);
       if (payload) handler({ ...event, event: RuntimeEventName.SkillsUpdates, payload });
@@ -1096,7 +1112,7 @@ function normalizeSkillDeleteManyResponse(response: GeneratedSkillsDeleteManyRes
 async function invokeSkillChange(command: SkillChangeCommand, args: SkillChangeArgs, dryRun: boolean): Promise<SkillChangeResponse> {
   switch (command) {
     case SkillChangeCommand.Set: {
-      const source = args as Omit<GeneratedSkillsSetRequest, "visibility"> & { visibility: string };
+      const source = args as Omit<GeneratedSkillsSetRequest, "visibility"> & { visibility: SkillVisibility };
       const request: GeneratedSkillsSetRequest = { ...source, visibility: runtimeVisibility(source.visibility), dryRun };
       return normalizeSkillSetResponse(await invokeCommand(TauriCommand.SkillsSet, request));
     }

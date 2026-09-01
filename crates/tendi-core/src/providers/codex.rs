@@ -1103,7 +1103,8 @@ fn usage_signature(usage: &crate::analytics::AnalyticsTokenUsage) -> String {
 
 pub(crate) fn parse_analytics_line(line: &str, record: &mut SessionAnalyticsRecord) {
     let head = &line.as_bytes()[..line.len().min(1024)];
-    const MARKERS: [&[u8]; 11] = [
+    const MARKERS: [&[u8]; 12] = [
+        b"\"session_meta\"",
         b"\"turn_context\"",
         b"\"thread_settings_applied\"",
         b"\"token_count\"",
@@ -1137,6 +1138,12 @@ pub(crate) fn parse_analytics_line(line: &str, record: &mut SessionAnalyticsReco
     let payload = value.get("payload").unwrap_or(&Value::Null);
     let payload_type = payload.get("type").and_then(Value::as_str).unwrap_or("");
 
+    if entry_type == "session_meta" {
+        if let Some(model) = extract_model(&value) {
+            crate::analytics::set_model(record, &model);
+        }
+        return;
+    }
     if entry_type == "turn_context" {
         if let Some(model) = payload.get("model").and_then(Value::as_str) {
             crate::analytics::set_model(record, model);
@@ -1196,12 +1203,19 @@ pub(crate) fn parse_analytics_line(line: &str, record: &mut SessionAnalyticsReco
         let stamp = timestamp.unwrap_or_default();
         crate::analytics::close_open_run(record, &stamp, false);
         if !stamp.is_empty() {
-            record.state.open_run = Some(stamp);
+            crate::analytics::start_open_run(record, stamp);
         }
         return;
     }
     if payload_type == "task_complete" {
-        crate::analytics::close_open_run(record, timestamp.as_deref().unwrap_or(""), true);
+        if payload
+            .get("last_agent_message")
+            .is_some_and(Value::is_null)
+        {
+            crate::analytics::discard_open_run(record);
+        } else {
+            crate::analytics::close_open_run(record, timestamp.as_deref().unwrap_or(""), true);
+        }
         return;
     }
     if payload_type != "token_count" {
@@ -1325,6 +1339,9 @@ fn session_line_requires_metadata_parse(
 
 fn extract_model(value: &Value) -> Option<String> {
     let model = match value.get("type").and_then(Value::as_str) {
+        Some("session_meta") => value
+            .pointer("/payload/base_instructions/provenance/model")
+            .or_else(|| value.pointer("/payload/provenance/model")),
         Some("turn_context") => value.pointer("/payload/model"),
         Some("event_msg")
             if value.pointer("/payload/type").and_then(Value::as_str)
@@ -1849,7 +1866,23 @@ fn collect_codex_item(value: &Value, items: &mut Vec<TranscriptItem>) {
             attach_tool_result(items, call_id.as_deref(), result, duration_ms, timestamp_ms);
         }
         Some(kind @ ("web_search_call" | "image_generation_call")) => {
-            push_item(items, "tool", String::new(), Some(kind.to_string()), time);
+            let command = extract_codex_tool_command(payload);
+            let summary = command
+                .as_deref()
+                .map(|command| command.chars().take(220).collect())
+                .unwrap_or_else(|| summarize_tool_call(payload));
+            push_tool_item(
+                items,
+                "tool",
+                summary,
+                Some(kind.to_string()),
+                time,
+                command,
+                None,
+                extract_duration_ms(payload, None),
+                extract_call_id(payload),
+                timestamp_ms,
+            );
         }
         _ => {}
     }
@@ -2561,6 +2594,7 @@ impl super::AgentProvider for CodexProvider {
             token_usage: true,
             reasoning_tokens: true,
             explicit_runs: true,
+            duration: true,
             rate_limit_history: true,
         }
     }

@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 
+import { createHash } from "node:crypto";
 import { readFile, mkdir, readdir, writeFile } from "node:fs/promises";
 import { execFileSync } from "node:child_process";
 import { createRequire } from "node:module";
@@ -13,7 +14,9 @@ const metaSchemaPath = resolve(root, "runtime-schema/meta-schema.json");
 const checkOnly = process.argv.includes("--check");
 const validateOnly = process.argv.includes("--validate-only");
 
-const schema = JSON.parse(await readFile(schemaPath, "utf8"));
+const schemaText = await readFile(schemaPath, "utf8");
+const schema = JSON.parse(schemaText);
+const contractFingerprint = createHash("sha256").update(schemaText, "utf8").digest("hex");
 const metaSchema = JSON.parse(await readFile(metaSchemaPath, "utf8"));
 const methods = schema.methods;
 const components = schema.components?.schemas ?? {};
@@ -375,6 +378,7 @@ export function isDesktopCommand(command: string): command is CommandName {
 }
 export const PROTOCOL_VERSION = 2;
 export const SCHEMA_VERSION = 1;
+export const RUNTIME_CONTRACT_FINGERPRINT = ${JSON.stringify(contractFingerprint)};
 export const RUNTIME_ERROR_CODES = ${JSON.stringify(Object.fromEntries(errors.map((error) => [error.kind, error.code])))} as const;
 `;
 }
@@ -732,6 +736,7 @@ pub use serde_json::Value;
 
 pub const PROTOCOL_VERSION: u64 = 2;
 pub const SCHEMA_VERSION: u64 = 1;
+pub const RUNTIME_CONTRACT_FINGERPRINT: &str = "${contractFingerprint}";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -993,6 +998,7 @@ function generateInventory(inventory) {
     openrpc: schema.openrpc,
     protocolVersion: schema["x-tendi"].protocolVersion,
     schemaVersion: schema["x-tendi"].schemaVersion,
+    contractFingerprint,
     methods: methods.map((method) => ({
       name: method.name,
       owner: method["x-tendi"].owner,

@@ -638,11 +638,12 @@ fn parse_transcript_page_with_snapshot(
     } else {
         reader.fill_buf()?.is_empty()
     };
-    if done && include_metadata && !agent_provider(agent).transcript_cacheable() {
-        if let Some(store_path) = cursor_store
-            .map(Path::to_path_buf)
-            .or_else(|| agent_provider(agent).transcript_metadata_store_path(path))
-        {
+    if let Some(store_path) = cursor_store
+        .map(Path::to_path_buf)
+        .or_else(|| agent_provider(agent).transcript_metadata_store_path(path))
+    {
+        agent_provider(agent).enrich_transcript_tools_from_store(&store_path, &mut items)?;
+        if done && include_metadata && !agent_provider(agent).transcript_cacheable() {
             agent_provider(agent).append_transcript_metadata_from_store(&store_path, &mut items)?;
         }
     }
@@ -1763,7 +1764,8 @@ pub(crate) fn is_non_message_content_item(value: &Value) -> bool {
 }
 
 pub(crate) fn clean_body(text: &str) -> Option<String> {
-    let text = split_internal_context_segments(text)
+    let text = strip_timestamp_tags(text);
+    let text = split_internal_context_segments(&text)
         .into_iter()
         .filter_map(|(label, segment)| label.is_none().then_some(segment))
         .collect::<Vec<_>>()
@@ -1778,6 +1780,25 @@ pub(crate) fn clean_body(text: &str) -> Option<String> {
     }
 
     Some(text.to_string())
+}
+
+fn strip_timestamp_tags(text: &str) -> String {
+    const OPEN: &str = "<timestamp>";
+    const CLOSE: &str = "</timestamp>";
+    let mut result = String::with_capacity(text.len());
+    let mut cursor = 0;
+    while let Some(relative_start) = text[cursor..].find(OPEN) {
+        let start = cursor + relative_start;
+        result.push_str(&text[cursor..start]);
+        let content_start = start + OPEN.len();
+        let Some(relative_end) = text[content_start..].find(CLOSE) else {
+            result.push_str(&text[start..]);
+            return result;
+        };
+        cursor = content_start + relative_end + CLOSE.len();
+    }
+    result.push_str(&text[cursor..]);
+    result
 }
 
 pub(crate) fn split_internal_context_segments(text: &str) -> Vec<(Option<&'static str>, String)> {
@@ -2064,13 +2085,43 @@ pub(crate) fn extract_tool_command(payload: &Value) -> Option<String> {
         return Some(truncate_text(command.trim(), 4_000));
     }
 
-    let arguments = payload.get("arguments").and_then(Value::as_str)?;
-    let value = serde_json::from_str::<Value>(arguments).ok()?;
-    value
-        .get("cmd")
-        .or_else(|| value.get("command"))
-        .and_then(Value::as_str)
-        .map(|command| truncate_text(command.trim(), 4_000))
+    if let Some(arguments) = payload.get("arguments") {
+        if let Some(arguments) = arguments.as_str() {
+            if let Ok(value) = serde_json::from_str::<Value>(arguments) {
+                if let Some(command) = value
+                    .get("cmd")
+                    .or_else(|| value.get("command"))
+                    .and_then(Value::as_str)
+                {
+                    return Some(truncate_text(command.trim(), 4_000));
+                }
+            }
+        }
+        if let Some(text) = serialize_tool_input(arguments) {
+            return Some(truncate_text(&text, 4_000));
+        }
+    }
+
+    payload
+        .get("action")
+        .and_then(serialize_tool_input)
+        .map(|action| truncate_text(&action, 4_000))
+        .or_else(|| {
+            payload
+                .get("input")
+                .and_then(serialize_tool_input)
+                .map(|input| truncate_text(&input, 4_000))
+        })
+}
+
+fn serialize_tool_input(value: &Value) -> Option<String> {
+    let text = match value {
+        Value::String(text) => text.trim().to_string(),
+        Value::Object(_) | Value::Array(_) => serde_json::to_string(value).ok()?,
+        Value::Null => return None,
+        _ => value.to_string(),
+    };
+    (!text.is_empty()).then_some(text)
 }
 
 pub(crate) fn extract_tool_result(payload: &Value) -> Option<String> {
@@ -2141,7 +2192,7 @@ mod tests {
     };
 
     use rusqlite::Connection;
-    use serde_json::json;
+    use serde_json::{Value, json};
 
     use super::{
         TranscriptSearchScopes, collect_shared_item, parse_search_transcript,
@@ -2865,6 +2916,42 @@ mod tests {
         );
     }
 
+    #[test]
+    fn extracts_codex_special_tool_actions() {
+        let web_search = json!({
+            "type": "response_item",
+            "payload": {
+                "type": "web_search_call",
+                "action": { "type": "search", "query": "Cursor transcript" }
+            }
+        });
+        let image_generation = json!({
+            "type": "response_item",
+            "payload": {
+                "type": "image_generation_call",
+                "action": { "type": "image_generation", "prompt": "A small icon" }
+            }
+        });
+        let mut items = Vec::new();
+
+        collect_codex_item(&web_search, &mut items);
+        collect_codex_item(&image_generation, &mut items);
+
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].tag.as_deref(), Some("web_search_call"));
+        assert_eq!(
+            serde_json::from_str::<Value>(items[0].command.as_deref().unwrap())
+                .expect("web search action JSON"),
+            json!({ "type": "search", "query": "Cursor transcript" })
+        );
+        assert_eq!(items[1].tag.as_deref(), Some("image_generation_call"));
+        assert_eq!(
+            serde_json::from_str::<Value>(items[1].command.as_deref().unwrap())
+                .expect("image generation action JSON"),
+            json!({ "type": "image_generation", "prompt": "A small icon" })
+        );
+    }
+
 
     #[test]
     fn attaches_codex_function_call_output_and_duration() {
@@ -3345,7 +3432,7 @@ mod tests {
                     {
                         "type": "tool_use",
                         "name": "Read",
-                        "input": { "command": "cat src/App.jsx" }
+                        "input": { "path": "src/App.jsx" }
                     }
                 ]
             }
@@ -3362,7 +3449,29 @@ mod tests {
         assert_eq!(items[1].body, "I will inspect it.");
         assert_eq!(items[2].kind, "tool");
         assert_eq!(items[2].tag.as_deref(), Some("Read"));
-        assert_eq!(items[2].command.as_deref(), Some("cat src/App.jsx"));
+        assert_eq!(
+            serde_json::from_str::<Value>(items[2].command.as_deref().unwrap())
+                .expect("Read arguments JSON"),
+            json!({ "path": "src/App.jsx" })
+        );
+    }
+
+    #[test]
+    fn ignores_timestamp_only_user_messages() {
+        let value = json!({
+            "role": "user",
+            "message": {
+                "content": [{
+                    "type": "text",
+                    "text": "<timestamp>Tuesday, Sep 1, 2026, 10:37 AM (UTC+8)</timestamp>"
+                }]
+            }
+        });
+        let mut items = Vec::new();
+
+        collect_shared_item(&value, &mut items);
+
+        assert!(items.is_empty());
     }
 
 
