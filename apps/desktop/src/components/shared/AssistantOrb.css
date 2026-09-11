@@ -1,0 +1,1051 @@
+.assistantOrbHost {
+  position: absolute;
+  z-index: var(--z-drawer);
+  top: 50%;
+  right: 0;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  transform: translateY(-50%);
+  pointer-events: none;
+}
+
+.assistantOrbHost > * {
+  pointer-events: auto;
+}
+
+.assistantOrbTriggerArea {
+  position: relative;
+  --assistant-orb-surface: color-mix(in oklch, var(--text) 92%, var(--accent) 8%);
+  width: 64px;
+  height: 80px;
+  overflow: hidden;
+  touch-action: pan-y;
+}
+
+.assistantOrbLiquid {
+  position: absolute;
+  inset: 0;
+  display: block;
+  width: 64px;
+  height: 80px;
+  overflow: hidden;
+  transform-origin: center;
+  animation: assistantOrbBreath 3.4s linear infinite;
+  pointer-events: none;
+}
+
+.assistantOrbLiquid path {
+  fill: var(--assistant-orb-surface);
+  filter: drop-shadow(0 4px 10px color-mix(in oklch, var(--shadow-color) 24%, transparent));
+}
+
+.assistantOrbNotificationDot {
+  fill: #2496e8;
+  stroke: var(--content-bg);
+  stroke-width: 2;
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: assistantNotificationPop 320ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.assistantOrbButton {
+  position: absolute;
+  top: 22px;
+  width: 36px;
+  height: 36px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: 999px;
+  color: var(--content-bg);
+  background: transparent;
+  box-shadow: none;
+  cursor: pointer;
+  transition: box-shadow 140ms ease-out;
+  will-change: left;
+}
+
+.assistantOrbTriggerArea[data-state="stretching"] .assistantOrbLiquid {
+  animation: none;
+}
+
+.assistantOrbButton:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: -2px;
+}
+
+.assistantOrbMark {
+  display: grid;
+  width: 100%;
+  height: 100%;
+  place-items: center;
+}
+
+.assistantOrbFace {
+  display: block;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+  color: currentColor;
+}
+
+.assistantOrbFaceEye,
+.assistantOrbFaceDot {
+  fill: currentColor;
+}
+
+.assistantChatPanel {
+  position: relative;
+  width: min(360px, calc(100vw - 28px));
+  height: min(540px, calc(100vh - 28px));
+  display: flex;
+  flex-direction: column;
+  margin-right: 24px;
+  border-radius: calc(16px + 8px);
+  background: var(--panel-bg);
+  box-shadow: var(--shadow-elevated);
+  overflow: hidden;
+  transform-origin: right center;
+  touch-action: pan-y;
+}
+
+.assistantChatHeader {
+  min-height: 52px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px;
+  background: var(--panel-bg);
+}
+
+.assistantChatHeaderStart {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.assistantChatHeaderEnd {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.assistantChatClose,
+.assistantSendButton {
+  display: grid;
+  place-items: center;
+  border: 0;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+
+.assistantChatClose {
+  position: relative;
+  z-index: 5;
+  width: 26px;
+  height: 26px;
+  flex: 0 0 auto;
+  color: var(--muted);
+  background: transparent;
+}
+
+.assistantChatPin {
+  width: 26px;
+  height: 26px;
+  min-width: 26px;
+  padding: 0;
+  border-color: transparent;
+  border-radius: var(--radius-sm);
+  color: var(--muted);
+  background: transparent;
+}
+
+.assistantChatHistoryToggle {
+  width: 26px;
+  height: 26px;
+  min-width: 26px;
+  padding: 0;
+  border-color: transparent;
+  border-radius: var(--radius-sm);
+  color: var(--muted);
+  background: transparent;
+}
+
+.assistantChatNewSession {
+  width: 26px;
+  height: 26px;
+  min-width: 26px;
+  padding: 0;
+  border-color: transparent;
+  border-radius: var(--radius-sm);
+  color: var(--muted);
+  background: transparent;
+}
+
+.assistantChatClose:hover,
+.assistantChatClose:focus-visible,
+.assistantChatPin:hover,
+.assistantChatPin:focus-visible,
+.assistantChatHistoryToggle:hover,
+.assistantChatHistoryToggle:focus-visible,
+.assistantChatNewSession:hover,
+.assistantChatNewSession:focus-visible {
+  border-color: transparent;
+  color: var(--text);
+  background: transparent;
+}
+
+.assistantChatPin[aria-pressed="true"] {
+  color: var(--text);
+}
+
+.assistantChatHistoryToggle[aria-pressed="true"] {
+  color: var(--text);
+  background: var(--control-fill);
+}
+
+.assistantChatHistory {
+  min-width: 0;
+  min-height: 0;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  padding: 16px 12px;
+  overflow: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+  scrollbar-width: thin;
+  scrollbar-color: var(--line-strong) transparent;
+}
+
+.assistantChatHistoryBackdrop {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  display: block;
+  width: 100%;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: var(--overlay-scrim);
+  cursor: default;
+}
+
+.assistantChatHistoryDrawer {
+  position: absolute;
+  inset: 0 auto 0 0;
+  z-index: 3;
+  width: min(292px, calc(100% - 20px));
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  border-right: 1px solid var(--control-border);
+  background: var(--panel-bg);
+  box-shadow: 20px 0 40px color-mix(in oklch, var(--overlay-scrim) 70%, transparent);
+}
+
+.assistantChatHistoryHeading {
+  margin: 0 12px 10px;
+  color: var(--muted);
+  font-size: var(--text-xs);
+  font-weight: 650;
+  letter-spacing: 0.04em;
+  line-height: var(--leading-micro);
+  text-transform: uppercase;
+}
+
+.assistantChatHistoryList {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.assistantChatHistoryList > li {
+  min-width: 0;
+}
+
+.assistantChatHistoryEmpty {
+  flex: 1;
+}
+
+.assistantChatHistoryItem {
+  width: 100%;
+  min-width: 0;
+  display: block;
+  padding: 10px 12px;
+  border: 0;
+  border-radius: 8px;
+  color: var(--text);
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+}
+
+.assistantChatHistoryItem:hover,
+.assistantChatHistoryItem:focus-visible {
+  background: var(--hover-fill-strong);
+}
+
+.assistantChatHistoryItem.isActive {
+  background: var(--active-fill);
+}
+
+.assistantChatHistoryItemTitle {
+  display: block;
+  width: 100%;
+  min-width: 0;
+  overflow: hidden;
+  font-size: var(--text-ui);
+  line-height: var(--leading-ui);
+  overflow-wrap: anywhere;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.assistantChatMessages {
+  height: 100%;
+  min-height: 0;
+  flex: 1;
+  padding: 12px 16px;
+  overflow: auto;
+  overscroll-behavior: contain;
+  outline: none;
+  scrollbar-gutter: stable;
+  scrollbar-width: thin;
+  scrollbar-color: var(--line-strong) transparent;
+  scroll-behavior: smooth;
+}
+
+.assistantMessageScrollerContent {
+  min-height: 100%;
+}
+
+.assistantMessageGroup {
+  min-height: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.assistantMessageRow {
+  width: 100%;
+  min-width: 0;
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.assistantMessageRow--user {
+  justify-content: flex-end;
+}
+
+.assistantMessageRow--assistant {
+  justify-content: flex-start;
+}
+
+.assistantMessageContent {
+  min-width: 0;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+}
+
+.assistantMessageRow--user .assistantMessageContent {
+  align-items: flex-end;
+}
+
+.assistantMessageBubble {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+}
+
+.assistantMessageBubble--user {
+  align-items: flex-end;
+}
+
+.assistantMessageBubbleContent {
+  position: relative;
+  z-index: 0;
+  min-width: 36px;
+  max-width: 82%;
+  box-sizing: border-box;
+  padding: 10px 14px;
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  color: var(--text);
+  background: var(--chat-assistant-bg);
+  font-size: var(--text-sm);
+  line-height: var(--leading-title);
+}
+
+.assistantMessageBubble--user .assistantMessageBubbleContent {
+  border-color: transparent;
+  color: var(--chat-user-fg);
+  background: var(--chat-user-bg);
+}
+
+.assistantMessageBubbleText {
+  position: relative;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+  -webkit-user-select: text;
+  user-select: text;
+}
+
+.assistantMessageBubbleText * {
+  -webkit-user-select: text;
+  user-select: text;
+}
+
+.assistantMessageBubbleText .tiptapEditorShell {
+  min-height: 0;
+  display: block;
+  background: transparent;
+}
+
+.assistantMessageBubbleText .tiptapEditorHost,
+.assistantMessageBubbleText .tiptapEditor {
+  min-height: 0;
+  display: block;
+  overflow: visible;
+}
+
+.assistantMessageBubbleText .tiptapEditor .ProseMirror {
+  min-height: 0;
+  padding: 0;
+  color: inherit;
+  font-size: var(--text-sm);
+  line-height: var(--leading-title);
+  white-space: pre-wrap;
+}
+
+.assistantMessageBubbleText .tiptapEditor .ProseMirror > :first-child {
+  margin-top: 0;
+}
+
+.assistantMessageBubbleText .tiptapEditor .ProseMirror > :last-child {
+  margin-bottom: 0;
+}
+
+.assistantMessageBubbleText .tiptapEditor .ProseMirror p {
+  color: inherit;
+}
+
+.assistantMessageBubbleText .tiptapEditor .ProseMirror h1,
+.assistantMessageBubbleText .tiptapEditor .ProseMirror h2,
+.assistantMessageBubbleText .tiptapEditor .ProseMirror h3,
+.assistantMessageBubbleText .tiptapEditor .ProseMirror h4,
+.assistantMessageBubbleText .tiptapEditor .ProseMirror h5,
+.assistantMessageBubbleText .tiptapEditor .ProseMirror h6 {
+  margin: 0 0 8px;
+  padding: 0;
+  border: 0;
+  line-height: var(--leading-ui);
+}
+
+.assistantMessageBubbleText .tiptapEditor .ProseMirror h1 {
+  font-size: var(--text-title);
+}
+
+.assistantMessageBubbleText .tiptapEditor .ProseMirror h2 {
+  font-size: var(--text-body);
+}
+
+.assistantMessageBubbleText .tiptapEditor .ProseMirror h3,
+.assistantMessageBubbleText .tiptapEditor .ProseMirror h4,
+.assistantMessageBubbleText .tiptapEditor .ProseMirror h5,
+.assistantMessageBubbleText .tiptapEditor .ProseMirror h6 {
+  font-size: var(--text-sm);
+}
+
+.assistantMessageBubbleText .tiptapEditor .ProseMirror p,
+.assistantMessageBubbleText .tiptapEditor .ProseMirror ul,
+.assistantMessageBubbleText .tiptapEditor .ProseMirror ol,
+.assistantMessageBubbleText .tiptapEditor .ProseMirror blockquote,
+.assistantMessageBubbleText .tiptapEditor .ProseMirror pre {
+  margin: 0 0 10px;
+}
+
+.assistantMessageBubbleText .tiptapEditor .ProseMirror ul,
+.assistantMessageBubbleText .tiptapEditor .ProseMirror ol {
+  padding-left: 20px;
+}
+
+.assistantMessageBubbleText .tiptapEditor .ProseMirror blockquote {
+  border-left: 3px solid var(--focus-ring);
+  padding-left: 10px;
+  color: color-mix(in oklch, currentColor 78%, transparent);
+}
+
+.assistantMessageBubbleText .tiptapEditor .ProseMirror code {
+  padding: 2px 4px;
+  border-radius: 4px;
+  color: inherit;
+  background: color-mix(in oklch, currentColor 10%, transparent);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+}
+
+.assistantMessageBubbleText .tiptapEditor .ProseMirror pre {
+  overflow-x: auto;
+  padding: 10px;
+  border: 1px solid color-mix(in oklch, currentColor 14%, transparent);
+  border-radius: 8px;
+  background: color-mix(in oklch, currentColor 8%, transparent);
+}
+
+.assistantMessageBubbleText .tiptapEditor .ProseMirror pre code {
+  padding: 0;
+  background: transparent;
+  white-space: pre;
+}
+
+.assistantMessageBubbleText .tiptapEditor .ProseMirror a {
+  color: inherit;
+  font-weight: 600;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.assistantMessageBubbleText .tiptapEditor .ProseMirror .tableWrapper {
+  max-width: 100%;
+  overflow-x: auto;
+  margin: 0 0 10px;
+}
+
+.assistantMessageBubbleText .tiptapEditor .ProseMirror table {
+  width: max-content;
+  min-width: 100%;
+  border-collapse: collapse;
+  table-layout: auto;
+}
+
+.assistantMessageBubbleText .tiptapEditor .ProseMirror th,
+.assistantMessageBubbleText .tiptapEditor .ProseMirror td {
+  min-width: 0;
+  padding: 5px 7px;
+  border: 1px solid color-mix(in oklch, currentColor 14%, transparent);
+  text-align: left;
+  vertical-align: top;
+}
+
+.assistantMessageBubbleText .tiptapEditor .ProseMirror th {
+  font-weight: 700;
+  background: color-mix(in oklch, currentColor 8%, transparent);
+}
+
+.assistantMessageBubbleText .tiptapEditor .ProseMirror td {
+  background: transparent;
+}
+
+.assistantMessageBubbleText .tiptapEditor .ProseMirror th > *,
+.assistantMessageBubbleText .tiptapEditor .ProseMirror td > * {
+  margin-bottom: 0;
+}
+
+.assistantMessageBubbleText .tiptapEditor .ProseMirror ul[data-type="taskList"] {
+  padding-left: 0;
+  list-style: none;
+}
+
+.assistantMessageBubbleText .tiptapEditor .ProseMirror ul[data-type="taskList"] li {
+  display: flex;
+  align-items: flex-start;
+  gap: 7px;
+}
+
+.assistantMessageBubbleText .tiptapEditor .ProseMirror ul[data-type="taskList"] li > label {
+  flex: 0 0 auto;
+  padding-top: 2px;
+  user-select: none;
+}
+
+.assistantMessageBubbleText .tiptapEditor .ProseMirror ul[data-type="taskList"] li > div {
+  min-width: 0;
+  flex: 1;
+}
+
+.assistantMessageBubbleText .tiptapEditor .ProseMirror ul[data-type="taskList"] li p {
+  margin-bottom: 0;
+}
+
+.assistantMessageBubbleText .tiptapEditor .ProseMirror ul[data-type="taskList"] li input[type="checkbox"] {
+  width: 13px;
+  height: 13px;
+  margin: 0;
+  accent-color: var(--accent);
+}
+
+.assistantMessageBubbleText .tiptapEditor .ProseMirror hr {
+  margin: 10px 0;
+  border: 0;
+  border-top: 1px solid color-mix(in oklch, currentColor 18%, transparent);
+}
+
+.assistantMessageBubbleText a {
+  color: inherit;
+  font-weight: 600;
+  text-decoration: underline;
+  text-underline-offset: 4px;
+}
+
+.assistantMessageBubbleText code {
+  padding: 2px 4px;
+  border-radius: 4px;
+  background: color-mix(in oklch, var(--panel-bg) 60%, transparent);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+}
+
+.assistantMessageBubbleText pre {
+  margin: 8px 0;
+  padding: 12px;
+  overflow-x: auto;
+  border-radius: 12px;
+  background: color-mix(in oklch, var(--panel-bg) 60%, transparent);
+}
+
+.assistantMessageBubbleText pre code {
+  padding: 0;
+  background: transparent;
+}
+
+.assistantStreamingResponse {
+  width: 100%;
+}
+
+.assistantStreamingResponseText {
+  color: inherit;
+}
+
+.assistantToolActivityList {
+  width: min(100%, 82%);
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.assistantToolActivityList .toolCall {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: color-mix(in oklch, var(--panel-bg) 72%, var(--chat-assistant-bg));
+  color: var(--text);
+}
+
+.assistantToolActivityList .toolCallSummary {
+  min-height: 30px;
+  height: auto;
+  gap: 7px;
+  padding: 5px 8px;
+}
+
+.assistantToolActivityList .toolCall code,
+.assistantToolActivityList .toolCallStatus,
+.assistantToolActivityList .toolCallLabel,
+.assistantToolActivityList .toolCallWaiting {
+  font-size: var(--text-xs);
+}
+
+.assistantToolActivityList .toolCallDetails {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 0 8px 8px 30px;
+}
+
+.assistantToolActivityList .toolCallLabel {
+  margin-bottom: 3px;
+  color: var(--muted);
+  font-weight: 600;
+}
+
+.assistantToolActivityList .toolCallBlock pre {
+  max-height: 140px;
+  padding: 7px 8px;
+  border-radius: 7px;
+  background: color-mix(in oklch, var(--panel-bg) 82%, transparent);
+  line-height: var(--leading-ui);
+  overflow-wrap: anywhere;
+}
+
+.assistantChatEmpty {
+  min-height: 100%;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 20px;
+  padding: 24px 4px 32px;
+  color: var(--muted);
+  text-align: left;
+}
+
+.assistantPromptList {
+  width: calc(100% - 24px);
+  align-self: center;
+  display: grid;
+  gap: 8px;
+}
+
+.assistantChatEmpty .assistantPromptButton {
+  width: 100%;
+  min-width: 0;
+  height: auto;
+  min-height: 0;
+  justify-content: initial;
+  padding: 11px 8px;
+  border-color: transparent;
+  border-radius: var(--radius-lg);
+  background: transparent;
+  text-align: start;
+  white-space: normal;
+  font-weight: 400;
+}
+
+.assistantChatEmpty .assistantPromptButton > .sharedLayoutBgContent {
+  width: 100%;
+  min-width: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+}
+
+.assistantChatEmpty .assistantPromptButton:hover:not(:disabled) {
+  border-color: transparent;
+  background: transparent;
+}
+
+.assistantChatEmpty .assistantPromptButton:disabled {
+  border-color: transparent;
+  background: transparent;
+  opacity: 0.55;
+}
+
+.assistantPromptCopy {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 3px;
+}
+
+.assistantPromptCopy strong {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text);
+  font-size: var(--text-ui);
+  font-weight: 600;
+  line-height: var(--leading-ui);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.assistantPromptCopy span {
+  overflow: hidden;
+  color: var(--muted);
+  font-size: var(--text-xs);
+  line-height: var(--leading-micro);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.assistantChatEmpty .assistantPromptButton .sharedLayoutBgContent > svg {
+  flex: 0 0 auto;
+  color: var(--muted);
+  transition: transform 160ms var(--ease-out-soft), color 160ms var(--ease-out-soft);
+}
+
+.assistantChatEmpty .assistantPromptButton:hover:not(:disabled) .sharedLayoutBgContent > svg {
+  color: var(--text);
+  transform: translate(2px, -2px);
+}
+
+.assistantPromptPill {
+  border-radius: var(--radius-lg);
+  background: var(--hover-fill-strong);
+}
+
+.assistantMessageTyping {
+  display: inline-flex;
+  height: 20px;
+  align-items: center;
+  gap: 4px;
+  color: var(--muted);
+}
+
+.assistantTypingDot {
+  width: 4px;
+  height: 4px;
+  border-radius: 999px;
+  background: currentColor;
+}
+
+.assistantScreenReaderOnly {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+.assistantComposerDock {
+  flex: 0 0 auto;
+  padding: 0;
+}
+
+.assistantChatForm {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 0;
+  padding: 8px;
+  border: 0;
+  border-radius: 0 0 16px 16px;
+  background: var(--control-fill);
+}
+
+.assistantComposerPendant {
+  position: absolute;
+  z-index: 1;
+  top: -16px;
+  left: 12px;
+  width: 32px;
+  height: 32px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: 999px;
+  appearance: none;
+  color: var(--panel-bg);
+  background: transparent;
+  cursor: pointer;
+  transform-origin: center;
+  animation: assistantOrbBreath 3.4s linear infinite;
+  pointer-events: auto;
+}
+
+.assistantComposerPendant:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 3px;
+}
+
+.assistantComposerPendant[data-state="loading"] {
+  animation: none;
+}
+
+.assistantComposerPendant:disabled {
+  cursor: default;
+}
+
+.assistantComposerShape,
+.assistantComposerLoadingShape,
+.assistantComposerFace {
+  position: absolute;
+  inset: 0;
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+.assistantComposerShape,
+.assistantComposerLoadingShape {
+  color: color-mix(in oklch, var(--text) 92%, var(--accent) 8%);
+  filter: drop-shadow(0 4px 10px color-mix(in oklch, var(--text) 18%, transparent));
+}
+
+.assistantComposerShape path,
+.assistantComposerLoadingShape path {
+  fill: currentColor;
+}
+
+.assistantComposerFace {
+  color: var(--panel-bg);
+}
+
+.assistantComposerNotificationDot {
+  position: absolute;
+  z-index: 1;
+  top: 0;
+  right: 0;
+  width: 8px;
+  height: 8px;
+  border: 2px solid var(--panel-bg);
+  border-radius: 999px;
+  background: #2496e8;
+  box-shadow: 0 1px 3px color-mix(in oklch, var(--shadow-color) 18%, transparent);
+  animation: assistantNotificationPop 320ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.assistantComposerMeasurement {
+  position: absolute;
+  inset: 0 8px auto;
+  min-height: 48px;
+  padding: 5px 8px 3px;
+  visibility: hidden;
+  pointer-events: none;
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+  font-size: var(--text-ui);
+  line-height: var(--leading-ui);
+}
+
+.assistantChatForm textarea {
+  box-sizing: border-box;
+  min-width: 0;
+  width: 100%;
+  height: 48px;
+  min-height: 48px;
+  max-height: 192px;
+  overflow-y: auto;
+  resize: none;
+  padding: 5px 8px 3px;
+  border: 0;
+  border-radius: 0;
+  color: var(--text);
+  background: transparent;
+  font-size: var(--text-ui);
+  line-height: var(--leading-ui);
+  outline: none;
+  user-select: text;
+}
+
+.assistantChatForm textarea::placeholder {
+  color: color-mix(in oklch, var(--muted) 70%, transparent);
+}
+
+.assistantComposerToolbar {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 4px;
+  min-height: 32px;
+  margin-top: 4px;
+}
+
+.assistantAgentSelect {
+  width: auto;
+  max-width: 208px;
+  height: 32px;
+  min-height: 32px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: 12px;
+  background: transparent;
+  box-shadow: none;
+  font-size: var(--text-ui);
+}
+
+.assistantAgentSelect:hover:not(:disabled),
+.assistantAgentSelect[data-state="open"] {
+  background: var(--control-fill);
+  box-shadow: none;
+}
+
+.assistantAgentSelect:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: -2px;
+}
+
+.menuContent.assistantAgentSelectContent {
+  z-index: calc(var(--z-drawer) + 1);
+}
+
+.assistantAgentSelect .agentOptionLabel {
+  width: auto;
+  max-width: 100%;
+}
+
+.assistantAgentSelect .agentOptionIcon {
+  width: 16px;
+  height: 16px;
+  flex-basis: 16px;
+  border-radius: 4px;
+}
+
+.assistantComposerNoAgent {
+  color: var(--muted);
+  font-size: var(--text-xs);
+}
+
+.assistantComposerActions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: auto;
+}
+
+.assistantSendButton {
+  width: 32px;
+  height: 32px;
+  flex: 0 0 32px;
+  color: var(--panel-bg);
+  background: var(--text);
+  border-radius: 999px;
+  transition: background-color 140ms ease-out, transform 140ms ease-out;
+}
+
+.assistantSendButton:hover:not(:disabled) {
+  background: color-mix(in oklch, var(--text) 90%, transparent);
+}
+
+.assistantSendButton:active:not(:disabled) {
+  transform: scale(var(--press-scale));
+}
+
+.assistantSendButton:disabled {
+  color: var(--muted);
+  background: var(--control-fill);
+  cursor: default;
+}
+
+@keyframes assistantOrbBreath {
+  0%, 50%, 100% { transform: scaleY(1); }
+  25% { transform: scaleY(1.005); }
+  75% { transform: scaleY(0.995); }
+}
+
+@keyframes assistantNotificationPop {
+  from { opacity: 0; transform: scale(0.55); }
+  to { opacity: 1; transform: scale(1); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .assistantOrbLiquid,
+  .assistantOrbButton,
+  .assistantComposerPendant,
+  .assistantComposerNotificationDot,
+  .assistantChatMessages {
+    animation: none;
+    transition: none;
+    scroll-behavior: auto;
+  }
+}
+
+@media (max-width: 700px) {
+  .assistantOrbHost {
+    right: 0;
+  }
+
+  .assistantChatPanel {
+    width: min(360px, calc(100vw - 16px));
+    height: min(540px, calc(100vh - 16px));
+    margin-right: 20px;
+  }
+}

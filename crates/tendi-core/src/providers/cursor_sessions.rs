@@ -10,7 +10,11 @@ use rusqlite::{Connection, OpenFlags};
 use serde_json::Value;
 use walkdir::WalkDir;
 
-use crate::{providers::cursor::find_cursor_store_db, sessions};
+use crate::{
+    providers::cursor::find_cursor_store_db,
+    session_skills::{Evidence, SkillEvidenceCandidate},
+    sessions,
+};
 
 use super::*;
 
@@ -470,11 +474,11 @@ pub(crate) fn scan_cursor_store_db(path: Option<PathBuf>) -> CursorStoreMeta {
                 if value.get("role").and_then(Value::as_str).is_some() {
                     message_count += 1;
                 }
-                if sessions::extract_session_title(&value).is_some() {
+                if sessions::extract_session_title_for_agent(AgentKind::Cursor, &value).is_some() {
                     turn_count += 1;
                 }
                 if title.is_none() {
-                    title = sessions::extract_session_title(&value);
+                    title = sessions::extract_session_title_for_agent(AgentKind::Cursor, &value);
                 }
                 if let Some(blob_model) = extract_cursor_blob_model(&value) {
                     if model.is_none() {
@@ -482,7 +486,9 @@ pub(crate) fn scan_cursor_store_db(path: Option<PathBuf>) -> CursorStoreMeta {
                     }
                     models.push(blob_model);
                 }
-                if let Some((role, body)) = sessions::extract_session_message(&value) {
+                if let Some((role, body)) =
+                    sessions::extract_session_message_for_agent(AgentKind::Cursor, &value)
+                {
                     if let Some(body) = sessions::clean_preview_text(&body) {
                         match role {
                             "user" => {
@@ -586,6 +592,185 @@ pub(crate) fn cursor_store_models_for_path(path: &Path) -> Vec<String> {
 
 pub(crate) fn cursor_store_tool_calls_for_path(path: &Path) -> Vec<CursorToolCall> {
     scan_cursor_store_db(Some(path.to_path_buf())).tool_calls
+}
+
+pub(crate) fn cursor_store_skill_evidence_for_path(path: &Path) -> Vec<SkillEvidenceCandidate> {
+    if path.file_name().and_then(|name| name.to_str()) != Some("store.db") || !path.is_file() {
+        return Vec::new();
+    }
+    let Ok(connection) = Connection::open_with_flags(
+        path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    ) else {
+        return Vec::new();
+    };
+    let Ok(mut statement) = connection.prepare("select data from blobs") else {
+        return Vec::new();
+    };
+    let Ok(rows) = statement.query_map([], |row| row.get::<_, Vec<u8>>(0)) else {
+        return Vec::new();
+    };
+
+    let mut candidates = Vec::new();
+    for bytes in rows.filter_map(Result::ok) {
+        let Ok(value) = serde_json::from_slice::<Value>(&bytes) else {
+            continue;
+        };
+        collect_cursor_skill_evidence(&value, &mut candidates);
+    }
+    candidates
+}
+
+fn collect_cursor_skill_evidence(value: &Value, out: &mut Vec<SkillEvidenceCandidate>) {
+    let time = crate::providers::cursor::cursor_event_timestamp(value);
+    let mut strings = Vec::new();
+    collect_value_strings(value, &mut strings);
+    for text in strings.iter().copied() {
+        for path in cursor_agent_skill_paths(text) {
+            out.push(SkillEvidenceCandidate {
+                name: None,
+                path: Some(path),
+                evidence: Evidence {
+                    kind: "agent_skill".to_string(),
+                    text: text.to_string(),
+                    time: time.clone(),
+                },
+                confidence: "explicit",
+            });
+        }
+    }
+
+    let Some(content) = value.get("content").and_then(Value::as_array) else {
+        return;
+    };
+    for item in content {
+        let item_type = item.get("type").and_then(Value::as_str);
+        if !matches!(item_type, Some("tool-call" | "tool-result")) {
+            continue;
+        }
+        let tool_name = item
+            .get("toolName")
+            .or_else(|| item.get("tool_name"))
+            .and_then(Value::as_str)
+            .filter(|name| !name.trim().is_empty())
+            .unwrap_or("tool")
+            .to_string();
+        let evidence_text = serde_json::to_string(item).unwrap_or_default();
+        let mut item_strings = Vec::new();
+        collect_value_strings(item, &mut item_strings);
+        for text in item_strings {
+            for path in cursor_skill_file_paths(text) {
+                out.push(SkillEvidenceCandidate {
+                    name: None,
+                    path: Some(path),
+                    evidence: Evidence {
+                        kind: tool_name.clone(),
+                        text: evidence_text.clone(),
+                        time: time.clone(),
+                    },
+                    confidence: "observed",
+                });
+            }
+        }
+    }
+}
+
+fn cursor_skill_file_paths(text: &str) -> Vec<String> {
+    let mut paths = crate::session_skills::skill_file_candidate_paths(text);
+    let mut search_from = 0;
+    while let Some(relative_start) = text[search_from..].find("SKILL.md") {
+        let end = search_from + relative_start + "SKILL.md".len();
+        let mut start = search_from + relative_start;
+        while start > 0 {
+            let previous = text[..start].chars().next_back().unwrap_or_default();
+            if previous.is_whitespace()
+                || matches!(
+                    previous,
+                    '"' | '\''
+                        | '`'
+                        | '<'
+                        | '>'
+                        | '|'
+                        | ';'
+                        | '&'
+                        | '('
+                        | ')'
+                        | '['
+                        | ']'
+                        | '{'
+                        | '}'
+                )
+            {
+                break;
+            }
+            start -= previous.len_utf8();
+        }
+        let candidate = text[start..end].trim_matches(|ch| {
+            matches!(
+                ch,
+                '"' | '\'' | '`' | '<' | '>' | '[' | ']' | '(' | ')' | '{' | '}'
+            )
+        });
+        if candidate.contains('/') && !paths.iter().any(|path| path == candidate) {
+            paths.push(candidate.to_string());
+        }
+        search_from = end;
+    }
+    paths
+}
+
+fn collect_value_strings<'a>(value: &'a Value, out: &mut Vec<&'a str>) {
+    match value {
+        Value::String(text) => out.push(text),
+        Value::Array(items) => {
+            for item in items {
+                collect_value_strings(item, out);
+            }
+        }
+        Value::Object(object) => {
+            for value in object.values() {
+                collect_value_strings(value, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn cursor_agent_skill_paths(text: &str) -> Vec<String> {
+    let mut paths = Vec::new();
+    let mut search_from = 0;
+    while let Some(relative_start) = text[search_from..].find("<agent_skill") {
+        let start = search_from + relative_start;
+        let Some(relative_end) = text[start..].find('>') else {
+            break;
+        };
+        let tag = &text[start..start + relative_end];
+        for attribute in ["fullPath", "full_path", "path"] {
+            if let Some(path) =
+                xml_attribute_value(tag, attribute).filter(|path| path.ends_with("SKILL.md"))
+            {
+                if !paths.contains(&path) {
+                    paths.push(path);
+                }
+                break;
+            }
+        }
+        search_from = start + relative_end + 1;
+    }
+    paths
+}
+
+fn xml_attribute_value(text: &str, attribute: &str) -> Option<String> {
+    let marker = format!("{attribute}=");
+    let start = text.find(&marker)? + marker.len();
+    let quote = text.as_bytes().get(start).copied()?;
+    if !matches!(quote, b'\"' | b'\'') {
+        return None;
+    }
+    let value_start = start + 1;
+    let value_end = text[value_start..].find(quote as char)? + value_start;
+    let value = text[value_start..value_end].trim();
+    (!value.is_empty()).then(|| value.to_string())
 }
 
 fn cursor_store_result_text(value: Option<&Value>) -> Option<String> {
@@ -697,4 +882,75 @@ pub(crate) fn decode_cursor_project_dir(value: &str) -> Option<PathBuf> {
         return Some(PathBuf::from(format!("/{}", parts.join("/"))));
     }
     Some(PathBuf::from(parts.join("/")))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        fs,
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
+    use rusqlite::Connection;
+    use serde_json::json;
+
+    use super::*;
+
+    #[test]
+    fn extracts_skill_evidence_from_cursor_store() {
+        let root = std::env::temp_dir().join(format!(
+            "tendi-cursor-skill-evidence-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("system time")
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).expect("create temp directory");
+        let skill_path = root.join(".ctx/plans/e2e/SKILL.md");
+        fs::create_dir_all(skill_path.parent().expect("skill parent")).expect("create skill");
+        let store_path = root.join("store.db");
+        let connection = Connection::open(&store_path).expect("open store");
+        connection
+            .execute("CREATE TABLE blobs (data BLOB)", [])
+            .expect("create blobs table");
+        for value in [
+            json!({
+                "role": "assistant",
+                "content": [{
+                    "type": "tool-call",
+                    "toolCallId": "read-1",
+                    "toolName": "Read",
+                    "args": { "path": skill_path }
+                }]
+            }),
+            json!({
+                "role": "user",
+                "content": [{
+                    "type": "text",
+                    "text": format!("<agent_skill fullPath=\"{}\">", skill_path.display())
+                }]
+            }),
+        ] {
+            let data = value.to_string();
+            connection
+                .execute("INSERT INTO blobs (data) VALUES (?1)", [data.as_bytes()])
+                .expect("insert blob");
+        }
+        drop(connection);
+
+        let evidence = cursor_store_skill_evidence_for_path(&store_path);
+        assert!(evidence.iter().any(|candidate| {
+            candidate.path.as_deref() == Some(skill_path.to_str().expect("skill path"))
+                && candidate.evidence.kind == "Read"
+                && candidate.confidence == "observed"
+        }));
+        assert!(evidence.iter().any(|candidate| {
+            candidate.path.as_deref() == Some(skill_path.to_str().expect("skill path"))
+                && candidate.evidence.kind == "agent_skill"
+                && candidate.confidence == "explicit"
+        }));
+
+        fs::remove_dir_all(root).expect("remove temp directory");
+    }
 }

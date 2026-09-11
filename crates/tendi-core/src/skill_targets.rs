@@ -684,7 +684,6 @@ fn xdg_config_home(home: &Path) -> PathBuf {
 mod tests {
     use super::*;
 
-
     #[test]
     fn legacy_names_keep_their_serialized_values() {
         for (kind, expected) in [
@@ -706,7 +705,11 @@ mod tests {
         assert_eq!(target_config(&claude_alias).unwrap().id, "claude-code");
         assert_eq!(claude_alias.agent_kind().unwrap(), AgentKind::Claude);
         assert_eq!(
-            "claude-code".parse::<SkillTarget>().unwrap().agent_kind().unwrap(),
+            "claude-code"
+                .parse::<SkillTarget>()
+                .unwrap()
+                .agent_kind()
+                .unwrap(),
             AgentKind::Claude
         );
     }

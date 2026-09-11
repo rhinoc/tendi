@@ -5,7 +5,7 @@ pub use serde_json::Value;
 pub const PROTOCOL_VERSION: u64 = 2;
 pub const SCHEMA_VERSION: u64 = 1;
 pub const RUNTIME_CONTRACT_FINGERPRINT: &str =
-    "ae1f371d0cbd1f43cda682fa5ec5d3c39b123fe00de9c6df399b3744c55d39f9";
+    "e9a5feda453d0f8ae64e057bd42006e5a1732fbeb5cd27e9e79a46a0d1a963e3";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -845,6 +845,16 @@ pub struct McpSetEnabledRequest {
     pub server_path: StringList,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct McpProbeRequest {
+    pub agent: AgentKind,
+    pub path: String,
+    #[serde(rename = "expectedTrustHash")]
+    pub expected_trust_hash: String,
+    pub name: String,
+    #[serde(rename = "serverPath")]
+    pub server_path: StringList,
+}
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct McpSetEnabledManyRequest {
     pub requests: Vec<McpSetEnabledRequest>,
 }
@@ -1065,8 +1075,6 @@ pub struct SkillsUpdateManyRequest {
 pub struct SkillsDeleteManyRequest {
     #[serde(rename = "skillIds")]
     pub skill_ids: StringList,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub names: Option<StringList>,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SkillsMarketplaceSearchRequest {
@@ -1213,6 +1221,13 @@ pub enum SessionResumeTargetResponse {
     Terminal,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SessionResumeError {
+    pub code: String,
+    pub provider: Option<String>,
+    pub retryable: bool,
+    pub action: String,
+}
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SessionResumeResponse {
     pub status: String,
     #[serde(rename = "lockPath")]
@@ -1225,6 +1240,8 @@ pub struct SessionResumeResponse {
     #[serde(rename = "commandLine")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub command_line: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<SessionResumeError>,
 }
 pub type LogsExportResponse = String;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1332,6 +1349,83 @@ pub struct SessionIdentity {
     pub agent: AgentKind,
     pub path: String,
 }
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SessionListSortKey {
+    #[serde(rename = "title")]
+    Title,
+    #[serde(rename = "agent")]
+    Agent,
+    #[serde(rename = "project")]
+    Project,
+    #[serde(rename = "startedAt")]
+    StartedAt,
+    #[serde(rename = "updatedAt")]
+    UpdatedAt,
+    #[serde(rename = "messages")]
+    Messages,
+    #[serde(rename = "turns")]
+    Turns,
+    #[serde(rename = "cacheRate")]
+    CacheRate,
+    #[serde(rename = "searchScore")]
+    SearchScore,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SessionListSortDirection {
+    #[serde(rename = "asc")]
+    Asc,
+    #[serde(rename = "desc")]
+    Desc,
+}
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SessionsListRequest {
+    pub query: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent: Option<AgentKind>,
+    #[serde(rename = "sortKey")]
+    pub sort_key: SessionListSortKey,
+    #[serde(rename = "sortDirection")]
+    pub sort_direction: SessionListSortDirection,
+    #[serde(rename = "groupBy")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub group_by: Option<SessionListSortKey>,
+    pub page: u64,
+    #[serde(rename = "pageSize")]
+    pub page_size: u64,
+    #[serde(rename = "showChildSessions")]
+    pub show_child_sessions: bool,
+    #[serde(rename = "selectedProjectKeys")]
+    pub selected_project_keys: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub locate: Option<SessionIdentity>,
+}
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SessionListProjectOption {
+    pub key: String,
+    pub label: String,
+    pub title: String,
+    pub count: u64,
+}
+pub type SessionListProjectOptionList = Vec<SessionListProjectOption>;
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SessionsListResponse {
+    pub revision: Revision,
+    pub rows: SessionRecordList,
+    #[serde(rename = "projectOptions")]
+    pub project_options: SessionListProjectOptionList,
+    pub total: u64,
+    #[serde(rename = "childSessionCount")]
+    pub child_session_count: u64,
+    pub page: u64,
+    #[serde(rename = "pageCount")]
+    pub page_count: u64,
+    #[serde(rename = "pageStart")]
+    pub page_start: u64,
+    #[serde(rename = "pageEnd")]
+    pub page_end: u64,
+    #[serde(rename = "groupCount")]
+    pub group_count: Option<u64>,
+}
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SessionsSearchRequest {
     pub query: String,
@@ -1435,6 +1529,10 @@ pub struct SessionRecord {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub parent_session_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub search_score: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub search_snippet: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub token_usage: Option<SessionTokenUsage>,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1475,8 +1573,8 @@ pub struct SessionSkillLinksRequest {
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SkillSessionLinksRequest {
-    #[serde(rename = "skillName")]
-    pub skill_name: String,
+    #[serde(rename = "skillId")]
+    pub skill_id: String,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SessionSkillLink {
@@ -1532,6 +1630,93 @@ pub struct SkillTargetRecord {
     pub global_path: Option<String>,
 }
 pub type SkillTargetRecordList = Vec<SkillTargetRecord>;
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AssistantMessage {
+    pub role: String,
+    pub content: String,
+}
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AssistantChatSession {
+    pub id: String,
+    pub messages: Vec<AssistantMessage>,
+    #[serde(rename = "linkedSession")]
+    pub linked_session: Option<JsonObject>,
+}
+pub type AssistantChatSessionList = Vec<AssistantChatSession>;
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AssistantContext {
+    #[serde(rename = "pageId")]
+    pub page_id: String,
+    #[serde(rename = "pageTitle")]
+    pub page_title: String,
+    pub filters: JsonObject,
+    pub selection: String,
+    #[serde(rename = "selectedContent")]
+    pub selected_content: Vec<String>,
+    pub skill: Option<JsonObject>,
+    pub session: Option<JsonObject>,
+    pub tendi: JsonObject,
+}
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AssistantUsage {
+    #[serde(rename = "inputTokens")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub input_tokens: Option<u64>,
+    #[serde(rename = "cachedInputTokens")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cached_input_tokens: Option<u64>,
+    #[serde(rename = "outputTokens")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output_tokens: Option<u64>,
+    #[serde(rename = "reasoningOutputTokens")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_output_tokens: Option<u64>,
+    #[serde(rename = "totalTokens")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub total_tokens: Option<u64>,
+}
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AssistantAskRequest {
+    #[serde(rename = "conversationId")]
+    pub conversation_id: String,
+    #[serde(rename = "requestId")]
+    pub request_id: String,
+    pub message: String,
+    pub history: Vec<AssistantMessage>,
+    pub context: AssistantContext,
+    pub agent: String,
+    pub workspace: String,
+    #[serde(rename = "persistUserMessage")]
+    pub persist_user_message: bool,
+}
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AssistantAskResponse {
+    pub answer: String,
+    pub status: String,
+    pub usage: AssistantUsage,
+    pub error: Option<String>,
+}
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AssistantCancelRequest {
+    #[serde(rename = "conversationId")]
+    pub conversation_id: String,
+}
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AssistantCancelResponse {
+    pub cancelled: bool,
+}
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AssistantStreamEvent {
+    #[serde(rename = "conversationId")]
+    pub conversation_id: String,
+    #[serde(rename = "requestId")]
+    pub request_id: String,
+    pub kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AppSettings {
     pub appearance: String,
@@ -1617,6 +1802,28 @@ pub struct HookRecord {
 }
 pub type HookRecordList = Vec<HookRecord>;
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct McpIcon {
+    pub src: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mime_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sizes: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub theme: Option<String>,
+}
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct McpTool {
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub input_schema: Option<JsonValue>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub icons: Option<Vec<McpIcon>>,
+}
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct McpServerRecord {
     pub agent: AgentKind,
     pub name: String,
@@ -1627,9 +1834,29 @@ pub struct McpServerRecord {
     pub path: String,
     pub trust_hash: String,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub probe_cache_version: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub probe_state: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub server_path: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub read_only_reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub server_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub server_title: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub server_version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub server_description: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub server_website_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub probe_error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub icons: Option<Vec<McpIcon>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tools: Option<Vec<McpTool>>,
 }
 pub type McpServerRecordList = Vec<McpServerRecord>;
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1814,6 +2041,15 @@ pub struct SkillsUpdatesEvent {
     pub status: String,
     pub skills: Option<Vec<SkillRecord>>,
     pub updates: Vec<SkillUpdateReport>,
+    pub error: Option<String>,
+}
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SkillsChangedEvent {
+    pub paths: Vec<String>,
+}
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ProjectionChangedEvent {
+    pub domain: String,
     pub error: Option<String>,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -2159,14 +2395,16 @@ fn validate_json_schema(
             ));
         }
     }
-    if let Some(minimum) = schema.get("minimum").and_then(JsonValue::as_f64) {
-        if value.as_f64().is_none_or(|actual| actual < minimum) {
-            return Err(format!("{path} is below minimum {minimum}"));
+    if let Some(actual) = value.as_f64() {
+        if let Some(minimum) = schema.get("minimum").and_then(JsonValue::as_f64) {
+            if actual < minimum {
+                return Err(format!("{path} is below minimum {minimum}"));
+            }
         }
-    }
-    if let Some(maximum) = schema.get("maximum").and_then(JsonValue::as_f64) {
-        if value.as_f64().is_none_or(|actual| actual > maximum) {
-            return Err(format!("{path} exceeds maximum {maximum}"));
+        if let Some(maximum) = schema.get("maximum").and_then(JsonValue::as_f64) {
+            if actual > maximum {
+                return Err(format!("{path} exceeds maximum {maximum}"));
+            }
         }
     }
     if let Some(min_length) = schema.get("minLength").and_then(JsonValue::as_u64) {
@@ -2260,6 +2498,7 @@ pub type SkillsRefreshRequest = EmptyRequest;
 pub type SkillsRefreshResponse = SkillRefreshResponse;
 pub type SessionsSnapshotRequest = EmptyRequest;
 pub type SessionsSnapshotResponse = SessionSnapshot;
+
 pub type SessionsScanStartRequest = EmptyRequest;
 pub type SessionsScanStartResponse = SessionScanStartResponse;
 pub type SessionsSearchResponse = SessionSearchHitList;
@@ -2275,6 +2514,9 @@ pub type SettingsGetRequest = EmptyRequest;
 pub type SettingsGetResponse = AppSettings;
 pub type SettingsSaveRequest = AppSettings;
 pub type SettingsSaveResponse = AppSettings;
+
+pub type AssistantChatSessionsRequest = EmptyRequest;
+pub type AssistantChatSessionsResponse = AssistantChatSessionList;
 pub type SessionProjectsListRequest = EmptyRequest;
 pub type SessionProjectsListResponse = SessionProjectSummaryList;
 pub type ProjectScanScopesListRequest = EmptyRequest;
@@ -2311,6 +2553,7 @@ pub type HookReviewResponse = HookMutationDelta;
 pub type HookSourceReadResponse = HookSourceContentResponse;
 pub type McpListRequest = EmptyRequest;
 pub type McpListResponse = McpServerRecordList;
+pub type McpProbeResponse = McpMutationResponse;
 pub type McpSetEnabledResponse = McpMutationResponse;
 pub type McpSetEnabledManyResponse = McpMutationResponse;
 pub type PromptsListRequest = EmptyRequest;
@@ -2382,6 +2625,8 @@ pub enum CommandRequest {
     SkillsRefresh(SkillsRefreshRequest),
     #[serde(rename = "sessions_snapshot")]
     SessionsSnapshot(SessionsSnapshotRequest),
+    #[serde(rename = "sessions_list")]
+    SessionsList(SessionsListRequest),
     #[serde(rename = "sessions_scan_start")]
     SessionsScanStart(SessionsScanStartRequest),
     #[serde(rename = "sessions_search")]
@@ -2402,6 +2647,12 @@ pub enum CommandRequest {
     SettingsGet(SettingsGetRequest),
     #[serde(rename = "settings_save")]
     SettingsSave(SettingsSaveRequest),
+    #[serde(rename = "assistant_ask")]
+    AssistantAsk(AssistantAskRequest),
+    #[serde(rename = "assistant_cancel")]
+    AssistantCancel(AssistantCancelRequest),
+    #[serde(rename = "assistant_chat_sessions")]
+    AssistantChatSessions(AssistantChatSessionsRequest),
     #[serde(rename = "session_projects_list")]
     SessionProjectsList(SessionProjectsListRequest),
     #[serde(rename = "project_scan_scopes_list")]
@@ -2452,6 +2703,8 @@ pub enum CommandRequest {
     HookSourceRead(HookSourceReadRequest),
     #[serde(rename = "mcp_list")]
     McpList(McpListRequest),
+    #[serde(rename = "mcp_probe")]
+    McpProbe(McpProbeRequest),
     #[serde(rename = "mcp_set_enabled")]
     McpSetEnabled(McpSetEnabledRequest),
     #[serde(rename = "mcp_set_enabled_many")]
@@ -2576,6 +2829,8 @@ pub enum CommandResult {
     SkillsRefresh(SkillsRefreshResponse),
     #[serde(rename = "sessions_snapshot")]
     SessionsSnapshot(SessionsSnapshotResponse),
+    #[serde(rename = "sessions_list")]
+    SessionsList(SessionsListResponse),
     #[serde(rename = "sessions_scan_start")]
     SessionsScanStart(SessionsScanStartResponse),
     #[serde(rename = "sessions_search")]
@@ -2596,6 +2851,12 @@ pub enum CommandResult {
     SettingsGet(SettingsGetResponse),
     #[serde(rename = "settings_save")]
     SettingsSave(SettingsSaveResponse),
+    #[serde(rename = "assistant_ask")]
+    AssistantAsk(AssistantAskResponse),
+    #[serde(rename = "assistant_cancel")]
+    AssistantCancel(AssistantCancelResponse),
+    #[serde(rename = "assistant_chat_sessions")]
+    AssistantChatSessions(AssistantChatSessionsResponse),
     #[serde(rename = "session_projects_list")]
     SessionProjectsList(SessionProjectsListResponse),
     #[serde(rename = "project_scan_scopes_list")]
@@ -2646,6 +2907,8 @@ pub enum CommandResult {
     HookSourceRead(HookSourceReadResponse),
     #[serde(rename = "mcp_list")]
     McpList(McpListResponse),
+    #[serde(rename = "mcp_probe")]
+    McpProbe(McpProbeResponse),
     #[serde(rename = "mcp_set_enabled")]
     McpSetEnabled(McpSetEnabledResponse),
     #[serde(rename = "mcp_set_enabled_many")]
@@ -2760,6 +3023,7 @@ pub enum CommandName {
     SkillsList,
     SkillsRefresh,
     SessionsSnapshot,
+    SessionsList,
     SessionsScanStart,
     SessionsSearch,
     AnalyticsOverview,
@@ -2770,6 +3034,9 @@ pub enum CommandName {
     SkillSessionLinks,
     SettingsGet,
     SettingsSave,
+    AssistantAsk,
+    AssistantCancel,
+    AssistantChatSessions,
     SessionProjectsList,
     ProjectScanScopesList,
     ProjectScanScopesSave,
@@ -2795,6 +3062,7 @@ pub enum CommandName {
     HookReview,
     HookSourceRead,
     McpList,
+    McpProbe,
     McpSetEnabled,
     McpSetEnabledMany,
     PromptsList,
@@ -2859,6 +3127,7 @@ impl CommandName {
             "skills_list" => Some(Self::SkillsList),
             "skills_refresh" => Some(Self::SkillsRefresh),
             "sessions_snapshot" => Some(Self::SessionsSnapshot),
+            "sessions_list" => Some(Self::SessionsList),
             "sessions_scan_start" => Some(Self::SessionsScanStart),
             "sessions_search" => Some(Self::SessionsSearch),
             "analytics_overview" => Some(Self::AnalyticsOverview),
@@ -2869,6 +3138,9 @@ impl CommandName {
             "skill_session_links" => Some(Self::SkillSessionLinks),
             "settings_get" => Some(Self::SettingsGet),
             "settings_save" => Some(Self::SettingsSave),
+            "assistant_ask" => Some(Self::AssistantAsk),
+            "assistant_cancel" => Some(Self::AssistantCancel),
+            "assistant_chat_sessions" => Some(Self::AssistantChatSessions),
             "session_projects_list" => Some(Self::SessionProjectsList),
             "project_scan_scopes_list" => Some(Self::ProjectScanScopesList),
             "project_scan_scopes_save" => Some(Self::ProjectScanScopesSave),
@@ -2894,6 +3166,7 @@ impl CommandName {
             "hook_review" => Some(Self::HookReview),
             "hook_source_read" => Some(Self::HookSourceRead),
             "mcp_list" => Some(Self::McpList),
+            "mcp_probe" => Some(Self::McpProbe),
             "mcp_set_enabled" => Some(Self::McpSetEnabled),
             "mcp_set_enabled_many" => Some(Self::McpSetEnabledMany),
             "prompts_list" => Some(Self::PromptsList),
@@ -2959,6 +3232,7 @@ impl CommandName {
             Self::SkillsList => "skills_list",
             Self::SkillsRefresh => "skills_refresh",
             Self::SessionsSnapshot => "sessions_snapshot",
+            Self::SessionsList => "sessions_list",
             Self::SessionsScanStart => "sessions_scan_start",
             Self::SessionsSearch => "sessions_search",
             Self::AnalyticsOverview => "analytics_overview",
@@ -2969,6 +3243,9 @@ impl CommandName {
             Self::SkillSessionLinks => "skill_session_links",
             Self::SettingsGet => "settings_get",
             Self::SettingsSave => "settings_save",
+            Self::AssistantAsk => "assistant_ask",
+            Self::AssistantCancel => "assistant_cancel",
+            Self::AssistantChatSessions => "assistant_chat_sessions",
             Self::SessionProjectsList => "session_projects_list",
             Self::ProjectScanScopesList => "project_scan_scopes_list",
             Self::ProjectScanScopesSave => "project_scan_scopes_save",
@@ -2994,6 +3271,7 @@ impl CommandName {
             Self::HookReview => "hook_review",
             Self::HookSourceRead => "hook_source_read",
             Self::McpList => "mcp_list",
+            Self::McpProbe => "mcp_probe",
             Self::McpSetEnabled => "mcp_set_enabled",
             Self::McpSetEnabledMany => "mcp_set_enabled_many",
             Self::PromptsList => "prompts_list",
@@ -3063,7 +3341,7 @@ pub fn command_metadata(name: &str) -> Option<CommandMetadata> {
             name: "agents_list",
             owner: Owner::Daemon,
             execution: Execution::Read,
-            serialized_write: true,
+            serialized_write: false,
             requires_params: false,
             internal: false,
             deprecated: false,
@@ -3108,7 +3386,7 @@ pub fn command_metadata(name: &str) -> Option<CommandMetadata> {
             name: "skills_list",
             owner: Owner::Daemon,
             execution: Execution::Read,
-            serialized_write: true,
+            serialized_write: false,
             requires_params: false,
             internal: false,
             deprecated: false,
@@ -3128,6 +3406,15 @@ pub fn command_metadata(name: &str) -> Option<CommandMetadata> {
             execution: Execution::Read,
             serialized_write: false,
             requires_params: false,
+            internal: false,
+            deprecated: false,
+        }),
+        "sessions_list" => Some(CommandMetadata {
+            name: "sessions_list",
+            owner: Owner::Daemon,
+            execution: Execution::Read,
+            serialized_write: false,
+            requires_params: true,
             internal: false,
             deprecated: false,
         }),
@@ -3218,6 +3505,33 @@ pub fn command_metadata(name: &str) -> Option<CommandMetadata> {
             execution: Execution::Write,
             serialized_write: true,
             requires_params: true,
+            internal: false,
+            deprecated: false,
+        }),
+        "assistant_ask" => Some(CommandMetadata {
+            name: "assistant_ask",
+            owner: Owner::Desktop,
+            execution: Execution::Write,
+            serialized_write: true,
+            requires_params: true,
+            internal: false,
+            deprecated: false,
+        }),
+        "assistant_cancel" => Some(CommandMetadata {
+            name: "assistant_cancel",
+            owner: Owner::Desktop,
+            execution: Execution::Write,
+            serialized_write: true,
+            requires_params: true,
+            internal: false,
+            deprecated: false,
+        }),
+        "assistant_chat_sessions" => Some(CommandMetadata {
+            name: "assistant_chat_sessions",
+            owner: Owner::Desktop,
+            execution: Execution::Read,
+            serialized_write: false,
+            requires_params: false,
             internal: false,
             deprecated: false,
         }),
@@ -3342,7 +3656,7 @@ pub fn command_metadata(name: &str) -> Option<CommandMetadata> {
             name: "rules_list",
             owner: Owner::Daemon,
             execution: Execution::Read,
-            serialized_write: true,
+            serialized_write: false,
             requires_params: false,
             internal: false,
             deprecated: false,
@@ -3378,7 +3692,7 @@ pub fn command_metadata(name: &str) -> Option<CommandMetadata> {
             name: "hooks_list",
             owner: Owner::Daemon,
             execution: Execution::Read,
-            serialized_write: true,
+            serialized_write: false,
             requires_params: false,
             internal: false,
             deprecated: false,
@@ -3441,8 +3755,17 @@ pub fn command_metadata(name: &str) -> Option<CommandMetadata> {
             name: "mcp_list",
             owner: Owner::Daemon,
             execution: Execution::Read,
-            serialized_write: true,
+            serialized_write: false,
             requires_params: false,
+            internal: false,
+            deprecated: false,
+        }),
+        "mcp_probe" => Some(CommandMetadata {
+            name: "mcp_probe",
+            owner: Owner::Daemon,
+            execution: Execution::Write,
+            serialized_write: true,
+            requires_params: true,
             internal: false,
             deprecated: false,
         }),
@@ -3949,6 +4272,10 @@ pub fn validate_request(name: &str, args: &Value) -> Result<(), String> {
             serde_json::from_value::<BundledSkillInstallRequest>(args.clone())
                 .map_err(|error| format!("request is invalid: {error}"))?;
         }
+        "sessions_list" => {
+            serde_json::from_value::<SessionsListRequest>(args.clone())
+                .map_err(|error| format!("request is invalid: {error}"))?;
+        }
         "sessions_search" => {
             serde_json::from_value::<SessionsSearchRequest>(args.clone())
                 .map_err(|error| format!("request is invalid: {error}"))?;
@@ -3971,6 +4298,14 @@ pub fn validate_request(name: &str, args: &Value) -> Result<(), String> {
         }
         "settings_save" => {
             serde_json::from_value::<AppSettings>(args.clone())
+                .map_err(|error| format!("request is invalid: {error}"))?;
+        }
+        "assistant_ask" => {
+            serde_json::from_value::<AssistantAskRequest>(args.clone())
+                .map_err(|error| format!("request is invalid: {error}"))?;
+        }
+        "assistant_cancel" => {
+            serde_json::from_value::<AssistantCancelRequest>(args.clone())
                 .map_err(|error| format!("request is invalid: {error}"))?;
         }
         "project_scan_scopes_save" => {
@@ -4035,6 +4370,10 @@ pub fn validate_request(name: &str, args: &Value) -> Result<(), String> {
         }
         "hook_source_read" => {
             serde_json::from_value::<HookSourceReadRequest>(args.clone())
+                .map_err(|error| format!("request is invalid: {error}"))?;
+        }
+        "mcp_probe" => {
+            serde_json::from_value::<McpProbeRequest>(args.clone())
                 .map_err(|error| format!("request is invalid: {error}"))?;
         }
         "mcp_set_enabled" => {
@@ -4200,16 +4539,22 @@ pub enum EventName {
     AnalyticsProgress,
     AnalyticsRevision,
     SkillsUpdates,
+    SkillsChanged,
+    ProjectionChanged,
     ConfigChanged,
     TendiUpdateAvailable,
+    AssistantStream,
 }
 pub enum RuntimeEventPayload {
     SessionsScan(SessionScanEvent),
     AnalyticsProgress(AnalyticsProgressEvent),
     AnalyticsRevision(AnalyticsRevisionEvent),
     SkillsUpdates(SkillsUpdatesEvent),
+    SkillsChanged(SkillsChangedEvent),
+    ProjectionChanged(ProjectionChangedEvent),
     ConfigChanged(ConfigChangedEvent),
     TendiUpdateAvailable(UpdateCheckResult),
+    AssistantStream(AssistantStreamEvent),
 }
 impl RuntimeEventPayload {
     pub const fn event_name(&self) -> &'static str {
@@ -4218,8 +4563,11 @@ impl RuntimeEventPayload {
             Self::AnalyticsProgress(_) => "analytics://progress",
             Self::AnalyticsRevision(_) => "analytics://revision",
             Self::SkillsUpdates(_) => "skills://updates",
+            Self::SkillsChanged(_) => "skills://changed",
+            Self::ProjectionChanged(_) => "projection://changed",
             Self::ConfigChanged(_) => "config://changed",
             Self::TendiUpdateAvailable(_) => "tendi://update-available",
+            Self::AssistantStream(_) => "assistant://stream",
         }
     }
     pub fn into_json(self) -> JsonValue {
@@ -4236,10 +4584,19 @@ impl RuntimeEventPayload {
             Self::SkillsUpdates(payload) => {
                 serde_json::to_value(payload).expect("generated event payload serializes")
             }
+            Self::SkillsChanged(payload) => {
+                serde_json::to_value(payload).expect("generated event payload serializes")
+            }
+            Self::ProjectionChanged(payload) => {
+                serde_json::to_value(payload).expect("generated event payload serializes")
+            }
             Self::ConfigChanged(payload) => {
                 serde_json::to_value(payload).expect("generated event payload serializes")
             }
             Self::TendiUpdateAvailable(payload) => {
+                serde_json::to_value(payload).expect("generated event payload serializes")
+            }
+            Self::AssistantStream(payload) => {
                 serde_json::to_value(payload).expect("generated event payload serializes")
             }
         }
@@ -4252,8 +4609,11 @@ impl EventName {
             "analytics://progress" => Some(Self::AnalyticsProgress),
             "analytics://revision" => Some(Self::AnalyticsRevision),
             "skills://updates" => Some(Self::SkillsUpdates),
+            "skills://changed" => Some(Self::SkillsChanged),
+            "projection://changed" => Some(Self::ProjectionChanged),
             "config://changed" => Some(Self::ConfigChanged),
             "tendi://update-available" => Some(Self::TendiUpdateAvailable),
+            "assistant://stream" => Some(Self::AssistantStream),
             _ => None,
         }
     }
@@ -4263,8 +4623,11 @@ impl EventName {
             Self::AnalyticsProgress => "analytics://progress",
             Self::AnalyticsRevision => "analytics://revision",
             Self::SkillsUpdates => "skills://updates",
+            Self::SkillsChanged => "skills://changed",
+            Self::ProjectionChanged => "projection://changed",
             Self::ConfigChanged => "config://changed",
             Self::TendiUpdateAvailable => "tendi://update-available",
+            Self::AssistantStream => "assistant://stream",
         }
     }
 }
@@ -4303,6 +4666,11 @@ pub fn validate_result(name: &str, value: &Value) -> Result<(), String> {
         }
         "skills_refresh" => {
             serde_json::from_value::<SkillRefreshResponse>(value.clone())
+                .map_err(|error| format!("result is invalid: {error}"))?;
+            Ok(())
+        }
+        "sessions_list" => {
+            serde_json::from_value::<SessionsListResponse>(value.clone())
                 .map_err(|error| format!("result is invalid: {error}"))?;
             Ok(())
         }
@@ -4353,6 +4721,21 @@ pub fn validate_result(name: &str, value: &Value) -> Result<(), String> {
         }
         "settings_save" => {
             serde_json::from_value::<AppSettings>(value.clone())
+                .map_err(|error| format!("result is invalid: {error}"))?;
+            Ok(())
+        }
+        "assistant_ask" => {
+            serde_json::from_value::<AssistantAskResponse>(value.clone())
+                .map_err(|error| format!("result is invalid: {error}"))?;
+            Ok(())
+        }
+        "assistant_cancel" => {
+            serde_json::from_value::<AssistantCancelResponse>(value.clone())
+                .map_err(|error| format!("result is invalid: {error}"))?;
+            Ok(())
+        }
+        "assistant_chat_sessions" => {
+            serde_json::from_value::<AssistantChatSessionList>(value.clone())
                 .map_err(|error| format!("result is invalid: {error}"))?;
             Ok(())
         }
@@ -4478,6 +4861,11 @@ pub fn validate_result(name: &str, value: &Value) -> Result<(), String> {
         }
         "mcp_list" => {
             serde_json::from_value::<McpServerRecordList>(value.clone())
+                .map_err(|error| format!("result is invalid: {error}"))?;
+            Ok(())
+        }
+        "mcp_probe" => {
+            serde_json::from_value::<McpMutationResponse>(value.clone())
                 .map_err(|error| format!("result is invalid: {error}"))?;
             Ok(())
         }
@@ -4784,12 +5172,24 @@ pub fn validate_event(event: &RuntimeEventEnvelope) -> Result<(), String> {
             serde_json::from_value::<SkillsUpdatesEvent>(Value::Object(event.payload.clone()))
                 .map_err(|error| format!("event payload is invalid: {error}"))?;
         }
+        "skills://changed" => {
+            serde_json::from_value::<SkillsChangedEvent>(Value::Object(event.payload.clone()))
+                .map_err(|error| format!("event payload is invalid: {error}"))?;
+        }
+        "projection://changed" => {
+            serde_json::from_value::<ProjectionChangedEvent>(Value::Object(event.payload.clone()))
+                .map_err(|error| format!("event payload is invalid: {error}"))?;
+        }
         "config://changed" => {
             serde_json::from_value::<ConfigChangedEvent>(Value::Object(event.payload.clone()))
                 .map_err(|error| format!("event payload is invalid: {error}"))?;
         }
         "tendi://update-available" => {
             serde_json::from_value::<UpdateCheckResult>(Value::Object(event.payload.clone()))
+                .map_err(|error| format!("event payload is invalid: {error}"))?;
+        }
+        "assistant://stream" => {
+            serde_json::from_value::<AssistantStreamEvent>(Value::Object(event.payload.clone()))
                 .map_err(|error| format!("event payload is invalid: {error}"))?;
         }
         _ => {}

@@ -13,6 +13,7 @@ import type { RuntimeData } from "../src/lib/data.ts";
 
 function rawSkill(trackingStatus = "checkable"): Record<string, unknown> {
   return {
+    id: "demo@shared:user:-:local",
     name: "demo",
     agents: ["shared"],
     tags: [],
@@ -47,6 +48,13 @@ test("normalize separates tracking status from remote update availability", () =
   assert.equal(skill.updateAvailability, "unknown");
   assert.equal("updateStatus" in skill, false);
   assert.equal("meta" in skill, false);
+});
+
+test("normalize rejects skills without a canonical id", () => {
+  const skill = rawSkill();
+  delete skill.id;
+
+  assert.equal(normalizeSkill(skill), undefined);
 });
 
 test("remote update reports only change update availability", () => {

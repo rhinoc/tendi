@@ -1,7 +1,10 @@
 import { ColumnDataType, type ColumnDef } from "../components/DataTable.types";
 import { AgentBadge } from "../components/shared/AgentBadge.tsx";
 import { AgentChips } from "../components/shared/AgentChips.tsx";
-import { basename, friendlyAgent, titleValue } from "./index.ts";
+import { Badge } from "../components/shared/Badge.tsx";
+import { McpServerIcon } from "../components/shared/McpServerIcon.tsx";
+import { Tooltip } from "../components/shared/Tooltip.tsx";
+import { basename, EMPTY_DISPLAY_VALUE, friendlyAgent, mcpDisplayName, mcpNeedsLogin, scopeNameForValue } from "./index.ts";
 import type { McpRecord, RuleRecord } from "./index.ts";
 
 type AgentRow = { agent?: string | null };
@@ -53,14 +56,45 @@ export const ruleColumns: ColumnDef<RuleRow>[] = [
 type McpRow = McpRecord;
 
 export const mcpColumns: ColumnDef<McpRow>[] = [
-  { ...agentColumn, sticky: true, width: "var(--data-freeze-column-width, 96px)" },
   {
     key: "name",
-    header: "Name",
-    label: "Name",
+    header: "MCP server",
+    label: "MCP server",
     type: ColumnDataType.Text,
-    width: "150px",
+    width: "var(--data-freeze-column-width, 220px)",
+    sticky: true,
     sortValue: (row) => row.name.toLowerCase(),
+    title: (row) => row.server_description?.trim() || undefined,
+    render: (row) => {
+      const title = mcpDisplayName(row);
+      return (
+        <Tooltip content={row.server_description?.trim() || undefined} onlyWhenTruncated>
+          <span className="mcpNameCell">
+            <McpServerIcon icons={row.icons} />
+            <span className="mcpNameCopy">
+              <span className="dataCellTitleLine">
+                <span className="dataCellTitle">{title}</span>
+                {mcpNeedsLogin(row.status) ? <Badge tone="warning">Need login</Badge> : null}
+              </span>
+              <span className="dataCellSubLine">
+                <span className="dataCellSub">{row.server_description?.trim() || EMPTY_DISPLAY_VALUE}</span>
+              </span>
+            </span>
+          </span>
+        </Tooltip>
+      );
+    },
+  },
+  { ...agentColumn },
+  {
+    key: "tools",
+    header: "Tools",
+    label: "Tools",
+    type: ColumnDataType.Text,
+    width: "72px",
+    sortValue: (row) => row.tools.length,
+    value: (row) => row.probe_state === "ready" || row.probe_state === "ready-empty" ? row.tools.length : EMPTY_DISPLAY_VALUE,
+    title: (row) => row.probe_error || undefined,
   },
   {
     key: "scope",
@@ -68,7 +102,9 @@ export const mcpColumns: ColumnDef<McpRow>[] = [
     label: "Scope",
     type: ColumnDataType.Enum,
     width: "180px",
-    sortValue: (row) => row.scope.toLowerCase(),
+    sortValue: (row) => scopeNameForValue(row.scope).toLowerCase(),
+    groupBy: (row) => scopeNameForValue(row.scope),
+    value: (row) => scopeNameForValue(row.scope),
   },
   {
     key: "transport",
@@ -77,23 +113,5 @@ export const mcpColumns: ColumnDef<McpRow>[] = [
     type: ColumnDataType.Enum,
     width: "120px",
     sortValue: (row) => row.transport.toLowerCase(),
-  },
-  {
-    key: "status",
-    header: "Status",
-    label: "Status",
-    type: ColumnDataType.Enum,
-    width: "100px",
-    sortValue: (row) => titleValue(row.status).toLowerCase(),
-    value: (row) => titleValue(row.status),
-  },
-  {
-    key: "source",
-    header: "Source",
-    label: "Source",
-    type: ColumnDataType.Text,
-    width: "minmax(0, 1fr)",
-    sortValue: (row) => basename(row.path).toLowerCase(),
-    value: (row) => basename(row.path),
   },
 ];

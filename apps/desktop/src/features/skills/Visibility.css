@@ -1,16 +1,9 @@
-.selectControlTrigger.visibility {
+.segmentedControl.visibility {
   width: 100%;
   min-width: 0;
-  background: transparent;
 }
 
-.selectControlTrigger.visibility > svg {
-  opacity: 0;
-  transition: opacity 140ms ease-out;
-}
-
-.selectControlTrigger.visibility:hover > svg,
-.selectControlTrigger.visibility:focus-visible > svg,
-.selectControlTrigger.visibility[data-state="open"] > svg {
-  opacity: 1;
+.segmentedControl.visibility .segmentedControlItem {
+  min-width: 0;
+  padding-inline: 6px;
 }

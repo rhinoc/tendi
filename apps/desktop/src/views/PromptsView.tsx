@@ -33,10 +33,11 @@ import { SearchField } from "../components/shared/SearchField.tsx";
 import { Tooltip } from "../components/shared/Tooltip.tsx";
 import { Toast } from "../components/shared/Toast.tsx";
 import { AsyncStatus } from "../lib/async-status.ts";
+import { useTabState } from "../lib/tab-state.ts";
 import { DataTable } from "../components/DataTable.tsx";
 import { ColumnDataType, type ColumnDef } from "../components/DataTable.types";
 import type { DataTableMenuComponents } from "../components/shared/DataTableMenus.tsx";
-import { actionLabels, copiedValueLabel, copyValueLabel, promptActionLabels, selectionCopiedLabel, selectionCopyLabel, selectionDeleteLabel, TableSelectionActionId, compactDateTime, normalizePromptTags, promptPreview, promptSelectionActionIds, promptTagsLabel, suppressNextClick, type PromptRecord } from "../lib/index.ts";
+import { actionLabels, copiedValueLabel, copyValueLabel, promptActionLabels, promptDisplayName, selectionCopiedLabel, selectionCopyLabel, selectionDeleteLabel, TableSelectionActionId, compactDateTime, normalizePromptTags, promptPreview, promptSelectionActionIds, promptTagsLabel, suppressNextClick, type PromptRecord } from "../lib/index.ts";
 import { deletePrompts, savePrompt as savePromptCommand } from "../lib/runtime-gateway.ts";
 import type { RawDomainRow } from "../controllers/controller-types.ts";
 
@@ -212,23 +213,35 @@ type PromptsViewProps = {
   onRefreshPrompts: () => void | Promise<void>;
   onPromptSaved?: (prompt: RawDomainRow) => void;
   onPromptsDeleted?: (ids: string[]) => void;
+  locatePromptId?: string;
+  onLocatePromptComplete?: (id: string) => void;
 };
 
-export function PromptsView({ prompts, loadingPrompts = false, loadError = "", hasRows = false, onRefreshPrompts, onPromptSaved, onPromptsDeleted }: PromptsViewProps) {
+export function PromptsView({ prompts, loadingPrompts = false, loadError = "", hasRows = false, onRefreshPrompts, onPromptSaved, onPromptsDeleted, locatePromptId, onLocatePromptComplete }: PromptsViewProps) {
   const [selected, setSelected] = useState<string[]>([]);
-  const [query, setQuery] = useState("");
+  const [query, setQuery] = useTabState("prompts.query", "");
   const [editingPrompt, setEditingPrompt] = useState<PromptRecord | null>(null);
   const [dialogOpen, setDialogOpen] = useState(false);
   const [saving, setSaving] = useState(false);
   const [dialogError, setDialogError] = useState("");
   const [deletingPromptIds, setDeletingPromptIds] = useState<string[]>([]);
   const [pendingDeleteIds, setPendingDeleteIds] = useState<string[]>([]);
+  const [promptLocatorRequest, setPromptLocatorRequest] = useState("");
   const normalizedQuery = query.trim().toLowerCase();
   const visiblePrompts = useMemo(() => {
     if (!normalizedQuery) return prompts;
     return prompts.filter((prompt) => [prompt.title, promptTagsLabel(prompt), prompt.body]
       .some((value) => value.toLowerCase().includes(normalizedQuery)));
   }, [normalizedQuery, prompts]);
+  useEffect(() => {
+    if (!locatePromptId) return;
+    setQuery("");
+    setPromptLocatorRequest(locatePromptId);
+  }, [locatePromptId]);
+  const completePromptLocator = useCallback((id: string) => {
+    setPromptLocatorRequest((current) => current === id ? "" : current);
+    onLocatePromptComplete?.(id);
+  }, [onLocatePromptComplete]);
   useEffect(() => {
     setSelected((current) => current.filter((id) => prompts.some((prompt) => prompt.id === id)));
   }, [prompts]);
@@ -304,13 +317,13 @@ export function PromptsView({ prompts, loadingPrompts = false, loadError = "", h
       [TableSelectionActionId.Copy]: {
         id: TableSelectionActionId.Copy,
         direct: <CopyButton copyLabel={copyLabel} copiedLabel={copiedLabel} iconSize={15} onCopy={() => copyPrompts(selectedRows)}>{actionLabels.copy}</CopyButton>,
-        menu: <Menu.Item className="skillMenuItem" onSelect={() => { void copyPrompts(selectedRows); }}><Copy size={14} />{copyLabel}</Menu.Item>,
+        menu: <Menu.Item className="menuItem" onSelect={() => { void copyPrompts(selectedRows); }}><Copy size={14} />{copyLabel}</Menu.Item>,
         measure: <><Copy size={15} /><span>{actionLabels.copy}</span></>,
       },
       [TableSelectionActionId.Edit]: {
         id: TableSelectionActionId.Edit,
         direct: <Button size="sm" variant="ghost" aria-label="Edit prompt" onClick={() => prompt && openEditPrompt(prompt)}><Pencil size={15} /><span>Edit</span></Button>,
-        menu: <Menu.Item className="skillMenuItem" disabled={!prompt} onSelect={() => prompt && openEditPrompt(prompt)}><Pencil size={14} />Edit prompt</Menu.Item>,
+        menu: <Menu.Item className="menuItem" disabled={!prompt} onSelect={() => prompt && openEditPrompt(prompt)}><Pencil size={14} />Edit prompt</Menu.Item>,
         measure: <><Pencil size={15} /><span>Edit</span></>,
       },
       [TableSelectionActionId.Delete]: {
@@ -332,7 +345,7 @@ export function PromptsView({ prompts, loadingPrompts = false, loadError = "", h
       width: "minmax(300px, 1fr)",
       render: (prompt) => (
         <>
-          <Tooltip content={prompt.title} onlyWhenTruncated><span className="dataCellTitle">{prompt.title}</span></Tooltip>
+          <Tooltip content={promptDisplayName(prompt)} onlyWhenTruncated><span className="dataCellTitle">{promptDisplayName(prompt)}</span></Tooltip>
           <span className="dataCellSubLine">
             <Tooltip content={prompt.body} onlyWhenTruncated><span className="dataCellSub">{promptPreview(prompt)}</span></Tooltip>
           </span>
@@ -364,20 +377,20 @@ export function PromptsView({ prompts, loadingPrompts = false, loadError = "", h
     {
       key: "actions",
       header: "",
-      width: "72px",
+      width: "76px",
       render: (prompt) => {
         return (
           <div className="rowActions">
             <CopyButton
-              className="appButton appButton-icon"
-              copyLabel={copyValueLabel(prompt.title)}
+              iconOnly
+              copyLabel={copyValueLabel(promptDisplayName(prompt))}
               copiedLabel={copiedValueLabel("prompt")}
               iconSize={15}
               stopPropagation
               onCopy={() => copyPrompts([prompt])}
             />
             <RowActionsMenu
-              ariaLabel={`Prompt actions for ${prompt.title}`}
+              ariaLabel={`Prompt actions for ${promptDisplayName(prompt)}`}
               onOpenChange={(open) => { if (!open) suppressNextClick(); }}
             >
               {renderDataTableSelectionMenu(selectionActions([prompt], DropdownMenu))}
@@ -418,12 +431,16 @@ export function PromptsView({ prompts, loadingPrompts = false, loadError = "", h
         rows={visiblePrompts}
         columns={columns}
         getRowId={(prompt) => prompt.id}
-        getRowLabel={(prompt) => prompt.title}
+        getRowLabel={promptDisplayName}
         selectable
         selectedIds={selected}
         onSelectionChange={setSelected}
+        onDeleteSelected={requestDeletePrompts}
         enableMarquee
+        scrollRestorationKey="prompts.list"
         onRowClick={openEditPrompt}
+        scrollToRowId={promptLocatorRequest}
+        onScrollToRowComplete={completePromptLocator}
         rowContextMenu={rowContextMenu}
         bottomBar={bottomBar}
         bottomBarActionsClassName="selectionActions"

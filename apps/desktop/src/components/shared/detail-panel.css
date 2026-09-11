@@ -1,15 +1,13 @@
 /* Shared third-column chrome: DetailPanelHost, DetailPanel, DetailCollapsedRail */
 
-.transcriptPanelHost,
-.ruleEditorPanelHost,
-.hookDetailPanelHost {
+.detailPanelHost {
   min-width: 0;
   min-height: 0;
   display: flex;
   flex-direction: column;
 }
 
-.transcriptPanelHost.collapsed {
+.detailPanelHost.collapsed {
   flex: 0 0 48px;
 }
 
@@ -30,7 +28,8 @@
   place-items: center;
 }
 
-.ruleEditorPanel {
+.detailPanel,
+.configEditorPanel {
   flex: 1;
   min-width: 0;
   min-height: 0;
@@ -39,29 +38,34 @@
   background: var(--editor-bg);
 }
 
-.ruleEditorPanel .threadHeader {
+.detailPanel .threadHeader,
+.configEditorPanel .threadHeader {
+  position: relative;
+  z-index: var(--z-raised);
   flex: 0 0 auto;
   background: var(--content-bg);
 }
 
-.ruleEditorPanel .threadHeader:not(:has(.threadMeta)) .threadTitleLine {
+.detailPanel .threadHeader:not(:has(.threadMeta)) .threadTitleLine,
+.configEditorPanel .threadHeader:not(:has(.threadMeta)) .threadTitleLine {
   border-bottom: 0;
 }
 
-.ruleEditorPanel .threadTitleLine {
+.detailPanel .threadTitleLine,
+.configEditorPanel .threadTitleLine {
   padding-right: 12px;
 }
 
-.ruleEditorPanel .editorActions {
+.detailPanel--ruleEditor .editorActions {
   margin-left: auto;
   gap: 4px;
 }
 
-.ruleEditorPanel .codePane {
+.detailPanel--ruleEditor .codePane {
   flex: 1;
 }
 
-.ruleEditorContent {
+.detailPanel--ruleEditor .ruleEditorContent {
   position: relative;
   display: flex;
   flex: 1;
@@ -69,17 +73,17 @@
   min-height: 0;
 }
 
-.ruleEditorContent > .codePane {
+.detailPanel--ruleEditor .ruleEditorContent > .codePane {
   flex: 1;
 }
 
-.ruleEditorLoading {
+.detailPanel--ruleEditor .ruleEditorLoading {
   flex: 1;
   display: grid;
   place-items: center;
 }
 
-.ruleEditorStatusOverlay {
+.detailPanel--ruleEditor .ruleEditorStatusOverlay {
   position: absolute;
   inset: 0;
   z-index: 1;
@@ -135,18 +139,6 @@
   margin-left: 0;
 }
 
-.threadPanelToggle.sessionResumeButton.isSuccess,
-.threadPanelToggle.sessionResumeButton.isSuccess:hover {
-  color: var(--green);
-  background: var(--green-soft);
-}
-
-.threadPanelToggle.sessionResumeButton.isError,
-.threadPanelToggle.sessionResumeButton.isError:hover {
-  color: var(--danger);
-  background: var(--danger-soft);
-}
-
 .transcriptRail {
   width: 48px;
   min-width: 48px;
@@ -179,7 +171,7 @@
 }
 
 .threadMeta {
-  min-height: 36px;
+  min-height: var(--control-height-row);
   padding: 0 16px;
   display: flex;
   align-items: center;
@@ -202,6 +194,10 @@
   font-family: var(--font-mono);
   font-weight: 500;
   opacity: 0.54;
+}
+
+.threadMeta span.threadMessageCount {
+  font-family: inherit;
 }
 
 @media (max-width: 980px) {

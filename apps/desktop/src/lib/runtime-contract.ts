@@ -16,6 +16,10 @@ export function omitUndefinedProperties(value: unknown): unknown {
   return value;
 }
 
+export function tauriCommandArgs(request: unknown): Record<string, unknown> | undefined {
+  return request === undefined ? undefined : { request };
+}
+
 export function normalizeRuntimeSkillVisibility(value: string): RuntimeSkillVisibility {
   const normalized = value.trim().toLowerCase();
   if (normalized === "auto" || normalized === "manual" || normalized === "off" || normalized === "mixed") return normalized;

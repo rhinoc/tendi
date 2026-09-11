@@ -1,0 +1,330 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Liquid Edge Button Demo</title>
+    <link rel="icon" href="data:," />
+    <style>
+      :root {
+        color-scheme: light;
+        font-family:
+          Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI",
+          sans-serif;
+        color: #123344;
+        background: #72c9ed;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        min-width: 320px;
+        min-height: 100vh;
+        margin: 0;
+        overflow-x: hidden;
+        background:
+          radial-gradient(circle at 18% 12%, rgb(255 255 255 / 18%), transparent 28rem),
+          #72c9ed;
+      }
+
+      main {
+        width: min(720px, calc(100% - 48px));
+        margin: 0 auto;
+        padding: 72px 0 120px;
+      }
+
+      .eyebrow {
+        margin: 0 0 16px;
+        font-size: 12px;
+        font-weight: 760;
+        letter-spacing: 0.14em;
+        opacity: 0.62;
+        text-transform: uppercase;
+      }
+
+      h1 {
+        max-width: 610px;
+        margin: 0;
+        font-size: clamp(40px, 7vw, 72px);
+        font-weight: 650;
+        letter-spacing: -0.055em;
+        line-height: 0.98;
+      }
+
+      .lead {
+        max-width: 530px;
+        margin: 28px 0 0;
+        font-size: 17px;
+        line-height: 1.7;
+        opacity: 0.72;
+      }
+
+      .edge-launcher {
+        position: fixed;
+        z-index: 10;
+        top: 50%;
+        right: 0;
+        width: 260px;
+        height: 420px;
+        overflow: hidden;
+        transform: translateY(-50%);
+        pointer-events: none;
+      }
+
+      .liquid-svg {
+        display: block;
+        width: 100%;
+        height: 100%;
+        overflow: hidden;
+        pointer-events: none;
+      }
+
+      .liquid-shape {
+        fill: #1c1d1b;
+        filter: drop-shadow(0 14px 20px rgb(13 34 44 / 20%));
+      }
+
+      .button-icon {
+        color: #f4f6f2;
+        opacity: 0.38;
+      }
+
+      .interaction-zone {
+        position: absolute;
+        top: 130px;
+        right: 0;
+        width: 150px;
+        height: 160px;
+        padding: 0;
+        border: 0;
+        outline: none;
+        background: transparent;
+        cursor: pointer;
+        pointer-events: auto;
+      }
+
+      .interaction-zone:focus-visible {
+        border: 2px solid rgb(255 255 255 / 82%);
+        border-right: 0;
+        border-radius: 90px 0 0 90px;
+      }
+
+      .hint {
+        position: fixed;
+        right: 20px;
+        bottom: 20px;
+        margin: 0;
+        padding: 9px 12px;
+        border: 1px solid rgb(18 51 68 / 12%);
+        border-radius: 999px;
+        background: rgb(255 255 255 / 30%);
+        font-size: 12px;
+        backdrop-filter: blur(12px);
+      }
+
+      @media (max-width: 620px) {
+        main {
+          width: min(100% - 36px, 720px);
+          padding-top: 48px;
+        }
+
+        .edge-launcher {
+          transform: translateY(-50%) scale(0.84);
+          transform-origin: right center;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <p class="eyebrow">SVG path morph</p>
+      <h1>半圆贴边，黏连后再完整展开。</h1>
+      <p class="lead">
+        蓝色区域就是窗口。把鼠标移动到右侧按钮：窗口内的半圆先拉动上下两条黏连曲线，接近完整圆形时断开。
+      </p>
+    </main>
+
+    <aside class="edge-launcher" aria-label="液体贴边按钮演示">
+      <svg class="liquid-svg" viewBox="0 0 260 420" aria-hidden="true">
+        <path class="liquid-shape"></path>
+        <g class="button-icon" transform="translate(260 210)">
+          <path
+            d="M-10 -8.5C-15.5 -8.5 -20 -4.6 -20 .3C-20 3 -18.6 5.4 -16.4 7L-17.3 11.2L-13 9C-12.1 9.2 -11.1 9.4 -10 9.4C-4.5 9.4 0 5.5 0 .6C0 -4.3 -4.5 -8.5 -10 -8.5Z"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            stroke-linejoin="round"
+          />
+          <path
+            d="M-14.5 .2H-14.4M-10 .2H-9.9M-5.5 .2H-5.4"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2.5"
+            stroke-linecap="round"
+          />
+        </g>
+      </svg>
+
+      <button
+        class="interaction-zone"
+        type="button"
+        aria-label="展开贴边按钮"
+        aria-pressed="false"
+      ></button>
+    </aside>
+
+    <p class="hint">Hover 右侧半圆</p>
+
+    <script>
+      const SVG_WIDTH = 260;
+      const CENTER_Y = 210;
+      const RADIUS = 56;
+      const REST_X = 260;
+      const OPEN_X = 184;
+      const BREAK_AT = 0.76;
+      const DURATION = 760;
+
+      const launcher = document.querySelector(".edge-launcher");
+      const hitArea = document.querySelector(".interaction-zone");
+      const shape = document.querySelector(".liquid-shape");
+      const icon = document.querySelector(".button-icon");
+      const reduceMotion = matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+      let progress = 0;
+      let target = 0;
+      let pinned = false;
+      let animationFrame = 0;
+      let animationStart = 0;
+      let animationFrom = 0;
+
+      const clamp = (value, min, max) => Math.min(max, Math.max(min, value));
+      const mix = (from, to, amount) => from + (to - from) * amount;
+      const ease = (value) =>
+        value < 0.5
+          ? 4 * value * value * value
+          : 1 - Math.pow(-2 * value + 2, 3) / 2;
+
+      const pointOnCircle = (cx, angle) => {
+        const radians = (angle * Math.PI) / 180;
+        return {
+          x: cx + RADIUS * Math.cos(radians),
+          y: CENTER_Y + RADIUS * Math.sin(radians),
+        };
+      };
+
+      const arcTangent = (angle) => {
+        const radians = (angle * Math.PI) / 180;
+        return {
+          x: Math.sin(radians),
+          y: -Math.cos(radians),
+        };
+      };
+
+      const circlePath = (cx) => [
+        `M ${cx - RADIUS} ${CENTER_Y}`,
+        `A ${RADIUS} ${RADIUS} 0 1 0 ${cx + RADIUS} ${CENTER_Y}`,
+        `A ${RADIUS} ${RADIUS} 0 1 0 ${cx - RADIUS} ${CENTER_Y}`,
+        "Z",
+      ].join(" ");
+
+      const connectedPath = (cx, amount) => {
+        const local = clamp(amount / BREAK_AT, 0, 1);
+        const pinch = ease(Math.pow(local, 2.8));
+        const angle = mix(130, 6, pinch);
+        const edgeSpan = mix(94, 6, pinch);
+        const upper = pointOnCircle(cx, -angle);
+        const lower = pointOnCircle(cx, angle);
+        const upperTangent = arcTangent(-angle);
+        const lowerTangent = arcTangent(angle);
+        const edgeTop = CENTER_Y - edgeSpan;
+        const edgeBottom = CENTER_Y + edgeSpan;
+        const arcIsLarge = angle < 90 ? 1 : 0;
+        const circleHandle = mix(22, 4, pinch);
+        const edgeHandle = mix(34, 4, pinch);
+
+        return [
+          `M ${SVG_WIDTH} ${edgeTop}`,
+          `C ${SVG_WIDTH} ${edgeTop + edgeHandle}`,
+          `${upper.x - upperTangent.x * circleHandle} ${upper.y - upperTangent.y * circleHandle}`,
+          `${upper.x} ${upper.y}`,
+          `A ${RADIUS} ${RADIUS} 0 ${arcIsLarge} 0 ${lower.x} ${lower.y}`,
+          `C ${lower.x + lowerTangent.x * circleHandle} ${lower.y + lowerTangent.y * circleHandle}`,
+          `${SVG_WIDTH} ${edgeBottom - edgeHandle}`,
+          `${SVG_WIDTH} ${edgeBottom}`,
+          "Z",
+        ].join(" ");
+      };
+
+      const render = () => {
+        const cx = mix(REST_X, OPEN_X, ease(progress));
+        shape.setAttribute(
+          "d",
+          progress < BREAK_AT ? connectedPath(cx, progress) : circlePath(cx),
+        );
+
+        const iconX = cx;
+        const iconOpacity = mix(0.38, 1, clamp(progress / 0.72, 0, 1));
+        const iconRotation = mix(0, -8, ease(progress));
+        icon.setAttribute(
+          "transform",
+          `translate(${iconX + 10} ${CENTER_Y}) rotate(${iconRotation})`,
+        );
+        icon.style.opacity = iconOpacity;
+
+        launcher.dataset.phase =
+          progress === 0 ? "attached" : progress >= BREAK_AT ? "detached" : "stretching";
+      };
+
+      const animate = (timestamp) => {
+        if (!animationStart) animationStart = timestamp;
+        const distance = Math.abs(target - animationFrom);
+        const elapsed = timestamp - animationStart;
+        const time = clamp(elapsed / Math.max(DURATION * distance, 1), 0, 1);
+        progress = mix(animationFrom, target, ease(time));
+        render();
+
+        if (time < 1) {
+          animationFrame = requestAnimationFrame(animate);
+        } else {
+          progress = target;
+          animationFrame = 0;
+          render();
+        }
+      };
+
+      const setTarget = (nextTarget) => {
+        if (target === nextTarget && animationFrame) return;
+        target = nextTarget;
+        cancelAnimationFrame(animationFrame);
+
+        if (reduceMotion) {
+          progress = target;
+          render();
+          return;
+        }
+
+        animationFrom = progress;
+        animationStart = 0;
+        animationFrame = requestAnimationFrame(animate);
+      };
+
+      hitArea.addEventListener("pointerenter", () => setTarget(1));
+      hitArea.addEventListener("pointerleave", () => {
+        if (!pinned) setTarget(0);
+      });
+      hitArea.addEventListener("focus", () => setTarget(1));
+      hitArea.addEventListener("blur", () => {
+        if (!pinned) setTarget(0);
+      });
+      hitArea.addEventListener("click", () => {
+        pinned = !pinned;
+        hitArea.setAttribute("aria-pressed", String(pinned));
+        setTarget(pinned ? 1 : 0);
+      });
+
+      render();
+    </script>
+  </body>
+</html>

@@ -1,3 +1,4 @@
+use std::thread;
 use std::{
     fmt,
     sync::{
@@ -5,7 +6,6 @@ use std::{
         mpsc::{self, Receiver, SyncSender, TrySendError},
     },
 };
-use std::thread;
 
 use tendi_core::OperationId;
 
@@ -35,12 +35,7 @@ impl Drop for CoordinatorInner {
 impl CoordinatorInner {
     fn shutdown(&self) {
         let _ = self.sender.send(CoordinatorMessage::Shutdown);
-        if let Some(worker) = self
-            .worker
-            .lock()
-            .expect("worker lock is healthy")
-            .take()
-        {
+        if let Some(worker) = self.worker.lock().expect("worker lock is healthy").take() {
             let _ = worker.join();
         }
     }
@@ -59,7 +54,9 @@ pub struct OperationCoordinator {
 
 impl fmt::Debug for OperationCoordinator {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.debug_struct("OperationCoordinator").finish_non_exhaustive()
+        formatter
+            .debug_struct("OperationCoordinator")
+            .finish_non_exhaustive()
     }
 }
 
@@ -92,10 +89,13 @@ impl OperationCoordinator {
     where
         F: FnOnce() + Send + 'static,
     {
-        match self.inner.sender.try_send(CoordinatorMessage::Run(QueuedOperation {
-            operation_id,
-            job: Box::new(job),
-        })) {
+        match self
+            .inner
+            .sender
+            .try_send(CoordinatorMessage::Run(QueuedOperation {
+                operation_id,
+                job: Box::new(job),
+            })) {
             Ok(()) => Ok(()),
             Err(TrySendError::Full(_)) => Err(SubmitError::QueueFull),
             Err(TrySendError::Disconnected(_)) => Err(SubmitError::WorkerStopped),
@@ -147,8 +147,7 @@ mod tests {
             let done_tx = done_tx.clone();
             coordinator
                 .submit(
-                    OperationId::new(format!("op-{value}"))
-                        .expect("test operation id is valid"),
+                    OperationId::new(format!("op-{value}")).expect("test operation id is valid"),
                     move || {
                         order.lock().expect("order lock is healthy").push(value);
                         done_tx.send(()).expect("test receiver is alive");

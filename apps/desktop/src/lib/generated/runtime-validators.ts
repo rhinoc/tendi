@@ -2640,6 +2640,37 @@ const SCHEMAS: Record<string, Record<string, unknown>> = {
     ],
     "additionalProperties": false
   },
+  "McpProbeRequest": {
+    "type": "object",
+    "properties": {
+      "agent": {
+        "$ref": "#/components/schemas/AgentKind"
+      },
+      "path": {
+        "type": "string",
+        "minLength": 1
+      },
+      "expectedTrustHash": {
+        "type": "string",
+        "minLength": 1
+      },
+      "name": {
+        "type": "string",
+        "minLength": 1
+      },
+      "serverPath": {
+        "$ref": "#/components/schemas/StringList"
+      }
+    },
+    "required": [
+      "agent",
+      "path",
+      "expectedTrustHash",
+      "name",
+      "serverPath"
+    ],
+    "additionalProperties": false
+  },
   "McpSetEnabledManyRequest": {
     "type": "object",
     "properties": {
@@ -3192,9 +3223,6 @@ const SCHEMAS: Record<string, Record<string, unknown>> = {
     "properties": {
       "skillIds": {
         "$ref": "#/components/schemas/StringList"
-      },
-      "names": {
-        "$ref": "#/components/schemas/StringList"
       }
     },
     "required": [
@@ -3600,6 +3628,48 @@ const SCHEMAS: Record<string, Record<string, unknown>> = {
       "terminal"
     ]
   },
+  "SessionResumeError": {
+    "type": "object",
+    "properties": {
+      "code": {
+        "type": "string",
+        "enum": [
+          "desktop_runtime_required",
+          "desktop_command_failed",
+          "worktree_not_found",
+          "terminal_unavailable",
+          "terminal_launch_failed",
+          "session_not_resumable",
+          "internal"
+        ]
+      },
+      "provider": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "retryable": {
+        "type": "boolean"
+      },
+      "action": {
+        "type": "string",
+        "enum": [
+          "retry",
+          "settings",
+          "open_project",
+          "none"
+        ]
+      }
+    },
+    "required": [
+      "code",
+      "provider",
+      "retryable",
+      "action"
+    ],
+    "additionalProperties": false
+  },
   "SessionResumeResponse": {
     "type": "object",
     "properties": {
@@ -3607,7 +3677,8 @@ const SCHEMAS: Record<string, Record<string, unknown>> = {
         "type": "string",
         "enum": [
           "activeWriter",
-          "launched"
+          "launched",
+          "failed"
         ]
       },
       "lockPath": {
@@ -3633,6 +3704,9 @@ const SCHEMAS: Record<string, Record<string, unknown>> = {
           "string",
           "null"
         ]
+      },
+      "error": {
+        "$ref": "#/components/schemas/SessionResumeError"
       }
     },
     "required": [
@@ -3984,6 +4058,176 @@ const SCHEMAS: Record<string, Record<string, unknown>> = {
     ],
     "additionalProperties": false
   },
+  "SessionListSortKey": {
+    "type": "string",
+    "enum": [
+      "title",
+      "agent",
+      "project",
+      "startedAt",
+      "updatedAt",
+      "messages",
+      "turns",
+      "cacheRate",
+      "searchScore"
+    ]
+  },
+  "SessionListSortDirection": {
+    "type": "string",
+    "enum": [
+      "asc",
+      "desc"
+    ]
+  },
+  "SessionsListRequest": {
+    "type": "object",
+    "properties": {
+      "query": {
+        "type": "string"
+      },
+      "agent": {
+        "$ref": "#/components/schemas/AgentKind"
+      },
+      "sortKey": {
+        "$ref": "#/components/schemas/SessionListSortKey"
+      },
+      "sortDirection": {
+        "$ref": "#/components/schemas/SessionListSortDirection"
+      },
+      "groupBy": {
+        "$ref": "#/components/schemas/SessionListSortKey"
+      },
+      "page": {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 9007199254740991
+      },
+      "pageSize": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 500
+      },
+      "showChildSessions": {
+        "type": "boolean"
+      },
+      "selectedProjectKeys": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        }
+      },
+      "locate": {
+        "$ref": "#/components/schemas/SessionIdentity"
+      }
+    },
+    "required": [
+      "query",
+      "sortKey",
+      "sortDirection",
+      "page",
+      "pageSize",
+      "showChildSessions",
+      "selectedProjectKeys"
+    ],
+    "additionalProperties": false
+  },
+  "SessionListProjectOption": {
+    "type": "object",
+    "properties": {
+      "key": {
+        "type": "string"
+      },
+      "label": {
+        "type": "string"
+      },
+      "title": {
+        "type": "string"
+      },
+      "count": {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 9007199254740991
+      }
+    },
+    "required": [
+      "key",
+      "label",
+      "title",
+      "count"
+    ],
+    "additionalProperties": false
+  },
+  "SessionListProjectOptionList": {
+    "type": "array",
+    "items": {
+      "$ref": "#/components/schemas/SessionListProjectOption"
+    }
+  },
+  "SessionsListResponse": {
+    "type": "object",
+    "properties": {
+      "revision": {
+        "$ref": "#/components/schemas/Revision"
+      },
+      "rows": {
+        "$ref": "#/components/schemas/SessionRecordList"
+      },
+      "projectOptions": {
+        "$ref": "#/components/schemas/SessionListProjectOptionList"
+      },
+      "total": {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 9007199254740991
+      },
+      "childSessionCount": {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 9007199254740991
+      },
+      "page": {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 9007199254740991
+      },
+      "pageCount": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 9007199254740991
+      },
+      "pageStart": {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 9007199254740991
+      },
+      "pageEnd": {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 9007199254740991
+      },
+      "groupCount": {
+        "type": [
+          "integer",
+          "null"
+        ],
+        "minimum": 0,
+        "maximum": 9007199254740991
+      }
+    },
+    "required": [
+      "revision",
+      "rows",
+      "projectOptions",
+      "total",
+      "childSessionCount",
+      "page",
+      "pageCount",
+      "pageStart",
+      "pageEnd",
+      "groupCount"
+    ],
+    "additionalProperties": false
+  },
   "SessionsSearchRequest": {
     "type": "object",
     "properties": {
@@ -4318,6 +4562,12 @@ const SCHEMAS: Record<string, Record<string, unknown>> = {
           "null"
         ]
       },
+      "search_score": {
+        "type": "number"
+      },
+      "search_snippet": {
+        "type": "string"
+      },
       "token_usage": {
         "$ref": "#/components/schemas/SessionTokenUsage"
       }
@@ -4457,13 +4707,13 @@ const SCHEMAS: Record<string, Record<string, unknown>> = {
   "SkillSessionLinksRequest": {
     "type": "object",
     "properties": {
-      "skillName": {
+      "skillId": {
         "type": "string",
         "minLength": 1
       }
     },
     "required": [
-      "skillName"
+      "skillId"
     ],
     "additionalProperties": false
   },
@@ -4691,6 +4941,295 @@ const SCHEMAS: Record<string, Record<string, unknown>> = {
     "items": {
       "$ref": "#/components/schemas/SkillTargetRecord"
     }
+  },
+  "AssistantMessage": {
+    "type": "object",
+    "properties": {
+      "role": {
+        "type": "string",
+        "enum": [
+          "user",
+          "assistant"
+        ]
+      },
+      "content": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "role",
+      "content"
+    ],
+    "additionalProperties": false
+  },
+  "AssistantChatSession": {
+    "type": "object",
+    "properties": {
+      "id": {
+        "type": "string",
+        "minLength": 1
+      },
+      "messages": {
+        "type": "array",
+        "items": {
+          "$ref": "#/components/schemas/AssistantMessage"
+        }
+      },
+      "linkedSession": {
+        "type": [
+          "object",
+          "null"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "agent": {
+            "type": "string",
+            "minLength": 1
+          },
+          "path": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "id",
+          "agent",
+          "path"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "required": [
+      "id",
+      "messages",
+      "linkedSession"
+    ],
+    "additionalProperties": false
+  },
+  "AssistantChatSessionList": {
+    "type": "array",
+    "items": {
+      "$ref": "#/components/schemas/AssistantChatSession"
+    }
+  },
+  "AssistantContext": {
+    "type": "object",
+    "properties": {
+      "pageId": {
+        "type": "string"
+      },
+      "pageTitle": {
+        "type": "string"
+      },
+      "filters": {
+        "type": "object",
+        "additionalProperties": true
+      },
+      "selection": {
+        "type": "string"
+      },
+      "selectedContent": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        }
+      },
+      "skill": {
+        "type": [
+          "object",
+          "null"
+        ],
+        "additionalProperties": true
+      },
+      "session": {
+        "type": [
+          "object",
+          "null"
+        ],
+        "additionalProperties": true
+      },
+      "tendi": {
+        "type": "object",
+        "additionalProperties": true
+      }
+    },
+    "required": [
+      "pageId",
+      "pageTitle",
+      "filters",
+      "selection",
+      "selectedContent",
+      "skill",
+      "session",
+      "tendi"
+    ],
+    "additionalProperties": false
+  },
+  "AssistantUsage": {
+    "type": "object",
+    "properties": {
+      "inputTokens": {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 9007199254740991
+      },
+      "cachedInputTokens": {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 9007199254740991
+      },
+      "outputTokens": {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 9007199254740991
+      },
+      "reasoningOutputTokens": {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 9007199254740991
+      },
+      "totalTokens": {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 9007199254740991
+      }
+    },
+    "additionalProperties": false
+  },
+  "AssistantAskRequest": {
+    "type": "object",
+    "properties": {
+      "conversationId": {
+        "type": "string",
+        "minLength": 1
+      },
+      "requestId": {
+        "type": "string",
+        "minLength": 1
+      },
+      "message": {
+        "type": "string",
+        "minLength": 1
+      },
+      "history": {
+        "type": "array",
+        "items": {
+          "$ref": "#/components/schemas/AssistantMessage"
+        }
+      },
+      "context": {
+        "$ref": "#/components/schemas/AssistantContext"
+      },
+      "agent": {
+        "type": "string",
+        "minLength": 1
+      },
+      "workspace": {
+        "type": "string"
+      },
+      "persistUserMessage": {
+        "type": "boolean"
+      }
+    },
+    "required": [
+      "conversationId",
+      "requestId",
+      "message",
+      "history",
+      "context",
+      "agent",
+      "workspace",
+      "persistUserMessage"
+    ],
+    "additionalProperties": false
+  },
+  "AssistantAskResponse": {
+    "type": "object",
+    "properties": {
+      "answer": {
+        "type": "string"
+      },
+      "status": {
+        "type": "string",
+        "enum": [
+          "completed",
+          "error"
+        ]
+      },
+      "usage": {
+        "$ref": "#/components/schemas/AssistantUsage"
+      },
+      "error": {
+        "type": [
+          "string",
+          "null"
+        ]
+      }
+    },
+    "required": [
+      "answer",
+      "status",
+      "usage",
+      "error"
+    ],
+    "additionalProperties": false
+  },
+  "AssistantCancelRequest": {
+    "type": "object",
+    "properties": {
+      "conversationId": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "required": [
+      "conversationId"
+    ],
+    "additionalProperties": false
+  },
+  "AssistantCancelResponse": {
+    "type": "object",
+    "properties": {
+      "cancelled": {
+        "type": "boolean"
+      }
+    },
+    "required": [
+      "cancelled"
+    ],
+    "additionalProperties": false
+  },
+  "AssistantStreamEvent": {
+    "type": "object",
+    "properties": {
+      "conversationId": {
+        "type": "string",
+        "minLength": 1
+      },
+      "requestId": {
+        "type": "string",
+        "minLength": 1
+      },
+      "kind": {
+        "type": "string",
+        "minLength": 1
+      },
+      "text": {
+        "type": "string"
+      },
+      "detail": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "conversationId",
+      "requestId",
+      "kind"
+    ],
+    "additionalProperties": false
   },
   "AppSettings": {
     "type": "object",
@@ -4960,6 +5499,57 @@ const SCHEMAS: Record<string, Record<string, unknown>> = {
       "$ref": "#/components/schemas/HookRecord"
     }
   },
+  "McpIcon": {
+    "type": "object",
+    "properties": {
+      "src": {
+        "type": "string"
+      },
+      "mime_type": {
+        "type": "string"
+      },
+      "sizes": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        }
+      },
+      "theme": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "src"
+    ],
+    "additionalProperties": false
+  },
+  "McpTool": {
+    "type": "object",
+    "properties": {
+      "name": {
+        "type": "string"
+      },
+      "title": {
+        "type": "string"
+      },
+      "description": {
+        "type": "string"
+      },
+      "input_schema": {
+        "$ref": "#/components/schemas/JsonValue"
+      },
+      "icons": {
+        "type": "array",
+        "items": {
+          "$ref": "#/components/schemas/McpIcon"
+        }
+      }
+    },
+    "required": [
+      "name"
+    ],
+    "additionalProperties": false
+  },
   "McpServerRecord": {
     "type": "object",
     "properties": {
@@ -4987,6 +5577,13 @@ const SCHEMAS: Record<string, Record<string, unknown>> = {
       "trust_hash": {
         "type": "string"
       },
+      "probe_cache_version": {
+        "type": "integer",
+        "minimum": 0
+      },
+      "probe_state": {
+        "type": "string"
+      },
       "server_path": {
         "type": "array",
         "items": {
@@ -4998,6 +5595,36 @@ const SCHEMAS: Record<string, Record<string, unknown>> = {
           "string",
           "null"
         ]
+      },
+      "server_name": {
+        "type": "string"
+      },
+      "server_title": {
+        "type": "string"
+      },
+      "server_version": {
+        "type": "string"
+      },
+      "server_description": {
+        "type": "string"
+      },
+      "server_website_url": {
+        "type": "string"
+      },
+      "probe_error": {
+        "type": "string"
+      },
+      "icons": {
+        "type": "array",
+        "items": {
+          "$ref": "#/components/schemas/McpIcon"
+        }
+      },
+      "tools": {
+        "type": "array",
+        "items": {
+          "$ref": "#/components/schemas/McpTool"
+        }
       }
     },
     "required": [
@@ -5703,6 +6330,47 @@ const SCHEMAS: Record<string, Record<string, unknown>> = {
       "status",
       "skills",
       "updates",
+      "error"
+    ],
+    "additionalProperties": false
+  },
+  "SkillsChangedEvent": {
+    "type": "object",
+    "properties": {
+      "paths": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        }
+      }
+    },
+    "required": [
+      "paths"
+    ],
+    "additionalProperties": false
+  },
+  "ProjectionChangedEvent": {
+    "type": "object",
+    "properties": {
+      "domain": {
+        "type": "string",
+        "enum": [
+          "agents",
+          "skills",
+          "rules",
+          "hooks",
+          "mcp"
+        ]
+      },
+      "error": {
+        "type": [
+          "string",
+          "null"
+        ]
+      }
+    },
+    "required": [
+      "domain",
       "error"
     ],
     "additionalProperties": false
@@ -6487,6 +7155,7 @@ const REQUEST_SCHEMAS: Record<CommandName, string> = {
   "skills_list": "EmptyRequest",
   "skills_refresh": "EmptyRequest",
   "sessions_snapshot": "EmptyRequest",
+  "sessions_list": "SessionsListRequest",
   "sessions_scan_start": "EmptyRequest",
   "sessions_search": "SessionsSearchRequest",
   "analytics_overview": "AnalyticsOverviewRequest",
@@ -6497,6 +7166,9 @@ const REQUEST_SCHEMAS: Record<CommandName, string> = {
   "skill_session_links": "SkillSessionLinksRequest",
   "settings_get": "EmptyRequest",
   "settings_save": "AppSettings",
+  "assistant_ask": "AssistantAskRequest",
+  "assistant_cancel": "AssistantCancelRequest",
+  "assistant_chat_sessions": "EmptyRequest",
   "session_projects_list": "EmptyRequest",
   "project_scan_scopes_list": "EmptyRequest",
   "project_scan_scopes_save": "ProjectScanScopesSaveRequest",
@@ -6522,6 +7194,7 @@ const REQUEST_SCHEMAS: Record<CommandName, string> = {
   "hook_review": "HookReviewRequest",
   "hook_source_read": "HookSourceReadRequest",
   "mcp_list": "EmptyRequest",
+  "mcp_probe": "McpProbeRequest",
   "mcp_set_enabled": "McpSetEnabledRequest",
   "mcp_set_enabled_many": "McpSetEnabledManyRequest",
   "prompts_list": "EmptyRequest",
@@ -6584,6 +7257,7 @@ const RESULT_SCHEMAS: Record<CommandName, string> = {
   "skills_list": "SkillRecordList",
   "skills_refresh": "SkillRefreshResponse",
   "sessions_snapshot": "SessionSnapshot",
+  "sessions_list": "SessionsListResponse",
   "sessions_scan_start": "SessionScanStartResponse",
   "sessions_search": "SessionSearchHitList",
   "analytics_overview": "AnalyticsOverview",
@@ -6594,6 +7268,9 @@ const RESULT_SCHEMAS: Record<CommandName, string> = {
   "skill_session_links": "SessionSkillLinkList",
   "settings_get": "AppSettings",
   "settings_save": "AppSettings",
+  "assistant_ask": "AssistantAskResponse",
+  "assistant_cancel": "AssistantCancelResponse",
+  "assistant_chat_sessions": "AssistantChatSessionList",
   "session_projects_list": "SessionProjectSummaryList",
   "project_scan_scopes_list": "ProjectScanScopeList",
   "project_scan_scopes_save": "ProjectScanScopeList",
@@ -6619,6 +7296,7 @@ const RESULT_SCHEMAS: Record<CommandName, string> = {
   "hook_review": "HookMutationDelta",
   "hook_source_read": "HookSourceContentResponse",
   "mcp_list": "McpServerRecordList",
+  "mcp_probe": "McpMutationResponse",
   "mcp_set_enabled": "McpMutationResponse",
   "mcp_set_enabled_many": "McpMutationResponse",
   "prompts_list": "PromptRecordList",
@@ -6676,8 +7354,11 @@ const EVENT_SCHEMAS: Record<string, string> = {
   "analytics://progress": "AnalyticsProgressEvent",
   "analytics://revision": "AnalyticsRevisionEvent",
   "skills://updates": "SkillsUpdatesEvent",
+  "skills://changed": "SkillsChangedEvent",
+  "projection://changed": "ProjectionChangedEvent",
   "config://changed": "ConfigChangedEvent",
-  "tendi://update-available": "UpdateCheckResult"
+  "tendi://update-available": "UpdateCheckResult",
+  "assistant://stream": "AssistantStreamEvent"
 };
 const ajv = new Ajv2020({ allErrors: true, strict: false });
 ajv.addSchema({ $id: "tendi-runtime-contract", components: { schemas: SCHEMAS } });

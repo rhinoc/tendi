@@ -485,7 +485,10 @@ mod tests {
         super::delete_rule_files_for_project_roots(&project, std::slice::from_ref(&rule_path), &[])
             .expect("known rule should be deleted");
         assert!(!rule_path.exists());
-        assert!(super::delete_rule_files_for_project_roots(&project, &[project.join("other.md")], &[]).is_err());
+        assert!(
+            super::delete_rule_files_for_project_roots(&project, &[project.join("other.md")], &[])
+                .is_err()
+        );
 
         let _ = fs::remove_dir_all(root);
     }

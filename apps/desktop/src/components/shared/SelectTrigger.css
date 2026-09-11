@@ -1,5 +1,152 @@
-.skillMenuContent.selectControlContent {
-  min-width: max(168px, var(--radix-select-trigger-width));
+.selectControlContent {
+  --select-content-enter-y: -3px;
+  --select-content-exit-y: -2px;
+  --select-content-transform-origin: top center;
+  z-index: var(--z-menu);
+  width: var(--radix-select-trigger-width);
+  min-width: 168px;
+  padding: 4px;
+  border-radius: var(--radius-lg);
+  background: var(--panel-bg);
+  border: 1px solid var(--control-border);
+  box-shadow: var(--shadow-menu-depth);
+  backdrop-filter: blur(14px);
+  overflow: hidden;
+}
+
+.selectControlContent[data-state="open"] {
+  animation: selectContentIn 140ms var(--ease-out-soft) both;
+  transform-origin: var(--select-content-transform-origin);
+}
+
+.selectControlContent[data-state="closed"] {
+  animation: selectContentOut 120ms var(--ease-out-soft) both;
+  transform-origin: var(--select-content-transform-origin);
+}
+
+.selectControlContent[data-side="top"] {
+  --select-content-enter-y: 3px;
+  --select-content-exit-y: 2px;
+  --select-content-transform-origin: bottom center;
+}
+
+.selectControlItem {
+  position: relative;
+  --select-item-enter-y: -6px;
+  width: 100%;
+  height: auto;
+  min-height: var(--control-height);
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 6px 10px;
+  border: 0;
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  font-size: var(--text-ui);
+  line-height: 20px;
+  text-align: left;
+  cursor: pointer;
+  transition: background-color 140ms var(--ease-out-soft), color 140ms var(--ease-out-soft);
+}
+
+.selectControlViewport {
+  max-height: min(420px, var(--radix-select-content-available-height, calc(100vh - 64px)));
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.selectControlItem[data-state="checked"] {
+  background: var(--hover-fill-strong);
+  color: var(--text);
+}
+
+.selectControlItem[data-highlighted],
+.selectControlItem[data-state="checked"][data-highlighted] {
+  background: var(--hover-fill-strong);
+  color: var(--text);
+  outline: none;
+}
+
+.selectControlItem[data-disabled] {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.selectControlItem[data-disabled][data-highlighted] {
+  background: transparent;
+  color: var(--text);
+}
+
+.selectControlContent[data-side="top"] .selectControlItem {
+  --select-item-enter-y: 6px;
+}
+
+.selectControlItem > .selectControlItemText {
+  min-width: 0;
+  height: 18px;
+  display: flex;
+  align-items: center;
+  line-height: var(--leading-ui);
+}
+
+.selectControlItemLeadingIcon {
+  width: 14px;
+  height: 14px;
+  flex: 0 0 14px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.selectControlItemIndicatorRight > .selectControlItemLeadingIcon {
+  order: 2;
+  margin-left: auto;
+}
+
+.selectControlItemIndicator {
+  display: inline-flex;
+  align-items: center;
+  color: var(--accent);
+}
+
+.selectControlMenuActionSeparator {
+  height: 1px;
+  margin: 5px 4px;
+  background: var(--line);
+}
+
+.selectControlMenuActionIcon {
+  display: inline-flex;
+  align-items: center;
+  color: var(--muted);
+}
+
+@keyframes selectContentIn {
+  from {
+    opacity: 0;
+    transform: translateY(var(--select-content-enter-y)) scale(0.985);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@keyframes selectContentOut {
+  from {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+  to {
+    opacity: 0;
+    transform: translateY(var(--select-content-exit-y)) scale(0.985);
+  }
 }
 
 .selectControlTrigger {
@@ -10,36 +157,36 @@
   align-items: center;
   justify-content: space-between;
   gap: 8px;
-  padding: 0 8px;
-  border: 0;
-  border-radius: var(--radius-sm);
-  background: var(--control-fill);
+  padding: 0 var(--control-padding-x);
+  border: 1px solid color-mix(in oklch, var(--text) 8%, transparent);
+  border-radius: var(--control-radius);
+  background: var(--panel-bg);
   color: var(--text);
   font: inherit;
-  font-size: var(--text-sm);
-  line-height: var(--leading-ui);
+  font-size: var(--text-ui);
+  line-height: 20px;
   text-align: left;
   cursor: pointer;
-  transition-property: background-color, color;
-  transition-duration: 140ms;
-  transition-timing-function: ease-out;
+  transition-property: border-color, color;
+  transition-duration: 160ms;
+  transition-timing-function: var(--ease-out-soft);
 }
 
 .selectControlTrigger:hover:not(:disabled),
 .selectControlTrigger[data-state="open"] {
-  background: var(--active-fill);
+  border-color: color-mix(in oklch, var(--text) 12%, transparent);
   color: var(--text);
 }
 
 .selectControlTrigger:disabled {
   color: var(--muted);
-  cursor: default;
-  opacity: 0.7;
+  pointer-events: none;
+  opacity: 0.5;
 }
 
 .selectControlTrigger:focus-visible {
-  outline: 2px solid var(--focus-ring);
-  outline-offset: -2px;
+  border-color: var(--line-strong);
+  outline: none;
 }
 
 .selectControlTrigger [data-radix-select-value],
@@ -68,4 +215,110 @@
 .selectControlTrigger > svg {
   flex: 0 0 14px;
   color: var(--muted);
+  transition: transform 180ms var(--ease-out-soft), color 160ms var(--ease-out-soft);
+}
+
+.selectControlTrigger[data-state="open"] > svg {
+  transform: rotate(180deg);
+}
+
+.selectControlEditable {
+  width: 100%;
+  min-width: 0;
+  height: var(--control-height);
+  min-height: var(--control-height);
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
+  padding: 0 4px 0 var(--control-padding-x);
+  border: 1px solid color-mix(in oklch, var(--text) 8%, transparent);
+  border-radius: var(--control-radius);
+  background: var(--panel-bg);
+  color: var(--text);
+  transition: border-color 160ms var(--ease-out-soft), color 160ms var(--ease-out-soft);
+}
+
+.selectControlEditable:hover,
+.selectControlEditable[data-state="open"] {
+  border-color: color-mix(in oklch, var(--text) 12%, transparent);
+}
+
+.selectControlEditable:focus-within {
+  border-color: var(--line-strong);
+  outline: none;
+}
+
+.selectControlEditable:has(input:disabled) {
+  color: var(--muted);
+  pointer-events: none;
+  opacity: 0.5;
+}
+
+.selectControlEditableInput {
+  min-width: 0;
+  width: 100%;
+  height: calc(var(--control-height) - 2px);
+  flex: 1 1 auto;
+  padding: 0;
+  border: 0;
+  outline: none;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-size: var(--text-ui);
+  line-height: 20px;
+}
+
+.selectControlEditableInput::placeholder {
+  color: var(--faint);
+}
+
+.selectControlEditableChevron {
+  width: calc(var(--control-height) - 4px);
+  height: calc(var(--control-height) - 4px);
+  flex: 0 0 calc(var(--control-height) - 4px);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 0;
+  border-radius: var(--control-item-radius);
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.selectControlEditableChevron:focus-visible {
+  outline: none;
+}
+
+.selectControlEditableChevron > svg {
+  transition: transform 180ms var(--ease-out-soft), color 160ms var(--ease-out-soft);
+}
+
+.selectControlEditableChevron[data-state="open"] > svg {
+  transform: rotate(180deg);
+}
+
+.selectEditableViewport {
+  max-height: min(420px, calc(100vh - 64px));
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.selectControlContent .selectControlItemIndicator {
+  color: var(--text);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .selectControlTrigger > svg,
+  .selectControlItem {
+    transition: none;
+  }
+
+  .selectControlContent[data-state="open"],
+  .selectControlContent[data-state="closed"],
+  .selectControlItem {
+    animation: none;
+  }
 }

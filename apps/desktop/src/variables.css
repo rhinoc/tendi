@@ -1,3 +1,5 @@
+@import "@mogeko/maple-mono-cn";
+
 @font-face {
   font-family: "Manrope";
   src: url("../node_modules/@fontsource-variable/manrope/files/manrope-latin-wght-normal.woff2") format("woff2-variations");
@@ -119,6 +121,7 @@
   --z-dialog: 51;
   --z-popover: 70;
   --z-drawer: 80;
+  --z-command-palette: 100;
 
   color-scheme: light dark;
 
@@ -245,23 +248,38 @@
 
   --shadow-border: 0 0 0 1px oklch(0 0 0 / 0.06);
   --shadow-border-hover: 0 0 0 1px oklch(0 0 0 / 0.08);
+  --shadow-color: oklch(0.277 0 0);
+  --shadow-floating-depth: 0 4px 10px oklch(0.277 0 0 / 0.14);
+  --shadow-floating:
+    0 0 0 1px oklch(0.277 0 0 / 0.06),
+    var(--shadow-floating-depth);
+  --shadow-elevated-depth: 0 18px 48px oklch(0.277 0 0 / 0.16);
+  --shadow-menu-depth: 0 12px 36px oklch(0.277 0 0 / 0.14);
   --shadow-elevated:
     0 0 0 1px oklch(0.277 0 0 / 0.08),
-    0 18px 48px oklch(0.277 0 0 / 0.16);
+    var(--shadow-elevated-depth);
   --shadow-menu:
     0 0 0 1px oklch(0.277 0 0 / 0.08),
-    0 12px 36px oklch(0.277 0 0 / 0.14);
+    var(--shadow-menu-depth);
 
   --radius-sm: 6px;
   --radius-md: 8px;
   --radius-lg: 12px;
+  --dialog-radius: calc(var(--radius-md) + 22px);
   --radius: var(--radius-md);
   --selection-checkbox-radius: 4px;
   /* Concentric: outer = inner + pad (e.g. dialog 12 + pad 8 → control 8) */
 
   /* Shared control dimensions — single-line controls use one outer height. */
-  --control-height: 30px;
-  --control-size-icon: var(--control-height);
+  --control-height: 32px;
+  --control-height-compact: 28px;
+  --control-height-row: 36px;
+  --control-icon-size: var(--control-height);
+  --control-icon-size-compact: 24px;
+  --control-size-icon: var(--control-icon-size);
+  --control-radius: 9px;
+  --control-item-radius: var(--radius-md);
+  --control-padding-x: 10px;
   --dialog-advance-button-width: 112px;
   --stateful-button-width: 132px;
   --stateful-button-wide-width: 152px;
@@ -273,13 +291,14 @@
   --badge-padding: 4px;
   --badge-radius: 999px;
   --segmented-track-padding: 3px;
-  --segmented-track-gap: 2px;
-  --segmented-item-height: 24px;
-  --segmented-icon-item-size: 24px;
+  --segmented-track-radius: calc(var(--segmented-item-radius) + var(--segmented-track-padding));
+  --segmented-item-radius: var(--radius-sm);
+  --segmented-item-height: 26px;
+  --segmented-icon-item-size: 26px;
 
   --font-sans: "Manrope", ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
   --font-brand: "Bricolage Grotesque", var(--font-sans);
-  --font-mono: "Maple Mono", ui-monospace, Menlo, monospace;
+  --font-mono: "Maple Mono", "Maple Mono CN", ui-monospace, Menlo, monospace;
 
   /* Semantic type scale — every UI size resolves to an integer pixel token. */
   --text-icon: 8px;
@@ -495,12 +514,19 @@
 
   --shadow-border: 0 0 0 1px oklch(1 0 0 / 0.08);
   --shadow-border-hover: 0 0 0 1px oklch(1 0 0 / 0.13);
+  --shadow-color: oklch(0 0 0);
+  --shadow-floating-depth: 0 4px 10px oklch(0 0 0 / 0.32);
+  --shadow-floating:
+    0 0 0 1px oklch(0.894 0.057 89.24 / 0.1),
+    var(--shadow-floating-depth);
+  --shadow-elevated-depth: 0 18px 48px oklch(0 0 0 / 0.52);
+  --shadow-menu-depth: 0 12px 36px oklch(0 0 0 / 0.48);
   --shadow-elevated:
     0 0 0 1px oklch(0.894 0.057 89.24 / 0.1),
-    0 18px 48px oklch(0 0 0 / 0.52);
+    var(--shadow-elevated-depth);
   --shadow-menu:
     0 0 0 1px oklch(0.894 0.057 89.24 / 0.1),
-    0 12px 36px oklch(0 0 0 / 0.48);
+    var(--shadow-menu-depth);
 
   --row-frame-line: oklch(0.894 0.057 89.24 / 0.1);
   --row-frame-bg: oklch(0.894 0.057 89.24 / 0.05);
@@ -515,6 +541,26 @@
 :root[data-theme-changing="true"] *::before,
 :root[data-theme-changing="true"] *::after {
   transition: none !important;
+}
+
+:root[data-theme-transition="circle"]::view-transition-old(root) {
+  animation: none;
+  mix-blend-mode: normal;
+}
+
+:root[data-theme-transition="circle"]::view-transition-new(root) {
+  mix-blend-mode: normal;
+  animation: tendi-theme-circle-reveal 700ms cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+@keyframes tendi-theme-circle-reveal {
+  from {
+    clip-path: circle(0% at var(--theme-transition-origin, 50% 50%));
+  }
+
+  to {
+    clip-path: circle(150% at var(--theme-transition-origin, 50% 50%));
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {

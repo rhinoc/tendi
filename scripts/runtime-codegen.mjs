@@ -149,6 +149,15 @@ async function sourceInventory() {
     const schemaMethods = new Set(methods.map((method) => method.name));
     const schemaEvents = new Set(events.map((event) => event.name));
 
+    for (const method of methods.filter((candidate) => candidate["x-tendi"].owner === "desktop")) {
+      const signature = tauri.match(new RegExp(`#\\[tauri::command[^\\]]*\\]\\s*(?:pub\\s+)?(?:async\\s+)?fn\\s+${method.name}\\s*\\(([\\s\\S]*?)\\)\\s*(?:->|\\{)`));
+      assert(signature, `Tauri command ${method.name} signature is missing`);
+      if (method.params.length === 0) continue;
+      assert(/\brequest\s*:/.test(signature[1]), `Tauri command ${method.name} must accept a named request argument`);
+      const requestType = refName(method.params[0].schema);
+      if (requestType) assert(signature[1].includes(`request: runtime_schema::${requestType}`), `Tauri command ${method.name} must accept runtime_schema::${requestType}`);
+    }
+
     for (const name of daemonMethods) assert(schemaMethods.has(name), `daemon dispatch method ${name} is missing from schema`);
     for (const name of tauriCommands) assert(schemaMethods.has(name) || transportNames.has(name), `Tauri command ${name} is missing from schema or transport metadata`);
     for (const name of cliMethods) assert(schemaMethods.has(name), `CLI daemon method ${name} is missing from schema`);
@@ -678,11 +687,13 @@ fn validate_json_schema(value: &JsonValue, raw_schema: &JsonValue, root: &JsonVa
             .unwrap_or(true);
         if !matches { return Err(format!("{path} must be {}, got {}", types, value_type(value))); }
     }
-    if let Some(minimum) = schema.get("minimum").and_then(JsonValue::as_f64) {
-        if value.as_f64().is_none_or(|actual| actual < minimum) { return Err(format!("{path} is below minimum {minimum}")); }
-    }
-    if let Some(maximum) = schema.get("maximum").and_then(JsonValue::as_f64) {
-        if value.as_f64().is_none_or(|actual| actual > maximum) { return Err(format!("{path} exceeds maximum {maximum}")); }
+    if let Some(actual) = value.as_f64() {
+        if let Some(minimum) = schema.get("minimum").and_then(JsonValue::as_f64) {
+            if actual < minimum { return Err(format!("{path} is below minimum {minimum}")); }
+        }
+        if let Some(maximum) = schema.get("maximum").and_then(JsonValue::as_f64) {
+            if actual > maximum { return Err(format!("{path} exceeds maximum {maximum}")); }
+        }
     }
     if let Some(min_length) = schema.get("minLength").and_then(JsonValue::as_u64) {
         if value.as_str().is_none_or(|actual| actual.chars().count() < min_length as usize) { return Err(format!("{path} is shorter than {min_length}")); }

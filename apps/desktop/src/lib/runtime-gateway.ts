@@ -1,18 +1,26 @@
-import { TauriCommand, invokeCommand, subscribeDaemonEvents, type BundledSkillInstallReport, type BundledSkillStatus, type CliInstallStatus, type DaemonEvent, type UpdateCheckResult } from "./tauri.ts";
+import { listen } from "@tauri-apps/api/event";
+import { TauriCommand, invokeCommand, isTauriRuntime, subscribeDaemonEvents, type BundledSkillInstallReport, type BundledSkillStatus, type CliInstallStatus, type DaemonEvent, type UpdateCheckResult } from "./tauri.ts";
 import { RuntimeDomainKey, type DomainKey } from "./domain.ts";
-import { assertRuntimeEvent } from "./generated/runtime-events.ts";
+import { assertRuntimeEvent, assertRuntimeEventPayload } from "./generated/runtime-events.ts";
 import { RuntimeEventName } from "./generated/runtime-events.ts";
 import type {
   AgentConfigFile,
   AgentKind,
+  AssistantAskRequest,
+  AssistantAskResponse,
+  AssistantChatSession,
+  AssistantStreamEvent,
   HookDeleteRequest,
   HookReviewRequest,
   HookSetEnabledRequest,
   HookSourceReadRequest,
+  McpProbeRequest,
   McpSetEnabledRequest,
   ResponseFor,
   SessionResumeRequest,
   SessionScanEvent,
+  SessionsListRequest,
+  SessionsListResponse,
   SessionsSearchRequest,
   SkillFileMutationResponse as GeneratedSkillFileMutationResponse,
   SkillsAddRequest as GeneratedSkillsAddRequest,
@@ -29,10 +37,13 @@ import type {
   SkillsUpdateManyResponse as GeneratedSkillsUpdateManyResponse,
   SkillsWrapResponse as GeneratedSkillsWrapResponse,
   SkillsUpdatesEvent,
+  SkillsChangedEvent,
   AnalyticsProgressEvent,
   AnalyticsRevisionEvent,
+  ProjectionChangedEvent,
   SkillVisibility as GeneratedSkillVisibility,
 } from "./generated/runtime-types.ts";
+import { normalizeSessionRows, type SessionListPageRequest, type SessionListPageResult } from "../controllers/session-controller.ts";
 import type { RawDomainRow } from "../controllers/controller-types.ts";
 import { toRawDomainRow, toRawDomainRows } from "./raw-domain.ts";
 import type { SkillAddPlan, SkillInstallResult } from "./skills.ts";
@@ -41,7 +52,8 @@ import type { SkillUpdateReport } from "./skill-updates.ts";
 import { isRuntimeAgentKind, runtimeAgentKind } from "./agents.ts";
 import { normalizeSkillFileEntries, type SkillFileEntry } from "./file-tree.ts";
 import { readRuleFile, type RuleFileResult } from "./rule-file.ts";
-import { SessionResumeOutcomeStatus, SessionResumeTarget, type SessionIdentityRecord, type SessionRecord } from "./sessions.ts";
+import { SessionResumeErrorAction, SessionResumeErrorCode, SessionResumeOutcomeStatus, SessionResumeTarget, type SessionIdentityRecord, type SessionRecord, type SessionResumeError } from "./sessions.ts";
+import { sessionResumeError } from "./session-resume.ts";
 import { normalizeConfigProfiles, normalizeSettings, type SettingsPayload } from "./settings.ts";
 import type { ProjectSummary, SessionProjectSummary } from "./projects.ts";
 import type { AnalyticsRefreshProgress, OverviewAnalytics } from "./analytics.ts";
@@ -55,6 +67,7 @@ import {
   type TranscriptSearchResult,
   type TranscriptSearchScopes,
 } from "./transcript.ts";
+import { logger } from "./logger.ts";
 
 export enum SkillScope {
   Global = "global",
@@ -260,7 +273,6 @@ export type BackupStatusResponse = {
   versions: Array<{ id: string; createdAt: number; summary: string }>;
   catalog: BackupCatalogResponse;
 };
-export type BackupTargetResponse = { id: string; displayName: string; supportsGlobal: boolean };
 export type BackupRestoreOperation = { id: string; name: string; category: string; target: string; status: string; message?: string | null };
 export type BackupRestoreResponse = {
   revision?: string;
@@ -294,11 +306,15 @@ export type RuntimeSkillUpdateEvent = Omit<SkillsUpdatesEvent, "skills" | "updat
 
 export type RuntimeAnalyticsRevisionEvent = AnalyticsRevisionEvent;
 export type RuntimeAnalyticsProgressEvent = AnalyticsRefreshProgress;
+export type RuntimeSkillChangedEvent = SkillsChangedEvent;
+export type RuntimeProjectionChangedEvent = ProjectionChangedEvent;
 
 export type RuntimeEvent =
   | (DaemonEvent<RuntimeSessionScanEvent> & { event: typeof RuntimeEventName.SessionsScan })
   | (DaemonEvent<RuntimeAnalyticsProgressEvent> & { event: typeof RuntimeEventName.AnalyticsProgress })
   | (DaemonEvent<RuntimeSkillUpdateEvent> & { event: typeof RuntimeEventName.SkillsUpdates })
+  | (DaemonEvent<RuntimeSkillChangedEvent> & { event: typeof RuntimeEventName.SkillsChanged })
+  | (DaemonEvent<RuntimeProjectionChangedEvent> & { event: typeof RuntimeEventName.ProjectionChanged })
   | (DaemonEvent<RuntimeAnalyticsRevisionEvent> & { event: typeof RuntimeEventName.AnalyticsRevision });
 
 type ListableDomain = Exclude<DomainKey, RuntimeDomainKey.Sessions>;
@@ -359,6 +375,12 @@ function runtimeHookRequest<T extends { agent: AgentKind }>(args: HookRequestInp
 type McpRequestInput = Omit<McpSetEnabledRequest, "agent"> & { agent: string };
 
 function runtimeMcpRequest(args: McpRequestInput): McpSetEnabledRequest {
+  return { ...args, agent: runtimeAgentKind(args.agent), serverPath: [...args.serverPath] };
+}
+
+type McpProbeRequestInput = Omit<McpProbeRequest, "agent"> & { agent: string };
+
+function runtimeMcpProbeRequest(args: McpProbeRequestInput): McpProbeRequest {
   return { ...args, agent: runtimeAgentKind(args.agent), serverPath: [...args.serverPath] };
 }
 
@@ -440,6 +462,10 @@ export async function subscribeRuntimeEvents(handler: (event: RuntimeEvent) => v
     } else if (event.event === RuntimeEventName.SkillsUpdates) {
       const payload = parseSkillUpdateEvent(event.payload);
       if (payload) handler({ ...event, event: RuntimeEventName.SkillsUpdates, payload });
+    } else if (event.event === RuntimeEventName.SkillsChanged) {
+      handler({ ...event, event: RuntimeEventName.SkillsChanged, payload: event.payload });
+    } else if (event.event === RuntimeEventName.ProjectionChanged) {
+      handler({ ...event, event: RuntimeEventName.ProjectionChanged, payload: event.payload });
     } else if (event.event === RuntimeEventName.AnalyticsRevision) {
       const payload = parseAnalyticsRevisionEvent(event.payload);
       if (payload) handler({ ...event, event: RuntimeEventName.AnalyticsRevision, payload });
@@ -489,6 +515,26 @@ export async function invokeSessionScanStart(): Promise<SessionScanStartDto> {
   return invokeCommand(TauriCommand.SessionsScanStart);
 }
 
+export async function invokeSessionList(request: SessionListPageRequest): Promise<SessionListPageResult> {
+  const runtimeRequest: SessionsListRequest = {
+    query: request.query,
+    agent: request.agent ? runtimeAgentKind(request.agent) : undefined,
+    sortKey: request.sort.key as SessionsListRequest["sortKey"],
+    sortDirection: request.sort.direction,
+    groupBy: request.groupBy ? request.groupBy as SessionsListRequest["groupBy"] : undefined,
+    page: request.page,
+    pageSize: request.pageSize,
+    showChildSessions: request.showChildSessions,
+    selectedProjectKeys: request.selectedProjectKeys,
+    locate: request.locate ? runtimeSessionCandidate(request.locate) : undefined,
+  };
+  const response: SessionsListResponse = await invokeCommand(TauriCommand.SessionsList, runtimeRequest);
+  return {
+    ...response,
+    rows: normalizeSessionRows(response.rows as unknown as RawDomainRow[]),
+  };
+}
+
 type RuntimeSessionCandidate = NonNullable<SessionsSearchRequest["candidates"]>[number];
 
 function runtimeSessionCandidate(value: Pick<SessionRecord, "id" | "agent" | "path">): RuntimeSessionCandidate {
@@ -503,9 +549,12 @@ function runtimeSessionCandidate(value: Pick<SessionRecord, "id" | "agent" | "pa
 
 export async function invokeSessionSearch(
   query: string,
-  candidates: readonly Pick<SessionRecord, "id" | "agent" | "path">[],
+  candidates?: readonly Pick<SessionRecord, "id" | "agent" | "path">[],
 ): Promise<RawDomainRow[]> {
-  const request = { query, candidates: candidates.map(runtimeSessionCandidate) };
+  const request: SessionsSearchRequest = {
+    query,
+    candidates: candidates?.map(runtimeSessionCandidate),
+  };
   return recordRows(await invokeCommand(TauriCommand.SessionsSearch, request), "session search");
 }
 
@@ -513,8 +562,8 @@ export async function invokeSessionSkillLinks(sessionId: string, agent: string):
   return recordRows(await invokeCommand(TauriCommand.SessionSkillLinks, { sessionId, agent: runtimeAgentKind(agent) }), "session skill links");
 }
 
-export async function invokeSkillSessionLinks(skillName: string): Promise<RawDomainRow[]> {
-  return recordRows(await invokeCommand(TauriCommand.SkillSessionLinks, { skillName }), "skill session links");
+export async function invokeSkillSessionLinks(skillId: string): Promise<RawDomainRow[]> {
+  return recordRows(await invokeCommand(TauriCommand.SkillSessionLinks, { skillId }), "skill session links");
 }
 
 export async function invokeProjectList(): Promise<ProjectSummary[] | null> {
@@ -652,6 +701,48 @@ export async function saveSettings(settings: SettingsPayload): Promise<SettingsP
   } catch {
     return null;
   }
+}
+
+export async function askAssistant(request: AssistantAskRequest): Promise<AssistantAskResponse> {
+  const response = await invokeCommand(TauriCommand.AssistantAsk, request);
+  if (response.status !== "completed" && response.status !== "error") {
+    throw new Error("Invalid assistant response status");
+  }
+  return response;
+}
+
+export async function askAssistantStream(
+  request: AssistantAskRequest,
+  onEvent: (event: AssistantStreamEvent) => void,
+): Promise<AssistantAskResponse> {
+  if (!isTauriRuntime()) return askAssistant(request);
+  const unlisten = await listen<unknown>(RuntimeEventName.AssistantStream, (event) => {
+    try {
+      assertRuntimeEventPayload(RuntimeEventName.AssistantStream, event.payload);
+      if (
+        event.payload.conversationId === request.conversationId
+        && event.payload.requestId === request.requestId
+      ) onEvent(event.payload);
+    } catch (error) {
+      logger.warn("assistant stream event payload validation failed", { error });
+    }
+  });
+  try {
+    return await askAssistant(request);
+  } finally {
+    unlisten();
+  }
+}
+
+export async function cancelAssistant(conversationId: string): Promise<boolean> {
+  if (!isTauriRuntime()) return false;
+  const response = await invokeCommand(TauriCommand.AssistantCancel, { conversationId });
+  return response.cancelled;
+}
+
+export async function loadAssistantChatSessions(): Promise<AssistantChatSession[]> {
+  if (!isTauriRuntime()) return [];
+  return invokeCommand(TauriCommand.AssistantChatSessions);
 }
 
 export async function readTerminalApps(): Promise<TerminalAppResponse[] | null> {
@@ -841,12 +932,12 @@ export async function distributeSkills(args: {
 }
 
 export async function removeSkillLocations(args: {
-  names: readonly string[];
+  ids: readonly string[];
   targets: readonly string[];
   scope: SkillScope;
 }): Promise<SkillDistributionResponse> {
   const request: GeneratedSkillsRemoveLocationsRequest = {
-    skillIds: [...args.names],
+    skillIds: [...args.ids],
     targets: [...args.targets],
     scope: runtimeScope(args.scope),
   };
@@ -952,10 +1043,47 @@ export async function openUrl(url: string): Promise<void> {
 
 export type SessionResumeInTerminalResponse =
   | { status: typeof SessionResumeOutcomeStatus.ActiveWriter; lockPath: string }
-  | { status: typeof SessionResumeOutcomeStatus.Launched; agent: string; terminal: string; commandLine: string };
+  | { status: typeof SessionResumeOutcomeStatus.Launched; agent: string; terminal: string; commandLine: string }
+  | { status: typeof SessionResumeOutcomeStatus.Failed; error: SessionResumeError };
 
 export async function resumeSessionInTerminal(session: SessionResumeRequest): Promise<SessionResumeInTerminalResponse> {
-  const response = await invokeCommand(TauriCommand.SessionResumeInTerminal, { session });
+  if (!isTauriRuntime()) {
+    return {
+      status: SessionResumeOutcomeStatus.Failed,
+      error: sessionResumeError(
+        SessionResumeErrorCode.DesktopRuntimeRequired,
+        null,
+        false,
+        SessionResumeErrorAction.None,
+      ),
+    };
+  }
+  let response: ResponseFor<"session_resume_in_terminal">;
+  try {
+    response = await invokeCommand(TauriCommand.SessionResumeInTerminal, { session });
+  } catch {
+    return {
+      status: SessionResumeOutcomeStatus.Failed,
+      error: sessionResumeError(
+        SessionResumeErrorCode.DesktopCommandFailed,
+        null,
+        true,
+        SessionResumeErrorAction.Retry,
+      ),
+    };
+  }
+  if (response.status === "failed") {
+    if (!response.error) throw new Error("Invalid failed session resume response");
+    return {
+      status: SessionResumeOutcomeStatus.Failed,
+      error: sessionResumeError(
+        response.error.code as SessionResumeErrorCode,
+        response.error.provider,
+        response.error.retryable,
+        response.error.action as SessionResumeErrorAction,
+      ),
+    };
+  }
   if (response.status === "activeWriter") {
     if (!response.lockPath) throw new Error("Invalid active writer response");
     return { status: SessionResumeOutcomeStatus.ActiveWriter, lockPath: response.lockPath };
@@ -1034,6 +1162,10 @@ export async function reviewHook(args: HookRequestInput<HookReviewRequest>): Pro
 
 export async function setMcpEnabled(args: McpRequestInput): Promise<ResponseFor<"mcp_set_enabled">> {
   return invokeCommand(TauriCommand.McpSetEnabled, runtimeMcpRequest(args));
+}
+
+export async function probeMcp(args: McpProbeRequestInput): Promise<ResponseFor<"mcp_probe">> {
+  return invokeCommand(TauriCommand.McpProbe, runtimeMcpProbeRequest(args));
 }
 
 export async function setMcpEnabledMany(requests: readonly McpRequestInput[]): Promise<ResponseFor<"mcp_set_enabled_many">> {

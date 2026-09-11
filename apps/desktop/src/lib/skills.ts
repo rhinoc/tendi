@@ -44,6 +44,7 @@ export type NormalizedSkillPath = NonNullable<SkillLike["paths"]>[number] & {
   agent: string;
   install_target: string;
   source_kind: string;
+  sha256: string;
 };
 
 export type NormalizedSkill = {
@@ -70,6 +71,10 @@ export type NormalizedSkill = {
   paths: NormalizedSkillPath[];
   [key: string]: unknown;
 };
+
+export function skillDisplayName(skill: Pick<NormalizedSkill, "name"> | null | undefined): string {
+  return skill?.name || "Skill";
+}
 
 export type RawSkillRecord = RawDomainRow;
 
@@ -194,8 +199,10 @@ export function skillSection(skill: SkillLike & { visibility?: SkillVisibility |
 
 export function normalizeSkill(skill: Record<string, unknown>): NormalizedSkill | undefined {
   const name = typeof skill.name === "string" && skill.name.trim() ? skill.name.trim() : undefined;
+  const id = typeof skill.id === "string" && skill.id.trim() ? skill.id.trim() : undefined;
   if (
     !name
+    || !id
     || !Array.isArray(skill.agents)
     || skill.agents.length === 0
     || !Array.isArray(skill.tags)
@@ -256,7 +263,7 @@ export function normalizeSkill(skill: Record<string, unknown>): NormalizedSkill 
   if (installTargets.length !== skill.install_targets.length) return undefined;
   const tone = statusTone({ ...(skill as SkillLike), source, visibility, isSystem } as SkillLike & { visibility?: SkillVisibility; isSystem?: boolean });
   return {
-    id: typeof skill.id === "string" && skill.id.trim() ? skill.id.trim() : name,
+    id,
     section: skillSection({ ...(skill as SkillLike & { visibility?: SkillVisibility | string; statusTone?: string; isSystem?: boolean }), source, paths, visibility, statusTone: tone, isSystem }),
     name,
     description: typeof skill.description === "string" ? skill.description : "",
@@ -282,6 +289,10 @@ export function normalizeSkill(skill: Record<string, unknown>): NormalizedSkill 
 
 export function primarySkillPath(skill: SkillLike): string | null {
   return skill.paths?.find((path) => path.path)?.path ?? null;
+}
+
+export function primarySkillScope(skill: SkillLike): string | null {
+  return skill.paths?.find((path) => path.path)?.scope ?? null;
 }
 
 export function skillTargets(skill: SkillLike & { name?: string }) {
@@ -363,17 +374,3 @@ export const SkillChangeCommand = {
   Wrap: TauriCommand.SkillsWrap,
 } as const;
 export type SkillChangeCommand = typeof SkillChangeCommand[keyof typeof SkillChangeCommand];
-
-export function findSkillBySelector<T extends { id: string; name: string; paths?: Array<{ scope?: string }> }>(
-  skills: T[],
-  selector: string,
-): T | undefined {
-  const trimmed = selector.trim();
-  if (!trimmed) return undefined;
-  const byId = skills.find((skill) => skill.id === trimmed);
-  if (byId) return byId;
-  const byName = skills.filter((skill) => skill.name === trimmed);
-  if (byName.length <= 1) return byName[0];
-  return byName.find((skill) => (skill.paths ?? []).every((path) => path.scope !== "project"))
-    ?? byName[0];
-}

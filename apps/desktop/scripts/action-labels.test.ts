@@ -9,7 +9,6 @@ test("keeps shared file action labels in one source", () => {
     revealInFinder: "Reveal in Finder",
     copyPath: "Copy path",
     pathCopied: "Path copied",
-    deleteSelected: "Delete selected",
     copy: "Copy",
     copied: "Copied",
     copyFailed: "Copy failed",

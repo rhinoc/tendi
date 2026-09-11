@@ -22,17 +22,17 @@ export function InfoDropdownMenu({
   sideOffset = 8,
 }: InfoDropdownMenuProps) {
   const notifyRowMenuOpenChange = useRowMenuOpenChange();
-  const className = ["skillInfoContent", contentClassName].filter(Boolean).join(" ");
+  const className = ["infoContent", contentClassName].filter(Boolean).join(" ");
   return (
     <DropdownMenu.Root onOpenChange={(open) => notifyRowMenuOpenChange?.(open)}>
       <DropdownMenu.Trigger asChild>{trigger}</DropdownMenu.Trigger>
       <DropdownMenu.Portal>
         <MenuContent className={className} align="end" sideOffset={sideOffset} data-no-drag onMouseDown={(event) => event.stopPropagation()}>
-          <div className="skillInfoHeader">
+          <div className="infoHeader">
             <span>{label}</span>
             <strong>{title}</strong>
           </div>
-          <div className="skillInfoSections">{children}</div>
+          <div className="infoSections">{children}</div>
         </MenuContent>
       </DropdownMenu.Portal>
     </DropdownMenu.Root>

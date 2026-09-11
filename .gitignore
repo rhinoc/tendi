@@ -13,3 +13,4 @@ apps/desktop/src-tauri/gen
 apps/desktop/src-tauri/binaries/
 apps/desktop/test-results/
 .codex-screenshots/
+.ctx/

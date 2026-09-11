@@ -63,7 +63,6 @@ if (typeof mock.module !== "function") {
     desktopStore,
     selectAnalyticsDisplayValue,
     selectAnalyticsValue,
-    selectCatalogCounts,
     selectSessionListStatus,
     useDesktopStore,
   } = await import("../src/store/desktop-store.ts");
@@ -76,23 +75,6 @@ if (typeof mock.module !== "function") {
   function withSessions(store: InstanceType<typeof DesktopStore>, sessions: ReturnType<typeof session>[]) {
     store.actions.commitDomainSnapshot("sessions", sessions);
   }
-
-  test("derives the catalog count from rows and exposes no count writer", () => {
-    const store = new DesktopStore();
-
-    store.actions.commitDomainSnapshot("skills", toRawDomainRows([{ name: "one" }, { name: "two" }], "test skill rows"));
-    store.actions.commitDomainSnapshot("sessions", [session("one")]);
-
-    assert.deepEqual(selectCatalogCounts(store.getSnapshot().catalogs.data), {
-      skills: 2,
-      sessions: 1,
-      prompts: 0,
-      rules: 0,
-      hooks: 0,
-      mcp: 0,
-    });
-    assert.equal("setInventoryCount" in store.actions, false);
-  });
 
   test("reports a loaded session after the first rows load", () => {
     const store = new DesktopStore();

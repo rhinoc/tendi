@@ -79,7 +79,7 @@ function checkFile(fileName, sourceText) {
 
   const checkRawMenuContent = (tagName) => {
     if (SHARED_MENU_CONTENT_FILES.has(fileName) || tagName.getText(sourceFile) !== "DropdownMenu.Content") return;
-    report(tagName, "raw DropdownMenu.Content is not allowed; use MenuContent or DialogMenuContent");
+    report(tagName, "raw DropdownMenu.Content is not allowed; use MenuContent");
   };
 
   const visit = (node) => {

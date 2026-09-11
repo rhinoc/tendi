@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { CheckCircle2, Monitor, Moon, Sun, Trash2 } from "lucide-react";
 import { DropdownMenu, Popover } from "radix-ui";
-import { actionLabels, AsyncStatus, CliInstallState, compactDateTime, DesktopUpdateStatus, formatUserPath, logExportLabels, MissingSessionProjectPolicy, normalizeSettings, remoteRepositoryLabel, TauriCommand, normalizeMissingSessionProjectPolicy, normalizeSessionResumeTarget, safeInvoke, SessionResumeTarget, type BundledSkillStatus, type CliInstallStatus, type DesktopUpdateState, type ProjectSummary, type RawSkillRecord, type SettingsPayload, type SettingsState, type SkillInstallResult } from "../../lib/index.ts";
+import { actionLabels, AsyncStatus, CliInstallState, compactDateTime, DesktopUpdateStatus, EMPTY_DISPLAY_VALUE, formatRelativeTime, formatUserPath, logExportLabels, MissingSessionProjectPolicy, normalizeSettings, remoteRepositoryLabel, TauriCommand, normalizeMissingSessionProjectPolicy, normalizeSessionResumeTarget, safeInvoke, SessionResumeTarget, type BundledSkillStatus, type CliInstallStatus, type DesktopUpdateState, type ProjectSummary, type RawSkillRecord, type SettingsPayload, type SettingsState, type SkillInstallResult } from "../../lib/index.ts";
 import { Appearance, ColorTheme, FontFamily, type ResolvedAppearance, type ThemePreferences } from "../../lib/appearance.ts";
 import { appIconOptions, appIconPreviewDataUrl, type AppIcon } from "../../lib/app-icon.ts";
 import { Button } from "../../components/shared/Button.tsx";
@@ -44,6 +44,15 @@ type TerminalApp = {
   available?: boolean;
 };
 
+const terminalAppLabels: Record<string, string> = {
+  auto: "Auto",
+  terminal: "Terminal",
+  iterm: "iTerm",
+  ghostty: "Ghostty",
+  warp: "Warp",
+  orca: "Orca",
+};
+
 const projectTableColumns: CompactTableColumn<ProjectSummary>[] = [
   { key: "name", header: "Project", width: "160px", cellClassName: "compactTableCell--title", empty: "" },
   {
@@ -53,7 +62,7 @@ const projectTableColumns: CompactTableColumn<ProjectSummary>[] = [
     cellClassName: "compactTableCell--muted",
     value: (project) => formatUserPath(project.rootPath),
     title: (project) => project.rootPath || undefined,
-    empty: "-",
+    empty: EMPTY_DISPLAY_VALUE,
   },
   {
     key: "remoteUrl",
@@ -62,7 +71,7 @@ const projectTableColumns: CompactTableColumn<ProjectSummary>[] = [
     cellClassName: "compactTableCell--muted",
     value: (project) => remoteRepositoryLabel(project.remoteUrl) || undefined,
     title: (project) => project.remoteUrl || undefined,
-    empty: "-",
+    empty: EMPTY_DISPLAY_VALUE,
   },
   {
     key: "lastScannedAt",
@@ -71,7 +80,7 @@ const projectTableColumns: CompactTableColumn<ProjectSummary>[] = [
     cellClassName: "compactTableCell--muted",
     value: (project) => compactDateTime(project.lastScannedAt, { year: true }) || undefined,
     title: (project) => project.lastScannedAt || undefined,
-    empty: "-",
+    empty: EMPTY_DISPLAY_VALUE,
   },
 ];
 
@@ -142,9 +151,9 @@ type SettingsViewProps = {
   appSettingsLoadError: string;
   onRetryAppSettings: () => void;
   update: DesktopUpdateState;
+  lastUpdateCheckAt?: number;
   onCheckForUpdates: () => void;
   onInstallUpdate: () => void;
-  onViewUpdateNotes: () => void;
   onSkillsUpdated?: (skills: RawSkillRecord[], options?: { patch?: boolean; deleted?: string[] }) => void;
   installedAgentKeys: string[];
   targetOptions: Array<{
@@ -283,9 +292,10 @@ function SettingsGroup({ title, children }: { title: string; children: ReactNode
   );
 }
 
-export function SettingsView({ appearance, themePreferences, fontFamily, terminal, editor, additionalSessionRoots, developerMode, sessionResumeTarget, missingSessionProjectPolicy, appIcon, configProfiles, projects, onAppearanceChange, onThemeChange, onFontFamilyChange, onTerminalChange, onEditorChange, onAdditionalSessionRootsChange, onDeveloperModeChange, onSessionResumeTargetChange, onMissingSessionProjectPolicyChange, onAppIconChange, onProjectsScanned, appSettingsLoading, appSettingsLoadError, onRetryAppSettings, update, onCheckForUpdates, onInstallUpdate, onViewUpdateNotes, onSkillsUpdated, installedAgentKeys, targetOptions }: SettingsViewProps) {
-  const [terminalInput, setTerminalInput] = useState("auto");
-  const [editorInput, setEditorInput] = useState("vscode");
+export function SettingsView({ appearance, themePreferences, fontFamily, terminal, editor, additionalSessionRoots, developerMode, sessionResumeTarget, missingSessionProjectPolicy, appIcon, configProfiles, projects, onAppearanceChange, onThemeChange, onFontFamilyChange, onTerminalChange, onEditorChange, onAdditionalSessionRootsChange, onDeveloperModeChange, onSessionResumeTargetChange, onMissingSessionProjectPolicyChange, onAppIconChange, onProjectsScanned, appSettingsLoading, appSettingsLoadError, onRetryAppSettings, update, lastUpdateCheckAt, onCheckForUpdates, onInstallUpdate, onSkillsUpdated, installedAgentKeys, targetOptions }: SettingsViewProps) {
+  const [relativeTimeNow, setRelativeTimeNow] = useState(() => Date.now());
+  const [terminalInput, setTerminalInput] = useState(terminal);
+  const [editorInput, setEditorInput] = useState(editor);
   const [additionalSessionRootsInput, setAdditionalSessionRootsInput] = useState("");
   const [projectScanScopesInput, setProjectScanScopesInput] = useState("");
   const [terminalApps, setTerminalApps] = useState<TerminalApp[]>([]);
@@ -317,6 +327,10 @@ export function SettingsView({ appearance, themePreferences, fontFamily, termina
   const [settingsLoadError, setSettingsLoadError] = useState("");
   const [logExportState, setLogExportState] = useState<AsyncStatus>(AsyncStatus.Idle);
   const [logExportError, setLogExportError] = useState("");
+  useEffect(() => {
+    const timer = window.setInterval(() => setRelativeTimeNow(Date.now()), 30_000);
+    return () => window.clearInterval(timer);
+  }, []);
   const appearanceSaveRequestRef = useRef(0);
   const themeSaveRequestRef = useRef(0);
   const appIconSaveRequestRef = useRef(0);
@@ -330,20 +344,26 @@ export function SettingsView({ appearance, themePreferences, fontFamily, termina
   const onThemeChangeRef = useRef(onThemeChange);
   onThemeChangeRef.current = onThemeChange;
   const terminalOptions: SettingsApplicationOption[] = useMemo(() => {
-    const items = terminalApps.length ? terminalApps : [{ id: "auto", label: "Auto", available: true }];
+    const items = terminalApps.length
+      ? terminalApps
+      : [
+          { id: "auto", label: "Auto", available: true },
+          ...(terminal && terminal !== "auto"
+            ? [{ id: terminal, label: terminalAppLabels[terminal] ?? terminal }]
+            : []),
+        ];
     return items.map((app) => ({
       value: app.id,
       label: app.label,
       available: app.available,
     }));
-  }, [terminalApps]);
+  }, [terminal, terminalApps]);
   const editorOptions: SettingsApplicationOption[] = [
     { value: "vscode", label: "VS Code" },
     { value: "zed", label: "Zed" },
     { value: "cursor", label: "Cursor" },
     { value: "coteditor", label: "CotEditor" },
   ];
-
   const loadSettings = useCallback(async () => {
     const inputRevisions = { ...inputRevisionRef.current };
     setSettingsLoading(true);
@@ -718,26 +738,7 @@ export function SettingsView({ appearance, themePreferences, fontFamily, termina
         title="Install Tendi skill"
       />
       <ContentTopDragStrip />
-      <PageHeader title="Settings">
-        <div className="settingsUpdateActions">
-            {update.status === DesktopUpdateStatus.Available && update.version && update.body?.trim() ? (
-            <Button size="sm" onClick={onViewUpdateNotes}>Release notes</Button>
-          ) : null}
-          <StatefulButton
-            size="sm"
-            state={update.status === DesktopUpdateStatus.Checking || update.status === DesktopUpdateStatus.Installing ? AsyncStatus.Loading : update.status === DesktopUpdateStatus.UpToDate ? AsyncStatus.Success : update.status === DesktopUpdateStatus.Error ? AsyncStatus.Error : AsyncStatus.Idle}
-            width={160}
-            minWidth={160}
-            onClick={update.status === DesktopUpdateStatus.Available ? onInstallUpdate : onCheckForUpdates}
-            aria-label={update.status === DesktopUpdateStatus.Checking ? "Checking for updates" : update.status === DesktopUpdateStatus.Installing ? "Installing update" : update.status === DesktopUpdateStatus.Available && update.version ? `Install update ${update.version}` : update.status === DesktopUpdateStatus.UpToDate ? "You're up to date" : update.status === DesktopUpdateStatus.Error ? "Check for updates again" : "Check for updates"}
-            loadingContent={<LoadingIcon size={16} />}
-            successContent="You're up to date"
-            errorContent="Check failed — try again"
-          >
-            {update.status === DesktopUpdateStatus.Available && update.version ? `Install ${update.version}` : actionLabels.checkForUpdates}
-          </StatefulButton>
-        </div>
-      </PageHeader>
+      <PageHeader title="Settings" />
       {combinedSettingsLoadError ? <LoadErrorState message={combinedSettingsLoadError} onRetry={retrySettings} /> : null}
       <div className="settingsShell">
         <div className="settingsGroups">
@@ -757,6 +758,7 @@ export function SettingsView({ appearance, themePreferences, fontFamily, termina
                     <SegmentedControlItem
                       value={option.value}
                       aria-label={option.label}
+                      data-appearance-option={option.value}
                       key={option.value}
                     >
                       <Icon size={14} />
@@ -800,6 +802,29 @@ export function SettingsView({ appearance, themePreferences, fontFamily, termina
           </SettingsSection>
           </SettingsGroup>
           <SettingsGroup title="General">
+          <SettingsSection title="Updates" className="settingsUpdateSection">
+            <div className="settingsUpdateActionStack">
+              <div className="settingsUpdatePrimaryActions">
+                <StatefulButton
+                  size="sm"
+                  variant="primary"
+                  state={update.status === DesktopUpdateStatus.Checking || update.status === DesktopUpdateStatus.Installing ? AsyncStatus.Loading : update.status === DesktopUpdateStatus.UpToDate ? AsyncStatus.Success : update.status === DesktopUpdateStatus.Error ? AsyncStatus.Error : AsyncStatus.Idle}
+                  width={160}
+                  minWidth={160}
+                  onClick={update.status === DesktopUpdateStatus.Available ? onInstallUpdate : onCheckForUpdates}
+                  aria-label={update.status === DesktopUpdateStatus.Checking ? "Checking for updates" : update.status === DesktopUpdateStatus.Installing ? "Installing update" : update.status === DesktopUpdateStatus.Available && update.version ? `Install update ${update.version}` : update.status === DesktopUpdateStatus.UpToDate ? "You're up to date" : update.status === DesktopUpdateStatus.Error ? "Check for updates again" : "Check for updates"}
+                  loadingContent={<LoadingIcon size={16} />}
+                  successContent="You're up to date"
+                  errorContent="Check failed — try again"
+                >
+                  {update.status === DesktopUpdateStatus.Available && update.version ? `Install ${update.version}` : actionLabels.checkForUpdates}
+                </StatefulButton>
+              </div>
+              <span className="settingsUpdateLastChecked">
+                Last checked: {lastUpdateCheckAt ? formatRelativeTime(lastUpdateCheckAt, relativeTimeNow) : "never"}
+              </span>
+            </div>
+          </SettingsSection>
           <div className="settingsApplicationPair">
           <SettingsSection title="Terminal">
             <SettingsApplicationPicker
@@ -867,7 +892,7 @@ export function SettingsView({ appearance, themePreferences, fontFamily, termina
             </SegmentedControl>
             {sessionResumeError ? <Toast tone="error" message={sessionResumeError} /> : null}
           </SettingsSection>
-          <SettingsSection title="Missing session projects">
+          <SettingsSection title="Orphaned sessions">
             <SegmentedControl
               className="settingsSessionResumeControl"
               value={missingSessionProjectPolicy}
@@ -929,6 +954,7 @@ export function SettingsView({ appearance, themePreferences, fontFamily, termina
             />
             <div className="settingsProjectScanActions">
               <StatefulButton
+                variant="primary"
                 state={projectScanState}
                 width={112}
                 minWidth={112}
@@ -971,7 +997,7 @@ export function SettingsView({ appearance, themePreferences, fontFamily, termina
                       {cliHealthy ? (
                         <RowActionsMenu ariaLabel="Tendi CLI actions">
                           <DropdownMenu.Item
-                            className="skillMenuItem danger"
+                            className="menuItem danger"
                             disabled={Boolean(cliBusy)}
                             onSelect={requestRemoveCli}
                           >
@@ -982,6 +1008,7 @@ export function SettingsView({ appearance, themePreferences, fontFamily, termina
                       ) : cliStatus?.supported && !cliConflict ? (
                         <StatefulButton
                           size="sm"
+                          variant="primary"
                           className="settingsAgentAction"
                           state={cliBusy === CliAction.Install ? AsyncStatus.Loading : AsyncStatus.Idle}
                           width={112}
@@ -1011,7 +1038,7 @@ export function SettingsView({ appearance, themePreferences, fontFamily, termina
                       ) : bundledSkillConflict ? <span>Needs attention</span> : bundledSkillStatus ? null : <span>Status unavailable</span>}
                     </div>
                     <div className="settingsCliActions">
-                      <Button className="settingsAgentAction" size="sm" onClick={() => { setBundledSkillError(""); setBundledSkillInstallOpen(true); }}>
+                      <Button variant="primary" className="settingsAgentAction" size="sm" onClick={() => { setBundledSkillError(""); setBundledSkillInstallOpen(true); }}>
                         Install skill
                       </Button>
                     </div>
@@ -1035,6 +1062,7 @@ export function SettingsView({ appearance, themePreferences, fontFamily, termina
           <SettingsSection title="Logs">
             <StatefulButton
               size="sm"
+              variant="primary"
               state={logExportState}
               width={144}
               minWidth={144}

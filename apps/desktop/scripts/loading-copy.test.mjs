@@ -36,3 +36,12 @@ test("button loading states do not render action copy", async () => {
   assert.match(promptsView, /loadingContent=\{<LoadingIcon size=\{16\} \/>\}/);
   assert.match(skillsView, /skillPreviewBusy[\s\S]{0,160}<LoadingIcon size=\{14\} \/>/);
 });
+
+test("session skill links do not wait for the global index run", async () => {
+  const app = await source("App.tsx");
+  assert.doesNotMatch(app, /ensureSkillIndexReady/);
+  assert.match(
+    app,
+    /const loadSessionSkillLinks = useCallback\([\s\S]*?await readSkillIndexStatus\(\);[\s\S]*?invokeSessionSkillLinks\(/,
+  );
+});

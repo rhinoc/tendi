@@ -25,9 +25,11 @@ import {
   type SortingState,
   type Updater,
 } from "@tanstack/react-table";
+import { flushSync } from "react-dom";
 import { ChevronDown, ListTree } from "lucide-react";
-import { Accordion, ContextMenu } from "radix-ui";
+import { ContextMenu } from "radix-ui";
 
+import { CollapsibleAccordion, type CollapsibleAccordionItem } from "./shared/CollapsibleAccordion.tsx";
 import { FreezeColumnResizeHandle, useFreezeColumnResize } from "./shared/freeze-column.tsx";
 import { LoadingState } from "./shared/LoadingState.tsx";
 import { SelectionActionBar } from "./shared/SelectionActionBar.tsx";
@@ -36,6 +38,7 @@ import { RowMenuOpenChangeProvider } from "./shared/row-menu-context.tsx";
 import { useVirtualViewport } from "./shared/useVirtualViewport.ts";
 import { fixedVirtualRange, virtualRangeFor } from "../lib/virtualization.ts";
 import {
+  EMPTY_DISPLAY_VALUE,
   MARQUEE_DRAG_THRESHOLD,
   clientPointFromContent,
   clientRectFromPoints,
@@ -50,6 +53,7 @@ import {
 } from "../lib/index.ts";
 import { ColumnCellVariant, ColumnDataType, type ColumnDef, type DataTableProps, type SortState } from "./DataTable.types";
 import { SortDirection } from "../lib/sort.ts";
+import { getTabScrollPosition, setTabScrollPosition } from "../lib/tab-state.ts";
 import "./DataTable.css";
 
 export type { ColumnDef, DataTableProps, FreezeColumnConfig, SortState } from "./DataTable.types";
@@ -88,14 +92,14 @@ const DATA_TABLE_INTERACTIVE_SELECTOR = "button, a, input, textarea, select, [ro
 const DATA_TABLE_MARQUEE_BLOCK_SELECTOR = [
   DATA_TABLE_INTERACTIVE_SELECTOR,
   ".visibility",
-  ".sectionHeader",
+  ".dataTableGroups [data-accordion-part='trigger']",
   "[data-no-drag]",
   "[data-selectable-text]",
 ].join(", ");
 
 function columnDisplayValue<TRow>(column: ColumnDef<TRow>, row: TRow): ReactNode {
   const raw = column.value ? column.value(row) : row[column.key as keyof TRow];
-  if (raw === null || raw === undefined || raw === "") return column.empty ?? "-";
+  if (raw === null || raw === undefined || raw === "") return column.empty ?? EMPTY_DISPLAY_VALUE;
   return raw as ReactNode;
 }
 
@@ -169,8 +173,8 @@ function renderTextCell<TRow>(column: ColumnDef<TRow>, row: TRow) {
       : "dataCellText";
   const explicitTitle = column.title?.(row);
   const title = explicitTitle
-    ?? (typeof display === "string" && display !== (column.empty ?? "-") ? display : undefined);
-  return <Tooltip content={title} interactive={Boolean(explicitTitle)} onlyWhenTruncated={!explicitTitle}><span className={className}>{display}</span></Tooltip>;
+    ?? (typeof display === "string" && display !== (column.empty ?? EMPTY_DISPLAY_VALUE) ? display : undefined);
+  return <Tooltip content={title} interactive={Boolean(explicitTitle)} onlyWhenTruncated><span className={className}>{display}</span></Tooltip>;
 }
 
 function renderCell<TRow>(column: ColumnDef<TRow>, row: TRow): ReactNode {
@@ -269,7 +273,7 @@ function DataTableRowComponent<TRow extends Record<string, unknown>>({
         >
           <ContextMenu.Trigger asChild>{body}</ContextMenu.Trigger>
           <ContextMenu.Portal>
-            <ContextMenu.Content className="skillMenuContent" alignOffset={6} data-no-drag>
+            <ContextMenu.Content className="menuContent" alignOffset={6} data-no-drag>
               {contextMenuContent}
             </ContextMenu.Content>
           </ContextMenu.Portal>
@@ -437,6 +441,7 @@ export function DataTable<TRow extends Record<string, unknown>>({
   selectable = false,
   selectedIds,
   onSelectionChange,
+  onDeleteSelected,
   enableMarquee = false,
   defaultGroupBy = null,
   groupBy: controlledGroupBy,
@@ -449,6 +454,7 @@ export function DataTable<TRow extends Record<string, unknown>>({
   manualSorting = false,
   rowHeight = DATA_TABLE_ROW_HEIGHT,
   enableVirtualization = true,
+  scrollRestorationKey,
   scrollResetKey,
   scrollToRowId,
   onScrollToRowComplete,
@@ -467,6 +473,7 @@ export function DataTable<TRow extends Record<string, unknown>>({
   const shellRef = useRef<HTMLDivElement>(null);
   const scrollAnchorRef = useRef<{ id: string; offsetTop: number } | null>(null);
   const previousScrollResetKeyRef = useRef(scrollResetKey);
+  const restoredScrollKeyRef = useRef<string | undefined>(undefined);
   const scrollHeaderTrackRef = useRef<HTMLDivElement>(null);
   const virtualSeekRef = useRef<HTMLDivElement>(null);
   const scrollRef = useRef<HTMLDivElement | null>(null);
@@ -485,56 +492,18 @@ export function DataTable<TRow extends Record<string, unknown>>({
       isEqual: (current, next) => current.height === next.height,
     },
   );
+  const rememberScrollPosition = useCallback((scroll: HTMLDivElement) => {
+    if (!scrollRestorationKey) return;
+    setTabScrollPosition(scrollRestorationKey, { top: scroll.scrollTop, left: scroll.scrollLeft });
+  }, [scrollRestorationKey]);
 
-  useLayoutEffect(() => {
-    const scroll = scrollRef.current;
-    if (!scroll) return undefined;
-    const resetToTop = () => {
-      scroll.scrollTop = 0;
-      virtualSeekRef.current?.classList.remove("dataTableVirtualSeek--visible");
-    };
-    const resetRequested = previousScrollResetKeyRef.current !== scrollResetKey;
-    previousScrollResetKeyRef.current = scrollResetKey;
-    const anchor = scrollAnchorRef.current;
-    if (resetRequested) {
-      scrollAnchorRef.current = null;
-      resetToTop();
-    } else if (anchor) {
-      const viewport = scroll.getBoundingClientRect();
-      const row = [...scroll.querySelectorAll<HTMLElement>("[data-row-id]")]
-        .find((candidate) => candidate.dataset.rowId === anchor.id && candidate.getBoundingClientRect().bottom > viewport.top);
-      if (row) {
-        const currentOffsetTop = row.getBoundingClientRect().top - viewport.top;
-        scroll.scrollTop += currentOffsetTop - anchor.offsetTop;
-      } else {
-        resetToTop();
-      }
-      scrollAnchorRef.current = null;
-    } else if (scroll.scrollTop > 0) {
-      resetToTop();
-    }
-    syncScrollPosition();
-    return () => {
-      const currentScroll = scrollRef.current;
-      if (!currentScroll) return;
-      const viewport = currentScroll.getBoundingClientRect();
-      const row = [...currentScroll.querySelectorAll<HTMLElement>("[data-row-id]")]
-        .find((candidate) => candidate.getBoundingClientRect().bottom > viewport.top);
-      const rowId = row?.dataset.rowId;
-      if (row && rowId) {
-        scrollAnchorRef.current = {
-          id: rowId,
-          offsetTop: row.getBoundingClientRect().top - viewport.top,
-        };
-      }
-    };
-  }, [rows, scrollResetKey, syncScrollPosition]);
   const marqueeDragRef = useRef<MarqueeDrag | null>(null);
   const suppressClickRef = useRef(false);
   const [marquee, setMarquee] = useState<MarqueeRect | null>(null);
   const [hoveredRowId, setHoveredRowId] = useState<string | null>(null);
   const [openRowMenuId, setOpenRowMenuId] = useState<string | null>(null);
   const [expandedGroups, setExpandedGroups] = useState<string[]>([]);
+  const initialGroupingMountRef = useRef(true);
   const previousGroupStateRef = useRef<{ groupingKey: string; groupKeys: string[] } | null>(null);
   const groupingControlled = controlledGroupBy !== undefined;
 
@@ -718,6 +687,35 @@ export function DataTable<TRow extends Record<string, unknown>>({
   const allSelected = selectableRows.length > 0 && selectedVisibleCount === selectableRows.length;
   const mixedSelected = selectedVisibleCount > 0 && !allSelected;
   const selectionActive = selectedRows.length > 0;
+
+  const handleKeyDown = useCallback((event: KeyboardEvent) => {
+    const selectAll = (event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "a";
+    const deleteSelected = event.key === "Delete" || event.key === "Backspace";
+    const clearSelected = event.key === "Escape";
+    if ((!selectAll && !deleteSelected && !clearSelected) || event.defaultPrevented || event.altKey || event.shiftKey) return;
+    const target = event.target instanceof Element ? event.target : null;
+    if (target?.closest("input, textarea, select, [contenteditable=\"true\"], [role=\"dialog\"], [role=\"menu\"], [role=\"listbox\"]")) return;
+    if (selectAll) {
+      if (selectableIds.length === 0) return;
+      event.preventDefault();
+      setSelected((current) => [...new Set([...current, ...selectableIds])]);
+      return;
+    }
+    if (clearSelected) {
+      if (selectedRows.length === 0) return;
+      event.preventDefault();
+      setSelected([]);
+      return;
+    }
+    if (!onDeleteSelected || selectedRows.length === 0) return;
+    event.preventDefault();
+    onDeleteSelected(selectedRows);
+  }, [onDeleteSelected, selectableIds, selectedRows, setSelected]);
+
+  useEffect(() => {
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [handleKeyDown]);
 
   const toggleAllVisible = useCallback(() => {
     const visible = new Set(selectableIds);
@@ -1191,6 +1189,77 @@ export function DataTable<TRow extends Record<string, unknown>>({
     });
   }, [groupRows, grouping]);
 
+  const groupingReady = !grouping[0]
+    || groupRows.length === 0
+    || groupRows.every((group) => expandedGroupSet.has(`${group.groupingValue}`));
+
+  useLayoutEffect(() => {
+    if (!initialGroupingMountRef.current) return;
+    if (!grouping[0]) {
+      initialGroupingMountRef.current = false;
+      return;
+    }
+    if (groupRows.length > 0 && groupingReady) initialGroupingMountRef.current = false;
+  }, [groupRows.length, grouping, groupingReady]);
+
+  useLayoutEffect(() => {
+    const scroll = scrollRef.current;
+    if (!scroll) return undefined;
+    const resetToTop = () => {
+      scroll.scrollTop = 0;
+      rememberScrollPosition(scroll);
+      virtualSeekRef.current?.classList.remove("dataTableVirtualSeek--visible");
+    };
+    const resetRequested = previousScrollResetKeyRef.current !== scrollResetKey;
+    previousScrollResetKeyRef.current = scrollResetKey;
+    const shouldRestore = Boolean(scrollRestorationKey && restoredScrollKeyRef.current !== scrollRestorationKey);
+    const storedPosition = scrollRestorationKey ? getTabScrollPosition(scrollRestorationKey) : undefined;
+    if (shouldRestore && storedPosition && rows.length === 0) return undefined;
+    if (shouldRestore && storedPosition && storedPosition.top > 0 && !groupingReady) return undefined;
+    if (shouldRestore) restoredScrollKeyRef.current = scrollRestorationKey;
+    const anchor = scrollAnchorRef.current;
+    if (shouldRestore && !resetRequested && storedPosition) {
+      const maxScrollTop = Math.max(0, scroll.scrollHeight - scroll.clientHeight);
+      const maxScrollLeft = Math.max(0, scroll.scrollWidth - scroll.clientWidth);
+      scroll.scrollTop = Math.min(maxScrollTop, Math.max(0, storedPosition.top));
+      scroll.scrollLeft = Math.min(maxScrollLeft, Math.max(0, storedPosition.left));
+      rememberScrollPosition(scroll);
+      scrollAnchorRef.current = null;
+    } else if (resetRequested) {
+      scrollAnchorRef.current = null;
+      resetToTop();
+    } else if (anchor) {
+      const viewport = scroll.getBoundingClientRect();
+      const row = [...scroll.querySelectorAll<HTMLElement>("[data-row-id]")]
+        .find((candidate) => candidate.dataset.rowId === anchor.id && candidate.getBoundingClientRect().bottom > viewport.top);
+      if (row) {
+        const currentOffsetTop = row.getBoundingClientRect().top - viewport.top;
+        scroll.scrollTop += currentOffsetTop - anchor.offsetTop;
+      } else {
+        resetToTop();
+      }
+      scrollAnchorRef.current = null;
+    } else if (scroll.scrollTop > 0) {
+      resetToTop();
+    }
+    syncScrollPosition();
+    return () => {
+      const currentScroll = scrollRef.current;
+      if (!currentScroll) return;
+      rememberScrollPosition(currentScroll);
+      const viewport = currentScroll.getBoundingClientRect();
+      const row = [...currentScroll.querySelectorAll<HTMLElement>("[data-row-id]")]
+        .find((candidate) => candidate.getBoundingClientRect().bottom > viewport.top);
+      const rowId = row?.dataset.rowId;
+      if (row && rowId) {
+        scrollAnchorRef.current = {
+          id: rowId,
+          offsetTop: row.getBoundingClientRect().top - viewport.top,
+        };
+      }
+    };
+  }, [expandedGroupSet, groupingReady, rememberScrollPosition, rows, scrollResetKey, scrollRestorationKey, syncScrollPosition]);
+
   const headerRow = showColumnHeader ? (
     <div className="dataTableHeader" role="row">
       <span className="dataHeaderSelection" aria-hidden="true" />
@@ -1216,33 +1285,41 @@ export function DataTable<TRow extends Record<string, unknown>>({
     </div>
   ) : null;
 
-  const renderFrozenGroups = () => (
-    <Accordion.Root
-      key={grouping[0]}
-      className="dataTableGroups"
-      type="multiple"
-      value={expandedGroups}
-      onValueChange={setExpandedGroups}
-    >
-      {groupRows.map((group, index) => {
-        const key = `${group.groupingValue}`;
-        return (
-          <Accordion.Item className="dataGroup" value={key} key={group.id}>
-            <Accordion.Header asChild>
-              <div className="sectionHeading">
-                <Accordion.Trigger className="sectionHeader">
-                  <span className="sectionHeaderLabel">{effectiveGroupLabel(key)}</span>
-                  <span className="sectionHeaderCount">{group.subRows.length}</span>
-                  <ChevronDown className="accordionChevron" size={14} />
-                </Accordion.Trigger>
-              </div>
-            </Accordion.Header>
-            <Accordion.Content>{renderGroupedRows(group, groupLayouts[index], (row) => renderSplitDataRow(row, DataTablePane.Frozen))}</Accordion.Content>
-          </Accordion.Item>
-        );
-      })}
-    </Accordion.Root>
-  );
+  const renderGroupedAccordion = (renderRow: (row: Row<TRow>) => ReactNode) => {
+    const items: CollapsibleAccordionItem[] = groupRows.map((group, index) => {
+      const key = `${group.groupingValue}`;
+      return {
+        id: key,
+        rowClassName: "dataGroup",
+        expandable: true,
+        title: (
+          <>
+            <span className="sectionHeaderLabel">{effectiveGroupLabel(key)}</span>
+            <span className="sectionHeaderCount">{group.subRows.length}</span>
+          </>
+        ),
+        content: renderGroupedRows(group, groupLayouts[index], renderRow),
+      };
+    });
+
+    return (
+      <CollapsibleAccordion
+        key={grouping[0]}
+        className="dataTableGroups"
+        variant="data-table"
+        type="multiple"
+        value={expandedGroups}
+        onValueChange={(nextValue) => {
+          if (Array.isArray(nextValue)) setExpandedGroups(nextValue);
+        }}
+        separateExpandedItems={false}
+        reduceMotion={initialGroupingMountRef.current}
+        items={items}
+      />
+    );
+  };
+
+  const renderFrozenGroups = () => renderGroupedAccordion((row) => renderSplitDataRow(row, DataTablePane.Frozen));
 
   const renderScrollGroups = () => (
     <div className="dataTableGroups">
@@ -1295,6 +1372,7 @@ export function DataTable<TRow extends Record<string, unknown>>({
   const handleBodyScroll = useCallback(() => {
     const scroll = scrollRef.current;
     if (!scroll) return;
+    rememberScrollPosition(scroll);
     const viewportTop = scroll.scrollTop;
     if (freezeColumn) syncScrollHeader(scroll.scrollLeft);
     if (!virtualizedRows && !virtualizedGroups) {
@@ -1314,8 +1392,18 @@ export function DataTable<TRow extends Record<string, unknown>>({
     if (seekGap) setVirtualSeekVisible(true, seekGap.top, seekGap.height);
     else if (groupedSeekGap) setVirtualSeekVisible(true, groupedSeekGap.top, groupedSeekGap.height);
     else setVirtualSeekVisible(false);
-    scheduleScrollSync();
-  }, [freezeColumn, groupLayouts, groupRows, groupedWindowMissedAt, rowHeight, scheduleScrollSync, scrollRef, scrollTop, setVirtualSeekVisible, showColumnHeader, syncScrollHeader, syncScrollPosition, viewportHeight, virtualDatasetEpoch, virtualStableKey, virtualizedGroups, virtualizedRows, visibleRows]);
+    if (seekGap || groupedSeekGap) {
+      // Native scrolling moves the viewport before React commits the next
+      // virtual window. Commit the target window in the same scroll event when
+      // the old window no longer covers the viewport; otherwise the user can
+      // see a blank frame (especially with a frozen pane).
+      flushSync(() => {
+        syncScrollPosition();
+      });
+    } else {
+      scheduleScrollSync();
+    }
+  }, [freezeColumn, groupLayouts, groupRows, groupedWindowMissedAt, rememberScrollPosition, rowHeight, scheduleScrollSync, scrollRef, scrollTop, setVirtualSeekVisible, showColumnHeader, syncScrollHeader, syncScrollPosition, viewportHeight, virtualDatasetEpoch, virtualStableKey, virtualizedGroups, virtualizedRows, visibleRows]);
 
   const handleBodyWheel = useCallback((event: ReactWheelEvent<HTMLDivElement>) => {
     if (event.deltaY === 0 || (!virtualizedRows && !virtualizedGroups)) return;
@@ -1431,31 +1519,7 @@ export function DataTable<TRow extends Record<string, unknown>>({
                 {headerRow}
                 <div className="dataTableBody">
                   {grouping[0] ? (
-                    <Accordion.Root
-                      key={grouping[0]}
-                      className="dataTableGroups"
-                      type="multiple"
-                      value={expandedGroups}
-                      onValueChange={setExpandedGroups}
-                    >
-                      {groupRows.map((group, index) => {
-                        const key = `${group.groupingValue}`;
-                        return (
-                          <Accordion.Item className="dataGroup" value={key} key={group.id}>
-                            <Accordion.Header asChild>
-                              <div className="sectionHeading">
-                                <Accordion.Trigger className="sectionHeader">
-                                  <span className="sectionHeaderLabel">{effectiveGroupLabel(key)}</span>
-                                  <span className="sectionHeaderCount">{group.subRows.length}</span>
-                                  <ChevronDown className="accordionChevron" size={14} />
-                                </Accordion.Trigger>
-                              </div>
-                            </Accordion.Header>
-                            <Accordion.Content>{renderGroupedRows(group, groupLayouts[index], renderDataRow)}</Accordion.Content>
-                          </Accordion.Item>
-                        );
-                      })}
-                    </Accordion.Root>
+                    renderGroupedAccordion(renderDataRow)
                   ) : (
                     renderVisibleRows(renderDataRow)
                   )}

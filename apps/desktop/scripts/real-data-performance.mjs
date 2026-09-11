@@ -248,9 +248,87 @@ try {
     }
     const callbacks = new Map();
     let nextCallbackId = 1;
+    const sessionRows = report.sessions?.sessions || [];
+    const sessionValue = (session, key) => {
+      if (key === "messages") return Number(session.message_count ?? session.messages ?? 0);
+      if (key === "turns") return Number(session.turn_count ?? session.turns ?? 0);
+      if (key === "agent") return `${session.agent || ""}`;
+      if (key === "project") return `${session.logical_project_name || session.project || session.repository || ""}`;
+      if (key === "title") return `${session.title || ""}`;
+      return `${session[key] ?? session[key.replace(/[A-Z]/g, (letter) => `_${letter.toLowerCase()}`)] ?? ""}`;
+    };
+    const sessionProjectOption = (session) => {
+      const path = `${session.repository || session.project || ""}`.replace(/[\\/]+$/, "");
+      const label = `${session.logical_project_name || path.split(/[\\/]/).at(-1) || ""}`;
+      return { key: path, label, title: `${session.repository_url || session.repositoryUrl || path}` };
+    };
+    const sessionList = (rawRequest) => {
+      const request = rawRequest?.request || rawRequest || {};
+      const showChildren = Boolean(request.showChildSessions);
+      const agent = `${request.agent || ""}`;
+      const query = `${request.query || ""}`.trim().toLowerCase();
+      const selectedProjects = new Set(request.selectedProjectKeys || []);
+      const projectOptions = new Map();
+      for (const session of sessionRows) {
+        if (agent && `${session.agent || ""}` !== agent) continue;
+        if (!showChildren && session.parent_session_id) continue;
+        const option = sessionProjectOption(session);
+        const current = projectOptions.get(option.key);
+        projectOptions.set(option.key, { ...option, count: (current?.count || 0) + 1 });
+      }
+      let rows = (query ? searchRows : sessionRows).filter((session) => {
+        if (agent && `${session.agent || ""}` !== agent) return false;
+        if (!showChildren && session.parent_session_id) return false;
+        return selectedProjects.size === 0 || selectedProjects.has(sessionProjectOption(session).key);
+      });
+      const direction = request.sortDirection === "asc" ? 1 : -1;
+      rows = [...rows].sort((left, right) => direction * `${sessionValue(left, request.sortKey)}`.localeCompare(`${sessionValue(right, request.sortKey)}`, undefined, { numeric: true }));
+      const pageSize = Math.max(1, Number(request.pageSize || 50));
+      let pages = [];
+      if (request.groupBy) {
+        const groups = new Map();
+        for (const row of rows) {
+          const key = `${sessionValue(row, request.groupBy)}`;
+          groups.set(key, [...(groups.get(key) || []), row]);
+        }
+        let pageRows = [];
+        let start = 0;
+        let groupCount = 0;
+        for (const group of groups.values()) {
+          if (pageRows.length >= pageSize) {
+            pages.push({ rows: pageRows, start, groupCount });
+            start += pageRows.length;
+            pageRows = [];
+            groupCount = 0;
+          }
+          pageRows.push(...group);
+          groupCount += 1;
+        }
+        pages.push({ rows: pageRows, start, groupCount });
+      } else {
+        for (let start = 0; start < rows.length || (rows.length === 0 && start === 0); start += pageSize) {
+          pages.push({ rows: rows.slice(start, start + pageSize), start, groupCount: null });
+          if (rows.length === 0) break;
+        }
+      }
+      const requestedPage = Math.max(0, Number(request.page || 0));
+      const page = Math.min(requestedPage, pages.length - 1);
+      const selected = pages[page];
+      return {
+        revision: 0,
+        rows: selected.rows,
+        projectOptions: [...projectOptions.values()],
+        total: rows.length,
+        childSessionCount: sessionRows.filter((session) => session.parent_session_id).length,
+        page,
+        pageCount: pages.length,
+        pageStart: selected.start,
+        pageEnd: selected.start + selected.rows.length,
+        groupCount: selected.groupCount,
+      };
+    };
     window.__TAURI_EVENT_PLUGIN_INTERNALS__ = { unregisterListener: () => {} };
-    window.__TAURI_INTERNALS__ = {
-      invoke: async (command, args = {}) => {
+    const invokeDomainCommand = async (command, args = {}) => {
         if (command === "plugin:event|listen") {
           callbacks.set(args.handler, args.event);
           return args.handler;
@@ -267,6 +345,7 @@ try {
           snapshotId: "sessions:real-data-performance:0",
           payload: report.sessions?.sessions || [],
         };
+        if (command === "sessions_list") return sessionList(args);
         if (command === "rules_list") return report.rules?.rules || [];
         if (command === "hooks_list") return report.hooks?.hooks || [];
         if (command === "mcp_list") return report.mcp?.servers || [];
@@ -333,6 +412,18 @@ try {
           };
         }
         return null;
+    };
+    window.__TAURI_INTERNALS__ = {
+      invoke: async (command, args = {}) => {
+        if (command === "daemon_invoke") {
+          const request = args.request ?? {};
+          return {
+            jsonrpc: "2.0",
+            id: request.id,
+            result: await invokeDomainCommand(request.method, request.params),
+          };
+        }
+        return invokeDomainCommand(command, args);
       },
       transformCallback: (callback) => {
         const id = nextCallbackId++;
@@ -365,7 +456,7 @@ try {
       missing: false,
       elapsedMs: Number((performance.now() - startedAt).toFixed(1)),
       periods: document.querySelectorAll(".overviewTrendBarButton").length,
-      rungs: document.querySelectorAll(".overviewTrendRung").length,
+      rungs: document.querySelectorAll(".overviewTrendRungPath").length,
       emptyMessage: document.querySelector(".overviewTrendEmptyMessage")?.textContent?.trim() || null,
       chartText: document.querySelector(".overviewTrendBlock")?.textContent?.trim().slice(0, 180) || null,
       scrollWidth: viewport.scrollWidth,

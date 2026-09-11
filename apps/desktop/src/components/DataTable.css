@@ -51,15 +51,6 @@
   );
 }
 
-.dataTableShell--frozen:has(.sessionFreezeResizeHandle:hover),
-.dataTableShell--frozen:has(.sessionFreezeResizeHandle[data-resize-handle-active]) {
-  --data-table-frozen-divider-color: var(--focus-ring);
-}
-
-.dataTableShell--frozen .sessionFreezeResizeHandle {
-  left: var(--data-table-frozen-divider-left);
-}
-
 .dataTableSplitScroll {
   overflow: auto;
 }
@@ -184,6 +175,7 @@
   overflow-anchor: none;
   overscroll-behavior-x: none;
   overscroll-behavior-y: auto;
+  scroll-behavior: auto;
 }
 
 /* During a large scroll jump React may need more than one frame to replace the
@@ -194,7 +186,10 @@
   position: absolute;
   top: 0;
   left: 0;
-  z-index: var(--z-content);
+  /* The frozen pane has its own stacking layer. The seek layer must cover both
+     panes while React commits the target virtual window, or the frozen side
+     exposes a white gap during a large native scroll jump. */
+  z-index: var(--z-header-rule);
   box-sizing: border-box;
   pointer-events: none;
   background-color: var(--surface-3, var(--surface-2, var(--content-bg)));
@@ -237,30 +232,16 @@
   height: 34px;
 }
 
-.sectionHeader {
-  width: 100%;
-  height: 34px;
-  display: flex;
-  align-items: center;
-  gap: 5px;
-  border: 0;
-  padding: 0;
-  background: transparent;
-  cursor: pointer;
-  font-family: inherit;
-  text-align: left;
+.dataGroup [data-accordion-part="trigger"] {
+  color: var(--data-table-header-color, var(--muted));
+  font-size: var(--data-table-header-font-size, var(--text-xs));
+  font-weight: var(--data-table-header-font-weight, 750);
+  letter-spacing: var(--data-table-header-letter-spacing, 0.08em);
+  text-transform: uppercase;
 }
 
-.sectionHeader:hover {
+.dataGroup [data-accordion-part="trigger"]:hover {
   color: var(--muted);
-}
-
-.accordionChevron {
-  transition: transform 140ms ease;
-}
-
-.sectionHeader[data-state="closed"] .accordionChevron {
-  transform: rotate(-90deg);
 }
 
 /* ===========================================================================
@@ -343,7 +324,7 @@
 /* Group (section) headers indent to the row text column so the header label and
    the item text share a vertical line (the checkbox sits to their left). The
    indent equals row offset + selection column + track gap. */
-.dataGroup .sectionHeader {
+.dataGroup [data-accordion-part="trigger"] {
   padding-left: var(--data-table-text-rail-indent);
   padding-right: var(--page-right-inset);
   color: var(--data-table-header-color, var(--muted));
@@ -355,7 +336,7 @@
 
 /* Non-frozen tables: the group heading spans the full row width, so it can pin
    to the top (just below the sticky column header) while its rows scroll. */
-.dataTableShell:not(.dataTableShell--frozen) .dataGroup .sectionHeading {
+.dataTableShell:not(.dataTableShell--frozen) .dataGroup [data-accordion-part="heading"] {
   position: sticky;
   top: var(--data-table-sticky-header-offset, 0px);
   z-index: var(--z-sticky);
@@ -365,7 +346,7 @@
 /* Frozen tables: group headers share the first-column rail and must not scroll
    horizontally with the rest of the grid (same stick zone as the divider). They
    stay below the sticky column header via the shared group z-layer. */
-.dataTableShell--frozen .dataGroup .sectionHeading {
+.dataTableShell--frozen .dataGroup [data-accordion-part="heading"] {
   position: sticky;
   top: var(--data-table-sticky-header-offset, 0px);
   left: 0;
@@ -375,7 +356,7 @@
   background-color: var(--data-table-header-bg, var(--content-bg));
 }
 
-.dataTableShell--frozen .dataGroup .sectionHeader {
+.dataTableShell--frozen .dataGroup [data-accordion-part="trigger"] {
   width: 100%;
   padding-right: 12px;
   box-sizing: border-box;
@@ -392,8 +373,13 @@
    the generic frozen heading geometry would otherwise pin it behind the
    frozen pane and expose row content in the group-header band. */
 .dataTableShell--frozen .dataTableScrollPane .dataSplitGroupSpacer {
+  position: sticky;
+  top: var(--data-table-sticky-header-offset, 0px);
+  z-index: var(--z-sticky);
+  box-sizing: border-box;
   left: auto;
   width: 100%;
+  background-color: var(--data-table-header-bg, var(--content-bg));
 }
 
 .sectionHeaderLabel {
@@ -809,33 +795,6 @@
   left: calc(-1 * var(--data-table-split-scroll-leading-gap));
 }
 
-.sessionFreezeResizeHandle {
-  --resize-handle-hit-area: 7px;
-  position: absolute;
-  top: 0;
-  bottom: 0;
-  left: calc(var(--frozen-leading-offset) + var(--session-freeze-column-width));
-  z-index: var(--z-resize-handle);
-  width: var(--resize-handle-hit-area);
-  padding: 0;
-  margin-left: calc(var(--resize-handle-hit-area) * -0.5);
-  border: 0;
-  background: transparent;
-  cursor: col-resize;
-  outline: none;
-}
-
-.sessionFreezeResizeHandle::after {
-  content: "";
-  position: absolute;
-  top: 0;
-  bottom: 0;
-  left: 50%;
-  width: 1px;
-  transform: translateX(-50%);
-  background: transparent;
-}
-
 .dataCellText {
   min-width: 0;
   overflow: hidden;
@@ -855,23 +814,19 @@
   font-weight: 720;
 }
 
-.sessionTitleWithKind {
-  width: 100%;
+.dataCellTitleLine {
   min-width: 0;
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 7px;
+  width: 100%;
+  max-width: 100%;
+  overflow: hidden;
 }
 
-.sessionTitleText {
-  flex: 1 1 auto;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-size: var(--text-ui);
-  font-weight: 720;
-  line-height: var(--leading-ui);
+.dataRow .dataCell:has(.dataCellSub) .dataCellTitleLine .dataCellTitle {
+  width: auto;
+  flex: 0 1 auto;
 }
 
 .dataCellNumber {
@@ -889,28 +844,6 @@
   margin-top: 5px;
 }
 
-.sessionPreviewSubLine {
-  display: grid;
-  align-items: stretch;
-  gap: 2px;
-}
-
-.sessionPreviewMessage {
-  display: flex;
-  align-items: center;
-  gap: 5px;
-  min-width: 0;
-}
-
-.sessionPreviewMessage > svg {
-  flex: 0 0 13px;
-  color: var(--faint);
-}
-
-.sessionPreviewText {
-  margin-top: 0;
-}
-
 .dataCellSub {
   display: block;
   width: 100%;
@@ -922,12 +855,6 @@
   color: var(--faint);
   font-size: var(--text-sm);
   line-height: var(--leading-tight);
-}
-
-.sessionSearchSnippet mark {
-  border-radius: 2px;
-  background: color-mix(in srgb, var(--accent) 24%, transparent);
-  color: inherit;
 }
 
 .dataCell[data-column="source"] .dataCellSub {

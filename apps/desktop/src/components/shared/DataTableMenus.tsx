@@ -1,5 +1,5 @@
 import type { ComponentType, ReactNode } from "react";
-import { Code2, Copy, FolderOpen, Trash2 } from "lucide-react";
+import { Code2, Copy, Delete as DeleteKeyIcon, FolderOpen, Trash2 } from "lucide-react";
 
 import { actionLabels, TauriCommand, copyText, safeInvoke } from "../../lib/index.ts";
 
@@ -13,6 +13,10 @@ export type DataTableMenuComponents = {
   }>;
   Separator: ComponentType<{ className?: string }>;
 };
+
+export function MenuShortcut({ children }: { children: ReactNode }) {
+  return <span className="menuShortcut" aria-hidden="true">{children}</span>;
+}
 
 export function OpenInEditorMenuItem({
   Menu,
@@ -28,7 +32,7 @@ export function OpenInEditorMenuItem({
   const resolved = `${path ?? ""}`.trim();
   return (
     <Menu.Item
-      className="skillMenuItem"
+      className="menuItem"
       disabled={!resolved}
       onSelect={() => resolved && safeInvoke(TauriCommand.OpenInEditor, { path: resolved, line: line ?? undefined })}
     >
@@ -50,7 +54,7 @@ export function RevealInFinderMenuItem({
   const resolved = `${path ?? ""}`.trim();
   return (
     <Menu.Item
-      className="skillMenuItem"
+      className="menuItem"
       disabled={!resolved}
       onSelect={() => resolved && safeInvoke(TauriCommand.RevealInFinder, { path: resolved })}
     >
@@ -71,7 +75,7 @@ export function CopyPathMenuItem({
 }) {
   const resolved = `${path ?? ""}`.trim();
   return (
-    <Menu.Item className="skillMenuItem" disabled={!resolved} onSelect={() => resolved && copyText(resolved)}>
+    <Menu.Item className="menuItem" disabled={!resolved} onSelect={() => resolved && copyText(resolved)}>
       <Copy size={14} />
       {label}
     </Menu.Item>
@@ -90,7 +94,7 @@ export function CopyTextMenuItem({
   disabled?: boolean;
 }) {
   return (
-    <Menu.Item className="skillMenuItem" disabled={disabled || !text} onSelect={() => copyText(text)}>
+    <Menu.Item className="menuItem" disabled={disabled || !text} onSelect={() => copyText(text)}>
       <Copy size={14} />
       {label}
     </Menu.Item>
@@ -109,28 +113,10 @@ export function DeleteMenuItem({
   disabled?: boolean;
 }) {
   return (
-    <Menu.Item className="skillMenuItem danger" disabled={disabled} onSelect={onSelect}>
+    <Menu.Item className="menuItem danger" disabled={disabled} onSelect={onSelect}>
       <Trash2 size={14} />
       {label}
-    </Menu.Item>
-  );
-}
-
-export function BulkDeleteMenuItem({
-  Menu,
-  label = actionLabels.deleteSelected,
-  onSelect,
-  disabled = false,
-}: {
-  Menu: DataTableMenuComponents;
-  label?: string;
-  onSelect: () => void;
-  disabled?: boolean;
-}) {
-  return (
-    <Menu.Item className="skillMenuItem danger" disabled={disabled} onSelect={onSelect}>
-      <Trash2 size={14} />
-      {label}
+      <MenuShortcut><DeleteKeyIcon size={14} strokeWidth={1.8} /></MenuShortcut>
     </Menu.Item>
   );
 }

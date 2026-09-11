@@ -17,3 +17,9 @@ test("Skills popover waits for loaded links before opening", () => {
   assert.match(sessionsView, /<Popover\.Root open=\{open\} onOpenChange=\{handleOpenChange\}>/);
   assert.match(sessionsView, /loading \|\| links\.length > 0 \? " hasChart"/);
 });
+
+test("Sessions remote-list failure does not loop on empty fallback state", () => {
+  assert.match(sessionsView, /const EMPTY_SESSION_ROWS: SessionRecord\[\] = \[\];/);
+  assert.match(sessionsView, /const tableSessions = localListView\?\.tableSessions \?\? remoteList\?\.rows \?\? EMPTY_SESSION_ROWS;/);
+  assert.match(sessionsView, /setInferredResumeTargets\(\(current\) => Object\.keys\(current\)\.length === 0 \? current : \{\}\);/);
+});

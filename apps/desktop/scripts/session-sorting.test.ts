@@ -49,6 +49,20 @@ if (typeof mock.module !== "function") {
     );
   });
 
+  test("sorts search results by relevance before updated time", () => {
+    const sessions = [
+      { ...session("newer-single-match", "2026-08-28T03:49:00Z", "2026-08-29T03:49:00Z"), searchScore: 6 },
+      { ...session("older-multiple-match", "2026-08-27T03:49:00Z", "2026-08-28T03:49:00Z"), searchScore: 20 },
+    ];
+
+    assert.deepEqual(
+      [...sessions]
+        .sort((left, right) => compareSessions(left, right, { key: "searchScore", direction: "desc" }))
+        .map((item) => item.id),
+      ["older-multiple-match", "newer-single-match"],
+    );
+  });
+
   test("keeps logical identity stable when a session moves to a different source path", () => {
     const metadata = session("session-1", "2026-08-28T03:49:00Z", "2026-08-28T03:50:00Z");
     const transcript = { ...metadata, path: "/sessions/session-1.jsonl" };

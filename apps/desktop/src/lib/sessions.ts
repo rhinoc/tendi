@@ -90,11 +90,37 @@ export enum SessionResumeTarget {
 export enum SessionResumeOutcomeStatus {
   ActiveWriter = "activeWriter",
   Launched = "launched",
+  Failed = "failed",
 }
+
+export enum SessionResumeErrorCode {
+  DesktopRuntimeRequired = "desktop_runtime_required",
+  DesktopCommandFailed = "desktop_command_failed",
+  WorktreeNotFound = "worktree_not_found",
+  TerminalUnavailable = "terminal_unavailable",
+  TerminalLaunchFailed = "terminal_launch_failed",
+  SessionNotResumable = "session_not_resumable",
+  Internal = "internal",
+}
+
+export enum SessionResumeErrorAction {
+  Retry = "retry",
+  Settings = "settings",
+  OpenProject = "open_project",
+  None = "none",
+}
+
+export type SessionResumeError = {
+  code: SessionResumeErrorCode;
+  provider: string | null;
+  retryable: boolean;
+  action: SessionResumeErrorAction;
+};
 
 export type SessionResumeOutcome =
   | { status: typeof SessionResumeOutcomeStatus.ActiveWriter; lockPath: string }
-  | { status: typeof SessionResumeOutcomeStatus.Launched; target: SessionResumeTarget; terminal?: string };
+  | { status: typeof SessionResumeOutcomeStatus.Launched; target: SessionResumeTarget; terminal?: string }
+  | { status: typeof SessionResumeOutcomeStatus.Failed; error: SessionResumeError };
 
 export function normalizeSessionResumeTarget(value: unknown): SessionResumeTarget {
   if (value === SessionResumeTarget.App) return SessionResumeTarget.App;
@@ -131,9 +157,15 @@ export enum SessionSortKey {
   Messages = "messages",
   Turns = "turns",
   CacheRate = "cacheRate",
+  SearchScore = "searchScore",
 }
 
 export type SortState = { key: string; direction: SortDirection };
+
+export const SESSION_SEARCH_SORT: SortState = {
+  key: SessionSortKey.SearchScore,
+  direction: SortDirection.Desc,
+};
 
 export enum SessionKind {
   Main = "main",
@@ -341,6 +373,15 @@ export function sortValue(session: SessionRecord, key: string): string | number 
 }
 
 export function compareSessions(a: SessionRecord, b: SessionRecord, sort: SortState): number {
+  if (sort.key === SessionSortKey.SearchScore) {
+    const leftScore = a.searchScore ?? Number.NEGATIVE_INFINITY;
+    const rightScore = b.searchScore ?? Number.NEGATIVE_INFINITY;
+    if (leftScore !== rightScore) {
+      const ordering = leftScore < rightScore ? -1 : 1;
+      return ordering * (sort.direction === SortDirection.Asc ? 1 : -1);
+    }
+    return compareSessions(a, b, { key: SessionSortKey.UpdatedAt, direction: SortDirection.Desc });
+  }
   if (sort.key === SessionSortKey.StartedAt) {
     return compareTimestamps(a.startedAt, b.startedAt) * (sort.direction === SortDirection.Asc ? 1 : -1);
   }

@@ -22,6 +22,8 @@
 5. **全量 snapshot 是替换语义**：snapshot 只接受服务端给出的 revision 和 rows，不再在 backfill 结束后额外调用旧的全量 session list 接口。带 warning 的 domain 只写 failed 状态，不覆盖最近一次成功 snapshot。
 6. **mutation 可回滚**：filesystem 多文件 apply 和 SQLite persistence 都必须满足 all-or-nothing；失败不得留下半套 skill。skill source version 在提交时做 compare-and-swap，旧 preview 不能覆盖新版本。
 
+投影 list 请求只读取 `normalized_snapshots` 的最近一次快照，并通过 `projection_status` 判断是否需要刷新。缺失或过期时，请求立即返回已有快照（首次为空），刷新由按 domain 去重的 `projection_operations` 后台任务执行；完成后发出 `projection://changed`，桌面端重新读取该 domain。写操作仍保留同步投影读取，因为 mutation 必须基于最新快照做冲突检查。
+
 ## 数据流
 
 ```text
@@ -54,6 +56,8 @@ provider parser
 provider trait 负责识别、路径、parser、状态和 source locator。共享层只负责调度和格式化，不依据文件扩展名推断 provider。session 对外暴露稳定的 `SessionKey` / `SourceLocator`，文件移动不会改变 native identity；不同 provider 的同名 native id 仍然隔离。
 
  skill mutation 的落地入口统一是 `skillIds`；文件编辑入口统一是 `skillId`。CLI 的 pattern 只负责在当前 projection 解析成 IDs，不能直接作为写入定位符。display name 只用于展示、搜索和新 wrapper 的目标名称，不参与既有安装的定位。
+
+Skill identity follows the installation boundary: one record represents one canonical filesystem directory, and its discovered paths are aliases only when they canonicalize to that same directory. Independent copies are separate records regardless of name, source metadata, or content hash. Any ambiguous name reference is rejected or omitted; it never selects the first record.
 
 CLI 的 scan、skill、backup、session/catalog list 与 search 优先 attach 同 workspace daemon；无 daemon 时才通过 OS database-write lock 使用 scoped Store。daemon 路径进入同一个 coordinator。
 

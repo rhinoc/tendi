@@ -1,0 +1,195 @@
+.confirmDialogPanel[data-update-preview="true"] {
+  width: min(1180px, calc(100vw - 48px));
+}
+
+.skillDeleteNames {
+  display: grid;
+  gap: 8px;
+  margin: -8px 22px 18px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--inset-fill);
+}
+
+.skillDeleteNames span {
+  overflow: hidden;
+  color: var(--text);
+  font-size: var(--text-sm);
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.skillUpdateDiffFrame {
+  height: min(62vh, 640px);
+  margin: -4px 22px 20px;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+}
+
+.skillUpdateDiffToolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 0 0 auto;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--line);
+  background: var(--surface-2);
+  color: var(--muted);
+  font-size: var(--text-sm);
+}
+
+.skillUpdateDiffToolbarLabel {
+  flex: 1 1 auto;
+}
+
+.skillUpdateDiffToolbarActions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.skillUpdateDiff {
+  width: 100%;
+  height: auto;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.skillUpdateDiffFilesPanel,
+.skillUpdateDiffEditor {
+  min-width: 0;
+  min-height: 0;
+}
+
+.skillUpdateDiffFilesPanel {
+  border-right: 1px solid var(--line);
+  background: var(--surface-2);
+}
+
+.fileTree.skillUpdateFileTree {
+  border-right: 0;
+  padding-block: 6px;
+  background: transparent;
+}
+
+.skillUpdateFileStatus {
+  flex: 0 0 auto;
+  font-weight: 700;
+}
+
+.skillUpdateFileStatus.changed {
+  color: var(--tone-info);
+}
+
+.skillUpdateFileStatus.needsResolution {
+  color: var(--danger-text);
+}
+
+.skillUpdateDiffResizeHandle {
+  margin-inline: -3px;
+}
+
+.skillUpdateDiffEditor {
+  overflow: hidden;
+}
+
+.skillUpdateDiffEditorBody {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.skillUpdateDiffEditor .codeMirrorEditor {
+  width: 100%;
+  min-width: 0;
+  min-height: 0;
+  flex: 1 1 auto;
+  overflow: hidden;
+}
+
+.skillUpdateDiffEditor .codeMirrorEditor > div {
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+}
+
+.skillMergeResolutionBar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 0 0 auto;
+  padding: 8px 10px;
+  border-top: 1px solid var(--line);
+  background: var(--surface-2);
+  color: var(--muted);
+  font-size: var(--text-sm);
+}
+
+.skillMergeResolutionBar span {
+  flex: 1 1 auto;
+}
+
+.skillMergeResolutionBar button {
+  flex: 0 0 auto;
+  padding: 4px 8px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-sm);
+  background: var(--panel-bg);
+  color: var(--text);
+  cursor: pointer;
+  font-size: var(--text-ui);
+}
+
+.skillMergeResolutionBar button:hover {
+  background: var(--hover-fill);
+}
+
+.skillUpdatePreviewLoading {
+  margin: 4px 22px 20px;
+}
+
+.loadingState.skillUpdatePreviewLoading {
+  width: calc(100% - 44px);
+  height: min(62vh, 640px);
+  margin: -4px 22px 20px;
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+}
+
+.skillUpdatePreviewEmpty {
+  min-height: 64px;
+  margin: -4px 22px 20px;
+  padding: 20px;
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  color: var(--muted);
+  font-size: var(--text-ui);
+  line-height: var(--leading-body);
+  text-align: center;
+  white-space: pre-wrap;
+}
+
+.skillUpdateApplyTooltipTarget {
+  display: inline-flex;
+}
+
+.skillUpdateApplyTooltipTarget:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 3px;
+  border-radius: var(--radius-sm);
+}

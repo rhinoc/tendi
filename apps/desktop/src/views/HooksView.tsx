@@ -2,17 +2,18 @@ import { Tooltip } from "../components/shared/Tooltip.tsx";
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, type ComponentType, type ReactNode } from "react";
 import { Group as PanelGroup, Panel } from "react-resizable-panels";
 import { ContextMenu, Dialog, DropdownMenu } from "radix-ui";
-import { Code2, Copy, Crosshair, FolderOpen, Power, PowerOff, SearchX, Trash2, Webhook } from "lucide-react";
+import { Code2, Copy, Crosshair, Delete as DeleteKeyIcon, FolderOpen, Power, PowerOff, SearchX, Trash2, Webhook } from "lucide-react";
 
 import { DataTable } from "../components/DataTable.tsx";
 import { ColumnDataType, type ColumnDef, type SortState } from "../components/DataTable.types";
 import { SortDirection } from "../lib/sort.ts";
+import { useTabState } from "../lib/tab-state.ts";
 import { AgentBadge } from "../components/shared/AgentBadge.tsx";
 import { Badge } from "../components/shared/Badge.tsx";
 import { Button } from "../components/shared/Button.tsx";
 import { CopyButton } from "../components/shared/CopyButton.tsx";
 import { DataTableSelectionActions, renderDataTableSelectionMenu, type DataTableSelectionActionDefinition } from "../components/shared/DataTableSelectionActions.tsx";
-import { OpenInEditorMenuItem } from "../components/shared/DataTableMenus.tsx";
+import { MenuShortcut, OpenInEditorMenuItem } from "../components/shared/DataTableMenus.tsx";
 import { DetailPanel } from "../components/shared/DetailPanel.tsx";
 import { DetailPanelHost } from "../components/shared/DetailPanelHost.tsx";
 import { DialogActionButton } from "../components/shared/DialogActionButton.tsx";
@@ -34,6 +35,7 @@ import {
   actionLabels,
   copiedValueLabel,
   copyValueLabel,
+  EMPTY_DISPLAY_VALUE,
   HOOK_FREEZE_COLUMN,
   selectionDeleteLabel,
   TableSelectionActionId,
@@ -43,6 +45,7 @@ import {
   formatUserPath,
   friendlyAgent,
   hookDeleteDisabledReason,
+  hookDisplayName,
   hookDeleteIdentity,
   hookHandlerText,
   hookItemsFromRows,
@@ -140,6 +143,8 @@ type HooksViewProps = {
   onSetHookEnabled?: (hook: HookRecord, enabled: boolean) => Promise<CatalogMutationResponse>;
   onSetHooksEnabled?: (hooks: HookRecord[], enabled: boolean) => Promise<CatalogMutationResponse>;
   onReviewHook?: (hook: HookRecord) => Promise<CatalogMutationResponse>;
+  locateHookId?: string;
+  onLocateHookComplete?: (id: string) => void;
   projects?: ProjectSummary[];
 };
 
@@ -154,7 +159,7 @@ export function HookDetailRow({ label, value, mono = false, copyable = false }: 
   const text = `${value ?? ""}`;
   const content = (
     <div className={`hookDetailValue ${mono ? "mono" : ""}`}>
-      <span>{text || "-"}</span>
+      <span>{text || EMPTY_DISPLAY_VALUE}</span>
       {copyable && text ? (
         <CopyButton className="hookCopyButton" value={text} copyLabel={copyValueLabel(label)} copiedLabel={copiedValueLabel(label)} />
       ) : null}
@@ -222,7 +227,7 @@ function HookActionsCell({
   const hook = item.hook;
   return (
     <RowActionsMenu
-      ariaLabel={`Hook actions for ${hook.event}`}
+      ariaLabel={`Hook actions for ${hookDisplayName(hook)}`}
       onOpenChange={(open) => { if (!open) suppressNextClick(); }}
     >
       {actions}
@@ -254,31 +259,31 @@ function hookSelectionActions(
     [TableSelectionActionId.Reveal]: {
       id: TableSelectionActionId.Reveal,
       direct: <button aria-label={actionLabels.revealInFinder} disabled={!path} onClick={() => path && void safeInvoke(TauriCommand.RevealInFinder, { path })}><FolderOpen size={15} /><span>{actionLabels.revealInFinder}</span></button>,
-      menu: <Menu.Item className="skillMenuItem" disabled={!path} onSelect={() => path && void safeInvoke(TauriCommand.RevealInFinder, { path })}><FolderOpen size={14} />{actionLabels.revealInFinder}</Menu.Item>,
+      menu: <Menu.Item className="menuItem" disabled={!path} onSelect={() => path && void safeInvoke(TauriCommand.RevealInFinder, { path })}><FolderOpen size={14} />{actionLabels.revealInFinder}</Menu.Item>,
       measure: <><FolderOpen size={15} /><span>{actionLabels.revealInFinder}</span></>,
     },
     [TableSelectionActionId.CopyPath]: {
       id: TableSelectionActionId.CopyPath,
       direct: <CopyButton value={path} disabled={!path} copyLabel={actionLabels.copyPath} copiedLabel={actionLabels.pathCopied} iconSize={15}>{actionLabels.copyPath}</CopyButton>,
-      menu: <Menu.Item className="skillMenuItem" disabled={!path} onSelect={() => path && copyText(path)}><Copy size={14} />{actionLabels.copyPath}</Menu.Item>,
+      menu: <Menu.Item className="menuItem" disabled={!path} onSelect={() => path && copyText(path)}><Copy size={14} />{actionLabels.copyPath}</Menu.Item>,
       measure: <><Copy size={15} /><span>{actionLabels.copyPath}</span></>,
     },
     [TableSelectionActionId.Enable]: {
       id: TableSelectionActionId.Enable,
       direct: <Button size="sm" variant="ghost" aria-label="Enable selected hooks" disabled={enableTargets.length === 0 || busy} onClick={() => { void setSelectedHooksEnabled(enableTargets, true); }}><Power size={15} /><span>{actionLabels.enable}</span></Button>,
-      menu: <Menu.Item className="skillMenuItem" disabled={enableTargets.length === 0 || busy} onSelect={() => { void setSelectedHooksEnabled(enableTargets, true); }}><Power size={14} />{actionLabels.enable}</Menu.Item>,
+      menu: <Menu.Item className="menuItem" disabled={enableTargets.length === 0 || busy} onSelect={() => { void setSelectedHooksEnabled(enableTargets, true); }}><Power size={14} />{actionLabels.enable}</Menu.Item>,
       measure: <><Power size={15} /><span>{actionLabels.enable}</span></>,
     },
     [TableSelectionActionId.Disable]: {
       id: TableSelectionActionId.Disable,
       direct: <Button size="sm" variant="ghost" aria-label="Disable selected hooks" disabled={disableTargets.length === 0 || busy} onClick={() => { void setSelectedHooksEnabled(disableTargets, false); }}><PowerOff size={15} /><span>{actionLabels.disable}</span></Button>,
-      menu: <Menu.Item className="skillMenuItem" disabled={disableTargets.length === 0 || busy} onSelect={() => { void setSelectedHooksEnabled(disableTargets, false); }}><PowerOff size={14} />{actionLabels.disable}</Menu.Item>,
+      menu: <Menu.Item className="menuItem" disabled={disableTargets.length === 0 || busy} onSelect={() => { void setSelectedHooksEnabled(disableTargets, false); }}><PowerOff size={14} />{actionLabels.disable}</Menu.Item>,
       measure: <><PowerOff size={15} /><span>{actionLabels.disable}</span></>,
     },
     [TableSelectionActionId.Delete]: {
       id: TableSelectionActionId.Delete,
       direct: <Button size="sm" variant="ghost" className="danger" aria-label={deleteLabel} aria-busy={deleting || undefined} disabled={deletable.length === 0 || busy} onClick={() => requestDeleteHooks(deletable)}>{deleting ? <LoadingIcon size={15} /> : <Trash2 size={15} />}<span>{deleteLabel}</span></Button>,
-      menu: <Menu.Item className="skillMenuItem danger" disabled={deletable.length === 0 || busy} onSelect={() => requestDeleteHooks(deletable)}><Trash2 size={14} />{deleteLabel}</Menu.Item>,
+      menu: <Menu.Item className="menuItem danger" disabled={deletable.length === 0 || busy} onSelect={() => requestDeleteHooks(deletable)}><Trash2 size={14} />{deleteLabel}<MenuShortcut><DeleteKeyIcon size={14} strokeWidth={1.8} /></MenuShortcut></Menu.Item>,
       measure: <><Trash2 size={15} /><span>{deleteLabel}</span></>,
       separatorBefore: true,
     },
@@ -301,12 +306,12 @@ function hookParameterRows(hook: HookRecord | null, enabledControl: ReactNode): 
   return rows;
 }
 
-export function HooksView({ rows, loadingRows = false, loadError = "", hasRows = false, onRetry, onDeleteHook, onDeleteHooks, onSetHookEnabled, onSetHooksEnabled, onReviewHook, projects = [] }: HooksViewProps) {
+export function HooksView({ rows, loadingRows = false, loadError = "", hasRows = false, onRetry, onDeleteHook, onDeleteHooks, onSetHookEnabled, onSetHooksEnabled, onReviewHook, locateHookId, onLocateHookComplete, projects = [] }: HooksViewProps) {
   const hookItems = useMemo(() => hookItemsFromRows(rows), [rows]);
-  const [activeKey, setActiveKey] = useState(hookItems[0]?.key ?? "");
+  const [activeKey, setActiveKey] = useTabState("hooks.activeKey", hookItems[0]?.key ?? "");
   const [selected, setSelected] = useState<string[]>([]);
-  const [query, setQuery] = useState("");
-  const [detailCollapsed, setDetailCollapsed] = useState(false);
+  const [query, setQuery] = useTabState("hooks.query", "");
+  const [detailCollapsed, setDetailCollapsed] = useTabState("hooks.detailCollapsed", false);
   const [deletingKey, setDeletingKey] = useState("");
   const [updatingEnabledKeys, setUpdatingEnabledKeys] = useState<Set<string>>(() => new Set());
   const [reviewingKey, setReviewingKey] = useState("");
@@ -314,8 +319,18 @@ export function HooksView({ rows, loadingRows = false, loadError = "", hasRows =
   const [deleteError, setDeleteError] = useState("");
   const [pendingDeleteItems, setPendingDeleteItems] = useState<HookItem[]>([]);
   const [sourceState, setSourceState] = useState<HookSourceState>({ key: "", loading: false, data: null, error: "" });
+  const [hookLocatorRequest, setHookLocatorRequest] = useState("");
   const activeHookSelectionIdentityRef = useRef("");
   const normalizedQuery = query.trim().toLowerCase();
+  useEffect(() => {
+    if (!locateHookId) return;
+    setQuery("");
+    setHookLocatorRequest(locateHookId);
+  }, [locateHookId]);
+  const completeHookLocator = useCallback((id: string) => {
+    setHookLocatorRequest((current) => current === id ? "" : current);
+    onLocateHookComplete?.(id);
+  }, [onLocateHookComplete]);
   const filteredHooks = useMemo(() => {
     if (!normalizedQuery) return hookItems;
     return hookItems.filter((item) => hookSearchText(item.hook).includes(normalizedQuery));
@@ -450,23 +465,23 @@ export function HooksView({ rows, loadingRows = false, loadError = "", hasRows =
       header: "Event",
       type: ColumnDataType.Enum,
       sticky: true,
-      groupBy: (item) => item.hook.event,
+      groupBy: (item) => hookDisplayName(item.hook),
       sortable: true,
-      sortValue: (item) => item.hook.event,
+      sortValue: (item) => hookDisplayName(item.hook),
       width: "var(--data-freeze-column-width, 330px)",
       render: (item) => {
         const hook = item.hook;
         const handler = hookHandlerText(hook);
         return (
           <>
-            <span className="hookEventTitle">
-              <span className="dataCellTitle">{hook.event}</span>
+            <span className="dataCellTitleLine">
+              <span className="dataCellTitle">{hookDisplayName(hook)}</span>
               {hook.needs_review ? (
                 <Badge
                   as="button"
                   type="button"
                   tone="warning"
-                  aria-label={`Review ${hook.event}`}
+                  aria-label={`Review ${hookDisplayName(hook)}`}
                   onClick={(event) => {
                     event.stopPropagation();
                     requestReviewHook(item);
@@ -671,13 +686,15 @@ export function HooksView({ rows, loadingRows = false, loadError = "", hasRows =
               rows={filteredHooks}
               columns={hookColumns}
               getRowId={(item) => item.key}
-        getRowLabel={(item) => item.hook.event}
+              getRowLabel={(item) => hookDisplayName(item.hook)}
               freezeColumn={HOOK_FREEZE_COLUMN}
               defaultSort={defaultSort}
               selectable
               selectedIds={selected}
               onSelectionChange={setSelected}
+              onDeleteSelected={requestDeleteHooks}
               enableMarquee
+              scrollRestorationKey="hooks.list"
               rowContextMenu={rowContextMenu}
               bottomBar={bottomBar}
               bottomBarActionsClassName="selectionActions"
@@ -687,6 +704,8 @@ export function HooksView({ rows, loadingRows = false, loadError = "", hasRows =
                 setActiveKey(item.key);
                 setDetailCollapsed(false);
               }}
+              scrollToRowId={hookLocatorRequest}
+              onScrollToRowComplete={completeHookLocator}
               loading={loadingRows && !hasRows}
               loadingLabel="Loading hooks"
               emptyState={loadError && !hasRows ? <LoadErrorState message={loadError} onRetry={onRetry} /> : (
@@ -705,18 +724,16 @@ export function HooksView({ rows, loadingRows = false, loadError = "", hasRows =
         collapsed={detailCollapsed}
         onExpand={() => setDetailCollapsed(false)}
         expandLabel="Expand hook detail"
-        railLabel={activeHook?.event ?? ""}
+        railLabel={activeHook ? hookDisplayName(activeHook) : ""}
         hasSelection={Boolean(activeHook)}
         emptyState={loadingRows ? <LoadingState label="Loading hooks" /> : <EmptyState compact title="Select a hook to view its details." />}
-        hostClassName="hookDetailPanelHost"
       >
         {activeHook ? (
           <DetailPanel
-            className="ruleEditorPanel hookDetailPanel"
-            title={activeHook.event}
+            title={hookDisplayName(activeHook)}
             meta={(
               <div className="threadMeta hookSourceMeta">
-                <Tooltip content={formatUserPath(hookSourcePath(activeHook))} onlyWhenTruncated><span>{formatUserPath(hookSourcePath(activeHook)) || "-"}</span></Tooltip>
+            <Tooltip content={formatUserPath(hookSourcePath(activeHook))} onlyWhenTruncated><span>{formatUserPath(hookSourcePath(activeHook)) || EMPTY_DISPLAY_VALUE}</span></Tooltip>
               </div>
             )}
             collapseLabel="Collapse hook detail"
@@ -830,7 +847,7 @@ export function HooksView({ rows, loadingRows = false, loadError = "", hasRows =
             Approve the current configuration for this {pendingReviewItem?.hook.agent ?? ""} hook?
           </p>
           <div className="hookReviewDialogDetails">
-            <strong>{pendingReviewItem?.hook.event ?? ""}</strong>
+            <strong>{hookDisplayName(pendingReviewItem?.hook)}</strong>
             <span>{formatUserPath(hookSourcePath(pendingReviewItem?.hook))}</span>
             <code>{compactCommand(hookHandlerText(pendingReviewItem?.hook))}</code>
           </div>

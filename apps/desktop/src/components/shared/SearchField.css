@@ -1,24 +1,24 @@
 .searchBox {
   box-sizing: border-box;
-  height: 28px;
-  min-height: 28px;
+  height: var(--control-height);
+  min-height: var(--control-height);
   width: 210px;
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 0 10px;
+  padding: 0 var(--control-padding-x);
   background: var(--panel-bg);
-  border: 0;
-  border-radius: var(--radius-md);
-  box-shadow: var(--shadow-border);
+  border: 1px solid var(--control-border);
+  border-radius: var(--control-radius);
+  box-shadow: none;
   color: var(--faint);
-  transition-property: box-shadow;
+  transition-property: border-color;
   transition-duration: 140ms;
   transition-timing-function: ease-out;
 }
 
 .searchBox:focus-within {
-  box-shadow: var(--shadow-border-hover), 0 0 0 3px var(--focus-ring-soft);
+  border-color: var(--line-strong);
 }
 
 .searchBox input {

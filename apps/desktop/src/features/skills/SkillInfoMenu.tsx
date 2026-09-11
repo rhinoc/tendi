@@ -9,6 +9,7 @@ import {
   formatUserPath,
   openSource,
   safeInvoke,
+  skillDisplayName,
   skillSourceDetails,
   skillTargets,
   isWebSource,
@@ -25,7 +26,7 @@ import { CopyButton } from "../../components/shared/CopyButton.tsx";
 import { InfoDropdownMenu } from "../../components/shared/InfoDropdownMenu.tsx";
 import { InfoSection } from "../../components/shared/InfoSection.tsx";
 import { IconButton } from "../../components/shared/IconButton.tsx";
-import type { SkillDependencyRecord } from "./SkillDependencyGraph.tsx";
+import { skillRelationList, type SkillDependencyRecord } from "./SkillDependencyGraph.tsx";
 import { Visibility } from "./Visibility.tsx";
 
 export type SkillInfoMenuSkill = SkillLike & {
@@ -43,21 +44,15 @@ export type SkillInfoMenuSkill = SkillLike & {
 export type SkillInfoMenuProps = {
   skill: SkillInfoMenuSkill;
   skills: SkillDependencyRecord[];
-  onOpenSkill?: (name: string) => void;
+  onOpenSkill?: (skillId: string) => void;
 };
-
-function relationList(ids: string[], skills: SkillDependencyRecord[]) {
-  return ids
-    .flatMap((id) => skills.filter((item) => item.id === id))
-    .sort((left, right) => left.name.localeCompare(right.name));
-}
 
 function SkillInfoRelations({
   rows,
   onOpenSkill,
 }: {
   rows: { label: string; skills: SkillDependencyRecord[] }[];
-  onOpenSkill?: (name: string) => void;
+  onOpenSkill?: (skillId: string) => void;
 }) {
   return (
     <table className="skillInfoRelationsTable">
@@ -68,10 +63,10 @@ function SkillInfoRelations({
             <td>
               <div className="skillInfoRelationList">
                 {row.skills.map((relatedSkill) => (
-                  <Tooltip key={relatedSkill.id ?? relatedSkill.name} content={relatedSkill.description}><button
+                  <Tooltip key={relatedSkill.id} content={relatedSkill.description}><button
                     className="skillInfoRelationChip"
-                    disabled={!onOpenSkill}
-                    onClick={() => onOpenSkill?.(relatedSkill.id ?? relatedSkill.name)}
+                    disabled={!onOpenSkill || !relatedSkill.id}
+                    onClick={() => relatedSkill.id && onOpenSkill?.(relatedSkill.id)}
                   >
                     {relatedSkill.name}
                   </button></Tooltip>
@@ -93,8 +88,8 @@ export function SkillInfoMenu({ skill, skills, onOpenSkill }: SkillInfoMenuProps
   const sourceUrl = sourceOpenUrl(sourceValue, sourceDetails.kind, sourceDetails.relativePath);
   const sourceActionLabels = skillSourceActionLabels(sourceDetails);
   const installLocations = skillTargets(skill);
-  const dependencies = relationList(skill.dependencyIds ?? [], skills);
-  const dependents = relationList(skill.dependentIds ?? [], skills);
+  const dependencies = skillRelationList(skill.dependencyIds ?? [], skills);
+  const dependents = skillRelationList(skill.dependentIds ?? [], skills);
   const relationRows = [
     { label: "Depends on", skills: dependencies },
     { label: "Used by", skills: dependents },
@@ -107,7 +102,8 @@ export function SkillInfoMenu({ skill, skills, onOpenSkill }: SkillInfoMenuProps
         </IconButton>
       )}
       label="Skill info"
-      title={skill.name}
+      title={skillDisplayName(skill)}
+      contentClassName="skillInfoMenuContent"
     >
             <InfoSection label="Source" className="skillInfoSourceSection">
                 {sourceValue ? (
@@ -128,14 +124,13 @@ export function SkillInfoMenu({ skill, skills, onOpenSkill }: SkillInfoMenuProps
                   : <Tooltip content={displaySourceValue} onlyWhenTruncated><code>{displaySourceValue}</code></Tooltip>)}
                 {sourceValue && (
                   <>
-                    <button
+                    <IconButton
                       aria-label={sourceActionLabels.ariaLabel}
-                      className="appButton appButton-icon"
                       onClick={() => openSource(sourceValue, sourceDetails.kind, sourceDetails.relativePath)}
                     >
                       {sourceUrl ? <ExternalLink size={13} /> : <FolderOpen size={13} />}
-                    </button>
-                    <CopyButton className="appButton appButton-icon" value={sourceValue} copyLabel={copyValueLabel("source")} copiedLabel={copiedValueLabel("source")} />
+                    </IconButton>
+                    <CopyButton iconOnly value={sourceValue} copyLabel={copyValueLabel("source")} copiedLabel={copiedValueLabel("source")} />
                   </>
                 )}
             </InfoSection>
@@ -158,15 +153,14 @@ export function SkillInfoMenu({ skill, skills, onOpenSkill }: SkillInfoMenuProps
                       <AgentBadge agent={target.agent} small />
                     </span>
                     <Tooltip content={formatUserPath(target.path)} onlyWhenTruncated><code>{formatUserPath(target.path)}</code></Tooltip>
-                    <button
+                    <IconButton
                       aria-label={revealPathLabel(target.label)}
-                      className="appButton appButton-icon"
                       onClick={() => target.path && safeInvoke(TauriCommand.RevealInFinder, { path: target.path })}
                     >
                       <FolderOpen size={13} />
-                    </button>
+                    </IconButton>
                     <CopyButton
-                      className="appButton appButton-icon"
+                      iconOnly
                       value={target.path}
                       copyLabel={copyPathLabel(target.label)}
                       copiedLabel={copiedPathLabel(target.label)}

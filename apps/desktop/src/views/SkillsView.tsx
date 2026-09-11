@@ -4,8 +4,10 @@ import { ContextMenu, Dialog, DropdownMenu } from "radix-ui";
 import {
   ChevronLeft,
   ChevronRight,
+  Check,
   Code2,
   Copy,
+  Delete as DeleteKeyIcon,
   ArrowRightLeft,
   Eye,
   FolderOpen,
@@ -25,9 +27,10 @@ import { AgentOptionLabel } from "../components/shared/AgentOptionLabel.tsx";
 import { Badge } from "../components/shared/Badge.tsx";
 import { BadgeList } from "../components/shared/BadgeList.tsx";
 import { ContentTopDragStrip } from "../components/shared/ContentTopDragStrip.tsx";
-import { OpenInEditorMenuItem } from "../components/shared/DataTableMenus.tsx";
+import { MenuShortcut, OpenInEditorMenuItem } from "../components/shared/DataTableMenus.tsx";
 import { DialogActionButton } from "../components/shared/DialogActionButton.tsx";
 import { DialogActionBar } from "../components/shared/DialogActionBar.tsx";
+import { DialogApplyButton } from "../components/shared/DialogApplyButton.tsx";
 import { DialogAdvanceButton } from "../components/shared/DialogAdvanceButton.tsx";
 import { DialogShell } from "../components/shared/DialogShell.tsx";
 import { DialogTextField } from "../components/shared/DialogTextField.tsx";
@@ -52,7 +55,8 @@ import { Visibility } from "../features/skills/Visibility.tsx";
 import { DataTable } from "../components/DataTable.tsx";
 import { ColumnDataType, type ColumnDef, type SortState } from "../components/DataTable.types";
 import { SortDirection } from "../lib/sort.ts";
-import { actionLabels, SKILL_FREEZE_COLUMN, selectionDeleteLabel, SkillUpdateAvailability, TauriCommand, SkillOperationStatus, SkillVisibility, agentIdentityKey, allSkillVisibilities, compactDateTime, copyText, editableSkillVisibilities, findSkillBySelector, isReadOnlySkillSource, isSkillRowSelectable, isSkillSelectable, isSkillVisibilityEditable, primarySkillPath, safeInvoke, scopeColumn, skillSourceAction, skillSourceDetails, skillTargets, sourceRemoteDetails, suppressNextClick, type NormalizedSkill, type ProjectSummary, type RawSkillRecord, type SkillAddPlan, type SkillInstallResult, type WrapperArgs } from "../lib/index.ts";
+import { useTabState } from "../lib/tab-state.ts";
+import { actionLabels, isVisibleAgent, SKILL_FREEZE_COLUMN, scopeColumnFromValue, primarySkillPath, primarySkillScope, selectionDeleteLabel, SkillUpdateAvailability, TauriCommand, SkillOperationStatus, SkillVisibility, agentIdentityKey, allSkillVisibilities, compactDateTime, copyText, editableSkillVisibilities, isReadOnlySkillSource, isSkillRowSelectable, isSkillSelectable, isSkillVisibilityEditable, safeInvoke, skillDisplayName, skillSourceAction, skillSourceDetails, skillTargets, sourceRemoteDetails, suppressNextClick, type NormalizedSkill, type ProjectSummary, type RawSkillRecord, type SkillAddPlan, type SkillInstallResult, type WrapperArgs } from "../lib/index.ts";
 import { captureSkillSourcePage, isSkillSourceActionReady, normalizeSkillAddPlan, resolveSkillInstallTarget, restoreSkillSourcePage, shouldShowSkillQuickSelect, skillSourceErrorMessage, type SkillSourcePageSnapshot } from "../lib/add-skill-dialog.ts";
 import { SkillActionId, skillActionIds } from "../lib/skill-actions.ts";
 import {
@@ -73,8 +77,6 @@ import {
   type SkillChangeResponse,
   type SkillPreviewReadResponse,
 } from "../lib/runtime-gateway.ts";
-
-export type SkillsTableSort = SortState;
 
 enum SkillsViewMode {
   List = "list",
@@ -178,18 +180,25 @@ export type VisibilityMenuItemsProps = {
 };
 
 export function VisibilityMenuItems({ Menu, selectedSkills, onSetVisibility }: VisibilityMenuItemsProps) {
-  const names = selectedSkills.filter(isSkillVisibilityEditable).map((skill) => skill.id || skill.name);
+  const editableSkills = selectedSkills.filter(isSkillVisibilityEditable);
+  const names = editableSkills.map((skill) => skill.id);
+  const activeVisibility = editableSkills.every((skill) => skill.visibility === editableSkills[0]?.visibility)
+    ? editableSkills[0]?.visibility
+    : undefined;
   const disabled = names.length === 0;
   return (
     <>
       {editableSkillVisibilities.map((visibility) => (
         <Menu.Item
-          className="skillMenuItem"
+          className="menuItem selectItemIndicatorRight"
           disabled={disabled}
           key={visibility}
           onSelect={() => onSetVisibility(names, visibility)}
         >
-          {visibility}
+          <span className="selectItemText">{visibility}</span>
+          <span className="selectItemLeadingIcon" aria-hidden="true">
+            {visibility === activeVisibility ? <Check className="selectItemIndicator" size={14} /> : null}
+          </span>
         </Menu.Item>
       ))}
     </>
@@ -229,15 +238,15 @@ function renderSkillPathMenuItems(Menu: SkillMenuComponents, action: SkillPathAc
   if (targets.length > 1) {
     return (
       <Menu.Sub>
-        <Menu.SubTrigger className="skillMenuItem skillMenuSubTrigger">
+        <Menu.SubTrigger className="menuItem menuSubTrigger">
           <Icon size={14} />
           <span>{label}</span>
-          <ChevronRight className="skillMenuSubIcon" size={14} />
+          <ChevronRight className="menuSubIcon" size={14} />
         </Menu.SubTrigger>
         <Menu.Portal>
-          <Menu.SubContent className="skillMenuContent" sideOffset={8} alignOffset={-6}>
+          <Menu.SubContent className="menuContent" sideOffset={8} alignOffset={-6}>
             {targets.map((target) => (
-              <Menu.Item className="skillMenuItem" key={`${action}-${target.id}`} onSelect={() => runSkillPathAction(action, target.path)}>
+              <Menu.Item className="menuItem" key={`${action}-${target.id}`} onSelect={() => runSkillPathAction(action, target.path)}>
                 <AgentOptionLabel agent={target.agent} label={target.label} />
               </Menu.Item>
             ))}
@@ -247,7 +256,7 @@ function renderSkillPathMenuItems(Menu: SkillMenuComponents, action: SkillPathAc
     );
   }
   return (
-    <Menu.Item className="skillMenuItem" disabled={!primaryPath} onSelect={() => primaryPath && runSkillPathAction(action, primaryPath)}>
+    <Menu.Item className="menuItem" disabled={!primaryPath} onSelect={() => primaryPath && runSkillPathAction(action, primaryPath)}>
       <Icon size={14} />
       {label}
     </Menu.Item>
@@ -286,21 +295,21 @@ function skillActionDefinitions({ Menu, selectedSkills, applyUpdates, deleteSkil
   const singleSkill = selectedSkills.length === 1 ? selectedSkills[0] : undefined;
   const primaryPath = singleSkill ? primarySkillPath(singleSkill) : null;
   const targets: SkillTarget[] = singleSkill ? skillTargets(singleSkill) : [];
-  const updateNames = selectedSkills.filter((skill) => skill.updateAvailability === SkillUpdateAvailability.UpdateAvailable).map((skill) => skill.id || skill.name);
-  const deletableNames = selectedSkills.filter(isSkillSelectable).map((skill) => skill.id || skill.name);
+  const updateNames = selectedSkills.filter((skill) => skill.updateAvailability === SkillUpdateAvailability.UpdateAvailable).map((skill) => skill.id);
+  const deletableNames = selectedSkills.filter(isSkillSelectable).map((skill) => skill.id);
   const movableSkills = selectedSkills.filter((skill) => !isReadOnlySkillSource(skill) && skillTargets(skill).length > 0);
-  const updateLabel = selectedSkills.length === 1 ? "Apply update" : "Update";
+  const updateLabel = "Update";
   const locationLabel = selectedSkills.length === 1 ? "Manage locations" : "Locations";
   const deleteLabel = selectionDeleteLabel("skill", selectedSkills.length);
   const visibilityMenu = (
     <Menu.Sub>
-      <Menu.SubTrigger className="skillMenuItem skillMenuSubTrigger">
+      <Menu.SubTrigger className="menuItem menuSubTrigger">
         <Eye size={14} />
         <span>Visibility</span>
-        <ChevronRight className="skillMenuSubIcon" size={14} />
+        <ChevronRight className="menuSubIcon" size={14} />
       </Menu.SubTrigger>
       <Menu.Portal>
-        <Menu.SubContent className="skillMenuContent" sideOffset={8} alignOffset={-6}>
+        <Menu.SubContent className="menuContent" sideOffset={8} alignOffset={-6}>
           <VisibilityMenuItems Menu={Menu} selectedSkills={selectedSkills} onSetVisibility={setVisibility} />
         </Menu.SubContent>
       </Menu.Portal>
@@ -312,18 +321,14 @@ function skillActionDefinitions({ Menu, selectedSkills, applyUpdates, deleteSkil
       direct: <button aria-label={actionLabels.openInEditor} disabled={!primaryPath} onClick={() => primaryPath && safeInvoke(TauriCommand.OpenInEditor, { path: primaryPath })}><Code2 size={15} /><span>{actionLabels.openInEditor}</span></button>,
       menu: <OpenInEditorMenuItem Menu={Menu} path={primaryPath} />,
       measure: <><Code2 size={15} /><span>{actionLabels.openInEditor}</span></>,
-    },
-    [SkillActionId.Locations]: {
-      id: SkillActionId.Locations,
-      direct: <button aria-label={locationLabel} disabled={movableSkills.length === 0} onClick={() => movableSkills.length > 0 && manageLocations(movableSkills)}><ArrowRightLeft size={15} /><span>{locationLabel}</span></button>,
-      menu: <Menu.Item className="skillMenuItem" disabled={movableSkills.length === 0} onSelect={() => { if (movableSkills.length === 0) return; suppressNextClick(); manageLocations(movableSkills); }}><ArrowRightLeft size={14} />{locationLabel}</Menu.Item>,
-      measure: <><ArrowRightLeft size={15} /><span>{locationLabel}</span></>,
+      separatorBefore: true,
     },
     [SkillActionId.Update]: {
       id: SkillActionId.Update,
       direct: <button className="skillApplyUpdatesButton" aria-label={updateLabel} disabled={updateNames.length === 0} onClick={() => updateNames.length > 0 && applyUpdates(updateNames)}><RefreshCw size={15} aria-hidden="true" /><span>{updateLabel}{selectedSkills.length > 1 && updateNames.length ? ` (${updateNames.length})` : ""}</span></button>,
-      menu: <Menu.Item className="skillMenuItem" disabled={updateNames.length === 0} onSelect={() => { if (updateNames.length === 0) return; suppressNextClick(); applyUpdates(updateNames); }}><RefreshCw size={14} />{updateLabel}{selectedSkills.length > 1 && updateNames.length ? ` (${updateNames.length})` : ""}</Menu.Item>,
+      menu: <Menu.Item className="menuItem" disabled={updateNames.length === 0} onSelect={() => { if (updateNames.length === 0) return; suppressNextClick(); applyUpdates(updateNames); }}><RefreshCw size={14} />{updateLabel}{selectedSkills.length > 1 && updateNames.length ? ` (${updateNames.length})` : ""}</Menu.Item>,
       measure: <><RefreshCw size={15} /><span>{updateLabel}{selectedSkills.length > 1 && updateNames.length ? ` (${updateNames.length})` : ""}</span></>,
+      separatorBefore: true,
     },
     [SkillActionId.Reveal]: {
       id: SkillActionId.Reveal,
@@ -346,13 +351,20 @@ function skillActionDefinitions({ Menu, selectedSkills, applyUpdates, deleteSkil
     [SkillActionId.Wrapper]: {
       id: SkillActionId.Wrapper,
       direct: <button aria-label="Create wrapper" onClick={() => createWrapper(selectedSkills)}><PackagePlus size={15} /><span>Create wrapper</span></button>,
-      menu: <Menu.Item className="skillMenuItem" onSelect={() => { suppressNextClick(); createWrapper(selectedSkills); }}><PackagePlus size={14} />Create wrapper</Menu.Item>,
+      menu: <Menu.Item className="menuItem" onSelect={() => { suppressNextClick(); createWrapper(selectedSkills); }}><PackagePlus size={14} />Create wrapper</Menu.Item>,
       measure: <><PackagePlus size={15} /><span>Create wrapper</span></>,
+      separatorBefore: true,
+    },
+    [SkillActionId.Locations]: {
+      id: SkillActionId.Locations,
+      direct: <button aria-label={locationLabel} disabled={movableSkills.length === 0} onClick={() => movableSkills.length > 0 && manageLocations(movableSkills)}><ArrowRightLeft size={15} /><span>{locationLabel}</span></button>,
+      menu: <Menu.Item className="menuItem" disabled={movableSkills.length === 0} onSelect={() => { if (movableSkills.length === 0) return; suppressNextClick(); manageLocations(movableSkills); }}><ArrowRightLeft size={14} />{locationLabel}</Menu.Item>,
+      measure: <><ArrowRightLeft size={15} /><span>{locationLabel}</span></>,
     },
     [SkillActionId.Delete]: {
       id: SkillActionId.Delete,
       direct: <button className="danger" aria-label={deleteLabel} disabled={deletableNames.length === 0} onClick={() => deletableNames.length > 0 && deleteSkills(deletableNames)}><Trash2 size={15} /><span>{deleteLabel}</span></button>,
-      menu: <Menu.Item className="skillMenuItem danger" disabled={deletableNames.length === 0} onSelect={() => { if (deletableNames.length === 0) return; suppressNextClick(); deleteSkills(deletableNames); }}><Trash2 size={14} />{deleteLabel}</Menu.Item>,
+      menu: <Menu.Item className="menuItem danger" disabled={deletableNames.length === 0} onSelect={() => { if (deletableNames.length === 0) return; suppressNextClick(); deleteSkills(deletableNames); }}><Trash2 size={14} />{deleteLabel}<MenuShortcut><DeleteKeyIcon size={14} strokeWidth={1.8} /></MenuShortcut></Menu.Item>,
       measure: <><Trash2 size={15} /><span>{deleteLabel}</span></>,
       separatorBefore: true,
     },
@@ -425,7 +437,7 @@ export function SkillMainCell({ skill, openSkill, onApplyUpdates }: SkillMainCel
             openSkill(skill);
           }}
         >
-          <span className="skillNameText">{skill.name}</span>
+          <span className="skillNameText">{skillDisplayName(skill)}</span>
           {skill.isWrapper && <Badge tone={SKILL_BADGE_TONES.wrapper}>wrapper</Badge>}
         </button>
         {sourceAction && (
@@ -445,10 +457,10 @@ export function SkillMainCell({ skill, openSkill, onApplyUpdates }: SkillMainCel
             as="button"
             tone={SKILL_BADGE_TONES.update}
             type="button"
-            aria-label={`View update for ${skill.name}`}
+            aria-label={`View update for ${skillDisplayName(skill)}`}
             onClick={(event) => {
               event.stopPropagation();
-              onApplyUpdates([skill.name]);
+              onApplyUpdates([skill.id]);
             }}
           >
             Update
@@ -480,7 +492,7 @@ export type SkillActionsCellProps = {
 export function SkillActionsCell({ skill, onApplyUpdates, onDeleteSkills, onManageLocations, onCreateWrapper, onSetVisibility }: SkillActionsCellProps) {
   return (
     <RowActionsMenu
-      ariaLabel={`Skill actions for ${skill.name}`}
+      ariaLabel={`Skill actions for ${skillDisplayName(skill)}`}
       onOpenChange={(open) => { if (!open) suppressNextClick(); }}
     >
       <SkillActionsMenuItems Menu={DropdownMenu} skill={skill} onApplyUpdates={onApplyUpdates} onDeleteSkills={onDeleteSkills} onManageLocations={onManageLocations} onCreateWrapper={onCreateWrapper} onSetVisibility={onSetVisibility} />
@@ -686,6 +698,9 @@ export type AddSkillDialogProps = {
   title?: string;
 };
 
+const DIALOG_CLOSE_ANIMATION_MS = 220;
+const LOCATION_DIALOG_CLOSE_ANIMATION_MS = 260;
+
 export type SkillTargetOption = {
   id: string;
   displayName: string;
@@ -734,7 +749,7 @@ export function AddSkillDialog({ open, onOpenChange, trigger, onClose, onPreview
           index,
           installed: installed.has(agentIdentityKey(option.id)),
         }))
-        .filter(({ option }) => option.supportsGlobal && option.id !== "universal")
+        .filter(({ option }) => option.supportsGlobal && option.id !== "universal" && isVisibleAgent(option.id))
         .sort((left, right) => {
           if (left.option.id === "shared") return -1;
           if (right.option.id === "shared") return 1;
@@ -786,7 +801,7 @@ export function AddSkillDialog({ open, onOpenChange, trigger, onClose, onPreview
   const allSelected = selectableSkills.length > 0 && selectableSkills.every((skill) => selectedSet.has(skill.name));
   const mixedSelected = selected.length > 0 && !allSelected;
   const firstSearchMatch = searchMatches[0] ?? "";
-  const canInstall = Boolean(target && source.trim() && plan && selected.length > 0 && (!selectedHasExisting || replaceExisting) && !busy);
+  const canInstall = Boolean(resolvedTarget && source.trim() && plan && selected.length > 0 && (!selectedHasExisting || replaceExisting) && !busy);
   const canGoBack = Boolean(plan) || sourcePageBeforePreview !== null;
   const advanceLabel = busy ? "Preparing installation" : "Install selected skills";
   const advanceText = busy ? "Installing" : `Install ${selected.length}`;
@@ -955,7 +970,6 @@ export function AddSkillDialog({ open, onOpenChange, trigger, onClose, onPreview
 
   const closeDialog = () => {
     if (dialogBusy) return;
-    resetDialogState();
     onClose();
   };
 
@@ -1004,7 +1018,7 @@ export function AddSkillDialog({ open, onOpenChange, trigger, onClose, onPreview
       setBusyAction(SkillAddBusyAction.Preview);
       const previewResponse = await previewSkillAdd({
         source: source.trim(),
-        target,
+        target: resolvedTarget,
         scope: SkillScope.Global,
         skills: selected,
         copy,
@@ -1029,7 +1043,7 @@ export function AddSkillDialog({ open, onOpenChange, trigger, onClose, onPreview
       setBusyAction(SkillAddBusyAction.Install);
       const result = await installSkillAdd({
         source: source.trim(),
-        target,
+        target: resolvedTarget,
         scope: SkillScope.Global,
         skills: selected,
         copy,
@@ -1086,7 +1100,9 @@ export function AddSkillDialog({ open, onOpenChange, trigger, onClose, onPreview
   }, [firstSearchMatch]);
 
   useEffect(() => {
-    if (!open && !dialogBusy) resetDialogState();
+    if (open || dialogBusy) return;
+    const timeoutId = window.setTimeout(resetDialogState, DIALOG_CLOSE_ANIMATION_MS);
+    return () => window.clearTimeout(timeoutId);
   }, [dialogBusy, open, resetDialogState]);
 
   const toggleSkill = (name: string) => {
@@ -1115,14 +1131,11 @@ export function AddSkillDialog({ open, onOpenChange, trigger, onClose, onPreview
     <DialogShell
       open={open}
       onOpenChange={(nextOpen) => {
-        if (!nextOpen) {
-          if (dialogBusy) return;
-          resetDialogState();
-        }
+        if (!nextOpen && dialogBusy) return;
         onOpenChange(nextOpen);
       }}
       trigger={trigger}
-        className={`addSkillPanel ${plan ? "hasPlan" : "sourceStage"} ${reviewingSkills ? "isReviewing" : ""} ${advancedOpen ? "hasAdvanced" : ""} ${skillPreview ? "hasSkillPreview" : ""}`}
+      className={`addSkillPanel ${plan ? "hasPlan" : "sourceStage"} ${reviewingSkills ? "isReviewing" : ""} ${advancedOpen ? "hasAdvanced" : ""} ${skillPreview ? "hasSkillPreview" : ""}`}
       descriptionId="add-skill-dialog-description"
     >
       <div className="addSkillBody">
@@ -1428,26 +1441,26 @@ export function AddSkillDialog({ open, onOpenChange, trigger, onClose, onPreview
         >
           <header className="addSkillAdvancedHeader">
             <strong>Advanced settings</strong>
-            <IconButton aria-label="Close advanced settings" onClick={() => setAdvancedOpen(false)}>
-              <X size={14} />
-            </IconButton>
           </header>
           <div className="addSkillAdvancedBody">
             <div className="dialogField">
               <span>Visibility</span>
-              <SelectControl
+              <SegmentedControl
+                fullWidth
                 value={visibility}
                 onValueChange={(value) => {
-                  if (busy) return;
+                  if (!value || busy) return;
                   setVisibility(value as SkillVisibility);
                 }}
-                label="Skill visibility"
                 disabled={installing}
-                contentClassName="dialogSelectContent"
-                options={editableSkillVisibilities.map((option) => ({ value: option, label: option }))}
-                side="bottom"
-                align="start"
-              />
+                aria-label="Skill visibility"
+              >
+                {editableSkillVisibilities.map((option) => (
+                  <SegmentedControlItem key={option} value={option}>
+                    {option}
+                  </SegmentedControlItem>
+                ))}
+              </SegmentedControl>
             </div>
             <div className="dialogField">
               <span>Install mode</span>
@@ -1510,7 +1523,7 @@ export function AddSkillDialog({ open, onOpenChange, trigger, onClose, onPreview
         {plan && reviewingSkills ? (
           <DialogActionButton variant="primary" onClick={() => setReviewingSkills(false)}>Done</DialogActionButton>
         ) : plan ? (
-          <DialogAdvanceButton
+          <DialogApplyButton
             label={advanceText}
             ariaLabel={advanceLabel}
             busy={busy}
@@ -1581,15 +1594,26 @@ export function SkillsView({
   projects = [],
 }: SkillsViewProps) {
   const [selected, setSelected] = useState<string[]>([]);
-  const [query, setQuery] = useState("");
-  const [viewMode, setViewMode] = useState<SkillsViewMode>(SkillsViewMode.List);
+  const [query, setQuery] = useTabState("skills.query", "");
+  const [viewMode, setViewMode] = useTabState("skills.viewMode", SkillsViewMode.List);
+  const [sort, setSort] = useTabState<SortState | null>("skills.sort", { key: "mtime", direction: SortDirection.Desc });
+  const [groupBy, setGroupBy] = useTabState<string | null>("skills.groupBy", "origin");
   const [showWrapper, setShowWrapper] = useState(false);
   const [showAddSkill, setShowAddSkill] = useState(false);
   const [skillAddError, setSkillAddError] = useState("");
   const [installedWrapperSkills, setInstalledWrapperSkills] = useState<SkillWrapperSelection[]>([]);
   const [skillLocatorRequest, setSkillLocatorRequest] = useState("");
-  const [locationSkills, setLocationSkills] = useState<NormalizedSkill[]>([]);
+  const [locationSkillIds, setLocationSkillIds] = useState<string[]>([]);
   const [locationAgent, setLocationAgent] = useState<string | undefined>(undefined);
+  const [locationDialogOpen, setLocationDialogOpen] = useState(false);
+  const locationDialogCloseTimer = useRef<number | null>(null);
+  const locationSkills = useMemo(() => {
+    const skillsById = new Map(skillItems.map((skill) => [skill.id, skill]));
+    return locationSkillIds.flatMap((id) => {
+      const skill = skillsById.get(id);
+      return skill ? [skill] : [];
+    });
+  }, [locationSkillIds, skillItems]);
   const normalizedQuery = query.trim().toLowerCase();
   const skillListView = useMemo(() => selectSkillListView(skillItems, query, selected), [query, selected, skillItems]);
   const { visibleSkills, selectedSkills } = skillListView;
@@ -1639,26 +1663,57 @@ export function SkillsView({
   const deleteSkillsAndClear = useCallback((names: string[]) => {
     onDeleteSkills(names, clearSelection);
   }, [clearSelection, onDeleteSkills]);
-  const openManageLocations = useCallback((skill: NormalizedSkill, agent?: string) => {
-    setLocationSkills([skill]);
-    setLocationAgent(agent);
+  const deleteSelectedSkills = useCallback((skills: NormalizedSkill[]) => {
+    const names = skills.filter(isSkillSelectable).map((skill) => skill.id);
+    if (names.length > 0) deleteSkillsAndClear(names);
+  }, [deleteSkillsAndClear]);
+  const clearLocationDialogCloseTimer = useCallback(() => {
+    if (locationDialogCloseTimer.current === null) return;
+    window.clearTimeout(locationDialogCloseTimer.current);
+    locationDialogCloseTimer.current = null;
   }, []);
+  const clearLocationDialogState = useCallback(() => {
+    setLocationSkillIds([]);
+    setLocationAgent(undefined);
+  }, []);
+  const scheduleLocationDialogCleanup = useCallback(() => {
+    clearLocationDialogCloseTimer();
+    locationDialogCloseTimer.current = window.setTimeout(() => {
+      locationDialogCloseTimer.current = null;
+      clearLocationDialogState();
+    }, LOCATION_DIALOG_CLOSE_ANIMATION_MS);
+  }, [clearLocationDialogCloseTimer, clearLocationDialogState]);
+  useEffect(() => () => clearLocationDialogCloseTimer(), [clearLocationDialogCloseTimer]);
+  useEffect(() => {
+    if (!locationDialogOpen || locationSkillIds.length === 0 || locationSkills.length === locationSkillIds.length) return;
+    setLocationDialogOpen(false);
+    scheduleLocationDialogCleanup();
+    clearSelection();
+  }, [clearSelection, locationDialogOpen, locationSkillIds.length, locationSkills.length, scheduleLocationDialogCleanup]);
+  const openManageLocations = useCallback((skill: NormalizedSkill, agent?: string) => {
+    clearLocationDialogCloseTimer();
+    setLocationSkillIds([skill.id]);
+    setLocationAgent(agent);
+    setLocationDialogOpen(true);
+  }, [clearLocationDialogCloseTimer]);
   const openManageLocationsBatch = useCallback((skills: NormalizedSkill[]) => {
     const movableSkills = skills.filter((skill) => !isReadOnlySkillSource(skill) && skillTargets(skill).length > 0);
     if (movableSkills.length === 0) return;
-    setLocationSkills(movableSkills);
+    clearLocationDialogCloseTimer();
+    setLocationSkillIds(movableSkills.map((skill) => skill.id));
     setLocationAgent(undefined);
-  }, []);
+    setLocationDialogOpen(true);
+  }, [clearLocationDialogCloseTimer]);
   const applyLocationsAndClear = useCallback(async (
     skills?: RawSkillRecord[],
     options?: { patch?: boolean; deleted?: string[] },
   ) => {
-    setLocationSkills([]);
-    setLocationAgent(undefined);
+    setLocationDialogOpen(false);
+    scheduleLocationDialogCleanup();
     clearSelection();
     if (skills || options?.deleted?.length) onSkillsUpdated(skills ?? [], { patch: true, deleted: options?.deleted });
     else await onRefresh();
-  }, [clearSelection, onRefresh, onSkillsUpdated]);
+  }, [clearSelection, onRefresh, onSkillsUpdated, scheduleLocationDialogCleanup]);
   const handleInstalled = useCallback((result: SkillInstallResult) => {
     onAddInstalled(result);
     const name = installedSkillName(result);
@@ -1666,7 +1721,7 @@ export function SkillsView({
     setQuery("");
     setViewMode(SkillsViewMode.List);
     setSkillLocatorRequest(name);
-  }, [onAddInstalled]);
+  }, [onAddInstalled, setQuery]);
   const handleAddSkillOpenChange = useCallback((open: boolean) => {
     setShowAddSkill(open);
     if (open) setSkillAddError("");
@@ -1703,14 +1758,14 @@ export function SkillsView({
       width: "128px",
       value: skillOriginLabel,
     },
-    ...(projects.length > 0 ? [scopeColumn<SkillTableRow>(projects, (skill) => primarySkillPath(skill))] : []),
+    ...(projects.length > 0 ? [scopeColumnFromValue<SkillTableRow>((skill) => primarySkillScope(skill))] : []),
     {
       key: "visibility",
       header: "Visibility",
       type: ColumnDataType.Enum,
       groupOrder: [...allSkillVisibilities],
       sortValue: (skill) => skill.visibility.toLowerCase(),
-      width: "98px",
+      width: "150px",
       render: (skill) => <Visibility value={skill.visibility} skill={skill} onSetVisibility={setVisibilityAndClear} />,
     },
     {
@@ -1825,7 +1880,7 @@ export function SkillsView({
           error={hasRows ? "" : loadError}
           onRetry={() => { void onRefresh(); }}
           onOpenSkill={(selector) => {
-            const skill = findSkillBySelector(skillItems, selector);
+            const skill = skillItems.find((item) => item.id === selector);
             if (skill) openSkill(skill);
           }}
         />
@@ -1835,16 +1890,20 @@ export function SkillsView({
             rows={tableRows}
             columns={columns}
             getRowId={(skill) => skill.id}
-            getRowLabel={(skill) => skill.name}
+            getRowLabel={skillDisplayName}
             freezeColumn={SKILL_FREEZE_COLUMN}
             selectable={(skill) => isSkillRowSelectable(skill)}
             selectedIds={selected}
             onSelectionChange={setSelected}
+            onDeleteSelected={deleteSelectedSkills}
             enableMarquee
+            scrollRestorationKey="skills.list"
             scrollToRowId={skillLocatorRequest}
             onScrollToRowComplete={completeSkillLocator}
-            defaultGroupBy="origin"
-            defaultSort={{ key: "mtime", direction: SortDirection.Desc }}
+            groupBy={groupBy}
+            onGroupByChange={setGroupBy}
+            sort={sort}
+            onSortChange={setSort}
             onRowClick={openSkill}
             rowContextMenu={rowContextMenu}
             bottomBar={bottomBar}
@@ -1874,16 +1933,19 @@ export function SkillsView({
         onApplyWrapper={applyWrapperAndClear}
       />
       <SkillLocationDialog
-        open={locationSkills.length > 0}
+        open={locationDialogOpen}
         skills={locationSkills}
         initialAgent={locationAgent}
         installedAgentKeys={installedAgentKeys}
         targetOptions={targetOptions}
         onOpenChange={(open) => {
-          if (!open) {
-            setLocationSkills([]);
-            setLocationAgent(undefined);
+          if (open) {
+            clearLocationDialogCloseTimer();
+            setLocationDialogOpen(true);
+            return;
           }
+          setLocationDialogOpen(false);
+          scheduleLocationDialogCleanup();
         }}
         onApplied={applyLocationsAndClear}
       />

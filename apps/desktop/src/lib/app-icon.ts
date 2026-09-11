@@ -39,10 +39,10 @@ type IconPalette = {
 
 const iconPalettes: Record<AppIcon, IconPalette> = {
   [ColorTheme.SakuraPop]: {
-    tileTop: "#46247b", tileMiddle: "#1a0b3b", tileBottom: "#09051c", tileAccent: "#ff2d92",
-    rimLight: "#ff71ce", rimDark: "#b967ff", silverWarm: "#fff0fb", silverLight: "#ffd7f1",
-    silverMid: "#ffb5dd", silverDark: "#9b4a91", foldLight: "#ff71ce", foldMid: "#ff2d92",
-    foldDark: "#c51b70", edge: "#fff0fb", flare: "#fffb96",
+    tileTop: "#fff4fb", tileMiddle: "#fffafd", tileBottom: "#f0d2e6", tileAccent: "#e24792",
+    rimLight: "#ffffff", rimDark: "#d52f68", silverWarm: "#fff8fc", silverLight: "#ffb5dd",
+    silverMid: "#e24792", silverDark: "#9d5ddd", foldLight: "#ff71ce", foldMid: "#e24792",
+    foldDark: "#b82669", edge: "#fff8fc", flare: "#e9aa4b",
   },
   [ColorTheme.Gruvbox]: {
     tileTop: "#3c3836", tileMiddle: "#282828", tileBottom: "#1d2021", tileAccent: "#d65d0e",
@@ -75,10 +75,10 @@ const iconPalettes: Record<AppIcon, IconPalette> = {
     foldDark: "#7e57c2", edge: "#c0caf5", flare: "#e0af68",
   },
   [ColorTheme.Vercel]: {
-    tileTop: "#262626", tileMiddle: "#000000", tileBottom: "#000000", tileAccent: "#50a8ff",
+    tileTop: "#262626", tileMiddle: "#000000", tileBottom: "#000000", tileAccent: "#ffffff",
     rimLight: "#a3a3a3", rimDark: "#525252", silverWarm: "#ffffff", silverLight: "#ededed",
     silverMid: "#d4d4d4", silverDark: "#737373", foldLight: "#ffffff", foldMid: "#ededed",
-    foldDark: "#a3a3a3", edge: "#ffffff", flare: "#50a8ff",
+    foldDark: "#a3a3a3", edge: "#ffffff", flare: "#ffffff",
   },
 };
 

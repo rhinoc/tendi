@@ -1,19 +1,20 @@
 import { Tooltip } from "../../components/shared/Tooltip.tsx";
 import { useEffect, useMemo, useState } from "react";
-import { ChevronDown, ChevronRight, FileText, Folder } from "lucide-react";
 import { Group as PanelGroup, Panel } from "react-resizable-panels";
 import { Dialog } from "radix-ui";
 
-import { buildFileTreeRows, displayFileName, formatUserPath, isJsonPath, isYamlPath, skillChangeActionLabel, skillChangeBusyLabel, skillChangeCanConfirm, skillChangeDescription, skillChangeDisabledReason, skillChangeLoadingCopy, skillChangeTitle, SkillChangeCommand } from "../../lib/index.ts";
+import { buildFileTreeRows, displayFileName, formatUserPath, isJsonPath, isYamlPath, parentPath, skillChangeActionLabel, skillChangeBusyLabel, skillChangeCanConfirm, skillChangeDescription, skillChangeDisabledReason, skillChangeLoadingCopy, skillChangeTitle, SkillChangeCommand } from "../../lib/index.ts";
 import { CodeMirrorFileEditor, CodeMirrorLanguage } from "../../components/shared/CodeMirrorFileEditor.tsx";
 import { DialogActionButton } from "../../components/shared/DialogActionButton.tsx";
+import { DialogApplyButton } from "../../components/shared/DialogApplyButton.tsx";
 import { DialogShell } from "../../components/shared/DialogShell.tsx";
-import { DialogStatefulButton } from "../../components/shared/DialogStatefulButton.tsx";
+import { FileTree } from "../../components/shared/FileTree.tsx";
 import { LoadingState } from "../../components/shared/LoadingState.tsx";
 import { ResizeSeparator } from "../../components/shared/ResizeSeparator.tsx";
 import { Toast } from "../../components/shared/Toast.tsx";
-import { AsyncStatus } from "../../lib/async-status.ts";
 import type { SkillChangeResponse } from "../../lib/runtime-gateway.ts";
+
+import "./ConfirmSkillChangesDialog.css";
 
 const KEEP_LOCAL_RESOLUTION = "__tendi_keep_local__";
 const USE_UPDATE_RESOLUTION = "__tendi_use_update__";
@@ -23,6 +24,7 @@ export type ConfirmSkillChangesDialogProps = {
   open: boolean;
   command: SkillChangeCommand | null;
   names?: string[];
+  displayNames?: string[];
   preview?: SkillChangeResponse | null;
   previewError?: string;
   applyError?: string;
@@ -31,6 +33,8 @@ export type ConfirmSkillChangesDialogProps = {
   onConfirm: (resolutions?: Record<string, string>) => void;
 };
 
+export type ConfirmSkillChangesDialogContentProps = Omit<ConfirmSkillChangesDialogProps, "open">;
+
 type UpdateFile = {
   path: string;
   resolutionKey: string;
@@ -38,6 +42,8 @@ type UpdateFile = {
   base: string;
   incoming: string;
   after: string;
+  beforeExists: boolean;
+  incomingExists: boolean;
   status: string;
 };
 
@@ -48,6 +54,8 @@ type UpdateFileSource = {
   base?: string;
   incoming?: string;
   after: string;
+  before_exists?: boolean;
+  incoming_exists?: boolean;
   status?: string;
 };
 
@@ -65,6 +73,8 @@ function normalizeUpdateFile(file: UpdateFileSource, allowPathResolutionKey: boo
     base: file.base ?? "",
     incoming: file.incoming ?? "",
     after: file.after,
+    beforeExists: file.before_exists ?? file.before != null,
+    incomingExists: file.incoming_exists ?? file.incoming != null,
     status: file.status ?? "",
   };
 }
@@ -96,6 +106,22 @@ function isMergeResolutionStatus(status: string) {
   return status === "conflict" || status === "unavailable" || status === "binary";
 }
 
+function isFileLevelResolution(file: UpdateFile) {
+  return file.status === "binary"
+    || file.status === "unavailable"
+    || (file.status === "conflict" && file.beforeExists !== file.incomingExists);
+}
+
+function fileResolutionDescription(file: UpdateFile) {
+  if (file.beforeExists && !file.incomingExists) {
+    return "Modified locally, deleted remotely";
+  }
+  if (!file.beforeExists && file.incomingExists) {
+    return "Deleted locally, modified remotely";
+  }
+  return null;
+}
+
 function hasUnresolvedConflictMarkers(content: string) {
   return CONFLICT_MARKER_PATTERN.test(content);
 }
@@ -113,14 +139,27 @@ function resolvedUpdateContent(file: UpdateFile, resolutions: Record<string, str
   return resolution ?? file.after;
 }
 
+function isUnresolvedFile(file: UpdateFile, resolutions: Record<string, string>) {
+  if (!isMergeResolutionStatus(file.status)) return false;
+  const content = resolvedUpdateContent(file, resolutions);
+  return resolutions[file.resolutionKey] === undefined
+    || (file.status !== "binary" && hasUnresolvedConflictMarkers(content));
+}
+
 function SkillUpdateDiffPreview({
   files,
   resolutions,
+  unresolvedFiles,
+  resolutionCount,
   onResolve,
+  onResolveAll,
 }: {
   files: UpdateFile[];
   resolutions: Record<string, string>;
+  unresolvedFiles: UpdateFile[];
+  resolutionCount: number;
   onResolve: (file: UpdateFile, content: string) => void;
+  onResolveAll: (content: string) => void;
 }) {
   const [selectedPath, setSelectedPath] = useState("");
   const [collapsedFolders, setCollapsedFolders] = useState<Set<string>>(() => new Set());
@@ -136,6 +175,8 @@ function SkillUpdateDiffPreview({
         ? selected.incoming
         : "";
   const selectedIsMergeStatus = selected ? isMergeResolutionStatus(selected.status) : false;
+  const selectedIsFileLevelResolution = selected ? isFileLevelResolution(selected) : false;
+  const selectedFileResolutionDescription = selected ? fileResolutionDescription(selected) : null;
   const rows = useMemo(
     () => buildFileTreeRows(
       files.map((file) => ({ name: file.path, kind: "file" })),
@@ -156,50 +197,69 @@ function SkillUpdateDiffPreview({
     });
   };
   if (!selected) return null;
+  const items = rows.map(({ file, depth, isFolder }, index) => {
+    return {
+      id: file.name,
+      label: formatUserPath(displayFileName(file.name)),
+      kind: isFolder ? "folder" as const : "file" as const,
+      depth,
+      parentId: depth > 0 ? parentPath(file.name) : null,
+      expanded: isFolder && !collapsedFolders.has(file.name),
+      position: index + 1,
+    };
+  });
   return (
     <div className="skillUpdateDiffFrame">
+      {unresolvedFiles.length > 0 ? (
+        <div className="skillUpdateDiffToolbar" role="toolbar" aria-label="Bulk conflict resolution">
+          <span className="skillUpdateDiffToolbarLabel">
+            {unresolvedFiles.length}/{resolutionCount} conflicts to resolve
+          </span>
+          <div className="skillUpdateDiffToolbarActions">
+            <DialogActionButton variant="secondary" onClick={() => onResolveAll(KEEP_LOCAL_RESOLUTION)}>
+              Keep all local
+            </DialogActionButton>
+            <DialogActionButton variant="secondary" onClick={() => onResolveAll(USE_UPDATE_RESOLUTION)}>
+              Use all updates
+            </DialogActionButton>
+          </div>
+        </div>
+      ) : null}
       <PanelGroup className="skillUpdateDiff" orientation="horizontal">
         <Panel
           className="skillUpdateDiffFilesPanel"
           defaultSize="260px"
           minSize="190px"
           maxSize="520px"
-          style={{ overflowX: "hidden", overflowY: "auto" }}
+          style={{ overflow: "hidden" }}
         >
-          <nav className="skillUpdateDiffFiles" aria-label="Changed files">
-            {rows.map(({ file, depth, isFolder }) => {
-              const isCollapsed = collapsedFolders.has(file.name);
-              const isActive = !isFolder && file.name === selected.path;
-              const updateFile = isFolder ? undefined : filesByPath.get(file.name);
-              const isChanged = updateFile ? hasFileDiff(updateFile) : false;
-              const needsResolution = updateFile ? isMergeResolutionStatus(updateFile.status) : false;
+          <FileTree
+            items={items}
+            selectedId={selected.path}
+            onItemActivate={(item) => {
+              if (item.kind === "folder") toggleFolder(item.id);
+              else setSelectedPath(item.id);
+            }}
+            onItemToggle={(item) => {
+              if (item.kind === "folder") toggleFolder(item.id);
+            }}
+            renderItem={(item, row) => (
+              <Tooltip content={formatUserPath(item.id)} onlyWhenTruncated>{row}</Tooltip>
+            )}
+            renderTrailing={(item) => {
+              const updateFile = filesByPath.get(item.id);
+              if (!updateFile || !hasFileDiff(updateFile)) return null;
+              const needsResolution = isMergeResolutionStatus(updateFile.status);
               return (
-                <Tooltip key={file.name} content={formatUserPath(file.name)} onlyWhenTruncated><button
-                  type="button"
-                  aria-current={isActive ? "true" : undefined}
-                  aria-expanded={isFolder ? !isCollapsed : undefined}
-                  className={`skillUpdateTreeRow ${isFolder ? "folder" : ""} ${isChanged ? "changed" : ""} ${needsResolution ? "needsResolution" : ""} ${isActive ? "active" : ""}`}
-                  key={file.name}
-                  onClick={() => {
-                    if (isFolder) toggleFolder(file.name);
-                    else setSelectedPath(file.name);
-                  }}
-                  style={{ paddingLeft: `${8 + depth * 16}px` }}
-                >
-                  <span className="skillUpdateTreeChevron">
-                    {isFolder ? (isCollapsed ? <ChevronRight size={12} /> : <ChevronDown size={12} />) : null}
-                  </span>
-                  {isFolder ? <Folder size={14} /> : <FileText size={14} />}
-                  <span className="skillUpdateTreeName">{formatUserPath(displayFileName(file.name))}</span>
-                  {isChanged ? (
-                    <span className={`skillUpdateFileStatus ${needsResolution ? "needsResolution" : "changed"}`}>
-                      {needsResolution ? "!" : "M"}
-                    </span>
-                  ) : null}
-                </button></Tooltip>
+                <span className={`skillUpdateFileStatus ${needsResolution ? "needsResolution" : "changed"}`}>
+                  {needsResolution ? "!" : "M"}
+                </span>
               );
-            })}
-          </nav>
+            }}
+            showHeader={false}
+            className="skillUpdateFileTree"
+            ariaLabel="Changed files"
+          />
         </Panel>
         <ResizeSeparator className="skillUpdateDiffResizeHandle" />
         <Panel className="skillUpdateDiffEditor" minSize="45%">
@@ -218,22 +278,20 @@ function SkillUpdateDiffPreview({
                 ? (content) => onResolve(selected, content)
                 : undefined}
             />
-            {selected.status === "binary" ? (
-              <div className="skillMergeResolutionBar" role="group" aria-label="Resolve binary skill merge">
-                <span>
-                  Binary file cannot be merged
-                </span>
+            {selectedIsFileLevelResolution ? (
+              <div className="skillMergeResolutionBar" role="group" aria-label="Resolve file conflict">
+                {selectedFileResolutionDescription ? <span>{selectedFileResolutionDescription}</span> : null}
                 <button
                   type="button"
-                  onClick={() => onResolve(selected, selected.status === "binary" ? KEEP_LOCAL_RESOLUTION : selected.before)}
+                  onClick={() => onResolve(selected, KEEP_LOCAL_RESOLUTION)}
                 >
                   Keep local
                 </button>
                 <button
                   type="button"
-                  onClick={() => onResolve(selected, selected.status === "binary" ? USE_UPDATE_RESOLUTION : selected.incoming)}
+                  onClick={() => onResolve(selected, USE_UPDATE_RESOLUTION)}
                 >
-                  Use update
+                  {selected.incomingExists ? "Use update" : "Delete file"}
                 </button>
               </div>
             ) : null}
@@ -244,17 +302,17 @@ function SkillUpdateDiffPreview({
   );
 }
 
-export function ConfirmSkillChangesDialog({
-  open,
+export function ConfirmSkillChangesDialogContent({
   command,
   names = [],
+  displayNames = names,
   preview,
   previewError,
   applyError,
   busy,
   onOpenChange,
   onConfirm,
-}: ConfirmSkillChangesDialogProps) {
+}: ConfirmSkillChangesDialogContentProps) {
   const previewLoading = command === SkillChangeCommand.UpdateMany && !preview && !previewError;
   const actionLabel = skillChangeActionLabel(command);
   const busyLabel = skillChangeBusyLabel(command);
@@ -266,14 +324,8 @@ export function ConfirmSkillChangesDialog({
   const [resolutions, setResolutions] = useState<Record<string, string>>({});
   const previewIdentity = typeof preview?.previewId === "string" ? preview.previewId : "";
   useEffect(() => setResolutions({}), [command, previewIdentity]);
-  const unresolvedFiles = files.filter((file) => {
-    if (!isMergeResolutionStatus(file.status)) return false;
-    const content = resolvedUpdateContent(file, resolutions);
-    return resolutions[file.resolutionKey] === undefined
-      || (file.status !== "binary" && hasUnresolvedConflictMarkers(content));
-  });
-  const resolutionFiles = files.filter((file) => isMergeResolutionStatus(file.status));
-  const resolvedFiles = resolutionFiles.length - unresolvedFiles.length;
+  const unresolvedFiles = files.filter((file) => isUnresolvedFile(file, resolutions));
+  const resolutionCount = files.filter((file) => isMergeResolutionStatus(file.status)).length;
   const canApply = skillChangeCanConfirm(command, {
     previewLoading,
     previewError,
@@ -288,12 +340,7 @@ export function ConfirmSkillChangesDialog({
   });
   const emptyPreview = command === SkillChangeCommand.UpdateMany && preview && !previewError && files.length === 0;
   return (
-    <DialogShell
-      open={open}
-      onOpenChange={onOpenChange}
-      descriptionId="skill-changes-description"
-      contentProps={{ "data-update-preview": command === SkillChangeCommand.UpdateMany }}
-    >
+    <>
       <div className="skillChangeDialogBody">
         <Dialog.Title className="confirmDialogTitle">{skillChangeTitle(command)}</Dialog.Title>
         <p id="skill-changes-description" className="confirmDialogDescription">
@@ -302,14 +349,21 @@ export function ConfirmSkillChangesDialog({
         {previewLoading && <LoadingState className="skillUpdatePreviewLoading" label={skillChangeLoadingCopy.previewLabel} />}
         {command === SkillChangeCommand.DeleteMany && names.length > 0 && (
           <div className="skillDeleteNames" data-selectable-text>
-            {names.map((name) => <span key={name}>{name}</span>)}
+            {displayNames.map((name) => <span key={name}>{name}</span>)}
           </div>
         )}
         {files.length > 0 && (
           <SkillUpdateDiffPreview
             files={files}
             resolutions={resolutions}
+            unresolvedFiles={unresolvedFiles}
+            resolutionCount={resolutionCount}
             onResolve={(file, content) => setResolutions((current) => ({ ...current, [file.resolutionKey]: content }))}
+            onResolveAll={(content) => setResolutions((current) => {
+              const next = { ...current };
+              for (const file of unresolvedFiles) next[file.resolutionKey] = content;
+              return next;
+            })}
           />
         )}
         {emptyPreview && <div className="skillUpdatePreviewEmpty" data-selectable-text>{updatePreviewSummary(preview)}</div>}
@@ -317,29 +371,41 @@ export function ConfirmSkillChangesDialog({
       {dialogError ? <Toast tone="error" message={dialogError} /> : null}
       <div className="confirmDialogActions">
         <DialogActionButton variant="secondary" disabled={busy} onClick={() => onOpenChange(false)}>Cancel</DialogActionButton>
-        {resolutionFiles.length > 0 ? (
-          <span className="skillUpdateResolutionProgress" role="status" aria-live="polite">
-            {resolvedFiles}/{resolutionFiles.length} resolved
-          </span>
-        ) : null}
         <Tooltip content={canApply ? "" : applyDisabledReason}>
           <span
             className="skillUpdateApplyTooltipTarget"
             tabIndex={canApply ? undefined : 0}
           >
-            <DialogStatefulButton
-              state={busy ? AsyncStatus.Loading : AsyncStatus.Idle}
-              loadingLabel={busyLabel}
-              variant={command === SkillChangeCommand.DeleteMany ? "danger" : "primary"}
-              aria-label={actionLabel}
+            <DialogApplyButton
+              label={actionLabel}
+              busy={busy}
+              busyLabel={busyLabel}
+              ariaLabel={actionLabel}
+              autoFocus={command === SkillChangeCommand.DeleteMany && !busy && canApply}
+              expandOnFocus={command !== SkillChangeCommand.DeleteMany}
               onClick={() => onConfirm(resolutions)}
               disabled={!canApply}
-            >
-              {actionLabel}
-            </DialogStatefulButton>
+            />
           </span>
         </Tooltip>
       </div>
+    </>
+  );
+}
+
+export function ConfirmSkillChangesDialog({
+  open,
+  onOpenChange,
+  ...contentProps
+}: ConfirmSkillChangesDialogProps) {
+  return (
+    <DialogShell
+      open={open}
+      onOpenChange={onOpenChange}
+      descriptionId="skill-changes-description"
+      contentProps={{ "data-update-preview": contentProps.command === SkillChangeCommand.UpdateMany }}
+    >
+      <ConfirmSkillChangesDialogContent onOpenChange={onOpenChange} {...contentProps} />
     </DialogShell>
   );
 }

@@ -15,7 +15,6 @@ import { decideRevision } from "../lib/runtime-contract.ts";
 import { applyDomainSnapshot, applyHookCommandResult as reduceHookCommandResult, applyMcpCommandResult as reduceMcpCommandResult, applyPromptRecord, applyRuleCommandResult as reduceRuleCommandResult, buildCatalogIndexes } from "../controllers/catalog-controller.ts";
 import { applySkillPatch, applySkillSnapshot, applySkillVisibility, clearSkillUpdateAvailability } from "../controllers/skill-controller.ts";
 import { applySessionDelta } from "../controllers/session-controller.ts";
-import { selectOverviewCounts, selectOverviewHookReviewCount, selectOverviewSkillUpdateCount } from "../controllers/overview-controller.ts";
 import type { CatalogIndexes, RawDomainRow } from "../controllers/controller-types.ts";
 
 export type { SkillUpdateReport } from "../lib/skill-updates.ts";
@@ -34,12 +33,6 @@ export type DesktopSettingsValues = {
   missingSessionProjectPolicy: MissingSessionProjectPolicy;
   configProfiles: Record<string, string>;
 };
-export enum DomainLoadStatus {
-  Idle = "idle",
-  Loading = "loading",
-  Ready = "ready",
-  Error = "error",
-}
 export enum SessionListStatus {
   Loading = "loading",
   Loaded = "loaded",
@@ -176,26 +169,6 @@ function createInitialState(): DesktopStoreState {
       valueQueryKey: null,
     },
   };
-}
-
-export function selectCatalogCounts(data: RuntimeData): Record<DomainKey, number> {
-  return selectOverviewCounts(data);
-}
-
-export function selectCatalogCountLoadedDomains(state: DesktopStoreState): ReadonlySet<DomainKey> {
-  return state.catalogs.indexes.loadedDomains;
-}
-
-export function selectCatalogCountErrors(state: DesktopStoreState): ReadonlySet<DomainKey> {
-  return state.catalogs.indexes.errorDomains;
-}
-
-export function selectHookReviewCount(data: RuntimeData): number {
-  return selectOverviewHookReviewCount(data);
-}
-
-export function selectSkillUpdateCount(data: RuntimeData, agentFilter: string): number {
-  return selectOverviewSkillUpdateCount(data, agentFilter);
 }
 
 export function selectSessionListStatus(state: DesktopStoreState): SessionListStatus {
@@ -677,8 +650,4 @@ export function useDesktopStore<T>(selector: (state: DesktopStoreState) => T): T
     getSelectedSnapshot,
     getSelectedSnapshot,
   );
-}
-
-export function selectCatalogData(state: DesktopStoreState): RuntimeData {
-  return state.catalogs.data;
 }

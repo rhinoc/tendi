@@ -3,7 +3,6 @@ export const actionLabels = {
   revealInFinder: "Reveal in Finder",
   copyPath: "Copy path",
   pathCopied: "Path copied",
-  deleteSelected: "Delete selected",
   copy: "Copy",
   copied: "Copied",
   copyFailed: "Copy failed",

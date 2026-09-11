@@ -1,15 +1,7 @@
 import { Tooltip } from "../../components/shared/Tooltip.tsx";
 import { Badge } from "../../components/shared/Badge.tsx";
 import { lazy, Suspense, useCallback, useDeferredValue, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import {
-  ChevronDown,
-  ChevronRight,
-  FilePlus,
-  FileText,
-  Folder,
-  FolderPlus,
-  Waypoints,
-} from "lucide-react";
+import { FilePlus, FolderPlus, Waypoints } from "lucide-react";
 import { Group as PanelGroup, Panel, usePanelRef } from "react-resizable-panels";
 import { ContextMenu } from "radix-ui";
 import {
@@ -23,6 +15,7 @@ import {
   preferredSkillFileName,
   dialogCopy,
   safeInvoke,
+  skillDisplayName,
   TauriCommand,
   uniqueChildPath,
   type SkillFileEntry,
@@ -46,11 +39,13 @@ import {
 } from "../../lib/runtime-gateway.ts";
 import type { SkillIndexStatus } from "../../store/desktop-store.ts";
 import { EditorHeader } from "../../components/shared/EditorHeader.tsx";
+import { FileTree } from "../../components/shared/FileTree.tsx";
 import { DialogLoadingFallback } from "../../components/shared/DialogLoadingFallback.tsx";
 import { DialogActionButton } from "../../components/shared/DialogActionButton.tsx";
 import { DeleteConfirmationDialog } from "../../components/shared/DeleteConfirmationDialog.tsx";
 import { EditorStatePlaceholder } from "../../components/shared/EditorStatePlaceholder.tsx";
 import { FileTreeContextMenuItems } from "./FileTreeContextMenuItems.tsx";
+import { skillFileTreeTone } from "./skill-file-tree.ts";
 import { IconButton } from "../../components/shared/IconButton.tsx";
 import { LoadingState } from "../../components/shared/LoadingState.tsx";
 import { MarkdownFilePane, type DiffStats } from "../../components/shared/MarkdownFilePane.tsx";
@@ -59,9 +54,20 @@ import { Toast } from "../../components/shared/Toast.tsx";
 import type { SkillDependencyRecord } from "./SkillDependencyGraph.tsx";
 import { SkillInfoMenu } from "./SkillInfoMenu.tsx";
 import { LinkedSessionsDrawerFallback } from "../sessions/LinkedSessionsDrawerFallback.tsx";
+import {
+  discardDirtyDrafts,
+  getSkillEditorState,
+  hydrateSkillDraft,
+  trimCleanDrafts,
+  updateSkillEditorField,
+  useSkillEditorState,
+  type SkillDraft,
+  type SkillEditorStateValue,
+} from "./skill-editor-state.ts";
 
 const DiscardChangesDialog = lazy(() => import("../../components/shared/DiscardChangesDialog.tsx").then(({ DiscardChangesDialog: component }) => ({ default: component })));
 const LinkedSessionsDrawer = lazy(() => import("../sessions/linked-sessions.tsx").then(({ LinkedSessionsDrawer: component }) => ({ default: component })));
+const DIALOG_CLOSE_ANIMATION_MS = 220;
 
 export type SkillEditorViewProps = {
   skill: NormalizedSkill;
@@ -70,53 +76,25 @@ export type SkillEditorViewProps = {
   onReadSkillIndexStatus?: () => Promise<SkillIndexStatus | null>;
   skillIndexStatus?: SkillIndexStatus | null;
   onOpenSession?: (link: Record<string, unknown>) => void;
-  onOpenSkill?: (name: string) => void;
+  onOpenSkill?: (skillId: string) => void;
   onSaved?: (skills?: RawSkillRecord[]) => void;
 };
 
-type SkillDraft = {
-  content: string;
-  originalContent: string;
-  sha256: string;
-};
-
-const MAX_CLEAN_DRAFT_CHARS = 32 * 1024 * 1024;
-
-function trimCleanDrafts(drafts: Record<string, SkillDraft>, activePath: string) {
-  let cleanChars = 0;
-  const evictable: Array<[string, SkillDraft]> = [];
-  for (const [path, draft] of Object.entries(drafts)) {
-    if (path === activePath || draft.content !== draft.originalContent) continue;
-    cleanChars += draft.content.length;
-    evictable.push([path, draft]);
-  }
-  if (cleanChars <= MAX_CLEAN_DRAFT_CHARS) return drafts;
-
-  const next = { ...drafts };
-  for (const [path, draft] of evictable) {
-    if (cleanChars <= MAX_CLEAN_DRAFT_CHARS) break;
-    delete next[path];
-    cleanChars -= draft.content.length;
-  }
-  return next;
-}
-
 export function SkillEditorView({ skill, skills, back, onReadSkillIndexStatus, skillIndexStatus, onOpenSession, onOpenSkill, onSaved }: SkillEditorViewProps) {
   const currentSkill = skill;
-  const skillPath = currentSkill.paths.find((path) => path.path)?.path;
+  const skillLocation = currentSkill.paths.find((path) => path.path);
+  const skillPath = skillLocation?.path;
+  const skillContentHash = skillLocation?.sha256;
   const readOnly = isReadOnlySkillSource(currentSkill);
+  const editorState = useSkillEditorState(currentSkill.id);
+  const { activePath, selectedPath, drafts, createdPaths, fileTreeCollapsed, collapsedFolders } = editorState;
   const [files, setFiles] = useState<SkillFileEntry[]>([]);
   const [linkedSessions, setLinkedSessions] = useState<SessionSkillLinkRecord[]>([]);
   const [loadingLinkedSessions, setLoadingLinkedSessions] = useState(false);
   const [linkedSessionsError, setLinkedSessionsError] = useState("");
   const [showLinkedSessions, setShowLinkedSessions] = useState(false);
-  const [activePath, setActivePath] = useState("");
-  const [selectedPath, setSelectedPath] = useState("");
-  const [drafts, setDrafts] = useState<Record<string, SkillDraft>>({});
-  const [createdPaths, setCreatedPaths] = useState(() => new Set<string>());
-  const [fileTreeCollapsed, setFileTreeCollapsed] = useState(false);
-  const [collapsedFolders, setCollapsedFolders] = useState(() => new Set<string>());
   const [showDiscardDialog, setShowDiscardDialog] = useState(false);
+  const [discardDialogMounted, setDiscardDialogMounted] = useState(false);
   const [pendingDeleteEntry, setPendingDeleteEntry] = useState<SkillFileEntry | null>(null);
   const [deletingEntry, setDeletingEntry] = useState(false);
   const [renamingPath, setRenamingPath] = useState("");
@@ -127,9 +105,27 @@ export function SkillEditorView({ skill, skills, back, onReadSkillIndexStatus, s
   const [contentError, setContentError] = useState("");
   const [saveState, setSaveState] = useState<SaveStatus>(SaveStatus.Idle);
   const [saveError, setSaveError] = useState("");
-  const renameInputRef = useRef<HTMLInputElement>(null);
+  const setActivePath = useCallback((value: SkillEditorStateValue<string>) => {
+    updateSkillEditorField(currentSkill.id, "activePath", value);
+  }, [currentSkill.id]);
+  const setSelectedPath = useCallback((value: SkillEditorStateValue<string>) => {
+    updateSkillEditorField(currentSkill.id, "selectedPath", value);
+  }, [currentSkill.id]);
+  const setDrafts = useCallback((value: SkillEditorStateValue<Record<string, SkillDraft>>) => {
+    updateSkillEditorField(currentSkill.id, "drafts", value);
+  }, [currentSkill.id]);
+  const setCreatedPaths = useCallback((value: SkillEditorStateValue<Set<string>>) => {
+    updateSkillEditorField(currentSkill.id, "createdPaths", value);
+  }, [currentSkill.id]);
+  const setFileTreeCollapsed = useCallback((value: SkillEditorStateValue<boolean>) => {
+    updateSkillEditorField(currentSkill.id, "fileTreeCollapsed", value);
+  }, [currentSkill.id]);
+  const setCollapsedFolders = useCallback((value: SkillEditorStateValue<Set<string>>) => {
+    updateSkillEditorField(currentSkill.id, "collapsedFolders", value);
+  }, [currentSkill.id]);
   const linkedSessionsRequestRef = useRef(0);
-  const linkedSessionsSkillRef = useRef(currentSkill.name);
+  const discardDialogCloseTimer = useRef<number | null>(null);
+  const linkedSessionsSkillRef = useRef(currentSkill.id);
   const fileTreePanelRef = usePanelRef();
   const activeDraft = drafts[activePath] ?? { content: "", originalContent: "", sha256: "" };
   const content = activeDraft.content;
@@ -147,12 +143,7 @@ export function SkillEditorView({ skill, skills, back, onReadSkillIndexStatus, s
       setLoadingFiles(true);
       setFileError("");
       setFiles([]);
-      setActivePath("");
-      setSelectedPath("");
-      setDrafts({});
-      setCreatedPaths(new Set());
       setRenamingPath("");
-      setCollapsedFolders(new Set());
       setShowDiscardDialog(false);
       setLoadingContent(true);
       const fileListRead = readSkillFiles({
@@ -177,9 +168,16 @@ export function SkillEditorView({ skill, skills, back, onReadSkillIndexStatus, s
       if (cancelled) return;
       const next = [...fileListResult.value];
       const firstFile = preferredSkillFileName(next);
+      const hasFile = (path: string) => Boolean(path) && next.some((file) => file.kind === "file" && file.name === path);
+      const restoredState = getSkillEditorState(currentSkill.id);
+      const restoredActivePath = hasFile(restoredState.activePath) ? restoredState.activePath : firstFile ?? "";
+      const restoredSelectedPath = hasFile(restoredState.selectedPath)
+        ? restoredState.selectedPath
+        : restoredActivePath;
       setFiles(next);
-      setActivePath(firstFile ?? "");
-      setSelectedPath(firstFile ?? "");
+      updateSkillEditorField(currentSkill.id, "activePath", restoredActivePath);
+      updateSkillEditorField(currentSkill.id, "selectedPath", restoredSelectedPath);
+      updateSkillEditorField(currentSkill.id, "drafts", (current) => trimCleanDrafts(current, restoredActivePath));
       if (firstFile &&
         initialContentResult.status === "fulfilled"
         && typeof initialContentResult.value.content === "string"
@@ -187,14 +185,13 @@ export function SkillEditorView({ skill, skills, back, onReadSkillIndexStatus, s
       ) {
         const fileContent = initialContentResult.value.content;
         const fileHash = initialContentResult.value.sha256;
-        setDrafts((current) => trimCleanDrafts({
-          ...current,
-          "SKILL.md": {
-            content: fileContent,
-            originalContent: fileContent,
-            sha256: fileHash,
-          },
-        }, firstFile));
+        updateSkillEditorField(currentSkill.id, "drafts", (current) => hydrateSkillDraft(
+          current,
+          "SKILL.md",
+          fileContent,
+          fileHash,
+          restoredActivePath,
+        ));
       }
       setLoadingFiles(false);
       setLoadingContent(false);
@@ -203,16 +200,7 @@ export function SkillEditorView({ skill, skills, back, onReadSkillIndexStatus, s
     return () => {
       cancelled = true;
     };
-  }, [currentSkill.name, skillPath]);
-
-  useEffect(() => {
-    if (renamingPath) {
-      requestAnimationFrame(() => {
-        renameInputRef.current?.focus();
-        renameInputRef.current?.select();
-      });
-    }
-  }, [renamingPath]);
+  }, [currentSkill.id, skillContentHash, skillPath]);
 
   useEffect(() => {
     setSaveState(SaveStatus.Idle);
@@ -221,7 +209,7 @@ export function SkillEditorView({ skill, skills, back, onReadSkillIndexStatus, s
   }, [activePath]);
 
   useEffect(() => {
-    if (loadingFiles || drafts[activePath]) return undefined;
+    if (loadingFiles || !activePath || drafts[activePath]) return undefined;
     let cancelled = false;
     async function loadContent() {
       setLoadingContent(true);
@@ -245,14 +233,13 @@ export function SkillEditorView({ skill, skills, back, onReadSkillIndexStatus, s
       if (typeof result?.content === "string" && typeof result.sha256 === "string") {
         const fileContent = result.content;
         const fileHash = result.sha256;
-        setDrafts((current) => trimCleanDrafts({
-          ...current,
-          [activePath]: {
-            content: fileContent,
-            originalContent: fileContent,
-            sha256: fileHash,
-          },
-        }, activePath));
+        updateSkillEditorField(currentSkill.id, "drafts", (current) => hydrateSkillDraft(
+          current,
+          activePath,
+          fileContent,
+          fileHash,
+          activePath,
+        ));
       }
       setLoadingContent(false);
     }
@@ -261,7 +248,7 @@ export function SkillEditorView({ skill, skills, back, onReadSkillIndexStatus, s
       cancelled = true;
       setLoadingContent(false);
     };
-  }, [activePath, currentSkill.name, drafts, loadingFiles, skillPath]);
+  }, [activePath, currentSkill.id, drafts, loadingFiles, skillPath]);
 
   const save = useCallback(async () => {
     if (readOnly || !dirty || !original.sha256 || saveState === SaveStatus.Saving) return;
@@ -289,10 +276,12 @@ export function SkillEditorView({ skill, skills, back, onReadSkillIndexStatus, s
       setSaveError(message);
       setSaveState(SaveStatus.Error);
     }
-  }, [activePath, content, currentSkill.name, dirty, onSaved, original.sha256, readOnly, saveState]);
+  }, [activePath, content, currentSkill.id, dirty, onSaved, original.sha256, readOnly, saveState]);
   const rows = useMemo(() => buildFileTreeRows(files, collapsedFolders), [collapsedFolders, files]);
   const selectedEntry = useMemo(
-    () => files.find((file) => file.name === selectedPath) ?? files.find((file) => file.name === activePath) ?? null,
+    () => files.find((file) => file.kind === "file" && file.name === selectedPath)
+      ?? files.find((file) => file.kind === "file" && file.name === activePath)
+      ?? null,
     [activePath, files, selectedPath],
   );
   const diffLines = useMemo(
@@ -350,12 +339,20 @@ export function SkillEditorView({ skill, skills, back, onReadSkillIndexStatus, s
       return next;
     });
   };
+  const activateFileTreeEntry = (file: SkillFileEntry) => {
+    if (file.kind === "folder") return;
+    setSelectedPath(file.name);
+    setActivePath(file.name);
+  };
   const revealSelected = () => {
     if (selectedEntry?.path) safeInvoke(TauriCommand.RevealInFinder, { path: selectedEntry.path });
   };
   const beginRename = (entry: SkillFileEntry | null = selectedEntry) => {
     if (readOnly || !entry || entry.name === "SKILL.md") return;
-    setSelectedPath(entry.name);
+    if (entry.kind === "file") {
+      setSelectedPath(entry.name);
+      setActivePath(entry.name);
+    }
     setRenamingPath(entry.name);
     setRenameValue(displayFileName(entry.name));
   };
@@ -490,22 +487,6 @@ export function SkillEditorView({ skill, skills, back, onReadSkillIndexStatus, s
       setDeletingEntry(false);
     }
   };
-  const handleFileTreeKeyDown = (event: React.KeyboardEvent<HTMLElement>) => {
-    if (renamingPath) return;
-    if ((event.target as HTMLElement | null)?.closest(".fileTreeActions, .fileTreeToggle")) return;
-    if (event.key === "Enter") {
-      if (readOnly) return;
-      event.preventDefault();
-      beginRename();
-    } else if (event.key === "Delete" || event.key === "Backspace") {
-      if (readOnly) return;
-      event.preventDefault();
-      requestDeleteEntry();
-    } else if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "r") {
-      event.preventDefault();
-      revealSelected();
-    }
-  };
   const fileTreeStatus = (entry: SkillFileEntry) => {
     if (readOnly) return "";
     const paths = entry.kind === "folder"
@@ -518,6 +499,10 @@ export function SkillEditorView({ skill, skills, back, onReadSkillIndexStatus, s
     })) return "M";
     return "";
   };
+  const fileTreeEntryForItem = (item: { id: string; kind: "file" | "folder" }) => (
+    files.find((entry) => entry.name === item.id)
+      ?? (item.kind === "folder" ? { name: item.id, kind: "folder" } : null)
+  );
   const handleBack = () => {
     if (hasUnsavedDrafts) {
       setShowDiscardDialog(true);
@@ -525,6 +510,31 @@ export function SkillEditorView({ skill, skills, back, onReadSkillIndexStatus, s
     }
     back();
   };
+  const discardChanges = () => {
+    updateSkillEditorField(currentSkill.id, "drafts", (current) => discardDirtyDrafts(current));
+    back();
+  };
+
+  useEffect(() => {
+    if (showDiscardDialog) {
+      if (discardDialogCloseTimer.current !== null) {
+        window.clearTimeout(discardDialogCloseTimer.current);
+        discardDialogCloseTimer.current = null;
+      }
+      setDiscardDialogMounted(true);
+      return;
+    }
+    discardDialogCloseTimer.current = window.setTimeout(() => {
+      discardDialogCloseTimer.current = null;
+      setDiscardDialogMounted(false);
+    }, DIALOG_CLOSE_ANIMATION_MS);
+    return () => {
+      if (discardDialogCloseTimer.current !== null) {
+        window.clearTimeout(discardDialogCloseTimer.current);
+        discardDialogCloseTimer.current = null;
+      }
+    };
+  }, [showDiscardDialog]);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -538,14 +548,14 @@ export function SkillEditorView({ skill, skills, back, onReadSkillIndexStatus, s
   }, [save]);
 
   useLayoutEffect(() => {
-    if (linkedSessionsSkillRef.current === currentSkill.name) return;
-    linkedSessionsSkillRef.current = currentSkill.name;
+    if (linkedSessionsSkillRef.current === currentSkill.id) return;
+    linkedSessionsSkillRef.current = currentSkill.id;
     linkedSessionsRequestRef.current += 1;
     setLinkedSessions([]);
     setLinkedSessionsError("");
     setLoadingLinkedSessions(false);
     setShowLinkedSessions(false);
-  }, [currentSkill.name]);
+  }, [currentSkill.id]);
 
   const loadLinkedSessions = useCallback(async () => {
     const request = ++linkedSessionsRequestRef.current;
@@ -553,7 +563,7 @@ export function SkillEditorView({ skill, skills, back, onReadSkillIndexStatus, s
     setLinkedSessionsError("");
     try {
       if (onReadSkillIndexStatus) await onReadSkillIndexStatus();
-      const links = await invokeSkillSessionLinks(currentSkill.name);
+      const links = await invokeSkillSessionLinks(currentSkill.id);
       if (request === linkedSessionsRequestRef.current) {
         setLinkedSessions(links.flatMap((link) => {
           const normalized = normalizeSessionSkillLink(link);
@@ -565,13 +575,13 @@ export function SkillEditorView({ skill, skills, back, onReadSkillIndexStatus, s
     } finally {
       if (request === linkedSessionsRequestRef.current) setLoadingLinkedSessions(false);
     }
-  }, [currentSkill.name, onReadSkillIndexStatus, skillIndexStatus?.last_indexed_at]);
+  }, [currentSkill.id, onReadSkillIndexStatus, skillIndexStatus?.last_indexed_at]);
 
   useEffect(() => {
     if (!showLinkedSessions) return;
     void loadLinkedSessions();
     return () => { linkedSessionsRequestRef.current += 1; };
-  }, [currentSkill.name, loadLinkedSessions, showLinkedSessions]);
+  }, [currentSkill.id, loadLinkedSessions, showLinkedSessions]);
 
   /* The open handler primes the state so the drawer never renders a stale empty result. */
   const openLinkedSessions = () => {
@@ -588,7 +598,7 @@ export function SkillEditorView({ skill, skills, back, onReadSkillIndexStatus, s
   return (
     <section className="editorPage">
       <EditorHeader
-        title={currentSkill.name}
+        title={skillDisplayName(currentSkill)}
         backLabel="Back to skills"
         onBack={handleBack}
         actions={(
@@ -605,9 +615,10 @@ export function SkillEditorView({ skill, skills, back, onReadSkillIndexStatus, s
       />
       {fileError ? <Toast tone="error" message={fileError} onDismiss={() => setFileError("")} /> : null}
       {contentError ? <Toast tone="error" message={contentError} onDismiss={() => setContentError("")} /> : null}
-      {showDiscardDialog ? (
+      {discardDialogMounted ? (
         <Suspense fallback={(
           <DialogLoadingFallback
+            open={showDiscardDialog}
             title={dialogCopy.discardChangesTitle}
             label="Loading discard dialog"
             descriptionId="discard-changes-loading-description"
@@ -621,7 +632,7 @@ export function SkillEditorView({ skill, skills, back, onReadSkillIndexStatus, s
                   variant="danger"
                   onClick={() => {
                     setShowDiscardDialog(false);
-                    back();
+                    discardChanges();
                   }}
                 >
                   Discard changes
@@ -630,7 +641,7 @@ export function SkillEditorView({ skill, skills, back, onReadSkillIndexStatus, s
             )}
           />
         )}>
-          <DiscardChangesDialog open onOpenChange={setShowDiscardDialog} onDiscard={back} />
+          <DiscardChangesDialog open={showDiscardDialog} onOpenChange={setShowDiscardDialog} onDiscard={discardChanges} />
         </Suspense>
       ) : null}
       <DeleteConfirmationDialog
@@ -667,122 +678,115 @@ export function SkillEditorView({ skill, skills, back, onReadSkillIndexStatus, s
           minSize={fileTreeCollapsed ? "44px" : "190px"}
           panelRef={fileTreePanelRef}
         >
-          <aside className="fileTree" onKeyDown={handleFileTreeKeyDown}>
-            <ContextMenu.Root>
-              <ContextMenu.Trigger asChild>
-                <div className="fileTreeBody">
-                  <div className="fileTreeHeader">
-                    <button
-                      className="fileTreeToggle"
-                      aria-label={fileTreeCollapsed ? "Expand files" : "Collapse files"}
-                      onClick={() => setFileTreeCollapsed((value) => !value)}
-                    >
-                      {fileTreeCollapsed ? <ChevronRight size={14} /> : <ChevronDown size={14} />}
-                      {!fileTreeCollapsed && <span>Files</span>}
-                    </button>
-                    {!readOnly && !fileTreeCollapsed && (
-                      <div className="fileTreeActions">
-                        <IconButton aria-label="New file" onClick={() => createEntry("file")}><FilePlus size={13} /></IconButton>
-                        <IconButton aria-label="New folder" onClick={() => createEntry("folder")}><FolderPlus size={13} /></IconButton>
-                      </div>
-                    )}
-                  </div>
-                  {!fileTreeCollapsed && loadingFiles && (
-                    <LoadingState className="fileTreeLoading" label="Loading files" />
-                  )}
-                  {!fileTreeCollapsed && !loadingFiles && rows.map(({ file, depth, isFolder }) => {
-                const isCollapsed = collapsedFolders.has(file.name);
-                const isSelected = selectedPath === file.name;
-                const isRenaming = renamingPath === file.name;
-                const rowClassName = `fileItem ${isFolder ? "folderItem" : ""} ${file.name === activePath ? "active" : ""} ${isSelected ? "selected" : ""}`;
-                const rowStyle = { paddingLeft: `${9 + depth * 16}px` };
-                const rowIcon = isFolder ? <Folder size={14} /> : <FileText size={14} />;
-                const rowChevron = <span className="treeChevron">{isFolder ? (isCollapsed ? <ChevronRight size={12} /> : <ChevronDown size={12} />) : null}</span>;
-                const status = fileTreeStatus(file);
-                if (!readOnly && isRenaming) {
-                  return (
-                    <div className={`${rowClassName} renaming`} key={file.name} style={rowStyle}>
-                      {rowChevron}
-                      {rowIcon}
-                      <input
-                        aria-label={`Rename ${displayFileName(file.name)}`}
-                        ref={renameInputRef}
-                        value={renameValue}
-                        onBlur={submitRename}
-                        onChange={(event) => setRenameValue(event.target.value)}
-                        onKeyDown={(event) => {
-                          if (event.key === "Enter") {
-                            event.preventDefault();
-                            submitRename();
-                          } else if (event.key === "Escape") {
-                            event.preventDefault();
-                            setRenamingPath("");
-                          }
+          <FileTree
+            collapsed={fileTreeCollapsed}
+            onCollapsedChange={setFileTreeCollapsed}
+            items={rows.map(({ file, depth, isFolder }, index) => ({
+              id: file.name,
+              label: displayFileName(file.name),
+              kind: isFolder ? "folder" : "file",
+              depth,
+              parentId: depth > 0 ? parentPath(file.name) : null,
+              expanded: isFolder && !collapsedFolders.has(file.name),
+              position: index + 1,
+              className: skillFileTreeTone(file),
+            }))}
+            selectedId={selectedEntry?.name ?? null}
+            onItemActivate={(item) => {
+              const file = fileTreeEntryForItem(item);
+              if (file) activateFileTreeEntry(file);
+            }}
+            onItemToggle={(item) => {
+              if (item.kind === "folder") toggleFolder(item.id);
+            }}
+            onItemRename={(item) => {
+              const file = fileTreeEntryForItem(item);
+              if (file) beginRename(file);
+            }}
+            canRename={(item) => !readOnly && item.id !== "SKILL.md"}
+            onItemContextMenu={(item) => {
+              const file = fileTreeEntryForItem(item);
+              if (file?.kind === "file") activateFileTreeEntry(file);
+            }}
+            onTreeKeyDown={(event, item) => {
+              if (renamingPath) return;
+              const entry = fileTreeEntryForItem(item);
+              if (event.key === "Enter") {
+                if (readOnly) return;
+                if (entry?.kind === "folder") return;
+                event.preventDefault();
+                setSelectedPath(item.id);
+                beginRename(entry);
+              } else if (event.key === "Delete" || event.key === "Backspace") {
+                if (readOnly) return;
+                event.preventDefault();
+                requestDeleteEntry(entry);
+              } else if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "r") {
+                event.preventDefault();
+                if (entry?.path) safeInvoke(TauriCommand.RevealInFinder, { path: entry.path });
+              }
+            }}
+            renderItem={(item, row) => {
+              const file = fileTreeEntryForItem(item);
+              if (!file || renamingPath === item.id) return row;
+              return (
+                <ContextMenu.Root>
+                  <Tooltip content={file.name} onlyWhenTruncated>
+                    <ContextMenu.Trigger asChild>{row}</ContextMenu.Trigger>
+                  </Tooltip>
+                  <ContextMenu.Portal>
+                    <ContextMenu.Content className="menuContent" {...({ sideOffset: 6 } as Record<string, unknown>)}>
+                      <FileTreeContextMenuItems
+                        Menu={ContextMenu}
+                        entry={file}
+                        readOnly={readOnly || file.name === "SKILL.md"}
+                        onNewFile={() => { void createEntry("file", file); }}
+                        onNewFolder={() => { void createEntry("folder", file); }}
+                        onReveal={() => {
+                          if (file.path) safeInvoke(TauriCommand.RevealInFinder, { path: file.path });
                         }}
+                        onRename={() => beginRename(file)}
+                        onDelete={() => requestDeleteEntry(file)}
                       />
-                    </div>
-                  );
-                }
-                return (
-                  <ContextMenu.Root key={file.name}>
-                    <Tooltip content={file.name} onlyWhenTruncated>
-                      <ContextMenu.Trigger asChild>
-                        <button
-                        aria-expanded={isFolder ? !isCollapsed : undefined}
-                        className={rowClassName}
-                        onClick={() => {
-                          setSelectedPath(file.name);
-                          if (isFolder) toggleFolder(file.name);
-                          else setActivePath(file.name);
-                        }}
-                        onContextMenu={() => setSelectedPath(file.name)}
-                        onDoubleClick={readOnly ? undefined : () => beginRename(file)}
-                        style={rowStyle}
-                      >
-                        {rowChevron}
-                        {rowIcon}
-                        <span className="fileItemName">{displayFileName(file.name)}</span>
-                        {status && <Badge tone={status === "U" ? "success" : "warning"}>{status}</Badge>}
-                        </button>
-                      </ContextMenu.Trigger>
-                    </Tooltip>
-                    <ContextMenu.Portal>
-                      <ContextMenu.Content className="skillMenuContent" {...({ sideOffset: 6 } as Record<string, unknown>)}>
-                        <FileTreeContextMenuItems
-                          Menu={ContextMenu}
-                          entry={file}
-                          readOnly={readOnly || file.name === "SKILL.md"}
-                          onNewFile={() => createEntry("file", file)}
-                          onNewFolder={() => createEntry("folder", file)}
-                          onReveal={() => {
-                            if (file.path) safeInvoke(TauriCommand.RevealInFinder, { path: file.path });
-                          }}
-                          onRename={() => beginRename(file)}
-                          onDelete={() => requestDeleteEntry(file)}
-                        />
-                      </ContextMenu.Content>
-                    </ContextMenu.Portal>
-                  </ContextMenu.Root>
-                );
-                  })}
-                </div>
-              </ContextMenu.Trigger>
-              {!readOnly && <ContextMenu.Portal>
-                <ContextMenu.Content className="skillMenuContent" {...({ sideOffset: 6 } as Record<string, unknown>)}>
+                    </ContextMenu.Content>
+                  </ContextMenu.Portal>
+                </ContextMenu.Root>
+              );
+            }}
+            renderTrailing={(item) => {
+              const file = fileTreeEntryForItem(item);
+              const status = file ? fileTreeStatus(file) : "";
+              return status ? <Badge tone={status === "U" ? "success" : "warning"}>{status}</Badge> : null;
+            }}
+            renamingId={renamingPath}
+            renameValue={renameValue}
+            onRenameValueChange={setRenameValue}
+            onRenameCommit={submitRename}
+            onRenameCancel={() => setRenamingPath("")}
+            actions={!readOnly ? (
+              <>
+                <IconButton aria-label="New file" onClick={() => { void createEntry("file"); }}><FilePlus size={13} /></IconButton>
+                <IconButton aria-label="New folder" onClick={() => { void createEntry("folder"); }}><FolderPlus size={13} /></IconButton>
+              </>
+            ) : null}
+            rootContextMenu={!readOnly ? (
+              <ContextMenu.Portal>
+                <ContextMenu.Content className="menuContent" {...({ sideOffset: 6 } as Record<string, unknown>)}>
                   <FileTreeContextMenuItems
                     Menu={ContextMenu}
                     entry={null}
-                    readOnly={readOnly || selectedEntry?.name === "SKILL.md"}
-                    onNewFile={() => createEntry("file", null)}
-                    onNewFolder={() => createEntry("folder", null)}
+                    readOnly={selectedEntry?.name === "SKILL.md"}
+                    onNewFile={() => { void createEntry("file", null); }}
+                    onNewFolder={() => { void createEntry("folder", null); }}
                     onReveal={revealSelected}
                     onRename={() => beginRename()}
                     onDelete={() => requestDeleteEntry()}
                   />
                 </ContextMenu.Content>
-              </ContextMenu.Portal>}
-            </ContextMenu.Root>
-          </aside>
+              </ContextMenu.Portal>
+            ) : null}
+            loading={loadingFiles}
+          />
         </Panel>
         {!fileTreeCollapsed && <ResizeSeparator className="fileTreeResizeHandle" />}
         <Panel className="codePanePanel" minSize="360px">

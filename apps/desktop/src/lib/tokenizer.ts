@@ -2,10 +2,6 @@ import { countTokens as countO200kTokens } from "gpt-tokenizer/encoding/o200k_ba
 import { parse as parseYaml } from "yaml";
 
 import { formatTokenCount } from "./token-format.ts";
-import {
-  TOKENIZER_LABEL,
-  TOKENIZER_PACKAGE,
-} from "./tokenizer-types.ts";
 import type {
   MarkdownTokenStats,
   TokenBreakdownDetail,
@@ -15,12 +11,6 @@ import type {
   TranscriptTokenStats,
 } from "./tokenizer-types.ts";
 
-export { formatTokenCount } from "./token-format.ts";
-export {
-  TOKENIZER_LABEL,
-  TOKENIZER_PACKAGE,
-  TOKENIZER_URL,
-} from "./tokenizer-types.ts";
 export type {
   MarkdownTokenStats,
   TokenBreakdownDetail,
@@ -33,16 +23,10 @@ const ESTIMATED_CONTEXT_LIMIT = 200_000;
 export { cacheRateTone, tokenTone, tokenToneClass } from "./token-style.ts";
 export { TokenTone } from "./token-style.ts";
 
-export type { TokenBreakdownSegment } from "./tokenizer-types.ts";
-
 export function countTextTokens(value: unknown): number {
   const text = `${value ?? ""}`;
   if (!text) return 0;
   return countO200kTokens(text);
-}
-
-export function tokenEstimateTitle(): string {
-  return `Estimated with ${TOKENIZER_LABEL} using ${TOKENIZER_PACKAGE}; not exact billing.`;
 }
 
 function splitMarkdownFrontmatter(content: string): { frontmatter: string; body: string } {

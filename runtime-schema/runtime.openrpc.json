@@ -12,14 +12,15 @@
   ],
   "methods": [
     { "name": "scan", "params": [], "result": { "name": "result", "schema": { "$ref": "#/components/schemas/ScanResponse" } }, "x-tendi": { "owner": "daemon", "wire": "jsonrpc", "clients": ["cli"], "execution": "write", "internal": true } },
-    { "name": "agents_list", "params": [], "result": { "name": "result", "schema": { "$ref": "#/components/schemas/AgentRecordList" } }, "x-tendi": { "owner": "daemon", "wire": "jsonrpc", "clients": ["desktop", "cli"], "execution": "read", "serializedWrite": true, "typedHandler": true } },
+    { "name": "agents_list", "params": [], "result": { "name": "result", "schema": { "$ref": "#/components/schemas/AgentRecordList" } }, "x-tendi": { "owner": "daemon", "wire": "jsonrpc", "clients": ["desktop", "cli"], "execution": "read", "typedHandler": true } },
     { "name": "bundled_skill_status", "params": [], "result": { "name": "result", "schema": { "$ref": "#/components/schemas/BundledSkillStatus" } }, "x-tendi": { "owner": "daemon", "wire": "jsonrpc", "clients": ["desktop"], "execution": "read" } },
     { "name": "bundled_skill_install", "params": [{ "name": "request", "required": true, "schema": { "$ref": "#/components/schemas/BundledSkillInstallRequest" } }], "result": { "name": "result", "schema": { "$ref": "#/components/schemas/BundledSkillInstallReport" } }, "x-tendi": { "owner": "daemon", "wire": "jsonrpc", "clients": ["desktop", "cli"], "execution": "write" } },
     { "name": "bundled_skill_remove", "params": [], "result": { "name": "result", "schema": { "$ref": "#/components/schemas/BundledSkillStatus" } }, "x-tendi": { "owner": "daemon", "wire": "jsonrpc", "clients": ["desktop"], "execution": "write" } },
     { "name": "bundled_skill_prompt_dismiss", "params": [], "result": { "name": "result", "schema": { "$ref": "#/components/schemas/Unit" } }, "x-tendi": { "owner": "daemon", "wire": "jsonrpc", "clients": ["desktop"], "execution": "write" } },
-    { "name": "skills_list", "params": [], "result": { "name": "result", "schema": { "$ref": "#/components/schemas/SkillRecordList" } }, "x-tendi": { "owner": "daemon", "wire": "jsonrpc", "clients": ["desktop", "cli"], "execution": "read", "serializedWrite": true, "typedHandler": true } },
+    { "name": "skills_list", "params": [], "result": { "name": "result", "schema": { "$ref": "#/components/schemas/SkillRecordList" } }, "x-tendi": { "owner": "daemon", "wire": "jsonrpc", "clients": ["desktop", "cli"], "execution": "read", "typedHandler": true } },
     { "name": "skills_refresh", "params": [], "result": { "name": "result", "schema": { "$ref": "#/components/schemas/SkillRefreshResponse" } }, "x-tendi": { "owner": "daemon", "wire": "jsonrpc", "clients": ["desktop"], "execution": "write" } },
     { "name": "sessions_snapshot", "params": [], "result": { "name": "result", "schema": { "$ref": "#/components/schemas/SessionSnapshot" } }, "x-tendi": { "owner": "daemon", "wire": "jsonrpc", "clients": ["desktop", "cli"], "execution": "read", "typedHandler": true } },
+    { "name": "sessions_list", "params": [{ "name": "request", "required": true, "schema": { "$ref": "#/components/schemas/SessionsListRequest" } }], "result": { "name": "result", "schema": { "$ref": "#/components/schemas/SessionsListResponse" } }, "x-tendi": { "owner": "daemon", "wire": "jsonrpc", "clients": ["desktop"], "execution": "read", "typedHandler": true } },
     { "name": "sessions_scan_start", "params": [], "result": { "name": "result", "schema": { "$ref": "#/components/schemas/SessionScanStartResponse" } }, "x-tendi": { "owner": "daemon", "wire": "jsonrpc", "clients": ["desktop"], "execution": "write", "typedHandler": true } },
     { "name": "sessions_search", "params": [{ "name": "request", "required": true, "schema": { "$ref": "#/components/schemas/SessionsSearchRequest" } }], "result": { "name": "result", "schema": { "$ref": "#/components/schemas/SessionSearchHitList" } }, "x-tendi": { "owner": "daemon", "wire": "jsonrpc", "clients": ["desktop", "cli"], "execution": "read", "typedHandler": true } },
     { "name": "analytics_overview", "params": [{ "name": "request", "required": true, "schema": { "$ref": "#/components/schemas/AnalyticsOverviewRequest" } }], "result": { "name": "result", "schema": { "$ref": "#/components/schemas/AnalyticsOverview" } }, "x-tendi": { "owner": "daemon", "wire": "jsonrpc", "clients": ["desktop"], "execution": "read", "serializedWriteWhen": "refreshTranscripts", "typedHandler": true } },
@@ -30,6 +31,9 @@
     { "name": "skill_session_links", "params": [{ "name": "request", "required": true, "schema": { "$ref": "#/components/schemas/SkillSessionLinksRequest" } }], "result": { "name": "result", "schema": { "$ref": "#/components/schemas/SessionSkillLinkList" } }, "x-tendi": { "owner": "daemon", "wire": "jsonrpc", "clients": ["desktop"], "execution": "read", "typedHandler": true } },
     { "name": "settings_get", "params": [], "result": { "name": "result", "schema": { "$ref": "#/components/schemas/AppSettings" } }, "x-tendi": { "owner": "daemon", "wire": "jsonrpc", "clients": ["desktop"], "execution": "read", "typedHandler": true } },
     { "name": "settings_save", "params": [{ "name": "request", "required": true, "schema": { "$ref": "#/components/schemas/AppSettings" } }], "result": { "name": "result", "schema": { "$ref": "#/components/schemas/AppSettings" } }, "x-tendi": { "owner": "daemon", "wire": "jsonrpc", "clients": ["desktop"], "execution": "write", "typedHandler": true } },
+    { "name": "assistant_ask", "params": [{ "name": "request", "required": true, "schema": { "$ref": "#/components/schemas/AssistantAskRequest" } }], "result": { "name": "result", "schema": { "$ref": "#/components/schemas/AssistantAskResponse" } }, "x-tendi": { "owner": "desktop", "wire": "tauri", "clients": ["desktop"], "execution": "write" } },
+    { "name": "assistant_cancel", "params": [{ "name": "request", "required": true, "schema": { "$ref": "#/components/schemas/AssistantCancelRequest" } }], "result": { "name": "result", "schema": { "$ref": "#/components/schemas/AssistantCancelResponse" } }, "x-tendi": { "owner": "desktop", "wire": "tauri", "clients": ["desktop"], "execution": "write" } },
+    { "name": "assistant_chat_sessions", "params": [], "result": { "name": "result", "schema": { "$ref": "#/components/schemas/AssistantChatSessionList" } }, "x-tendi": { "owner": "desktop", "wire": "tauri", "clients": ["desktop"], "execution": "read" } },
     { "name": "session_projects_list", "params": [], "result": { "name": "result", "schema": { "$ref": "#/components/schemas/SessionProjectSummaryList" } }, "x-tendi": { "owner": "daemon", "wire": "jsonrpc", "clients": ["desktop"], "execution": "read", "typedHandler": true } },
     { "name": "project_scan_scopes_list", "params": [], "result": { "name": "result", "schema": { "$ref": "#/components/schemas/ProjectScanScopeList" } }, "x-tendi": { "owner": "daemon", "wire": "jsonrpc", "clients": ["desktop"], "execution": "read", "typedHandler": true } },
     { "name": "project_scan_scopes_save", "params": [{ "name": "request", "required": true, "schema": { "$ref": "#/components/schemas/ProjectScanScopesSaveRequest" } }], "result": { "name": "result", "schema": { "$ref": "#/components/schemas/ProjectScanScopeList" } }, "x-tendi": { "owner": "daemon", "wire": "jsonrpc", "clients": ["desktop"], "execution": "write", "typedHandler": true } },
@@ -43,18 +47,19 @@
     { "name": "agent_configs_delete_many", "params": [{ "name": "request", "required": true, "schema": { "$ref": "#/components/schemas/AgentConfigsDeleteRequest" } }], "result": { "name": "result", "schema": { "$ref": "#/components/schemas/AgentConfigDeleteResult" } }, "x-tendi": { "owner": "daemon", "wire": "jsonrpc", "clients": ["desktop"], "execution": "write", "typedHandler": true } },
     { "name": "config_profile_create", "params": [{ "name": "request", "required": true, "schema": { "$ref": "#/components/schemas/ConfigProfileCreateRequest" } }], "result": { "name": "result", "schema": { "$ref": "#/components/schemas/AgentConfigFile" } }, "x-tendi": { "owner": "daemon", "wire": "jsonrpc", "clients": ["desktop"], "execution": "write", "typedHandler": true } },
     { "name": "config_profile_set", "params": [{ "name": "request", "required": true, "schema": { "$ref": "#/components/schemas/ConfigProfileSetRequest" } }], "result": { "name": "result", "schema": { "$ref": "#/components/schemas/AppSettings" } }, "x-tendi": { "owner": "daemon", "wire": "jsonrpc", "clients": ["desktop"], "execution": "write", "typedHandler": true } },
-    { "name": "rules_list", "params": [], "result": { "name": "result", "schema": { "$ref": "#/components/schemas/RuleRecordList" } }, "x-tendi": { "owner": "daemon", "wire": "jsonrpc", "clients": ["desktop"], "execution": "read", "serializedWrite": true, "typedHandler": true } },
+    { "name": "rules_list", "params": [], "result": { "name": "result", "schema": { "$ref": "#/components/schemas/RuleRecordList" } }, "x-tendi": { "owner": "daemon", "wire": "jsonrpc", "clients": ["desktop"], "execution": "read", "typedHandler": true } },
     { "name": "rule_file_read", "params": [{ "name": "request", "required": true, "schema": { "$ref": "#/components/schemas/RuleFileReadRequest" } }], "result": { "name": "result", "schema": { "$ref": "#/components/schemas/RuleFileContentResponse" } }, "x-tendi": { "owner": "daemon", "wire": "jsonrpc", "clients": ["desktop"], "execution": "read" } },
     { "name": "rule_file_save", "params": [{ "name": "request", "required": true, "schema": { "$ref": "#/components/schemas/RuleFileSaveRequest" } }], "result": { "name": "result", "schema": { "$ref": "#/components/schemas/RuleFileWriteResponse" } }, "x-tendi": { "owner": "daemon", "wire": "jsonrpc", "clients": ["desktop"], "execution": "write" } },
     { "name": "rule_file_delete_many", "params": [{ "name": "request", "required": true, "schema": { "$ref": "#/components/schemas/RuleFileDeleteManyRequest" } }], "result": { "name": "result", "schema": { "$ref": "#/components/schemas/RuleFileDeleteManyResponse" } }, "x-tendi": { "owner": "daemon", "wire": "jsonrpc", "clients": ["desktop"], "execution": "write" } },
-    { "name": "hooks_list", "params": [], "result": { "name": "result", "schema": { "$ref": "#/components/schemas/HookRecordList" } }, "x-tendi": { "owner": "daemon", "wire": "jsonrpc", "clients": ["desktop"], "execution": "read", "serializedWrite": true, "typedHandler": true } },
+    { "name": "hooks_list", "params": [], "result": { "name": "result", "schema": { "$ref": "#/components/schemas/HookRecordList" } }, "x-tendi": { "owner": "daemon", "wire": "jsonrpc", "clients": ["desktop"], "execution": "read", "typedHandler": true } },
     { "name": "hook_delete", "params": [{ "name": "request", "required": true, "schema": { "$ref": "#/components/schemas/HookDeleteRequest" } }], "result": { "name": "result", "schema": { "$ref": "#/components/schemas/HookMutationDelta" } }, "x-tendi": { "owner": "daemon", "wire": "jsonrpc", "clients": ["desktop"], "execution": "write" } },
     { "name": "hook_delete_many", "params": [{ "name": "request", "required": true, "schema": { "$ref": "#/components/schemas/HookDeleteManyRequest" } }], "result": { "name": "result", "schema": { "$ref": "#/components/schemas/HookMutationDelta" } }, "x-tendi": { "owner": "daemon", "wire": "jsonrpc", "clients": ["desktop"], "execution": "write" } },
     { "name": "hook_set_enabled", "params": [{ "name": "request", "required": true, "schema": { "$ref": "#/components/schemas/HookSetEnabledRequest" } }], "result": { "name": "result", "schema": { "$ref": "#/components/schemas/HookMutationDelta" } }, "x-tendi": { "owner": "daemon", "wire": "jsonrpc", "clients": ["desktop"], "execution": "write" } },
     { "name": "hook_set_enabled_many", "params": [{ "name": "request", "required": true, "schema": { "$ref": "#/components/schemas/HookSetEnabledManyRequest" } }], "result": { "name": "result", "schema": { "$ref": "#/components/schemas/HookMutationDelta" } }, "x-tendi": { "owner": "daemon", "wire": "jsonrpc", "clients": ["desktop"], "execution": "write" } },
     { "name": "hook_review", "params": [{ "name": "request", "required": true, "schema": { "$ref": "#/components/schemas/HookReviewRequest" } }], "result": { "name": "result", "schema": { "$ref": "#/components/schemas/HookMutationDelta" } }, "x-tendi": { "owner": "daemon", "wire": "jsonrpc", "clients": ["desktop"], "execution": "write" } },
     { "name": "hook_source_read", "params": [{ "name": "request", "required": true, "schema": { "$ref": "#/components/schemas/HookSourceReadRequest" } }], "result": { "name": "result", "schema": { "$ref": "#/components/schemas/HookSourceContentResponse" } }, "x-tendi": { "owner": "daemon", "wire": "jsonrpc", "clients": ["desktop"], "execution": "read" } },
-    { "name": "mcp_list", "params": [], "result": { "name": "result", "schema": { "$ref": "#/components/schemas/McpServerRecordList" } }, "x-tendi": { "owner": "daemon", "wire": "jsonrpc", "clients": ["desktop", "cli"], "execution": "read", "serializedWrite": true, "typedHandler": true } },
+    { "name": "mcp_list", "params": [], "result": { "name": "result", "schema": { "$ref": "#/components/schemas/McpServerRecordList" } }, "x-tendi": { "owner": "daemon", "wire": "jsonrpc", "clients": ["desktop", "cli"], "execution": "read", "typedHandler": true } },
+    { "name": "mcp_probe", "params": [{ "name": "request", "required": true, "schema": { "$ref": "#/components/schemas/McpProbeRequest" } }], "result": { "name": "result", "schema": { "$ref": "#/components/schemas/McpMutationResponse" } }, "x-tendi": { "owner": "daemon", "wire": "jsonrpc", "clients": ["desktop"], "execution": "write" } },
     { "name": "mcp_set_enabled", "params": [{ "name": "request", "required": true, "schema": { "$ref": "#/components/schemas/McpSetEnabledRequest" } }], "result": { "name": "result", "schema": { "$ref": "#/components/schemas/McpMutationResponse" } }, "x-tendi": { "owner": "daemon", "wire": "jsonrpc", "clients": ["desktop"], "execution": "write" } },
     { "name": "mcp_set_enabled_many", "params": [{ "name": "request", "required": true, "schema": { "$ref": "#/components/schemas/McpSetEnabledManyRequest" } }], "result": { "name": "result", "schema": { "$ref": "#/components/schemas/McpMutationResponse" } }, "x-tendi": { "owner": "daemon", "wire": "jsonrpc", "clients": ["desktop"], "execution": "write" } },
     { "name": "prompts_list", "params": [], "result": { "name": "result", "schema": { "$ref": "#/components/schemas/PromptRecordList" } }, "x-tendi": { "owner": "daemon", "wire": "jsonrpc", "clients": ["desktop"], "execution": "read", "typedHandler": true } },
@@ -796,6 +801,18 @@
         "required": ["agent", "path", "expectedTrustHash", "name", "enabled", "serverPath"],
         "additionalProperties": false
       },
+      "McpProbeRequest": {
+        "type": "object",
+        "properties": {
+          "agent": { "$ref": "#/components/schemas/AgentKind" },
+          "path": { "type": "string", "minLength": 1 },
+          "expectedTrustHash": { "type": "string", "minLength": 1 },
+          "name": { "type": "string", "minLength": 1 },
+          "serverPath": { "$ref": "#/components/schemas/StringList" }
+        },
+        "required": ["agent", "path", "expectedTrustHash", "name", "serverPath"],
+        "additionalProperties": false
+      },
       "McpSetEnabledManyRequest": {
         "type": "object",
         "properties": { "requests": { "type": "array", "items": { "$ref": "#/components/schemas/McpSetEnabledRequest" } } },
@@ -987,7 +1004,7 @@
       },
       "SkillsDeleteManyRequest": {
         "type": "object",
-        "properties": { "skillIds": { "$ref": "#/components/schemas/StringList" }, "names": { "$ref": "#/components/schemas/StringList" } },
+        "properties": { "skillIds": { "$ref": "#/components/schemas/StringList" } },
         "required": ["skillIds"],
         "additionalProperties": false
       },
@@ -1110,14 +1127,26 @@
       "TerminalAppTestResponse": { "type": "string", "minLength": 1 },
       "EditorAppTestResponse": { "type": "boolean" },
       "SessionResumeTargetResponse": { "type": "string", "enum": ["app", "terminal"] },
+      "SessionResumeError": {
+        "type": "object",
+        "properties": {
+          "code": { "type": "string", "enum": ["desktop_runtime_required", "desktop_command_failed", "worktree_not_found", "terminal_unavailable", "terminal_launch_failed", "session_not_resumable", "internal"] },
+          "provider": { "type": ["string", "null"] },
+          "retryable": { "type": "boolean" },
+          "action": { "type": "string", "enum": ["retry", "settings", "open_project", "none"] }
+        },
+        "required": ["code", "provider", "retryable", "action"],
+        "additionalProperties": false
+      },
       "SessionResumeResponse": {
         "type": "object",
         "properties": {
-          "status": { "type": "string", "enum": ["activeWriter", "launched"] },
+          "status": { "type": "string", "enum": ["activeWriter", "launched", "failed"] },
           "lockPath": { "type": ["string", "null"] },
           "agent": { "type": ["string", "null"] },
           "terminal": { "type": ["string", "null"] },
-          "commandLine": { "type": ["string", "null"] }
+          "commandLine": { "type": ["string", "null"] },
+          "error": { "$ref": "#/components/schemas/SessionResumeError" }
         },
         "required": ["status"],
         "additionalProperties": false
@@ -1228,6 +1257,63 @@
         "required": ["id", "agent", "path"],
         "additionalProperties": false
       },
+      "SessionListSortKey": {
+        "type": "string",
+        "enum": ["title", "agent", "project", "startedAt", "updatedAt", "messages", "turns", "cacheRate", "searchScore"]
+      },
+      "SessionListSortDirection": {
+        "type": "string",
+        "enum": ["asc", "desc"]
+      },
+      "SessionsListRequest": {
+        "type": "object",
+        "properties": {
+          "query": { "type": "string" },
+          "agent": { "$ref": "#/components/schemas/AgentKind" },
+          "sortKey": { "$ref": "#/components/schemas/SessionListSortKey" },
+          "sortDirection": { "$ref": "#/components/schemas/SessionListSortDirection" },
+          "groupBy": { "$ref": "#/components/schemas/SessionListSortKey" },
+          "page": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
+          "pageSize": { "type": "integer", "minimum": 1, "maximum": 500 },
+          "showChildSessions": { "type": "boolean" },
+          "selectedProjectKeys": { "type": "array", "items": { "type": "string" } },
+          "locate": { "$ref": "#/components/schemas/SessionIdentity" }
+        },
+        "required": ["query", "sortKey", "sortDirection", "page", "pageSize", "showChildSessions", "selectedProjectKeys"],
+        "additionalProperties": false
+      },
+      "SessionListProjectOption": {
+        "type": "object",
+        "properties": {
+          "key": { "type": "string" },
+          "label": { "type": "string" },
+          "title": { "type": "string" },
+          "count": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 }
+        },
+        "required": ["key", "label", "title", "count"],
+        "additionalProperties": false
+      },
+      "SessionListProjectOptionList": {
+        "type": "array",
+        "items": { "$ref": "#/components/schemas/SessionListProjectOption" }
+      },
+      "SessionsListResponse": {
+        "type": "object",
+        "properties": {
+          "revision": { "$ref": "#/components/schemas/Revision" },
+          "rows": { "$ref": "#/components/schemas/SessionRecordList" },
+          "projectOptions": { "$ref": "#/components/schemas/SessionListProjectOptionList" },
+          "total": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
+          "childSessionCount": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
+          "page": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
+          "pageCount": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
+          "pageStart": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
+          "pageEnd": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
+          "groupCount": { "type": ["integer", "null"], "minimum": 0, "maximum": 9007199254740991 }
+        },
+        "required": ["revision", "rows", "projectOptions", "total", "childSessionCount", "page", "pageCount", "pageStart", "pageEnd", "groupCount"],
+        "additionalProperties": false
+      },
       "SessionsSearchRequest": {
         "type": "object",
         "properties": {
@@ -1308,6 +1394,8 @@
           "approval_mode": { "type": ["string", "null"] },
           "is_run_everything": { "type": ["boolean", "null"] },
           "parent_session_id": { "type": ["string", "null"] },
+          "search_score": { "type": "number" },
+          "search_snippet": { "type": "string" },
           "token_usage": { "$ref": "#/components/schemas/SessionTokenUsage" }
         },
         "required": ["id", "agent", "path"],
@@ -1365,8 +1453,8 @@
       },
       "SkillSessionLinksRequest": {
         "type": "object",
-        "properties": { "skillName": { "type": "string", "minLength": 1 } },
-        "required": ["skillName"],
+        "properties": { "skillId": { "type": "string", "minLength": 1 } },
+        "required": ["skillId"],
         "additionalProperties": false
       },
       "SessionSkillLink": {
@@ -1447,6 +1535,118 @@
       "SkillTargetRecordList": {
         "type": "array",
         "items": { "$ref": "#/components/schemas/SkillTargetRecord" }
+      },
+      "AssistantMessage": {
+        "type": "object",
+        "properties": {
+          "role": { "type": "string", "enum": ["user", "assistant"] },
+          "content": { "type": "string" }
+        },
+        "required": ["role", "content"],
+        "additionalProperties": false
+      },
+      "AssistantChatSession": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string", "minLength": 1 },
+          "messages": { "type": "array", "items": { "$ref": "#/components/schemas/AssistantMessage" } },
+          "linkedSession": {
+            "type": ["object", "null"],
+            "properties": {
+              "id": { "type": "string", "minLength": 1 },
+              "agent": { "type": "string", "minLength": 1 },
+              "path": { "type": "string", "minLength": 1 }
+            },
+            "required": ["id", "agent", "path"],
+            "additionalProperties": false
+          }
+        },
+        "required": ["id", "messages", "linkedSession"],
+        "additionalProperties": false
+      },
+      "AssistantChatSessionList": {
+        "type": "array",
+        "items": { "$ref": "#/components/schemas/AssistantChatSession" }
+      },
+      "AssistantContext": {
+        "type": "object",
+        "properties": {
+          "pageId": { "type": "string" },
+          "pageTitle": { "type": "string" },
+          "filters": { "type": "object", "additionalProperties": true },
+          "selection": { "type": "string" },
+          "selectedContent": { "type": "array", "items": { "type": "string" } },
+          "skill": { "type": ["object", "null"], "additionalProperties": true },
+          "session": { "type": ["object", "null"], "additionalProperties": true },
+          "tendi": { "type": "object", "additionalProperties": true }
+        },
+        "required": ["pageId", "pageTitle", "filters", "selection", "selectedContent", "skill", "session", "tendi"],
+        "additionalProperties": false
+      },
+      "AssistantUsage": {
+        "type": "object",
+        "properties": {
+          "inputTokens": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
+          "cachedInputTokens": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
+          "outputTokens": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
+          "reasoningOutputTokens": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
+          "totalTokens": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 }
+        },
+        "additionalProperties": false
+      },
+      "AssistantAskRequest": {
+        "type": "object",
+        "properties": {
+          "conversationId": { "type": "string", "minLength": 1 },
+          "requestId": { "type": "string", "minLength": 1 },
+          "message": { "type": "string", "minLength": 1 },
+          "history": { "type": "array", "items": { "$ref": "#/components/schemas/AssistantMessage" } },
+          "context": { "$ref": "#/components/schemas/AssistantContext" },
+          "agent": { "type": "string", "minLength": 1 },
+          "workspace": { "type": "string" },
+          "persistUserMessage": { "type": "boolean" }
+        },
+        "required": ["conversationId", "requestId", "message", "history", "context", "agent", "workspace", "persistUserMessage"],
+        "additionalProperties": false
+      },
+      "AssistantAskResponse": {
+        "type": "object",
+        "properties": {
+          "answer": { "type": "string" },
+          "status": { "type": "string", "enum": ["completed", "error"] },
+          "usage": { "$ref": "#/components/schemas/AssistantUsage" },
+          "error": { "type": ["string", "null"] }
+        },
+        "required": ["answer", "status", "usage", "error"],
+        "additionalProperties": false
+      },
+      "AssistantCancelRequest": {
+        "type": "object",
+        "properties": {
+          "conversationId": { "type": "string", "minLength": 1 }
+        },
+        "required": ["conversationId"],
+        "additionalProperties": false
+      },
+      "AssistantCancelResponse": {
+        "type": "object",
+        "properties": {
+          "cancelled": { "type": "boolean" }
+        },
+        "required": ["cancelled"],
+        "additionalProperties": false
+      },
+      "AssistantStreamEvent": {
+        "type": "object",
+        "properties": {
+          "conversationId": { "type": "string", "minLength": 1 },
+          "requestId": { "type": "string", "minLength": 1 },
+          "kind": { "type": "string", "minLength": 1 },
+          "text": { "type": "string" },
+          "detail": { "type": "string" }
+        },
+        "required": ["conversationId", "requestId", "kind"],
+        "additionalProperties": false
       },
       "AppSettings": {
         "type": "object",
@@ -1542,6 +1742,29 @@
         "type": "array",
         "items": { "$ref": "#/components/schemas/HookRecord" }
       },
+      "McpIcon": {
+        "type": "object",
+        "properties": {
+          "src": { "type": "string" },
+          "mime_type": { "type": "string" },
+          "sizes": { "type": "array", "items": { "type": "string" } },
+          "theme": { "type": "string" }
+        },
+        "required": ["src"],
+        "additionalProperties": false
+      },
+      "McpTool": {
+        "type": "object",
+        "properties": {
+          "name": { "type": "string" },
+          "title": { "type": "string" },
+          "description": { "type": "string" },
+          "input_schema": { "$ref": "#/components/schemas/JsonValue" },
+          "icons": { "type": "array", "items": { "$ref": "#/components/schemas/McpIcon" } }
+        },
+        "required": ["name"],
+        "additionalProperties": false
+      },
       "McpServerRecord": {
         "type": "object",
         "properties": {
@@ -1553,8 +1776,18 @@
           "status": { "type": "string" },
           "path": { "type": "string" },
           "trust_hash": { "type": "string" },
+          "probe_cache_version": { "type": "integer", "minimum": 0 },
+          "probe_state": { "type": "string" },
           "server_path": { "type": "array", "items": { "type": "string" } },
-          "read_only_reason": { "type": ["string", "null"] }
+          "read_only_reason": { "type": ["string", "null"] },
+          "server_name": { "type": "string" },
+          "server_title": { "type": "string" },
+          "server_version": { "type": "string" },
+          "server_description": { "type": "string" },
+          "server_website_url": { "type": "string" },
+          "probe_error": { "type": "string" },
+          "icons": { "type": "array", "items": { "$ref": "#/components/schemas/McpIcon" } },
+          "tools": { "type": "array", "items": { "$ref": "#/components/schemas/McpTool" } }
         },
         "required": ["agent", "name", "scope", "transport", "enabled", "status", "path", "trust_hash"],
         "additionalProperties": false
@@ -1783,6 +2016,23 @@
           "error": { "type": ["string", "null"] }
         },
         "required": ["status", "skills", "updates", "error"],
+        "additionalProperties": false
+      },
+      "SkillsChangedEvent": {
+        "type": "object",
+        "properties": {
+          "paths": { "type": "array", "items": { "type": "string" } }
+        },
+        "required": ["paths"],
+        "additionalProperties": false
+      },
+      "ProjectionChangedEvent": {
+        "type": "object",
+        "properties": {
+          "domain": { "type": "string", "enum": ["agents", "skills", "rules", "hooks", "mcp"] },
+          "error": { "type": ["string", "null"] }
+        },
+        "required": ["domain", "error"],
         "additionalProperties": false
       },
       "SkillUpdateReport": {
@@ -2098,8 +2348,11 @@
       { "name": "analytics://progress", "payload": { "$ref": "#/components/schemas/AnalyticsProgressEvent" }, "wire": "sse", "revisioned": false, "replay": false, "clients": ["desktop"] },
       { "name": "analytics://revision", "payload": { "$ref": "#/components/schemas/AnalyticsRevisionEvent" }, "wire": "sse", "revisioned": true, "replay": true, "clients": ["desktop"] },
       { "name": "skills://updates", "payload": { "$ref": "#/components/schemas/SkillsUpdatesEvent" }, "wire": "sse", "revisioned": false, "replay": false, "clients": ["desktop"] },
+      { "name": "skills://changed", "payload": { "$ref": "#/components/schemas/SkillsChangedEvent" }, "wire": "sse", "revisioned": false, "replay": false, "clients": ["desktop"] },
+      { "name": "projection://changed", "payload": { "$ref": "#/components/schemas/ProjectionChangedEvent" }, "wire": "sse", "revisioned": false, "replay": false, "clients": ["desktop", "cli"] },
       { "name": "config://changed", "payload": { "$ref": "#/components/schemas/ConfigChangedEvent" }, "wire": "sse", "revisioned": false, "replay": false, "clients": ["desktop"] },
-      { "name": "tendi://update-available", "payload": { "$ref": "#/components/schemas/UpdateCheckResult" }, "wire": "tauri", "revisioned": false, "replay": false, "clients": ["desktop"] }
+      { "name": "tendi://update-available", "payload": { "$ref": "#/components/schemas/UpdateCheckResult" }, "wire": "tauri", "revisioned": false, "replay": false, "clients": ["desktop"] },
+      { "name": "assistant://stream", "payload": { "$ref": "#/components/schemas/AssistantStreamEvent" }, "wire": "tauri", "revisioned": false, "replay": false, "clients": ["desktop"] }
     ],
     "transports": [
       { "name": "daemon_invoke", "kind": "tauri_bridge", "request": { "$ref": "#/components/schemas/JsonRpcRequest" }, "response": { "$ref": "#/components/schemas/JsonRpcResponse" } },

@@ -2,8 +2,11 @@ import type { ReactNode } from "react";
 import { PanelRightClose } from "lucide-react";
 import { IconButton } from "./IconButton.tsx";
 
+export type DetailPanelVariant = "ruleEditor";
+
 export type DetailPanelProps = {
   className?: string;
+  variant?: DetailPanelVariant;
   title: ReactNode;
   meta?: ReactNode;
   headerActions?: ReactNode;
@@ -13,7 +16,8 @@ export type DetailPanelProps = {
 };
 
 export function DetailPanel({
-  className = "ruleEditorPanel",
+  className = "",
+  variant,
   title,
   meta,
   headerActions,
@@ -21,8 +25,9 @@ export function DetailPanel({
   onCollapse,
   children,
 }: DetailPanelProps) {
+  const variantClassName = variant ? `detailPanel--${variant}` : "";
   return (
-    <aside className={className}>
+    <aside className={`detailPanel ${variantClassName} ${className}`.trim()}>
       <header className="threadHeader">
         <div className="threadTitleLine">
           <h2>{title}</h2>

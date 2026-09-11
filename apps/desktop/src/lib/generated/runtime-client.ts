@@ -34,6 +34,7 @@ export class RuntimeClient {
   async skillsList(request: RequestFor<"skills_list">): Promise<ResponseFor<"skills_list">> { return this.call("skills_list", request); }
   async skillsRefresh(request: RequestFor<"skills_refresh">): Promise<ResponseFor<"skills_refresh">> { return this.call("skills_refresh", request); }
   async sessionsSnapshot(request: RequestFor<"sessions_snapshot">): Promise<ResponseFor<"sessions_snapshot">> { return this.call("sessions_snapshot", request); }
+  async sessionsList(request: RequestFor<"sessions_list">): Promise<ResponseFor<"sessions_list">> { return this.call("sessions_list", request); }
   async sessionsScanStart(request: RequestFor<"sessions_scan_start">): Promise<ResponseFor<"sessions_scan_start">> { return this.call("sessions_scan_start", request); }
   async sessionsSearch(request: RequestFor<"sessions_search">): Promise<ResponseFor<"sessions_search">> { return this.call("sessions_search", request); }
   async analyticsOverview(request: RequestFor<"analytics_overview">): Promise<ResponseFor<"analytics_overview">> { return this.call("analytics_overview", request); }
@@ -44,6 +45,9 @@ export class RuntimeClient {
   async skillSessionLinks(request: RequestFor<"skill_session_links">): Promise<ResponseFor<"skill_session_links">> { return this.call("skill_session_links", request); }
   async settingsGet(request: RequestFor<"settings_get">): Promise<ResponseFor<"settings_get">> { return this.call("settings_get", request); }
   async settingsSave(request: RequestFor<"settings_save">): Promise<ResponseFor<"settings_save">> { return this.call("settings_save", request); }
+  async assistantAsk(request: RequestFor<"assistant_ask">): Promise<ResponseFor<"assistant_ask">> { return this.call("assistant_ask", request); }
+  async assistantCancel(request: RequestFor<"assistant_cancel">): Promise<ResponseFor<"assistant_cancel">> { return this.call("assistant_cancel", request); }
+  async assistantChatSessions(request: RequestFor<"assistant_chat_sessions">): Promise<ResponseFor<"assistant_chat_sessions">> { return this.call("assistant_chat_sessions", request); }
   async sessionProjectsList(request: RequestFor<"session_projects_list">): Promise<ResponseFor<"session_projects_list">> { return this.call("session_projects_list", request); }
   async projectScanScopesList(request: RequestFor<"project_scan_scopes_list">): Promise<ResponseFor<"project_scan_scopes_list">> { return this.call("project_scan_scopes_list", request); }
   async projectScanScopesSave(request: RequestFor<"project_scan_scopes_save">): Promise<ResponseFor<"project_scan_scopes_save">> { return this.call("project_scan_scopes_save", request); }
@@ -69,6 +73,7 @@ export class RuntimeClient {
   async hookReview(request: RequestFor<"hook_review">): Promise<ResponseFor<"hook_review">> { return this.call("hook_review", request); }
   async hookSourceRead(request: RequestFor<"hook_source_read">): Promise<ResponseFor<"hook_source_read">> { return this.call("hook_source_read", request); }
   async mcpList(request: RequestFor<"mcp_list">): Promise<ResponseFor<"mcp_list">> { return this.call("mcp_list", request); }
+  async mcpProbe(request: RequestFor<"mcp_probe">): Promise<ResponseFor<"mcp_probe">> { return this.call("mcp_probe", request); }
   async mcpSetEnabled(request: RequestFor<"mcp_set_enabled">): Promise<ResponseFor<"mcp_set_enabled">> { return this.call("mcp_set_enabled", request); }
   async mcpSetEnabledMany(request: RequestFor<"mcp_set_enabled_many">): Promise<ResponseFor<"mcp_set_enabled_many">> { return this.call("mcp_set_enabled_many", request); }
   async promptsList(request: RequestFor<"prompts_list">): Promise<ResponseFor<"prompts_list">> { return this.call("prompts_list", request); }

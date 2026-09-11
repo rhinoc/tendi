@@ -169,6 +169,19 @@ impl RuntimeClient {
         let result = Self::decode_response(CommandName::SessionsSnapshot, request_id, value)?;
         Ok(serde_json::from_value(result)?)
     }
+    pub fn sessions_list(
+        &mut self,
+        params: tendi_core::generated::runtime_contract::SessionsListRequest,
+    ) -> JsonRpcRequest {
+        self.request(CommandName::SessionsList, params)
+    }
+    pub fn decode_sessions_list_response(
+        request_id: &Value,
+        value: Value,
+    ) -> anyhow::Result<tendi_core::generated::runtime_contract::SessionsListResponse> {
+        let result = Self::decode_response(CommandName::SessionsList, request_id, value)?;
+        Ok(serde_json::from_value(result)?)
+    }
     pub fn sessions_scan_start(
         &mut self,
         params: tendi_core::generated::runtime_contract::SessionsScanStartRequest,
@@ -299,6 +312,46 @@ impl RuntimeClient {
         value: Value,
     ) -> anyhow::Result<tendi_core::generated::runtime_contract::SettingsSaveResponse> {
         let result = Self::decode_response(CommandName::SettingsSave, request_id, value)?;
+        Ok(serde_json::from_value(result)?)
+    }
+    pub fn assistant_ask(
+        &mut self,
+        params: tendi_core::generated::runtime_contract::AssistantAskRequest,
+    ) -> JsonRpcRequest {
+        self.request(CommandName::AssistantAsk, params)
+    }
+    pub fn decode_assistant_ask_response(
+        request_id: &Value,
+        value: Value,
+    ) -> anyhow::Result<tendi_core::generated::runtime_contract::AssistantAskResponse> {
+        let result = Self::decode_response(CommandName::AssistantAsk, request_id, value)?;
+        Ok(serde_json::from_value(result)?)
+    }
+    pub fn assistant_cancel(
+        &mut self,
+        params: tendi_core::generated::runtime_contract::AssistantCancelRequest,
+    ) -> JsonRpcRequest {
+        self.request(CommandName::AssistantCancel, params)
+    }
+    pub fn decode_assistant_cancel_response(
+        request_id: &Value,
+        value: Value,
+    ) -> anyhow::Result<tendi_core::generated::runtime_contract::AssistantCancelResponse> {
+        let result = Self::decode_response(CommandName::AssistantCancel, request_id, value)?;
+        Ok(serde_json::from_value(result)?)
+    }
+    pub fn assistant_chat_sessions(
+        &mut self,
+        params: tendi_core::generated::runtime_contract::AssistantChatSessionsRequest,
+    ) -> JsonRpcRequest {
+        self.request(CommandName::AssistantChatSessions, params)
+    }
+    pub fn decode_assistant_chat_sessions_response(
+        request_id: &Value,
+        value: Value,
+    ) -> anyhow::Result<tendi_core::generated::runtime_contract::AssistantChatSessionsResponse>
+    {
+        let result = Self::decode_response(CommandName::AssistantChatSessions, request_id, value)?;
         Ok(serde_json::from_value(result)?)
     }
     pub fn session_projects_list(
@@ -627,6 +680,19 @@ impl RuntimeClient {
         value: Value,
     ) -> anyhow::Result<tendi_core::generated::runtime_contract::McpListResponse> {
         let result = Self::decode_response(CommandName::McpList, request_id, value)?;
+        Ok(serde_json::from_value(result)?)
+    }
+    pub fn mcp_probe(
+        &mut self,
+        params: tendi_core::generated::runtime_contract::McpProbeRequest,
+    ) -> JsonRpcRequest {
+        self.request(CommandName::McpProbe, params)
+    }
+    pub fn decode_mcp_probe_response(
+        request_id: &Value,
+        value: Value,
+    ) -> anyhow::Result<tendi_core::generated::runtime_contract::McpProbeResponse> {
+        let result = Self::decode_response(CommandName::McpProbe, request_id, value)?;
         Ok(serde_json::from_value(result)?)
     }
     pub fn mcp_set_enabled(

@@ -1,13 +1,20 @@
-use std::{fs, path::PathBuf, time::{SystemTime, UNIX_EPOCH}};
+use std::{
+    fs,
+    path::PathBuf,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
-use tendi_core::{AgentKind, TranscriptItem};
 use tendi_core::transcript::parse_transcript;
+use tendi_core::{AgentKind, TranscriptItem};
 
 fn fixture_path(name: &str, content: &str) -> PathBuf {
     let root = std::env::temp_dir().join(format!(
         "tendi-provider-fixture-{}-{}",
         std::process::id(),
-        SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos(),
     ));
     fs::create_dir_all(&root).unwrap();
     let path = root.join(name);
@@ -22,9 +29,21 @@ fn tool(items: &[TranscriptItem]) -> &TranscriptItem {
 #[test]
 fn provider_fixtures_keep_parser_ownership_and_tool_identity() {
     let cases = [
-        ("codex.jsonl", AgentKind::Codex, include_str!("../testdata/transcripts/codex.jsonl")),
-        ("claude.jsonl", AgentKind::Claude, include_str!("../testdata/transcripts/claude.jsonl")),
-        ("cursor.jsonl", AgentKind::Cursor, include_str!("../testdata/transcripts/cursor.jsonl")),
+        (
+            "codex.jsonl",
+            AgentKind::Codex,
+            include_str!("../testdata/transcripts/codex.jsonl"),
+        ),
+        (
+            "claude.jsonl",
+            AgentKind::Claude,
+            include_str!("../testdata/transcripts/claude.jsonl"),
+        ),
+        (
+            "cursor.jsonl",
+            AgentKind::Cursor,
+            include_str!("../testdata/transcripts/cursor.jsonl"),
+        ),
     ];
 
     for (name, agent, content) in cases {

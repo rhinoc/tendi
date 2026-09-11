@@ -1,6 +1,9 @@
 #[cfg(not(target_os = "macos"))]
 use super::open_command_file;
-use super::{TerminalProvider, app_available, applescript_quote, command_status, terminal_script};
+use super::{
+    TerminalLaunchError, TerminalProvider, app_available, applescript_quote, command_status,
+    terminal_script,
+};
 
 pub(crate) struct Terminal;
 
@@ -20,7 +23,7 @@ impl TerminalProvider for Terminal {
     fn application_name(&self) -> String {
         "Terminal".to_string()
     }
-    fn launch(&self, command: &tendi_core::SessionCommand) -> Result<(), String> {
+    fn launch(&self, command: &tendi_core::SessionCommand) -> Result<(), TerminalLaunchError> {
         let script = terminal_script(command);
         #[cfg(target_os = "macos")]
         {
@@ -36,12 +39,15 @@ impl TerminalProvider for Terminal {
                     "end tell",
                 ])
                 .status()
-                .map_err(|err| format!("failed to open Terminal: {err}"))?;
-            return command_status(status, "open Terminal");
+                .map_err(|err| {
+                    TerminalLaunchError::launch_failed(format!("failed to open Terminal: {err}"))
+                })?;
+            return command_status(status, "open Terminal")
+                .map_err(TerminalLaunchError::launch_failed);
         }
         #[cfg(not(target_os = "macos"))]
         {
-            open_command_file("Terminal", &script)
+            open_command_file("Terminal", &script).map_err(TerminalLaunchError::launch_failed)
         }
     }
 }

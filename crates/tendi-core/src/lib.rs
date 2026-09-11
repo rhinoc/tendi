@@ -1,13 +1,14 @@
 pub mod agents;
 pub mod analytics;
+pub mod assistant;
 pub mod bundled_skill;
 pub mod config;
 pub mod files;
-pub mod generated;
 mod fsutil;
+pub mod generated;
 mod git;
-mod json_edit;
 pub mod hooks;
+mod json_edit;
 pub mod logging;
 pub mod mcp;
 pub mod projects;
@@ -16,8 +17,8 @@ pub mod rules;
 pub mod runtime_contract;
 pub mod session_skills;
 pub mod sessions;
-pub mod skill_marketplace;
 pub mod skill_backup;
+pub mod skill_marketplace;
 pub mod skill_restore;
 mod skill_source;
 pub mod skill_targets;
@@ -37,7 +38,7 @@ pub use mcp::{McpScan, McpServerRecord};
 pub use providers::{
     SessionCommand, SessionResumePlan, SessionWriter, accepts_session_app_url,
     active_session_writer, apply_session_config_profile, config_profile_key, parse_agent,
-    plan_session_resume, session_root_priority,
+    plan_assistant_ask, plan_session_resume, session_root_priority,
 };
 pub use rules::{RuleRecord, RuleScan};
 pub use runtime_contract::{

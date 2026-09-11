@@ -33,7 +33,77 @@ struct DaemonState {
     next_subscription_id: AtomicU64,
 }
 
+#[derive(Default)]
+struct AssistantState {
+    cancellations: Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>,
+}
+
+fn clear_assistant_cancellation(
+    cancellations: &Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>,
+    conversation_id: &str,
+    cancellation: &Arc<AtomicBool>,
+) {
+    if let Ok(mut active) = cancellations.lock()
+        && active
+            .get(conversation_id)
+            .is_some_and(|current| Arc::ptr_eq(current, cancellation))
+    {
+        active.remove(conversation_id);
+    }
+}
+
 const UPDATE_AVAILABLE_EVENT: &str = "tendi://update-available";
+
+fn session_resume_failure_response(
+    code: &str,
+    provider: Option<&str>,
+    retryable: bool,
+    action: &str,
+    detail: impl Into<String>,
+) -> runtime_schema::SessionResumeResponse {
+    let detail = detail.into();
+    tendi_core::logging::global().warn(
+        "session resume failed",
+        serde_json::json!({
+            "code": code,
+            "provider": provider,
+            "retryable": retryable,
+            "action": action,
+            "detail": detail,
+        }),
+    );
+    runtime_schema::SessionResumeResponse {
+        status: "failed".to_string(),
+        lock_path: None,
+        agent: None,
+        terminal: None,
+        command_line: None,
+        error: Some(runtime_schema::SessionResumeError {
+            code: code.to_string(),
+            provider: provider.map(str::to_string),
+            retryable,
+            action: action.to_string(),
+        }),
+    }
+}
+
+fn terminal_launch_failure_response(
+    terminal: &str,
+    error: terminals::TerminalLaunchError,
+) -> runtime_schema::SessionResumeResponse {
+    let (code, retryable, action) = match error.code {
+        terminals::TerminalLaunchErrorCode::WorktreeNotFound => {
+            ("worktree_not_found", false, "open_project")
+        }
+        terminals::TerminalLaunchErrorCode::TerminalUnavailable => {
+            ("terminal_unavailable", false, "settings")
+        }
+        terminals::TerminalLaunchErrorCode::LaunchFailed => {
+            ("terminal_launch_failed", true, "retry")
+        }
+    };
+    session_resume_failure_response(code, Some(terminal), retryable, action, error.detail)
+}
 
 struct UpdateState {
     operation_in_flight: Arc<AtomicBool>,
@@ -93,7 +163,11 @@ fn log_event(level: String, message: String, fields: Option<Value>) -> Result<()
 }
 
 #[tauri::command]
-fn app_icon_set(app: tauri::AppHandle, icon: String) -> Result<(), String> {
+fn app_icon_set(
+    app: tauri::AppHandle,
+    request: runtime_schema::AppIconSetRequest,
+) -> Result<(), String> {
+    let icon = request.icon;
     #[cfg(target_os = "macos")]
     {
         if icon.is_empty() {
@@ -224,6 +298,88 @@ async fn install_update(
     app.restart();
 }
 
+#[tauri::command(rename_all = "camelCase")]
+async fn assistant_ask(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AssistantState>,
+    request: runtime_schema::AssistantAskRequest,
+) -> Result<runtime_schema::AssistantAskResponse, String> {
+    let conversation_id = request.conversation_id.clone();
+    let cancellation = Arc::new(AtomicBool::new(false));
+    {
+        let mut cancellations = state
+            .cancellations
+            .lock()
+            .map_err(|_| "assistant cancellation state is poisoned".to_string())?;
+        if let Some(previous) = cancellations.insert(conversation_id.clone(), cancellation.clone())
+        {
+            previous.store(true, Ordering::Release);
+        }
+    }
+    let cancellations = Arc::clone(&state.cancellations);
+    tauri::async_runtime::spawn_blocking(move || {
+        let result = (|| -> Result<runtime_schema::AssistantAskResponse, String> {
+            let request = serde_json::from_value(
+                serde_json::to_value(request).map_err(|error| error.to_string())?,
+            )
+            .map_err(|error| format!("assistant request is invalid: {error}"))?;
+            let stream_sink: tendi_core::assistant::AssistantStreamSink = Arc::new(move |event| {
+                if let Err(error) =
+                    app.emit(runtime_schema::EventName::AssistantStream.as_str(), event)
+                {
+                    tendi_core::logging::global().warn(
+                        "assistant stream event emit failed",
+                        serde_json::json!({ "error": error.to_string() }),
+                    );
+                }
+            });
+            let response =
+                tendi_core::assistant::ask_with_stream(request, stream_sink, cancellation.clone());
+            serde_json::from_value(
+                serde_json::to_value(response).map_err(|error| error.to_string())?,
+            )
+            .map_err(|error| format!("assistant response is invalid: {error}"))
+        })();
+        clear_assistant_cancellation(&cancellations, &conversation_id, &cancellation);
+        result
+    })
+    .await
+    .map_err(|error| format!("assistant request failed: {error}"))?
+}
+
+#[tauri::command(rename_all = "camelCase")]
+fn assistant_cancel(
+    request: runtime_schema::AssistantCancelRequest,
+    state: tauri::State<'_, AssistantState>,
+) -> Result<runtime_schema::AssistantCancelResponse, String> {
+    let cancelled = state
+        .cancellations
+        .lock()
+        .map_err(|_| "assistant cancellation state is poisoned".to_string())?
+        .get(&request.conversation_id)
+        .map(|cancellation| {
+            cancellation.store(true, Ordering::Release);
+            true
+        })
+        .unwrap_or(false);
+    Ok(runtime_schema::AssistantCancelResponse { cancelled })
+}
+
+#[tauri::command]
+async fn assistant_chat_sessions() -> Result<runtime_schema::AssistantChatSessionList, String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        let store =
+            tendi_core::storage::Store::open_default().map_err(|error| format!("{error:#}"))?;
+        let sessions = store
+            .list_assistant_chat_sessions()
+            .map_err(|error| format!("{error:#}"))?;
+        serde_json::from_value(serde_json::to_value(sessions).map_err(|error| error.to_string())?)
+            .map_err(|error| format!("assistant chat history is invalid: {error}"))
+    })
+    .await
+    .map_err(|error| format!("assistant chat history request failed: {error}"))?
+}
+
 fn build_app_menu(app: &tauri::AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
     let check_for_updates =
         MenuItemBuilder::with_id("check_for_updates_menu", "Check for Updates...").build(app)?;
@@ -325,9 +481,10 @@ fn daemon_unsubscribe_events(
 
 #[tauri::command(rename_all = "camelCase")]
 async fn session_resume_target(
-    session: runtime_schema::SessionResumeRequest,
+    request: runtime_schema::SessionResumeTargetRequest,
 ) -> Result<runtime_schema::SessionResumeTargetResponse, String> {
     tauri::async_runtime::spawn_blocking(move || {
+        let session = request.session;
         let agent = parse_agent_result(&session.agent)?;
         let target =
             tendi_core::sessions::infer_session_resume_target(&PathBuf::from(session.path), agent)
@@ -343,10 +500,10 @@ async fn session_resume_target(
 
 #[tauri::command(rename_all = "camelCase")]
 async fn terminal_app_test(
-    terminal: String,
+    request: runtime_schema::TerminalAppTestRequest,
 ) -> Result<runtime_schema::TerminalAppTestResponse, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        let terminal = terminals::resolve_terminal(&terminal);
+        let terminal = terminals::resolve_terminal(&request.terminal);
         let app_name = terminals::terminal_application_name(&terminal);
         terminals::open_terminal_application(&app_name)?;
         Ok(app_name)
@@ -356,9 +513,11 @@ async fn terminal_app_test(
 }
 
 #[tauri::command(rename_all = "camelCase")]
-async fn editor_app_test(editor: String) -> Result<runtime_schema::EditorAppTestResponse, String> {
+async fn editor_app_test(
+    request: runtime_schema::EditorAppTestRequest,
+) -> Result<runtime_schema::EditorAppTestResponse, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        test_editor_command(&editor)?;
+        test_editor_command(&request.editor)?;
         Ok(true)
     })
     .await
@@ -367,13 +526,37 @@ async fn editor_app_test(editor: String) -> Result<runtime_schema::EditorAppTest
 
 #[tauri::command(rename_all = "camelCase")]
 async fn session_resume_in_terminal(
-    session: runtime_schema::SessionResumeRequest,
+    request: runtime_schema::SessionResumeInTerminalRequest,
 ) -> Result<runtime_schema::SessionResumeResponse, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        let agent = parse_agent_result(&session.agent)?;
+        let session = request.session;
+        let agent = match parse_agent_result(&session.agent) {
+            Ok(agent) => agent,
+            Err(error) => {
+                return Ok(session_resume_failure_response(
+                    "session_not_resumable",
+                    None,
+                    false,
+                    "none",
+                    error,
+                ));
+            }
+        };
         let path = PathBuf::from(session.path);
-        let project = absolute_project_path(session.project)?
-            .or_else(|| tendi_core::sessions::infer_session_project(&path, agent));
+        let project = match absolute_project_path(session.project) {
+            Ok(project) => {
+                project.or_else(|| tendi_core::sessions::infer_session_project(&path, agent))
+            }
+            Err(error) => {
+                return Ok(session_resume_failure_response(
+                    "internal",
+                    Some(agent.label()),
+                    false,
+                    "none",
+                    error,
+                ));
+            }
+        };
         let record = tendi_core::SessionRecord {
             id: session.id,
             agent,
@@ -398,37 +581,92 @@ async fn session_resume_in_terminal(
             parent_session_id: None,
             token_usage: None,
         };
-        if let Some(writer) =
-            tendi_core::active_session_writer(&record).map_err(|error| format!("{error:#}"))?
-        {
+        let active_writer = match tendi_core::active_session_writer(&record) {
+            Ok(writer) => writer,
+            Err(error) => {
+                return Ok(session_resume_failure_response(
+                    "internal",
+                    Some(agent.label()),
+                    true,
+                    "retry",
+                    format!("{error:#}"),
+                ));
+            }
+        };
+        if let Some(writer) = active_writer {
             return Ok(runtime_schema::SessionResumeResponse {
                 status: "activeWriter".to_string(),
                 lock_path: Some(writer.lock_path.display().to_string()),
                 agent: None,
                 terminal: None,
                 command_line: None,
+                error: None,
             });
         }
-        let mut plan =
-            tendi_core::plan_session_resume(&record).map_err(|error| format!("{error:#}"))?;
-        let store =
-            tendi_core::storage::Store::open_default().map_err(|error| format!("{error:#}"))?;
-        let settings = store.app_settings().map_err(|error| format!("{error:#}"))?;
+        let mut plan = match tendi_core::plan_session_resume(&record) {
+            Ok(plan) => plan,
+            Err(error) => {
+                return Ok(session_resume_failure_response(
+                    "session_not_resumable",
+                    Some(agent.label()),
+                    false,
+                    "none",
+                    format!("{error:#}"),
+                ));
+            }
+        };
+        let store = match tendi_core::storage::Store::open_default() {
+            Ok(store) => store,
+            Err(error) => {
+                return Ok(session_resume_failure_response(
+                    "internal",
+                    Some(agent.label()),
+                    true,
+                    "retry",
+                    format!("{error:#}"),
+                ));
+            }
+        };
+        let settings = match store.app_settings() {
+            Ok(settings) => settings,
+            Err(error) => {
+                return Ok(session_resume_failure_response(
+                    "internal",
+                    Some(agent.label()),
+                    true,
+                    "retry",
+                    format!("{error:#}"),
+                ));
+            }
+        };
         if let Some(profile) = tendi_core::config_profile_key(plan.agent)
             .and_then(|agent| settings.config_profiles.get(agent))
             .map(String::as_str)
         {
-            tendi_core::apply_session_config_profile(plan.agent, &mut plan.command, profile)
-                .map_err(|error| format!("{error:#}"))?;
+            if let Err(error) =
+                tendi_core::apply_session_config_profile(plan.agent, &mut plan.command, profile)
+            {
+                return Ok(session_resume_failure_response(
+                    "internal",
+                    Some(agent.label()),
+                    false,
+                    "none",
+                    format!("{error:#}"),
+                ));
+            }
         }
         let terminal = terminals::resolve_terminal(&settings.terminal);
-        let command_line = terminals::launch_command_in_terminal(&plan.command, &terminal)?;
+        let command_line = match terminals::launch_command_in_terminal(&plan.command, &terminal) {
+            Ok(command_line) => command_line,
+            Err(error) => return Ok(terminal_launch_failure_response(&terminal, error)),
+        };
         Ok(runtime_schema::SessionResumeResponse {
             status: "launched".to_string(),
             lock_path: None,
             agent: Some(plan.agent.label().to_string()),
             terminal: Some(terminal),
             command_line: Some(command_line),
+            error: None,
         })
     })
     .await
@@ -436,8 +674,13 @@ async fn session_resume_in_terminal(
 }
 
 #[tauri::command(rename_all = "camelCase")]
-fn open_in_editor(path: String, line: Option<u32>) -> Result<(), String> {
-    let path = PathBuf::from(path);
+fn open_in_editor(request: runtime_schema::OpenInEditorRequest) -> Result<(), String> {
+    let path = PathBuf::from(request.path);
+    let line = request
+        .line
+        .map(u32::try_from)
+        .transpose()
+        .map_err(|_| "editor line is too large".to_string())?;
     if !path.exists() {
         return Err(format!("path does not exist: {}", path.display()));
     }
@@ -524,8 +767,8 @@ fn editor_file_args(editor: &str, path: &Path, line: Option<u32>) -> Vec<String>
 }
 
 #[tauri::command(rename_all = "camelCase")]
-fn reveal_in_finder(path: String) -> Result<(), String> {
-    let path = PathBuf::from(path);
+fn reveal_in_finder(request: runtime_schema::RevealInFinderRequest) -> Result<(), String> {
+    let path = PathBuf::from(request.path);
     if !path.exists() {
         return Err(format!("path does not exist: {}", path.display()));
     }
@@ -704,8 +947,8 @@ fn is_rotated_log_name(name: &str, rotated_prefix: &str, suffix: &str) -> bool {
 }
 
 #[tauri::command(rename_all = "camelCase")]
-fn open_url(url: String) -> Result<(), String> {
-    let trimmed = url.trim();
+fn open_url(request: runtime_schema::OpenUrlRequest) -> Result<(), String> {
+    let trimmed = request.url.trim();
     let is_web_url = trimmed.starts_with("http://") || trimmed.starts_with("https://");
     let is_agent_session_url = tendi_core::accepts_session_app_url(trimmed);
     if !is_web_url && !is_agent_session_url {
@@ -803,6 +1046,7 @@ pub fn run() {
     tendi_core::logging::global().info("desktop process starting", Value::Null);
     let mut app = tauri::Builder::default()
         .manage(UpdateState::default())
+        .manage(AssistantState::default())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
             app.set_activation_policy(ActivationPolicy::Regular);

@@ -3,7 +3,9 @@ export { mcpCopy } from "./mcp-copy.ts";
 
 export {
   navItems,
+  DOMAIN_NAV_ITEMS,
   AppPage,
+  EMPTY_DISPLAY_VALUE,
   SIDEBAR_SIZE,
   COLLAPSED_SIDEBAR_SIZE,
   SESSION_FREEZE_COLUMN,
@@ -15,7 +17,7 @@ export {
   MARQUEE_AUTO_SCROLL_EDGE,
   MARQUEE_AUTO_SCROLL_MAX_SPEED,
 } from "./constants.ts";
-export type { NavItem, FreezeColumnConfig } from "./constants.ts";
+export type { NavItem, DomainNavItem, FreezeColumnConfig } from "./constants.ts";
 export { AsyncStatus } from "./async-status.ts";
 export { SortDirection } from "./sort.ts";
 
@@ -23,9 +25,11 @@ export { agentDefinition, agentDefinitions } from "./agent/index.ts";
 
 export {
   agentIcons,
+  ALL_AGENT_FILTER,
   normalizedAgentKey,
   agentIdentityKey,
   isConcreteAgent,
+  isVisibleAgent,
   agentClassName,
   agentIcon,
   friendlyAgent,
@@ -70,6 +74,7 @@ export {
   sourceRemoteDetails,
   remoteSkillFileUrl,
   sourceOpenUrl,
+  sourceFaviconUrl,
   sourceLocalPath,
   sourceIconDetails,
   pathLooksLikePluginCache,
@@ -91,14 +96,15 @@ export {
   allSkillVisibilities,
   normalizeSkill,
   normalizeSkillVisibility,
-  findSkillBySelector,
   primarySkillPath,
+  primarySkillScope,
   skillTargets,
   targetLabel,
   targetAgentLabel,
   localSkillSourcePath,
   skillSourceActionLabels,
   skillSourceAction,
+  skillDisplayName,
   SkillChangeCommand,
 } from "./skills.ts";
 export type { AvailableSkill, NormalizedSkill, NormalizedSkillPath, RawSkillRecord, SkillAddPlan, SkillInstallResult, SkillOperation, WrapperArgs } from "./skills.ts";
@@ -120,12 +126,16 @@ export { logger } from "./logger.ts";
 export { LogLevel } from "./logger.ts";
 export type { LogFields } from "./logger.ts";
 
-export { MissingSessionProjectPolicy, normalizeMissingSessionProjectPolicy, projectForPath, scopeColumn, scopeNameForPath } from "./projects.ts";
+export { MissingSessionProjectPolicy, ProjectScopeFilter, matchesProjectScope, normalizeMissingSessionProjectPolicy, normalizeProjectScopeFilter, pathIsProjectScoped, projectForPath, scopeColumn, scopeColumnFromValue, scopeNameForPath, scopeNameForValue } from "./projects.ts";
 export type { ProjectSummary, SessionProjectSummary } from "./projects.ts";
+export { normalizeSidebarFilters, persistSidebarFilters, readCachedSidebarFilters, SIDEBAR_FILTERS_STORAGE_KEY } from "./sidebar-filters.ts";
+export type { SidebarFilterState } from "./sidebar-filters.ts";
 
 export {
   SessionKind,
   SessionSortKey,
+  SessionResumeErrorAction,
+  SessionResumeErrorCode,
   SessionResumeOutcomeStatus,
   SessionResumeTarget,
   normalizeSession,
@@ -147,18 +157,19 @@ export {
   sessionProjectOption,
   sessionKind,
   sessionCacheRate,
+  SESSION_SEARCH_SORT,
   sortValue,
   compareSessions,
   sessionTimeMs,
 } from "./sessions.ts";
-export { sessionResumeErrorMessage, sessionResumeLabel, sessionResumeTargetForMenu, sessionResumeTargetsForMenu } from "./session-resume.ts";
+export { sessionResumeError, sessionResumeErrorMessage, sessionResumeLabel, sessionResumeTargetForMenu, sessionResumeTargetsForMenu } from "./session-resume.ts";
 export type { SessionResumeState } from "./session-resume.ts";
 export { sessionExternalKey, sessionSourceExternalKey, resolveInitialSession, resolveInitialSessionId } from "./session-selection.ts";
-export type { SessionIdentityRecord, SessionResumeOutcome, SessionSkillLinkRecord } from "./sessions.ts";
+export type { SessionIdentityRecord, SessionResumeError, SessionResumeOutcome, SessionSkillLinkRecord } from "./sessions.ts";
 export type { SessionRecord, SessionTokenUsage } from "./sessions.ts";
 
 export { summarizeSessionUsage } from "./overview.ts";
-export { formatSessionTitle, formatTranscriptPreview, summarizeSessionPreviewRecord } from "./session-preview.ts";
+export { formatSessionTitle, formatTranscriptPreview, sessionTitleValue, summarizeSessionPreviewRecord } from "./session-preview.ts";
 export type { RecentSessionPreview } from "./session-preview.ts";
 export type { SessionUsageSummary, TokenMix } from "./overview.ts";
 
@@ -176,11 +187,14 @@ export type {
 export {
   normalizePrompt,
   normalizePromptTags,
+  promptDisplayName,
   promptTagsLabel,
   promptPreview,
   promptTitleFromBody,
 } from "./prompt-model.ts";
 export type { PromptRecord } from "./prompt-model.ts";
+
+export { configDisplayName } from "./config.ts";
 
 export {
   normalizeRule,
@@ -217,11 +231,12 @@ export {
   hookSearchText,
   hookSourcePath,
   hookDeleteDisabledReason,
+  hookDisplayName,
   isHookMutationDelta,
 } from "./hooks.ts";
 export type { HookRecord, HookMutationDelta } from "./hooks.ts";
 
-export { mcpRowKey, mcpSourcePath, normalizeMcp, isMcpMutationDelta } from "./mcp.ts";
+export { mcpDisplayName, mcpNeedsLogin, mcpRowKey, mcpSourcePath, mcpStatusLabel, normalizeMcp, isMcpMutationDelta } from "./mcp.ts";
 export type { McpRecord, McpMutationDelta } from "./mcp.ts";
 
 export {
@@ -232,6 +247,8 @@ export {
   normalizeTranscriptLocatorPage,
   normalizeTranscriptPage,
   normalizeTranscriptSearchResult,
+  transcriptContextPreview,
+  transcriptEvidenceSearchText,
   transcriptItemType,
   TranscriptGroupType,
   groupTranscriptItems,
@@ -262,6 +279,7 @@ export {
   buildCatalogIndexes,
   reconcileCollection,
   selectCatalogView,
+  selectProjectScopeView,
 } from "../controllers/catalog-controller.ts";
 export type { CatalogIndexes, CatalogSource, DomainRows, RawDomainRow, RawDomainRows } from "../controllers/controller-types.ts";
 export {

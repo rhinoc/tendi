@@ -107,9 +107,16 @@ rejectText(catalogController, "if (Array.isArray(result)) return applyDomainSnap
 rejectText(mcpView, "Array.isArray(result)", "MCP view must consume the object mutation contract");
 rejectText(hooksView, "Array.isArray(result)", "Hooks view must consume the object mutation contract");
 rejectText(rulesView, "Array.isArray(result)", "Rules view must consume the object mutation contract");
-requireText(generatedContracts, '"agents_list" => Some(CommandMetadata {', "read refresh coordinator boundary");
-requireText(generatedContracts, 'name: "agents_list"', "read refresh command metadata");
-requireText(generatedContracts, "serialized_write: true", "read refresh serialized write metadata");
+requireText(storage, "pub fn read_cached_projection", "read projection snapshot boundary");
+requireText(daemon, "fn schedule_projection_refresh", "projection refresh coordinator");
+requireText(daemon, "PROJECTION_CHANGED_EVENT", "projection refresh completion event");
+for (const command of ["agents_list", "skills_list", "rules_list", "hooks_list", "mcp_list"]) {
+  const start = generatedContracts.indexOf(`"${command}" => Some(CommandMetadata {`);
+  const end = generatedContracts.indexOf(" }),", start);
+  if (start < 0 || end < 0) throw new Error(`read projection command metadata: missing ${command}`);
+  const metadata = generatedContracts.slice(start, end);
+  requireText(metadata, "serialized_write: false", `${command} must be a pure read`);
+}
 
 for (const needle of ["collect_generic_item", "generic_tool_payloads", "AgentTranscriptFormat = \"generic\""]) {
   rejectText(transcript, needle, "provider parser naming");

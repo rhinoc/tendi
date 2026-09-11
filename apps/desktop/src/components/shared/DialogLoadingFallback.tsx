@@ -5,6 +5,7 @@ import { LoadingState } from "./LoadingState.tsx";
 import { DialogShell } from "./DialogShell.tsx";
 
 export type DialogLoadingFallbackProps = {
+  open?: boolean;
   title: string;
   label: string;
   descriptionId: string;
@@ -16,6 +17,7 @@ export type DialogLoadingFallbackProps = {
 };
 
 export function DialogLoadingFallback({
+  open = true,
   title,
   label,
   descriptionId,
@@ -27,7 +29,7 @@ export function DialogLoadingFallback({
 }: DialogLoadingFallbackProps) {
   return (
     <DialogShell
-      open
+      open={open}
       onOpenChange={onOpenChange}
       className={className}
       descriptionId={descriptionId}

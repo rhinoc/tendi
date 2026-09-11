@@ -1,9 +1,11 @@
 import { useRef, type ComponentPropsWithoutRef } from "react";
 import { DropdownMenu } from "radix-ui";
 
-export type MenuContentProps = ComponentPropsWithoutRef<typeof DropdownMenu.Content>;
+export type MenuContentProps = ComponentPropsWithoutRef<typeof DropdownMenu.Content> & {
+  variant?: "menu" | "select";
+};
 
-export function MenuContent({ className = "", onCloseAutoFocus, onKeyDownCapture, onPointerDownCapture, ...props }: MenuContentProps) {
+export function MenuContent({ variant = "menu", className = "", onCloseAutoFocus, onKeyDownCapture, onPointerDownCapture, ...props }: MenuContentProps) {
   const pointerInteractionRef = useRef(false);
   return (
     <DropdownMenu.Content
@@ -21,7 +23,7 @@ export function MenuContent({ className = "", onCloseAutoFocus, onKeyDownCapture
         if (pointerInteractionRef.current) event.preventDefault();
         pointerInteractionRef.current = false;
       }}
-      className={["skillMenuContent", className].filter(Boolean).join(" ")}
+      className={[variant === "select" ? "selectControlContent" : "menuContent", className].filter(Boolean).join(" ")}
     />
   );
 }

@@ -7,6 +7,42 @@ mod orca;
 mod terminal;
 mod warp;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TerminalLaunchErrorCode {
+    WorktreeNotFound,
+    TerminalUnavailable,
+    LaunchFailed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct TerminalLaunchError {
+    pub(crate) code: TerminalLaunchErrorCode,
+    pub(crate) detail: String,
+}
+
+impl TerminalLaunchError {
+    pub(crate) fn worktree_not_found(detail: impl Into<String>) -> Self {
+        Self {
+            code: TerminalLaunchErrorCode::WorktreeNotFound,
+            detail: detail.into(),
+        }
+    }
+
+    pub(crate) fn terminal_unavailable(detail: impl Into<String>) -> Self {
+        Self {
+            code: TerminalLaunchErrorCode::TerminalUnavailable,
+            detail: detail.into(),
+        }
+    }
+
+    pub(crate) fn launch_failed(detail: impl Into<String>) -> Self {
+        Self {
+            code: TerminalLaunchErrorCode::LaunchFailed,
+            detail: detail.into(),
+        }
+    }
+}
+
 pub(crate) trait TerminalProvider {
     fn id(&self) -> &str;
     fn aliases(&self) -> &'static [&'static str] {
@@ -17,7 +53,7 @@ pub(crate) trait TerminalProvider {
     }
     fn available(&self) -> bool;
     fn application_name(&self) -> String;
-    fn launch(&self, command: &tendi_core::SessionCommand) -> Result<(), String>;
+    fn launch(&self, command: &tendi_core::SessionCommand) -> Result<(), TerminalLaunchError>;
 }
 
 pub(crate) fn resolve_terminal(value: &str) -> String {
@@ -56,7 +92,7 @@ pub(crate) fn open_terminal_application(app_name: &str) -> Result<(), String> {
 pub(crate) fn launch_command_in_terminal(
     command: &tendi_core::SessionCommand,
     terminal: &str,
-) -> Result<String, String> {
+) -> Result<String, TerminalLaunchError> {
     provider_for(terminal).launch(command)?;
     Ok(shell_command(command))
 }

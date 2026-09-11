@@ -103,15 +103,6 @@ fn is_local_repository_mutation(command: &OsStr) -> bool {
     )
 }
 
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
-#[allow(dead_code)]
-pub(crate) enum GitRepositoryStatus {
-    Clean,
-    Dirty,
-    NotRepository,
-    NotChecked,
-}
-
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub(crate) struct GitRepositorySnapshot {
     pub(crate) workspace: PathBuf,
@@ -121,7 +112,6 @@ pub(crate) struct GitRepositorySnapshot {
     pub(crate) remote_url: Option<String>,
     pub(crate) head_oid: Option<String>,
     pub(crate) local_checked_at: SystemTime,
-    pub(crate) status: GitRepositoryStatus,
     pub(crate) error: Option<String>,
 }
 
@@ -190,16 +180,6 @@ pub(crate) fn local_repository_snapshot(
     process_repository_snapshot_cache().metadata_snapshot(workspace, cancelled)
 }
 
-// Dirty state is deliberately opt-in. Metadata consumers must not pay for a
-// worktree scan just because a snapshot type can also carry status.
-#[allow(dead_code)]
-pub(crate) fn local_repository_status(
-    workspace: &Path,
-    cancelled: &AtomicBool,
-) -> Result<GitRepositoryStatus, GitRepositorySnapshotError> {
-    process_repository_snapshot_cache().status(workspace, cancelled)
-}
-
 pub(crate) fn invalidate_local_repository_snapshot(
     workspace: &Path,
     repo_root: Option<&Path>,
@@ -224,18 +204,9 @@ struct CachedGitRepositorySnapshot {
     cached_at: Instant,
 }
 
-#[derive(Debug, Clone)]
-#[allow(dead_code)]
-struct CachedGitRepositoryStatus {
-    status: GitRepositoryStatus,
-    cached_at: Instant,
-    checked_at: SystemTime,
-}
-
 pub(crate) struct GitRepositorySnapshotCache {
     ttl: Duration,
     entries: Mutex<HashMap<GitRepositoryCacheKey, CachedGitRepositorySnapshot>>,
-    status_entries: Mutex<HashMap<GitRepositoryCacheKey, CachedGitRepositoryStatus>>,
 }
 
 impl GitRepositorySnapshotCache {
@@ -243,25 +214,7 @@ impl GitRepositorySnapshotCache {
         Self {
             ttl,
             entries: Mutex::new(HashMap::new()),
-            status_entries: Mutex::new(HashMap::new()),
         }
-    }
-
-    // Preserve the existing complete-snapshot API for callers that need status.
-    // The resolver-facing local_repository_snapshot uses metadata_snapshot.
-    #[allow(dead_code)]
-    pub(crate) fn snapshot(
-        &self,
-        workspace: &Path,
-        cancelled: &AtomicBool,
-    ) -> Result<GitRepositorySnapshot, GitRepositorySnapshotError> {
-        let metadata = self.metadata_snapshot(workspace, cancelled)?;
-        let status = self.status_for_metadata(&metadata, cancelled)?;
-        let mut snapshot = metadata;
-        snapshot.local_checked_at = status.checked_at;
-        snapshot.status = status.status;
-        self.store_snapshot(snapshot.clone())?;
-        Ok(snapshot)
     }
 
     pub(crate) fn metadata_snapshot(
@@ -281,11 +234,7 @@ impl GitRepositorySnapshotCache {
         }
 
         if let Some(snapshot) = self.fresh_snapshot(&workspace)? {
-            let mut metadata = snapshot;
-            if metadata.status != GitRepositoryStatus::NotRepository {
-                metadata.status = GitRepositoryStatus::NotChecked;
-            }
-            return Ok(metadata);
+            return Ok(snapshot);
         }
 
         let snapshot = collect_repository_snapshot(&workspace, cancelled)?;
@@ -293,75 +242,6 @@ impl GitRepositorySnapshotCache {
             self.store_snapshot(snapshot.clone())?;
         }
         Ok(snapshot)
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn status(
-        &self,
-        workspace: &Path,
-        cancelled: &AtomicBool,
-    ) -> Result<GitRepositoryStatus, GitRepositorySnapshotError> {
-        let metadata = self.metadata_snapshot(workspace, cancelled)?;
-        Ok(self.status_for_metadata(&metadata, cancelled)?.status)
-    }
-
-    #[allow(dead_code)]
-    fn status_for_metadata(
-        &self,
-        metadata: &GitRepositorySnapshot,
-        cancelled: &AtomicBool,
-    ) -> Result<CachedGitRepositoryStatus, GitRepositorySnapshotError> {
-        if metadata.status == GitRepositoryStatus::NotRepository {
-            return Ok(CachedGitRepositoryStatus {
-                status: GitRepositoryStatus::NotRepository,
-                cached_at: Instant::now(),
-                checked_at: metadata.local_checked_at,
-            });
-        }
-        let Some(repo_root) = metadata.repo_root.as_ref() else {
-            return Err(GitRepositorySnapshotError::QueryFailed {
-                operation: "status",
-                detail: "metadata snapshot has no repository root".to_string(),
-            });
-        };
-        let key = GitRepositoryCacheKey {
-            workspace: metadata.workspace.clone(),
-            repo_root: repo_root.clone(),
-        };
-        if !self.ttl.is_zero() {
-            let status_entries = self
-                .status_entries
-                .lock()
-                .map_err(|_| GitRepositorySnapshotError::CachePoisoned)?;
-            if let Some(entry) = status_entries
-                .get(&key)
-                .filter(|entry| entry.cached_at.elapsed() < self.ttl)
-            {
-                return Ok(entry.clone());
-            }
-        }
-
-        let status_output = query_required(
-            &metadata.workspace,
-            &["status", "--porcelain", "--untracked-files=normal"],
-            cancelled,
-            "status",
-        )?;
-        let entry = CachedGitRepositoryStatus {
-            status: if status_output.stdout.is_empty() {
-                GitRepositoryStatus::Clean
-            } else {
-                GitRepositoryStatus::Dirty
-            },
-            cached_at: Instant::now(),
-            checked_at: SystemTime::now(),
-        };
-        let mut status_entries = self
-            .status_entries
-            .lock()
-            .map_err(|_| GitRepositorySnapshotError::CachePoisoned)?;
-        status_entries.insert(key, entry.clone());
-        Ok(entry)
     }
 
     pub(crate) fn invalidate(
@@ -376,18 +256,6 @@ impl GitRepositorySnapshotCache {
             .lock()
             .map_err(|_| GitRepositorySnapshotError::CachePoisoned)?;
         entries.retain(|key, _| {
-            if key.workspace != workspace {
-                return true;
-            }
-            repo_root
-                .as_ref()
-                .is_some_and(|repo_root| key.repo_root != *repo_root)
-        });
-        let mut status_entries = self
-            .status_entries
-            .lock()
-            .map_err(|_| GitRepositorySnapshotError::CachePoisoned)?;
-        status_entries.retain(|key, _| {
             if key.workspace != workspace {
                 return true;
             }
@@ -456,7 +324,6 @@ fn collect_repository_snapshot(
             remote_url: None,
             head_oid: None,
             local_checked_at: SystemTime::now(),
-            status: GitRepositoryStatus::NotRepository,
             error: Some(git_output_detail(&root_output)),
         });
     }
@@ -497,7 +364,6 @@ fn collect_repository_snapshot(
         remote_url,
         head_oid,
         local_checked_at: SystemTime::now(),
-        status: GitRepositoryStatus::NotChecked,
         error: None,
     })
 }
@@ -825,8 +691,8 @@ mod tests {
 
     use super::{
         CommandFailure, GitRepositorySnapshotCache, GitRepositorySnapshotError,
-        GitRepositoryStatus, LOCAL_COMMAND_TIMEOUT, local_repository_snapshot,
-        local_repository_status, run_git, run_local_git_query, run_program,
+        LOCAL_COMMAND_TIMEOUT, local_repository_snapshot, run_git, run_local_git_query,
+        run_program,
     };
 
     fn temp_dir(prefix: &str) -> std::path::PathBuf {
@@ -944,10 +810,9 @@ mod tests {
         let cancelled = AtomicBool::new(false);
 
         super::reset_local_git_query_trace();
-        let snapshot = cache.metadata_snapshot(&root, &cancelled).unwrap();
+        cache.metadata_snapshot(&root, &cancelled).unwrap();
         let queries = super::local_git_query_trace();
 
-        assert_eq!(snapshot.status, GitRepositoryStatus::NotChecked);
         assert!(
             queries
                 .iter()
@@ -963,47 +828,7 @@ mod tests {
     }
 
     #[test]
-    fn repository_status_api_is_cached_and_refreshes_after_invalidation() {
-        let root = create_git_repo(
-            "tendi-git-explicit-status",
-            "https://example.test/status.git",
-            "before",
-        );
-        let cache = GitRepositorySnapshotCache::new(Duration::from_secs(60));
-        let cancelled = AtomicBool::new(false);
-
-        super::reset_local_git_query_trace();
-        assert_eq!(
-            cache.status(&root, &cancelled).unwrap(),
-            GitRepositoryStatus::Clean
-        );
-        let first_query_count = super::local_git_query_trace().len();
-
-        fs::write(root.join("tracked.txt"), "after").unwrap();
-        assert_eq!(
-            cache.status(&root, &cancelled).unwrap(),
-            GitRepositoryStatus::Clean
-        );
-        assert_eq!(super::local_git_query_trace().len(), first_query_count);
-
-        cache.invalidate(&root, None).unwrap();
-        assert_eq!(
-            cache.status(&root, &cancelled).unwrap(),
-            GitRepositoryStatus::Dirty
-        );
-        assert!(super::local_git_query_trace().len() > first_query_count);
-
-        let uncached = GitRepositorySnapshotCache::new(Duration::ZERO);
-        assert_eq!(
-            uncached.status(&root, &cancelled).unwrap(),
-            GitRepositoryStatus::Dirty
-        );
-
-        fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn successful_mutation_invalidates_process_metadata_and_status_caches() {
+    fn successful_mutation_invalidates_process_metadata_cache() {
         let root = create_git_repo(
             "tendi-git-process-invalidation",
             "https://example.test/invalidation.git",
@@ -1012,11 +837,6 @@ mod tests {
         let cancelled = AtomicBool::new(false);
 
         let first_snapshot = local_repository_snapshot(&root, &cancelled).unwrap();
-        assert_eq!(first_snapshot.status, GitRepositoryStatus::NotChecked);
-        assert_eq!(
-            local_repository_status(&root, &cancelled).unwrap(),
-            GitRepositoryStatus::Clean
-        );
         let normalized_root = super::normalize_path(&root);
         let process_cache = super::process_repository_snapshot_cache();
         assert!(
@@ -1027,15 +847,6 @@ mod tests {
                 .keys()
                 .any(|key| key.workspace == normalized_root)
         );
-        assert!(
-            process_cache
-                .status_entries
-                .lock()
-                .unwrap()
-                .keys()
-                .any(|key| key.workspace == normalized_root)
-        );
-
         fs::write(root.join("tracked.txt"), "after").unwrap();
         git_success(&root, &["commit", "--quiet", "-am", "changed"]);
 
@@ -1047,21 +858,8 @@ mod tests {
                 .keys()
                 .any(|key| key.workspace == normalized_root)
         );
-        assert!(
-            !process_cache
-                .status_entries
-                .lock()
-                .unwrap()
-                .keys()
-                .any(|key| key.workspace == normalized_root)
-        );
-
         let refreshed_snapshot = local_repository_snapshot(&root, &cancelled).unwrap();
         assert_ne!(refreshed_snapshot.head_oid, first_snapshot.head_oid);
-        assert_eq!(
-            local_repository_status(&root, &cancelled).unwrap(),
-            GitRepositoryStatus::Clean
-        );
 
         fs::remove_dir_all(root).unwrap();
     }
@@ -1131,16 +929,14 @@ mod tests {
         let cache = GitRepositorySnapshotCache::new(Duration::from_secs(60));
         let cancelled = AtomicBool::new(false);
 
-        let first = cache.snapshot(&root, &cancelled).unwrap();
-        assert_eq!(first.status, GitRepositoryStatus::Clean);
+        let first = cache.metadata_snapshot(&root, &cancelled).unwrap();
         fs::write(root.join("tracked.txt"), "after").unwrap();
 
-        let cached = cache.snapshot(&root, &cancelled).unwrap();
+        let cached = cache.metadata_snapshot(&root, &cancelled).unwrap();
         assert_eq!(cached, first);
 
         cache.invalidate(&root, None).unwrap();
-        let refreshed = cache.snapshot(&root, &cancelled).unwrap();
-        assert_eq!(refreshed.status, GitRepositoryStatus::Dirty);
+        let refreshed = cache.metadata_snapshot(&root, &cancelled).unwrap();
         assert_ne!(refreshed.local_checked_at, first.local_checked_at);
 
         fs::remove_dir_all(root).unwrap();
@@ -1161,13 +957,19 @@ mod tests {
         let cache = GitRepositorySnapshotCache::new(Duration::from_secs(60));
         let cancelled = AtomicBool::new(false);
 
-        let first = cache.snapshot(&first_root, &cancelled).unwrap();
-        let second = cache.snapshot(&second_root, &cancelled).unwrap();
+        let first = cache.metadata_snapshot(&first_root, &cancelled).unwrap();
+        let second = cache.metadata_snapshot(&second_root, &cancelled).unwrap();
 
         assert_ne!(first.repo_root, second.repo_root);
         assert_ne!(first.remote_url, second.remote_url);
-        assert_eq!(cache.snapshot(&first_root, &cancelled).unwrap(), first);
-        assert_eq!(cache.snapshot(&second_root, &cancelled).unwrap(), second);
+        assert_eq!(
+            cache.metadata_snapshot(&first_root, &cancelled).unwrap(),
+            first
+        );
+        assert_eq!(
+            cache.metadata_snapshot(&second_root, &cancelled).unwrap(),
+            second
+        );
 
         fs::remove_dir_all(first_root).unwrap();
         fs::remove_dir_all(second_root).unwrap();
@@ -1182,12 +984,11 @@ mod tests {
         );
         let cache = GitRepositorySnapshotCache::new(Duration::ZERO);
         let cancelled = AtomicBool::new(false);
-        let successful = cache.snapshot(&root, &cancelled).unwrap();
+        let successful = cache.metadata_snapshot(&root, &cancelled).unwrap();
 
         fs::rename(root.join(".git"), root.join(".git-hidden")).unwrap();
-        let failed = cache.snapshot(&root, &cancelled).unwrap();
+        let failed = cache.metadata_snapshot(&root, &cancelled).unwrap();
         fs::rename(root.join(".git-hidden"), root.join(".git")).unwrap();
-        assert_eq!(failed.status, GitRepositoryStatus::NotRepository);
         assert!(failed.error.is_some());
 
         let entries = cache.entries.lock().unwrap();

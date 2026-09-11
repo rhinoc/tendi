@@ -17,7 +17,7 @@ export function renderDataTableSelectionMenu(actions: DataTableSelectionActionDe
     <>
       {actions.map((action) => (
         <Fragment key={action.id}>
-          {action.separatorBefore ? <div className="skillMenuSeparator" role="separator" /> : null}
+          {action.separatorBefore ? <div className="menuSeparator" role="separator" /> : null}
           {action.menu}
         </Fragment>
       ))}

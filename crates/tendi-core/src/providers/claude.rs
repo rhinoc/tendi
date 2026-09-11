@@ -9,11 +9,7 @@ use crate::transcript::{
     extract_content_text, extract_duration_ms, extract_thinking_text, extract_tool_command,
     push_item, push_tool_item, summarize_tool_call,
 };
-use crate::{
-    analytics::AnalyticsCapabilities,
-    skills::SkillVisibility,
-    time::timestamp_ms,
-};
+use crate::{analytics::AnalyticsCapabilities, skills::SkillVisibility, time::timestamp_ms};
 
 use super::*;
 
@@ -21,17 +17,28 @@ pub(super) struct ClaudeProvider;
 
 const CLAUDE_USER_MCP_SOURCE_KEY: &str = "__claude_user_mcp__.json";
 const CLAUDE_SKILL_FRONTMATTER_KEY: &str = "disable-model-invocation";
+const CLAUDE_PLUGIN_READ_ONLY_REASON: &str = "Claude plugin MCP is managed by the plugin";
+
+#[derive(Debug, Clone)]
+struct ClaudePluginState {
+    enabled: bool,
+    scope: String,
+}
 
 fn infer_mcp_transport(spec: &Value) -> Option<String> {
     spec.get("transport")
         .or_else(|| spec.get("type"))
         .and_then(Value::as_str)
         .map(str::to_string)
-        .or_else(|| spec.get("command").and_then(Value::as_str).map(|_| "stdio".to_string()))
         .or_else(|| {
-            spec.get("url").and_then(Value::as_str).map(|url| {
-                if url.contains("/sse") { "sse" } else { "http" }.to_string()
-            })
+            spec.get("command")
+                .and_then(Value::as_str)
+                .map(|_| "stdio".to_string())
+        })
+        .or_else(|| {
+            spec.get("url")
+                .and_then(Value::as_str)
+                .map(|url| if url.contains("/sse") { "sse" } else { "http" }.to_string())
         })
 }
 
@@ -52,8 +59,27 @@ fn infer_mcp_enabled(spec: &Value) -> bool {
         && spec.get("enabled").and_then(Value::as_bool).unwrap_or(true)
 }
 
+fn enrich_mcp_spec(
+    _name: &str,
+    spec: &Value,
+    transport: &str,
+    enabled: bool,
+    base_dir: Option<&Path>,
+    probe_cache: &mut crate::mcp::McpProbeCache,
+) -> crate::mcp::McpEnrichment {
+    crate::mcp::enrich_json_mcp_spec_with_headers_at_dir(
+        spec,
+        transport,
+        enabled,
+        &BTreeMap::new(),
+        base_dir,
+        probe_cache,
+    )
+}
+
 fn scan_claude_project_mcp(
     path: &Path,
+    probe_cache: &mut crate::mcp::McpProbeCache,
     servers: &mut Vec<McpServerRecord>,
     warnings: &mut Vec<String>,
 ) {
@@ -79,6 +105,8 @@ fn scan_claude_project_mcp(
             infer_mcp_transport,
             infer_mcp_enabled,
             infer_mcp_status,
+            enrich_mcp_spec,
+            probe_cache,
             servers,
             warnings,
         );
@@ -205,6 +233,350 @@ pub(crate) fn scan_claude_plugin_hooks(
     {
         crate::hooks::scan_hook_file(entry.path(), AgentKind::Claude, hooks, warnings);
     }
+}
+
+fn collect_claude_plugin_states(
+    path: &Path,
+    scope: &str,
+    states: &mut BTreeMap<String, ClaudePluginState>,
+) {
+    let Ok(text) = fs::read_to_string(path) else {
+        return;
+    };
+    let Ok(value) = serde_json::from_str::<Value>(&text) else {
+        return;
+    };
+    let Some(plugins) = value.get("enabledPlugins").and_then(Value::as_object) else {
+        return;
+    };
+    for (id, enabled) in plugins {
+        let Some(enabled) = enabled.as_bool() else {
+            continue;
+        };
+        states.insert(
+            id.to_ascii_lowercase(),
+            ClaudePluginState {
+                enabled,
+                scope: scope.to_string(),
+            },
+        );
+    }
+}
+
+fn claude_plugin_states(
+    home: &Path,
+    project_dirs: &[PathBuf],
+) -> BTreeMap<String, ClaudePluginState> {
+    let mut states = BTreeMap::new();
+    collect_claude_plugin_states(&home.join(".claude/settings.json"), "global", &mut states);
+    for project in project_dirs {
+        let scope = project.display().to_string();
+        collect_claude_plugin_states(&project.join(".claude/settings.json"), &scope, &mut states);
+        collect_claude_plugin_states(
+            &project.join(".claude/settings.local.json"),
+            &scope,
+            &mut states,
+        );
+    }
+    for path in [
+        Path::new("/Library/Application Support/ClaudeCode/managed-settings.json"),
+        Path::new("/etc/claude-code/managed-settings.json"),
+    ] {
+        collect_claude_plugin_states(path, "managed", &mut states);
+    }
+    states
+}
+
+fn claude_plugin_search_roots(home: &Path) -> Vec<PathBuf> {
+    let mut roots = vec![home.join(".claude/plugins/marketplaces")];
+    let known_marketplaces = home.join(".claude/plugins/known_marketplaces.json");
+    if let Ok(text) = fs::read_to_string(known_marketplaces)
+        && let Ok(value) = serde_json::from_str::<Value>(&text)
+        && let Some(marketplaces) = value.as_object()
+    {
+        roots.extend(marketplaces.values().filter_map(|marketplace| {
+            marketplace
+                .get("installLocation")
+                .and_then(Value::as_str)
+                .map(PathBuf::from)
+        }));
+    }
+    roots.sort();
+    roots.dedup();
+    roots
+}
+
+fn is_claude_plugin_manifest(path: &Path) -> bool {
+    path.file_name().and_then(|value| value.to_str()) == Some("plugin.json")
+        && path
+            .parent()
+            .and_then(Path::file_name)
+            .and_then(|value| value.to_str())
+            == Some(".claude-plugin")
+        && !path.components().any(|component| {
+            component
+                .as_os_str()
+                .to_str()
+                .is_some_and(|value| value.ends_with(".bak"))
+        })
+}
+
+fn claude_plugin_manifest_paths(home: &Path) -> Vec<PathBuf> {
+    let mut paths = claude_plugin_search_roots(home)
+        .into_iter()
+        .filter(|root| root.is_dir())
+        .flat_map(|root| {
+            WalkDir::new(root)
+                .follow_links(false)
+                .max_depth(6)
+                .into_iter()
+                .filter_map(Result::ok)
+                .filter(|entry| {
+                    entry.file_type().is_file() && is_claude_plugin_manifest(entry.path())
+                })
+                .map(|entry| entry.into_path())
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    paths.sort();
+    paths
+}
+
+fn claude_plugin_root(manifest_path: &Path) -> Option<&Path> {
+    manifest_path.parent()?.parent()
+}
+
+fn claude_plugin_id(manifest: &Value, plugin_root: &Path) -> Option<String> {
+    let plugin_name = manifest
+        .get("name")
+        .and_then(Value::as_str)
+        .filter(|name| !name.trim().is_empty())
+        .or_else(|| plugin_root.file_name().and_then(|value| value.to_str()))?;
+    let marketplace = plugin_root.parent()?.parent()?.file_name()?.to_str()?;
+    Some(format!("{plugin_name}@{marketplace}"))
+}
+
+fn read_claude_plugin_mcp_source(
+    path: &Path,
+    warnings: &mut Vec<String>,
+) -> Option<(PathBuf, String, Value)> {
+    let Ok(text) = fs::read_to_string(path) else {
+        return None;
+    };
+    let Ok(value) = serde_json::from_str::<Value>(&text) else {
+        warnings.push(format!(
+            "{}: invalid Claude plugin MCP JSON",
+            path.display()
+        ));
+        return None;
+    };
+    Some((path.to_path_buf(), text, value))
+}
+
+fn claude_plugin_mcp_sources(
+    manifest_path: &Path,
+    manifest_text: &str,
+    manifest: &Value,
+    plugin_root: &Path,
+    plugin_name: &str,
+    warnings: &mut Vec<String>,
+) -> Vec<(PathBuf, String, Value)> {
+    let Some(declaration) = manifest.get("mcpServers") else {
+        return read_claude_plugin_mcp_source(&plugin_root.join(".mcp.json"), warnings)
+            .into_iter()
+            .collect();
+    };
+    match declaration {
+        Value::String(relative) => {
+            read_claude_plugin_mcp_source(&plugin_root.join(relative), warnings)
+                .into_iter()
+                .collect()
+        }
+        Value::Object(object) => {
+            let value = if is_mcp_server_spec(object) {
+                serde_json::json!({"mcpServers": {plugin_name: declaration}})
+            } else {
+                serde_json::json!({"mcpServers": declaration})
+            };
+            vec![(
+                manifest_path.to_path_buf(),
+                manifest_text.to_string(),
+                value,
+            )]
+        }
+        _ => Vec::new(),
+    }
+}
+
+fn is_mcp_server_spec(object: &serde_json::Map<String, Value>) -> bool {
+    ["command", "url", "serverUrl", "type", "transport"]
+        .iter()
+        .any(|key| object.contains_key(*key))
+}
+
+fn claude_plugin_mcp_entries(
+    value: &Value,
+    fallback_name: &str,
+) -> Vec<(String, Value, Vec<String>)> {
+    let Some(object) = value.as_object() else {
+        return Vec::new();
+    };
+    if let Some(servers) = object.get("mcpServers").and_then(Value::as_object) {
+        if is_mcp_server_spec(servers) {
+            return vec![(
+                fallback_name.to_string(),
+                Value::Object(servers.clone()),
+                vec!["mcpServers".to_string()],
+            )];
+        }
+        return servers
+            .iter()
+            .map(|(name, spec)| (name.clone(), spec.clone(), vec!["mcpServers".to_string()]))
+            .collect();
+    }
+    object
+        .iter()
+        .filter(|(name, spec)| name.as_str() != "$schema" && spec.is_object())
+        .map(|(name, spec)| (name.clone(), spec.clone(), Vec::new()))
+        .collect()
+}
+
+fn claude_plugin_enrichment(
+    manifest: &Value,
+    plugin_root: &Path,
+    plugin_name: &str,
+    server_name: &str,
+) -> crate::mcp::McpEnrichment {
+    let interface = manifest.get("interface");
+    let display_name = interface
+        .and_then(|value| value.get("displayName"))
+        .and_then(Value::as_str)
+        .or_else(|| manifest.get("displayName").and_then(Value::as_str))
+        .or_else(|| manifest.get("name").and_then(Value::as_str));
+    let description = manifest
+        .get("description")
+        .and_then(Value::as_str)
+        .or_else(|| {
+            interface
+                .and_then(|value| value.get("longDescription"))
+                .and_then(Value::as_str)
+        });
+    let website = manifest
+        .get("homepage")
+        .and_then(Value::as_str)
+        .or_else(|| manifest.get("repository").and_then(Value::as_str))
+        .or_else(|| {
+            interface
+                .and_then(|value| value.get("websiteURL"))
+                .and_then(Value::as_str)
+        });
+    let icon = [
+        manifest.get("logo"),
+        manifest.get("icon"),
+        interface.and_then(|value| value.get("logo")),
+        interface.and_then(|value| value.get("icon")),
+    ]
+    .into_iter()
+    .flatten()
+    .filter_map(Value::as_str)
+    .find_map(|relative| crate::mcp::mcp_icon_from_file(&plugin_root.join(relative)));
+    crate::mcp::McpEnrichment {
+        plugin_name: Some(plugin_name.to_string()),
+        server_name: Some(server_name.to_string()),
+        server_title: display_name.map(str::to_string),
+        server_version: manifest
+            .get("version")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        server_description: description.map(str::to_string),
+        server_website_url: website.map(str::to_string),
+        icons: icon.into_iter().collect(),
+        ..Default::default()
+    }
+}
+
+pub(crate) fn scan_claude_plugin_mcp(
+    home: &Path,
+    project_dirs: &[PathBuf],
+    servers: &mut Vec<McpServerRecord>,
+    warnings: &mut Vec<String>,
+) {
+    let states = claude_plugin_states(home, project_dirs);
+    let mut scanned_plugins = BTreeMap::new();
+    for manifest_path in claude_plugin_manifest_paths(home) {
+        let Ok(manifest_text) = fs::read_to_string(&manifest_path) else {
+            continue;
+        };
+        let Ok(manifest) = serde_json::from_str::<Value>(&manifest_text) else {
+            continue;
+        };
+        let Some(plugin_root) = claude_plugin_root(&manifest_path) else {
+            continue;
+        };
+        let Some(plugin_id) = claude_plugin_id(&manifest, plugin_root) else {
+            continue;
+        };
+        let Some(state) = states.get(&plugin_id.to_ascii_lowercase()) else {
+            continue;
+        };
+        let Some(plugin_name) = manifest.get("name").and_then(Value::as_str) else {
+            continue;
+        };
+        let sources = claude_plugin_mcp_sources(
+            &manifest_path,
+            &manifest_text,
+            &manifest,
+            plugin_root,
+            plugin_name,
+            warnings,
+        );
+        if sources.is_empty() || scanned_plugins.contains_key(&plugin_id) {
+            continue;
+        }
+        scanned_plugins.insert(plugin_id.clone(), ());
+        for (path, text, value) in sources {
+            for (server_name, spec, server_path) in claude_plugin_mcp_entries(&value, plugin_name) {
+                let Some(transport) = infer_mcp_transport(&spec) else {
+                    warnings.push(format!(
+                        "{}: MCP server {server_name} has no recognized transport",
+                        path.display()
+                    ));
+                    continue;
+                };
+                let enabled = state.enabled && infer_mcp_enabled(&spec);
+                let enrichment =
+                    claude_plugin_enrichment(&manifest, plugin_root, plugin_name, &server_name);
+                servers.push(crate::mcp::build_mcp_server_record(
+                    &path,
+                    AgentKind::Claude,
+                    &state.scope,
+                    &text,
+                    &server_path,
+                    &server_name,
+                    transport,
+                    enabled,
+                    if enabled {
+                        "configured".to_string()
+                    } else {
+                        "disabled".to_string()
+                    },
+                    enrichment,
+                    Some(CLAUDE_PLUGIN_READ_ONLY_REASON.to_string()),
+                ));
+            }
+        }
+    }
+}
+
+fn is_claude_plugin_path(path: &Path) -> bool {
+    let components = path.components().collect::<Vec<_>>();
+    components.windows(2).any(|window| {
+        window[0].as_os_str() == std::ffi::OsStr::new("plugins")
+            && matches!(
+                window[1].as_os_str().to_str(),
+                Some("marketplaces") | Some("cache")
+            )
+    })
 }
 
 pub(crate) fn scan_claude_managed_dropins(
@@ -427,13 +799,11 @@ fn attach_claude_tool_results(
             continue;
         }
         handled = true;
-        let Some(body) = extract_content_text(item.get("content"))
-            .or_else(|| {
-                value
-                    .get("toolUseResult")
-                    .and_then(|result| extract_content_text(Some(result)))
-            })
-        else {
+        let Some(body) = extract_content_text(item.get("content")).or_else(|| {
+            value
+                .get("toolUseResult")
+                .and_then(|result| extract_content_text(Some(result)))
+        }) else {
             continue;
         };
         let call_id = item
@@ -806,6 +1176,27 @@ impl super::AgentProvider for ClaudeProvider {
         })
     }
 
+    fn assistant_ask_command(&self, workspace: &Path, prompt: &str) -> Option<SessionCommand> {
+        Some(SessionCommand {
+            executable: "claude".to_string(),
+            args: vec![
+                "--print".to_string(),
+                "--verbose".to_string(),
+                "--output-format".to_string(),
+                "stream-json".to_string(),
+                "--include-partial-messages".to_string(),
+                "--no-session-persistence".to_string(),
+                "--dangerously-skip-permissions".to_string(),
+                "--add-dir".to_string(),
+                workspace.display().to_string(),
+                "--".to_string(),
+                prompt.to_string(),
+            ],
+            cwd: Some(workspace.to_path_buf()),
+            env: Vec::new(),
+        })
+    }
+
     fn accepts_session_app_url(&self, url: &str) -> bool {
         url.strip_prefix("claude://resume?")
             .is_some_and(valid_resume_query)
@@ -846,8 +1237,7 @@ impl super::AgentProvider for ClaudeProvider {
     }
 
     fn recognizes_transcript(&self, value: &Value) -> bool {
-        (is_assistant_message(value)
-            && value.get("message").is_some())
+        (is_assistant_message(value) && value.get("message").is_some())
             || (value.get("type").and_then(Value::as_str) == Some("user")
                 && value.get("sessionId").is_some()
                 && value.get("message").is_some())
@@ -890,6 +1280,7 @@ impl super::AgentProvider for ClaudeProvider {
         ctx: &ProviderContext,
         servers: &mut Vec<McpServerRecord>,
         warnings: &mut Vec<String>,
+        probe_cache: &mut crate::mcp::McpProbeCache,
     ) -> Result<()> {
         if let Some(home) = &ctx.home {
             crate::mcp::scan_json_mcp(
@@ -900,10 +1291,12 @@ impl super::AgentProvider for ClaudeProvider {
                 infer_mcp_transport,
                 infer_mcp_enabled,
                 infer_mcp_status,
+                enrich_mcp_spec,
+                probe_cache,
                 servers,
                 warnings,
             );
-            scan_claude_project_mcp(&home.join(".claude.json"), servers, warnings);
+            scan_claude_project_mcp(&home.join(".claude.json"), probe_cache, servers, warnings);
             crate::mcp::scan_json_mcp(
                 &home.join(".claude/settings.json"),
                 self.kind(),
@@ -912,9 +1305,12 @@ impl super::AgentProvider for ClaudeProvider {
                 infer_mcp_transport,
                 infer_mcp_enabled,
                 infer_mcp_status,
+                enrich_mcp_spec,
+                probe_cache,
                 servers,
                 warnings,
             );
+            scan_claude_plugin_mcp(home, ctx.project_dirs(), servers, warnings);
         }
         for ancestor in ctx.project_dirs() {
             let scope = ancestor.display().to_string();
@@ -926,6 +1322,8 @@ impl super::AgentProvider for ClaudeProvider {
                 infer_mcp_transport,
                 infer_mcp_enabled,
                 infer_mcp_status,
+                enrich_mcp_spec,
+                probe_cache,
                 servers,
                 warnings,
             );
@@ -933,19 +1331,37 @@ impl super::AgentProvider for ClaudeProvider {
         Ok(())
     }
 
+    fn probe_mcp(
+        &self,
+        request: &McpProbeRequest,
+        current: &McpServerRecord,
+        probe_cache: &mut crate::mcp::McpProbeCache,
+    ) -> Result<McpServerRecord> {
+        if request.path.extension().and_then(|value| value.to_str()) != Some("json") {
+            bail!("Claude Code MCP source must be JSON")
+        }
+        crate::mcp::probe_json_mcp_server(
+            request,
+            current,
+            infer_mcp_transport,
+            infer_mcp_enabled,
+            infer_mcp_status,
+            enrich_mcp_spec,
+            probe_cache,
+        )
+    }
+
     fn set_mcp_enabled(&self, request: &McpSetEnabledRequest) -> Result<()> {
+        if is_claude_plugin_path(&request.path) {
+            bail!(CLAUDE_PLUGIN_READ_ONLY_REASON);
+        }
         if request.path.extension().and_then(|value| value.to_str()) != Some("json") {
             bail!("Claude Code MCP source must be JSON");
         }
         crate::mcp::set_json_server_enabled(request, &["mcpServers"], update_mcp_server)
     }
 
-    fn backup_mcp_entry(
-        &self,
-        path: &Path,
-        server_path: &[String],
-        name: &str,
-    ) -> Result<Value> {
+    fn backup_mcp_entry(&self, path: &Path, server_path: &[String], name: &str) -> Result<Value> {
         if path.extension().and_then(|value| value.to_str()) != Some("json") {
             bail!("Claude Code MCP source must be JSON");
         }
@@ -969,22 +1385,19 @@ impl super::AgentProvider for ClaudeProvider {
         if enabled { "configured" } else { "disabled" }
     }
 
-    fn delete_hooks(
-        &self,
-        requests: &[HookDeleteRequest],
-        source: &str,
-    ) -> Result<String> {
-        if requests[0].path.extension().and_then(|value| value.to_str()) != Some("json") {
+    fn delete_hooks(&self, requests: &[HookDeleteRequest], source: &str) -> Result<String> {
+        if requests[0]
+            .path
+            .extension()
+            .and_then(|value| value.to_str())
+            != Some("json")
+        {
             bail!("Claude Code hook source must be JSON");
         }
         crate::hooks::delete_json_hooks(requests, source)
     }
 
-    fn set_hook_enabled(
-        &self,
-        request: &HookSetEnabledRequest,
-        source: &str,
-    ) -> Result<String> {
+    fn set_hook_enabled(&self, request: &HookSetEnabledRequest, source: &str) -> Result<String> {
         if request.path.extension().and_then(|value| value.to_str()) != Some("json") {
             bail!("Claude Code hook source must be JSON");
         }
@@ -1087,10 +1500,7 @@ mod tests {
     };
 
     use super::{AgentProvider, ClaudeProvider, ProviderContext};
-    use crate::{
-        analytics::AnalyticsCapabilities,
-        skills::SkillVisibility,
-    };
+    use crate::{analytics::AnalyticsCapabilities, skills::SkillVisibility};
 
     fn temp_dir() -> PathBuf {
         std::env::temp_dir().join(format!(
@@ -1101,6 +1511,22 @@ mod tests {
                 .expect("system time before epoch")
                 .as_nanos()
         ))
+    }
+
+    #[test]
+    fn assistant_ask_enables_claude_streaming_output() {
+        let workspace = PathBuf::from("/tmp/tendi-claude-stream-test");
+        let command = ClaudeProvider
+            .assistant_ask_command(&workspace, "prompt")
+            .expect("Claude assistant command");
+
+        assert!(command.args.iter().any(|arg| arg == "--verbose"));
+        assert!(
+            command
+                .args
+                .iter()
+                .any(|arg| arg == "--include-partial-messages")
+        );
     }
 
     #[test]
@@ -1121,8 +1547,9 @@ mod tests {
         };
         let mut servers = Vec::new();
         let mut warnings = Vec::new();
+        let mut probe_cache = crate::mcp::McpProbeCache::default();
         ClaudeProvider
-            .scan_mcp(&context, &mut servers, &mut warnings)
+            .scan_mcp(&context, &mut servers, &mut warnings, &mut probe_cache)
             .expect("scan Claude MCP");
 
         assert!(warnings.is_empty(), "warnings: {warnings:#?}");
@@ -1157,8 +1584,9 @@ mod tests {
         };
         let mut servers = Vec::new();
         let mut warnings = Vec::new();
+        let mut probe_cache = crate::mcp::McpProbeCache::default();
         ClaudeProvider
-            .scan_mcp(&context, &mut servers, &mut warnings)
+            .scan_mcp(&context, &mut servers, &mut warnings, &mut probe_cache)
             .expect("scan Claude MCP");
 
         assert!(warnings.is_empty(), "warnings: {warnings:#?}");
@@ -1178,10 +1606,9 @@ mod tests {
 
     #[test]
     fn maps_claude_skill_invocation_frontmatter_to_visibility() {
-        let frontmatter: serde_yaml::Value = serde_yaml::from_str(
-            "name: demo\ndisable-model-invocation: true\n",
-        )
-        .expect("parse skill frontmatter");
+        let frontmatter: serde_yaml::Value =
+            serde_yaml::from_str("name: demo\ndisable-model-invocation: true\n")
+                .expect("parse skill frontmatter");
         let metadata = ClaudeProvider
             .skill_visibility_metadata(
                 PathBuf::from(".claude/skills/demo").as_path(),
@@ -1198,13 +1625,10 @@ mod tests {
         assert!(ClaudeProvider.skill_frontmatter_satisfies(meta, SkillVisibility::Manual));
 
         let rendered = ClaudeProvider
-            .render_skill_frontmatter(
-                "---\nname: demo\n---\n\n# Demo\n",
-                SkillVisibility::Manual,
-            )
+            .render_skill_frontmatter("---\nname: demo\n---\n\n# Demo\n", SkillVisibility::Manual)
             .expect("render Claude skill frontmatter");
         assert!(rendered.contains("disable-model-invocation: true"));
-        assert!(rendered.contains("visibility: manual"));
+        assert!(!rendered.contains("tendi:"));
     }
 
     #[test]
@@ -1230,13 +1654,8 @@ mod tests {
         let mut metadata = crate::sessions::SessionMetadata::default();
         let mut deduplicated_usage = BTreeMap::new();
 
-        ClaudeProvider.update_session_metadata(
-            &value,
-            &mut metadata,
-            &mut deduplicated_usage,
-        );
+        ClaudeProvider.update_session_metadata(&value, &mut metadata, &mut deduplicated_usage);
 
         assert_eq!(metadata.model, None);
     }
-
 }

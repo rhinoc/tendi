@@ -1,4 +1,3 @@
-import { Tooltip } from "./Tooltip.tsx";
 import { useCallback, useRef, useState, type CSSProperties } from "react";
 
 import { clamp } from "../../lib/index.ts";
@@ -102,7 +101,7 @@ export type FreezeColumnResizeHandleComponentProps = {
 
 export function FreezeColumnResizeHandle({ label, resize }: FreezeColumnResizeHandleComponentProps) {
   return (
-    <Tooltip content={label}><button
+    <button
       type="button"
       className="sessionFreezeResizeHandle"
       aria-label={label}
@@ -110,6 +109,6 @@ export function FreezeColumnResizeHandle({ label, resize }: FreezeColumnResizeHa
       aria-orientation="vertical"
       data-no-drag
       {...resize.handleProps}
-    /></Tooltip>
+    />
   );
 }

@@ -22,20 +22,15 @@ export function mergeSkillRows(previous: readonly RawSkillRecord[], next: readon
   const indexes = new Map<string, number>();
   merged.forEach((row, index) => {
     if (typeof row.id === "string" && row.id) indexes.set(`id:${row.id}`, index);
-    if (typeof row.name === "string" && row.name) indexes.set(`name:${row.name}`, index);
   });
   for (const row of next) {
     const idKey = typeof row.id === "string" && row.id ? `id:${row.id}` : "";
-    const nameKey = typeof row.name === "string" && row.name ? `name:${row.name}` : "";
-    const key = idKey || nameKey;
-    const index = (idKey ? indexes.get(idKey) : undefined) ?? (nameKey ? indexes.get(nameKey) : undefined);
+    const index = idKey ? indexes.get(idKey) : undefined;
     if (index === undefined) {
-      indexes.set(key || `row:${merged.length}`, merged.length);
+      if (idKey) indexes.set(idKey, merged.length);
       merged.push(row);
     } else {
       merged[index] = row;
-      if (idKey) indexes.set(idKey, index);
-      if (nameKey) indexes.set(nameKey, index);
     }
   }
   return merged;
@@ -75,25 +70,20 @@ export function applySkillSnapshot(data: RuntimeData, rows: readonly RawSkillRec
   return skills === data.skills ? data : { ...data, skills };
 }
 
-/** Apply install/move/update results with one id/name index and one pass. */
+/** Apply install/move/update results with one id index and one pass. */
 export function applySkillPatch(
   data: RuntimeData,
   rows: readonly RawSkillRecord[],
   deleted: readonly string[] = [],
 ): RuntimeData {
   const deletedSet = new Set(deleted);
-  const current = data.skills.filter((skill) => !deletedSet.has(skill.id) && !deletedSet.has(skill.name));
+  const current = data.skills.filter((skill) => !deletedSet.has(skill.id));
   const byId = new Map(current.map((skill) => [skill.id, skill]));
-  const nameCounts = new Map<string, number>();
-  for (const skill of current) nameCounts.set(skill.name, (nameCounts.get(skill.name) ?? 0) + 1);
   const patched = normalizedSkills(rows);
   const patchedById = new Map(patched.map((skill) => [skill.id, skill]));
-  const patchedByUniqueName = new Map(
-    patched.filter((skill) => (nameCounts.get(skill.name) ?? 0) === 1).map((skill) => [skill.name, skill]),
-  );
   const emitted = new Set<string>();
   const next = current.map((skill) => {
-    const update = patchedById.get(skill.id) ?? patchedByUniqueName.get(skill.name);
+    const update = patchedById.get(skill.id);
     if (!update) return skill;
     emitted.add(update.id);
     const preserved = preserveSkillUpdate(skill, update);
@@ -112,14 +102,9 @@ export function applySkillPatch(
 export function applySkillUpdateReports(data: RuntimeData, updates: readonly SkillUpdateReport[]): RuntimeData {
   if (updates.length === 0) return data;
   const byId = new Map(updates.flatMap((update) => update.id ? [[update.id, update] as const] : []));
-  const nameCounts = new Map<string, number>();
-  for (const skill of data.skills) nameCounts.set(skill.name, (nameCounts.get(skill.name) ?? 0) + 1);
-  const byUniqueName = new Map(
-    updates.filter((update) => (nameCounts.get(update.name) ?? 0) === 1).map((update) => [update.name, update]),
-  );
   let changed = false;
   const skills = data.skills.map((skill) => {
-    const update = byId.get(skill.id) ?? byUniqueName.get(skill.name);
+    const update = byId.get(skill.id);
     if (!update) return skill;
     const next = {
       ...skill,
@@ -138,7 +123,7 @@ export function clearSkillUpdateAvailability(data: RuntimeData, selectors: reado
   const selected = new Set(selectors);
   let changed = false;
   const skills = data.skills.map((skill) => {
-    if ((!selected.has(skill.id) && !selected.has(skill.name)) || skill.updateAvailability !== SkillUpdateAvailability.UpdateAvailable) return skill;
+    if (!selected.has(skill.id) || skill.updateAvailability !== SkillUpdateAvailability.UpdateAvailable) return skill;
     changed = true;
     return {
       ...skill,
@@ -154,7 +139,7 @@ export function applySkillVisibility(data: RuntimeData, selectors: readonly stri
   const selected = new Set(selectors);
   let changed = false;
   const skills = data.skills.map((skill) => {
-    if (!selected.has(skill.id) && !selected.has(skill.name)) return skill;
+    if (!selected.has(skill.id)) return skill;
     const nextTone = skill.statusTone === "muted" ? "muted" : visibility === SkillVisibility.Manual ? "warn" : "ok";
     const next = {
       ...skill,
@@ -168,14 +153,6 @@ export function applySkillVisibility(data: RuntimeData, selectors: readonly stri
   });
   return changed ? { ...data, skills } : data;
 }
-
-export type SkillSelectionPlan = {
-  selected: string[];
-  selectedRoots: string[];
-  newSkills: readonly { name: string }[];
-  existingSkills: readonly { name: string }[];
-  selectedHasExisting: boolean;
-};
 
 export function isNewSkillOperationStatus(status: SkillOperationStatus | undefined): boolean {
   return !status || status === SkillOperationStatus.Planned || status === SkillOperationStatus.Ready;

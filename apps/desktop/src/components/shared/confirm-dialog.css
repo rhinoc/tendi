@@ -3,11 +3,36 @@
   inset: 0;
   z-index: var(--z-dialog-backdrop);
   background: var(--overlay-scrim);
+  backdrop-filter: blur(4px);
+}
+
+.dialogOverlay[data-state="open"] {
+  animation: dialogOverlayIn 180ms var(--ease-out-soft) both;
+}
+
+.dialogOverlay[data-state="closed"] {
+  animation: dialogOverlayOut 240ms var(--ease-out-soft) both;
+}
+
+.dialogShell {
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  z-index: var(--z-dialog);
+  box-sizing: border-box;
+  transform: translate(-50%, -50%);
+  border: 1px solid var(--control-border);
+  border-radius: var(--dialog-radius);
+  padding: 0;
+  background: var(--panel-bg);
+  box-shadow: var(--shadow-elevated-depth);
+  overflow: hidden;
+  will-change: transform, opacity;
 }
 
 .confirmDialogTitle {
   margin: 0;
-  padding: 20px 22px 0;
+  padding: 20px 62px 0 22px;
   color: var(--text);
   font-size: var(--text-body);
   line-height: var(--leading-body);
@@ -35,35 +60,75 @@
   z-index: var(--z-dialog);
   width: min(380px, calc(100vw - 48px));
   transform: translate(-50%, -50%);
-  border: 0;
-  border-radius: var(--radius-lg);
+  border: 1px solid var(--control-border);
+  border-radius: var(--dialog-radius);
   padding: 0;
   background: var(--panel-bg);
-  box-shadow: var(--shadow-elevated);
+  box-shadow: var(--shadow-elevated-depth);
   overflow: hidden;
 }
 
-.confirmDialogPanel[data-update-preview="true"] {
-  width: min(1180px, calc(100vw - 48px));
+.dialogShell[data-state="open"] {
+  animation: dialogPanelIn 280ms cubic-bezier(0.2, 0, 0.2, 1) both;
 }
 
-.skillDeleteNames {
-  display: grid;
-  gap: 8px;
-  margin: -8px 22px 18px;
-  padding: 10px;
-  border: 1px solid var(--line);
-  border-radius: var(--radius-md);
-  background: var(--inset-fill);
+.dialogShell[data-state="closed"] {
+  animation: dialogPanelOut 260ms cubic-bezier(0.32, 0.72, 0, 1) both;
 }
 
-.skillDeleteNames span {
-  overflow: hidden;
-  color: var(--text);
-  font-size: var(--text-sm);
-  font-weight: 600;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+@keyframes dialogOverlayIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes dialogOverlayOut {
+  from { opacity: 1; }
+  to { opacity: 0; }
+}
+
+@keyframes dialogPanelIn {
+  from {
+    transform: translate(-50%, calc(-50% + 8px)) scale(0.98);
+    opacity: 0;
+  }
+  to {
+    transform: translate(-50%, -50%) scale(1);
+    opacity: 1;
+  }
+}
+
+@keyframes dialogPanelOut {
+  from {
+    transform: translate(-50%, -50%) scale(1);
+    opacity: 1;
+  }
+  to {
+    transform: translate(-50%, calc(-50% + 4px)) scale(0.98);
+    opacity: 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .dialogOverlay,
+  .dialogShell {
+    animation: none;
+  }
+}
+
+.dialogCloseButton.appButton-icon {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  z-index: 1;
+  width: 30px;
+  min-width: 30px;
+  height: 30px;
+  border-radius: 999px;
+  background: color-mix(in oklch, var(--text) 5%, transparent);
+}
+
+.dialogCloseButton.appButton-icon:hover {
+  background: color-mix(in oklch, var(--text) 9%, transparent);
 }
 
 .deleteConfirmationNames {
@@ -87,228 +152,10 @@
   white-space: nowrap;
 }
 
-.skillUpdateDiffFrame {
-  height: min(62vh, 640px);
-  margin: -4px 22px 20px;
-  overflow: hidden;
-  border: 1px solid var(--line);
-  border-radius: var(--radius-md);
-}
-
-.skillUpdateDiff {
-  width: 100%;
-  height: 100%;
-  overflow: hidden;
-}
-
-.skillUpdateDiffFilesPanel,
-.skillUpdateDiffEditor {
-  min-width: 0;
-  min-height: 0;
-}
-
-.skillUpdateDiffFilesPanel {
-  border-right: 1px solid var(--line);
-  background: var(--surface-2);
-}
-
-.skillUpdateDiffFiles {
-  width: 100%;
-  min-height: 100%;
-  padding: 6px 0;
-}
-
-.skillUpdateTreeRow {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  width: 100%;
-  height: 28px;
-  padding: 0 8px;
-  border: 0;
-  background: transparent;
-  color: var(--muted);
-  cursor: pointer;
-  font-size: var(--text-sm);
-  line-height: var(--leading-large);
-  text-align: left;
-}
-
-.skillUpdateTreeRow > svg,
-.skillUpdateTreeChevron {
-  flex: 0 0 auto;
-}
-
-.skillUpdateTreeRow > svg {
-  color: var(--faint);
-}
-
-.skillUpdateTreeChevron {
-  width: 12px;
-  height: 14px;
-  display: inline-grid;
-  place-items: center;
-  color: var(--faint);
-}
-
-.skillUpdateTreeName {
-  min-width: 0;
-  flex: 1 1 auto;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.skillUpdateTreeRow:hover {
-  background: var(--hover-fill);
-  color: var(--text);
-}
-
-.skillUpdateTreeRow.active {
-  background: var(--active-fill);
-  color: var(--text);
-}
-
-.skillUpdateTreeRow.changed .skillUpdateTreeName {
-  color: var(--tone-info);
-  font-weight: 600;
-}
-
-.skillUpdateTreeRow.needsResolution .skillUpdateTreeName {
-  color: var(--danger-text);
-}
-
-.skillUpdateFileStatus {
-  flex: 0 0 auto;
-  font-weight: 700;
-}
-
-.skillUpdateFileStatus.changed {
-  color: var(--tone-info);
-}
-
-.skillUpdateFileStatus.needsResolution {
-  color: var(--danger-text);
-}
-
-.skillUpdateTreeRow.folder {
-  color: var(--faint);
-}
-
-.skillUpdateDiffResizeHandle {
-  margin-inline: -3px;
-}
-
-.skillUpdateDiffEditor {
-  overflow: hidden;
-}
-
-.skillUpdateDiffEditorBody {
-  width: 100%;
-  height: 100%;
-  display: flex;
-  flex-direction: column;
-  min-width: 0;
-  min-height: 0;
-  overflow: hidden;
-}
-
-.skillUpdateDiffEditor .codeMirrorEditor {
-  width: 100%;
-  min-width: 0;
-  min-height: 0;
-  flex: 1 1 auto;
-  overflow: hidden;
-}
-
-.skillUpdateDiffEditor .codeMirrorEditor > div {
-  width: 100%;
-  height: 100%;
-  min-width: 0;
-  min-height: 0;
-}
-
-.skillMergeResolutionBar {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  flex: 0 0 auto;
-  padding: 8px 10px;
-  border-top: 1px solid var(--line);
-  background: var(--surface-2);
-  color: var(--muted);
-  font-size: var(--text-sm);
-}
-
-.skillMergeResolutionBar span {
-  flex: 1 1 auto;
-}
-
-.skillMergeResolutionBar button {
-  flex: 0 0 auto;
-  padding: 4px 8px;
-  border: 1px solid var(--line-strong);
-  border-radius: var(--radius-sm);
-  background: var(--panel-bg);
-  color: var(--text);
-  cursor: pointer;
-  font-size: var(--text-sm);
-}
-
-.skillMergeResolutionBar button:hover {
-  background: var(--hover-fill);
-}
-
-.skillUpdatePreviewLoading {
-  margin: 4px 22px 20px;
-}
-
-.loadingState.skillUpdatePreviewLoading {
-  width: calc(100% - 44px);
-  height: min(62vh, 640px);
-  margin: -4px 22px 20px;
-  display: grid;
-  place-items: center;
-  border: 1px solid var(--line);
-  border-radius: var(--radius-md);
-}
-
-.skillUpdatePreviewEmpty {
-  min-height: 64px;
-  margin: -4px 22px 20px;
-  padding: 20px;
-  display: grid;
-  place-items: center;
-  border: 1px solid var(--line);
-  border-radius: var(--radius-md);
-  color: var(--muted);
-  font-size: var(--text-ui);
-  line-height: var(--leading-body);
-  text-align: center;
-  white-space: pre-wrap;
-}
-
-.skillUpdateResolutionProgress {
-  margin-right: auto;
-  color: var(--muted);
-  font-size: var(--text-xs);
-  font-variant-numeric: tabular-nums;
-}
-
-.skillUpdateApplyTooltipTarget {
-  display: inline-flex;
-}
-
-.skillUpdateApplyTooltipTarget:focus-visible {
-  outline: 2px solid var(--focus-ring);
-  outline-offset: 3px;
-  border-radius: var(--radius-sm);
-}
-
 .confirmDialogActions {
   display: flex;
   align-items: center;
-  justify-content: flex-end;
+  justify-content: space-between;
   gap: 12px;
   padding: 14px 24px;
   border-top: 1px solid var(--line);

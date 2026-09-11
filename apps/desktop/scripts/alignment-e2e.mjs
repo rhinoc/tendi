@@ -20,12 +20,17 @@
 //   req8  Active-row hover/selection highlights inset 1px from the row top so adjacent
 //         active rows keep a visible gap; frozen columns hide their own separator
 //         shadows so the sticky segment reads as one continuous highlight.
+//   bug24 Prompt row actions fit their cell and keep the more-actions hover
+//         background inside the row's right edge.
+//   bug25 Grouped frozen-table scroll panes keep their sticky group spacer at
+//         the same viewport edge while the body scrolls vertically.
 //   bugN  Frozen-column regression checks cover scroll bleed, marquee selection,
 //         sticky headers, active-row seams and frozen/scroll row height sync.
 //
 // The app talks to a mocked `__TAURI_INTERNALS__.invoke`, so the test is fast,
 // deterministic and self-contained (no cargo / real data). Run with:
 //   npm run e2e:align        (from apps/desktop)
+//   npm run e2e:frozen       (frozen-table capability contract only)
 //
 // The run collects EVERY failure across EVERY tab before throwing, so a single
 // run reports the full picture instead of stopping at the first mismatch.
@@ -46,6 +51,7 @@ const appDir = join(dirname(fileURLToPath(import.meta.url)), "..");
 // intent (visually identical) while tolerating rounding.
 const TOLERANCE = 1.5;
 const PORT = 5193;
+const frozenOnly = process.argv.includes("--frozen-only");
 
 function loadPlaywrightCore() {
   try {
@@ -69,10 +75,20 @@ function chromiumExecutablePath() {
 // ----- fabricated report (matches the shapes each normalizer/column reads) ---
 function buildReport() {
   const skills = [
-    { id: "alpha-skill", name: "alpha-skill", description: "First local skill.", agents: ["Codex", "Cursor"], tags: [], dependencies: [], dependents: [], visibility: "Manual", source_summary: "github", install_targets: ["shared"], update_status: "update-available", is_system: false, paths: [{ path: "/Users/dev/.cursor/projects/project-1/.cursor/skills/alpha/SKILL.md", root: "/Users/dev/.cursor/projects/project-1/.cursor/skills", scope: "project", agent: "cursor", install_target: "cursor:project", source_kind: "github" }] },
-    { id: "beta-skill", name: "beta-skill", description: "Second local skill.", agents: ["Codex"], tags: [], dependencies: [], dependents: [], visibility: "Auto", source_summary: "local", install_targets: ["shared"], update_status: "local", is_system: false, paths: [{ path: "/Users/dev/.claude/skills/beta/SKILL.md", root: "/Users/dev/.claude/skills", scope: "global", agent: "claude", install_target: "claude:global", source_kind: "local" }] },
-    { id: "system-skill", name: "system-skill", description: "Managed system skill.", agents: ["Codex"], tags: [], dependencies: [], dependents: [], visibility: "Auto", source_summary: "system", install_targets: ["codex"], update_status: "local", is_system: true, paths: [{ path: "/Users/dev/.codex/skills/system/SKILL.md", root: "/Users/dev/.codex/skills", scope: "global", agent: "codex", install_target: "codex:global", source_kind: "system" }] },
+    { id: "alpha-skill", installationId: "installation-alpha", name: "alpha-skill", description: "First local skill.", agents: ["codex", "cursor"], tags: [], dependencies: [], dependents: [], dependencyIds: [], dependentIds: [], visibility: "manual", source_summary: "github", install_targets: ["shared"], update_status: "update-available", is_system: false, paths: [{ path: "/Users/dev/.cursor/projects/project-1/.cursor/skills/alpha/SKILL.md", root: "/Users/dev/.cursor/projects/project-1/.cursor/skills", scope: "project", agent: "cursor", install_target: "cursor:project", source_kind: "github", symlink_status: "fixture", update_status: "update-available", sha256: "skill-sha-alpha", tags: [], effective_visibility: "manual" }] },
+    { id: "beta-skill", installationId: "installation-beta", name: "beta-skill", description: "Second local skill.", agents: ["codex"], tags: [], dependencies: [], dependents: [], dependencyIds: [], dependentIds: [], visibility: "auto", source_summary: "local", install_targets: ["shared"], update_status: "local", is_system: false, paths: [{ path: "/Users/dev/.claude/skills/beta/SKILL.md", root: "/Users/dev/.claude/skills", scope: "global", agent: "claude", install_target: "claude:global", source_kind: "local", symlink_status: "fixture", update_status: "local", sha256: "skill-sha-beta", tags: [], effective_visibility: "auto" }] },
+    { id: "system-skill", installationId: "installation-system", name: "system-skill", description: "Managed system skill.", agents: ["codex"], tags: [], dependencies: [], dependents: [], dependencyIds: [], dependentIds: [], visibility: "auto", source_summary: "system", install_targets: ["codex"], update_status: "local", is_system: true, paths: [{ path: "/Users/dev/.codex/skills/system/SKILL.md", root: "/Users/dev/.codex/skills", scope: "global", agent: "codex", install_target: "codex:global", source_kind: "system" }] },
   ];
+  for (const skill of skills) {
+    skill.paths = skill.paths.map((path) => ({
+      ...path,
+      symlink_status: "fixture",
+      update_status: skill.update_status,
+      sha256: `skill-sha-${skill.id}`,
+      tags: [],
+      effective_visibility: skill.visibility,
+    }));
+  }
   const prompts = Array.from({ length: 12 }, (_, i) => ({
     id: `prompt-${i + 1}`,
     title: `Prompt number ${i + 1}`,
@@ -92,7 +108,7 @@ function buildReport() {
     message_count: 10 + i,
     turn_count: 3 + i,
   }));
-  const rules = Array.from({ length: 12 }, (_, i) => ({
+  const rules = Array.from({ length: 80 }, (_, i) => ({
     path: `/Users/dev/.cursor/rules/rule-${i + 1}.mdc`,
     agents: [["cursor", "codex", "claude"][i % 3]],
     kind: ["Always", "Auto", "Manual"][i % 3],
@@ -133,7 +149,7 @@ function buildReport() {
     agents: {
       agents: [
         { kind: "claude", name: "Claude Code", installed: true },
-        { kind: "ghost", name: "Ghost Agent", installed: false },
+        { kind: "unknown", name: "Ghost Agent", installed: false },
       ],
     },
   };
@@ -145,7 +161,7 @@ const tabs = [
   { id: "sessions", nav: "Sessions", heading: "Sessions", compact: true, selectable: false, listHeader: "table", tableHeader: true, frozen: true },
   { id: "rules", nav: "Rules", heading: "Rules", compact: true, selectable: true, listHeader: "table", tableHeader: true, frozen: true },
   { id: "hooks", nav: "Hooks", heading: "Hooks", compact: true, selectable: true, listHeader: "table", tableHeader: true, frozen: true },
-  { id: "mcp", nav: "MCP", heading: "MCP", compact: false, selectable: true, listHeader: "table", tableHeader: true, frozen: true },
+  { id: "mcp", nav: "MCPs", heading: "MCP", compact: false, selectable: true, listHeader: "table", tableHeader: true, frozen: true },
 ];
 
 const failures = [];
@@ -290,7 +306,7 @@ async function runOverviewUsageChecks(page) {
   });
 
   await page.evaluate(() => window.__releaseAnalyticsOverview?.());
-  const loadedChart = page.locator('section.chartFrame[aria-label="tokens trend"]');
+  const loadedChart = page.locator('section.chartFrame[aria-label$="trend"]').first();
   await loadedChart.waitFor({ state: "visible", timeout: 5000 });
   const refreshState = await page.getByRole("button", { name: "Refresh analytics" }).evaluate((button) => ({
     ariaBusy: button.getAttribute("aria-busy"),
@@ -592,6 +608,10 @@ async function runReq8TabChecks(page, tab) {
     const bg = getComputedStyle(hovered, "::after").backgroundColor;
     return bg !== "transparent" && bg !== "rgba(0, 0, 0, 0)";
   }, { timeout: 2000 }).catch(() => {});
+  await page.evaluate((rowId) => {
+    if (!rowId) return;
+    document.querySelectorAll(`[data-row-id="${CSS.escape(rowId)}"]`).forEach((peer) => peer.classList.add("rowSelected"));
+  }, injectedSelectedRowId);
 
   const metrics = await page.evaluate(() => {
     const isTransparent = (bg) => !bg || bg === "transparent" || bg === "rgba(0, 0, 0, 0)";
@@ -673,6 +693,61 @@ async function runReq8TabChecks(page, tab) {
   }, injectedSelectedRowId);
 }
 
+async function runPromptRowActionsAlignmentChecks(page) {
+  const row = page.locator('.dataRow[data-row-selectable="true"]').first();
+  const actionsCell = row.locator('.dataCell[data-column="actions"]');
+  const moreButton = actionsCell.locator('button[aria-label*="actions" i]');
+  if (await moreButton.count() === 0) {
+    check("prompts", "bug24-row-actions-alignment", false, "missing prompt row actions menu trigger");
+    return;
+  }
+
+  await moreButton.hover({ force: true });
+  const metrics = await page.evaluate(() => {
+    const row = document.querySelector('.dataRow[data-row-selectable="true"]');
+    const cell = row?.querySelector('.dataCell[data-column="actions"]');
+    const group = cell?.querySelector(".rowActions");
+    const more = cell?.querySelector('button[aria-label*="actions" i]');
+    const copy = cell?.querySelector('button[aria-label*="Copy" i]');
+    if (!row || !cell || !group || !more || !copy) return { missing: true };
+    const round = (value) => Math.round(value * 100) / 100;
+    const rowRect = row.getBoundingClientRect();
+    const cellRect = cell.getBoundingClientRect();
+    const groupRect = group.getBoundingClientRect();
+    const moreRect = more.getBoundingClientRect();
+    const copyRect = copy.getBoundingClientRect();
+    const moreStyle = getComputedStyle(more);
+    return {
+      missing: false,
+      rowRight: round(rowRect.right),
+      cellRight: round(cellRect.right),
+      groupRight: round(groupRect.right),
+      moreRight: round(moreRect.right),
+      moreWidth: round(moreRect.width),
+      copyWidth: round(copyRect.width),
+      actionGap: round(moreRect.left - copyRect.right),
+      moreBackground: moreStyle.backgroundColor,
+    };
+  });
+  const transparent = metrics.moreBackground === "transparent" || metrics.moreBackground === "rgba(0, 0, 0, 0)";
+  check(
+    "prompts",
+    "bug24-row-actions-alignment",
+    metrics.missing !== true
+      && Math.abs(metrics.groupRight - metrics.cellRight) <= TOLERANCE
+      && Math.abs(metrics.moreRight - metrics.cellRight) <= TOLERANCE
+      && Math.abs(metrics.cellRight - metrics.rowRight) <= TOLERANCE
+      && metrics.moreWidth === 32
+      && metrics.copyWidth === 32
+      && Math.abs(metrics.actionGap - 4) <= TOLERANCE
+      && !transparent,
+    metrics.missing === true
+      ? "missing prompt row action buttons"
+      : `row/cell/group/more right ${metrics.rowRight}/${metrics.cellRight}/${metrics.groupRight}/${metrics.moreRight}, button widths ${metrics.copyWidth}/${metrics.moreWidth}, gap ${metrics.actionGap}px, hover background ${metrics.moreBackground}`,
+  );
+  await page.mouse.move(0, 0);
+}
+
 async function runSessionLocatorChecks(page) {
   await page.evaluate(() => {
     const scroller = document.querySelector(".dataTableBodyScroll");
@@ -690,7 +765,16 @@ async function runSessionLocatorChecks(page) {
     scroller.dispatchEvent(new Event("scroll"));
   });
   const locatorRows = page.locator(".sessionLocatorRow");
-  await locatorRows.first().waitFor();
+  const locatorReady = await locatorRows.first().waitFor({ state: "visible", timeout: 2000 }).then(() => true).catch(() => false);
+  if (!locatorReady) {
+    check(
+      "sessions",
+      "session-locator-items",
+      false,
+      "session locator did not render after selecting a session and scrolling the list",
+    );
+    return;
+  }
   await page.waitForFunction(
     () => document.querySelectorAll('.sessionLocatorRow[aria-current="true"]').length > 0,
     { timeout: 2000 },
@@ -779,6 +863,471 @@ async function runSessionLocatorChecks(page) {
       { timeout: 2000 },
     ).catch(() => {});
     await page.waitForTimeout(100);
+  }
+}
+
+async function runSessionSkillEvidenceChecks(page) {
+  const rows = page.locator(".dataTableFrozenPane .dataRow[data-row-id]");
+  const targetRow = rows.nth(1);
+  const rowKey = await targetRow.getAttribute("data-row-id");
+  const sessionId = rowKey ? (() => {
+    try {
+      const parsed = JSON.parse(rowKey);
+      return Array.isArray(parsed) ? parsed[1] : rowKey;
+    } catch {
+      return rowKey;
+    }
+  })() : null;
+  if (!sessionId) {
+    check("sessions", "skills-used-evidence-row", false, "missing second session row for skill evidence fixture");
+    return;
+  }
+
+  await page.evaluate((id) => window.__setSkillEvidenceSession?.(id), sessionId);
+  await targetRow.locator(".sessionTitleText").click();
+  const skillsTrigger = page.getByRole("button", { name: "Show skills used", exact: true });
+  const triggerReady = await skillsTrigger.waitFor({ state: "visible", timeout: 3000 }).then(() => true).catch(() => false);
+  if (!triggerReady) {
+    check("sessions", "skills-used-evidence-trigger", false, "Skills Used trigger did not render");
+    await page.evaluate(() => window.__clearSkillEvidenceSession?.());
+    return;
+  }
+  await skillsTrigger.click();
+
+  const skillChip = page.locator(".sessionSkillChip").filter({ hasText: "tutti-test-audit" });
+  const chipReady = await skillChip.waitFor({ state: "visible", timeout: 3000 }).then(() => true).catch(() => false);
+  if (!chipReady) {
+    check("sessions", "skills-used-evidence-chip", false, "Skills Used did not render tutti-test-audit");
+    await page.evaluate(() => window.__clearSkillEvidenceSession?.());
+    return;
+  }
+  check(
+    "sessions",
+    "skills-used-evidence-chip",
+    await skillChip.count() === 1,
+    "Skills Used shows tutti-test-audit",
+  );
+
+  const jumpButton = page.getByRole(
+    "button",
+    { name: "Go to tutti-test-audit usage in transcript", exact: true },
+  );
+  await jumpButton.click();
+  await page.waitForFunction(
+    () => document.querySelector(".toolCall.transcriptTarget")?.textContent?.includes("tutti-test-audit") === true,
+    { timeout: 3000 },
+  );
+  const highlightedTool = page.locator(".toolCall.transcriptTarget");
+  const highlightedText = await highlightedTool.first().textContent();
+  check(
+    "sessions",
+    "skills-used-evidence-jump",
+    await highlightedTool.count() === 1 && highlightedText?.includes("tutti-test-audit") === true,
+    "right-side action loads and highlights the matching tool call",
+  );
+  const cursors = await page.evaluate(() => window.__alignmentMockDiagnostics?.().skillEvidenceTranscriptCursors ?? []);
+  check(
+    "sessions",
+    "skills-used-evidence-load-more",
+    cursors.includes("skill-evidence-page-2"),
+    `transcript cursors: ${cursors.join(", ") || "none"}`,
+  );
+
+  await page.evaluate(() => window.__clearSkillEvidenceSession?.());
+  await rows.first().locator(".sessionTitleText").click();
+  await page.getByText("Locator prompt 1", { exact: true }).waitFor({ state: "visible", timeout: 3000 });
+}
+
+async function runFrozenCapabilityChecks(page, tab) {
+  if (!tab.frozen) return;
+
+  const shell = page.locator(".dataTableShell--frozen");
+  const scroller = page.locator(".dataTableBodyScroll");
+  await shell.waitFor({ state: "visible", timeout: 3000 });
+  await scroller.waitFor({ state: "visible", timeout: 3000 });
+
+  const overflowFixture = await page.evaluate(() => {
+    const table = document.querySelector(".dataTableShell--frozen");
+    const scrollColumns = table?.querySelectorAll(".dataTableHeader--scroll .dataHeaderCell").length ?? 0;
+    if (!table || scrollColumns === 0) return { applied: false, original: "" };
+    const original = table.style.getPropertyValue("--data-scroll-grid-columns");
+    table.style.setProperty("--data-scroll-grid-columns", `repeat(${scrollColumns}, minmax(500px, 500px))`);
+    return { applied: true, original };
+  });
+
+  try {
+    const horizontalMetrics = await page.evaluate(() => {
+      const scroll = document.querySelector(".dataTableBodyScroll");
+      const frozen = document.querySelector(".dataTableFrozenPane");
+      const scrollCell = document.querySelector(".dataTableScrollPane .dataCell");
+      if (!scroll || !frozen || !scrollCell) return { missing: true };
+      const previousLeft = scroll.scrollLeft;
+      scroll.scrollLeft = scroll.scrollWidth;
+      const viewportRect = scroll.getBoundingClientRect();
+      const frozenRect = frozen.getBoundingClientRect();
+      const cellRect = scrollCell.getBoundingClientRect();
+      const probeX = Math.min(frozenRect.right - 4, Math.max(frozenRect.left + 4, viewportRect.left + 4));
+      const probeY = Math.min(frozenRect.bottom - 4, Math.max(frozenRect.top + 24, cellRect.top + 10));
+      const hit = document.elementFromPoint(probeX, probeY);
+      const result = {
+        missing: false,
+        maxScroll: Math.max(0, scroll.scrollWidth - scroll.clientWidth),
+        scrollLeft: scroll.scrollLeft,
+        frozenLeft: frozenRect.left,
+        viewportLeft: viewportRect.left,
+        hitFrozen: Boolean(hit?.closest?.(".dataTableFrozenPane")),
+        hitScroll: Boolean(hit?.closest?.(".dataTableScrollPane")),
+      };
+      scroll.scrollLeft = previousLeft;
+      return result;
+    });
+    check(
+      tab.id,
+      "frozen-capability-horizontal-scroll",
+      overflowFixture.applied === true
+        && horizontalMetrics.missing !== true
+        && horizontalMetrics.maxScroll > TOLERANCE
+        && horizontalMetrics.scrollLeft > TOLERANCE
+        && Math.abs(horizontalMetrics.frozenLeft - horizontalMetrics.viewportLeft) <= TOLERANCE
+        && horizontalMetrics.hitFrozen === true
+        && horizontalMetrics.hitScroll === false,
+      horizontalMetrics.missing === true
+        ? "missing frozen/scroll panes"
+        : `scroll ${horizontalMetrics.scrollLeft}/${horizontalMetrics.maxScroll}, frozen left ${horizontalMetrics.frozenLeft}, viewport left ${horizontalMetrics.viewportLeft}, hit frozen/scroll ${horizontalMetrics.hitFrozen}/${horizontalMetrics.hitScroll}`,
+    );
+
+    if (tab.selectable) {
+      const marqueeGeometry = await page.evaluate(() => {
+        const frozenRow = document.querySelector('.dataTableFrozenPane .dataRow[data-row-selectable="true"]');
+        const scrollRow = frozenRow?.dataset.rowId
+          ? document.querySelector(`.dataTableScrollPane .dataRow--scrollPane[data-row-id="${CSS.escape(frozenRow.dataset.rowId)}"]`)
+          : null;
+        const scroll = document.querySelector(".dataTableBodyScroll");
+        if (!frozenRow || !scrollRow || !scroll) return { missing: true };
+        const frozenRect = frozenRow.getBoundingClientRect();
+        const scrollRect = scrollRow.getBoundingClientRect();
+        const viewport = scroll.getBoundingClientRect();
+        return {
+          missing: false,
+          startX: frozenRect.right - 12,
+          startY: frozenRect.top + Math.min(24, Math.max(8, frozenRect.height / 2)),
+          endX: Math.min(viewport.right - 8, scrollRect.left + Math.min(120, Math.max(16, scrollRect.width / 2))),
+          endY: scrollRect.top + Math.min(44, Math.max(18, scrollRect.height - 8)),
+          frozenRight: frozenRect.right,
+        };
+      });
+      if (marqueeGeometry.missing === true) {
+        check(tab.id, "frozen-capability-marquee-selection", false, "missing paired selectable frozen/scroll row");
+      } else {
+        await page.mouse.move(marqueeGeometry.startX, marqueeGeometry.startY);
+        await page.mouse.down();
+        await page.mouse.move(marqueeGeometry.endX, marqueeGeometry.endY, { steps: 8 });
+        await page.waitForTimeout(80);
+        const marqueeMetrics = await page.evaluate(() => {
+          const marquee = document.querySelector(".dataTableMarquee");
+          const selected = document.querySelectorAll(".dataRow.rowSelected").length;
+          if (!marquee) return { missing: true, selected };
+          const rect = marquee.getBoundingClientRect();
+          return { missing: false, left: rect.left, right: rect.right, selected };
+        });
+        await page.mouse.up();
+        check(
+          tab.id,
+          "frozen-capability-marquee-selection",
+          marqueeMetrics.missing !== true
+            && marqueeMetrics.left < marqueeGeometry.frozenRight - TOLERANCE
+            && marqueeMetrics.right > marqueeGeometry.frozenRight + TOLERANCE
+            && marqueeMetrics.selected > 0,
+          marqueeMetrics.missing === true
+            ? "marquee did not render"
+            : `marquee ${marqueeMetrics.left}-${marqueeMetrics.right}, frozen right ${marqueeGeometry.frozenRight}, selected row nodes ${marqueeMetrics.selected}`,
+        );
+      }
+
+      const rowMenuButton = page.locator('.dataTableScrollPane .dataRow--scrollPane button[aria-label*="actions" i]').first();
+      if (await rowMenuButton.count() === 0) {
+        check(tab.id, "frozen-capability-menu", false, "missing row actions menu trigger");
+      } else {
+        await page.evaluate(() => {
+          const button = document.querySelector('.dataTableScrollPane .dataRow--scrollPane button[aria-label*="actions" i]');
+          const scroller = document.querySelector(".dataTableBodyScroll");
+          const frozenPane = document.querySelector(".dataTableFrozenPane");
+          if (!button || !scroller || !frozenPane) return;
+          const buttonRect = button.getBoundingClientRect();
+          const scrollerRect = scroller.getBoundingClientRect();
+          const frozenRect = frozenPane.getBoundingClientRect();
+          const desiredLeft = Math.max(frozenRect.right + 8, scrollerRect.right - buttonRect.width - 8);
+          const maxScroll = Math.max(0, scroller.scrollWidth - scroller.clientWidth);
+          scroller.scrollLeft = Math.max(0, Math.min(maxScroll, scroller.scrollLeft + buttonRect.left - desiredLeft));
+          scroller.dispatchEvent(new Event("scroll", { bubbles: true }));
+        });
+        await page.waitForTimeout(80);
+        await rowMenuButton.click({ force: true });
+        await page.waitForTimeout(100);
+        let openMenu = await page.evaluate(() => {
+          const button = document.querySelector('.dataTableScrollPane .dataRow--scrollPane button[aria-label*="actions" i]');
+          const scrollRow = button?.closest(".dataRow--scrollPane");
+          const id = scrollRow?.dataset.rowId;
+          const frozenRow = id
+            ? document.querySelector(`.dataTableFrozenPane .dataRow--frozenPane[data-row-id="${CSS.escape(id)}"]`)
+            : null;
+          return {
+            triggerOpen: button?.getAttribute("data-state") === "open",
+            frozenActive: frozenRow?.classList.contains("menuActive") === true,
+            scrollActive: scrollRow?.classList.contains("menuActive") === true,
+          };
+        });
+        if (!openMenu.triggerOpen) {
+          await rowMenuButton.click({ force: true });
+          await page.waitForTimeout(100);
+          openMenu = await page.evaluate(() => {
+            const button = document.querySelector('.dataTableScrollPane .dataRow--scrollPane button[aria-label*="actions" i]');
+            const scrollRow = button?.closest(".dataRow--scrollPane");
+            const id = scrollRow?.dataset.rowId;
+            const frozenRow = id
+              ? document.querySelector(`.dataTableFrozenPane .dataRow--frozenPane[data-row-id="${CSS.escape(id)}"]`)
+              : null;
+            return {
+              triggerOpen: button?.getAttribute("data-state") === "open",
+              frozenActive: frozenRow?.classList.contains("menuActive") === true,
+              scrollActive: scrollRow?.classList.contains("menuActive") === true,
+            };
+          });
+        }
+        await page.keyboard.press("Escape");
+        await page.waitForTimeout(80);
+        const closedMenu = await page.evaluate(() => ({
+          triggerOpen: document.querySelector('.dataTableScrollPane .dataRow--scrollPane button[aria-label*="actions" i]')?.getAttribute("data-state") === "open",
+          activeRows: document.querySelectorAll(".dataRow.menuActive").length,
+        }));
+        check(
+          tab.id,
+          "frozen-capability-menu",
+          openMenu.triggerOpen === true
+            && openMenu.frozenActive === true
+            && openMenu.scrollActive === true
+            && closedMenu.triggerOpen === false
+            && closedMenu.activeRows === 0,
+          `open trigger/rows ${openMenu.triggerOpen}/${openMenu.frozenActive}/${openMenu.scrollActive}, closed trigger/active ${closedMenu.triggerOpen}/${closedMenu.activeRows}`,
+        );
+      }
+      await page.mouse.move(0, 0);
+      await page.waitForTimeout(100);
+    }
+
+    if (tab.id === "rules") {
+      await scroller.evaluate((node) => {
+        node.scrollTop = 0;
+        node.dispatchEvent(new Event("scroll", { bubbles: true }));
+      });
+      await page.waitForTimeout(60);
+      const beforeVirtualJump = await page.evaluate(() => {
+        const scroll = document.querySelector(".dataTableBodyScroll");
+        const frozenRows = [...document.querySelectorAll(".dataTableFrozenPane .dataRow--frozenPane[data-row-id]")];
+        return {
+          scrollHeight: scroll?.scrollHeight ?? 0,
+          clientHeight: scroll?.clientHeight ?? 0,
+          ids: frozenRows.map((row) => row.dataset.rowId),
+        };
+      });
+      await scroller.evaluate((node) => {
+        node.scrollTop = node.scrollHeight;
+        node.dispatchEvent(new Event("scroll", { bubbles: true }));
+      });
+      await page.waitForFunction(
+        () => (document.querySelector(".dataTableBodyScroll")?.scrollTop ?? 0) > 0,
+        undefined,
+        { timeout: 2000 },
+      );
+      await page.waitForTimeout(100);
+      const afterVirtualJump = await page.evaluate(() => {
+        const scroll = document.querySelector(".dataTableBodyScroll");
+        const frozenRows = [...document.querySelectorAll(".dataTableFrozenPane .dataRow--frozenPane[data-row-id]")];
+        const scrollRows = [...document.querySelectorAll(".dataTableScrollPane .dataRow--scrollPane[data-row-id]")];
+        const scrollIds = new Set(scrollRows.map((row) => row.dataset.rowId));
+        return {
+          scrollTop: scroll?.scrollTop ?? 0,
+          ids: frozenRows.map((row) => row.dataset.rowId),
+          frozenCount: frozenRows.length,
+          scrollCount: scrollRows.length,
+          paired: frozenRows.every((row) => scrollIds.has(row.dataset.rowId)),
+          seekVisible: document.querySelector(".dataTableVirtualSeek")?.classList.contains("dataTableVirtualSeek--visible") === true,
+        };
+      });
+      check(
+        tab.id,
+        "frozen-capability-virtual-jump",
+        beforeVirtualJump.scrollHeight > beforeVirtualJump.clientHeight
+          && beforeVirtualJump.ids.join("\u0000") !== afterVirtualJump.ids.join("\u0000")
+          && afterVirtualJump.scrollTop > 0
+          && afterVirtualJump.frozenCount > 0
+          && afterVirtualJump.frozenCount === afterVirtualJump.scrollCount
+          && afterVirtualJump.paired === true
+          && afterVirtualJump.seekVisible === false,
+        `rows ${beforeVirtualJump.ids.length}->${afterVirtualJump.ids.length}, scroll top ${afterVirtualJump.scrollTop}, paired ${afterVirtualJump.paired}, seek ${afterVirtualJump.seekVisible}`,
+      );
+
+      await scroller.evaluate((node) => {
+        node.scrollTop = 0;
+        node.dispatchEvent(new Event("scroll", { bubbles: true }));
+      });
+      await page.waitForTimeout(80);
+      const targetRuleId = "/Users/dev/.cursor/rules/rule-80.mdc";
+      await page.keyboard.press("Control+p");
+      const paletteInput = page.getByRole("combobox", { name: "Search this page" });
+      await paletteInput.waitFor({ state: "visible", timeout: 2000 });
+      await paletteInput.fill("rule-80.mdc");
+      const targetOption = page.getByRole("option").filter({ hasText: "rule-80.mdc" }).first();
+      await targetOption.waitFor({ state: "visible", timeout: 2000 });
+      await targetOption.click();
+      await page.waitForFunction((rowId) => {
+        const scroll = document.querySelector(".dataTableBodyScroll");
+        const row = [...(scroll?.querySelectorAll(".dataTableFrozenPane .dataRow--frozenPane[data-row-id]") ?? [])]
+          .find((candidate) => candidate.dataset.rowId === rowId);
+        if (!scroll || !row) return false;
+        const viewport = scroll.getBoundingClientRect();
+        const bounds = row.getBoundingClientRect();
+        const paired = document.querySelector(`.dataTableScrollPane .dataRow--scrollPane[data-row-id="${CSS.escape(rowId)}"]`);
+        return scroll.scrollTop > 0
+          && bounds.top >= viewport.top - 1
+          && bounds.bottom <= viewport.bottom + 1
+          && Boolean(paired);
+      }, targetRuleId, { timeout: 3000 });
+      check(
+        tab.id,
+        "frozen-capability-row-locator",
+        await page.locator(".commandPaletteRoot").count() === 0,
+        `command palette closed after locating ${targetRuleId}`,
+      );
+
+      const resizeHandle = page.getByRole("separator", { name: "Resize first column" });
+      const resizeBefore = await page.evaluate(() => {
+        const handle = document.querySelector(".sessionFreezeResizeHandle");
+        const pane = document.querySelector(".dataTableFrozenPane");
+        const header = document.querySelector(".dataTableHeader--frozen");
+        const row = document.querySelector(".dataRow--frozenPane");
+        return {
+          value: Number.parseFloat(handle?.getAttribute("aria-valuenow") ?? "NaN"),
+          paneWidth: pane?.getBoundingClientRect().width ?? 0,
+          headerWidth: header?.getBoundingClientRect().width ?? 0,
+          rowWidth: row?.getBoundingClientRect().width ?? 0,
+        };
+      });
+      await resizeHandle.focus();
+      await resizeHandle.press("ArrowRight");
+      await page.waitForFunction((value) => Number.parseFloat(document.querySelector(".sessionFreezeResizeHandle")?.getAttribute("aria-valuenow") ?? "NaN") === value + 10, resizeBefore.value, { timeout: 2000 });
+      const resizeAfter = await page.evaluate(() => {
+        const handle = document.querySelector(".sessionFreezeResizeHandle");
+        const pane = document.querySelector(".dataTableFrozenPane");
+        const header = document.querySelector(".dataTableHeader--frozen");
+        const row = document.querySelector(".dataRow--frozenPane");
+        return {
+          value: Number.parseFloat(handle?.getAttribute("aria-valuenow") ?? "NaN"),
+          paneWidth: pane?.getBoundingClientRect().width ?? 0,
+          headerWidth: header?.getBoundingClientRect().width ?? 0,
+          rowWidth: row?.getBoundingClientRect().width ?? 0,
+        };
+      });
+      check(
+        tab.id,
+        "frozen-capability-column-resize",
+        Number.isFinite(resizeBefore.value)
+          && resizeAfter.value === resizeBefore.value + 10
+          && Math.abs((resizeAfter.paneWidth - resizeBefore.paneWidth) - 10) <= TOLERANCE
+          && Math.abs((resizeAfter.headerWidth - resizeBefore.headerWidth) - 10) <= TOLERANCE
+          && Math.abs((resizeAfter.rowWidth - resizeBefore.rowWidth) - 10) <= TOLERANCE
+          && Math.abs(resizeAfter.headerWidth - resizeAfter.rowWidth) <= TOLERANCE,
+        `value ${resizeBefore.value}->${resizeAfter.value}, pane ${resizeBefore.paneWidth}->${resizeAfter.paneWidth}, header/row ${resizeAfter.headerWidth}/${resizeAfter.rowWidth}`,
+      );
+      await resizeHandle.press("ArrowLeft");
+      await page.waitForFunction((value) => Number.parseFloat(document.querySelector(".sessionFreezeResizeHandle")?.getAttribute("aria-valuenow") ?? "NaN") === value, resizeBefore.value, { timeout: 2000 });
+    }
+
+    if (tab.id === "skills") {
+      const firstGroup = page.locator(".dataTableFrozenPane .dataGroup").first();
+      const groupTrigger = firstGroup.locator('[data-accordion-part="trigger"]');
+      await firstGroup.waitFor({ state: "visible", timeout: 2000 });
+      const initialGroupState = await firstGroup.getAttribute("data-state");
+      if (initialGroupState !== "open") {
+        await groupTrigger.click({ force: true });
+        await page.waitForFunction(() => document.querySelector(".dataTableFrozenPane .dataGroup")?.getAttribute("data-state") === "open", undefined, { timeout: 2000 });
+      }
+      for (let attempt = 0; attempt < 2 && await firstGroup.getAttribute("data-state") !== "closed"; attempt += 1) {
+        await groupTrigger.click({ force: true });
+        await page.waitForTimeout(50);
+      }
+      await page.waitForFunction(() => {
+        const frozen = document.querySelector(".dataTableFrozenPane .dataGroup");
+        const scroll = document.querySelector(".dataTableScrollPane .dataGroup");
+        const frozenContent = frozen?.querySelector('[role="region"]');
+        const scrollContent = scroll?.querySelector('[role="region"]');
+        const isCollapsed = (content) => !content || content.getBoundingClientRect().height < 1;
+        return frozen?.getAttribute("data-state") === "closed"
+          && isCollapsed(frozenContent)
+          && isCollapsed(scrollContent);
+      }, undefined, { timeout: 2000 }).catch(() => {});
+      const collapsedGroup = await page.evaluate(() => {
+        const frozen = document.querySelector(".dataTableFrozenPane .dataGroup");
+        const scroll = document.querySelector(".dataTableScrollPane .dataGroup");
+        const frozenContent = frozen?.querySelector('[role="region"]');
+        const scrollContent = scroll?.querySelector('[role="region"]');
+        return {
+          frozenState: frozen?.getAttribute("data-state"),
+          frozenContentHeight: frozenContent?.getBoundingClientRect().height ?? 0,
+          scrollContentHeight: scrollContent?.getBoundingClientRect().height ?? 0,
+          spacerHeight: scroll?.querySelector(".dataSplitGroupSpacer")?.getBoundingClientRect().height ?? 0,
+        };
+      });
+      check(
+        tab.id,
+        "frozen-capability-group-collapse",
+        collapsedGroup.frozenState === "closed"
+          && collapsedGroup.frozenContentHeight < 1
+          && collapsedGroup.scrollContentHeight < 1
+          && collapsedGroup.spacerHeight >= 34 - TOLERANCE,
+        `state ${collapsedGroup.frozenState}, content ${collapsedGroup.frozenContentHeight}/${collapsedGroup.scrollContentHeight}, spacer ${collapsedGroup.spacerHeight}`,
+      );
+      for (let attempt = 0; attempt < 2 && await firstGroup.getAttribute("data-state") !== "open"; attempt += 1) {
+        await groupTrigger.click({ force: true });
+        await page.waitForTimeout(50);
+      }
+      await page.waitForFunction(() => document.querySelector(".dataTableFrozenPane .dataGroup")?.getAttribute("data-state") === "open", undefined, { timeout: 2000 });
+      const reopenedGroup = await page.evaluate(() => {
+        const frozen = document.querySelector(".dataTableFrozenPane .dataGroup .dataRow--frozenPane");
+        const scroll = frozen?.dataset.rowId
+          ? document.querySelector(`.dataTableScrollPane .dataRow--scrollPane[data-row-id="${CSS.escape(frozen.dataset.rowId)}"]`)
+          : null;
+        return {
+          frozenHeight: frozen?.getBoundingClientRect().height ?? 0,
+          scrollHeight: scroll?.getBoundingClientRect().height ?? 0,
+          topDelta: frozen && scroll ? Math.abs(frozen.getBoundingClientRect().top - scroll.getBoundingClientRect().top) : Number.POSITIVE_INFINITY,
+        };
+      });
+      check(
+        tab.id,
+        "frozen-capability-group-reopen-sync",
+        reopenedGroup.frozenHeight > 0
+          && Math.abs(reopenedGroup.frozenHeight - reopenedGroup.scrollHeight) <= TOLERANCE
+          && reopenedGroup.topDelta <= TOLERANCE,
+        `row heights ${reopenedGroup.frozenHeight}/${reopenedGroup.scrollHeight}, top delta ${reopenedGroup.topDelta}`,
+      );
+    }
+  } finally {
+    await page.evaluate(({ original }) => {
+      const table = document.querySelector(".dataTableShell--frozen");
+      if (!table) return;
+      if (original) table.style.setProperty("--data-scroll-grid-columns", original);
+      else table.style.removeProperty("--data-scroll-grid-columns");
+      const scroll = document.querySelector(".dataTableBodyScroll");
+      if (scroll) {
+        scroll.scrollLeft = 0;
+        scroll.scrollTop = 0;
+        scroll.dispatchEvent(new Event("scroll", { bubbles: true }));
+      }
+    }, { original: overflowFixture.original });
+    await page.keyboard.press("Escape").catch(() => {});
+    await page.mouse.move(0, 0);
+    await page.waitForTimeout(60);
   }
 }
 
@@ -973,20 +1522,24 @@ async function runFrozenBugSmokeChecks(page, tab) {
       };
     }, { geometry: b6Geometry, b64: screenshot.toString("base64") });
   }
-  check(
-    tab.id,
-    "bug6-frozen-header-rule-visible",
-    b6Metrics.missing !== true
-      && b6Metrics.points.every((point) => (
-        point.height >= 1
-        && point.bg !== "transparent"
-        && point.bg !== "rgba(0, 0, 0, 0)"
-        && point.delta >= 8
-      )),
-    b6Metrics.missing === true
-      ? "missing frozen/scroll header"
-      : b6Metrics.points.map((point) => `${point.name} height ${point.height}px bg ${point.bg} pixel delta ${point.delta}`).join(", "),
-  );
+  // Keep the focused freeze contract independent of the legacy Hooks screenshot
+  // probe; the probe remains part of the full alignment run.
+  if (!frozenOnly || tab.id !== "hooks") {
+    check(
+      tab.id,
+      "bug6-frozen-header-rule-visible",
+      b6Metrics.missing !== true
+        && b6Metrics.points.every((point) => (
+          point.height >= 1
+          && point.bg !== "transparent"
+          && point.bg !== "rgba(0, 0, 0, 0)"
+          && point.delta >= 8
+        )),
+      b6Metrics.missing === true
+        ? "missing frozen/scroll header"
+        : b6Metrics.points.map((point) => `${point.name} height ${point.height}px bg ${point.bg} pixel delta ${point.delta}`).join(", "),
+    );
+  }
 
   if (tab.id === "sessions") {
     const separatorGeometry = await page.evaluate(() => {
@@ -1208,74 +1761,28 @@ async function runFrozenBugSmokeChecks(page, tab) {
   }
 
   if (tab.id === "skills") {
-    const visibilityTrigger = page.locator('.dataTableScrollPane .dataRow--scrollPane .selectControlTrigger.visibility').first();
-    if (await visibilityTrigger.count()) {
-      await visibilityTrigger.click();
-      await page.mouse.move(0, 0);
-      await page.waitForTimeout(150);
-      const openSelectMetrics = await page.evaluate(() => {
-        const trigger = document.querySelector('.dataTableScrollPane .dataRow--scrollPane .selectControlTrigger.visibility');
-        const scrollRow = trigger?.closest(".dataRow--scrollPane");
-        const id = scrollRow?.dataset.rowId;
-        const frozenRow = id
-          ? document.querySelector(`.dataTableFrozenPane .dataRow--frozenPane[data-row-id="${CSS.escape(id)}"]`)
-          : null;
-        if (!trigger || !scrollRow || !frozenRow) return { missing: true };
-        return {
-          missing: false,
-          triggerOpen: trigger.getAttribute("data-state") === "open",
-          frozenMenuActive: frozenRow.classList.contains("menuActive"),
-          scrollMenuActive: scrollRow.classList.contains("menuActive"),
-          frozenBg: getComputedStyle(frozenRow, "::after").backgroundColor,
-          scrollBg: getComputedStyle(scrollRow, "::after").backgroundColor,
-        };
-      });
+    const visibilityControl = page.locator('.dataTableScrollPane .dataRow--scrollPane .segmentedControl.visibility').first();
+    if (await visibilityControl.count()) {
+      const visibilityMetrics = await visibilityControl.evaluate((control) => ({
+        optionCount: control.querySelectorAll(".segmentedControlItem").length,
+        selectedCount: control.querySelectorAll('.segmentedControlItem[data-state="on"]').length,
+        rowClickIsolation: Boolean(control.closest("[data-no-row-click]")),
+      }));
       check(
         tab.id,
-        "bug22-select-menu-sync-open",
-        openSelectMetrics.missing !== true
-          && openSelectMetrics.triggerOpen === true
-          && openSelectMetrics.frozenMenuActive === true
-          && openSelectMetrics.scrollMenuActive === true
-          && openSelectMetrics.frozenBg === openSelectMetrics.scrollBg,
-        openSelectMetrics.missing === true
-          ? "missing paired row select rows"
-          : `trigger open ${openSelectMetrics.triggerOpen}, menuActive frozen/scroll ${openSelectMetrics.frozenMenuActive}/${openSelectMetrics.scrollMenuActive}, bg ${openSelectMetrics.frozenBg}/${openSelectMetrics.scrollBg}`,
+        "bug22-segmented-visibility",
+        visibilityMetrics.optionCount === 3 && visibilityMetrics.selectedCount === 1,
+        JSON.stringify(visibilityMetrics),
       );
-      await page.keyboard.press("Escape");
-      await page.waitForTimeout(150);
-      const closedSelectMetrics = await page.evaluate(() => {
-        const trigger = document.querySelector('.dataTableScrollPane .dataRow--scrollPane .selectControlTrigger.visibility');
-        const scrollRow = trigger?.closest(".dataRow--scrollPane");
-        const id = scrollRow?.dataset.rowId;
-        const frozenRow = id
-          ? document.querySelector(`.dataTableFrozenPane .dataRow--frozenPane[data-row-id="${CSS.escape(id)}"]`)
-          : null;
-        if (!trigger || !scrollRow || !frozenRow) return { missing: true };
-        return {
-          missing: false,
-          triggerOpen: trigger.getAttribute("data-state") === "open",
-          frozenMenuActive: frozenRow.classList.contains("menuActive"),
-          scrollMenuActive: scrollRow.classList.contains("menuActive"),
-          frozenBg: getComputedStyle(frozenRow, "::after").backgroundColor,
-          scrollBg: getComputedStyle(scrollRow, "::after").backgroundColor,
-        };
-      });
       check(
         tab.id,
-        "bug22-select-menu-sync-close",
-        closedSelectMetrics.missing !== true
-          && closedSelectMetrics.triggerOpen === false
-          && closedSelectMetrics.frozenMenuActive === false
-          && closedSelectMetrics.scrollMenuActive === false
-          && closedSelectMetrics.frozenBg === closedSelectMetrics.scrollBg,
-        closedSelectMetrics.missing === true
-          ? "missing paired row select rows"
-          : `trigger open ${closedSelectMetrics.triggerOpen}, menuActive frozen/scroll ${closedSelectMetrics.frozenMenuActive}/${closedSelectMetrics.scrollMenuActive}, bg ${closedSelectMetrics.frozenBg}/${closedSelectMetrics.scrollBg}`,
+        "bug23-visibility-does-not-open-detail",
+        visibilityMetrics.rowClickIsolation,
+        `row click isolation ${visibilityMetrics.rowClickIsolation}`,
       );
     } else {
-      check(tab.id, "bug22-select-menu-sync-open", false, "Visibility select trigger missing");
-      check(tab.id, "bug22-select-menu-sync-close", false, "Visibility select trigger missing");
+      check(tab.id, "bug22-segmented-visibility", false, "Visibility segmented control missing");
+      check(tab.id, "bug23-visibility-does-not-open-detail", false, "Visibility segmented control missing");
     }
   }
 
@@ -1459,7 +1966,12 @@ async function runFrozenBugSmokeChecks(page, tab) {
       await selectedRowCheckbox.click({ force: true });
       await page.waitForTimeout(30);
     }
-    await groupButton.evaluate((button) => button.click());
+    const currentGroupButton = page.locator(".dataTableHeader .dataHeaderGroupButton").first();
+    if (await currentGroupButton.count() === 0) {
+      check(tab.id, "bug3-group-button-stable", false, "group button disappeared while clearing selection");
+    } else {
+      await currentGroupButton.evaluate((button) => button.click());
+    }
     await page.waitForFunction(
       () => Boolean(
         document.querySelector(".dataTableHeader .dataHeaderGroupButton.activeGroup")
@@ -1470,11 +1982,12 @@ async function runFrozenBugSmokeChecks(page, tab) {
       ),
       { timeout: 2000 },
     ).catch(() => {});
+    await page.waitForTimeout(350);
     const groupedMetrics = await page.evaluate(() => {
       const round = (value) => Math.round(value * 100) / 100;
       const frozenGroup = document.querySelector(".dataTableFrozenPane .dataGroup");
       const scrollGroup = document.querySelector(".dataTableScrollPane .dataGroup");
-      const frozenHeading = frozenGroup?.querySelector(".sectionHeading");
+      const frozenHeading = frozenGroup?.querySelector('[data-accordion-part="heading"]');
       const scrollSpacer = scrollGroup?.querySelector(".dataSplitGroupSpacer");
       const scroller = document.querySelector(".dataTableBodyScroll");
       const frozenPane = document.querySelector(".dataTableFrozenPane");
@@ -1558,6 +2071,56 @@ async function runFrozenBugSmokeChecks(page, tab) {
         ? "missing grouped scroll spacer"
         : `covered ${groupedMetrics.scrollHeaderCovered}, background ${groupedMetrics.scrollSpacerBackground}, spacer ${groupedMetrics.scrollSpacerLeft}/${groupedMetrics.scrollSpacerRight}, frozen right ${groupedMetrics.frozenPaneRight}, viewport right ${groupedMetrics.viewportRight}`,
     );
+
+    if (tab.id === "rules") {
+      const stickyMetrics = await page.evaluate(() => {
+        const round = (value) => Math.round(value * 100) / 100;
+        const scroller = document.querySelector(".dataTableBodyScroll");
+        const scrollSpacer = document.querySelector(".dataTableScrollPane .dataSplitGroupSpacer");
+        if (!scroller || !scrollSpacer) return { missing: true };
+
+        const previousTop = scroller.scrollTop;
+        const previousLeft = scroller.scrollLeft;
+        const maxScrollTop = Math.max(0, scroller.scrollHeight - scroller.clientHeight);
+        const targetTop = Math.min(maxScrollTop, Math.max(160, scroller.clientHeight * 0.6));
+        scroller.scrollTop = targetTop;
+        scroller.dispatchEvent(new Event("scroll", { bubbles: true }));
+
+        const viewportRect = scroller.getBoundingClientRect();
+        const scrollSpacerRect = scrollSpacer.getBoundingClientRect();
+        const probeX = Math.min(viewportRect.right - 20, Math.max(scrollSpacerRect.left + 20, viewportRect.left + 20));
+        const probeY = viewportRect.top + 10;
+        const hit = document.elementFromPoint(probeX, probeY);
+        const result = {
+          missing: false,
+          maxScrollTop: round(maxScrollTop),
+          scrollTop: round(scroller.scrollTop),
+          viewportTop: round(viewportRect.top),
+          scrollSpacerTop: round(scrollSpacerRect.top),
+          scrollStickyDelta: round(Math.abs(scrollSpacerRect.top - viewportRect.top)),
+          scrollSpacerPosition: getComputedStyle(scrollSpacer).position,
+          hitScrollSpacer: Boolean(hit?.closest?.(".dataSplitGroupSpacer")),
+        };
+
+        scroller.scrollTop = previousTop;
+        scroller.scrollLeft = previousLeft;
+        scroller.dispatchEvent(new Event("scroll", { bubbles: true }));
+        return result;
+      });
+      check(
+        tab.id,
+        "bug25-grouped-scroll-spacer-sticky-on-vertical-scroll",
+        stickyMetrics.missing !== true
+          && stickyMetrics.maxScrollTop > 160
+          && stickyMetrics.scrollTop > 0
+          && stickyMetrics.scrollSpacerPosition === "sticky"
+          && stickyMetrics.scrollStickyDelta <= TOLERANCE
+          && stickyMetrics.hitScrollSpacer === true,
+        stickyMetrics.missing === true
+          ? "missing grouped sticky heading or scroll spacer"
+          : `scroll ${stickyMetrics.scrollTop}/${stickyMetrics.maxScrollTop}, viewport/spacer top ${stickyMetrics.viewportTop}/${stickyMetrics.scrollSpacerTop}, position ${stickyMetrics.scrollSpacerPosition}, delta ${stickyMetrics.scrollStickyDelta}, hit spacer ${stickyMetrics.hitScrollSpacer}`,
+      );
+    }
     check(
       tab.id,
       "bug18-grouped-row-separators-visible",
@@ -1633,6 +2196,9 @@ try {
     const navigationEntry = performance.getEntriesByType("navigation")[0];
     let sessionsSnapshotReleased = navigationEntry?.type === "reload";
     const sessionsSnapshotWaiters = [];
+    let skillEvidenceSessionId = "";
+    const skillEvidenceInput = 'const r = await tools.exec_command({cmd:"cat /Users/dev/project-fixture/.codex/skills/tutti-test-audit/SKILL.md"});';
+    const skillEvidenceTranscriptCursors = [];
     const sessionSnapshot = () => ({
       scopeKey: "workspace:/alignment-e2e",
       domain: "sessions",
@@ -1651,14 +2217,24 @@ try {
       const waiters = analyticsOverviewWaiters.splice(0);
       waiters.forEach((resolve) => resolve());
     };
+    window.__setSkillEvidenceSession = (sessionId) => {
+      skillEvidenceSessionId = sessionId;
+    };
+    window.__clearSkillEvidenceSession = () => {
+      skillEvidenceSessionId = "";
+    };
     let skillUpdateAttempts = 0;
     const unhandledCommands = [];
+    const invokedCommands = [];
+    const emittedEvents = [];
     const emitDaemonEvent = (event) => {
-      const resolve = daemonEventWaiters.shift();
-      if (resolve) resolve(event);
+      emittedEvents.push(event);
+      const waiters = daemonEventWaiters.splice(0);
+      if (waiters.length > 0) waiters.forEach((resolve) => resolve(event));
       else daemonEventQueue.push(event);
     };
     const invokeDomainCommand = async (command, args) => {
+      invokedCommands.push(command);
       if (command === "log_event") return null;
       if (command === "plugin:event|listen") {
         sessionScanHandler = callbacks.get(args.handler);
@@ -1680,6 +2256,7 @@ try {
       }
       if (command === "device_name") return "Mock Device";
       if (command === "session_resume_target") return "terminal";
+      if (command === "assistant_chat_sessions") return [];
       if (command === "analytics_revision") return 1;
       if (command === "bundled_skill_status") {
         return {
@@ -1695,7 +2272,27 @@ try {
         return { state: "idle", indexed: 0, total: 0, failed: 0 };
       }
       if (command === "session_skill_index_run") return { started: true };
-      if (command === "session_skill_links") return [];
+      if (command === "session_skill_links") {
+        if (args?.sessionId !== skillEvidenceSessionId) return [];
+        return [{
+          session_path: `/tmp/${skillEvidenceSessionId}.jsonl`,
+          session_project: "/Users/dev/project-fixture",
+          session_id: skillEvidenceSessionId,
+          agent: "codex",
+          session_title: "Skill evidence session",
+          session_started_at: "2026-06-16T09:00:00Z",
+          session_updated_at: "2026-06-16T18:00:00Z",
+          session_message_count: 3,
+          skill_name: "tutti-test-audit",
+          skill_path: "/Users/dev/project-fixture/.codex/skills/tutti-test-audit/SKILL.md",
+          skill_agent: "codex",
+          skill_scope: "project",
+          evidence_kind: "exec",
+          evidence_text: skillEvidenceInput,
+          evidence_time: null,
+          confidence: "observed",
+        }];
+      }
       if (command === "analytics_overview") {
         const usage = {
           inputTokens: 10,
@@ -1705,7 +2302,7 @@ try {
           reasoningOutputTokens: 0,
           totalTokens: 19,
         };
-        const runs = { started: 1, completed: 1, unclosed: 0, totalMs: 100, maxMs: 100 };
+        const runs = { started: 1, completed: 1, unclosed: 0, totalMs: 100, maxMs: 100, timedCompleted: 0 };
         const analytics = {
           revision: 1,
           generatedAt: "2026-06-29T19:00:00Z",
@@ -1723,6 +2320,7 @@ try {
             tokenUsage: true,
             reasoningTokens: false,
             explicitRuns: true,
+            duration: false,
             rateLimitHistory: false,
           }],
           summary: {
@@ -1800,18 +2398,41 @@ try {
         };
       }
       if (command === "skills_refresh") {
+        queueMicrotask(() => emitDaemonEvent({
+          id: 1,
+          event: "skills://updates",
+          payload: {
+            status: "completed",
+            skills: null,
+            updates: [{ id: "alpha-skill", name: "alpha-skill", status: "update-available", source_kind: "github" }],
+            error: null,
+          },
+        }));
         return {
           skills: report.skills.skills,
-          updateCheck: "completed",
-          updates: [{ name: "alpha-skill", status: "update-available" }],
+          updateCheck: "started",
         };
       }
       if (command === "skills_list") return report.skills.skills;
       if (command === "skills_backup_status") return { config: null, statuses: [], versions: [] };
       if (command === "skills_backup_sync") return null;
       if (command === "projects_list") return [
-        { id: "project-1", name: "project-1", rootPath: "/Users/dev/.cursor/projects/project-1" },
-        { id: "project-2", name: "project-2", rootPath: "/Users/dev/.cursor/projects/project-2" },
+        {
+          id: "project-1",
+          name: "project-1",
+          rootPath: "/Users/dev/.cursor/projects/project-1",
+          scopeId: "project-1",
+          status: "active",
+          lastScannedAt: "2026-09-03T00:00:00Z",
+        },
+        {
+          id: "project-2",
+          name: "project-2",
+          rootPath: "/Users/dev/.cursor/projects/project-2",
+          scopeId: "project-2",
+          status: "active",
+          lastScannedAt: "2026-09-03T00:00:00Z",
+        },
       ];
       if (command === "session_projects_list") return [];
       if (command === "project_scan_scopes_list") return [];
@@ -1832,10 +2453,86 @@ try {
         if (sessionsSnapshotReleased) return sessionSnapshot();
         return new Promise((resolve) => sessionsSnapshotWaiters.push(resolve));
       }
+      if (command === "sessions_list") {
+        const request = args ?? {};
+        const selectedProjects = new Set(request.selectedProjectKeys ?? []);
+        const projectOptions = new Map();
+        for (const session of report.sessions.sessions) {
+          const key = session.project ?? "";
+          const current = projectOptions.get(key);
+          projectOptions.set(key, {
+            key,
+            label: key.split("/").filter(Boolean).at(-1) ?? "",
+            title: key,
+            count: (current?.count ?? 0) + 1,
+          });
+        }
+        const field = (session, key) => {
+          if (key === "messages") return session.message_count ?? 0;
+          if (key === "turns") return session.turn_count ?? 0;
+          if (key === "project") return session.project ?? "";
+          if (key === "startedAt") return session.started_at ?? "";
+          if (key === "updatedAt") return session.updated_at ?? "";
+          return session[key] ?? "";
+        };
+        const direction = request.sortDirection === "asc" ? 1 : -1;
+        const rows = report.sessions.sessions
+          .filter((session) => (!request.agent || session.agent === request.agent)
+            && (request.showChildSessions || !session.parent_session_id)
+            && (selectedProjects.size === 0 || selectedProjects.has(session.project ?? ""))
+            && (!request.query || [session.id, session.title, session.project]
+              .some((value) => `${value ?? ""}`.toLowerCase().includes(`${request.query}`.toLowerCase()))))
+          .sort((left, right) => direction * `${field(left, request.sortKey)}`.localeCompare(`${field(right, request.sortKey)}`, undefined, { numeric: true }));
+        const pageSize = request.pageSize ?? 50;
+        const pages = [];
+        if (request.groupBy) {
+          const groups = new Map();
+          for (const row of rows) {
+            const key = `${field(row, request.groupBy)}`;
+            groups.set(key, [...(groups.get(key) ?? []), row]);
+          }
+          let pageRows = [];
+          let start = 0;
+          let groupCount = 0;
+          for (const groupRows of groups.values()) {
+            if (pageRows.length >= pageSize) {
+              pages.push({ rows: pageRows, start, groupCount });
+              start += pageRows.length;
+              pageRows = [];
+              groupCount = 0;
+            }
+            pageRows.push(...groupRows);
+            groupCount += 1;
+          }
+          pages.push({ rows: pageRows, start, groupCount });
+        } else {
+          for (let start = 0; start < rows.length; start += pageSize) {
+            pages.push({ rows: rows.slice(start, start + pageSize), start, groupCount: null });
+          }
+        }
+        if (pages.length === 0) pages.push({ rows: [], start: 0, groupCount: request.groupBy ? 0 : null });
+        const page = Math.min(request.page ?? 0, pages.length - 1);
+        const selected = pages[page];
+        const responseRows = request.query
+          ? selected.rows.map((session) => ({ ...session, search_score: 1, search_snippet: "Matched ⟦session⟧ text" }))
+          : selected.rows;
+        return {
+          revision: 0,
+          rows: responseRows,
+          projectOptions: [...projectOptions.values()],
+          total: rows.length,
+          childSessionCount: rows.filter((session) => session.parent_session_id).length,
+          page,
+          pageCount: pages.length,
+          pageStart: selected.start,
+          pageEnd: selected.start + selected.rows.length,
+          groupCount: selected.groupCount,
+        };
+      }
       if (command === "sessions_scan_start") {
         queueMicrotask(() => {
-          const recent = { id: 1, event: "sessions://scan", payload: { generation: 1, phase: "recent", upserts: report.sessions.sessions, deleted: [], scanned: report.sessions.sessions.length, complete: true } };
-          const backfill = { id: 1, event: "sessions://scan", payload: { generation: 1, phase: "backfill", upserts: [], deleted: [], scanned: report.sessions.sessions.length, complete: true } };
+          const recent = { id: 1, event: "sessions://scan", payload: { generation: 1, phase: "recent", upserts: report.sessions.sessions, deleted: [], scanned: report.sessions.sessions.length, complete: true, error: null } };
+          const backfill = { id: 1, event: "sessions://scan", payload: { generation: 1, phase: "backfill", upserts: [], deleted: [], scanned: report.sessions.sessions.length, complete: true, error: null } };
           emitDaemonEvent(recent);
           emitDaemonEvent(backfill);
           sessionScanHandler?.(recent);
@@ -1844,16 +2541,45 @@ try {
         return { generation: 1, started: true };
       }
       if (command === "session_transcript") {
+        if (skillEvidenceSessionId && args?.path === `/tmp/${skillEvidenceSessionId}.jsonl`) {
+          const cursor = args?.cursor ?? "";
+          skillEvidenceTranscriptCursors.push(cursor);
+          const hasTarget = cursor === "skill-evidence-page-2";
+          return {
+            items: hasTarget
+              ? [{
+                kind: "tool",
+                body: skillEvidenceInput,
+                tag: "exec",
+                time: "10:02",
+                command: skillEvidenceInput,
+                result: "skill file loaded",
+              }]
+              : [
+                { kind: "user", body: "Skill evidence prompt", tag: null, time: "10:00" },
+                { kind: "assistant", body: "Reading the project skill", tag: null, time: "10:01" },
+              ],
+            locatorItems: [],
+            warnings: [],
+            nextCursor: hasTarget ? null : "skill-evidence-page-2",
+            done: hasTarget,
+            sourceVersion: "skill-evidence-v1",
+            restartRequired: false,
+            unchanged: false,
+          };
+        }
         return {
           items: Array.from({ length: 5 }, (_, index) => ([
             {
               kind: "user",
               body: `Locator prompt ${index + 1}`,
+              tag: null,
               time: `10:0${index}`,
             },
             {
               kind: "assistant",
               body: `Locator response ${index + 1}`,
+              tag: null,
               time: `10:0${index}`,
             },
           ])).flat(),
@@ -1865,9 +2591,15 @@ try {
           warnings: [],
           nextCursor: null,
           done: true,
+          sourceVersion: "",
+          restartRequired: false,
+          unchanged: false,
         };
       }
       if (command === "session_transcript_locator") {
+        if (skillEvidenceSessionId && args?.path === `/tmp/${skillEvidenceSessionId}.jsonl`) {
+          return { locatorItems: [], warnings: [], sourceVersion: "skill-evidence-v1" };
+        }
         return {
           locatorItems: Array.from({ length: 5 }, (_, index) => ({
             index: index * 2,
@@ -1892,7 +2624,7 @@ try {
       if (command === "hooks_list") return report.hooks.hooks;
       if (command === "mcp_list") return report.mcp.servers;
       if (command === "agents_list") return report.agents.agents;
-      if (command === "skills_updates") return [];
+      if (command === "skills_updates") return { updateCheck: "started" };
       if (command === "skills_update_many") {
         if (args?.dryRun) {
           return {
@@ -1918,7 +2650,11 @@ try {
       invoke: async (command, args) => {
         if (command === "daemon_invoke") {
           const request = args?.request ?? {};
-          return { ok: true, result: await invokeDomainCommand(request.command, request.args) };
+          return {
+            jsonrpc: "2.0",
+            id: request.id,
+            result: await invokeDomainCommand(request.method, request.params),
+          };
         }
         if (command === "daemon_subscribe_events") return 1;
         if (command === "daemon_next_event") {
@@ -1936,7 +2672,12 @@ try {
       unregisterCallback: (id) => callbacks.delete(id),
       metadata: { currentWindow: { label: "main" }, currentWebview: { label: "main" } },
     };
-    window.__alignmentMockDiagnostics = () => ({ unhandledCommands: [...unhandledCommands] });
+    window.__alignmentMockDiagnostics = () => ({
+      unhandledCommands: [...unhandledCommands],
+      invokedCommands: [...invokedCommands],
+      emittedEvents: emittedEvents.map((event) => event.event),
+      skillEvidenceTranscriptCursors: [...skillEvidenceTranscriptCursors],
+    });
   }, buildReport());
 
   await page.goto(`http://127.0.0.1:${PORT}/`, { waitUntil: "domcontentloaded", timeout: 10000 });
@@ -1944,52 +2685,63 @@ try {
   await page.getByRole("heading", { name: "Overview", exact: true }).waitFor();
   await page.locator(".overviewPage").waitFor();
   await runPageHeaderChecks(page, "overview", "Overview", false);
-  await runOverviewUsageChecks(page);
-  const navLabels = await page.locator(".navItem").evaluateAll((buttons) => buttons.map((button) => button.textContent?.trim() ?? ""));
+  if (!frozenOnly) await runOverviewUsageChecks(page);
+  const navLabels = await page.locator(".navItemLabel").evaluateAll((labels) => labels.map((label) => label.textContent?.trim() ?? ""));
   check(
     "navigation",
     "all-pages-listed",
-    JSON.stringify(navLabels) === JSON.stringify(["Overview", "Skills", "Sessions", "Rules", "MCP", "Hooks", "Prompts", "Config", "Settings"]),
+    JSON.stringify(navLabels) === JSON.stringify(["Overview", "Skills", "Sessions", "Rules", "MCPs", "Hooks", "Prompts", "Configs", "Settings"]),
     navLabels.join(", "),
   );
   await page.getByRole("button", { name: "Skills", exact: true }).click();
   await page.getByRole("heading", { name: "Skills" }).waitFor();
-  await page.waitForFunction(
-    () => getComputedStyle(document.querySelector('.navItem[aria-label="Skills"]')).fontWeight === "550",
-    { timeout: 500 },
-  );
-  const navState = await page.evaluate(() => {
-    const buttons = [...document.querySelectorAll(".navItem")];
-    const active = document.querySelector('.navItem[aria-label="Skills"]');
-    return {
-      active: active?.classList.contains("active") === true && active?.getAttribute("aria-current") === "page",
-      fontWeights: [...new Set(buttons.map((button) => getComputedStyle(button).fontWeight))],
-      activeFontWeight: active ? getComputedStyle(active).fontWeight : "",
-    };
-  });
-  check("navigation", "active-state-after-click", navState.active, "Skills should be the active navigation item");
-  check("navigation", "active-tab-weight", navState.activeFontWeight === "550", `active weight: ${navState.activeFontWeight}`);
-  check("navigation", "inactive-tab-weight", navState.fontWeights.includes("400"), `weights: ${navState.fontWeights.join(", ")}`);
+  if (!frozenOnly) {
+    await page.locator('.navItem[aria-label="Skills"]').waitFor({ state: "visible", timeout: 2000 });
+    const navState = await page.evaluate(() => {
+      const buttons = [...document.querySelectorAll(".navItem")];
+      const active = document.querySelector('.navItem[aria-label="Skills"]');
+      return {
+        active: active?.classList.contains("active") === true && active?.getAttribute("aria-current") === "page",
+        fontWeights: [...new Set(buttons.map((button) => getComputedStyle(button).fontWeight))],
+        activeFontWeight: active ? getComputedStyle(active).fontWeight : "",
+      };
+    });
+    check("navigation", "active-state-after-click", navState.active, "Skills should be the active navigation item");
+    check("navigation", "active-tab-weight", navState.activeFontWeight === "550", `active weight: ${navState.activeFontWeight}`);
+    check("navigation", "inactive-tab-weight", navState.fontWeights.includes("400"), `weights: ${navState.fontWeights.join(", ")}`);
 
-  writeStdout("\n== installed agent filter ==");
-  await page.getByRole("combobox", { name: "Agent filter" }).click();
-  await page.waitForFunction(
-    () => [...document.querySelectorAll('[role="option"]')].some((option) => option.textContent?.includes("Claude")),
-    { timeout: 2000 },
-  ).catch(() => {});
-  const agentOptions = await page.getByRole("option").allTextContents();
-  check("sidebar", "installed-agent-filter", agentOptions.some((label) => label.includes("Claude")), `options: ${agentOptions.join(", ")}`);
-  check("sidebar", "uninstalled-agent-filter", !agentOptions.some((label) => label.includes("Ghost Agent")), `options: ${agentOptions.join(", ")}`);
-  await page.keyboard.press("Escape");
+    writeStdout("\n== installed agent filter ==");
+    const filterTrigger = page.getByRole("button", { name: "Agent and scope filters" });
+    if (await filterTrigger.count() === 0) {
+      check("sidebar", "agent-filter-trigger", false, "missing agent and scope filter trigger");
+    } else {
+      await filterTrigger.click();
+      const agentSubmenu = page.getByRole("menuitem", { name: "Agent", exact: true });
+      if (await agentSubmenu.count() === 0) {
+        check("sidebar", "agent-filter-submenu", false, "missing Agent filter submenu");
+      } else {
+        await agentSubmenu.hover();
+        await page.waitForFunction(
+          () => [...document.querySelectorAll('[role="menuitem"]')].some((item) => item.textContent?.includes("Claude")),
+          { timeout: 2000 },
+        ).catch(() => {});
+        const agentOptions = await page.getByRole("menuitem").allTextContents();
+        check("sidebar", "installed-agent-filter", agentOptions.some((label) => label.includes("Claude")), `options: ${agentOptions.join(", ")}`);
+        check("sidebar", "uninstalled-agent-filter", !agentOptions.some((label) => label.includes("Ghost Agent")), `options: ${agentOptions.join(", ")}`);
+      }
+      await page.keyboard.press("Escape");
+      await page.keyboard.press("Escape");
+    }
 
-  writeStdout("\n== req8 non-frozen fixture ==");
-  await runReq8NonFrozenFixture(page);
-  writeStdout("\n== frozen hover parity fixture ==");
-  await runFrozenNativeHoverParityFixture(page);
-  writeStdout("\n== shared badge padding ==");
-  await runBadgePaddingChecks(page);
+    writeStdout("\n== req8 non-frozen fixture ==");
+    await runReq8NonFrozenFixture(page);
+    writeStdout("\n== frozen hover parity fixture ==");
+    await runFrozenNativeHoverParityFixture(page);
+    writeStdout("\n== shared badge padding ==");
+    await runBadgePaddingChecks(page);
+  }
 
-  for (const tab of tabs) {
+  for (const tab of (frozenOnly ? tabs.filter((item) => item.frozen) : tabs)) {
     writeStdout(`\n== ${tab.heading} ==`);
     if (tab.id !== "skills") {
       // Dismiss any overlay (e.g. a row click that opened an editor dialog)
@@ -2000,18 +2752,37 @@ try {
     await page.getByRole("heading", { name: tab.heading, exact: true }).waitFor();
     await runPageHeaderChecks(page, tab.id, tab.heading, tab.compact);
     if (tab.id === "sessions") {
-      const initialDetailPanels = await page.locator(".transcriptPanelHost").count();
-      check(
-        tab.id,
-        "bug-session-detail-no-fallback-flash",
-        initialDetailPanels === 0,
-        `${initialDetailPanels} detail panels before sessions load`,
-      );
+      if (!frozenOnly) {
+        const initialDetailPanels = await page.locator(".transcriptPanelHost").count();
+        check(
+          tab.id,
+          "bug-session-detail-no-fallback-flash",
+          initialDetailPanels === 0,
+          `${initialDetailPanels} detail panels before sessions load`,
+        );
+      }
       await page.evaluate(() => window.__releaseSessionsSnapshot?.());
     }
-    await page.locator(".dataRow").first().waitFor();
+    try {
+      await page.locator(".dataRow").first().waitFor({ timeout: frozenOnly ? 5000 : 30000 });
+    } catch (error) {
+      if (frozenOnly) {
+        const diagnostics = await page.evaluate(() => ({
+          heading: document.querySelector("h1")?.textContent?.trim() ?? "",
+          body: document.body.textContent?.trim().slice(0, 800) ?? "",
+          loading: document.querySelector(".loadingState")?.textContent?.trim() ?? "",
+          tableRows: document.querySelectorAll(".dataRow").length,
+          frozenRows: document.querySelectorAll(".dataRow--frozenPane").length,
+          pageErrors: window.__alignmentMockDiagnostics?.() ?? null,
+        }));
+        writeStdout(`frozen e2e table bootstrap diagnostics: ${JSON.stringify(diagnostics)}`);
+      }
+      throw error;
+    }
 
-    if (tab.id === "sessions") {
+    if (tab.id === "prompts" && !frozenOnly) await runPromptRowActionsAlignmentChecks(page);
+
+    if (tab.id === "sessions" && !frozenOnly) {
       const searchInput = page.getByPlaceholder("Search sessions");
       await searchInput.fill("session");
       await page.locator(".sessionSearchSnippet").first().waitFor();
@@ -2114,8 +2885,13 @@ try {
       await searchInput.fill("");
     }
 
-    if (tab.id === "skills") {
-      await page.getByRole("button", { name: "View update for alpha-skill" }).click();
+    if (tab.id === "skills" && !frozenOnly) {
+      const updateButton = page.getByRole("button", { name: "View update for alpha-skill" });
+      if (await updateButton.count() === 0) {
+        const diagnostics = await page.evaluate(() => window.__alignmentMockDiagnostics?.() ?? null);
+        check(tab.id, "bug-update-badge-visible", false, `missing update badge; diagnostics ${JSON.stringify(diagnostics)}`);
+      } else {
+        await updateButton.click();
       const updateDialog = page.locator(".confirmDialogPanel");
       await updateDialog.getByRole("button", { name: "Apply updates" }).click();
       const updateFailure = updateDialog.getByRole("alert");
@@ -2150,6 +2926,7 @@ try {
       if (visibilityGroupingPersisted === "true") {
         await originGroupButton.click();
         await page.waitForTimeout(40);
+      }
       }
     }
 
@@ -2336,7 +3113,7 @@ try {
       );
     }
 
-    if (["skills", "rules", "hooks", "mcp"].includes(tab.id)) {
+    if (!frozenOnly && ["skills", "rules", "hooks", "mcp"].includes(tab.id)) {
       const scopes = await page.evaluate(() => [...new Set(
         [...document.querySelectorAll(".dataTableScrollPane [data-column='scope']")]
           .map((node) => node.textContent?.trim() ?? ""),
@@ -2429,18 +3206,26 @@ try {
       }
     }
 
-    if (tab.id === "sessions") {
+    if (tab.id === "sessions" && !frozenOnly) {
       const pageSize = page.getByRole("combobox", { name: "Rows per page" });
       await pageSize.click();
       await page.getByRole("option", { name: "100", exact: true }).click();
       await page.waitForFunction(() => document.querySelector(".sessionPagerInfo")?.textContent?.includes("1-100"));
       const scroller = page.locator(".dataTableBodyScroll");
-      await scroller.hover({ force: true });
-      await page.mouse.wheel(0, 100_000);
-      await page.waitForFunction(() => {
+      await scroller.evaluate((node) => {
+        node.scrollTop = node.scrollHeight;
+        node.dispatchEvent(new Event("scroll", { bubbles: true }));
+      });
+      const reachedScrollEnd = await page.waitForFunction(() => {
         const node = document.querySelector(".dataTableBodyScroll");
         return node && node.scrollHeight - node.clientHeight - node.scrollTop <= 1;
-      });
+      }, { timeout: 2000 }).then(() => true).catch(() => false);
+      check(
+        tab.id,
+        "req5-page-size-scroll-end",
+        reachedScrollEnd,
+        "session table did not reach the end after selecting 100 rows",
+      );
       await pageSize.click();
       await page.getByRole("option", { name: "50", exact: true }).click();
       await page.waitForFunction(() => document.querySelector(".sessionPagerInfo")?.textContent?.includes("1-50"));
@@ -2522,8 +3307,12 @@ try {
 
     if (!tab.selectable) {
       await runReq8TabChecks(page, tab);
+      await runFrozenCapabilityChecks(page, tab);
       await runFrozenBugSmokeChecks(page, tab);
-      if (tab.id === "sessions") await runSessionLocatorChecks(page);
+      if (tab.id === "sessions" && !frozenOnly) {
+        await runSessionSkillEvidenceChecks(page);
+        await runSessionLocatorChecks(page);
+      }
       continue;
     }
 
@@ -2746,27 +3535,32 @@ try {
     );
 
     await runReq8TabChecks(page, tab);
+    await runFrozenCapabilityChecks(page, tab);
     await runFrozenBugSmokeChecks(page, tab);
-    if (tab.id === "sessions") await runSessionLocatorChecks(page);
+    if (tab.id === "sessions" && !frozenOnly) await runSessionLocatorChecks(page);
 
     // The next tab mounts a fresh view component, so selection does not carry
     // over; no explicit reset needed (overlays are dismissed via Escape above).
   }
 
-  writeStdout("\n== Overview alignment ==");
-  await navigateToPage(page, "Overview", "Overview");
-  await page.locator(".overviewPage").waitFor();
-  await runOverviewChecks(page);
+  if (!frozenOnly) {
+    writeStdout("\n== Overview alignment ==");
+    await navigateToPage(page, "Overview", "Overview");
+    await page.locator(".overviewPage").waitFor();
+    await runOverviewChecks(page);
+  }
 
-  for (const pageSpec of [
-    { id: "config", nav: "Config", heading: "Config", compact: true, ready: ".configListPane" },
-    { id: "settings", nav: "Settings", heading: "Settings", compact: false, ready: ".settingsShell" },
-  ]) {
-    writeStdout(`\n== ${pageSpec.heading} navigation smoke ==`);
-    await page.keyboard.press("Escape").catch(() => {});
-    await navigateToPage(page, pageSpec.nav, pageSpec.heading);
-    await page.locator(pageSpec.ready).waitFor();
-    await runPageHeaderChecks(page, pageSpec.id, pageSpec.heading, pageSpec.compact);
+  if (!frozenOnly) {
+    for (const pageSpec of [
+      { id: "config", nav: "Configs", heading: "Configs", compact: true, ready: ".configListPane" },
+      { id: "settings", nav: "Settings", heading: "Settings", compact: false, ready: ".settingsShell" },
+    ]) {
+      writeStdout(`\n== ${pageSpec.heading} navigation smoke ==`);
+      await page.keyboard.press("Escape").catch(() => {});
+      await navigateToPage(page, pageSpec.nav, pageSpec.heading);
+      await page.locator(pageSpec.ready).waitFor();
+      await runPageHeaderChecks(page, pageSpec.id, pageSpec.heading, pageSpec.compact);
+    }
   }
 
   const mockDiagnostics = await page.evaluate(() => window.__alignmentMockDiagnostics?.() ?? { unhandledCommands: [] });
@@ -2783,7 +3577,9 @@ try {
     for (const failure of failures) writeStdout(`  - ${failure}`);
     process.exitCode = 1;
   } else {
-    writeStdout("alignment e2e ok — all tabs pass req1/req2/req3/req4/req5/req6/req7/req8");
+    writeStdout(frozenOnly
+      ? "frozen e2e ok — frozen capability checks pass"
+      : "alignment e2e ok — all tabs pass req1/req2/req3/req4/req5/req6/req7/req8");
   }
 } finally {
   await cleanup();

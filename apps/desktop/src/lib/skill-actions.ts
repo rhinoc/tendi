@@ -12,9 +12,8 @@ export enum SkillActionId {
 export const skillActionIds = ({ selectionCount }: { selectionCount: number }): SkillActionId[] => {
   if (selectionCount === 0) return [];
   const actionIds: SkillActionId[] = selectionCount === 1
-    ? [SkillActionId.OpenEditor, SkillActionId.Locations, SkillActionId.Update, SkillActionId.Reveal, SkillActionId.CopyPath]
-    : [SkillActionId.Locations, SkillActionId.Update];
-  actionIds.push(SkillActionId.Visibility);
-  actionIds.push(SkillActionId.Wrapper, SkillActionId.Delete);
+    ? [SkillActionId.Visibility, SkillActionId.Update, SkillActionId.OpenEditor, SkillActionId.Reveal, SkillActionId.CopyPath, SkillActionId.Wrapper, SkillActionId.Locations]
+    : [SkillActionId.Visibility, SkillActionId.Update, SkillActionId.Wrapper, SkillActionId.Locations];
+  actionIds.push(SkillActionId.Delete);
   return actionIds;
 };

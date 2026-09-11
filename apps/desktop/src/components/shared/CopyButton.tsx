@@ -1,16 +1,18 @@
-import { useEffect, useState, type ButtonHTMLAttributes, type MouseEvent, type ReactNode } from "react";
+import { useEffect, useState, type MouseEvent, type ReactNode } from "react";
 import { AlertCircle } from "lucide-react";
 
 import { actionLabels, copyText } from "../../lib/index.ts";
+import { Button, type ButtonProps } from "./Button.tsx";
 import { CopyFeedbackIcon, useCopyFeedback } from "./useCopyFeedback.tsx";
 
-export type CopyButtonProps = Omit<ButtonHTMLAttributes<HTMLButtonElement>, "onClick" | "children" | "title"> & {
+export type CopyButtonProps = Omit<ButtonProps, "onClick" | "children" | "title" | "variant" | "iconOnly"> & {
   value?: string | null;
   onCopy?: () => Promise<unknown> | unknown;
   copyLabel: string;
   copiedLabel?: string;
   iconSize?: number;
   stopPropagation?: boolean;
+  iconOnly?: boolean;
   children?: ReactNode;
   copiedChildren?: ReactNode;
 };
@@ -22,8 +24,10 @@ export function CopyButton({
   copiedLabel = actionLabels.copied,
   iconSize = 13,
   stopPropagation = false,
+  iconOnly = false,
   className = "",
   disabled,
+  type = "button",
   children,
   copiedChildren,
   ...props
@@ -58,34 +62,32 @@ export function CopyButton({
   const label = copyError ? actionLabels.copyFailed : copied ? copiedLabel : copyLabel;
   const resolvedClassName = `${className}${copied ? " isCopied" : ""}${copyError ? " isCopyError" : ""}`.trim();
   const hasCustomChildren = children != null || copiedChildren != null;
-
-  return (
-    <button
-      type="button"
-      {...props}
-      aria-label={label}
-      className={resolvedClassName}
-      disabled={disabled}
-      onClick={handleClick}
-    >
-      {copyError ? (
-        <>
-          <AlertCircle size={iconSize} strokeWidth={2.2} />
-          {hasCustomChildren ? children : null}
-        </>
-      ) : !hasCustomChildren ? (
-        <CopyFeedbackIcon copied={copied} size={iconSize} />
-      ) : copied ? (
-        <>
-          <CopyFeedbackIcon copied size={iconSize} swap={false} />
-          {copiedChildren ?? children}
-        </>
-      ) : (
-        <>
-          <CopyFeedbackIcon copied={false} size={iconSize} swap={false} />
-          {children}
-        </>
-      )}
-    </button>
+  const content = copyError ? (
+    <>
+      <AlertCircle size={iconSize} strokeWidth={2.2} />
+      {hasCustomChildren ? children : null}
+    </>
+  ) : !hasCustomChildren ? (
+    <CopyFeedbackIcon copied={copied} size={iconSize} />
+  ) : copied ? (
+    <>
+      <CopyFeedbackIcon copied size={iconSize} swap={false} />
+      {copiedChildren ?? children}
+    </>
+  ) : (
+    <>
+      <CopyFeedbackIcon copied={false} size={iconSize} swap={false} />
+      {children}
+    </>
   );
+  const buttonProps = {
+    ...props,
+    type,
+    "aria-label": label,
+    className: resolvedClassName,
+    disabled,
+    onClick: handleClick,
+  };
+
+  return iconOnly ? <Button {...buttonProps} variant="icon" iconOnly>{content}</Button> : <button {...buttonProps}>{content}</button>;
 }

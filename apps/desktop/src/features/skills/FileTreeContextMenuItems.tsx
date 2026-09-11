@@ -43,30 +43,30 @@ export function FileTreeContextMenuItems({
     <>
       {showWriteActions && canCreateChildren && (
         <>
-          <Menu.Item className="skillMenuItem" onSelect={onNewFile}>
+          <Menu.Item className="menuItem" onSelect={onNewFile}>
             <FilePlus size={14} />
             New file
           </Menu.Item>
-          <Menu.Item className="skillMenuItem" onSelect={onNewFolder}>
+          <Menu.Item className="menuItem" onSelect={onNewFolder}>
             <FolderPlus size={14} />
             New folder
           </Menu.Item>
-          {showEntryActions && <Menu.Separator className="skillMenuSeparator" />}
+          {showEntryActions && <Menu.Separator className="menuSeparator" />}
         </>
       )}
       {showEntryActions && (
         <>
-          <Menu.Item className="skillMenuItem" disabled={!entry?.path} onSelect={onReveal}>
+          <Menu.Item className="menuItem" disabled={!entry?.path} onSelect={onReveal}>
             <FolderOpen size={14} />
             {actionLabels.revealInFinder}
           </Menu.Item>
           {showWriteActions && (
             <>
-              <Menu.Item className="skillMenuItem" onSelect={onRename}>
+              <Menu.Item className="menuItem" onSelect={onRename}>
                 <Pencil size={14} />
                 Rename
               </Menu.Item>
-              <Menu.Item className="skillMenuItem danger" onSelect={onDelete}>
+              <Menu.Item className="menuItem danger" onSelect={onDelete}>
                 <Trash2 size={14} />
                 Delete
               </Menu.Item>

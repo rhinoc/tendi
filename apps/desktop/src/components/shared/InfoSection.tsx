@@ -8,9 +8,9 @@ export type InfoSectionProps = {
   className?: string;
 };
 
-export function InfoSection({ label, children, valueLine = true, valueClassName = "skillInfoValueLine", className = "" }: InfoSectionProps) {
+export function InfoSection({ label, children, valueLine = true, valueClassName = "infoValueLine", className = "" }: InfoSectionProps) {
   return (
-    <section className={`skillInfoSection${className ? ` ${className}` : ""}`}>
+    <section className={`infoSection${className ? ` ${className}` : ""}`}>
       <span>{label}</span>
       {valueLine ? <div className={valueClassName}>{children}</div> : children}
     </section>

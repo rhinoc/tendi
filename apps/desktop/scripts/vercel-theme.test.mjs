@@ -36,10 +36,10 @@ test("Vercel theme keeps surfaces, syntax, charts, and selection semantically di
     const page = await browser.newPage();
     await page.setContent(`
       <main class="overviewPage">
-        <i class="overviewTrendRung category0"></i>
-        <i class="overviewTrendRung category1"></i>
-        <i class="overviewTrendRung category2"></i>
-        <i class="overviewTrendRung category3"></i>
+        <i class="chartLegendSwatch category0"></i>
+        <i class="chartLegendSwatch category1"></i>
+        <i class="chartLegendSwatch category2"></i>
+        <i class="chartLegendSwatch category3"></i>
       </main>
       <aside class="sidebar"></aside>
       <div class="configListPane"><div class="dataRow rowFrame configRowActive"></div></div>
@@ -69,6 +69,7 @@ test("Vercel theme keeps surfaces, syntax, charts, and selection semantically di
       "src/variables.css",
       "src/theme-overrides.css",
       "src/components/DataTable.css",
+      "src/components/shared/FileTree.css",
       "src/styles.css",
       "src/components/shared/Badge.css",
       "src/components/shared/SegmentedControl.css",
@@ -121,6 +122,11 @@ test("Vercel theme keeps surfaces, syntax, charts, and selection semantically di
         insetProbe.style.background = "var(--green-soft)";
         const greenFill = getComputedStyle(insetProbe).backgroundColor;
         insetProbe.remove();
+        const accentProbe = document.createElement("i");
+        accentProbe.style.background = "var(--accent)";
+        document.body.append(accentProbe);
+        const accentFill = getComputedStyle(accentProbe).backgroundColor;
+        accentProbe.remove();
         const activeConfigStyle = getComputedStyle(document.querySelector(".configRowActive"), "::after");
         const selectedRowStyle = getComputedStyle(document.querySelector(".rowSelected"), "::after");
         const sessionSelectedRowStyle = getComputedStyle(document.querySelector(".sessionSelectedRow"), "::after");
@@ -160,6 +166,7 @@ test("Vercel theme keeps surfaces, syntax, charts, and selection semantically di
           editorSelection: getComputedStyle(document.querySelector(".cm-selectionBackground")).backgroundColor,
           focusedEditorSelection: getComputedStyle(document.querySelector(".focusedSelection")).backgroundColor,
           segmentedSelection: getComputedStyle(document.querySelector(".segmentedSelection")).backgroundColor,
+          accentFill,
           modelConfig: modelConfigStyle.backgroundColor,
           copySuccess: getComputedStyle(document.querySelector(".messageActionButton.isCopied")).backgroundColor,
           transcriptTargetOutline: transcriptTargetStyle.outlineColor,
@@ -214,7 +221,7 @@ test("Vercel theme keeps surfaces, syntax, charts, and selection semantically di
       assert.notEqual(actual.marqueeSelection, actual.selection, `${appearance} marquee uses a separate lighter fill`);
       assert.equal(actual.editorSelection, actual.selection, `${appearance} editor selection`);
       assert.equal(actual.focusedEditorSelection, actual.selectionStrong, `${appearance} focused editor selection uses strong fill`);
-      assert.equal(actual.segmentedSelection, actual.selectionStrong, `${appearance} segmented selection uses strong fill`);
+      assert.equal(actual.segmentedSelection, actual.accentFill, `${appearance} segmented selection uses the accent fill`);
       assert.equal(actual.modelConfig, actual.insetFill, `${appearance} model config is neutral`);
       assert.notEqual(actual.modelConfig, actual.greenFill, `${appearance} model config is not success green`);
       assert.equal(actual.copySuccess, actual.greenFill, `${appearance} copy success stays green`);
@@ -265,6 +272,7 @@ test("all themes use the same object-selection roles", async () => {
           "src/variables.css",
           "src/theme-overrides.css",
           "src/components/DataTable.css",
+          "src/components/shared/FileTree.css",
           "src/styles.css",
           "src/components/shared/SegmentedControl.css",
           "src/views/ConfigView.css",

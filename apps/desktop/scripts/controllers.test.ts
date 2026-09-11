@@ -42,6 +42,7 @@ if (typeof mock.module !== "function") {
   const {
     applySessionDelta,
     coalesceSessionEventBuffer,
+    mergeSessionListRows,
     selectSessionRelationships,
     selectSessionListView,
   } = await import("../src/controllers/session-controller.ts");
@@ -135,7 +136,36 @@ if (typeof mock.module !== "function") {
     assert.equal(view.pageCount, 1);
   });
 
-  test("keeps remote session search stable when its result rows are committed", async () => {
+  test("defaults remote search results to relevance order", () => {
+    const base = [
+      { id: "newer", agent: "codex", title: "newer", path: "/newer", projectPath: "/repo", updatedAt: "2026-08-29T00:00:00Z" },
+      { id: "older", agent: "codex", title: "older", path: "/older", projectPath: "/repo", updatedAt: "2026-08-28T00:00:00Z" },
+    ];
+    const view = selectSessionListView({
+      sessions: base,
+      searchRows: [
+        { ...base[0], searchScore: 6 },
+        { ...base[1], searchScore: 20 },
+      ],
+      searchRowsKey: "needle\0codex\0newer\0/newer\0codex\0older\0/older",
+      query: "needle",
+      remoteSearch: true,
+      sort: { key: "updatedAt", direction: "desc" },
+      pageSize: 50,
+      groupBy: null,
+      showChildSessions: false,
+      selectedProjectKeys: [],
+      projectFilterQuery: "",
+      missingSessionProjectPolicy: "show",
+      projects: [],
+      sessionProjects: [],
+    });
+
+    assert.equal(view.activeSort.key, "searchScore");
+    assert.deepEqual(view.tableSessions.map((session) => session.id), ["older", "newer"]);
+  });
+
+  test("keeps imported-session search stable and leaves daemon list requests candidate-free", async () => {
     const base = [
       { id: "one", agent: "codex", title: "one", path: "/one", projectPath: "/repo", updatedAt: "2026-08-29T00:00:00Z" },
       { id: "two", agent: "codex", title: "two", path: "/two", projectPath: "/repo", updatedAt: "2026-08-28T00:00:00Z" },
@@ -163,12 +193,19 @@ if (typeof mock.module !== "function") {
     assert.deepEqual(result.tableSessions.map((session) => session.id), ["two"]);
 
     const source = await readFile(new URL("../src/views/SessionsView.tsx", import.meta.url), "utf8");
-    const effectStart = source.indexOf("  useEffect(() => {\n    if (!normalizedQuery || !searchSessions)");
+    const effectStart = source.indexOf("  useEffect(() => {\n    if (!useLocalSessionList || !normalizedQuery)");
     const effectEnd = source.indexOf("\n  useEffect(() => {", effectStart + 1);
     assert.ok(effectStart >= 0 && effectEnd > effectStart);
     const dependencyList = source.slice(effectStart, effectEnd).slice(source.slice(effectStart, effectEnd).lastIndexOf("  }, ["));
     assert.match(dependencyList, /searchRequestKey/);
     assert.doesNotMatch(dependencyList, /searchCandidates/);
+
+    const requestStart = source.indexOf("  const remoteListBaseRequest = useMemo<SessionListPageRequest>");
+    const requestEnd = source.indexOf("\n  const remoteListRequest =", requestStart);
+    assert.ok(requestStart >= 0 && requestEnd > requestStart);
+    const requestSource = source.slice(requestStart, requestEnd);
+    assert.match(requestSource, /query: normalizedQuery/);
+    assert.doesNotMatch(requestSource, /searchCandidates|allSessionItems/);
   });
 
   test("keeps raw session rows until the controller write boundary", () => {
@@ -232,6 +269,28 @@ if (typeof mock.module !== "function") {
       path: "/sessions/same-session/same-session.jsonl",
     }], "migrated session row"));
     assert.deepEqual(next.map((session) => session.path), ["/sessions/same-session/same-session.jsonl"]);
+  });
+
+  test("merges newer live session metadata into a paged list row", () => {
+    const row = {
+      id: "session-1",
+      agent: "codex",
+      path: "/sessions/session-1.jsonl",
+      title: "",
+      updatedAt: "2026-09-09T10:41:22.363Z",
+      messages: 6,
+    };
+    const live = {
+      ...row,
+      title: "Latest prompt",
+      updatedAt: "2026-09-09T10:41:22.434Z",
+      messages: 7,
+      lastUserMessage: "Latest prompt",
+    };
+    const merged = mergeSessionListRows([row], [live]);
+
+    assert.equal(merged[0], live);
+    assert.equal(merged[0].lastUserMessage, "Latest prompt");
   });
 
   test("preserves native session id casing when resolving relationships", () => {

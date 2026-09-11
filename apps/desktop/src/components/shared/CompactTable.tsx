@@ -1,5 +1,6 @@
 import type { CSSProperties, ReactNode } from "react";
 
+import { EMPTY_DISPLAY_VALUE } from "../../lib/constants.ts";
 import { Tooltip } from "./Tooltip.tsx";
 import "./CompactTable.css";
 
@@ -30,7 +31,7 @@ function valueForColumn<TRow>(column: CompactTableColumn<TRow>, row: TRow) {
 function displayValue<TRow>(column: CompactTableColumn<TRow>, row: TRow) {
   const value = valueForColumn(column, row);
   return value === null || value === undefined || value === ""
-    ? (column.empty ?? "-")
+    ? (column.empty ?? EMPTY_DISPLAY_VALUE)
     : value;
 }
 
@@ -63,7 +64,7 @@ export function CompactTable<TRow>({
               {columns.map((column) => {
                 const display = displayValue(column, row);
                 const title = column.title?.(row)
-                  ?? (typeof display === "string" && display !== (column.empty ?? "-") ? display : undefined);
+                  ?? (typeof display === "string" && display !== (column.empty ?? EMPTY_DISPLAY_VALUE) ? display : undefined);
                 const cellClassName = [
                   "compactTableCell",
                   column.cellClassName,

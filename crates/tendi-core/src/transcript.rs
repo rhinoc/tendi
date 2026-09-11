@@ -1606,7 +1606,12 @@ pub(crate) fn extract_content_text(value: Option<&Value>) -> Option<String> {
             .and_then(Value::as_str)
             .and_then(clean_body)
             .or_else(|| extract_content_text(value.get("content")))
-            .or_else(|| value.get("message").and_then(Value::as_str).and_then(clean_body)),
+            .or_else(|| {
+                value
+                    .get("message")
+                    .and_then(Value::as_str)
+                    .and_then(clean_body)
+            }),
         _ => None,
     }
 }
@@ -2043,9 +2048,10 @@ pub(crate) fn attach_tool_result(
     let Some(call_id) = call_id.filter(|call_id| !call_id.trim().is_empty()) else {
         return false;
     };
-    let matched = items.iter_mut().rev().find(|item| {
-        item.kind == "tool" && item.call_id.as_deref() == Some(call_id)
-    });
+    let matched = items
+        .iter_mut()
+        .rev()
+        .find(|item| item.kind == "tool" && item.call_id.as_deref() == Some(call_id));
     let Some(item) = matched else {
         return false;
     };
@@ -2195,10 +2201,10 @@ mod tests {
     use serde_json::{Value, json};
 
     use super::{
-        TranscriptSearchScopes, collect_shared_item, parse_search_transcript,
-        parse_transcript,
+        TranscriptSearchScopes, collect_shared_item, parse_search_transcript, parse_transcript,
         parse_transcript_locator_page, parse_transcript_page, parse_transcript_page_at_snapshot,
-        search_transcript, summarize_tool_call, transcript_search_cache_offsets, transcript_source_version,
+        search_transcript, summarize_tool_call, transcript_search_cache_offsets,
+        transcript_source_version,
     };
 
     use crate::providers::{
@@ -2269,6 +2275,33 @@ mod tests {
         let search = parse_search_transcript(&path, crate::skills::AgentKind::Codex).unwrap();
         assert_eq!(search.items.len(), 1);
         assert_eq!(search.items[0].body, "child answer");
+
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn codex_goal_message_becomes_user_transcript_item() {
+        let path = temp_path("tendi-codex-goal-user-transcript-test.jsonl");
+        fs::write(
+            &path,
+            [
+                codex_message(
+                    "user",
+                    "<codex_internal_context source=\"goal\"><objective>Goal objective\nwith details</objective></codex_internal_context>",
+                ),
+                codex_message("assistant", "Started"),
+            ]
+            .join("\n"),
+        )
+        .unwrap();
+
+        let scan = parse_transcript(&path, crate::skills::AgentKind::Codex).unwrap();
+
+        assert_eq!(scan.items.len(), 2);
+        assert_eq!(scan.items[0].kind, "user");
+        assert_eq!(scan.items[0].body, "Goal objective\nwith details");
+        assert_eq!(scan.items[1].kind, "assistant");
+        assert_eq!(scan.items[1].body, "Started");
 
         fs::remove_file(path).unwrap();
     }
@@ -2380,6 +2413,33 @@ mod tests {
     }
 
     #[test]
+    fn transcript_locator_skips_codex_selected_skill_context() {
+        let path = temp_path("tendi-transcript-locator-skill-context-test.jsonl");
+        fs::write(
+            &path,
+            [
+                codex_message(
+                    "user",
+                    "<skill>\n<name>datafinder</name>\n<path>/tmp/datafinder/SKILL.md</path>\n</skill>",
+                ),
+                codex_message("user", "one"),
+                codex_message("assistant", "two"),
+            ]
+            .join("\n"),
+        )
+        .unwrap();
+
+        let locator =
+            parse_transcript_locator_page(&path, crate::skills::AgentKind::Codex).unwrap();
+
+        assert_eq!(locator.locator_items.len(), 1);
+        assert_eq!(locator.locator_items[0].index, 1);
+        assert_eq!(locator.locator_items[0].label, "one");
+        assert_eq!(locator.locator_items[0].response, "two");
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
     fn transcript_cursor_preserves_utf8_line_boundaries() {
         let path = temp_path("tendi-transcript-page-utf8-offset-test.jsonl");
         fs::write(
@@ -2407,7 +2467,6 @@ mod tests {
         assert!(second.done);
         fs::remove_file(path).unwrap();
     }
-
 
     #[test]
     fn transcript_cursor_requests_restart_when_the_file_appends() {
@@ -2611,7 +2670,6 @@ mod tests {
         fs::remove_file(path).unwrap();
     }
 
-
     #[test]
     fn transcript_page_attaches_tool_result_within_same_page() {
         let path = temp_path("tendi-transcript-page-same-tool-test.jsonl");
@@ -2644,8 +2702,6 @@ mod tests {
         assert_eq!(page.items[0].result.as_deref(), Some("passed"));
         fs::remove_file(path).unwrap();
     }
-
-
 
     #[test]
     fn search_transcript_skips_tool_results_and_keeps_messages() {
@@ -2722,9 +2778,6 @@ mod tests {
         assert_eq!(page.items[0].body, "initial message");
         fs::remove_file(path).unwrap();
     }
-
-
-
 
     #[test]
     fn transcript_search_reuses_unchanged_offset_index_and_invalidates_on_append() {
@@ -2807,7 +2860,6 @@ mod tests {
 
         fs::remove_file(path).unwrap();
     }
-
 
     #[test]
     fn inserts_cursor_model_markers_in_store_order() {
@@ -2910,10 +2962,7 @@ mod tests {
             "arguments": "{\"cmd\":\"rg -n \\\"needle\\\" src\"}"
         });
 
-        assert_eq!(
-            summarize_tool_call(&payload),
-            "rg -n \"needle\" src"
-        );
+        assert_eq!(summarize_tool_call(&payload), "rg -n \"needle\" src");
     }
 
     #[test]
@@ -2951,7 +3000,6 @@ mod tests {
             json!({ "type": "image_generation", "prompt": "A small icon" })
         );
     }
-
 
     #[test]
     fn attaches_codex_function_call_output_and_duration() {
@@ -3473,8 +3521,6 @@ mod tests {
 
         assert!(items.is_empty());
     }
-
-
 
     #[test]
     fn classifies_cursor_subagent_notifications_and_context() {

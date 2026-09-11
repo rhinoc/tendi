@@ -42,7 +42,7 @@ import {
   OverviewUsageMetric,
 } from "./OverviewTrendChart.tsx";
 import { desktopStore, selectAnalyticsDisplayValue, selectAnalyticsValue, useDesktopStore } from "../store/desktop-store.ts";
-import { RuntimeDomainKey } from "../lib/index.ts";
+import { ALL_AGENT_FILTER, DOMAIN_NAV_ITEMS, EMPTY_DISPLAY_VALUE, RuntimeDomainKey } from "../lib/index.ts";
 import type { DomainKey } from "../lib/index.ts";
 import { SessionListStatus } from "../store/desktop-store.ts";
 import "./OverviewView.css";
@@ -63,9 +63,10 @@ export type OverviewViewProps = {
   onOpenSession: (session: SessionRecord) => void;
 };
 
-const ANALYTICS_LOAD_STEPS = [30, 90, 182, 365] as const;
+const ANALYTICS_DEFAULT_RANGE_DAYS = 30;
 const MAX_ANALYTICS_DAYS = 365;
-let retainedAnalyticsRange = 30;
+const ANALYTICS_LOAD_STEPS = [ANALYTICS_DEFAULT_RANGE_DAYS, 90, 182, MAX_ANALYTICS_DAYS] as const;
+let retainedAnalyticsRange = ANALYTICS_DEFAULT_RANGE_DAYS;
 let retainedUsageMetric: OverviewUsageMetric = OverviewUsageMetric.Tokens;
 const USAGE_METRICS = [
   OverviewUsageMetric.Sessions,
@@ -85,6 +86,7 @@ const USAGE_METRIC_LABELS: Record<OverviewUsageMetric, string> = {
   [OverviewUsageMetric.Tools]: "Tools",
   [OverviewUsageMetric.Skills]: "Skills",
 };
+const OVERVIEW_INVENTORY = DOMAIN_NAV_ITEMS.map(({ domain, label }) => ({ id: domain, label }));
 const overviewAnalyticsQueries = new Map<string, Promise<OverviewAnalytics | null>>();
 
 function inclusiveDaysSince(date: string): number {
@@ -210,7 +212,7 @@ export const OverviewView = memo(function OverviewView({
     }
     setAnalyticsError("");
     const args = {
-      agent: agentFilter === "All" ? null : agentFilter,
+      agent: agentFilter === ALL_AGENT_FILTER ? null : agentFilter,
       days: analyticsRange,
       rankDays: Math.min(30, analyticsRange),
       refreshTranscripts,
@@ -263,15 +265,7 @@ export const OverviewView = memo(function OverviewView({
 
   const updateSkillCount = skillUpdateCount;
 
-  const inventory: Array<{ id: DomainKey; label: string }> = [
-    { id: RuntimeDomainKey.Skills, label: "Skills" },
-    { id: RuntimeDomainKey.Sessions, label: "Sessions" },
-    { id: RuntimeDomainKey.Prompts, label: "Prompts" },
-    { id: RuntimeDomainKey.Rules, label: "Rules" },
-    { id: RuntimeDomainKey.Hooks, label: "Hooks" },
-    { id: RuntimeDomainKey.Mcp, label: "MCP" },
-  ];
-  const overviewCountErrorLabels = inventory
+  const overviewCountErrorLabels = OVERVIEW_INVENTORY
     .filter((item) => overviewCountErrors.has(item.id))
     .map((item) => item.label);
 
@@ -282,13 +276,13 @@ export const OverviewView = memo(function OverviewView({
 
       <div className="overviewBody">
         <nav className="overviewInventory" aria-label="Workspace inventory">
-          {inventory.map((item) => (
+          {OVERVIEW_INVENTORY.map((item) => (
             <button
               key={item.id}
               type="button"
               className="overviewInventoryItem"
               onClick={() => onNavigate(item.id)}
-              aria-label={`${item.label}: ${counts[item.id].toLocaleString()}${item.id === "hooks" && hookReviewCount > 0 ? `, ${hookReviewCount} need review` : ""}. Open ${item.label}`}
+              aria-label={`${item.label}: ${counts[item.id].toLocaleString()}${item.id === RuntimeDomainKey.Hooks && hookReviewCount > 0 ? `, ${hookReviewCount} need review` : ""}. Open ${item.label}`}
             >
               <span>
                 <span className="overviewInventoryLabelRow">
@@ -298,14 +292,14 @@ export const OverviewView = memo(function OverviewView({
                       {updateSkillCount} {updateSkillCount === 1 ? "update" : "updates"}
                     </Badge>
                   ) : null}
-                  {item.id === "hooks" && hookReviewCount > 0 ? (
+                  {item.id === RuntimeDomainKey.Hooks && hookReviewCount > 0 ? (
                     <Badge tone="warning">
                       {hookReviewCount} review{hookReviewCount === 1 ? "" : "s"}
                     </Badge>
                   ) : null}
                 </span>
                 <span className="overviewInventoryValue">
-                  {overviewCountsLoaded.has(item.id) ? counts[item.id] : "—"}
+                  {overviewCountsLoaded.has(item.id) ? counts[item.id] : EMPTY_DISPLAY_VALUE}
                 </span>
               </span>
               <ArrowUpRight size={14} aria-hidden="true" />
@@ -428,23 +422,23 @@ export const OverviewView = memo(function OverviewView({
                                 <span className="overviewSessionRowTitle"><SessionTitleText interactive={false} value={displayTitle} /></span>
                               </Tooltip>
                             </span>
-                            <span className="overviewSessionUpdated">{formatRelativeTime(session.updatedAt) || "—"}</span>
+                            <span className="overviewSessionUpdated">{formatRelativeTime(session.updatedAt) || EMPTY_DISPLAY_VALUE}</span>
                           </span>
                           <span className="overviewSessionMessage">
                             <span className="overviewSessionMessageLabel" role="img" aria-label="User message"><ArrowRight size={13} aria-hidden="true" /></span>
-                            <span className="overviewSessionMessageText"><TranscriptLinkText interactive={false} value={preview?.userLast ?? "—"} /></span>
+                            <span className="overviewSessionMessageText"><TranscriptLinkText interactive={false} value={preview?.userLast ?? EMPTY_DISPLAY_VALUE} /></span>
                           </span>
                           <span className="overviewSessionFooter">
                             <span className="overviewSessionMessage">
                               <span className="overviewSessionMessageLabel" role="img" aria-label="Agent reply"><ArrowLeft size={13} aria-hidden="true" /></span>
-                              <span className="overviewSessionMessageText"><TranscriptLinkText interactive={false} value={preview?.assistantLast ?? "—"} /></span>
+                              <span className="overviewSessionMessageText"><TranscriptLinkText interactive={false} value={preview?.assistantLast ?? EMPTY_DISPLAY_VALUE} /></span>
                             </span>
                             <span className="overviewSessionProject">{sessionProject(session)}</span>
                           </span>
                         </button>
                       </ContextMenu.Trigger>
                       <ContextMenu.Portal>
-                        <ContextMenu.Content className="skillMenuContent" data-no-drag>
+                        <ContextMenu.Content className="menuContent" data-no-drag>
                           <OpenInEditorMenuItem Menu={ContextMenu} path={session.path} />
                         </ContextMenu.Content>
                       </ContextMenu.Portal>

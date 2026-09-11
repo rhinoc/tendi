@@ -243,7 +243,10 @@ impl SessionKey {
     }
 
     pub fn stable_string(&self) -> String {
-        format!("{:?}\0{}\0{}", self.provider, self.namespace, self.native_id)
+        format!(
+            "{:?}\0{}\0{}",
+            self.provider, self.namespace, self.native_id
+        )
     }
 }
 

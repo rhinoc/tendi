@@ -11,7 +11,7 @@ import {
   codeMirrorMarkdownLanguage,
 } from "../src/lib/codemirror-markdown.ts";
 import { codeMirrorSearchExtension, prosemirrorTextRanges } from "../src/components/shared/codemirror-search.ts";
-import { findTextRanges } from "../src/components/shared/text-ranges.ts";
+import { findTextRanges, findTextRangesForQueryTerms, splitSearchQueryTerms } from "../src/components/shared/text-ranges.ts";
 import { buildEditableDiffDecorations } from "../src/lib/codemirror-diff.ts";
 import { codeMirrorHighlightStyle } from "../src/lib/codemirror-theme.ts";
 
@@ -84,6 +84,19 @@ test("Search ranges preserve source positions when case folding expands text", (
   assert.deepEqual(findTextRanges("İabc", "abc"), [{ from: 1, to: 4 }]);
   assert.deepEqual(findTextRanges("😀Alpha", "alpha"), [{ from: 2, to: 7 }]);
   assert.deepEqual(findTextRanges("a.b", "."), [{ from: 1, to: 2 }]);
+});
+
+test("Session search ranges highlight each whitespace-delimited term", () => {
+  assert.deepEqual(splitSearchQueryTerms("  title  Agent\nshared "), ["title", "Agent", "shared"]);
+  assert.deepEqual(
+    findTextRangesForQueryTerms("Agent title and shared agent", ["title", "agent", "shared"]),
+    [
+      { from: 0, to: 5 },
+      { from: 6, to: 11 },
+      { from: 16, to: 22 },
+      { from: 23, to: 28 },
+    ],
+  );
 });
 
 test("ProseMirror search ranges preserve text-node positions", () => {

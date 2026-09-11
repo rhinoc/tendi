@@ -14,7 +14,7 @@ use tendi_core::{
     session_skills::{SessionFileState, SessionSkillLink},
     sessions::SessionIdentity,
     skills::{SkillPath, SkillRecord, SkillRoot, SkillScan, SkillVisibility, refresh_skill_scan},
-    storage::{PromptWrite, Store},
+    storage::{PromptWrite, SessionListQuery, Store},
     transcript::parse_transcript_page,
 };
 
@@ -38,6 +38,7 @@ fn main() -> Result<()> {
         "primary-settings" => primary_settings(),
         "secondary-session-page" => secondary_session_page(),
         "secondary-session-search" => secondary_session_search(),
+        "secondary-session-list-10k" => secondary_session_list_10k(),
         "secondary-session-10k-soak" => secondary_session_10k_soak(),
         "secondary-linked-sessions" => secondary_linked_sessions(),
         "secondary-skill-files" => secondary_skill_files(),
@@ -85,8 +86,8 @@ fn primary_overview() -> Result<Value> {
         },
         1,
     )?;
-    let refreshed = store
-        .refresh_session_analytics_for_scope_with_progress(&scope_key, &sessions, |_| {})?;
+    let refreshed =
+        store.refresh_session_analytics_for_scope_with_progress(&scope_key, &sessions, |_| {})?;
     if refreshed.failed != 0 || refreshed.parsed != OVERVIEW_SESSIONS {
         bail!(
             "overview fixture analytics incomplete: parsed {}, failed {}",
@@ -222,7 +223,9 @@ fn secondary_session_10k_soak() -> Result<Value> {
         .map(|index| {
             session(
                 index,
-                scratch.path().join(format!("transcripts/session-{index:05}.jsonl")),
+                scratch
+                    .path()
+                    .join(format!("transcripts/session-{index:05}.jsonl")),
                 index % 128,
             )
         })
@@ -262,6 +265,58 @@ fn secondary_session_10k_soak() -> Result<Value> {
             }),
             listed.len(),
         ))
+    })
+}
+
+fn secondary_session_list_10k() -> Result<Value> {
+    let scratch = Scratch::new("session-list-10k")?;
+    let store = Store::open(scratch.path().join("session-list-10k.sqlite3"))?;
+    let scope_key = ScopeKey::new(scratch.path().display().to_string())
+        .map_err(|error| anyhow::anyhow!(error))?;
+    let sessions = (0..SESSION_SOAK_COUNT)
+        .map(|index| {
+            session(
+                index,
+                scratch
+                    .path()
+                    .join(format!("transcripts/session-{index:05}.jsonl")),
+                index % 128,
+            )
+        })
+        .collect::<Vec<_>>();
+    store.save_sessions_at_for_scope(
+        &scope_key,
+        &SessionScan {
+            sessions,
+            warnings: Vec::new(),
+        },
+        1,
+    )?;
+
+    measured(|| {
+        let page = store.list_session_page_for_scope(
+            &scope_key,
+            SessionListQuery {
+                query: String::new(),
+                agent: None,
+                sort_key: "updatedAt".to_string(),
+                sort_direction: "desc".to_string(),
+                group_by: None,
+                page: 0,
+                page_size: 50,
+                show_child_sessions: false,
+                selected_project_keys: Vec::new(),
+                locate: None,
+            },
+        )?;
+        if page.rows.len() != 50 || page.total != SESSION_SOAK_COUNT {
+            bail!(
+                "unexpected 10k session page: {} of {}",
+                page.rows.len(),
+                page.total
+            );
+        }
+        Ok((page, SESSION_SOAK_COUNT))
     })
 }
 
@@ -320,7 +375,8 @@ fn secondary_linked_sessions() -> Result<Value> {
     }
 
     measured(|| {
-        let links = store.skill_session_links_for_scope(&scope_key, "perf-linked-skill")?;
+        let links =
+            store.skill_session_links_for_scope(&scope_key, std::slice::from_ref(&skill_path))?;
         let count = links.len();
         if count != LINKED_SESSIONS {
             bail!("unexpected linked session count: {count}");
@@ -437,6 +493,7 @@ fn tertiary_skill_save() -> Result<Value> {
         .and_then(|skill| skill.paths.first())
         .context("target skill missing from fixture scan")?;
     let skill_dir = target.path.clone();
+    let target_id = format!("skill@path:{}", skill_dir.canonicalize()?.to_string_lossy());
     let before = tendi_core::files::read_skill_file(
         scratch.path(),
         target_name,
@@ -473,7 +530,7 @@ fn tertiary_skill_save() -> Result<Value> {
             "references/perf-renamed.md",
             Some(&skill_dir),
         )?;
-        let refreshed = refresh_skill_scan(scratch.path(), scan, &[target_name.to_string()], &[])?;
+        let refreshed = refresh_skill_scan(scratch.path(), scan, &[target_id], &[])?;
         let target = refreshed
             .skills
             .iter()

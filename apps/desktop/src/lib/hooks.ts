@@ -17,6 +17,10 @@ export type HookRecord = {
   status_message?: string | null;
 };
 
+export function hookDisplayName(hook: Pick<HookRecord, "event"> | null | undefined): string {
+  return hook?.event || "Hook";
+}
+
 function requiredString(value: unknown): string | undefined {
   if (typeof value !== "string") return undefined;
   const normalized = value.trim();

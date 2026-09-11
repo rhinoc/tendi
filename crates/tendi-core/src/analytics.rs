@@ -676,7 +676,11 @@ pub(crate) fn aggregate_overview(
                 }
                 let slot = by_day.entry(date.to_string()).or_default();
                 record_session(slot, analytics.agent, &identity);
-                add_run(&mut slot.runs, &contribution, analytics.capabilities().duration);
+                add_run(
+                    &mut slot.runs,
+                    &contribution,
+                    analytics.capabilities().duration,
+                );
                 add_model_run(
                     &mut slot.models,
                     &contribution,
@@ -1453,9 +1457,7 @@ fn resolve_single_model_runs(analytics: &mut SessionAnalytics) {
     let mut models = analytics
         .runs
         .iter()
-        .filter_map(|run| {
-            (!run.model.trim().is_empty()).then_some(run.model.trim().to_string())
-        })
+        .filter_map(|run| (!run.model.trim().is_empty()).then_some(run.model.trim().to_string()))
         .chain(analytics.responses.iter().filter_map(|response| {
             (!response.model.trim().is_empty()).then_some(response.model.trim().to_string())
         }))
@@ -2247,11 +2249,13 @@ mod tests {
             vec!["gpt-only", "gpt-only"]
         );
         assert_eq!(parsed.analytics.responses.len(), 2);
-        assert!(parsed
-            .analytics
-            .responses
-            .iter()
-            .all(|response| response.model == "gpt-only"));
+        assert!(
+            parsed
+                .analytics
+                .responses
+                .iter()
+                .all(|response| response.model == "gpt-only")
+        );
         let _ = fs::remove_dir_all(root);
     }
 
@@ -2304,7 +2308,11 @@ mod tests {
 
         assert_eq!(parsed.analytics.runs.len(), 1);
         assert_eq!(parsed.analytics.runs[0].model, "claude-real");
-        assert!(!serde_json::to_string(&parsed).unwrap().contains("<synthetic>"));
+        assert!(
+            !serde_json::to_string(&parsed)
+                .unwrap()
+                .contains("<synthetic>")
+        );
         let _ = fs::remove_dir_all(root);
     }
 
@@ -2430,17 +2438,15 @@ mod tests {
         assert_eq!(overview.summary.runs.timed_completed, 1);
         assert_eq!(overview.summary.runs.total_ms, 120_000);
 
-        let projected = aggregate_overview_records(
-            &[overview_record(&record)],
-            2,
-            1,
-            Vec::new(),
-        );
+        let projected = aggregate_overview_records(&[overview_record(&record)], 2, 1, Vec::new());
         assert_eq!(
             serde_json::to_value(&overview.days).unwrap(),
             serde_json::to_value(&projected.days).unwrap()
         );
-        assert_eq!(overview.summary.runs.total_ms, projected.summary.runs.total_ms);
+        assert_eq!(
+            overview.summary.runs.total_ms,
+            projected.summary.runs.total_ms
+        );
     }
 
     #[test]
@@ -2473,12 +2479,7 @@ mod tests {
         assert!(day.models.is_empty());
         assert_eq!(overview.summary.runs.total_ms, 0);
 
-        let projected = aggregate_overview_records(
-            &[overview_record(&record)],
-            1,
-            1,
-            Vec::new(),
-        );
+        let projected = aggregate_overview_records(&[overview_record(&record)], 1, 1, Vec::new());
         assert!(projected.days[0].models.is_empty());
         assert_eq!(projected.days[0].runs.total_ms, 0);
     }
@@ -2576,7 +2577,6 @@ mod tests {
         );
         fs::remove_dir_all(root).unwrap();
     }
-
 
     #[test]
     fn overview_keeps_model_attribution_and_mcp_servers_separate() {

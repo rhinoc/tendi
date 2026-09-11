@@ -24,6 +24,7 @@ use crate::{
         AnalyticsRefreshProgress, AnalyticsRefreshReport, OverviewAnalytics,
         SessionAnalyticsOverviewRecord, SessionAnalyticsRecord,
     },
+    assistant::{AssistantChatSession, AssistantMessage, AssistantSessionLink},
     fsutil::sha256_text,
     projects::{self, ProjectRecord, ProjectScanResult, ProjectScanScope},
     runtime_contract::{
@@ -37,7 +38,7 @@ use crate::{
         normalize_session_projects,
     },
     skills::{
-        AgentKind, SkillScan, SkillSnapshot, SkillSnapshotFile, SkillSourceRecord,
+        AgentKind, SkillPath, SkillScan, SkillSnapshot, SkillSnapshotFile, SkillSourceRecord,
     },
     time::compare_timestamps,
     transcript,
@@ -51,17 +52,18 @@ struct ProjectState {
 }
 
 const SESSION_ANALYTICS_BATCH_SIZE: usize = 64;
-const STORAGE_SCHEMA_VERSION: i64 = 1;
+const STORAGE_SCHEMA_VERSION: i64 = 2;
 const SESSION_SEARCH_INDEX_VERSION: i64 = 2;
-const PROJECTION_PARSER_VERSION: &str = "scan-v5";
+const PROJECTION_PARSER_VERSION: &str = "scan-v6";
 const SESSION_PAYLOAD_PREVIEWS_MIGRATION_KEY: &str = "session_payload_previews_backfilled_v1";
+const CODEX_GLOBAL_SKILL_CONFIG_MIGRATION_KEY: &str = "codex_global_skill_config_migrated_v1";
 const DATABASE_WRITE_LOCK_ATTEMPTS: usize = 100;
 const DATABASE_WRITE_LOCK_RETRY: Duration = Duration::from_millis(50);
 const DATABASE_READ_LOCK_ATTEMPTS: usize = 100;
 const DATABASE_READ_LOCK_RETRY: Duration = Duration::from_millis(50);
 const SCOPED_SESSION_TABLE: &str = "scoped_sessions";
 const SCOPED_SESSION_SCAN_SOURCE_TABLE: &str = "scoped_session_scan_sources";
-const SESSION_SCAN_CACHE_PARSER_VERSION: &str = "scan-v7";
+const SESSION_SCAN_CACHE_PARSER_VERSION: &str = "scan-v10";
 const SESSION_SEARCH_CANDIDATE_TABLE: &str = "tendi_session_search_candidates";
 const SESSION_SEARCH_MATCH_TABLE: &str = "tendi_session_search_matches";
 const DEFAULT_SCOPE_KEY: &str = "installation:default";
@@ -93,8 +95,7 @@ where
         match read() {
             Ok(value) => return Ok(value),
             Err(error)
-                if attempt + 1 < DATABASE_READ_LOCK_ATTEMPTS
-                    && is_database_lock_error(&error) =>
+                if attempt + 1 < DATABASE_READ_LOCK_ATTEMPTS && is_database_lock_error(&error) =>
             {
                 std::thread::sleep(DATABASE_READ_LOCK_RETRY);
             }
@@ -322,6 +323,357 @@ pub struct SessionSearchHit {
     pub search_snippet: String,
 }
 
+#[derive(Debug, Clone)]
+pub struct SessionListQuery {
+    pub query: String,
+    pub agent: Option<AgentKind>,
+    pub sort_key: String,
+    pub sort_direction: String,
+    pub group_by: Option<String>,
+    pub page: usize,
+    pub page_size: usize,
+    pub show_child_sessions: bool,
+    pub selected_project_keys: Vec<String>,
+    pub locate: Option<SessionIdentity>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SessionListRow {
+    #[serde(flatten)]
+    pub session: SessionRecord,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub search_score: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub search_snippet: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionListProjectOption {
+    pub key: String,
+    pub label: String,
+    pub title: String,
+    pub count: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionListPage {
+    pub rows: Vec<SessionListRow>,
+    pub project_options: Vec<SessionListProjectOption>,
+    pub total: usize,
+    pub child_session_count: usize,
+    pub page: usize,
+    pub page_count: usize,
+    pub page_start: usize,
+    pub page_end: usize,
+    pub group_count: Option<usize>,
+}
+
+#[derive(Debug, Clone)]
+struct ResolvedSessionProject {
+    key: String,
+    label: String,
+    title: String,
+}
+
+#[derive(Debug)]
+struct SessionListGroupPage {
+    rows: Vec<SessionListRow>,
+    start: usize,
+    group_count: usize,
+}
+
+fn session_list_text(value: Option<&str>) -> String {
+    value.unwrap_or_default().trim().to_string()
+}
+
+fn session_list_path(value: Option<&PathBuf>) -> String {
+    value
+        .map(|path| {
+            path.to_string_lossy()
+                .trim_end_matches(['/', '\\'])
+                .to_string()
+        })
+        .unwrap_or_default()
+}
+
+fn session_list_project_label(session: &SessionRecord) -> String {
+    let logical_name = session_list_text(session.logical_project_name.as_deref());
+    if !logical_name.is_empty() {
+        return logical_name;
+    }
+    session
+        .repository
+        .as_ref()
+        .or(session.project.as_ref())
+        .and_then(|path| path.file_name())
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default()
+}
+
+fn session_list_identity(session: &SessionRecord) -> String {
+    format!(
+        "{}\0{}\0{}",
+        session.agent.label(),
+        session.id,
+        session.path.display()
+    )
+}
+
+fn session_list_project_group_key(session: &SessionRecord) -> String {
+    if let Some(project_id) = session
+        .logical_project_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+    {
+        return serde_json::to_string(&(
+            "logical-project",
+            project_id,
+            session_list_project_label(session).as_str(),
+        ))
+        .unwrap_or_default();
+    }
+    let repository = session_list_path(session.repository.as_ref());
+    if repository.is_empty() {
+        session_list_path(session.project.as_ref())
+    } else {
+        repository
+    }
+}
+
+fn session_list_project_for_path<'a>(
+    path: Option<&PathBuf>,
+    projects: &'a [ProjectRecord],
+) -> Option<&'a ProjectRecord> {
+    let path = path?;
+    projects
+        .iter()
+        .filter(|project| path == &project.root_path || path.starts_with(&project.root_path))
+        .max_by_key(|project| project.root_path.components().count())
+}
+
+fn resolve_session_list_project(
+    session: &SessionRecord,
+    policy: &str,
+    session_projects: &[SessionProjectSummary],
+    projects: &[ProjectRecord],
+) -> Option<ResolvedSessionProject> {
+    let logical_id = session
+        .logical_project_id
+        .as_deref()
+        .unwrap_or_default()
+        .trim();
+    let workspace_path = session_list_path(session.project.as_ref());
+    let summary = session_projects.iter().find(|project| {
+        (!logical_id.is_empty() && project.id.trim() == logical_id)
+            || (!workspace_path.is_empty()
+                && project
+                    .paths
+                    .iter()
+                    .any(|path| session_list_path(Some(path)) == workspace_path))
+    });
+    if summary.is_some_and(|project| project.missing) && policy == "hide" {
+        return None;
+    }
+
+    let label = session_list_project_label(session);
+    let title = session
+        .repository_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .unwrap_or(workspace_path);
+    if policy != "merge-by-name" {
+        return Some(ResolvedSessionProject {
+            key: session_list_project_group_key(session),
+            label,
+            title,
+        });
+    }
+
+    let normalized_name = label.trim().to_lowercase();
+    let same_name_projects = projects
+        .iter()
+        .filter(|project| {
+            let root_name = project
+                .root_path
+                .file_name()
+                .map(|name| name.to_string_lossy().to_lowercase())
+                .unwrap_or_default();
+            !normalized_name.is_empty()
+                && (project.name.trim().to_lowercase() == normalized_name
+                    || root_name == normalized_name)
+        })
+        .collect::<Vec<_>>();
+    let scanned_project = session_list_project_for_path(session.project.as_ref(), projects)
+        .or_else(|| session_list_project_for_path(session.repository.as_ref(), projects))
+        .or_else(|| {
+            (summary.is_some_and(|project| project.missing) && same_name_projects.len() == 1)
+                .then_some(same_name_projects[0])
+        });
+    let Some(project) = scanned_project else {
+        return Some(ResolvedSessionProject {
+            key: session_list_project_group_key(session),
+            label,
+            title,
+        });
+    };
+    Some(ResolvedSessionProject {
+        key: serde_json::to_string(&("scanned-project", project.id.as_str())).unwrap_or_default(),
+        label: project.name.trim().to_string(),
+        title: project
+            .remote_url
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| project.root_path.to_string_lossy().into_owned()),
+    })
+}
+
+fn compare_session_list_rows(
+    left: &SessionListRow,
+    right: &SessionListRow,
+    key: &str,
+    direction: &str,
+) -> std::cmp::Ordering {
+    let sessions = (&left.session, &right.session);
+    let ordering = match key {
+        "startedAt" => compare_timestamps(
+            sessions.0.started_at.as_deref(),
+            sessions.1.started_at.as_deref(),
+        ),
+        "updatedAt" => compare_timestamps(
+            sessions.0.updated_at.as_deref(),
+            sessions.1.updated_at.as_deref(),
+        ),
+        "messages" => sessions
+            .0
+            .message_count
+            .unwrap_or(0)
+            .cmp(&sessions.1.message_count.unwrap_or(0)),
+        "turns" => sessions
+            .0
+            .turn_count
+            .unwrap_or(0)
+            .cmp(&sessions.1.turn_count.unwrap_or(0)),
+        "cacheRate" => {
+            let rate = |session: &SessionRecord| {
+                session
+                    .token_usage
+                    .as_ref()
+                    .filter(|usage| usage.input_tokens > 0)
+                    .map(|usage| usage.cached_input_tokens as f64 / usage.input_tokens as f64)
+                    .unwrap_or(-1.0)
+            };
+            rate(sessions.0).total_cmp(&rate(sessions.1))
+        }
+        "searchScore" => left
+            .search_score
+            .unwrap_or(f64::NEG_INFINITY)
+            .total_cmp(&right.search_score.unwrap_or(f64::NEG_INFINITY)),
+        "title" => session_list_text(sessions.0.title.as_deref())
+            .to_lowercase()
+            .cmp(&session_list_text(sessions.1.title.as_deref()).to_lowercase()),
+        "agent" => sessions
+            .0
+            .agent
+            .label()
+            .to_lowercase()
+            .cmp(&sessions.1.agent.label().to_lowercase()),
+        "project" => session_list_project_label(sessions.0)
+            .to_lowercase()
+            .cmp(&session_list_project_label(sessions.1).to_lowercase()),
+        _ => std::cmp::Ordering::Equal,
+    };
+    if direction == "desc" {
+        ordering.reverse()
+    } else {
+        ordering
+    }
+}
+
+fn session_list_group_key(row: &SessionListRow, group_by: &str) -> String {
+    match group_by {
+        "agent" => row.session.agent.label().to_string(),
+        "project" => session_list_project_group_key(&row.session),
+        "startedAt" => row
+            .session
+            .started_at
+            .as_deref()
+            .and_then(|value| value.get(..10))
+            .unwrap_or_default()
+            .to_string(),
+        "updatedAt" => row
+            .session
+            .updated_at
+            .as_deref()
+            .and_then(|value| value.get(..10))
+            .unwrap_or_default()
+            .to_string(),
+        "title" => session_list_text(row.session.title.as_deref()),
+        "messages" => row.session.message_count.unwrap_or(0).to_string(),
+        "turns" => row.session.turn_count.unwrap_or(0).to_string(),
+        "cacheRate" => row
+            .session
+            .token_usage
+            .as_ref()
+            .filter(|usage| usage.input_tokens > 0)
+            .map(|usage| {
+                (usage.cached_input_tokens as f64 / usage.input_tokens as f64 * 100.0).to_string()
+            })
+            .unwrap_or_default(),
+        _ => String::new(),
+    }
+}
+
+fn build_session_list_group_pages(
+    rows: Vec<SessionListRow>,
+    group_by: &str,
+    page_size: usize,
+) -> Vec<SessionListGroupPage> {
+    let mut group_indexes = HashMap::<String, usize>::new();
+    let mut groups = Vec::<Vec<SessionListRow>>::new();
+    for row in rows {
+        let key = session_list_group_key(&row, group_by);
+        let index = *group_indexes.entry(key).or_insert_with(|| {
+            groups.push(Vec::new());
+            groups.len() - 1
+        });
+        groups[index].push(row);
+    }
+    let mut pages = Vec::new();
+    let mut page_rows = Vec::new();
+    let mut page_start = 0;
+    let mut page_group_count = 0;
+    for group in groups {
+        if !page_rows.is_empty() && page_rows.len() >= page_size {
+            let row_count = page_rows.len();
+            pages.push(SessionListGroupPage {
+                rows: page_rows,
+                start: page_start,
+                group_count: page_group_count,
+            });
+            page_start += row_count;
+            page_rows = Vec::new();
+            page_group_count = 0;
+        }
+        page_rows.extend(group);
+        page_group_count += 1;
+    }
+    if !page_rows.is_empty() || pages.is_empty() {
+        pages.push(SessionListGroupPage {
+            rows: page_rows,
+            start: page_start,
+            group_count: page_group_count,
+        });
+    }
+    pages
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionProjectSummary {
@@ -342,7 +694,9 @@ struct SessionSearchDocument {
 
 impl Store {
     pub fn open_default() -> Result<Self> {
-        Self::open(default_db_path()?)
+        let store = Self::open(default_db_path()?)?;
+        store.run_pending_installation_migrations()?;
+        Ok(store)
     }
 
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
@@ -372,6 +726,54 @@ impl Store {
             }
         }
         Ok(store)
+    }
+
+    fn run_pending_installation_migrations(&self) -> Result<()> {
+        let already_migrated = self
+            .conn
+            .query_row(
+                "SELECT 1 FROM meta WHERE key = ?1 LIMIT 1",
+                params![CODEX_GLOBAL_SKILL_CONFIG_MIGRATION_KEY],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()?
+            .is_some();
+        if already_migrated {
+            return Ok(());
+        }
+
+        crate::providers::codex::migrate_legacy_global_skill_config()
+            .context("failed to migrate legacy Codex global skill config")?;
+
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute(
+            "UPDATE projection_contexts
+             SET state = 'stale', scanned_at = NULL, error = NULL,
+                 parser_version = ?1
+             WHERE domain = 'skills'",
+            params![PROJECTION_PARSER_VERSION],
+        )?;
+        tx.execute(
+            "UPDATE scoped_projection_contexts
+             SET state = 'stale', scanned_at = NULL, error = NULL,
+                 parser_version = ?1
+             WHERE domain = 'skills'",
+            params![PROJECTION_PARSER_VERSION],
+        )?;
+        tx.execute(
+            "UPDATE projection_heads
+             SET status = 'stale', updated_at = ?1
+             WHERE domain = 'skills'",
+            params![unix_now() as i64],
+        )?;
+        tx.execute(
+            "INSERT INTO meta (key, value)
+             VALUES (?1, '1')
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![CODEX_GLOBAL_SKILL_CONFIG_MIGRATION_KEY],
+        )?;
+        tx.commit()?;
+        Ok(())
     }
 
     pub fn path(&self) -> &Path {
@@ -406,10 +808,10 @@ impl Store {
     }
 
     pub fn clear_skill_backup_config(&self) -> Result<bool> {
-        Ok(self
-            .conn
-            .execute("DELETE FROM app_settings WHERE key = 'skill_backup_config'", [])?
-            > 0)
+        Ok(self.conn.execute(
+            "DELETE FROM app_settings WHERE key = 'skill_backup_config'",
+            [],
+        )? > 0)
     }
 
     pub fn app_settings(&self) -> Result<AppSettings> {
@@ -662,6 +1064,119 @@ impl Store {
         })
     }
 
+    pub fn list_assistant_chat_sessions(&self) -> Result<Vec<AssistantChatSession>> {
+        with_database_read_lock_retry(|| self.list_assistant_chat_sessions_once())
+    }
+
+    fn list_assistant_chat_sessions_once(&self) -> Result<Vec<AssistantChatSession>> {
+        let session_rows = {
+            let mut statement = self.conn.prepare(
+                "SELECT id, linked_session_id, linked_session_agent, linked_session_path
+                 FROM assistant_chat_sessions
+                 ORDER BY updated_at DESC, id ASC",
+            )?;
+            statement
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                        row.get::<_, Option<String>>(3)?,
+                    ))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?
+        };
+
+        session_rows
+            .into_iter()
+            .map(|(id, linked_id, linked_agent, linked_path)| {
+                let linked_session = match (linked_id, linked_agent, linked_path) {
+                    (Some(id), Some(agent), Some(path)) => {
+                        Some(AssistantSessionLink { id, agent, path })
+                    }
+                    (None, None, None) => None,
+                    _ => bail!("assistant chat session has an incomplete linked session"),
+                };
+                let mut statement = self.conn.prepare(
+                    "SELECT role, content
+                     FROM assistant_chat_messages
+                     WHERE session_id = ?1
+                     ORDER BY id ASC",
+                )?;
+                let messages = statement
+                    .query_map([&id], |row| {
+                        Ok(AssistantMessage {
+                            role: row.get(0)?,
+                            content: row.get(1)?,
+                        })
+                    })?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                Ok(AssistantChatSession {
+                    id,
+                    messages,
+                    linked_session,
+                })
+            })
+            .collect()
+    }
+
+    pub fn append_assistant_chat_message(
+        &self,
+        conversation_id: &str,
+        workspace: &Path,
+        linked_session: Option<&AssistantSessionLink>,
+        message: &AssistantMessage,
+    ) -> Result<()> {
+        let conversation_id = conversation_id.trim();
+        if conversation_id.is_empty() {
+            bail!("assistant conversation id is required")
+        }
+        if !matches!(message.role.as_str(), "user" | "assistant") {
+            bail!("assistant message role is invalid")
+        }
+        let content = message.content.trim();
+        if content.is_empty() {
+            bail!("assistant message content is required")
+        }
+        let workspace = workspace.to_string_lossy().trim().to_string();
+        if workspace.is_empty() {
+            bail!("assistant workspace is required")
+        }
+        let now = Local::now().to_rfc3339();
+        let (linked_id, linked_agent, linked_path) = linked_session
+            .map(|session| {
+                (
+                    Some(session.id.as_str()),
+                    Some(session.agent.as_str()),
+                    Some(session.path.as_str()),
+                )
+            })
+            .unwrap_or((None, None, None));
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute(
+            "INSERT INTO assistant_chat_sessions (
+                id, workspace, linked_session_id, linked_session_agent, linked_session_path,
+                created_at, updated_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)
+             ON CONFLICT(id) DO UPDATE SET updated_at = excluded.updated_at",
+            params![
+                conversation_id,
+                workspace,
+                linked_id,
+                linked_agent,
+                linked_path,
+                now,
+            ],
+        )?;
+        tx.execute(
+            "INSERT INTO assistant_chat_messages (session_id, role, content, created_at)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![conversation_id, message.role, content, now],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
     pub fn project_scan_scopes(&self) -> Result<Vec<ProjectScanScope>> {
         with_database_read_lock_retry(|| self.project_scan_scopes_once())
     }
@@ -840,12 +1355,14 @@ impl Store {
     ) -> Result<()> {
         let workspace_root = canonical_workspace_root(workspace_root);
         let scope_key = workspace_scope_key(&workspace_root)?;
+        let mut skill_source_records = report.skill_source_migrations.clone();
+        skill_source_records.extend(skill_source_records_from_scan(&report.skills));
         let tx = self.conn.unchecked_transaction()?;
         if report.skills.warnings.is_empty() {
             self.insert_skill_source_records_if_missing_for_workspace_in_tx(
                 &tx,
                 &scope_key,
-                &report.skill_source_migrations,
+                &skill_source_records,
             )?;
             self.write_normalized_snapshot_in_tx(&tx, &scope_key, "skills", &report.skills)?;
         }
@@ -862,12 +1379,7 @@ impl Store {
             self.write_normalized_snapshot_in_tx(&tx, &scope_key, "mcp", &report.mcp)?;
         }
         if report.sessions.warnings.is_empty() {
-            self.save_sessions_at_with_scope_in_tx(
-                &tx,
-                &report.sessions,
-                unix_now(),
-                &scope_key,
-            )?;
+            self.save_sessions_at_with_scope_in_tx(&tx, &report.sessions, unix_now(), &scope_key)?;
             let normalized_sessions = SessionScan {
                 sessions: report
                     .sessions
@@ -878,11 +1390,20 @@ impl Store {
                     .collect(),
                 warnings: report.sessions.warnings.clone(),
             };
-            self.write_normalized_snapshot_in_tx(&tx, &scope_key, "sessions", &normalized_sessions)?;
-            let session_projects = Self::session_project_summaries_from_sessions(
-                &normalized_sessions.sessions,
-            );
-            self.write_normalized_snapshot_in_tx(&tx, &scope_key, "session_projects", &session_projects)?;
+            self.write_normalized_snapshot_in_tx(
+                &tx,
+                &scope_key,
+                "sessions",
+                &normalized_sessions,
+            )?;
+            let session_projects =
+                Self::session_project_summaries_from_sessions(&normalized_sessions.sessions);
+            self.write_normalized_snapshot_in_tx(
+                &tx,
+                &scope_key,
+                "session_projects",
+                &session_projects,
+            )?;
         }
         for (domain, ready, error) in [
             (
@@ -983,7 +1504,6 @@ impl Store {
         Ok(entries.len())
     }
 
-
     pub fn fs_manifest_entry(
         &self,
         source_kind: &str,
@@ -1039,9 +1559,10 @@ impl Store {
                  FROM fs_manifest
                  WHERE scope_key = ?1 AND source_kind = ?2 AND root = ?3",
             )?;
-            let rows = statement.query_map(params![DEFAULT_SCOPE_KEY, source_kind, root_key], |row| {
-                row.get::<_, String>(0)
-            })?;
+            let rows = statement
+                .query_map(params![DEFAULT_SCOPE_KEY, source_kind, root_key], |row| {
+                    row.get::<_, String>(0)
+                })?;
             rows.collect::<std::result::Result<Vec<_>, _>>()?
         };
         let seen_paths = seen_paths
@@ -1195,14 +1716,16 @@ impl Store {
     ) -> Result<()> {
         ensure_projection_domain(domain)?;
         tx.execute(
-            &format!("INSERT INTO {SCOPED_PROJECTION_CONTEXT_TABLE}
+            &format!(
+                "INSERT INTO {SCOPED_PROJECTION_CONTEXT_TABLE}
                 (scope_key, domain, state, scanned_at, error, parser_version)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)
              ON CONFLICT(scope_key, domain) DO UPDATE SET
                 state = excluded.state,
                 scanned_at = excluded.scanned_at,
                 error = excluded.error,
-                parser_version = excluded.parser_version"),
+                parser_version = excluded.parser_version"
+            ),
             params![
                 scope_key.as_str(),
                 domain,
@@ -1245,14 +1768,16 @@ impl Store {
             .optional()?
             .unwrap_or(Revision::ZERO.value() as i64);
         tx.execute(
-            &format!("INSERT INTO {NORMALIZED_SNAPSHOT_TABLE}
+            &format!(
+                "INSERT INTO {NORMALIZED_SNAPSHOT_TABLE}
                 (scope_key, domain, payload_json, source_version, revision, updated_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)
              ON CONFLICT(scope_key, domain) DO UPDATE SET
                 payload_json = excluded.payload_json,
                 source_version = excluded.source_version,
                 revision = excluded.revision,
-                updated_at = excluded.updated_at"),
+                updated_at = excluded.updated_at"
+            ),
             params![
                 scope_key.as_str(),
                 domain,
@@ -1301,6 +1826,19 @@ impl Store {
         with_database_read_lock_retry(|| self.read_normalized_snapshot_once(scope_key, domain))
     }
 
+    /// Read the last persisted projection without inspecting or refreshing its
+    /// source files. Callers use this on request paths; freshness is owned by
+    /// the projection refresh coordinator.
+    pub fn read_cached_projection<T: for<'de> Deserialize<'de>>(
+        &self,
+        domain: &str,
+        workspace_root: &Path,
+    ) -> Result<Option<T>> {
+        ensure_projection_domain(domain)?;
+        let scope_key = workspace_scope_key(&canonical_workspace_root(workspace_root))?;
+        self.read_normalized_snapshot(&scope_key, domain)
+    }
+
     fn read_normalized_snapshot_once<T: for<'de> Deserialize<'de>>(
         &self,
         scope_key: &ScopeKey,
@@ -1308,8 +1846,10 @@ impl Store {
     ) -> Result<Option<T>> {
         self.conn
             .query_row(
-                &format!("SELECT payload_json FROM {NORMALIZED_SNAPSHOT_TABLE}
-                 WHERE scope_key = ?1 AND domain = ?2"),
+                &format!(
+                    "SELECT payload_json FROM {NORMALIZED_SNAPSHOT_TABLE}
+                 WHERE scope_key = ?1 AND domain = ?2"
+                ),
                 params![scope_key.as_str(), domain],
                 |row| row.get::<_, String>(0),
             )
@@ -1385,9 +1925,9 @@ impl Store {
     fn list_sessions_from_table(&self, scope_key: &ScopeKey) -> Result<SessionScan> {
         // `data_json` is the SessionRecord authority. The scalar session columns are
         // denormalized projections retained for compatibility and write-side indexing.
-        let mut stmt = self.conn.prepare(
-            "SELECT data_json FROM scoped_sessions WHERE scope_key = ?1",
-        )?;
+        let mut stmt = self
+            .conn
+            .prepare("SELECT data_json FROM scoped_sessions WHERE scope_key = ?1")?;
         let mut sessions = Vec::new();
         let mut warnings = Vec::new();
         let mut rows = stmt.query(params![scope_key.as_str()])?;
@@ -1427,9 +1967,7 @@ impl Store {
         &self,
         scope_key: &ScopeKey,
     ) -> Result<Vec<SessionProjectSummary>> {
-        let sessions = self
-            .list_sessions_from_table(scope_key)?
-            .sessions;
+        let sessions = self.list_sessions_from_table(scope_key)?.sessions;
         Ok(Self::session_project_summaries_from_sessions(&sessions))
     }
 
@@ -1441,15 +1979,17 @@ impl Store {
             let Some(id) = session.logical_project_id.as_ref() else {
                 continue;
             };
-            let entry = summaries.entry(id.clone()).or_insert_with(|| SessionProjectSummary {
-                id: id.clone(),
-                name: session
-                    .logical_project_name
-                    .clone()
-                    .unwrap_or_else(|| "Unnamed project".to_string()),
-                missing: true,
-                paths: Vec::new(),
-            });
+            let entry = summaries
+                .entry(id.clone())
+                .or_insert_with(|| SessionProjectSummary {
+                    id: id.clone(),
+                    name: session
+                        .logical_project_name
+                        .clone()
+                        .unwrap_or_else(|| "Unnamed project".to_string()),
+                    missing: true,
+                    paths: Vec::new(),
+                });
             if let Some(path) = &session.project {
                 entry.paths.push(path.clone());
             }
@@ -1482,9 +2022,11 @@ impl Store {
         let context = self
             .conn
             .query_row(
-                &format!("SELECT state
+                &format!(
+                    "SELECT state
                  FROM {SCOPED_PROJECTION_CONTEXT_TABLE}
-                 WHERE scope_key = ?1 AND domain = ?2"),
+                 WHERE scope_key = ?1 AND domain = ?2"
+                ),
                 params![scope_key.as_str(), domain],
                 |row| row.get::<_, String>(0),
             )
@@ -1505,9 +2047,12 @@ impl Store {
 
         let entries = self.list_fs_manifest_for_domain(domain, &scope_key)?;
         if entries.is_empty() {
-            return Ok(ProjectionStatus::Missing);
+            // An empty source set is a valid, persisted projection. The
+            // context and snapshot above already distinguish it from a
+            // projection that has never been initialized.
+            return Ok(ProjectionStatus::Fresh);
         }
-        if domain == "skills"
+        if matches!(domain, "skills" | "mcp")
             && entries
                 .iter()
                 .any(|entry| entry.parser_version != PROJECTION_PARSER_VERSION)
@@ -1551,16 +2096,13 @@ impl Store {
         let context = self
             .conn
             .query_row(
-                &format!("SELECT state, parser_version
+                &format!(
+                    "SELECT state, parser_version
                  FROM {SCOPED_PROJECTION_CONTEXT_TABLE}
-                 WHERE scope_key = ?1 AND domain = 'skills'"),
+                 WHERE scope_key = ?1 AND domain = 'skills'"
+                ),
                 params![scope_key.as_str()],
-                |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, String>(1)?,
-                    ))
-                },
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
             )
             .optional()?;
         let Some((state, parser_version)) = context else {
@@ -1576,14 +2118,14 @@ impl Store {
 
     /// Return the cached skill projection when the explicitly selected skills
     /// are still fresh. Unselected skill files are intentionally ignored here:
-    /// callers using this path only need a stable update plan for `names`.
-    pub fn list_skills_for_names_if_current(
+    /// callers using this path only need a stable update plan for `skill_ids`.
+    pub fn list_skills_for_ids_if_current(
         &self,
         workspace_root: &Path,
-        names: &[String],
+        skill_ids: &[String],
     ) -> Result<Option<SkillScan>> {
-        let selected_names = names.iter().cloned().collect::<BTreeSet<_>>();
-        if selected_names.is_empty() {
+        let selected_ids = skill_ids.iter().cloned().collect::<BTreeSet<_>>();
+        if selected_ids.is_empty() {
             return Ok(None);
         }
 
@@ -1592,24 +2134,19 @@ impl Store {
         let context = self
             .conn
             .query_row(
-                &format!("SELECT state, parser_version
+                &format!(
+                    "SELECT state, parser_version
                  FROM {SCOPED_PROJECTION_CONTEXT_TABLE}
-                 WHERE scope_key = ?1 AND domain = 'skills'"),
+                 WHERE scope_key = ?1 AND domain = 'skills'"
+                ),
                 params![scope_key.as_str()],
-                |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, String>(1)?,
-                    ))
-                },
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
             )
             .optional()?;
         let Some((state, parser_version)) = context else {
             return Ok(None);
         };
-        if state != "ready"
-            || parser_version != PROJECTION_PARSER_VERSION
-        {
+        if state != "ready" || parser_version != PROJECTION_PARSER_VERSION {
             return Ok(None);
         }
 
@@ -1632,12 +2169,12 @@ impl Store {
             .skills
             .iter()
             .filter(|skill| {
-                selected_names
+                selected_ids
                     .iter()
-                    .any(|name| crate::skills::skill_matches_selector(skill, name))
+                    .any(|id| crate::skills::skill_matches_id(skill, id))
             })
             .collect::<Vec<_>>();
-        if selected.len() != selected_names.len() {
+        if selected.len() != selected_ids.len() {
             return Ok(None);
         }
 
@@ -1775,6 +2312,7 @@ impl Store {
 
     pub fn save_skills_for_workspace(&self, workspace_root: &Path, scan: &SkillScan) -> Result<()> {
         let workspace_root = canonical_workspace_root(workspace_root);
+        let source_records = skill_source_records_from_scan(scan);
         self.save_projection_domain_snapshot(
             &workspace_root,
             "skills",
@@ -1782,7 +2320,7 @@ impl Store {
             &manifest_entries_for_skills(scan, &workspace_root),
             scan.warnings.is_empty(),
             (!scan.warnings.is_empty()).then(|| scan.warnings.join("; ")),
-            &[],
+            &source_records,
         )
     }
 
@@ -1793,6 +2331,8 @@ impl Store {
         source_migrations: &[SkillSourceRecord],
     ) -> Result<()> {
         let workspace_root = canonical_workspace_root(workspace_root);
+        let mut source_records = source_migrations.to_vec();
+        source_records.extend(skill_source_records_from_scan(scan));
         self.save_projection_domain_snapshot(
             &workspace_root,
             "skills",
@@ -1800,7 +2340,7 @@ impl Store {
             &manifest_entries_for_skills(scan, &workspace_root),
             scan.warnings.is_empty(),
             (!scan.warnings.is_empty()).then(|| scan.warnings.join("; ")),
-            source_migrations,
+            &source_records,
         )
     }
 
@@ -1863,18 +2403,10 @@ impl Store {
         if let Some(snapshot) = snapshot {
             self.write_normalized_snapshot_in_tx(&tx, &scope_key, domain, snapshot)?;
         }
-        self.finalize_projection_domain_in_tx(
-            &tx,
-            domain,
-            workspace_root,
-            entries,
-            ready,
-            error,
-        )?;
+        self.finalize_projection_domain_in_tx(&tx, domain, workspace_root, entries, ready, error)?;
         tx.commit()?;
         Ok(())
     }
-
 
     fn compare_session_updated_at(
         left: &SessionRecord,
@@ -2007,11 +2539,8 @@ impl Store {
             let seen_at = session_project_seen_at(session);
             let suggested_name = suggested_project_name(session);
             if let Some(project) = projects.get_mut(&project_id) {
-                if compare_timestamps(
-                    Some(seen_at.as_str()),
-                    Some(project.last_seen_at.as_str()),
-                )
-                .is_gt()
+                if compare_timestamps(Some(seen_at.as_str()), Some(project.last_seen_at.as_str()))
+                    .is_gt()
                 {
                     project.last_seen_at = seen_at.clone();
                     if !project.name_custom {
@@ -2304,13 +2833,7 @@ impl Store {
         }
         let source_version = SourceVersion::new(PROJECTION_PARSER_VERSION)
             .map_err(|error| anyhow::anyhow!(error))?;
-        advance_projection_head_in_tx(
-            &tx,
-            scope_key,
-            "analytics",
-            Some(&source_version),
-            "ready",
-        )?;
+        advance_projection_head_in_tx(&tx, scope_key, "analytics", Some(&source_version), "ready")?;
         tx.commit()?;
         Ok(())
     }
@@ -2329,13 +2852,7 @@ impl Store {
         let allowed = scoped_sessions
             .iter()
             .filter(|session| agent.is_none_or(|expected| session.agent == expected))
-            .map(|session| {
-                (
-                    session.id.clone(),
-                    session.agent,
-                    session.path.clone(),
-                )
-            })
+            .map(|session| (session.id.clone(), session.agent, session.path.clone()))
             .collect::<HashSet<_>>();
         let today = chrono::Local::now().date_naive();
         let days = days.clamp(1, 365);
@@ -2343,11 +2860,8 @@ impl Store {
         let since = today - chrono::Duration::days(i64::from(days.saturating_sub(1)));
         let rank_since = today - chrono::Duration::days(i64::from(rank_days.saturating_sub(1)));
         let cutoff = since.min(rank_since).to_string();
-        let (records, warnings) = self.load_session_analytics_overview_records_for_scope(
-            scope_key,
-            agent,
-            &cutoff,
-        )?;
+        let (records, warnings) =
+            self.load_session_analytics_overview_records_for_scope(scope_key, agent, &cutoff)?;
         let mut overview =
             analytics::aggregate_overview_records(&records, days, rank_days, warnings);
         let mut capabilities = BTreeMap::<AgentKind, AnalyticsCapabilities>::new();
@@ -2407,9 +2921,9 @@ impl Store {
                 capabilities,
             })
             .collect();
-        overview.warnings.extend(
-            self.analytics_overview_index_warnings_for_scope(scope_key, agent)?,
-        );
+        overview
+            .warnings
+            .extend(self.analytics_overview_index_warnings_for_scope(scope_key, agent)?);
         Ok(overview)
     }
 
@@ -2438,7 +2952,9 @@ impl Store {
                 Ok(record) => records.push(record),
                 Err(error) => {
                     invalid = true;
-                    warnings.push(format!("invalid scoped analytics overview cache row: {error}"));
+                    warnings.push(format!(
+                        "invalid scoped analytics overview cache row: {error}"
+                    ));
                 }
             }
         }
@@ -2461,7 +2977,9 @@ impl Store {
                 let (analytics_json, parser_state_json) = row?;
                 match (
                     serde_json::from_str::<crate::analytics::SessionAnalytics>(&analytics_json),
-                    serde_json::from_str::<crate::analytics::AnalyticsParserState>(&parser_state_json),
+                    serde_json::from_str::<crate::analytics::AnalyticsParserState>(
+                        &parser_state_json,
+                    ),
                 ) {
                     (Ok(analytics), Ok(state)) => {
                         records.push(analytics::overview_record(&SessionAnalyticsRecord {
@@ -2698,7 +3216,6 @@ impl Store {
         })
     }
 
-
     pub fn session_scan_cache_for_scope(&self, scope_key: &ScopeKey) -> Result<SessionScanCache> {
         let sessions = self.list_sessions_for_scope(scope_key)?.sessions;
         let mut source_states_by_session: HashMap<
@@ -2744,7 +3261,9 @@ impl Store {
             );
             let source_states = source_states_by_session.remove(&key)?;
             let session_path = session.path.clone();
-            let primary = source_states.iter().find(|source| source.path == session_path)?;
+            let primary = source_states
+                .iter()
+                .find(|source| source.path == session_path)?;
             let file_mtime = primary.file_mtime;
             let file_size = primary.file_size;
             Some(SessionScanCacheEntry {
@@ -2759,7 +3278,6 @@ impl Store {
         });
         Ok(SessionScanCache::from_entries(entries))
     }
-
 
     pub fn sessions_last_scan_at_for_scope(&self, scope_key: &ScopeKey) -> Result<Option<u64>> {
         self.sessions_last_scan_at_for_key(&format!("sessions_last_scan_at:{}", scope_key.as_str()))
@@ -2817,22 +3335,24 @@ impl Store {
                 },
             )
             .optional()?;
-        row.map(|(scope, domain, revision, source_version, schema_version, status)| {
-            Ok(ProjectionHead {
-                scope_key: ScopeKey::new(scope).map_err(|error| anyhow::anyhow!(error))?,
-                domain,
-                revision: Revision::new(
-                    u64::try_from(revision).context("invalid projection revision")?,
-                ),
-                source_version: source_version
-                    .map(SourceVersion::new)
-                    .transpose()
-                    .map_err(|error| anyhow::anyhow!(error))?,
-                schema_version: u32::try_from(schema_version)
-                    .context("invalid projection schema version")?,
-                status,
-            })
-        })
+        row.map(
+            |(scope, domain, revision, source_version, schema_version, status)| {
+                Ok(ProjectionHead {
+                    scope_key: ScopeKey::new(scope).map_err(|error| anyhow::anyhow!(error))?,
+                    domain,
+                    revision: Revision::new(
+                        u64::try_from(revision).context("invalid projection revision")?,
+                    ),
+                    source_version: source_version
+                        .map(SourceVersion::new)
+                        .transpose()
+                        .map_err(|error| anyhow::anyhow!(error))?,
+                    schema_version: u32::try_from(schema_version)
+                        .context("invalid projection schema version")?,
+                    status,
+                })
+            },
+        )
         .transpose()
     }
 
@@ -2850,13 +3370,7 @@ impl Store {
             anyhow::bail!("projection status must not be empty");
         }
         let tx = self.conn.unchecked_transaction()?;
-        let head = advance_projection_head_in_tx(
-            &tx,
-            scope_key,
-            domain,
-            source_version,
-            status,
-        )?;
+        let head = advance_projection_head_in_tx(&tx, scope_key, domain, source_version, status)?;
         tx.commit()?;
         Ok(head)
     }
@@ -2952,57 +3466,58 @@ impl Store {
                 },
             )
             .optional()?;
-        row.map(|(
-            operation_id,
-            kind,
-            scope_key,
-            status,
-            input_revision,
-            source_version,
-            checkpoint_json,
-            error,
-        )| {
-            let kind = match kind.as_str() {
-                "scan" => crate::runtime_contract::OperationKind::Scan,
-                "watch" => crate::runtime_contract::OperationKind::Watch,
-                "backfill" => crate::runtime_contract::OperationKind::Backfill,
-                "analytics" => crate::runtime_contract::OperationKind::Analytics,
-                "skill_update" => crate::runtime_contract::OperationKind::SkillUpdate,
-                "projection" => crate::runtime_contract::OperationKind::Projection,
-                other => anyhow::bail!("unknown operation kind: {other}"),
-            };
-            let status = match status.as_str() {
-                "queued" => OperationStatus::Queued,
-                "running" => OperationStatus::Running,
-                "committing" => OperationStatus::Committing,
-                "committed" => OperationStatus::Committed,
-                "published" => OperationStatus::Published,
-                "failed" => OperationStatus::Failed,
-                "cancelled" => OperationStatus::Cancelled,
-                "timed_out" => OperationStatus::TimedOut,
-                "stale" => OperationStatus::Stale,
-                other => anyhow::bail!("unknown operation status: {other}"),
-            };
-            Ok(OperationRecord {
-                operation_id: OperationId::new(operation_id)
-                    .map_err(|error| anyhow::anyhow!(error))?,
+        row.map(
+            |(
+                operation_id,
                 kind,
-                scope_key: ScopeKey::new(scope_key).map_err(|error| anyhow::anyhow!(error))?,
+                scope_key,
                 status,
-                input_revision: Revision::new(
-                    u64::try_from(input_revision).context("invalid operation revision")?,
-                ),
-                source_version: source_version
-                    .map(SourceVersion::new)
-                    .transpose()
-                    .map_err(|error| anyhow::anyhow!(error))?,
+                input_revision,
+                source_version,
                 checkpoint_json,
                 error,
-            })
-        })
+            )| {
+                let kind = match kind.as_str() {
+                    "scan" => crate::runtime_contract::OperationKind::Scan,
+                    "watch" => crate::runtime_contract::OperationKind::Watch,
+                    "backfill" => crate::runtime_contract::OperationKind::Backfill,
+                    "analytics" => crate::runtime_contract::OperationKind::Analytics,
+                    "skill_update" => crate::runtime_contract::OperationKind::SkillUpdate,
+                    "projection" => crate::runtime_contract::OperationKind::Projection,
+                    other => anyhow::bail!("unknown operation kind: {other}"),
+                };
+                let status = match status.as_str() {
+                    "queued" => OperationStatus::Queued,
+                    "running" => OperationStatus::Running,
+                    "committing" => OperationStatus::Committing,
+                    "committed" => OperationStatus::Committed,
+                    "published" => OperationStatus::Published,
+                    "failed" => OperationStatus::Failed,
+                    "cancelled" => OperationStatus::Cancelled,
+                    "timed_out" => OperationStatus::TimedOut,
+                    "stale" => OperationStatus::Stale,
+                    other => anyhow::bail!("unknown operation status: {other}"),
+                };
+                Ok(OperationRecord {
+                    operation_id: OperationId::new(operation_id)
+                        .map_err(|error| anyhow::anyhow!(error))?,
+                    kind,
+                    scope_key: ScopeKey::new(scope_key).map_err(|error| anyhow::anyhow!(error))?,
+                    status,
+                    input_revision: Revision::new(
+                        u64::try_from(input_revision).context("invalid operation revision")?,
+                    ),
+                    source_version: source_version
+                        .map(SourceVersion::new)
+                        .transpose()
+                        .map_err(|error| anyhow::anyhow!(error))?,
+                    checkpoint_json,
+                    error,
+                })
+            },
+        )
         .transpose()
     }
-
 
     pub fn apply_session_delta_for_scope(
         &self,
@@ -3010,11 +3525,7 @@ impl Store {
         sessions: &[SessionRecord],
     ) -> Result<Vec<SessionRecord>> {
         let tx = self.conn.unchecked_transaction()?;
-        let changed = Self::apply_session_delta_in_tx(
-            &tx,
-            sessions,
-            scope_key,
-        )?;
+        let changed = Self::apply_session_delta_in_tx(&tx, sessions, scope_key)?;
         if !changed.is_empty() {
             advance_projection_head_in_tx(&tx, scope_key, "sessions", None, "ready")?;
         }
@@ -3025,23 +3536,14 @@ impl Store {
         Ok(changed)
     }
 
-
     pub fn apply_session_delta_and_resolve_projects_for_scope(
         &self,
         scope_key: &ScopeKey,
         sessions: &[SessionRecord],
     ) -> Result<Vec<SessionRecord>> {
         let tx = self.conn.unchecked_transaction()?;
-        let mut changed = Self::apply_session_delta_in_tx(
-            &tx,
-            sessions,
-            scope_key,
-        )?;
-        self.resolve_session_projects_in_tx(
-            &tx,
-            &mut changed,
-            scope_key,
-        )?;
+        let mut changed = Self::apply_session_delta_in_tx(&tx, sessions, scope_key)?;
+        self.resolve_session_projects_in_tx(&tx, &mut changed, scope_key)?;
         if !changed.is_empty() {
             advance_projection_head_in_tx(&tx, scope_key, "sessions", None, "ready")?;
         }
@@ -3057,21 +3559,10 @@ impl Store {
         scope_key: &ScopeKey,
         sessions: &[SessionRecord],
         removed_paths: &[PathBuf],
-    ) -> Result<(
-        Vec<SessionRecord>,
-        Vec<crate::sessions::SessionIdentity>,
-    )> {
+    ) -> Result<(Vec<SessionRecord>, Vec<crate::sessions::SessionIdentity>)> {
         let tx = self.conn.unchecked_transaction()?;
-        let mut changed = Self::apply_session_delta_in_tx(
-            &tx,
-            sessions,
-            scope_key,
-        )?;
-        self.resolve_session_projects_in_tx(
-            &tx,
-            &mut changed,
-            scope_key,
-        )?;
+        let mut changed = Self::apply_session_delta_in_tx(&tx, sessions, scope_key)?;
+        self.resolve_session_projects_in_tx(&tx, &mut changed, scope_key)?;
         let existing = Self::list_sessions_in_tx(&tx, scope_key)?;
         let removed = existing
             .into_iter()
@@ -3241,9 +3732,7 @@ impl Store {
         tx: &Transaction<'_>,
         scope_key: &ScopeKey,
     ) -> Result<Vec<SessionRecord>> {
-        let mut stmt = tx.prepare(
-            "SELECT data_json FROM scoped_sessions WHERE scope_key = ?1",
-        )?;
+        let mut stmt = tx.prepare("SELECT data_json FROM scoped_sessions WHERE scope_key = ?1")?;
         let mut sessions = Vec::new();
         let mut rows = stmt.query([scope_key.as_str()])?;
         while let Some(row) = rows.next()? {
@@ -3253,7 +3742,6 @@ impl Store {
         }
         Ok(sessions)
     }
-
 
     fn ensure_scoped_fs_manifest(&self) -> Result<()> {
         let mut stmt = self.conn.prepare("PRAGMA table_info(fs_manifest)")?;
@@ -3308,7 +3796,6 @@ impl Store {
         Ok(())
     }
 
-
     pub fn remove_sessions_for_paths_for_scope(
         &self,
         scope_key: &ScopeKey,
@@ -3357,6 +3844,160 @@ impl Store {
             .collect())
     }
 
+    pub fn list_session_page_for_scope(
+        &self,
+        scope_key: &ScopeKey,
+        query: SessionListQuery,
+    ) -> Result<SessionListPage> {
+        let settings = self.app_settings()?;
+        let projects = self.list_projects()?;
+        let session_projects = self.list_session_projects_for_scope(scope_key)?;
+        let base_sessions = self
+            .list_sessions_for_scope(scope_key)?
+            .sessions
+            .into_iter()
+            .filter(|session| query.agent.is_none_or(|agent| session.agent == agent))
+            .collect::<Vec<_>>();
+
+        let project_source = base_sessions
+            .iter()
+            .filter(|session| query.show_child_sessions || session.parent_session_id.is_none());
+        let mut project_options = HashMap::<String, SessionListProjectOption>::new();
+        for session in project_source {
+            let Some(option) = resolve_session_list_project(
+                session,
+                &settings.missing_session_project_policy,
+                &session_projects,
+                &projects,
+            ) else {
+                continue;
+            };
+            project_options
+                .entry(option.key.clone())
+                .and_modify(|current| current.count += 1)
+                .or_insert(SessionListProjectOption {
+                    key: option.key,
+                    label: option.label,
+                    title: option.title,
+                    count: 1,
+                });
+        }
+        let mut project_options = project_options.into_values().collect::<Vec<_>>();
+        project_options.sort_by(|left, right| {
+            left.label
+                .to_lowercase()
+                .cmp(&right.label.to_lowercase())
+                .then_with(|| left.title.to_lowercase().cmp(&right.title.to_lowercase()))
+        });
+
+        let normalized_query = query.query.trim();
+        let mut rows = if normalized_query.is_empty() {
+            base_sessions
+                .into_iter()
+                .map(|session| SessionListRow {
+                    session,
+                    search_score: None,
+                    search_snippet: None,
+                })
+                .collect::<Vec<_>>()
+        } else {
+            self.search_sessions_for_scope(scope_key, normalized_query, None)?
+                .into_iter()
+                .filter(|hit| query.agent.is_none_or(|agent| hit.session.agent == agent))
+                .map(|hit| SessionListRow {
+                    session: hit.session,
+                    search_score: Some(hit.search_score),
+                    search_snippet: Some(hit.search_snippet),
+                })
+                .collect::<Vec<_>>()
+        };
+
+        let selected_projects = query
+            .selected_project_keys
+            .iter()
+            .map(String::as_str)
+            .collect::<HashSet<_>>();
+        if !selected_projects.is_empty() {
+            rows.retain(|row| {
+                resolve_session_list_project(
+                    &row.session,
+                    &settings.missing_session_project_policy,
+                    &session_projects,
+                    &projects,
+                )
+                .is_some_and(|project| selected_projects.contains(project.key.as_str()))
+            });
+        }
+        let child_session_count = rows
+            .iter()
+            .filter(|row| row.session.parent_session_id.is_some())
+            .count();
+        if !query.show_child_sessions {
+            rows.retain(|row| row.session.parent_session_id.is_none());
+        }
+        rows.sort_by(|left, right| {
+            compare_session_list_rows(left, right, &query.sort_key, &query.sort_direction)
+        });
+
+        let total = rows.len();
+        let locate_key = query.locate.as_ref().map(|session| {
+            format!(
+                "{}\0{}\0{}",
+                session.agent.label(),
+                session.id,
+                session.path.display(),
+            )
+        });
+        if let Some(group_by) = query.group_by.as_deref() {
+            let pages = build_session_list_group_pages(rows, group_by, query.page_size);
+            let located_page = locate_key.as_deref().and_then(|target| {
+                pages.iter().position(|page| {
+                    page.rows
+                        .iter()
+                        .any(|row| session_list_identity(&row.session) == target)
+                })
+            });
+            let page_count = pages.len().max(1);
+            let page = located_page.unwrap_or(query.page).min(page_count - 1);
+            let selected = &pages[page];
+            return Ok(SessionListPage {
+                rows: selected.rows.clone(),
+                project_options,
+                total,
+                child_session_count,
+                page,
+                page_count,
+                page_start: selected.start,
+                page_end: selected.start + selected.rows.len(),
+                group_count: Some(selected.group_count),
+            });
+        }
+
+        let page_count = total.div_ceil(query.page_size).max(1);
+        let located_page = locate_key.as_deref().and_then(|target| {
+            rows.iter()
+                .position(|row| session_list_identity(&row.session) == target)
+                .map(|index| index / query.page_size)
+        });
+        let page = located_page.unwrap_or(query.page).min(page_count - 1);
+        let page_start = if total == 0 {
+            0
+        } else {
+            page * query.page_size
+        };
+        let page_end = (page_start + query.page_size).min(total);
+        Ok(SessionListPage {
+            rows: rows[page_start..page_end].to_vec(),
+            project_options,
+            total,
+            child_session_count,
+            page,
+            page_count,
+            page_start,
+            page_end,
+            group_count: None,
+        })
+    }
 
     /// Search the workspace-owned session projection through its own scoped
     /// FTS index. The legacy global FTS tables are never consulted here.
@@ -3576,8 +4217,6 @@ impl Store {
         Ok(hits)
     }
 
-
-
     fn compare_session_search_hits(
         left: &SessionSearchHit,
         right: &SessionSearchHit,
@@ -3587,7 +4226,6 @@ impl Store {
             .total_cmp(&left.search_score)
             .then_with(|| Self::compare_session_updated_at(&left.session, &right.session))
     }
-
 
     fn session_search_candidate_join(
         &self,
@@ -3611,8 +4249,8 @@ impl Store {
             &format!("DELETE FROM temp.{SESSION_SEARCH_CANDIDATE_TABLE}"),
             [],
         )?;
-        let candidates_json = serde_json::to_string(candidates)
-            .context("serialize session search candidates")?;
+        let candidates_json =
+            serde_json::to_string(candidates).context("serialize session search candidates")?;
         self.conn.execute(
             &format!(
                 "INSERT OR IGNORE INTO temp.{SESSION_SEARCH_CANDIDATE_TABLE}
@@ -3681,7 +4319,6 @@ impl Store {
         )
     }
 
-
     pub fn save_sessions_at_for_scope(
         &self,
         scope_key: &ScopeKey,
@@ -3690,7 +4327,6 @@ impl Store {
     ) -> Result<()> {
         self.save_sessions_at_with_scope(sessions, scanned_at, scope_key)
     }
-
 
     /// Rebuild the derived scoped search index from the canonical session
     /// projection. The index is disposable; search itself never falls back to
@@ -3910,7 +4546,6 @@ impl Store {
         Ok(())
     }
 
-
     pub fn clear_session_skill_index_for_scope(&self, scope_key: &ScopeKey) -> Result<()> {
         let tx = self.conn.unchecked_transaction()?;
         tx.execute(
@@ -3924,7 +4559,6 @@ impl Store {
         tx.commit()?;
         Ok(())
     }
-
 
     pub fn ensure_session_skill_index_version_for_scope(
         &self,
@@ -3962,7 +4596,6 @@ impl Store {
         Ok(true)
     }
 
-
     pub fn session_skill_index_is_current_for_scope(
         &self,
         scope_key: &ScopeKey,
@@ -3989,7 +4622,6 @@ impl Store {
             .optional()?;
         Ok(status.as_deref() == Some("indexed"))
     }
-
 
     pub fn replace_session_skill_links_for_scope(
         &self,
@@ -4056,7 +4688,6 @@ impl Store {
         Ok(())
     }
 
-
     pub fn mark_session_skill_index_failed_for_scope(
         &self,
         scope_key: &ScopeKey,
@@ -4090,7 +4721,6 @@ impl Store {
         )?;
         Ok(())
     }
-
 
     pub fn session_skill_index_status_for_scope(
         &self,
@@ -4141,34 +4771,51 @@ impl Store {
         })
     }
 
-
     pub fn session_skill_links_for_scope(
         &self,
         scope_key: &ScopeKey,
         session_id: &str,
         agent: AgentKind,
     ) -> Result<Vec<SessionSkillLink>> {
-        with_database_read_lock_retry(|| self.query_session_skill_links_from(
-            "scoped_session_skill_links",
-            "scoped_sessions",
-            "WHERE links.scope_key = ?1 AND links.session_id = ?2 AND links.agent = ?3",
-            params![scope_key.as_str(), session_id, agent_label(agent)],
-        ))
+        with_database_read_lock_retry(|| {
+            self.query_session_skill_links_from(
+                "scoped_session_skill_links",
+                "scoped_sessions",
+                "WHERE links.scope_key = ?1 AND links.session_id = ?2 AND links.agent = ?3",
+                params![scope_key.as_str(), session_id, agent_label(agent)],
+            )
+        })
     }
 
     pub fn skill_session_links_for_scope(
         &self,
         scope_key: &ScopeKey,
-        skill_name: &str,
+        skill_paths: &[PathBuf],
     ) -> Result<Vec<SessionSkillLink>> {
-        with_database_read_lock_retry(|| self.query_session_skill_links_from(
-            "scoped_session_skill_links",
-            "scoped_sessions",
-            "WHERE links.scope_key = ?1 AND links.skill_name = ?2",
-            params![scope_key.as_str(), skill_name],
-        ))
+        if skill_paths.is_empty() {
+            return Ok(Vec::new());
+        }
+        let placeholders = (2..=skill_paths.len() + 1)
+            .map(|index| format!("?{index}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let where_clause = format!(
+            "WHERE links.scope_key = ?1 AND links.skill_path IN ({placeholders})
+               AND (sessions.data_json IS NULL
+                    OR json_extract(sessions.data_json, '$.parent_session_id') IS NULL)"
+        );
+        let mut values = Vec::with_capacity(skill_paths.len() + 1);
+        values.push(scope_key.as_str().to_string());
+        values.extend(skill_paths.iter().map(|path| path.display().to_string()));
+        with_database_read_lock_retry(|| {
+            self.query_session_skill_links_from(
+                "scoped_session_skill_links",
+                "scoped_sessions",
+                &where_clause,
+                rusqlite::params_from_iter(values.iter()),
+            )
+        })
     }
-
 
     fn query_session_skill_links_from<P>(
         &self,
@@ -4333,15 +4980,15 @@ impl Store {
             let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
             for row in rows {
                 let data_json = row?;
-                records.push(serde_json::from_str::<SkillSourceRecord>(&data_json).map_err(
-                    |error| {
+                records.push(
+                    serde_json::from_str::<SkillSourceRecord>(&data_json).map_err(|error| {
                         rusqlite::Error::FromSqlConversionFailure(
                             0,
                             rusqlite::types::Type::Text,
                             Box::new(error),
                         )
-                    },
-                )?);
+                    })?,
+                );
             }
         }
         records.sort_by(|left, right| {
@@ -4358,24 +5005,94 @@ impl Store {
         workspace_root: &Path,
     ) -> Result<Vec<SkillSourceRecord>> {
         let scope_key = workspace_scope_key(&canonical_workspace_root(workspace_root))?;
+        let mut records_by_path = BTreeMap::new();
         let mut statement = self.conn.prepare(
             "SELECT data_json FROM scoped_skill_sources
              WHERE scope_key = ?1
              ORDER BY skill_name, skill_path",
         )?;
-        let rows = statement.query_map(params![scope_key.as_str()], |row| row.get::<_, String>(0))?;
-        rows.map(|row| {
+        let rows =
+            statement.query_map(params![scope_key.as_str()], |row| row.get::<_, String>(0))?;
+        for row in rows {
             let data_json = row?;
-            serde_json::from_str::<SkillSourceRecord>(&data_json).map_err(|error| {
+            let record =
+                serde_json::from_str::<SkillSourceRecord>(&data_json).map_err(|error| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        0,
+                        rusqlite::types::Type::Text,
+                        Box::new(error),
+                    )
+                })?;
+            records_by_path.insert(record.skill_path.clone(), record);
+        }
+
+        // Existing installations may still have provenance in the legacy global table. It is
+        // keyed by the exact materialized skill path, so it is safe to use it only when this
+        // workspace has no scoped record for that path.
+        let mut legacy_statement = self.conn.prepare(
+            "SELECT data_json FROM skill_sources
+             ORDER BY skill_name, skill_path",
+        )?;
+        let legacy_rows = legacy_statement.query_map([], |row| row.get::<_, String>(0))?;
+        for row in legacy_rows {
+            let data_json = row?;
+            let record =
+                serde_json::from_str::<SkillSourceRecord>(&data_json).map_err(|error| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        0,
+                        rusqlite::types::Type::Text,
+                        Box::new(error),
+                    )
+                })?;
+            records_by_path
+                .entry(record.skill_path.clone())
+                .or_insert(record);
+        }
+
+        // The first workspace-scoped projection migration kept the legacy skill index but did
+        // not copy its embedded provenance into the new source table. Recover those records by
+        // exact installed path while the legacy index is still available.
+        let mut legacy_path_statement = self.conn.prepare(
+            "SELECT skill_name, data_json FROM skill_paths
+             WHERE scope_key = ?1
+             ORDER BY skill_name, path",
+        )?;
+        let legacy_path_rows = legacy_path_statement
+            .query_map(params![DEFAULT_SCOPE_KEY], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?;
+        for row in legacy_path_rows {
+            let (skill_name, data_json) = row?;
+            let path = serde_json::from_str::<SkillPath>(&data_json).map_err(|error| {
                 rusqlite::Error::FromSqlConversionFailure(
-                    0,
+                    1,
                     rusqlite::types::Type::Text,
                     Box::new(error),
                 )
-            })
-        })
-        .collect::<std::result::Result<Vec<_>, _>>()
-        .map_err(Into::into)
+            })?;
+            let record = SkillSourceRecord {
+                skill_name,
+                skill_path: path.path,
+                source_kind: path.source_kind,
+                source: path.source,
+                source_ref: path.source_ref,
+                source_version: path.source_version,
+                source_relative_path: path.source_relative_path,
+                update_status: path.update_status,
+                origin: "legacy-skill-path".to_string(),
+            };
+            records_by_path
+                .entry(record.skill_path.clone())
+                .or_insert(record);
+        }
+
+        let mut records = records_by_path.into_values().collect::<Vec<_>>();
+        records.sort_by(|left, right| {
+            left.skill_name
+                .cmp(&right.skill_name)
+                .then_with(|| left.skill_path.cmp(&right.skill_path))
+        });
+        Ok(records)
     }
 
     pub fn skill_source_record(&self, skill_path: &Path) -> Result<Option<SkillSourceRecord>> {
@@ -4467,11 +5184,8 @@ impl Store {
         }
         let scope_key = workspace_scope_key(&canonical_workspace_root(workspace_root))?;
         let tx = self.conn.unchecked_transaction()?;
-        let inserted = self.insert_skill_source_records_if_missing_for_workspace_in_tx(
-            &tx,
-            &scope_key,
-            records,
-        )?;
+        let inserted = self
+            .insert_skill_source_records_if_missing_for_workspace_in_tx(&tx, &scope_key, records)?;
         tx.commit()?;
         Ok(inserted)
     }
@@ -4638,29 +5352,6 @@ impl Store {
         Ok(deleted)
     }
 
-    pub fn delete_skill_source_records_for_names(&self, names: &[String]) -> Result<usize> {
-        if names.is_empty() {
-            return Ok(0);
-        }
-        let tx = self.conn.unchecked_transaction()?;
-        let mut deleted = 0;
-        for name in names {
-            tx.execute(
-                "DELETE FROM skill_snapshots
-                 WHERE skill_path IN (
-                    SELECT skill_path FROM skill_sources WHERE skill_name = ?1
-                 )",
-                params![name],
-            )?;
-            deleted += tx.execute(
-                "DELETE FROM skill_sources WHERE skill_name = ?1",
-                params![name],
-            )?;
-        }
-        tx.commit()?;
-        Ok(deleted)
-    }
-
     pub fn skill_snapshot(&self, skill_path: &Path) -> Result<Option<SkillSnapshot>> {
         let path = skill_path.display().to_string();
         let read_snapshot = |sql: &str| -> Result<Option<SkillSnapshot>> {
@@ -4750,7 +5441,10 @@ impl Store {
             tx.execute(
                 "DELETE FROM scoped_skill_snapshots
                  WHERE scope_key = ?1 AND skill_path = ?2",
-                params![scope_key.as_str(), snapshot.skill_path.display().to_string()],
+                params![
+                    scope_key.as_str(),
+                    snapshot.skill_path.display().to_string()
+                ],
             )?;
             for file in &snapshot.files {
                 tx.execute(
@@ -4991,7 +5685,10 @@ impl Store {
             tx.execute(
                 "DELETE FROM scoped_skill_snapshots
                  WHERE scope_key = ?1 AND skill_path = ?2",
-                params![scope_key.as_str(), snapshot.skill_path.display().to_string()],
+                params![
+                    scope_key.as_str(),
+                    snapshot.skill_path.display().to_string()
+                ],
             )?;
             for file in &snapshot.files {
                 tx.execute(
@@ -5056,7 +5753,6 @@ impl Store {
         tx.commit()?;
         Ok(())
     }
-
 
     pub fn list_prompts(&self) -> Result<Vec<PromptRecord>> {
         with_database_read_lock_retry(|| self.list_prompts_once())
@@ -5624,6 +6320,23 @@ impl Store {
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS assistant_chat_sessions (
+                id TEXT PRIMARY KEY,
+                workspace TEXT NOT NULL,
+                linked_session_id TEXT,
+                linked_session_agent TEXT,
+                linked_session_path TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS assistant_chat_messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL,
+                role TEXT NOT NULL CHECK (role IN ('user', 'assistant')),
+                content TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (session_id) REFERENCES assistant_chat_sessions(id) ON DELETE CASCADE
+            );
             CREATE TABLE IF NOT EXISTS app_settings (
                 key TEXT PRIMARY KEY,
                 value TEXT NOT NULL
@@ -5726,6 +6439,10 @@ impl Store {
                 ON mcp_servers(agent, name, transport, status, path);
             CREATE INDEX IF NOT EXISTS idx_prompts_updated_title
                 ON prompts(updated_at DESC, title ASC);
+            CREATE INDEX IF NOT EXISTS idx_assistant_chat_sessions_updated
+                ON assistant_chat_sessions(updated_at DESC, id ASC);
+            CREATE INDEX IF NOT EXISTS idx_assistant_chat_messages_session
+                ON assistant_chat_messages(session_id, id ASC);
             ",
         )?;
         Ok(())
@@ -6640,6 +7357,29 @@ fn manifest_entries_for_agents(
     entries
 }
 
+fn skill_source_records_from_scan(scan: &SkillScan) -> Vec<SkillSourceRecord> {
+    let mut records_by_path = BTreeMap::new();
+    for skill in &scan.skills {
+        for path in &skill.paths {
+            let record = SkillSourceRecord {
+                skill_name: skill.name.clone(),
+                skill_path: path.path.clone(),
+                source_kind: path.source_kind.clone(),
+                source: path.source.clone(),
+                source_ref: path.source_ref.clone(),
+                source_version: path.source_version.clone(),
+                source_relative_path: path.source_relative_path.clone(),
+                update_status: path.update_status.clone(),
+                origin: "projection-scan".to_string(),
+            };
+            records_by_path
+                .entry(record.skill_path.clone())
+                .or_insert(record);
+        }
+    }
+    records_by_path.into_values().collect()
+}
+
 fn manifest_entries_for_skills(scan: &SkillScan, workspace_root: &Path) -> Vec<FsManifestEntry> {
     let mut entries = Vec::new();
     for skill in &scan.skills {
@@ -6769,7 +7509,6 @@ fn advance_projection_head_in_tx(
     })
 }
 
-
 fn bump_analytics_revision(conn: &rusqlite::Transaction<'_>) -> Result<()> {
     conn.execute(
         "INSERT INTO meta (key, value) VALUES ('analytics_revision', '1')
@@ -6867,7 +7606,6 @@ fn cleanup_stale_scoped_session_scan_source_rows(
     Ok(())
 }
 
-
 fn cleanup_stale_scoped_session_search_rows(
     conn: &rusqlite::Transaction<'_>,
     scope_key: &ScopeKey,
@@ -6898,9 +7636,6 @@ fn cleanup_stale_scoped_session_search_rows(
     )?;
     Ok(())
 }
-
-
-
 
 fn index_scoped_session_search_document_best_effort(
     tx: &Transaction<'_>,
@@ -7052,13 +7787,9 @@ fn index_scoped_session_search_document(
             "assistant" => document.assistant_text = item.body,
             _ => return,
         }
-        if let Err(error) = insert_scoped_session_search_record(
-            tx,
-            scope_key,
-            session,
-            record_order,
-            &document,
-        ) {
+        if let Err(error) =
+            insert_scoped_session_search_record(tx, scope_key, session, record_order, &document)
+        {
             insert_error = Some(error);
         } else {
             record_order += 1;
@@ -7202,6 +7933,29 @@ fn compact_search_snippet(value: &str) -> String {
     value.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
+const SEARCH_SNIPPET_LEADING_CONTEXT_CHARS: usize = 0;
+const SEARCH_SNIPPET_TRAILING_CONTEXT_CHARS: usize = 80;
+
+fn snippet_context_start(value: &str, end: usize) -> usize {
+    if SEARCH_SNIPPET_LEADING_CONTEXT_CHARS == 0 {
+        return end;
+    }
+    value[..end]
+        .char_indices()
+        .rev()
+        .nth(SEARCH_SNIPPET_LEADING_CONTEXT_CHARS.saturating_sub(1))
+        .map(|(index, _)| index)
+        .unwrap_or(0)
+}
+
+fn snippet_context_end(value: &str, start: usize) -> usize {
+    value[start..]
+        .char_indices()
+        .nth(SEARCH_SNIPPET_TRAILING_CONTEXT_CHARS)
+        .map(|(index, _)| start + index)
+        .unwrap_or(value.len())
+}
+
 fn contains_search_score(document: &SessionSearchDocument, terms: &[String]) -> f64 {
     terms
         .iter()
@@ -7245,17 +7999,15 @@ fn highlight_contains_match(value: &str, term: &str) -> Option<String> {
         return Some(value.chars().take(160).collect());
     }
 
-    let mut start = match_start.saturating_sub(80);
-    while start > 0 && !value.is_char_boundary(start) {
-        start -= 1;
-    }
-    let mut end = (match_end + 80).min(value.len());
-    while end < value.len() && !value.is_char_boundary(end) {
-        end += 1;
-    }
+    let start = snippet_context_start(value, match_start);
+    let end = snippet_context_end(value, match_end);
     Some(format!(
         "{}{}⟦{}⟧{}{}",
-        if start > 0 { "… " } else { "" },
+        if start > 0 && start < match_start {
+            "… "
+        } else {
+            ""
+        },
         &value[start..match_start],
         &value[match_start..match_end],
         &value[match_end..end],
@@ -7314,9 +8066,13 @@ mod tests {
             AnalyticsParserState, AnalyticsResponseUsage, AnalyticsTokenUsage, SessionAnalytics,
             SessionAnalyticsRecord,
         },
+        assistant::{AssistantMessage, AssistantSessionLink},
+        runtime_contract::{
+            OperationId, OperationKind, OperationRecord, OperationStatus, Revision, ScopeKey,
+            SourceVersion,
+        },
         session_skills::{SessionFileState, SessionSkillLink},
         sessions::SessionIdentity,
-        runtime_contract::{OperationId, OperationKind, OperationRecord, OperationStatus, Revision, ScopeKey, SourceVersion},
         skills::{
             AgentKind, SkillPath, SkillRoot, SkillSnapshot, SkillSnapshotFile, SkillSourceRecord,
         },
@@ -7325,7 +8081,9 @@ mod tests {
     use rusqlite::{Connection, params};
 
     use super::{
-        AppSettings, PromptWrite, SESSION_SEARCH_CANDIDATE_TABLE, Store, normalize_repository_url,
+        AppSettings, PromptWrite, SESSION_SEARCH_CANDIDATE_TABLE, SessionListQuery, SessionListRow,
+        Store, agent_label, compare_session_list_rows, highlight_contains_match,
+        normalize_repository_url,
     };
 
     #[test]
@@ -7342,6 +8100,39 @@ mod tests {
             normalize_repository_url("ssh://git@github.com/tutti-os/tutti.git"),
             Some("github.com/tutti-os/tutti".to_string())
         );
+    }
+
+    #[test]
+    fn search_snippet_context_counts_cjk_characters() {
+        let value = format!("{}命中{}", "前".repeat(81), "后".repeat(81));
+        let snippet = highlight_contains_match(&value, "命中").unwrap();
+
+        assert!(!snippet.starts_with("… "));
+        assert!(snippet.ends_with(" …"));
+        assert!(snippet.contains("⟦命中⟧"));
+        let marker_start = snippet.find('⟦').unwrap();
+        assert_eq!(snippet[..marker_start].chars().count(), 0);
+        assert_eq!(snippet.chars().count(), 86);
+    }
+
+    #[test]
+    fn search_score_sort_precedes_updated_time() {
+        let mut rows = vec![
+            SessionListRow {
+                session: session("newer", "Newer"),
+                search_score: Some(6.0),
+                search_snippet: Some("single match".to_string()),
+            },
+            SessionListRow {
+                session: session("older", "Older"),
+                search_score: Some(20.0),
+                search_snippet: Some("multiple matches".to_string()),
+            },
+        ];
+        rows.sort_by(|left, right| compare_session_list_rows(left, right, "searchScore", "desc"));
+
+        assert_eq!(rows[0].session.id, "older");
+        assert_eq!(rows[1].session.id, "newer");
     }
 
     #[test]
@@ -7381,11 +8172,19 @@ mod tests {
             .apply_session_delta_for_scope(&scope, std::slice::from_ref(&session))
             .unwrap();
         let cache = store.session_scan_cache_for_scope(&scope).unwrap();
-        assert!(cache.session_if_current(AgentKind::Codex, &transcript).is_some());
+        assert!(
+            cache
+                .session_if_current(AgentKind::Codex, &transcript)
+                .is_some()
+        );
 
         fs::write(&transcript, "changed source\n").unwrap();
         let cache = store.session_scan_cache_for_scope(&scope).unwrap();
-        assert!(cache.session_if_current(AgentKind::Codex, &transcript).is_none());
+        assert!(
+            cache
+                .session_if_current(AgentKind::Codex, &transcript)
+                .is_none()
+        );
 
         store
             .conn
@@ -7396,13 +8195,21 @@ mod tests {
             .unwrap();
         fs::write(&transcript, "initial\n").unwrap();
         let cache = store.session_scan_cache_for_scope(&scope).unwrap();
-        assert!(cache.session_if_current(AgentKind::Codex, &transcript).is_none());
+        assert!(
+            cache
+                .session_if_current(AgentKind::Codex, &transcript)
+                .is_none()
+        );
 
         store
             .apply_session_delta_for_scope(&scope, std::slice::from_ref(&session))
             .unwrap();
         let cache = store.session_scan_cache_for_scope(&scope).unwrap();
-        assert!(cache.session_if_current(AgentKind::Codex, &transcript).is_some());
+        assert!(
+            cache
+                .session_if_current(AgentKind::Codex, &transcript)
+                .is_some()
+        );
 
         let _ = fs::remove_dir_all(temp);
     }
@@ -7476,9 +8283,11 @@ mod tests {
                 1,
             )
             .unwrap();
-        assert!(!store
-            .ensure_scoped_session_search_for_scope(&scope)
-            .unwrap());
+        assert!(
+            !store
+                .ensure_scoped_session_search_for_scope(&scope)
+                .unwrap()
+        );
         store
             .conn
             .execute(
@@ -7494,16 +8303,14 @@ mod tests {
                 .is_empty()
         );
         assert_eq!(
-            store.ensure_scoped_session_search_for_scope(&scope).unwrap(),
+            store
+                .ensure_scoped_session_search_for_scope(&scope)
+                .unwrap(),
             true
         );
         assert_eq!(
             store
-                .search_sessions_for_scope(
-                    &scope,
-                    "backfill-private-marker",
-                    Some(&candidates),
-                )
+                .search_sessions_for_scope(&scope, "backfill-private-marker", Some(&candidates),)
                 .unwrap()
                 .len(),
             1
@@ -7549,6 +8356,129 @@ mod tests {
             )
             .unwrap();
         assert_eq!(matched_empty, 0);
+
+        drop(store);
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn session_list_page_filters_sorts_pages_searches_and_locates_in_storage() {
+        let temp = temp_dir("tendi-storage-session-list-page");
+        fs::create_dir_all(&temp).unwrap();
+        let store = Store::open(temp.join("tendi.sqlite3")).unwrap();
+        let scope = ScopeKey::new("workspace:session-list-page").unwrap();
+        let mut sessions = [
+            session("oldest", "Oldest session"),
+            session("middle", "Needle in title"),
+            session("newest", "Newest session"),
+            session("other", "Other project"),
+            session("child", "Child session"),
+        ];
+        for (index, record) in sessions.iter_mut().enumerate() {
+            record.updated_at = Some(format!("2026-06-23T10:{index:02}:00Z"));
+        }
+        sessions[3].project = Some(PathBuf::from("/tmp/another-project"));
+        sessions[3].path = PathBuf::from("/tmp/another-project/other.jsonl");
+        sessions[4].parent_session_id = Some("newest".to_string());
+        store
+            .save_sessions_at_for_scope(
+                &scope,
+                &SessionScan {
+                    sessions: sessions.to_vec(),
+                    warnings: Vec::new(),
+                },
+                1,
+            )
+            .unwrap();
+
+        let base_query = SessionListQuery {
+            query: String::new(),
+            agent: None,
+            sort_key: "updatedAt".to_string(),
+            sort_direction: "desc".to_string(),
+            group_by: None,
+            page: 0,
+            page_size: 2,
+            show_child_sessions: false,
+            selected_project_keys: Vec::new(),
+            locate: None,
+        };
+        let first_page = store
+            .list_session_page_for_scope(&scope, base_query.clone())
+            .unwrap();
+        assert_eq!(first_page.total, 4);
+        assert_eq!(first_page.child_session_count, 1);
+        assert_eq!(first_page.page_count, 2);
+        assert_eq!(
+            first_page
+                .rows
+                .iter()
+                .map(|row| row.session.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["other", "newest"],
+        );
+        let mut contract_value = serde_json::to_value(&first_page).unwrap();
+        contract_value["revision"] = serde_json::json!(1);
+        let contract_page = serde_json::from_value::<
+            crate::generated::runtime_contract::SessionsListResponse,
+        >(contract_value)
+        .unwrap();
+        assert_eq!(contract_page.rows.len(), 2);
+
+        let located = store
+            .list_session_page_for_scope(
+                &scope,
+                SessionListQuery {
+                    locate: Some(SessionIdentity::from(&sessions[0])),
+                    ..base_query.clone()
+                },
+            )
+            .unwrap();
+        assert_eq!(located.page, 1);
+        assert!(located.rows.iter().any(|row| row.session.id == "oldest"));
+
+        let searched = store
+            .list_session_page_for_scope(
+                &scope,
+                SessionListQuery {
+                    query: "needle".to_string(),
+                    page_size: 50,
+                    ..base_query.clone()
+                },
+            )
+            .unwrap();
+        assert_eq!(searched.total, 1);
+        assert_eq!(searched.rows[0].session.id, "middle");
+        assert!(searched.rows[0].search_score.is_some());
+
+        let filtered = store
+            .list_session_page_for_scope(
+                &scope,
+                SessionListQuery {
+                    selected_project_keys: vec!["/tmp/another-project".to_string()],
+                    page_size: 50,
+                    ..base_query.clone()
+                },
+            )
+            .unwrap();
+        assert_eq!(filtered.total, 1);
+        assert_eq!(filtered.rows[0].session.id, "other");
+
+        let grouped = store
+            .list_session_page_for_scope(
+                &scope,
+                SessionListQuery {
+                    sort_direction: "asc".to_string(),
+                    group_by: Some("project".to_string()),
+                    locate: Some(SessionIdentity::from(&sessions[3])),
+                    ..base_query
+                },
+            )
+            .unwrap();
+        assert_eq!(grouped.page_count, 2);
+        assert_eq!(grouped.page, 1);
+        assert_eq!(grouped.group_count, Some(1));
+        assert_eq!(grouped.rows[0].session.id, "other");
 
         drop(store);
         fs::remove_dir_all(temp).unwrap();
@@ -7608,7 +8538,6 @@ mod tests {
         release.join().unwrap();
         value
     }
-
 
     #[test]
     fn app_settings_store_normalized_additional_session_roots() {
@@ -7684,8 +8613,6 @@ mod tests {
         fs::remove_dir_all(temp).unwrap();
     }
 
-
-
     #[test]
     fn workspace_scan_warning_keeps_the_last_good_canonical_snapshot() {
         let temp = temp_dir("tendi-storage-scan-warning");
@@ -7697,7 +8624,10 @@ mod tests {
         store.save_scan_for_workspace(&workspace, &clean).unwrap();
 
         let mut failed = report_with_skill("new", SkillVisibility::Manual);
-        failed.skills.warnings.push("partial provider scan".to_string());
+        failed
+            .skills
+            .warnings
+            .push("partial provider scan".to_string());
         store.save_scan_for_workspace(&workspace, &failed).unwrap();
 
         let cached = store
@@ -7709,9 +8639,6 @@ mod tests {
         drop(store);
         fs::remove_dir_all(temp).unwrap();
     }
-
-
-
 
     #[test]
     fn skill_snapshots_round_trip_and_are_removed_with_source_records() {
@@ -7811,12 +8738,15 @@ mod tests {
             .unwrap()
             .collect::<std::result::Result<Vec<_>, _>>()
             .unwrap();
-        assert!(columns.iter().any(|column| column == "search_index_version"));
+        assert!(
+            columns
+                .iter()
+                .any(|column| column == "search_index_version")
+        );
 
         drop(store);
         fs::remove_dir_all(temp).unwrap();
     }
-
 
     #[test]
     fn existing_duplicate_skill_paths_are_deduplicated_before_unique_index() {
@@ -7895,7 +8825,6 @@ mod tests {
         drop(reopened);
         fs::remove_dir_all(temp).unwrap();
     }
-
 
     #[test]
     fn projection_manifest_invalidates_on_new_edit_and_delete() {
@@ -7999,14 +8928,10 @@ mod tests {
         let manifest = store
             .list_fs_manifest_for_root(&workspace.canonicalize().unwrap())
             .unwrap();
-        assert!(
-            manifest
-                .iter()
-                .any(|entry| {
-                    entry.source_kind == "skill-candidate"
-                        && entry.path == skills_lock.canonicalize().unwrap()
-                })
-        );
+        assert!(manifest.iter().any(|entry| {
+            entry.source_kind == "skill-candidate"
+                && entry.path == skills_lock.canonicalize().unwrap()
+        }));
 
         store
             .conn
@@ -8192,7 +9117,6 @@ mod tests {
         fs::remove_dir_all(temp).unwrap();
     }
 
-
     #[test]
     fn projection_refresh_lock_serializes_same_domain_across_connections() {
         let temp = temp_dir("tendi-projection-lock-cross-connection");
@@ -8267,10 +9191,6 @@ mod tests {
         fs::remove_dir_all(temp).unwrap();
     }
 
-
-
-
-
     fn test_skill_source(name: &str, path: &Path) -> SkillSourceRecord {
         SkillSourceRecord {
             skill_name: name.to_string(),
@@ -8297,10 +9217,16 @@ mod tests {
         let source_b = test_skill_source("beta", &workspace_b.join("skills/beta"));
 
         store
-            .upsert_skill_source_records_for_workspace(&workspace_a, std::slice::from_ref(&source_a))
+            .upsert_skill_source_records_for_workspace(
+                &workspace_a,
+                std::slice::from_ref(&source_a),
+            )
             .unwrap();
         store
-            .upsert_skill_source_records_for_workspace(&workspace_b, std::slice::from_ref(&source_b))
+            .upsert_skill_source_records_for_workspace(
+                &workspace_b,
+                std::slice::from_ref(&source_b),
+            )
             .unwrap();
 
         assert_eq!(
@@ -8321,6 +9247,123 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["beta"]
         );
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn workspace_skill_source_records_fall_back_to_legacy_records() {
+        let temp = temp_dir("tendi-storage-skill-source-legacy-fallback");
+        let workspace = temp.join("workspace");
+        fs::create_dir_all(&workspace).unwrap();
+        let store = Store::open(temp.join("tendi.sqlite3")).unwrap();
+
+        let legacy_path = temp.join("shared-skills/legacy");
+        let shared_path = temp.join("shared-skills/shared");
+        let legacy = test_skill_source("legacy", &legacy_path);
+        let legacy_shared = test_skill_source("legacy-shared", &shared_path);
+        store
+            .upsert_skill_source_records(&[legacy, legacy_shared])
+            .unwrap();
+
+        let mut scoped_shared = test_skill_source("scoped-shared", &shared_path);
+        scoped_shared.source_kind = "local".to_string();
+        scoped_shared.source = None;
+        store
+            .upsert_skill_source_records_for_workspace(&workspace, &[scoped_shared])
+            .unwrap();
+
+        let records = store
+            .skill_source_records_for_workspace(&workspace)
+            .unwrap();
+        assert_eq!(
+            records
+                .iter()
+                .map(|record| record.skill_name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["legacy", "scoped-shared"]
+        );
+        assert_eq!(records[1].source_kind, "local");
+
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn workspace_skill_source_records_fall_back_to_legacy_skill_paths() {
+        let temp = temp_dir("tendi-storage-skill-source-path-fallback");
+        let workspace = temp.join("workspace");
+        let skill_path = temp.join("shared-skills/legacy-path");
+        fs::create_dir_all(&workspace).unwrap();
+        let store = Store::open(temp.join("tendi.sqlite3")).unwrap();
+
+        let mut scan = report_with_skill("legacy-path", SkillVisibility::Auto).skills;
+        let path = &mut scan.skills[0].paths[0];
+        path.path = skill_path.clone();
+        path.root = skill_path.parent().unwrap().to_path_buf();
+        path.scope = "global".to_string();
+        path.source_kind = "github".to_string();
+        path.source = Some("https://github.com/example/legacy-skills.git".to_string());
+        path.source_relative_path = Some("skills/legacy-path".to_string());
+        path.update_status = "checkable".to_string();
+        store
+            .conn
+            .execute(
+                "INSERT INTO skill_paths (
+                    skill_name, path, root, scope, agent, sha256, data_json
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![
+                    "legacy-path",
+                    skill_path.display().to_string(),
+                    path.root.display().to_string(),
+                    path.scope,
+                    agent_label(path.agent),
+                    path.sha256,
+                    serde_json::to_string(path).unwrap(),
+                ],
+            )
+            .unwrap();
+
+        let records = store
+            .skill_source_records_for_workspace(&workspace)
+            .unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].skill_name, "legacy-path");
+        assert_eq!(records[0].source_kind, "github");
+        assert_eq!(
+            records[0].source.as_deref(),
+            Some("https://github.com/example/legacy-skills.git")
+        );
+        assert_eq!(records[0].origin, "legacy-skill-path");
+
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn saving_skills_persists_scanned_source_records_for_workspace() {
+        let temp = temp_dir("tendi-storage-skill-source-scan-persistence");
+        let workspace = temp.join("workspace");
+        let skill_path = workspace.join(".agents/skills/remote");
+        fs::create_dir_all(&workspace).unwrap();
+        let store = Store::open(temp.join("tendi.sqlite3")).unwrap();
+
+        let mut scan = report_with_skill("remote", SkillVisibility::Auto).skills;
+        let path = &mut scan.skills[0].paths[0];
+        path.path = skill_path.clone();
+        path.root = skill_path.parent().unwrap().to_path_buf();
+        path.scope = "global".to_string();
+        path.source_kind = "github".to_string();
+        path.source = Some("https://github.com/example/remote-skills.git".to_string());
+        path.source_relative_path = Some("skills/remote".to_string());
+        path.update_status = "checkable".to_string();
+
+        store.save_skills_for_workspace(&workspace, &scan).unwrap();
+
+        let records = store
+            .skill_source_records_for_workspace(&workspace)
+            .unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].source_kind, "github");
+        assert_eq!(records[0].origin, "projection-scan");
+
         fs::remove_dir_all(temp).unwrap();
     }
 
@@ -8398,7 +9441,11 @@ mod tests {
                 &[],
             )
             .unwrap_err();
-        assert!(error.to_string().contains("changed after the update preview"));
+        assert!(
+            error
+                .to_string()
+                .contains("changed after the update preview")
+        );
 
         drop(store);
         fs::remove_dir_all(temp).unwrap();
@@ -8425,13 +9472,16 @@ mod tests {
                 &[(source_path, Some("version-a".to_string()))],
             )
             .unwrap_err();
-        assert!(error.to_string().contains("changed after the update preview"));
+        assert!(
+            error
+                .to_string()
+                .contains("changed after the update preview")
+        );
         assert_eq!(fs::read_to_string(&skill_path).unwrap(), "before\n");
 
         drop(store);
         fs::remove_dir_all(temp).unwrap();
     }
-
 
     fn report_with_skill(name: &str, visibility: SkillVisibility) -> ScanReport {
         let root = PathBuf::from("/tmp/tendi-test/.agents/skills");
@@ -8513,7 +9563,6 @@ mod tests {
         }
     }
 
-
     #[test]
     fn scoped_session_projection_keeps_workspaces_isolated() {
         let temp = temp_dir("tendi-storage-scoped-sessions");
@@ -8558,9 +9607,20 @@ mod tests {
         let first = store.list_sessions_for_scope(&first_scope).unwrap();
         let second = store.list_sessions_for_scope(&second_scope).unwrap();
         assert_eq!(first.sessions[0].title.as_deref(), Some("First workspace"));
-        assert_eq!(second.sessions[0].title.as_deref(), Some("Second workspace"));
-        assert_eq!(store.sessions_last_scan_at_for_scope(&first_scope).unwrap(), Some(1));
-        assert_eq!(store.sessions_last_scan_at_for_scope(&second_scope).unwrap(), Some(2));
+        assert_eq!(
+            second.sessions[0].title.as_deref(),
+            Some("Second workspace")
+        );
+        assert_eq!(
+            store.sessions_last_scan_at_for_scope(&first_scope).unwrap(),
+            Some(1)
+        );
+        assert_eq!(
+            store
+                .sessions_last_scan_at_for_scope(&second_scope)
+                .unwrap(),
+            Some(2)
+        );
         assert_eq!(
             store
                 .search_sessions_for_scope(&first_scope, "first", None)
@@ -8627,9 +9687,11 @@ mod tests {
                 1,
             )
             .unwrap();
-        let mut first_analytics = analytics_record("same", AgentKind::Codex, "2026-08-28T10:00:00Z", 11);
+        let mut first_analytics =
+            analytics_record("same", AgentKind::Codex, "2026-08-28T10:00:00Z", 11);
         first_analytics.analytics.session_path = first_session.path;
-        let mut second_analytics = analytics_record("same", AgentKind::Codex, "2026-08-28T10:00:00Z", 99);
+        let mut second_analytics =
+            analytics_record("same", AgentKind::Codex, "2026-08-28T10:00:00Z", 99);
         second_analytics.analytics.session_path = second_session.path;
         store
             .save_session_analytics_records_for_scope(&first_scope, &[first_analytics])
@@ -8670,25 +9732,14 @@ mod tests {
             )
             .unwrap();
 
-        let mut recent_analytics = analytics_record(
-            "recent",
-            AgentKind::Codex,
-            &Local::now().to_rfc3339(),
-            11,
-        );
+        let mut recent_analytics =
+            analytics_record("recent", AgentKind::Codex, &Local::now().to_rfc3339(), 11);
         recent_analytics.analytics.session_path = recent_session.path;
-        let mut old_analytics = analytics_record(
-            "old",
-            AgentKind::Codex,
-            "2020-01-01T10:00:00Z",
-            99,
-        );
+        let mut old_analytics =
+            analytics_record("old", AgentKind::Codex, "2020-01-01T10:00:00Z", 99);
         old_analytics.analytics.session_path = old_session.path;
         store
-            .save_session_analytics_records_for_scope(
-                &scope,
-                &[recent_analytics, old_analytics],
-            )
+            .save_session_analytics_records_for_scope(&scope, &[recent_analytics, old_analytics])
             .unwrap();
 
         let overview = store
@@ -8703,12 +9754,6 @@ mod tests {
         drop(store);
         fs::remove_dir_all(temp).unwrap();
     }
-
-
-
-
-
-
 
     #[test]
     fn analytics_overview_index_migrates_old_schema_in_resumable_batches() {
@@ -8806,7 +9851,6 @@ mod tests {
         fs::remove_dir_all(temp).unwrap();
     }
 
-
     #[test]
     fn concurrent_store_open_serializes_schema_migrations() {
         let temp = temp_dir("tendi-storage-concurrent-open");
@@ -8860,7 +9904,9 @@ mod tests {
                         let mut settings = baseline.clone();
                         settings.terminal = format!("worker-{worker}-{round}");
                         let saved = store
-                            .with_database_write_lock_retry(|| store.save_app_settings(settings.clone()))
+                            .with_database_write_lock_retry(|| {
+                                store.save_app_settings(settings.clone())
+                            })
                             .unwrap();
                         assert_eq!(saved.terminal, format!("worker-{worker}-{round}"));
                     }
@@ -8873,9 +9919,6 @@ mod tests {
         drop(Store::open(&db).unwrap());
         fs::remove_dir_all(temp).unwrap();
     }
-
-
-
 
     #[test]
     fn prompts_can_be_saved_updated_and_deleted() {
@@ -8917,6 +9960,59 @@ mod tests {
 
         assert_eq!(store.delete_prompts(&[saved.id]).unwrap(), 1);
         assert!(store.list_prompts().unwrap().is_empty());
+
+        drop(store);
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn assistant_chat_messages_persist_without_empty_sessions() {
+        let temp = temp_dir("tendi-storage-assistant-chat");
+        let db = temp.join("tendi.sqlite3");
+        let workspace = temp.join("workspace");
+        fs::create_dir_all(&workspace).unwrap();
+        let store = Store::open(&db).unwrap();
+
+        assert!(store.list_assistant_chat_sessions().unwrap().is_empty());
+
+        let linked_session = AssistantSessionLink {
+            id: "transcript-1".to_string(),
+            agent: "codex".to_string(),
+            path: workspace.join("transcript.jsonl").display().to_string(),
+        };
+        store
+            .append_assistant_chat_message(
+                "assistant-chat-1",
+                &workspace,
+                Some(&linked_session),
+                &AssistantMessage {
+                    role: "user".to_string(),
+                    content: "Summarize this session".to_string(),
+                },
+            )
+            .unwrap();
+        store
+            .append_assistant_chat_message(
+                "assistant-chat-1",
+                &workspace,
+                None,
+                &AssistantMessage {
+                    role: "assistant".to_string(),
+                    content: "The session is ready to review.".to_string(),
+                },
+            )
+            .unwrap();
+
+        let sessions = Store::open(&db)
+            .unwrap()
+            .list_assistant_chat_sessions()
+            .unwrap();
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].id, "assistant-chat-1");
+        assert_eq!(sessions[0].messages.len(), 2);
+        assert_eq!(sessions[0].messages[0].role, "user");
+        assert_eq!(sessions[0].messages[1].role, "assistant");
+        assert_eq!(sessions[0].linked_session, Some(linked_session));
 
         drop(store);
         fs::remove_dir_all(temp).unwrap();
@@ -8971,7 +10067,6 @@ mod tests {
         drop(store);
         fs::remove_dir_all(temp).unwrap();
     }
-
 
     fn session(id: &str, title: &str) -> SessionRecord {
         SessionRecord {
@@ -9077,15 +10172,17 @@ mod tests {
 
         assert_eq!(
             store
-                .skill_session_links_for_scope(&first_scope, "first-skill")
+                .skill_session_links_for_scope(&first_scope, &[skill_path("first-skill")])
                 .unwrap()
                 .len(),
             1
         );
-        assert!(store
-            .skill_session_links_for_scope(&first_scope, "second-skill")
-            .unwrap()
-            .is_empty());
+        assert!(
+            store
+                .skill_session_links_for_scope(&first_scope, &[skill_path("second-skill")])
+                .unwrap()
+                .is_empty()
+        );
         assert_eq!(
             store
                 .session_skill_index_status_for_scope(&first_scope, false)
@@ -9105,6 +10202,56 @@ mod tests {
         fs::remove_dir_all(temp).unwrap();
     }
 
+    #[test]
+    fn skill_session_links_exclude_child_sessions() {
+        let temp = temp_dir("tendi-storage-skill-links-no-children");
+        fs::create_dir_all(&temp).unwrap();
+        let store = Store::open(temp.join("tendi.sqlite3")).unwrap();
+        let scope = ScopeKey::new("workspace:/skill-links").unwrap();
+        let parent = session("parent", "Parent session");
+        let mut child = session("child", "Child session");
+        child.parent_session_id = Some(parent.id.clone());
+        let scan = SessionScan {
+            sessions: vec![parent.clone(), child.clone()],
+            warnings: Vec::new(),
+        };
+        store.save_sessions_at_for_scope(&scope, &scan, 1).unwrap();
+        let state = SessionFileState {
+            file_mtime: 1,
+            file_size: 1,
+        };
+        store
+            .replace_session_skill_links_for_scope(
+                &scope,
+                &parent,
+                &state,
+                &[link(&parent, "shared-skill")],
+            )
+            .unwrap();
+        store
+            .replace_session_skill_links_for_scope(
+                &scope,
+                &child,
+                &state,
+                &[link(&child, "shared-skill")],
+            )
+            .unwrap();
+
+        let links = store
+            .skill_session_links_for_scope(&scope, &[skill_path("shared-skill")])
+            .unwrap();
+        assert_eq!(
+            links
+                .iter()
+                .map(|item| item.session_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["parent"]
+        );
+
+        drop(store);
+        fs::remove_dir_all(temp).unwrap();
+    }
+
     fn link(session: &SessionRecord, skill_name: &str) -> SessionSkillLink {
         SessionSkillLink {
             session_id: session.id.clone(),
@@ -9116,7 +10263,7 @@ mod tests {
             session_updated_at: session.updated_at.clone(),
             session_message_count: session.message_count,
             skill_name: skill_name.to_string(),
-            skill_path: PathBuf::from(format!("/tmp/tendi-test/.codex/skills/{skill_name}")),
+            skill_path: skill_path(skill_name),
             skill_agent: Some(AgentKind::Codex),
             skill_scope: Some("global".to_string()),
             evidence_kind: "exec_command".to_string(),
@@ -9124,6 +10271,10 @@ mod tests {
             evidence_time: Some("2026-06-23T10:00:00Z".to_string()),
             confidence: "observed".to_string(),
         }
+    }
+
+    fn skill_path(skill_name: &str) -> PathBuf {
+        PathBuf::from(format!("/tmp/tendi-test/.codex/skills/{skill_name}"))
     }
 
     #[test]
@@ -9168,16 +10319,21 @@ mod tests {
             error: None,
         };
         store.record_operation(&operation).unwrap();
-        assert_eq!(store.operation(&operation.operation_id).unwrap(), Some(operation.clone()));
+        assert_eq!(
+            store.operation(&operation.operation_id).unwrap(),
+            Some(operation.clone())
+        );
 
-        assert!(store
-            .update_operation(
-                &operation.operation_id,
-                OperationStatus::Failed,
-                operation.checkpoint_json.as_deref(),
-                Some("provider failed"),
-            )
-            .unwrap());
+        assert!(
+            store
+                .update_operation(
+                    &operation.operation_id,
+                    OperationStatus::Failed,
+                    operation.checkpoint_json.as_deref(),
+                    Some("provider failed"),
+                )
+                .unwrap()
+        );
         let saved = store.operation(&operation.operation_id).unwrap().unwrap();
         assert_eq!(saved.status, OperationStatus::Failed);
         assert_eq!(saved.error.as_deref(), Some("provider failed"));

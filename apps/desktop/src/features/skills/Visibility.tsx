@@ -1,5 +1,8 @@
 import { SkillVisibility, editableSkillVisibilities, isSkillVisibilityEditable } from "../../lib/index.ts";
-import { SelectControl } from "../../components/shared/SelectControl.tsx";
+import {
+  SegmentedControl,
+  SegmentedControlItem,
+} from "../../components/shared/SegmentedControl.tsx";
 import "./Visibility.css";
 
 export type VisibilitySkill = {
@@ -20,16 +23,31 @@ export function Visibility({ value, skill, onSetVisibility, readOnly = false }: 
   const options = value === SkillVisibility.Mixed
     ? [{ value: SkillVisibility.Mixed, label: SkillVisibility.Mixed }]
     : editableSkillVisibilities.map((option) => ({ value: option, label: option }));
-  const selector = skill.id?.trim() || skill.name;
+  const selector = skill.id?.trim();
 
-  return <SelectControl
-    value={value}
-    onValueChange={(nextValue) => {
-      if (!disabled) onSetVisibility?.([selector], nextValue as SkillVisibility);
-    }}
-    label="Visibility"
-    options={options}
-    className="visibility"
-    disabled={disabled}
-  />;
+  return (
+    <div
+      className="visibility"
+      data-no-row-click
+      onClick={(event) => event.stopPropagation()}
+    >
+      <SegmentedControl
+        value={value}
+        onValueChange={(nextValue) => {
+          if (!disabled && selector && nextValue) {
+            onSetVisibility?.([selector], nextValue as SkillVisibility);
+          }
+        }}
+        className="visibility"
+        disabled={disabled}
+        aria-label="Visibility"
+      >
+        {options.map((option) => (
+          <SegmentedControlItem key={option.value} value={option.value}>
+            {option.label}
+          </SegmentedControlItem>
+        ))}
+      </SegmentedControl>
+    </div>
+  );
 }

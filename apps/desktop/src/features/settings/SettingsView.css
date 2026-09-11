@@ -63,10 +63,30 @@
   padding-inline: 16px;
 }
 
-.settingsUpdateActions {
+.settingsUpdateActionStack {
+  justify-self: start;
+  width: max-content;
+  max-width: 100%;
+  display: grid;
+  grid-template-rows: var(--control-height) var(--leading-ui);
+  justify-items: start;
+  gap: 3px;
+  align-content: start;
+  min-height: calc(var(--control-height) + 3px + var(--leading-ui));
+}
+
+.settingsUpdatePrimaryActions {
   display: flex;
   align-items: center;
   gap: 8px;
+  height: var(--control-height);
+}
+
+.settingsUpdateLastChecked {
+  color: var(--muted);
+  font-size: var(--text-xs);
+  line-height: var(--leading-ui);
+  white-space: nowrap;
 }
 
 .settingsApplicationPair {
@@ -105,7 +125,7 @@
 
 .settingsThemePickerLabel {
   color: var(--muted);
-  font-size: var(--text-sm);
+  font-size: var(--text-ui);
   font-weight: 650;
   line-height: var(--leading-ui);
 }
@@ -133,7 +153,7 @@
   height: 18px;
   flex: 0 0 18px;
   border-radius: 50%;
-  box-shadow: 0 0 0 1px var(--line);
+  box-shadow: inset 0 0 0 1px var(--line);
 }
 
 .settingsAppIconSelect {
@@ -184,6 +204,11 @@
   max-width: 100%;
 }
 
+.settingsAssistantSelect {
+  width: 100%;
+  max-width: 100%;
+}
+
 .settingsSessionResumeControl {
   width: max-content;
   max-width: 100%;
@@ -199,45 +224,20 @@
   gap: 6px;
 }
 
-.settingsApplicationInput {
-  position: relative;
-  min-width: 0;
-  flex: 1 1 auto;
-  overflow: hidden;
-  border-radius: var(--radius-sm);
-}
-
-.settingsApplicationInput:focus-within {
-  box-shadow: 0 0 0 2px var(--focus-ring);
-}
-
-.settingsSelect {
-  box-sizing: border-box;
-  height: var(--control-height);
-  width: 100%;
-  padding: 0 34px 0 8px;
-  border: 0;
-  border-radius: var(--radius-sm);
-  background: var(--control-fill);
-  color: var(--text);
-  font: inherit;
-  font-size: var(--text-sm);
-  line-height: var(--leading-ui);
-}
-
 .settingsTextarea {
   box-sizing: border-box;
   width: 100%;
   min-height: var(--textarea-min-height);
   resize: vertical;
-  padding: 8px;
-  border: 0;
-  border-radius: var(--radius-sm);
-  background: var(--control-fill);
+  padding: 8px var(--control-padding-x);
+  border: 1px solid var(--control-border);
+  border-radius: var(--control-radius);
+  background: var(--panel-bg);
   color: var(--text);
   font: inherit;
-  font-size: var(--text-sm);
+  font-size: var(--text-ui);
   line-height: var(--leading-ui);
+  transition: border-color 160ms var(--ease-out-soft);
 }
 
 .settingsCheckboxRow {
@@ -246,23 +246,17 @@
   align-items: center;
   gap: 7px;
   color: var(--text);
-  font-size: var(--text-sm);
+  font-size: var(--text-ui);
 }
 
-.settingsSelect::placeholder,
-.settingsTextarea::placeholder {
+.settingsTextarea::placeholder,
+.selectControlEditableInput::placeholder {
   color: var(--faint);
 }
 
-.settingsSelect:focus,
 .settingsTextarea:focus {
-  background: var(--active-fill);
   outline: none;
-  box-shadow: 0 0 0 2px var(--focus-ring);
-}
-
-.settingsApplicationInput .settingsSelect:focus {
-  box-shadow: none;
+  border-color: var(--line-strong);
 }
 
 .settingsSelectContent {
@@ -274,7 +268,7 @@
 .settingsThemeSelectContent.selectControlContent,
 .settingsAppIconSelectContent.selectControlContent,
 .settingsSelectContent.selectControlContent {
-  width: max(168px, var(--radix-select-trigger-width));
+  width: max(168px, var(--radix-select-trigger-width, 168px));
   max-width: calc(100vw - 32px);
   box-sizing: border-box;
 }
@@ -283,17 +277,6 @@
 .settingsAppIconSelectContent .selectViewport,
 .settingsSelectContent.selectControlContent .selectViewport {
   scrollbar-gutter: stable;
-}
-
-.settingsApplicationMenuButton {
-  position: absolute;
-  top: 1px;
-  right: 1px;
-}
-
-.settingsApplicationInput .settingsApplicationMenuButton:hover:not(:disabled) {
-  background: transparent;
-  color: var(--text);
 }
 
 .settingsSection {
@@ -437,6 +420,15 @@
   gap: 6px;
   font-size: var(--text-sm);
   line-height: var(--leading-ui);
+}
+
+.settingsUpdateSection .settingsControlGroup {
+  justify-items: start;
+}
+
+.settingsMuted {
+  color: var(--muted);
+  font-size: var(--text-sm);
 }
 
 @media (max-width: 980px) {

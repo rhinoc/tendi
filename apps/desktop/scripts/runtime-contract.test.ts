@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 
-import { decideRevision, normalizeRuntimeSkillVisibility, omitUndefinedProperties } from "../src/lib/runtime-contract.ts";
+import { decideRevision, normalizeRuntimeSkillVisibility, omitUndefinedProperties, tauriCommandArgs } from "../src/lib/runtime-contract.ts";
 import { RuntimeContractError, validateEvent, validateRequest, validateResponse, validateResult } from "../src/lib/generated/runtime-validators.ts";
 import { RuntimeClient } from "../src/lib/generated/runtime-client.ts";
 import { RUNTIME_CONTRACT_FINGERPRINT } from "../src/lib/generated/runtime-types.ts";
@@ -63,6 +63,27 @@ test("generated validators enforce empty request and safe revision fields", () =
   }), RuntimeContractError);
 });
 
+test("accepts structured session resume failures", () => {
+  validateResult("session_resume_in_terminal", {
+    status: "failed",
+    error: {
+      code: "worktree_not_found",
+      provider: "orca",
+      retryable: false,
+      action: "open_project",
+    },
+  });
+  assert.throws(() => validateResult("session_resume_in_terminal", {
+    status: "failed",
+    error: {
+      code: "selector_not_found",
+      provider: "orca",
+      retryable: false,
+      action: "open_project",
+    },
+  }), RuntimeContractError);
+});
+
 test("generated runtime contract fingerprint matches the source schema", () => {
   const schema = readFileSync(new URL("../../../runtime-schema/runtime.openrpc.json", import.meta.url));
   assert.equal(
@@ -100,6 +121,11 @@ test("generated client sends one JSON-RPC envelope and validates its result", as
     params: {},
   });
   assert.match(request.id, /^desktop-\d+$/);
+});
+
+test("wraps Tauri command requests under the named request argument", () => {
+  assert.deepEqual(tauriCommandArgs({ icon: "svg" }), { request: { icon: "svg" } });
+  assert.equal(tauriCommandArgs(undefined), undefined);
 });
 
 test("omits undefined request properties before runtime validation", () => {

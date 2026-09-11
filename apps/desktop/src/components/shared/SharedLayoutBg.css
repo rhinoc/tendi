@@ -1,0 +1,41 @@
+.sharedLayoutBg {
+  position: relative;
+  width: 100%;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.sharedLayoutBgItem {
+  position: relative;
+}
+
+.sharedLayoutBgPillContainer {
+  position: absolute;
+  z-index: 0;
+  top: 0;
+  bottom: 0;
+  pointer-events: none;
+}
+
+.sharedLayoutBgPill {
+  width: 100%;
+  height: 100%;
+  border-radius: var(--radius-md);
+  background: var(--hover-fill-strong);
+}
+
+.navHoverPillContainer {
+  bottom: auto;
+  height: var(--control-height-row);
+}
+
+.navHoverPill {
+  border-radius: var(--radius-lg);
+  background: var(--hover-fill-strong);
+}
+
+.sharedLayoutBgContent {
+  position: relative;
+  z-index: 1;
+}

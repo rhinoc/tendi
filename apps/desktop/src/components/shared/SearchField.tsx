@@ -1,6 +1,7 @@
 import type { ChangeEventHandler, KeyboardEventHandler, ReactNode } from "react";
 import { Search } from "lucide-react";
 
+import { LoadingIcon } from "./LoadingIcon.tsx";
 import { SearchClearButton } from "./SearchClearButton.tsx";
 import "./SearchField.css";
 
@@ -11,6 +12,7 @@ export type SearchFieldProps = {
   "aria-label"?: string;
   className?: string;
   pageSearch?: boolean;
+  loading?: boolean;
   onKeyDown?: KeyboardEventHandler<HTMLInputElement>;
   onClear: () => void;
   clearLabel?: string;
@@ -24,15 +26,21 @@ export function SearchField({
   "aria-label": ariaLabel,
   className = "",
   pageSearch = false,
+  loading = false,
   onKeyDown,
   onClear,
   clearLabel,
   endContent,
 }: SearchFieldProps) {
   return (
-    <div className={className ? `searchBox ${className}` : "searchBox"} data-page-search={pageSearch ? "true" : undefined}>
+    <div
+      className={className ? `searchBox ${className}` : "searchBox"}
+      data-page-search={pageSearch ? "true" : undefined}
+      aria-busy={loading || undefined}
+    >
       <Search size={18} />
       <input aria-label={ariaLabel} placeholder={placeholder} value={value} onChange={onChange} onKeyDown={onKeyDown} />
+      {loading ? <LoadingIcon size={14} /> : null}
       <SearchClearButton value={value} onClear={onClear} ariaLabel={clearLabel} />
       {endContent ? <span className="searchBoxEndContent">{endContent}</span> : null}
     </div>

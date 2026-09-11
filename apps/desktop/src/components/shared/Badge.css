@@ -12,7 +12,7 @@
   gap: 4px;
   padding: var(--badge-padding);
   overflow: hidden;
-  border: 0;
+  border: 1px solid color-mix(in oklch, var(--badge-color) 24%, transparent);
   border-radius: var(--badge-radius);
   color: var(--badge-color);
   background: var(--badge-fill);
@@ -71,6 +71,7 @@
 .badge[data-interactive="true"]:hover {
   --badge-fill: color-mix(in oklch, var(--badge-color) 18%, var(--control-fill));
   --badge-color: var(--text);
+  border-color: color-mix(in oklch, var(--badge-color) 40%, transparent);
 }
 
 .badge[data-interactive="true"]:focus-visible {

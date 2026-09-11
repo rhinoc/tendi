@@ -172,7 +172,7 @@ impl SessionScanCache {
             && entry.file_size == file_size
             && self.additional_file_states_current(entry)
             && !session_requires_rescan(&entry.session))
-            .then(|| entry.session.clone())
+        .then(|| entry.session.clone())
     }
 
     pub(crate) fn session_if_current_id(
@@ -189,7 +189,7 @@ impl SessionScanCache {
                 && entry.file_size == file_size
                 && self.additional_file_states_current(entry)
                 && !session_requires_rescan(&entry.session))
-                .then(|| entry.session.clone())
+            .then(|| entry.session.clone())
         })
     }
 
@@ -901,23 +901,32 @@ fn merge_sessions(sessions: Vec<SessionRecord>) -> Vec<SessionRecord> {
 }
 
 fn merge_session(existing: &mut SessionRecord, incoming: &SessionRecord) {
-    if existing.title.is_none() {
+    let transcript_title_overrides_index = incoming.title.is_some()
+        && is_index_path(existing.agent, &existing.path)
+        && is_transcript_path(existing.agent, &incoming.path)
+        && crate::providers::agent_provider(existing.agent)
+            .session_transcript_title_overrides_index();
+    if existing.title.is_none() || transcript_title_overrides_index {
         existing.title = incoming.title.clone();
     }
     if existing.project.is_none() {
         existing.project = incoming.project.clone();
     }
     if let Some(started_at) = &incoming.started_at {
-        if existing.started_at.as_deref().is_none_or(|current| {
-            compare_timestamps(Some(started_at), Some(current)).is_lt()
-        })
+        if existing
+            .started_at
+            .as_deref()
+            .is_none_or(|current| compare_timestamps(Some(started_at), Some(current)).is_lt())
         {
             existing.started_at = Some(started_at.clone());
         }
     }
     if existing.updated_at.is_none()
-        || compare_timestamps(incoming.updated_at.as_deref(), existing.updated_at.as_deref())
-            .is_gt()
+        || compare_timestamps(
+            incoming.updated_at.as_deref(),
+            existing.updated_at.as_deref(),
+        )
+        .is_gt()
     {
         existing.updated_at = incoming.updated_at.clone();
     }
@@ -1152,22 +1161,21 @@ fn scan_jsonl_meta_lines<I, S>(
         {
             continue;
         }
-        if let Some(title) = extract_session_title(&value) {
-            meta.turn_count = meta.turn_count.map(|count| count + 1);
-            meta.title_candidates.push(title);
+        if let Some(body) = provider.and_then(|provider| provider.session_user_message(&value)) {
+            record_user_session_metadata(meta, &body);
         }
-        if let Some((role, body)) = extract_session_message(&value) {
-            if let Some(body) = clean_preview_text(&body) {
-                match role {
-                    "user" => {
-                        if meta.first_user_message.is_none() {
-                            meta.first_user_message = Some(body.clone());
-                        }
-                        meta.last_user_message = Some(body);
+        let message = provider
+            .map(|provider| extract_session_message_for_agent(provider.kind(), &value))
+            .unwrap_or_else(|| extract_session_message(&value));
+        if let Some((role, body)) = message {
+            match role {
+                "user" => record_user_session_metadata(meta, &body),
+                "assistant" => {
+                    if let Some(body) = clean_preview_text(&body) {
+                        meta.last_assistant_message = Some(body);
                     }
-                    "assistant" => meta.last_assistant_message = Some(body),
-                    _ => {}
                 }
+                _ => {}
             }
         }
         if let Some(timestamp) =
@@ -1191,6 +1199,19 @@ fn scan_jsonl_meta_lines<I, S>(
                 .filter(|url| !url.is_empty())
                 .map(str::to_string);
         }
+    }
+}
+
+fn record_user_session_metadata(meta: &mut SessionMetadata, body: &str) {
+    if let Some(title) = clean_title(body) {
+        meta.turn_count = meta.turn_count.map(|count| count + 1);
+        meta.title_candidates.push(title);
+    }
+    if let Some(body) = clean_preview_text(body) {
+        if meta.first_user_message.is_none() {
+            meta.first_user_message = Some(body.clone());
+        }
+        meta.last_user_message = Some(body);
     }
 }
 
@@ -1337,23 +1358,38 @@ fn json_str<'a>(value: &'a Value, path: &[&str]) -> Option<&'a str> {
 }
 
 pub(crate) fn apply_time_bounds(meta: &mut SessionMetadata, timestamp: &str) {
-    if meta.started_at.as_deref().is_none_or(|current| {
-        compare_timestamps(Some(timestamp), Some(current)).is_lt()
-    }) {
+    if meta
+        .started_at
+        .as_deref()
+        .is_none_or(|current| compare_timestamps(Some(timestamp), Some(current)).is_lt())
+    {
         meta.started_at = Some(timestamp.to_string());
     }
-    if meta.updated_at.as_deref().is_none_or(|current| {
-        compare_timestamps(Some(timestamp), Some(current)).is_gt()
-    }) {
+    if meta
+        .updated_at
+        .as_deref()
+        .is_none_or(|current| compare_timestamps(Some(timestamp), Some(current)).is_gt())
+    {
         meta.updated_at = Some(timestamp.to_string());
     }
 }
 
 pub(crate) fn extract_session_title(value: &Value) -> Option<String> {
-    let role = json_str(value, &["role"])
-        .or_else(|| json_str(value, &["message", "role"]))
-        .or_else(|| json_str(value, &["payload", "role"]));
-    if role != Some("user") {
+    extract_session_title_for_agent(infer_session_value_agent(value), value)
+}
+
+fn infer_session_value_agent(value: &Value) -> AgentKind {
+    if value.get("type").and_then(Value::as_str) == Some("response_item") {
+        AgentKind::Codex
+    } else {
+        AgentKind::Unknown
+    }
+}
+
+pub(crate) fn extract_session_title_for_agent(agent: AgentKind, value: &Value) -> Option<String> {
+    if crate::providers::agent_provider(agent).session_message_kind(value)
+        != Some(crate::providers::SessionMessageKind::User)
+    {
         return None;
     }
     let text = extract_user_text(
@@ -1367,13 +1403,17 @@ pub(crate) fn extract_session_title(value: &Value) -> Option<String> {
 }
 
 pub(crate) fn extract_session_message(value: &Value) -> Option<(&'static str, String)> {
-    let role = json_str(value, &["role"])
-        .or_else(|| json_str(value, &["message", "role"]))
-        .or_else(|| json_str(value, &["payload", "role"]))?;
-    let role = match role {
-        "user" => "user",
-        "assistant" => "assistant",
-        _ => return None,
+    extract_session_message_for_agent(infer_session_value_agent(value), value)
+}
+
+pub(crate) fn extract_session_message_for_agent(
+    agent: AgentKind,
+    value: &Value,
+) -> Option<(&'static str, String)> {
+    let role = match crate::providers::agent_provider(agent).session_message_kind(value)? {
+        crate::providers::SessionMessageKind::User => "user",
+        crate::providers::SessionMessageKind::Assistant => "assistant",
+        crate::providers::SessionMessageKind::Context => return None,
     };
     let content = value
         .pointer("/message/content")
@@ -1762,28 +1802,24 @@ mod tests {
     use rusqlite::Connection;
     use serde_json::json;
 
+    use crate::providers::codex::scan_jsonl_sessions_for_test as scan_codex_jsonl;
     use crate::{
         git,
         providers::{codex::scan_session_index as scan_codex_index, cursor_sessions},
         skills::AgentKind,
     };
-    use crate::providers::codex::scan_jsonl_sessions_for_test as scan_codex_jsonl;
 
     use super::{
         SESSION_PREVIEW_MAX_CHARS, SessionRecord, SessionRepositoryResolver, SessionScanCache,
         SessionScanCacheEntry, SessionScanSourceState, clean_preview_text, clean_title,
-        extract_session_title, file_state, compare_timestamps, infer_session_project,
-        infer_session_resume_target,
-        is_session_candidate_path,
-        merge_sessions, normalize_session_projects,
-        repository_from_git_snapshot, scan_additional_session_roots, scan_jsonl_meta_for_agent,
-        scan_jsonl_sessions, session_requires_rescan,
-        session_watch_plan, should_replace_session_path,
+        compare_timestamps, extract_session_message, extract_session_title, file_state,
+        infer_session_project, infer_session_resume_target, is_session_candidate_path,
+        merge_sessions, normalize_session_projects, repository_from_git_snapshot,
+        scan_additional_session_roots, scan_jsonl_meta_for_agent, scan_jsonl_sessions,
+        session_requires_rescan, session_watch_plan, should_replace_session_path,
     };
 
-    use cursor_sessions::{
-        decode_cursor_project_dir, scan_cursor_meta,
-    };
+    use cursor_sessions::{decode_cursor_project_dir, scan_cursor_meta};
 
     fn temp_dir(prefix: &str) -> PathBuf {
         std::env::temp_dir().join(format!(
@@ -2023,10 +2059,6 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
-
-
-
-
     #[test]
     fn cursor_project_folder_decodes_to_workspace_path() {
         assert_eq!(
@@ -2034,7 +2066,6 @@ mod tests {
             Some(Path::new("/Users/test/dev/example/nextop"))
         );
     }
-
 
     #[test]
     fn scans_additional_roots_by_transcript_format() {
@@ -2256,6 +2287,10 @@ mod tests {
         let mut invalidated_scan = Vec::new();
         scan_codex_jsonl(&root, &mut invalidated_scan, Some(&cache));
         assert_eq!(invalidated_scan[0].message_count, Some(2));
+        assert_eq!(
+            invalidated_scan[0].last_assistant_message.as_deref(),
+            Some("Answer")
+        );
 
         fs::remove_dir_all(root).unwrap();
     }
@@ -2295,8 +2330,6 @@ mod tests {
 
         fs::remove_dir_all(root).unwrap();
     }
-
-
 
     #[cfg(unix)]
     #[test]
@@ -2348,7 +2381,6 @@ mod tests {
 
         fs::remove_dir_all(root).unwrap();
     }
-
 
     #[test]
     fn session_candidate_discovery_uses_provider_owned_files() {
@@ -2415,6 +2447,23 @@ mod tests {
             extract_session_title(&codex_with_embedded_context),
             Some("Real request".to_string())
         );
+
+        let codex_selected_skill = json!({
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "user",
+                "content": [{
+                    "type": "input_text",
+                    "text": "<skill><name>foo</name><path>/tmp/foo/SKILL.md</path></skill>"
+                }],
+                "internal_chat_message_metadata_passthrough": {
+                    "content_item_kinds": ["skills.selected_skill_instructions"]
+                }
+            }
+        });
+        assert_eq!(extract_session_title(&codex_selected_skill), None);
+        assert_eq!(extract_session_message(&codex_selected_skill), None);
         assert_eq!(
             clean_title(
                 "<user_info>Ryan</user_info>\n<timestamp>today</timestamp>\n<user_query>\nUse the Cursor transcript title\n</user_query>"
@@ -2712,6 +2761,66 @@ mod tests {
     }
 
     #[test]
+    fn codex_goal_message_provides_session_title_and_user_preview() {
+        let root = temp_dir("tendi-codex-goal-title-test");
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("rollout-12345678-1234-1234-1234-123456789012.jsonl");
+        fs::write(
+            &path,
+            [
+                r#"{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"<codex_internal_context source=\"goal\">\n<objective>\nShip the release:\nFollow the checklist\n</objective>\n</codex_internal_context>"}]}}"#,
+                r#"{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"I will start."}]}}"#,
+                r#"{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Check the final result"}]}}"#,
+            ]
+            .join("\n"),
+        )
+        .unwrap();
+
+        let meta = scan_jsonl_meta_for_agent(&path, Some(AgentKind::Codex));
+
+        assert_eq!(meta.title.as_deref(), Some("Ship the release:"));
+        assert_eq!(
+            meta.first_user_message.as_deref(),
+            Some("Ship the release: Follow the checklist")
+        );
+        assert_eq!(
+            meta.last_user_message.as_deref(),
+            Some("Check the final result")
+        );
+        assert_eq!(meta.turn_count, Some(2));
+        assert_eq!(
+            crate::providers::codex::session_title(&path).as_deref(),
+            Some("Ship the release:")
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn codex_goal_title_overrides_index_thread_name() {
+        let root = temp_dir("tendi-codex-goal-index-title-test");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(
+            root.join("rollout-12345678-1234-1234-1234-123456789012.jsonl"),
+            r#"{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"<codex_internal_context source=\"goal\"><objective>Goal title</objective></codex_internal_context>"}]}}"#,
+        )
+        .unwrap();
+
+        let mut transcript_sessions = Vec::new();
+        scan_codex_jsonl(&root, &mut transcript_sessions, None);
+        assert_eq!(transcript_sessions.len(), 1);
+        let mut index_session = transcript_sessions[0].clone();
+        index_session.path = root.join("session_index.jsonl");
+        index_session.title = Some("Index thread name".to_string());
+        index_session.first_user_message = None;
+
+        let sessions = merge_sessions(vec![index_session, transcript_sessions.remove(0)]);
+
+        assert_eq!(sessions[0].title.as_deref(), Some("Goal title"));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn metadata_fast_path_keeps_time_bounds_and_user_turns() {
         let root = temp_dir("tendi-session-metadata-fast-path-test");
         fs::create_dir_all(&root).unwrap();
@@ -2738,8 +2847,6 @@ mod tests {
         assert_eq!(meta.title.as_deref(), Some("Check CPU usage"));
         let _ = fs::remove_dir_all(root);
     }
-
-
 
     #[test]
     fn cursor_meta_skips_project_only_empty_sessions() {
@@ -2780,7 +2887,6 @@ mod tests {
 
         let _ = fs::remove_dir_all(root);
     }
-
 
     #[test]
     fn cursor_store_metadata_links_subagent_transcript_to_parent() {
@@ -2900,20 +3006,12 @@ mod tests {
             .map(|byte| format!("{byte:02x}"))
             .collect::<String>();
         connection
-            .execute(
-                "INSERT INTO meta (key, value) VALUES ('0', ?1)",
-                [&encoded],
-            )
+            .execute("INSERT INTO meta (key, value) VALUES ('0', ?1)", [&encoded])
             .unwrap();
         drop(connection);
 
         let mut sessions = Vec::new();
-        cursor_sessions::scan_cursor_meta_file(
-            &meta_path,
-            &mut sessions,
-            AgentKind::Cursor,
-            None,
-        );
+        cursor_sessions::scan_cursor_meta_file(&meta_path, &mut sessions, AgentKind::Cursor, None);
         let session = sessions.pop().unwrap();
         assert_eq!(session.parent_session_id, None);
         let (file_mtime, file_size) = file_state(&meta_path).unwrap();
@@ -3216,5 +3314,4 @@ mod tests {
         assert_eq!(usage.total_tokens, 175);
         let _ = fs::remove_dir_all(root);
     }
-
 }

@@ -572,6 +572,13 @@ export type McpSetEnabledRequest = {
   enabled: boolean;
   serverPath: StringList;
 };
+export type McpProbeRequest = {
+  agent: AgentKind;
+  path: string;
+  expectedTrustHash: string;
+  name: string;
+  serverPath: StringList;
+};
 export type McpSetEnabledManyRequest = {
   requests: McpSetEnabledRequest[];
 };
@@ -696,7 +703,6 @@ export type SkillsUpdateManyRequest = {
 };
 export type SkillsDeleteManyRequest = {
   skillIds: StringList;
-  names?: StringList;
 };
 export type SkillsMarketplaceSearchRequest = {
   query: string;
@@ -782,12 +788,19 @@ export type CliInstallStatus = {
 export type TerminalAppTestResponse = string;
 export type EditorAppTestResponse = boolean;
 export type SessionResumeTargetResponse = "app" | "terminal";
+export type SessionResumeError = {
+  code: "desktop_runtime_required" | "desktop_command_failed" | "worktree_not_found" | "terminal_unavailable" | "terminal_launch_failed" | "session_not_resumable" | "internal";
+  provider: string | null;
+  retryable: boolean;
+  action: "retry" | "settings" | "open_project" | "none";
+};
 export type SessionResumeResponse = {
-  status: "activeWriter" | "launched";
+  status: "activeWriter" | "launched" | "failed";
   lockPath?: string | null;
   agent?: string | null;
   terminal?: string | null;
   commandLine?: string | null;
+  error?: SessionResumeError;
 };
 export type LogsExportResponse = string;
 export type AgentKind = "codex" | "cursor" | "claude" | "shared" | "unknown";
@@ -850,6 +863,39 @@ export type SessionIdentity = {
   agent: AgentKind;
   path: string;
 };
+export type SessionListSortKey = "title" | "agent" | "project" | "startedAt" | "updatedAt" | "messages" | "turns" | "cacheRate" | "searchScore";
+export type SessionListSortDirection = "asc" | "desc";
+export type SessionsListRequest = {
+  query: string;
+  agent?: AgentKind;
+  sortKey: SessionListSortKey;
+  sortDirection: SessionListSortDirection;
+  groupBy?: SessionListSortKey;
+  page: number;
+  pageSize: number;
+  showChildSessions: boolean;
+  selectedProjectKeys: string[];
+  locate?: SessionIdentity;
+};
+export type SessionListProjectOption = {
+  key: string;
+  label: string;
+  title: string;
+  count: number;
+};
+export type SessionListProjectOptionList = SessionListProjectOption[];
+export type SessionsListResponse = {
+  revision: Revision;
+  rows: SessionRecordList;
+  projectOptions: SessionListProjectOptionList;
+  total: number;
+  childSessionCount: number;
+  page: number;
+  pageCount: number;
+  pageStart: number;
+  pageEnd: number;
+  groupCount: number | null;
+};
 export type SessionsSearchRequest = {
   query: string;
   candidates?: SessionIdentity[];
@@ -910,6 +956,8 @@ export type SessionRecord = {
   approval_mode?: string | null;
   is_run_everything?: boolean | null;
   parent_session_id?: string | null;
+  search_score?: number;
+  search_snippet?: string;
   token_usage?: SessionTokenUsage;
 };
 export type SessionSnapshot = {
@@ -940,7 +988,7 @@ export type SessionSkillLinksRequest = {
   agent: AgentKind;
 };
 export type SkillSessionLinksRequest = {
-  skillName: string;
+  skillId: string;
 };
 export type SessionSkillLink = {
   session_id: string;
@@ -986,6 +1034,62 @@ export type SkillTargetRecord = {
   globalPath: string | null;
 };
 export type SkillTargetRecordList = SkillTargetRecord[];
+export type AssistantMessage = {
+  role: "user" | "assistant";
+  content: string;
+};
+export type AssistantChatSession = {
+  id: string;
+  messages: AssistantMessage[];
+  linkedSession: JsonObject | null;
+};
+export type AssistantChatSessionList = AssistantChatSession[];
+export type AssistantContext = {
+  pageId: string;
+  pageTitle: string;
+  filters: JsonObject;
+  selection: string;
+  selectedContent: string[];
+  skill: JsonObject | null;
+  session: JsonObject | null;
+  tendi: JsonObject;
+};
+export type AssistantUsage = {
+  inputTokens?: number;
+  cachedInputTokens?: number;
+  outputTokens?: number;
+  reasoningOutputTokens?: number;
+  totalTokens?: number;
+};
+export type AssistantAskRequest = {
+  conversationId: string;
+  requestId: string;
+  message: string;
+  history: AssistantMessage[];
+  context: AssistantContext;
+  agent: string;
+  workspace: string;
+  persistUserMessage: boolean;
+};
+export type AssistantAskResponse = {
+  answer: string;
+  status: "completed" | "error";
+  usage: AssistantUsage;
+  error: string | null;
+};
+export type AssistantCancelRequest = {
+  conversationId: string;
+};
+export type AssistantCancelResponse = {
+  cancelled: boolean;
+};
+export type AssistantStreamEvent = {
+  conversationId: string;
+  requestId: string;
+  kind: string;
+  text?: string;
+  detail?: string;
+};
 export type AppSettings = {
   appearance: string;
   fontFamily: string;
@@ -1043,6 +1147,19 @@ export type HookRecord = {
   read_only_reason?: string | null;
 };
 export type HookRecordList = HookRecord[];
+export type McpIcon = {
+  src: string;
+  mime_type?: string;
+  sizes?: string[];
+  theme?: string;
+};
+export type McpTool = {
+  name: string;
+  title?: string;
+  description?: string;
+  input_schema?: JsonValue;
+  icons?: McpIcon[];
+};
 export type McpServerRecord = {
   agent: AgentKind;
   name: string;
@@ -1052,8 +1169,18 @@ export type McpServerRecord = {
   status: string;
   path: string;
   trust_hash: string;
+  probe_cache_version?: number;
+  probe_state?: string;
   server_path?: string[];
   read_only_reason?: string | null;
+  server_name?: string;
+  server_title?: string;
+  server_version?: string;
+  server_description?: string;
+  server_website_url?: string;
+  probe_error?: string;
+  icons?: McpIcon[];
+  tools?: McpTool[];
 };
 export type McpServerRecordList = McpServerRecord[];
 export type PromptRecord = {
@@ -1188,6 +1315,13 @@ export type SkillsUpdatesEvent = {
   status: "completed" | "failed";
   skills: SkillRecord[] | null;
   updates: SkillUpdateReport[];
+  error: string | null;
+};
+export type SkillsChangedEvent = {
+  paths: string[];
+};
+export type ProjectionChangedEvent = {
+  domain: "agents" | "skills" | "rules" | "hooks" | "mcp";
   error: string | null;
 };
 export type SkillUpdateReport = {
@@ -1340,7 +1474,7 @@ export type JsonRpcError = { code: number; message: string; data?: JsonRpcErrorD
 export type JsonRpcResponse = { jsonrpc: "2.0"; id: JsonRpcId; result?: JsonValue; error?: JsonRpcError };
 export type RuntimeEventEnvelope = { id: number; event: string; payload: JsonValue; scopeKey?: string; domain?: string; operationId?: string; baseRevision?: number; revision?: number; sourceVersion?: string | null };
 
-export type CommandName = "scan" | "agents_list" | "bundled_skill_status" | "bundled_skill_install" | "bundled_skill_remove" | "bundled_skill_prompt_dismiss" | "skills_list" | "skills_refresh" | "sessions_snapshot" | "sessions_scan_start" | "sessions_search" | "analytics_overview" | "analytics_revision" | "session_skill_index_status" | "session_skill_index_run" | "session_skill_links" | "skill_session_links" | "settings_get" | "settings_save" | "session_projects_list" | "project_scan_scopes_list" | "project_scan_scopes_save" | "projects_list" | "projects_scan" | "terminal_apps_list" | "agent_configs_list" | "agent_config_watch" | "agent_config_read" | "agent_config_save" | "agent_configs_delete_many" | "config_profile_create" | "config_profile_set" | "rules_list" | "rule_file_read" | "rule_file_save" | "rule_file_delete_many" | "hooks_list" | "hook_delete" | "hook_delete_many" | "hook_set_enabled" | "hook_set_enabled_many" | "hook_review" | "hook_source_read" | "mcp_list" | "mcp_set_enabled" | "mcp_set_enabled_many" | "prompts_list" | "prompt_save" | "prompts_delete_many" | "session_transcript" | "session_transcript_locator" | "session_transcript_search" | "skills_targets" | "skills_backup_status" | "skills_backup_configure" | "skills_backup_sync" | "skills_backup_now" | "skills_backup_versions" | "skills_backup_restore" | "skills_backup_adopt" | "skills_backup_adopt_many" | "skills_backup_disconnect" | "skills_add" | "skills_add_preview_read" | "skills_distribute" | "skills_remove_locations" | "skills_set" | "skills_wrap" | "skills_updates" | "skills_updates_cancel" | "skills_update" | "skills_update_many" | "skills_delete_many" | "skills_marketplace_search" | "skill_files" | "skill_file_read" | "skill_file_save" | "skill_file_create" | "skill_folder_create" | "skill_path_rename" | "skill_path_delete" | "app_icon_set" | "cli_status" | "cli_install" | "cli_remove" | "terminal_app_test" | "editor_app_test" | "session_resume_target" | "session_resume_in_terminal" | "open_in_editor" | "reveal_in_finder" | "logs_export" | "open_url" | "check_for_updates" | "install_update";
+export type CommandName = "scan" | "agents_list" | "bundled_skill_status" | "bundled_skill_install" | "bundled_skill_remove" | "bundled_skill_prompt_dismiss" | "skills_list" | "skills_refresh" | "sessions_snapshot" | "sessions_list" | "sessions_scan_start" | "sessions_search" | "analytics_overview" | "analytics_revision" | "session_skill_index_status" | "session_skill_index_run" | "session_skill_links" | "skill_session_links" | "settings_get" | "settings_save" | "assistant_ask" | "assistant_cancel" | "assistant_chat_sessions" | "session_projects_list" | "project_scan_scopes_list" | "project_scan_scopes_save" | "projects_list" | "projects_scan" | "terminal_apps_list" | "agent_configs_list" | "agent_config_watch" | "agent_config_read" | "agent_config_save" | "agent_configs_delete_many" | "config_profile_create" | "config_profile_set" | "rules_list" | "rule_file_read" | "rule_file_save" | "rule_file_delete_many" | "hooks_list" | "hook_delete" | "hook_delete_many" | "hook_set_enabled" | "hook_set_enabled_many" | "hook_review" | "hook_source_read" | "mcp_list" | "mcp_probe" | "mcp_set_enabled" | "mcp_set_enabled_many" | "prompts_list" | "prompt_save" | "prompts_delete_many" | "session_transcript" | "session_transcript_locator" | "session_transcript_search" | "skills_targets" | "skills_backup_status" | "skills_backup_configure" | "skills_backup_sync" | "skills_backup_now" | "skills_backup_versions" | "skills_backup_restore" | "skills_backup_adopt" | "skills_backup_adopt_many" | "skills_backup_disconnect" | "skills_add" | "skills_add_preview_read" | "skills_distribute" | "skills_remove_locations" | "skills_set" | "skills_wrap" | "skills_updates" | "skills_updates_cancel" | "skills_update" | "skills_update_many" | "skills_delete_many" | "skills_marketplace_search" | "skill_files" | "skill_file_read" | "skill_file_save" | "skill_file_create" | "skill_folder_create" | "skill_path_rename" | "skill_path_delete" | "app_icon_set" | "cli_status" | "cli_install" | "cli_remove" | "terminal_app_test" | "editor_app_test" | "session_resume_target" | "session_resume_in_terminal" | "open_in_editor" | "reveal_in_finder" | "logs_export" | "open_url" | "check_for_updates" | "install_update";
 export const TauriCommand = {
   Scan: "scan",
   AgentsList: "agents_list",
@@ -1351,6 +1485,7 @@ export const TauriCommand = {
   SkillsList: "skills_list",
   SkillsRefresh: "skills_refresh",
   SessionsSnapshot: "sessions_snapshot",
+  SessionsList: "sessions_list",
   SessionsScanStart: "sessions_scan_start",
   SessionsSearch: "sessions_search",
   AnalyticsOverview: "analytics_overview",
@@ -1361,6 +1496,9 @@ export const TauriCommand = {
   SkillSessionLinks: "skill_session_links",
   SettingsGet: "settings_get",
   SettingsSave: "settings_save",
+  AssistantAsk: "assistant_ask",
+  AssistantCancel: "assistant_cancel",
+  AssistantChatSessions: "assistant_chat_sessions",
   SessionProjectsList: "session_projects_list",
   ProjectScanScopesList: "project_scan_scopes_list",
   ProjectScanScopesSave: "project_scan_scopes_save",
@@ -1386,6 +1524,7 @@ export const TauriCommand = {
   HookReview: "hook_review",
   HookSourceRead: "hook_source_read",
   McpList: "mcp_list",
+  McpProbe: "mcp_probe",
   McpSetEnabled: "mcp_set_enabled",
   McpSetEnabledMany: "mcp_set_enabled_many",
   PromptsList: "prompts_list",
@@ -1457,6 +1596,7 @@ export type SkillsRefreshRequest = EmptyRequest;
 export type SkillsRefreshResponse = SkillRefreshResponse;
 export type SessionsSnapshotRequest = EmptyRequest;
 export type SessionsSnapshotResponse = SessionSnapshot;
+
 export type SessionsScanStartRequest = EmptyRequest;
 export type SessionsScanStartResponse = SessionScanStartResponse;
 export type SessionsSearchResponse = SessionSearchHitList;
@@ -1472,6 +1612,10 @@ export type SettingsGetRequest = EmptyRequest;
 export type SettingsGetResponse = AppSettings;
 export type SettingsSaveRequest = AppSettings;
 export type SettingsSaveResponse = AppSettings;
+
+
+export type AssistantChatSessionsRequest = EmptyRequest;
+export type AssistantChatSessionsResponse = AssistantChatSessionList;
 export type SessionProjectsListRequest = EmptyRequest;
 export type SessionProjectsListResponse = SessionProjectSummaryList;
 export type ProjectScanScopesListRequest = EmptyRequest;
@@ -1508,6 +1652,7 @@ export type HookReviewResponse = HookMutationDelta;
 export type HookSourceReadResponse = HookSourceContentResponse;
 export type McpListRequest = EmptyRequest;
 export type McpListResponse = McpServerRecordList;
+export type McpProbeResponse = McpMutationResponse;
 export type McpSetEnabledResponse = McpMutationResponse;
 export type McpSetEnabledManyResponse = McpMutationResponse;
 export type PromptsListRequest = EmptyRequest;
@@ -1577,6 +1722,7 @@ export type RuntimeRequests = {
   "skills_list": SkillsListRequest;
   "skills_refresh": SkillsRefreshRequest;
   "sessions_snapshot": SessionsSnapshotRequest;
+  "sessions_list": SessionsListRequest;
   "sessions_scan_start": SessionsScanStartRequest;
   "sessions_search": SessionsSearchRequest;
   "analytics_overview": AnalyticsOverviewRequest;
@@ -1587,6 +1733,9 @@ export type RuntimeRequests = {
   "skill_session_links": SkillSessionLinksRequest;
   "settings_get": SettingsGetRequest;
   "settings_save": SettingsSaveRequest;
+  "assistant_ask": AssistantAskRequest;
+  "assistant_cancel": AssistantCancelRequest;
+  "assistant_chat_sessions": AssistantChatSessionsRequest;
   "session_projects_list": SessionProjectsListRequest;
   "project_scan_scopes_list": ProjectScanScopesListRequest;
   "project_scan_scopes_save": ProjectScanScopesSaveRequest;
@@ -1612,6 +1761,7 @@ export type RuntimeRequests = {
   "hook_review": HookReviewRequest;
   "hook_source_read": HookSourceReadRequest;
   "mcp_list": McpListRequest;
+  "mcp_probe": McpProbeRequest;
   "mcp_set_enabled": McpSetEnabledRequest;
   "mcp_set_enabled_many": McpSetEnabledManyRequest;
   "prompts_list": PromptsListRequest;
@@ -1674,6 +1824,7 @@ export type RuntimeResponses = {
   "skills_list": SkillsListResponse;
   "skills_refresh": SkillsRefreshResponse;
   "sessions_snapshot": SessionsSnapshotResponse;
+  "sessions_list": SessionsListResponse;
   "sessions_scan_start": SessionsScanStartResponse;
   "sessions_search": SessionsSearchResponse;
   "analytics_overview": AnalyticsOverviewResponse;
@@ -1684,6 +1835,9 @@ export type RuntimeResponses = {
   "skill_session_links": SkillSessionLinksResponse;
   "settings_get": SettingsGetResponse;
   "settings_save": SettingsSaveResponse;
+  "assistant_ask": AssistantAskResponse;
+  "assistant_cancel": AssistantCancelResponse;
+  "assistant_chat_sessions": AssistantChatSessionsResponse;
   "session_projects_list": SessionProjectsListResponse;
   "project_scan_scopes_list": ProjectScanScopesListResponse;
   "project_scan_scopes_save": ProjectScanScopesSaveResponse;
@@ -1709,6 +1863,7 @@ export type RuntimeResponses = {
   "hook_review": HookReviewResponse;
   "hook_source_read": HookSourceReadResponse;
   "mcp_list": McpListResponse;
+  "mcp_probe": McpProbeResponse;
   "mcp_set_enabled": McpSetEnabledResponse;
   "mcp_set_enabled_many": McpSetEnabledManyResponse;
   "prompts_list": PromptsListResponse;
@@ -1765,14 +1920,15 @@ export type RuntimeResponses = {
 export type CommandMetadata = { owner: "daemon" | "desktop"; wire: "jsonrpc" | "tauri"; clients: readonly string[]; execution: "read" | "write"; serializedWrite: boolean; internal: boolean; deprecated: boolean };
 export const COMMAND_METADATA = {
   "scan": { owner: "daemon", wire: "jsonrpc", clients: ["cli"], execution: "write", serializedWrite: true, internal: true, deprecated: false },
-  "agents_list": { owner: "daemon", wire: "jsonrpc", clients: ["desktop","cli"], execution: "read", serializedWrite: true, internal: false, deprecated: false },
+  "agents_list": { owner: "daemon", wire: "jsonrpc", clients: ["desktop","cli"], execution: "read", serializedWrite: false, internal: false, deprecated: false },
   "bundled_skill_status": { owner: "daemon", wire: "jsonrpc", clients: ["desktop"], execution: "read", serializedWrite: false, internal: false, deprecated: false },
   "bundled_skill_install": { owner: "daemon", wire: "jsonrpc", clients: ["desktop","cli"], execution: "write", serializedWrite: true, internal: false, deprecated: false },
   "bundled_skill_remove": { owner: "daemon", wire: "jsonrpc", clients: ["desktop"], execution: "write", serializedWrite: true, internal: false, deprecated: false },
   "bundled_skill_prompt_dismiss": { owner: "daemon", wire: "jsonrpc", clients: ["desktop"], execution: "write", serializedWrite: true, internal: false, deprecated: false },
-  "skills_list": { owner: "daemon", wire: "jsonrpc", clients: ["desktop","cli"], execution: "read", serializedWrite: true, internal: false, deprecated: false },
+  "skills_list": { owner: "daemon", wire: "jsonrpc", clients: ["desktop","cli"], execution: "read", serializedWrite: false, internal: false, deprecated: false },
   "skills_refresh": { owner: "daemon", wire: "jsonrpc", clients: ["desktop"], execution: "write", serializedWrite: true, internal: false, deprecated: false },
   "sessions_snapshot": { owner: "daemon", wire: "jsonrpc", clients: ["desktop","cli"], execution: "read", serializedWrite: false, internal: false, deprecated: false },
+  "sessions_list": { owner: "daemon", wire: "jsonrpc", clients: ["desktop"], execution: "read", serializedWrite: false, internal: false, deprecated: false },
   "sessions_scan_start": { owner: "daemon", wire: "jsonrpc", clients: ["desktop"], execution: "write", serializedWrite: true, internal: false, deprecated: false },
   "sessions_search": { owner: "daemon", wire: "jsonrpc", clients: ["desktop","cli"], execution: "read", serializedWrite: false, internal: false, deprecated: false },
   "analytics_overview": { owner: "daemon", wire: "jsonrpc", clients: ["desktop"], execution: "read", serializedWrite: false, internal: false, deprecated: false },
@@ -1783,6 +1939,9 @@ export const COMMAND_METADATA = {
   "skill_session_links": { owner: "daemon", wire: "jsonrpc", clients: ["desktop"], execution: "read", serializedWrite: false, internal: false, deprecated: false },
   "settings_get": { owner: "daemon", wire: "jsonrpc", clients: ["desktop"], execution: "read", serializedWrite: false, internal: false, deprecated: false },
   "settings_save": { owner: "daemon", wire: "jsonrpc", clients: ["desktop"], execution: "write", serializedWrite: true, internal: false, deprecated: false },
+  "assistant_ask": { owner: "desktop", wire: "tauri", clients: ["desktop"], execution: "write", serializedWrite: true, internal: false, deprecated: false },
+  "assistant_cancel": { owner: "desktop", wire: "tauri", clients: ["desktop"], execution: "write", serializedWrite: true, internal: false, deprecated: false },
+  "assistant_chat_sessions": { owner: "desktop", wire: "tauri", clients: ["desktop"], execution: "read", serializedWrite: false, internal: false, deprecated: false },
   "session_projects_list": { owner: "daemon", wire: "jsonrpc", clients: ["desktop"], execution: "read", serializedWrite: false, internal: false, deprecated: false },
   "project_scan_scopes_list": { owner: "daemon", wire: "jsonrpc", clients: ["desktop"], execution: "read", serializedWrite: false, internal: false, deprecated: false },
   "project_scan_scopes_save": { owner: "daemon", wire: "jsonrpc", clients: ["desktop"], execution: "write", serializedWrite: true, internal: false, deprecated: false },
@@ -1796,18 +1955,19 @@ export const COMMAND_METADATA = {
   "agent_configs_delete_many": { owner: "daemon", wire: "jsonrpc", clients: ["desktop"], execution: "write", serializedWrite: true, internal: false, deprecated: false },
   "config_profile_create": { owner: "daemon", wire: "jsonrpc", clients: ["desktop"], execution: "write", serializedWrite: true, internal: false, deprecated: false },
   "config_profile_set": { owner: "daemon", wire: "jsonrpc", clients: ["desktop"], execution: "write", serializedWrite: true, internal: false, deprecated: false },
-  "rules_list": { owner: "daemon", wire: "jsonrpc", clients: ["desktop"], execution: "read", serializedWrite: true, internal: false, deprecated: false },
+  "rules_list": { owner: "daemon", wire: "jsonrpc", clients: ["desktop"], execution: "read", serializedWrite: false, internal: false, deprecated: false },
   "rule_file_read": { owner: "daemon", wire: "jsonrpc", clients: ["desktop"], execution: "read", serializedWrite: false, internal: false, deprecated: false },
   "rule_file_save": { owner: "daemon", wire: "jsonrpc", clients: ["desktop"], execution: "write", serializedWrite: true, internal: false, deprecated: false },
   "rule_file_delete_many": { owner: "daemon", wire: "jsonrpc", clients: ["desktop"], execution: "write", serializedWrite: true, internal: false, deprecated: false },
-  "hooks_list": { owner: "daemon", wire: "jsonrpc", clients: ["desktop"], execution: "read", serializedWrite: true, internal: false, deprecated: false },
+  "hooks_list": { owner: "daemon", wire: "jsonrpc", clients: ["desktop"], execution: "read", serializedWrite: false, internal: false, deprecated: false },
   "hook_delete": { owner: "daemon", wire: "jsonrpc", clients: ["desktop"], execution: "write", serializedWrite: true, internal: false, deprecated: false },
   "hook_delete_many": { owner: "daemon", wire: "jsonrpc", clients: ["desktop"], execution: "write", serializedWrite: true, internal: false, deprecated: false },
   "hook_set_enabled": { owner: "daemon", wire: "jsonrpc", clients: ["desktop"], execution: "write", serializedWrite: true, internal: false, deprecated: false },
   "hook_set_enabled_many": { owner: "daemon", wire: "jsonrpc", clients: ["desktop"], execution: "write", serializedWrite: true, internal: false, deprecated: false },
   "hook_review": { owner: "daemon", wire: "jsonrpc", clients: ["desktop"], execution: "write", serializedWrite: true, internal: false, deprecated: false },
   "hook_source_read": { owner: "daemon", wire: "jsonrpc", clients: ["desktop"], execution: "read", serializedWrite: false, internal: false, deprecated: false },
-  "mcp_list": { owner: "daemon", wire: "jsonrpc", clients: ["desktop","cli"], execution: "read", serializedWrite: true, internal: false, deprecated: false },
+  "mcp_list": { owner: "daemon", wire: "jsonrpc", clients: ["desktop","cli"], execution: "read", serializedWrite: false, internal: false, deprecated: false },
+  "mcp_probe": { owner: "daemon", wire: "jsonrpc", clients: ["desktop"], execution: "write", serializedWrite: true, internal: false, deprecated: false },
   "mcp_set_enabled": { owner: "daemon", wire: "jsonrpc", clients: ["desktop"], execution: "write", serializedWrite: true, internal: false, deprecated: false },
   "mcp_set_enabled_many": { owner: "daemon", wire: "jsonrpc", clients: ["desktop"], execution: "write", serializedWrite: true, internal: false, deprecated: false },
   "prompts_list": { owner: "daemon", wire: "jsonrpc", clients: ["desktop"], execution: "read", serializedWrite: false, internal: false, deprecated: false },
@@ -1869,5 +2029,5 @@ export function isDesktopCommand(command: string): command is CommandName {
 }
 export const PROTOCOL_VERSION = 2;
 export const SCHEMA_VERSION = 1;
-export const RUNTIME_CONTRACT_FINGERPRINT = "ae1f371d0cbd1f43cda682fa5ec5d3c39b123fe00de9c6df399b3744c55d39f9";
+export const RUNTIME_CONTRACT_FINGERPRINT = "e9a5feda453d0f8ae64e057bd42006e5a1732fbeb5cd27e9e79a46a0d1a963e3";
 export const RUNTIME_ERROR_CODES = {"INVALID_REQUEST":-32600,"METHOD_NOT_FOUND":-32601,"INVALID_PARAMS":-32602,"INVALID_ARGUMENT":-32602,"INTERNAL":-32603,"CORE_ERROR":-32603,"CONFLICT":-32002,"UNAUTHORIZED":-32003,"UNSUPPORTED_TRANSPORT":-32004,"CONTRACT_VIOLATION":-32005,"DAEMON_ERROR":-32001} as const;

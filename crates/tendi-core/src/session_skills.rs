@@ -9,17 +9,18 @@ use std::{
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 
 use crate::{
-    sessions::SessionRecord,
     runtime_contract::ScopeKey,
+    sessions::SessionRecord,
     skills::{AgentKind, SkillScan},
     storage::Store,
 };
 
 const OBSERVED_CONFIDENCE: &str = "observed";
 const EXPLICIT_CONFIDENCE: &str = "explicit";
-const SESSION_SKILL_INDEX_VERSION: &str = "2";
+const SESSION_SKILL_INDEX_VERSION: &str = "7";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionSkillLink {
@@ -86,6 +87,14 @@ pub(crate) struct Evidence {
     pub(crate) time: Option<String>,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct SkillEvidenceCandidate {
+    pub(crate) name: Option<String>,
+    pub(crate) path: Option<String>,
+    pub(crate) evidence: Evidence,
+    pub(crate) confidence: &'static str,
+}
+
 pub fn run_index_for_scope(
     cwd: &Path,
     scope_key: &ScopeKey,
@@ -96,20 +105,31 @@ pub fn run_index_for_scope(
         if let Some(skill_scan) = store.list_skills_for_workspace(cwd)? {
             (skill_scan, Vec::new(), false)
         } else {
-            let scanned = crate::skills::scan_skills_synced_for_projection(cwd)?;
+            let project_roots = store
+                .list_projects()?
+                .into_iter()
+                .map(|project| project.root_path)
+                .collect::<Vec<_>>();
+            let scanned =
+                crate::skills::scan_skills_synced_for_project_roots_with_store_for_projection(
+                    cwd,
+                    &store,
+                    &project_roots,
+                )?;
             (scanned.scan, scanned.source_migrations, true)
         };
     let session_scan = store.list_sessions_for_scope(scope_key)?;
 
     store.with_database_write_lock_retry(|| {
         if persist_skill_scan {
-            store.insert_skill_source_records_if_missing(&source_migrations)?;
-            store.save_skills_for_workspace(cwd, &skill_scan)?;
+            store.save_skills_for_workspace_with_source_migrations(
+                cwd,
+                &skill_scan,
+                &source_migrations,
+            )?;
         }
-        store.ensure_session_skill_index_version_for_scope(
-            scope_key,
-            SESSION_SKILL_INDEX_VERSION,
-        )?;
+        store
+            .ensure_session_skill_index_version_for_scope(scope_key, SESSION_SKILL_INDEX_VERSION)?;
         if force {
             store.clear_session_skill_index_for_scope(scope_key)?;
         }
@@ -122,7 +142,7 @@ pub fn run_index_for_scope(
     let mut failed = 0;
 
     for session in &session_scan.sessions {
-        let state = match session_file_state(&session.path) {
+        let state = match session_skill_index_state(session) {
             Ok(state) => state,
             Err(err) => {
                 failed += 1;
@@ -209,79 +229,126 @@ pub fn session_file_state(path: &Path) -> Result<SessionFileState> {
     })
 }
 
+fn session_skill_index_state(session: &SessionRecord) -> Result<SessionFileState> {
+    let provider = crate::providers::agent_provider(session.agent);
+    let mut source_paths = provider.session_scan_source_paths(&session.path);
+    source_paths.sort();
+    source_paths.dedup();
+    let primary_state = session_file_state(&session.path)?;
+    if source_paths.len() <= 1 {
+        return Ok(primary_state);
+    }
+
+    let mut digest = Sha256::new();
+    for path in source_paths {
+        let state = session_file_state(&path).unwrap_or(SessionFileState {
+            file_mtime: 0,
+            file_size: 0,
+        });
+        digest.update(path.to_string_lossy().as_bytes());
+        digest.update(state.file_mtime.to_le_bytes());
+        digest.update(state.file_size.to_le_bytes());
+    }
+    let digest = digest.finalize();
+    let file_mtime = i64::from_le_bytes(digest[..8].try_into().expect("sha256 digest length"));
+    let file_size = i64::from_le_bytes(digest[8..16].try_into().expect("sha256 digest length"));
+    Ok(SessionFileState {
+        file_mtime,
+        file_size,
+    })
+}
+
 fn extract_session_skill_links(
     session: &SessionRecord,
     lookup: &SkillLookup,
 ) -> Result<Vec<SessionSkillLink>> {
-    let file = fs::File::open(&session.path)
-        .with_context(|| format!("failed to read {}", session.path.display()))?;
     let mut links_by_key: BTreeMap<String, SessionSkillLink> = BTreeMap::new();
 
-    for line in BufReader::new(file).lines() {
-        let line = line.with_context(|| format!("failed to read {}", session.path.display()))?;
-        if line.trim().is_empty()
-            || (!line.contains("SKILL.md")
-                && !line.contains("<skill>")
-                && !line.contains('$')
-                && !is_skill_tool_line(&line))
-        {
-            continue;
-        }
-        let value = serde_json::from_str::<Value>(&line)
-            .with_context(|| format!("failed to parse {}", session.path.display()))?;
-
-        for candidate in explicit_skill_candidates(&value, session.agent) {
-            let skill = candidate
-                .path
-                .as_deref()
-                .and_then(|path| lookup.match_candidate(path, session.project.as_deref()))
-                .or_else(|| {
-                    candidate
-                        .name
-                        .as_deref()
-                        .and_then(|name| lookup.match_name(name, session.agent))
-                });
-            let Some(skill) = skill else {
+    let provider = crate::providers::agent_provider(session.agent);
+    if matches!(
+        provider.session_path_role(&session.path),
+        crate::providers::SessionPathRole::Transcript | crate::providers::SessionPathRole::Metadata
+    ) {
+        let file = fs::File::open(&session.path)
+            .with_context(|| format!("failed to read {}", session.path.display()))?;
+        for line in BufReader::new(file).lines() {
+            let line =
+                line.with_context(|| format!("failed to read {}", session.path.display()))?;
+            if line.trim().is_empty()
+                || (!line.contains("SKILL.md")
+                    && !line.contains("<skill>")
+                    && !line.contains('$')
+                    && !is_skill_tool_line(&line))
+            {
                 continue;
-            };
-            insert_skill_link(
-                &mut links_by_key,
-                session,
-                skill,
-                &candidate.evidence,
-                EXPLICIT_CONFIDENCE,
-            );
-        }
+            }
+            let value = serde_json::from_str::<Value>(&line)
+                .with_context(|| format!("failed to parse {}", session.path.display()))?;
 
-        for (payload, evidence) in tool_payloads(session.agent, &value) {
-            let mut strings = Vec::new();
-            collect_strings(payload, &mut strings);
-            for text in strings {
-                for candidate in skill_file_candidates(text) {
-                    let Some(skill) = lookup.match_candidate(candidate, session.project.as_deref())
-                    else {
-                        continue;
-                    };
-                    insert_skill_link(
-                        &mut links_by_key,
-                        session,
-                        skill,
-                        &evidence,
-                        OBSERVED_CONFIDENCE,
-                    );
+            for candidate in explicit_skill_candidates(&value, session.agent) {
+                insert_candidate_link(&mut links_by_key, session, lookup, &candidate);
+            }
+
+            for (payload, evidence) in tool_payloads(session.agent, &value) {
+                let mut strings = Vec::new();
+                collect_strings(payload, &mut strings);
+                for text in strings {
+                    for candidate in skill_file_candidates(text) {
+                        let Some(skill) =
+                            lookup.match_candidate(candidate, session.project.as_deref())
+                        else {
+                            continue;
+                        };
+                        insert_skill_link(
+                            &mut links_by_key,
+                            session,
+                            skill,
+                            &evidence,
+                            OBSERVED_CONFIDENCE,
+                        );
+                    }
                 }
             }
+        }
+    }
+
+    for source_path in provider.session_scan_source_paths(&session.path) {
+        for candidate in provider.extract_session_skill_evidence_from_source(&source_path)? {
+            insert_candidate_link(&mut links_by_key, session, lookup, &candidate);
         }
     }
 
     Ok(links_by_key.into_values().collect())
 }
 
-#[derive(Debug, Clone)]
-struct ExplicitSkillCandidate {
-    name: Option<String>,
-    path: Option<String>,
-    evidence: Evidence,
+type ExplicitSkillCandidate = SkillEvidenceCandidate;
+
+fn insert_candidate_link(
+    links_by_key: &mut BTreeMap<String, SessionSkillLink>,
+    session: &SessionRecord,
+    lookup: &SkillLookup,
+    candidate: &SkillEvidenceCandidate,
+) {
+    let skill = candidate
+        .path
+        .as_deref()
+        .and_then(|path| lookup.match_candidate(path, session.project.as_deref()))
+        .or_else(|| {
+            candidate
+                .name
+                .as_deref()
+                .and_then(|name| lookup.match_name(name))
+        });
+    let Some(skill) = skill else {
+        return;
+    };
+    insert_skill_link(
+        links_by_key,
+        session,
+        skill,
+        &candidate.evidence,
+        candidate.confidence,
+    );
 }
 
 fn insert_skill_link(
@@ -319,7 +386,8 @@ fn explicit_skill_candidates(value: &Value, agent: AgentKind) -> Vec<ExplicitSki
         .map(str::to_string);
     let mut candidates = Vec::new();
 
-    if is_user_message(value) {
+    let provider = crate::providers::agent_provider(agent);
+    if provider.session_message_kind(value) == Some(crate::providers::SessionMessageKind::User) {
         for text in user_message_texts(value) {
             if text.contains("<skill>") {
                 let name = xml_tag_value(&text, "name");
@@ -333,6 +401,7 @@ fn explicit_skill_candidates(value: &Value, agent: AgentKind) -> Vec<ExplicitSki
                             text: text.clone(),
                             time: timestamp.clone(),
                         },
+                        confidence: EXPLICIT_CONFIDENCE,
                     });
                 }
             }
@@ -348,9 +417,14 @@ fn explicit_skill_candidates(value: &Value, agent: AgentKind) -> Vec<ExplicitSki
                         text: format!("explicit skill reference: ${raw_name}"),
                         time: timestamp.clone(),
                     },
+                    confidence: EXPLICIT_CONFIDENCE,
                 });
             }
         }
+    }
+
+    for candidate in provider.extract_session_skill_evidence(value) {
+        candidates.push(candidate);
     }
 
     for (payload, evidence) in tool_payloads(agent, value) {
@@ -366,6 +440,7 @@ fn explicit_skill_candidates(value: &Value, agent: AgentKind) -> Vec<ExplicitSki
                     text: evidence.text,
                     time: evidence.time,
                 },
+                confidence: EXPLICIT_CONFIDENCE,
             });
         }
     }
@@ -378,15 +453,6 @@ fn is_skill_tool_line(line: &str) -> bool {
         || line.contains(r#""name":"Skill""#)
         || line.contains(r#""name": "skill""#)
         || line.contains(r#""name": "Skill""#)
-}
-
-fn is_user_message(value: &Value) -> bool {
-    if value.get("type").and_then(Value::as_str) == Some("response_item") {
-        return value.pointer("/payload/type").and_then(Value::as_str) == Some("message")
-            && value.pointer("/payload/role").and_then(Value::as_str) == Some("user");
-    }
-    value.get("type").and_then(Value::as_str) == Some("user")
-        || value.get("role").and_then(Value::as_str) == Some("user")
 }
 
 fn user_message_texts(value: &Value) -> Vec<String> {
@@ -509,6 +575,13 @@ fn skill_file_candidates(text: &str) -> Vec<&str> {
     candidates
 }
 
+pub(crate) fn skill_file_candidate_paths(text: &str) -> Vec<String> {
+    skill_file_candidates(text)
+        .into_iter()
+        .map(str::to_string)
+        .collect()
+}
+
 fn is_path_boundary(ch: char) -> bool {
     ch.is_whitespace()
         || matches!(
@@ -521,6 +594,7 @@ pub(crate) fn summarize_evidence(value: &Value) -> String {
     for pointer in [
         "/input/command",
         "/input/file_path",
+        "/input",
         "/arguments",
         "/action/command",
         "/command",
@@ -578,28 +652,28 @@ impl SkillLookup {
             .and_then(|items| (items.len() == 1).then_some(&items[0]))
     }
 
-    fn match_name(&self, name: &str, agent: AgentKind) -> Option<&SkillPathRef> {
+    fn match_name(&self, name: &str) -> Option<&SkillPathRef> {
         let names = [name, name.rsplit_once(':').map_or(name, |(_, name)| name)];
         for name in names {
             let Some(items) = self.by_name.get(name) else {
                 continue;
             };
-            let agent_matches = items
+            let unique_installations = items
                 .iter()
-                .filter(|item| item.skill_agent == agent)
-                .collect::<Vec<_>>();
-            if agent_matches.len() == 1 {
-                return agent_matches.into_iter().next();
-            }
-            let shared_matches = items
-                .iter()
-                .filter(|item| item.skill_agent == AgentKind::Shared)
-                .collect::<Vec<_>>();
-            if shared_matches.len() == 1 {
-                return shared_matches.into_iter().next();
-            }
-            if items.len() == 1 {
-                return items.first();
+                .map(|item| {
+                    (
+                        normalize_path_key(
+                            &item
+                                .skill_path
+                                .canonicalize()
+                                .unwrap_or_else(|_| item.skill_path.clone()),
+                        ),
+                        item,
+                    )
+                })
+                .collect::<BTreeMap<_, _>>();
+            if unique_installations.len() == 1 {
+                return unique_installations.values().next().copied();
             }
         }
         None
@@ -697,6 +771,46 @@ mod tests {
     }
 
     #[test]
+    fn extracts_codex_custom_tool_skill_read_with_transcript_visible_evidence() {
+        let root = temp_dir("codex-custom-tool-read");
+        let skill_dir = root.join(".codex/skills/foo");
+        fs::create_dir_all(&skill_dir).unwrap();
+        fs::write(skill_dir.join("SKILL.md"), "---\nname: foo\n---\n").unwrap();
+        let transcript = root.join("session.jsonl");
+        let input = format!(
+            "const r = await tools.exec_command({{cmd: \"sed -n '1,300p' {}/SKILL.md\"}});",
+            skill_dir.display()
+        );
+        fs::write(
+            &transcript,
+            format!(
+                "{}\n",
+                json!({
+                    "type": "response_item",
+                    "timestamp": "2026-06-24T10:00:00Z",
+                    "payload": {
+                        "type": "custom_tool_call",
+                        "name": "exec",
+                        "input": input,
+                    }
+                })
+            ),
+        )
+        .unwrap();
+
+        let links = extract_session_skill_links(
+            &session(&transcript, AgentKind::Codex),
+            &SkillLookup::new(&skill_scan("foo", &skill_dir, AgentKind::Codex)),
+        )
+        .unwrap();
+
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0].evidence_kind, "exec");
+        assert_eq!(links[0].evidence_text, input);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn extracts_claude_read_tool_skill_read() {
         let root = temp_dir("claude-read");
         let skill_dir = root.join(".claude/skills/foo");
@@ -769,9 +883,69 @@ mod tests {
         let _ = fs::remove_dir_all(root);
     }
 
+    #[test]
+    fn extracts_codex_selected_skill_without_treating_it_as_user_input() {
+        let root = temp_dir("codex-selected-skill");
+        let skill_dir = root.join(".agents/skills/foo");
+        fs::create_dir_all(&skill_dir).unwrap();
+        fs::write(skill_dir.join("SKILL.md"), "---\nname: foo\n---\n").unwrap();
+        let transcript = root.join("session.jsonl");
+        fs::write(
+            &transcript,
+            format!(
+                "{}\n",
+                json!({
+                    "type": "response_item",
+                    "timestamp": "2026-06-24T10:00:00Z",
+                    "payload": {
+                        "type": "message",
+                        "role": "user",
+                        "content": [{
+                            "type": "input_text",
+                            "text": format!(
+                                "<skill>\n<name>foo</name>\n<path>{}</path>\n</skill>",
+                                skill_dir.join("SKILL.md").display()
+                            )
+                        }]
+                    }
+                })
+            ),
+        )
+        .unwrap();
 
+        let links = extract_session_skill_links(
+            &session(&transcript, AgentKind::Codex),
+            &SkillLookup::new(&skill_scan("foo", &skill_dir, AgentKind::Codex)),
+        )
+        .unwrap();
 
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0].skill_name, "foo");
+        assert_eq!(links[0].evidence_kind, "explicit_skill");
+        assert_eq!(links[0].confidence, EXPLICIT_CONFIDENCE);
+        let _ = fs::remove_dir_all(root);
+    }
 
+    #[test]
+    fn skill_index_state_tracks_cursor_store_changes() {
+        let root = temp_dir("cursor-freshness");
+        fs::create_dir_all(&root).unwrap();
+        let meta_path = root.join("meta.json");
+        let store_path = root.join("store.db");
+        fs::write(&meta_path, "{}\n").unwrap();
+        fs::write(&store_path, "initial\n").unwrap();
+
+        let session = session(&meta_path, AgentKind::Cursor);
+        let first = session_skill_index_state(&session).unwrap();
+        fs::write(&store_path, "updated store evidence\n").unwrap();
+        let second = session_skill_index_state(&session).unwrap();
+
+        assert_ne!(
+            (first.file_mtime, first.file_size),
+            (second.file_mtime, second.file_size)
+        );
+        let _ = fs::remove_dir_all(root);
+    }
 
     fn session(path: &Path, agent: AgentKind) -> SessionRecord {
         SessionRecord {

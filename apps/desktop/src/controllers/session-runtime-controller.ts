@@ -25,6 +25,9 @@ type SessionScanEvent = Extract<RuntimeEvent, { event: typeof RuntimeEventName.S
 
 export type SessionRuntimeControllerOptions = {
   refreshSessionProjects: () => Promise<void>;
+  refreshSkills: () => Promise<unknown>;
+  refreshProjection: (domain: string) => Promise<void>;
+  setProjectionError: (domain: string, message: string) => void;
   runSkillIndex: () => Promise<unknown> | void;
   setSessionRefreshError: (message: string) => void;
   setAnalyticsRevision: (revision: number) => void;
@@ -45,6 +48,9 @@ export function useSessionRuntimeController(
 ): SessionRuntimeController {
   const {
     refreshSessionProjects,
+    refreshSkills,
+    refreshProjection,
+    setProjectionError,
     runSkillIndex,
     setSessionRefreshError,
     setAnalyticsRevision,
@@ -249,6 +255,29 @@ export function useSessionRuntimeController(
           setSkillUpdateError(payload.error || "Update check failed");
         }
         setCheckingSkillUpdates(false);
+      } else if (event.event === RuntimeEventName.SkillsChanged) {
+        void refreshSkills().catch((error) => {
+          logger.warn("skills watcher refresh failed", { error });
+        });
+      } else if (event.event === RuntimeEventName.ProjectionChanged) {
+        if (event.payload.error) {
+          logger.warn("projection refresh failed", {
+            domain: event.payload.domain,
+            error: event.payload.error,
+          });
+          setProjectionError(event.payload.domain, event.payload.error);
+          return;
+        }
+        void refreshProjection(event.payload.domain).catch((error) => {
+          logger.warn("projection snapshot refresh failed", {
+            domain: event.payload.domain,
+            error,
+          });
+          setProjectionError(
+            event.payload.domain,
+            error instanceof Error ? error.message : `${error}`,
+          );
+        });
       }
     });
     sessionEventReady.current = setup.then((cleanup) => {
@@ -267,7 +296,7 @@ export function useSessionRuntimeController(
       for (const waiters of sessionScanWaiters.current.values()) waiters.forEach((resolve) => resolve());
       sessionScanWaiters.current.clear();
     };
-  }, [finishSessionScanWaiters, handleSessionScanEvent, resyncSessionSnapshot, setAnalyticsRevision, setAnalyticsRevisionError, setAnalyticsRevisionReady, setCheckingSkillUpdates, setSkillUpdateError]);
+  }, [finishSessionScanWaiters, handleSessionScanEvent, refreshProjection, refreshSkills, resyncSessionSnapshot, setAnalyticsRevision, setAnalyticsRevisionError, setAnalyticsRevisionReady, setCheckingSkillUpdates, setProjectionError, setSkillUpdateError]);
 
   const refreshSessionsFromScan = useCallback(() => {
     setSessionRefreshError("");

@@ -2,7 +2,7 @@
   z-index: 1200;
   max-width: min(320px, calc(100vw - 16px));
   max-height: min(360px, calc(var(--radix-tooltip-content-available-height, 100vh) - 12px));
-  padding: 5px 8px;
+  padding: 6px 9px;
   overflow-y: auto;
   overflow-wrap: anywhere;
   overscroll-behavior: contain;
@@ -12,13 +12,21 @@
   line-height: var(--leading-body);
   scrollbar-width: thin;
   white-space: pre-wrap;
-  background: var(--surface-3);
-  border: 0;
-  border-radius: var(--radius-sm);
-  box-shadow: var(--shadow-menu);
+  background: var(--panel-bg);
+  border: 1px solid var(--control-border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-menu-depth);
+  backdrop-filter: blur(12px);
   pointer-events: none;
   user-select: text;
-  animation: appTooltipIn 100ms var(--ease-out-soft);
+}
+
+.appTooltip[data-state="open"] {
+  animation: appTooltipIn 140ms var(--ease-out-soft) both;
+}
+
+.appTooltip[data-state="closed"] {
+  animation: appTooltipOut 110ms var(--ease-out-soft) both;
 }
 
 .appTooltip.isInteractive {
@@ -34,6 +42,17 @@
   to {
     opacity: 1;
     transform: translateY(0) scale(1);
+  }
+}
+
+@keyframes appTooltipOut {
+  from {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+  to {
+    opacity: 0;
+    transform: translateY(2px) scale(0.98);
   }
 }
 

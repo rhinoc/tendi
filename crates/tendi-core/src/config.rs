@@ -137,10 +137,9 @@ fn configs_for_roots(home: &Path) -> Vec<AgentConfigFile> {
 fn configs_for_roots_with_codex_home(home: &Path, codex_home: &Path) -> Vec<AgentConfigFile> {
     let mut configs = crate::providers::agent_providers()
         .into_iter()
-        .flat_map(|provider| provider.config_files(
-            home,
-            &provider.config_home_for_test(home, codex_home),
-        ))
+        .flat_map(|provider| {
+            provider.config_files(home, &provider.config_home_for_test(home, codex_home))
+        })
         .collect::<Vec<_>>();
     for config in &mut configs {
         config.updated_at = file_updated_at(&config.path);
@@ -347,8 +346,6 @@ mod tests {
         ))
     }
 
-
-
     #[test]
     fn accepts_a_custom_codex_home() {
         let home = temp_home("custom-codex");
@@ -480,10 +477,7 @@ mod tests {
         let content = "# profile comment\nmodel = \"one\"\n";
         let created = create_profile_for_roots(AgentKind::Codex, &home, "deep-review", content)
             .expect("valid profile should be created");
-        assert_eq!(
-            created.path,
-            codex_home.join("deep-review.config.toml")
-        );
+        assert_eq!(created.path, codex_home.join("deep-review.config.toml"));
         assert!(created.exists);
         assert_eq!(
             fs::read_to_string(codex_home.join("deep-review.config.toml"))

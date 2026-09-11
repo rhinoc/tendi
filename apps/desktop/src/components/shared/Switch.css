@@ -43,15 +43,25 @@
 .appSwitchThumb {
   position: absolute;
   left: 2px;
+  margin: 0;
+  flex: 0 0 var(--switch-thumb-size);
   width: var(--switch-thumb-size);
   height: var(--switch-thumb-size);
   border-radius: 50%;
   background: var(--text);
-  box-shadow: none;
-  transition: transform 120ms ease, background-color 120ms ease;
+  box-shadow: var(--control-thumb-shadow);
+  transform: translateX(0);
+  transition: background-color 120ms ease-out, transform 120ms ease-out;
 }
 
 .appSwitch.isOn .appSwitchThumb {
   background: var(--accent-contrast);
-  transform: translateX(var(--switch-thumb-size));
+  transform: translateX(calc(var(--switch-width) - var(--switch-thumb-size) - 4px));
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .appSwitch,
+  .appSwitchThumb {
+    transition: none;
+  }
 }

@@ -12,8 +12,8 @@
   color: var(--panel-bg);
   cursor: pointer;
   transition-property: background-color, border-color, color;
-  transition-duration: 120ms;
-  transition-timing-function: ease-out;
+  transition-duration: 160ms;
+  transition-timing-function: var(--ease-out-soft);
 }
 
 .selectionCheckbox::after {
@@ -41,6 +41,10 @@
 .selectionCheckbox:hover,
 .selectionCheckbox:focus-visible {
   border-color: var(--focus-ring);
+}
+
+.selectionCheckbox:active:not(:disabled) {
+  transform: scale(0.92);
 }
 
 .selectionCheckbox.isChecked:hover,

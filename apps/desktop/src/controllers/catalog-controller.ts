@@ -1,10 +1,11 @@
-import { friendlyAgent, normalizedAgentKey, sameAgent } from "../lib/agents.ts";
-import { hookDeleteIdentity, isHookMutationDelta, normalizeHook, type HookRecord } from "../lib/hooks.ts";
-import { isMcpMutationDelta, mcpRowKey, normalizeMcp, type McpRecord } from "../lib/mcp.ts";
+import { ALL_AGENT_FILTER, friendlyAgent, normalizedAgentKey, sameAgent } from "../lib/agents.ts";
+import { hookDeleteIdentity, hookSourcePath, isHookMutationDelta, normalizeHook, type HookRecord } from "../lib/hooks.ts";
+import { isMcpMutationDelta, mcpRowKey, mcpSourcePath, normalizeMcp, type McpRecord } from "../lib/mcp.ts";
 import { normalizePrompt, type PromptRecord } from "../lib/prompt-model.ts";
 import { normalizeRule, ruleAgents, type RuleRecord } from "../lib/rules.ts";
 import { normalizeSession, sessionLogicalIdentity, type SessionRecord } from "../lib/sessions.ts";
 import { normalizeSkill, type NormalizedSkill } from "../lib/skills.ts";
+import { matchesProjectScope, pathIsProjectScoped, ProjectScopeFilter, type ProjectSummary } from "../lib/projects.ts";
 import { DOMAIN_KEYS, RuntimeDomainKey, type DomainKey } from "../lib/domain.ts";
 import type { RuntimeData } from "../lib/data.ts";
 import type { CatalogIndexes, CatalogSource, RawDomainRow } from "./controller-types.ts";
@@ -63,7 +64,7 @@ function applyNormalizedRows<K extends RuntimeDomainKey>(
 
 function recordKey(domain: RuntimeDomainKey, row: Record<string, unknown>): string {
   if (domain === RuntimeDomainKey.Sessions) return sessionLogicalIdentity(row as Pick<SessionRecord, "agent" | "id">);
-  if (domain === RuntimeDomainKey.Skills) return `${row.id ?? row.name ?? ""}`;
+  if (domain === RuntimeDomainKey.Skills) return `${row.id ?? ""}`;
   if (domain === RuntimeDomainKey.Agents) return `${row.id ?? row.name ?? row.path ?? ""}`;
   if (domain === RuntimeDomainKey.Prompts) return `${row.id ?? ""}`;
   if (domain === RuntimeDomainKey.Rules) return `${row.path ?? ""}`;
@@ -226,7 +227,7 @@ export function selectCatalogView(data: RuntimeData, agentFilter: string, source
   const cached = catalogViewCache.get(data)?.find((entry) => entry.agentFilter === agentFilter && entry.sourceIndex === sourceIndex);
   if (cached) return cached.view;
   const previous = latestCatalogViews.find((entry) => entry.agentFilter === agentFilter && entry.sourceIndex === sourceIndex);
-  const view = agentFilter === "All" ? {
+  const view = agentFilter === ALL_AGENT_FILTER ? {
     agents: data.agents,
     skills: data.skills,
     prompts: data.prompts,
@@ -268,4 +269,49 @@ export function selectCatalogView(data: RuntimeData, agentFilter: string, source
   if (latestIndex >= 0) latestCatalogViews[latestIndex] = entry;
   else latestCatalogViews.push(entry);
   return view;
+}
+
+function explicitProjectScope(value: string | null | undefined): boolean | undefined {
+  const normalized = `${value ?? ""}`.trim().toLowerCase();
+  if (normalized === ProjectScopeFilter.Project) return true;
+  if (normalized === ProjectScopeFilter.Global) return false;
+  return undefined;
+}
+
+function skillMatchesProjectScope(skill: NormalizedSkill, filter: ProjectScopeFilter): boolean {
+  if (filter === ProjectScopeFilter.All) return true;
+  return skill.paths.some((path) => `${path.scope}`.trim().toLowerCase() === filter);
+}
+
+function ruleMatchesProjectScope(rule: RuleRecord, filter: ProjectScopeFilter, projects: readonly ProjectSummary[]): boolean {
+  if (filter === ProjectScopeFilter.All) return true;
+  const projectScoped = explicitProjectScope(rule.scope) ?? pathIsProjectScoped(rule.path, projects);
+  return matchesProjectScope(filter, projectScoped);
+}
+
+function hookMatchesProjectScope(hook: HookRecord, filter: ProjectScopeFilter, projects: readonly ProjectSummary[]): boolean {
+  if (filter === ProjectScopeFilter.All) return true;
+  return matchesProjectScope(filter, pathIsProjectScoped(hookSourcePath(hook), projects));
+}
+
+function mcpMatchesProjectScope(server: McpRecord, filter: ProjectScopeFilter, projects: readonly ProjectSummary[]): boolean {
+  if (filter === ProjectScopeFilter.All) return true;
+  const projectScoped = explicitProjectScope(server.scope)
+    ?? (server.scope.trim().length > 0 ? true : pathIsProjectScoped(mcpSourcePath(server), projects));
+  return matchesProjectScope(filter, projectScoped);
+}
+
+export function selectProjectScopeView(
+  view: CatalogView,
+  filter: ProjectScopeFilter,
+  projects: readonly ProjectSummary[] = [],
+): CatalogView {
+  if (filter === ProjectScopeFilter.All) return view;
+  return {
+    ...view,
+    skills: view.skills.filter((skill) => skillMatchesProjectScope(skill, filter)),
+    rules: view.rules.filter((rule) => ruleMatchesProjectScope(rule, filter, projects)),
+    hooks: view.hooks.filter((hook) => hookMatchesProjectScope(hook, filter, projects)),
+    mcp: view.mcp.filter((server) => mcpMatchesProjectScope(server, filter, projects)),
+  };
 }

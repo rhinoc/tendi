@@ -905,7 +905,10 @@ pub(crate) fn delete_toml_hooks(requests: &[HookDeleteRequest], source: &str) ->
             bail!("matching hook was not found");
         }
     }
-    Ok(crate::fsutil::preserve_newline_style(source, value.to_string()))
+    Ok(crate::fsutil::preserve_newline_style(
+        source,
+        value.to_string(),
+    ))
 }
 
 pub(crate) fn set_json_hook_enabled(
@@ -928,7 +931,10 @@ pub(crate) fn set_toml_hook_enabled(
     if !set_toml_hook_enabled_in_document(&mut value, request) {
         bail!("matching hook was not found");
     }
-    Ok(crate::fsutil::preserve_newline_style(source, value.to_string()))
+    Ok(crate::fsutil::preserve_newline_style(
+        source,
+        value.to_string(),
+    ))
 }
 
 pub(crate) fn read_hook_entry(path: &Path, identity: &HookSourceMatch) -> Result<Value> {
@@ -943,10 +949,8 @@ pub(crate) fn read_hook_entry(path: &Path, identity: &HookSourceMatch) -> Result
         _ => bail!("unsupported hook source format"),
     };
     match path.extension().and_then(|value| value.to_str()) {
-        Some("toml") | Some("md") | Some("json") => {
-            find_json_hook_snippet(&value, identity)
-                .context("matching hook was not found in source")
-        }
+        Some("toml") | Some("md") | Some("json") => find_json_hook_snippet(&value, identity)
+            .context("matching hook was not found in source"),
         _ => unreachable!(),
     }
 }
@@ -961,7 +965,10 @@ pub(crate) fn merge_hook_entry(
         Some("json") => {
             let (source, mut value) = if path.is_file() {
                 let source = fs::read_to_string(path)?;
-                (Some(source.clone()), serde_json::from_str::<Value>(&source)?)
+                (
+                    Some(source.clone()),
+                    serde_json::from_str::<Value>(&source)?,
+                )
             } else {
                 (None, Value::Object(serde_json::Map::new()))
             };
@@ -980,9 +987,10 @@ pub(crate) fn merge_hook_entry(
                 (None, DocumentMut::new())
             };
             merge_toml_hook_entry(&mut value, identity, entry)?;
-            Ok(source.map_or_else(|| value.to_string(), |source| {
-                crate::fsutil::preserve_newline_style(&source, value.to_string())
-            }))
+            Ok(source.map_or_else(
+                || value.to_string(),
+                |source| crate::fsutil::preserve_newline_style(&source, value.to_string()),
+            ))
         }
         Some("md") => {
             let text = if path.is_file() {
@@ -991,9 +999,8 @@ pub(crate) fn merge_hook_entry(
                 "---\n{}\n---\n".to_string()
             };
             let (frontmatter, body, newline) = split_yaml_frontmatter(&text)?;
-            let mut value = serde_json::to_value(serde_yaml::from_str::<serde_yaml::Value>(
-                frontmatter,
-            )?)?;
+            let mut value =
+                serde_json::to_value(serde_yaml::from_str::<serde_yaml::Value>(frontmatter)?)?;
             merge_json_hook_entry(&mut value, identity, entry)?;
             let frontmatter = replace_yaml_hooks_block(frontmatter, &value, newline)?;
             Ok(format!("---{newline}{frontmatter}{newline}---{body}"))
@@ -1008,11 +1015,7 @@ fn split_yaml_frontmatter(text: &str) -> Result<(&str, &str, &'static str)> {
     Ok((frontmatter, body, newline))
 }
 
-fn replace_yaml_hooks_block(
-    frontmatter: &str,
-    value: &Value,
-    newline: &str,
-) -> Result<String> {
+fn replace_yaml_hooks_block(frontmatter: &str, value: &Value, newline: &str) -> Result<String> {
     let rendered = serde_yaml::to_string(&json!({
         "hooks": value.get("hooks").cloned().unwrap_or(Value::Null),
     }))?
@@ -1020,12 +1023,9 @@ fn replace_yaml_hooks_block(
     .replace('\n', newline);
     let lines = frontmatter.split(newline).collect::<Vec<_>>();
     let mut output = Vec::new();
-    if let Some(start) = lines
-        .iter()
-        .position(|line| {
-            !line.starts_with(' ') && !line.starts_with('\t') && line.starts_with("hooks:")
-        })
-    {
+    if let Some(start) = lines.iter().position(|line| {
+        !line.starts_with(' ') && !line.starts_with('\t') && line.starts_with("hooks:")
+    }) {
         output.extend_from_slice(&lines[..start]);
         let mut end = start + 1;
         while end < lines.len()
@@ -1139,9 +1139,9 @@ fn merge_toml_hook_entry(
             events.push(group);
         }
         Some(Item::Value(EditValue::Array(events))) => {
-            let hook_value = hook_item.into_value().map_err(|_| {
-                anyhow::anyhow!("hook sync entry payload must be a TOML value")
-            })?;
+            let hook_value = hook_item
+                .into_value()
+                .map_err(|_| anyhow::anyhow!("hook sync entry payload must be a TOML value"))?;
             let mut hook_values = toml_edit::Array::new();
             hook_values.push_formatted(hook_value);
             group.insert("hooks", Item::Value(EditValue::Array(hook_values)));
@@ -1181,9 +1181,11 @@ fn merge_toml_hook_entry(
 
 fn single_hook_array(hook_item: Item) -> Result<ArrayOfTables> {
     let mut hooks = ArrayOfTables::new();
-    hooks.push(hook_item.into_table().map_err(|_| {
-        anyhow::anyhow!("hook sync entry payload must be a TOML table")
-    })?);
+    hooks.push(
+        hook_item
+            .into_table()
+            .map_err(|_| anyhow::anyhow!("hook sync entry payload must be a TOML table"))?,
+    );
     Ok(hooks)
 }
 
@@ -1325,9 +1327,9 @@ fn toml_edit_items_equal(left: &Item, right: &Item) -> bool {
         (Item::ArrayOfTables(left), Item::ArrayOfTables(right)) => {
             left.len() == right.len()
                 && (0..left.len()).all(|index| {
-                    left.get(index).zip(right.get(index)).is_some_and(|(left, right)| {
-                        toml_edit_tables_equal(left, right)
-                    })
+                    left.get(index)
+                        .zip(right.get(index))
+                        .is_some_and(|(left, right)| toml_edit_tables_equal(left, right))
                 })
         }
         _ => false,
@@ -1789,11 +1791,8 @@ fn remove_toml_event_hook_table(
         .and_then(Item::as_str)
         .map(str::to_string)
         .or(matcher);
-    let next_enabled = group_enabled
-        && table
-            .get("enabled")
-            .and_then(Item::as_bool)
-            .unwrap_or(true);
+    let next_enabled =
+        group_enabled && table.get("enabled").and_then(Item::as_bool).unwrap_or(true);
 
     if let Some(nested) = table.get_mut("hooks") {
         let removed = remove_toml_event_hook(nested, request, next_matcher.clone(), next_enabled);
@@ -1825,8 +1824,7 @@ fn remove_toml_event_hook_table(
 fn toml_is_empty_hook_specs_edit_value(value: &EditValue) -> bool {
     value.as_array().is_some_and(|items| items.is_empty())
         || value.as_inline_table().is_some_and(|table| {
-            TableLike::get(table, "hooks")
-                .is_some_and(toml_is_empty_hook_specs_value)
+            TableLike::get(table, "hooks").is_some_and(toml_is_empty_hook_specs_value)
         })
 }
 
@@ -1870,11 +1868,7 @@ fn hook_object_matches_toml(
         .get("statusMessage")
         .or_else(|| table.get("status_message"))
         .and_then(Item::as_str);
-    let enabled = group_enabled
-        && table
-            .get("enabled")
-            .and_then(Item::as_bool)
-            .unwrap_or(true);
+    let enabled = group_enabled && table.get("enabled").and_then(Item::as_bool).unwrap_or(true);
 
     request.event == event
         && request.matcher.as_deref() == matcher
@@ -2266,7 +2260,6 @@ mod tests {
         providers::{claude::scan_claude_component_file, codex::scan_codex_config_hooks},
         skills::AgentKind,
     };
-
 
     #[test]
     fn marks_codex_untrusted_and_modified_hooks_for_review() {
@@ -2721,7 +2714,11 @@ mod tests {
             },
         )
         .expect_err("prompt hooks must not be reviewed");
-        assert!(error.to_string().contains("this hook type does not support review"));
+        assert!(
+            error
+                .to_string()
+                .contains("this hook type does not support review")
+        );
 
         let _ = fs::remove_dir_all(root);
     }
@@ -2885,7 +2882,6 @@ command = "/bin/echo stop"
         assert_eq!(stop_hooks[0].command.as_deref(), Some("/bin/echo stop"));
         let _ = fs::remove_dir_all(root);
     }
-
 
     #[test]
     fn deletes_multiple_hooks_from_one_json_source() {

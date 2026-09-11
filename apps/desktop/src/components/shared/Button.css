@@ -3,61 +3,86 @@
   align-items: center;
   justify-content: center;
   gap: 6px;
+  height: var(--control-height);
   padding: 0 14px;
-  border: 0;
-  border-radius: var(--radius-md);
+  border: 1px solid var(--control-border);
+  border-radius: var(--control-radius);
   color: var(--text);
   background: var(--control-fill);
   box-shadow: none;
   cursor: pointer;
-  font-size: var(--text-sm);
-  font-weight: 400;
+  font-size: var(--text-ui);
+  font-weight: 500;
   line-height: var(--leading-ui);
   white-space: nowrap;
-  transition-property: box-shadow, background-color, color, transform;
-  transition-duration: 140ms;
-  transition-timing-function: ease-out;
+  transition-property: border-color, background-color, color;
+  transition-duration: 160ms;
+  transition-timing-function: var(--ease-out-soft);
+}
+
+.appButton > svg {
+  flex: 0 0 auto;
 }
 
 .appButton-sm {
   height: var(--control-height);
   min-width: 0;
-  padding: 0 9px;
-  border-radius: var(--radius-sm);
-  font-size: var(--text-sm);
+  padding: 0 12px;
+  border-radius: var(--control-radius);
+  font-size: var(--text-ui);
   line-height: var(--leading-ui);
 }
 
-.appButton:hover {
-  background: var(--hover-fill-strong);
+.appButton.appButton-iconOnly {
+  width: var(--control-icon-size);
+  height: var(--control-icon-size);
+  min-width: var(--control-icon-size);
+  padding: 0;
 }
 
-.appButton:active:not(:disabled) {
-  transform: scale(var(--press-scale));
+.appButton-compact {
+  height: var(--control-height-compact);
+}
+
+.appButton:hover {
+  border-color: var(--line-strong);
+  background: var(--hover-fill-strong);
+  box-shadow: none;
+}
+
+.appButton-secondary {
+  background: var(--surface-2);
+}
+
+.appButton-secondary:hover {
+  background: var(--surface-2);
 }
 
 .appButton:focus-visible {
-  outline: 2px solid var(--focus-ring);
-  outline-offset: -2px;
+  outline: 1px solid var(--focus-ring);
+  outline-offset: -1px;
 }
 
 .appButton-primary {
+  border-color: var(--accent);
   color: var(--accent-contrast);
   background: var(--accent);
   box-shadow: none;
 }
 
 .appButton-primary:hover {
+  border-color: var(--accent-hover);
   background: var(--accent-hover);
   box-shadow: none;
 }
 
 .appButton-icon {
-  width: var(--control-size-icon);
-  height: var(--control-height);
-  min-width: var(--control-size-icon);
+  width: var(--control-icon-size);
+  height: var(--control-icon-size);
+  min-width: var(--control-icon-size);
   padding: 0;
-  border-radius: var(--radius-sm);
+  border-color: transparent;
+  border-radius: var(--control-radius);
   color: var(--muted);
   background: transparent;
   box-shadow: none;
@@ -65,28 +90,40 @@
 
 .appButton-icon:hover,
 .appButton-icon.menuActive {
+  border-color: transparent;
   color: var(--text);
   background: var(--hover-fill-strong);
   box-shadow: none;
 }
 
 .appButton-icon.isCopied {
+  border-color: transparent;
   color: var(--green);
   background: var(--green-soft);
 }
 
 .appButton-icon.isCopyError {
+  border-color: transparent;
   color: var(--danger);
   background: var(--danger-soft);
 }
 
 .appButton-icon.filled {
+  border-color: transparent;
   color: var(--accent);
   background: var(--accent-soft);
 }
 
+.appButton-icon.filled:hover {
+  border-color: transparent;
+  color: var(--accent);
+  background: var(--accent-soft-strong);
+  box-shadow: none;
+}
+
 .appButton-icon:disabled,
 .appButton-icon[aria-disabled="true"] {
+  border-color: transparent;
   opacity: 0.45;
   color: var(--faint);
   background: var(--control-fill);
@@ -98,30 +135,47 @@
 }
 
 .appButton-ghost {
+  border-color: transparent;
   color: var(--muted);
   background: transparent;
   box-shadow: none;
 }
 
 .appButton-ghost:hover {
+  border-color: transparent;
   color: var(--text);
-  background: var(--hover-fill-strong);
+  background: color-mix(in oklch, var(--accent) 5%, transparent);
+  box-shadow: none;
+}
+
+.appButton-outline {
+  border-color: var(--control-border);
+  background: transparent;
+}
+
+.appButton-outline:hover {
+  border-color: var(--control-border);
+  color: var(--text);
+  background: color-mix(in oklch, var(--accent) 5%, transparent);
   box-shadow: none;
 }
 
 .appButton-danger {
+  border-color: var(--danger);
   color: var(--panel-bg);
-  background: var(--orange);
+  background: var(--danger);
   box-shadow: none;
 }
 
 .appButton-danger:hover {
+  border-color: var(--danger);
   background: var(--danger);
   box-shadow: none;
 }
 
 .appButton:disabled,
 .appButton:disabled:hover {
+  border-color: transparent;
   color: var(--faint);
   background: var(--control-fill);
   box-shadow: none;
@@ -134,6 +188,7 @@
 .appButton-icon[aria-disabled="true"],
 .appButton-icon:disabled:hover,
 .appButton-icon[aria-disabled="true"]:hover {
+  border-color: transparent;
   color: var(--faint);
   background: transparent;
   box-shadow: none;

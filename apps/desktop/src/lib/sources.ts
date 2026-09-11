@@ -1,4 +1,4 @@
-import { createElement, type ReactNode } from "react";
+import { createElement, useState, type ReactNode, type SyntheticEvent } from "react";
 import { Folder, GitBranch, Globe } from "lucide-react";
 import githubIcon from "@lobehub/icons-static-svg/icons/github.svg";
 
@@ -158,6 +158,47 @@ export function sourceOpenUrl(value: unknown, kind?: unknown, relativePath?: unk
   return null;
 }
 
+export function githubRepositoryAvatarUrl(value: unknown, kind?: unknown): string | null {
+  const remote = sourceRemoteDetails(value, kind);
+  if (remote?.host !== "github.com" || !remote.path) return null;
+  const owner = remote.path.split("/")[0]?.trim();
+  return owner ? `https://avatars.githubusercontent.com/${encodeURIComponent(owner)}?size=64` : null;
+}
+
+export function sourceFaviconUrl(value: unknown): string | null {
+  const text = `${value ?? ""}`.trim();
+  if (!text) return null;
+  try {
+    const parsed = new URL(text);
+    if ((parsed.protocol !== "http:" && parsed.protocol !== "https:") || !parsed.hostname) return null;
+    return `${parsed.origin}/favicon.ico`;
+  } catch {
+    return null;
+  }
+}
+
+function fallbackToGitHubIcon(event: SyntheticEvent<HTMLImageElement>) {
+  const image = event.currentTarget;
+  image.onerror = null;
+  image.classList.remove("skillInfoSourceAvatar");
+  image.src = githubIcon;
+}
+
+function SourceFavicon({ url }: { url: string }) {
+  const [failed, setFailed] = useState(false);
+  if (failed) return createElement(Globe, { size: 13 });
+  return createElement("img", {
+    className: "skillInfoSourceImage skillInfoSourceFavicon",
+    src: url,
+    alt: "",
+    draggable: false,
+    loading: "lazy",
+    decoding: "async",
+    fetchPriority: "low",
+    onError: () => setFailed(true),
+  });
+}
+
 export function sourceLocalPath(value: unknown): string {
   const text = `${value ?? ""}`.trim();
   try {
@@ -172,19 +213,37 @@ export function sourceLocalPath(value: unknown): string {
 export function sourceIconDetails(source: SourceDetails | null | undefined): { label: string; icon: ReactNode } {
   const value = source?.value ?? "";
   const kind = `${source?.kind ?? ""}`.toLowerCase();
-  const remote = parseRemoteSource(value);
+  const remote = sourceRemoteDetails(value, kind);
   const host = remote?.host ?? "";
   if (kind === "github" || host.includes("github.")) {
+    const avatarUrl = githubRepositoryAvatarUrl(value, kind);
     return {
       label: "GitHub",
-      icon: createElement("img", { className: "skillInfoSourceImage", src: githubIcon, alt: "", draggable: false }),
+      icon: createElement("img", {
+        className: avatarUrl ? "skillInfoSourceImage skillInfoSourceAvatar" : "skillInfoSourceImage",
+        src: avatarUrl ?? githubIcon,
+        alt: "",
+        draggable: false,
+        loading: avatarUrl ? "lazy" : undefined,
+        decoding: avatarUrl ? "async" : undefined,
+        fetchPriority: avatarUrl ? "low" : undefined,
+        onError: avatarUrl ? fallbackToGitHubIcon : undefined,
+      }),
     };
   }
   if (kind === "gitlab" || host.includes("gitlab.")) {
     return { label: "GitLab", icon: createElement(GitLabSourceIcon) };
   }
   if (isGitSource(value, kind)) return { label: "Git", icon: createElement(GitBranch, { size: 13 }) };
-  if (isWebSource(value)) return { label: "Web", icon: createElement(Globe, { size: 13 }) };
+  if (isWebSource(value)) {
+    const faviconUrl = sourceFaviconUrl(value);
+    return {
+      label: "Web",
+      icon: faviconUrl
+        ? createElement(SourceFavicon, { key: faviconUrl, url: faviconUrl })
+        : createElement(Globe, { size: 13 }),
+    };
+  }
   return { label: source?.label ?? "", icon: createElement(Folder, { size: 13 }) };
 }
 

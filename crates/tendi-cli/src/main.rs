@@ -6,7 +6,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::{ArgAction, Parser, Subcommand, ValueEnum};
 use tendi_core::generated::runtime_contract::{AgentKind as RuntimeAgentKind, JsonRpcRequest};
 
@@ -54,6 +54,18 @@ enum Command {
     Mcp {
         #[command(subcommand)]
         command: ListCommand,
+    },
+    Assistant {
+        #[command(subcommand)]
+        command: AssistantCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum AssistantCommand {
+    Ask {
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -190,7 +202,7 @@ enum BackupCommand {
         #[arg(long)]
         yes: bool,
         #[arg(long, value_enum)]
-            conflict: Option<BackupRestoreConflictArg>,
+        conflict: Option<BackupRestoreConflictArg>,
         #[arg(long)]
         json: bool,
     },
@@ -314,7 +326,9 @@ impl From<VisibilityArg> for tendi_core::SkillVisibility {
     }
 }
 
-fn runtime_visibility(value: VisibilityArg) -> tendi_core::generated::runtime_contract::SkillVisibility {
+fn runtime_visibility(
+    value: VisibilityArg,
+) -> tendi_core::generated::runtime_contract::SkillVisibility {
     match value {
         VisibilityArg::Auto => tendi_core::generated::runtime_contract::SkillVisibility::Auto,
         VisibilityArg::Manual => tendi_core::generated::runtime_contract::SkillVisibility::Manual,
@@ -410,12 +424,7 @@ where
     let request = build(&mut runtime_client)?;
     let request_id = request.id.clone();
     let request = serde_json::to_vec(&request)?;
-    let Some(response) = daemon_http_json(
-        &address,
-        "POST",
-        "/v1/rpc",
-        Some(request),
-    )? else {
+    let Some(response) = daemon_http_json(&address, "POST", "/v1/rpc", Some(request))? else {
         return Ok(None);
     };
     Ok(Some(decode(&request_id, response)?))
@@ -428,10 +437,12 @@ macro_rules! try_daemon_json {
             |runtime_client| Ok(runtime_client.$method($params)),
             RuntimeClient::$decode,
         )?;
-        response
-            .map(serde_json::to_value)
-            .transpose()
+        response.map(serde_json::to_value).transpose()
     }};
+}
+
+fn daemon_list_has_rows(value: &serde_json::Value) -> bool {
+    value.as_array().is_some_and(|rows| !rows.is_empty())
 }
 
 fn try_daemon_agents_list(
@@ -439,9 +450,12 @@ fn try_daemon_agents_list(
 ) -> Result<Option<Vec<tendi_core::agents::AgentRecord>>> {
     try_daemon_request(
         cwd,
-        |runtime_client| Ok(runtime_client.agents_list(
-            tendi_core::generated::runtime_contract::EmptyRequest {},
-        )),
+        |runtime_client| {
+            Ok(
+                runtime_client
+                    .agents_list(tendi_core::generated::runtime_contract::EmptyRequest {}),
+            )
+        },
         RuntimeClient::decode_agents_list_response,
     )?
     .map(|agents| {
@@ -451,14 +465,15 @@ fn try_daemon_agents_list(
     .transpose()
 }
 
-fn try_daemon_skills_list(
-    cwd: &std::path::Path,
-) -> Result<Option<Vec<tendi_core::SkillRecord>>> {
+fn try_daemon_skills_list(cwd: &std::path::Path) -> Result<Option<Vec<tendi_core::SkillRecord>>> {
     try_daemon_request(
         cwd,
-        |runtime_client| Ok(runtime_client.skills_list(
-            tendi_core::generated::runtime_contract::EmptyRequest {},
-        )),
+        |runtime_client| {
+            Ok(
+                runtime_client
+                    .skills_list(tendi_core::generated::runtime_contract::EmptyRequest {}),
+            )
+        },
         RuntimeClient::decode_skills_list_response,
     )?
     .map(|skills| {
@@ -473,9 +488,10 @@ fn try_daemon_sessions_snapshot(
 ) -> Result<Option<tendi_core::generated::runtime_contract::SessionSnapshot>> {
     try_daemon_request(
         cwd,
-        |runtime_client| Ok(runtime_client.sessions_snapshot(
-            tendi_core::generated::runtime_contract::EmptyRequest {},
-        )),
+        |runtime_client| {
+            Ok(runtime_client
+                .sessions_snapshot(tendi_core::generated::runtime_contract::EmptyRequest {}))
+        },
         RuntimeClient::decode_sessions_snapshot_response,
     )?
     .map(Ok)
@@ -520,7 +536,10 @@ fn daemon_http_json(
                 std::io::ErrorKind::ConnectionRefused
                     | std::io::ErrorKind::TimedOut
                     | std::io::ErrorKind::NotFound
-            ) => return Ok(None),
+            ) =>
+        {
+            return Ok(None);
+        }
         Err(error) => return Err(error.into()),
     };
     stream.set_read_timeout(Some(Duration::from_secs(2)))?;
@@ -572,7 +591,12 @@ fn main() -> Result<()> {
 
     match cli.command {
         Command::Scan { json } => {
-            if let Some(value) = try_daemon_json!(&cwd, scan, tendi_core::generated::runtime_contract::EmptyRequest {}, decode_scan_response)? {
+            if let Some(value) = try_daemon_json!(
+                &cwd,
+                scan,
+                tendi_core::generated::runtime_contract::EmptyRequest {},
+                decode_scan_response
+            )? {
                 let report = serde_json::from_value::<tendi_core::ScanReport>(value)?;
                 if json {
                     println!("{}", serde_json::to_string_pretty(&report)?);
@@ -603,12 +627,14 @@ fn main() -> Result<()> {
         Command::Agents { command } => match command {
             ListCommand::List { json } => {
                 if let Some(agents) = try_daemon_agents_list(&cwd)? {
-                    if json {
-                        println!("{}", serde_json::to_string_pretty(&agents)?);
-                    } else {
-                        print_agents(&agents)?;
+                    if !agents.is_empty() {
+                        if json {
+                            println!("{}", serde_json::to_string_pretty(&agents)?);
+                        } else {
+                            print_agents(&agents)?;
+                        }
+                        return Ok(());
                     }
-                    return Ok(());
                 }
                 let store = tendi_core::storage::Store::open_default()?;
                 let report = ensure_projection(
@@ -648,12 +674,14 @@ fn main() -> Result<()> {
             }
             SkillCommand::List { json } => {
                 if let Some(skills) = try_daemon_skills_list(&cwd)? {
-                    if json {
-                        println!("{}", serde_json::to_string_pretty(&skills)?);
-                    } else {
-                        println!("{}", tendi_core::skills::format_skill_table(&skills));
+                    if !skills.is_empty() {
+                        if json {
+                            println!("{}", serde_json::to_string_pretty(&skills)?);
+                        } else {
+                            println!("{}", tendi_core::skills::format_skill_table(&skills));
+                        }
+                        return Ok(());
                     }
-                    return Ok(());
                 }
                 let store = tendi_core::storage::Store::open_default()?;
                 let report = ensure_projection(
@@ -709,13 +737,19 @@ fn main() -> Result<()> {
                 }
             }
             SkillCommand::Sync { command } => match command {
-                BackupCommand::Configure { remote_url, checkout, json } => {
+                BackupCommand::Configure {
+                    remote_url,
+                    checkout,
+                    json,
+                } => {
                     if let Some(value) = try_daemon_json!(
                         &cwd,
                         skills_backup_configure,
                         tendi_core::generated::runtime_contract::SkillsBackupConfigureRequest {
                             repository: remote_url.clone(),
-                            checkout_path: checkout.as_ref().map(|path| path.to_string_lossy().into_owned()),
+                            checkout_path: checkout
+                                .as_ref()
+                                .map(|path| path.to_string_lossy().into_owned()),
                             contents: None,
                         },
                         decode_skills_backup_configure_response
@@ -727,8 +761,8 @@ fn main() -> Result<()> {
                         }
                         return Ok(());
                     }
-                    let checkout_path = checkout
-                        .unwrap_or(tendi_core::skill_backup::default_checkout_path()?);
+                    let checkout_path =
+                        checkout.unwrap_or(tendi_core::skill_backup::default_checkout_path()?);
                     let config =
                         tendi_core::skill_backup::BackupConfig::new(remote_url, checkout_path);
                     config.validate()?;
@@ -751,7 +785,12 @@ fn main() -> Result<()> {
                     }
                 }
                 BackupCommand::Status { json } => {
-                    if let Some(value) = try_daemon_json!(&cwd, skills_backup_status, tendi_core::generated::runtime_contract::EmptyRequest {}, decode_skills_backup_status_response)? {
+                    if let Some(value) = try_daemon_json!(
+                        &cwd,
+                        skills_backup_status,
+                        tendi_core::generated::runtime_contract::EmptyRequest {},
+                        decode_skills_backup_status_response
+                    )? {
                         println!("{}", serde_json::to_string_pretty(&value)?);
                         return Ok(());
                     }
@@ -763,7 +802,12 @@ fn main() -> Result<()> {
                         Vec::new()
                     };
                     if json {
-                        println!("{}", serde_json::to_string_pretty(&serde_json::json!({ "config": config, "versions": versions }))?);
+                        println!(
+                            "{}",
+                            serde_json::to_string_pretty(
+                                &serde_json::json!({ "config": config, "versions": versions })
+                            )?
+                        );
                     } else if let Some(config) = config {
                         println!("remote: {}", config.remote_url);
                         println!("checkout: {}", config.checkout_path.display());
@@ -777,7 +821,12 @@ fn main() -> Result<()> {
                     }
                 }
                 BackupCommand::Run { json } => {
-                    if let Some(value) = try_daemon_json!(&cwd, skills_backup_now, tendi_core::generated::runtime_contract::EmptyRequest {}, decode_skills_backup_now_response)? {
+                    if let Some(value) = try_daemon_json!(
+                        &cwd,
+                        skills_backup_now,
+                        tendi_core::generated::runtime_contract::EmptyRequest {},
+                        decode_skills_backup_now_response
+                    )? {
                         println!("{}", serde_json::to_string_pretty(&value)?);
                         return Ok(());
                     }
@@ -799,7 +848,9 @@ fn main() -> Result<()> {
                     if let Some(value) = try_daemon_json!(
                         &cwd,
                         skills_backup_versions,
-                        tendi_core::generated::runtime_contract::SkillsBackupVersionsRequest { limit: Some(limit as u64) },
+                        tendi_core::generated::runtime_contract::SkillsBackupVersionsRequest {
+                            limit: Some(limit as u64)
+                        },
                         decode_skills_backup_versions_response
                     )? {
                         println!("{}", serde_json::to_string_pretty(&value)?);
@@ -815,23 +866,41 @@ fn main() -> Result<()> {
                         }
                     }
                 }
-                BackupCommand::Restore { revision, skills, to, scope, dry_run, yes, conflict, json } => {
-                    let daemon_restore_args = tendi_core::generated::runtime_contract::SkillsBackupRestoreRequest {
-                        revision: revision.clone(),
-                        skill_ids: (!skills.is_empty()).then_some(skills.clone()),
-                        target: to.to_string(),
-                        scope: runtime_scope(scope).to_string(),
-                        dry_run: Some(true),
-                        confirmed: None,
-                        resolutions: None,
-                    };
+                BackupCommand::Restore {
+                    revision,
+                    skills,
+                    to,
+                    scope,
+                    dry_run,
+                    yes,
+                    conflict,
+                    json,
+                } => {
+                    let daemon_restore_args =
+                        tendi_core::generated::runtime_contract::SkillsBackupRestoreRequest {
+                            revision: revision.clone(),
+                            skill_ids: (!skills.is_empty()).then_some(skills.clone()),
+                            target: to.to_string(),
+                            scope: runtime_scope(scope).to_string(),
+                            dry_run: Some(true),
+                            confirmed: None,
+                            resolutions: None,
+                        };
                     if let Some(preview) = try_daemon_request(
                         &cwd,
-                        |runtime_client| Ok(runtime_client.skills_backup_restore(daemon_restore_args.clone())),
+                        |runtime_client| {
+                            Ok(runtime_client.skills_backup_restore(daemon_restore_args.clone()))
+                        },
                         RuntimeClient::decode_skills_backup_restore_response,
                     )? {
-                        let has_conflicts = preview.operations.iter().any(|operation| operation.status == "conflict");
-                        let has_planned = preview.operations.iter().any(|operation| operation.status == "planned");
+                        let has_conflicts = preview
+                            .operations
+                            .iter()
+                            .any(|operation| operation.status == "conflict");
+                        let has_planned = preview
+                            .operations
+                            .iter()
+                            .any(|operation| operation.status == "planned");
                         if dry_run {
                             println!("{}", serde_json::to_string_pretty(&preview)?);
                             return Ok(());
@@ -840,7 +909,9 @@ fn main() -> Result<()> {
                             anyhow::bail!("--json requires --yes for a real restore");
                         }
                         if has_conflicts && conflict.is_none() {
-                            anyhow::bail!("restore has conflicts; pass --conflict skip, --conflict replace, or --conflict keep-both");
+                            anyhow::bail!(
+                                "restore has conflicts; pass --conflict skip, --conflict replace, or --conflict keep-both"
+                            );
                         }
                         if !has_planned && !has_conflicts {
                             return Ok(());
@@ -856,29 +927,25 @@ fn main() -> Result<()> {
                                 action: action.action().to_string(),
                             })
                             .collect::<Vec<_>>());
-                        let apply_args = tendi_core::generated::runtime_contract::SkillsBackupRestoreRequest {
-                            dry_run: Some(false),
-                            confirmed: Some(true),
-                            resolutions,
-                            ..daemon_restore_args
-                        };
+                        let apply_args =
+                            tendi_core::generated::runtime_contract::SkillsBackupRestoreRequest {
+                                dry_run: Some(false),
+                                confirmed: Some(true),
+                                resolutions,
+                                ..daemon_restore_args
+                            };
                         let applied = try_daemon_request(
                             &cwd,
                             |runtime_client| Ok(runtime_client.skills_backup_restore(apply_args)),
                             RuntimeClient::decode_skills_backup_restore_response,
                         )?
-                            .ok_or_else(|| anyhow::anyhow!("daemon disappeared during restore"))?;
+                        .ok_or_else(|| anyhow::anyhow!("daemon disappeared during restore"))?;
                         println!("{}", serde_json::to_string_pretty(&applied)?);
                         return Ok(());
                     }
                     let store = tendi_core::storage::Store::open_default()?;
                     let plan = tendi_core::skill_backup::plan_backup_restore(
-                        &store,
-                        &cwd,
-                        &revision,
-                        &skills,
-                        &to,
-                        scope,
+                        &store, &cwd, &revision, &skills, &to, scope,
                     )?;
                     if dry_run {
                         if json {
@@ -894,10 +961,18 @@ fn main() -> Result<()> {
                     if !json {
                         print_backup_restore_operations(&plan)?;
                     }
-                    let has_conflicts = plan.operations.iter().any(|operation| operation.status == "conflict");
-                    let has_planned = plan.operations.iter().any(|operation| operation.status == "planned");
+                    let has_conflicts = plan
+                        .operations
+                        .iter()
+                        .any(|operation| operation.status == "conflict");
+                    let has_planned = plan
+                        .operations
+                        .iter()
+                        .any(|operation| operation.status == "planned");
                     if has_conflicts && conflict.is_none() {
-                        anyhow::bail!("restore has conflicts; pass --conflict skip, --conflict replace, or --conflict keep-both");
+                        anyhow::bail!(
+                            "restore has conflicts; pass --conflict skip, --conflict replace, or --conflict keep-both"
+                        );
                     }
                     if !has_planned && !has_conflicts {
                         return Ok(());
@@ -911,9 +986,11 @@ fn main() -> Result<()> {
                             plan.operations
                                 .iter()
                                 .filter(|operation| operation.status == "conflict")
-                                .map(|operation| tendi_core::skill_backup::BackupRestoreResolution {
-                                    id: operation.id.clone(),
-                                    action: conflict.action().to_string(),
+                                .map(|operation| {
+                                    tendi_core::skill_backup::BackupRestoreResolution {
+                                        id: operation.id.clone(),
+                                        action: conflict.action().to_string(),
+                                    }
                                 })
                                 .collect::<Vec<_>>()
                         })
@@ -923,7 +1000,8 @@ fn main() -> Result<()> {
                         &resolutions,
                     )?;
                     let operations = applied.operations;
-                    let snapshots = tendi_core::skills::capture_skill_snapshots(&applied.source_records)?;
+                    let snapshots =
+                        tendi_core::skills::capture_skill_snapshots(&applied.source_records)?;
                     with_database_write_lock(&store, || {
                         store.persist_skill_update_persistence_for_workspace(
                             &cwd,
@@ -936,13 +1014,25 @@ fn main() -> Result<()> {
                         println!("{}", serde_json::to_string_pretty(&operations)?);
                     } else {
                         for operation in operations {
-                            println!("{} {} -> {}", operation.status, operation.name, operation.target.display());
+                            println!(
+                                "{} {} -> {}",
+                                operation.status,
+                                operation.name,
+                                operation.target.display()
+                            );
                         }
                     }
                 }
                 BackupCommand::Add { path, name, json } => {
-                    let name = name.or_else(|| path.file_name().and_then(|name| name.to_str()).map(str::to_string))
-                        .ok_or_else(|| anyhow::anyhow!("--name is required when the path has no file name"))?;
+                    let name = name
+                        .or_else(|| {
+                            path.file_name()
+                                .and_then(|name| name.to_str())
+                                .map(str::to_string)
+                        })
+                        .ok_or_else(|| {
+                            anyhow::anyhow!("--name is required when the path has no file name")
+                        })?;
                     if let Some(value) = try_daemon_json!(
                         &cwd,
                         skills_backup_adopt,
@@ -956,10 +1046,8 @@ fn main() -> Result<()> {
                         return Ok(());
                     }
                     let store = tendi_core::storage::Store::open_default()?;
-                    let record = tendi_core::skill_backup::skill_backup_record_for_adoption(
-                        &path,
-                        name,
-                    )?;
+                    let record =
+                        tendi_core::skill_backup::skill_backup_record_for_adoption(&path, name)?;
                     let record = with_database_write_lock(&store, || {
                         store.persist_skill_update_persistence_for_workspace(
                             &cwd,
@@ -980,7 +1068,12 @@ fn main() -> Result<()> {
                         println!("aborted");
                         return Ok(());
                     }
-                    if let Some(value) = try_daemon_json!(&cwd, skills_backup_disconnect, tendi_core::generated::runtime_contract::EmptyRequest {}, decode_skills_backup_disconnect_response)? {
+                    if let Some(value) = try_daemon_json!(
+                        &cwd,
+                        skills_backup_disconnect,
+                        tendi_core::generated::runtime_contract::EmptyRequest {},
+                        decode_skills_backup_disconnect_response
+                    )? {
                         println!("{}", serde_json::to_string_pretty(&value)?);
                         return Ok(());
                     }
@@ -1042,10 +1135,9 @@ fn main() -> Result<()> {
                         println!("aborted");
                         return Ok(());
                     }
-                    let preview_id = preview
-                        .preview_id
-                        .as_deref()
-                        .ok_or_else(|| anyhow::anyhow!("daemon skill add preview has no preview id"))?;
+                    let preview_id = preview.preview_id.as_deref().ok_or_else(|| {
+                        anyhow::anyhow!("daemon skill add preview has no preview id")
+                    })?;
                     let apply_args = tendi_core::generated::runtime_contract::SkillsAddRequest {
                         dry_run: false,
                         preview_id: Some(preview_id.to_string()),
@@ -1056,7 +1148,9 @@ fn main() -> Result<()> {
                         |runtime_client| Ok(runtime_client.skills_add(apply_args)),
                         RuntimeClient::decode_skills_add_response,
                     )?
-                        .ok_or_else(|| anyhow::anyhow!("daemon disappeared during skill installation"))?;
+                    .ok_or_else(|| {
+                        anyhow::anyhow!("daemon disappeared during skill installation")
+                    })?;
                     if json {
                         println!("{}", serde_json::to_string_pretty(&applied)?);
                     } else {
@@ -1143,9 +1237,11 @@ fn main() -> Result<()> {
                     println!("aborted");
                     return Ok(());
                 }
-                let applied = tendi_core::skill_restore::apply_project_skill_restore_without_database(&plan)?;
+                let applied =
+                    tendi_core::skill_restore::apply_project_skill_restore_without_database(&plan)?;
                 let report = applied.report;
-                let snapshots = tendi_core::skills::capture_skill_snapshots(&applied.source_records)?;
+                let snapshots =
+                    tendi_core::skills::capture_skill_snapshots(&applied.source_records)?;
                 with_database_write_lock(&store, || {
                     store.persist_skill_update_persistence_for_workspace(
                         &cwd,
@@ -1194,7 +1290,9 @@ fn main() -> Result<()> {
                         |runtime_client| Ok(runtime_client.skills_set(apply_args)),
                         RuntimeClient::decode_skills_set_response,
                     )?
-                        .ok_or_else(|| anyhow::anyhow!("daemon disappeared during visibility update"))?;
+                    .ok_or_else(|| {
+                        anyhow::anyhow!("daemon disappeared during visibility update")
+                    })?;
                     println!("{}", serde_json::to_string_pretty(&applied)?);
                     return Ok(());
                 }
@@ -1241,7 +1339,7 @@ fn main() -> Result<()> {
                         |runtime_client| Ok(runtime_client.skills_wrap(apply_args)),
                         RuntimeClient::decode_skills_wrap_response,
                     )?
-                        .ok_or_else(|| anyhow::anyhow!("daemon disappeared during wrapper update"))?;
+                    .ok_or_else(|| anyhow::anyhow!("daemon disappeared during wrapper update"))?;
                     println!("{}", serde_json::to_string_pretty(&applied)?);
                     return Ok(());
                 }
@@ -1319,7 +1417,7 @@ fn main() -> Result<()> {
                         |runtime_client| Ok(runtime_client.skills_update(apply_args)),
                         RuntimeClient::decode_skills_update_response,
                     )?
-                        .ok_or_else(|| anyhow::anyhow!("daemon disappeared during skill update"))?;
+                    .ok_or_else(|| anyhow::anyhow!("daemon disappeared during skill update"))?;
                     println!("{}", serde_json::to_string_pretty(&applied)?);
                     return Ok(());
                 }
@@ -1340,9 +1438,7 @@ fn main() -> Result<()> {
                 with_database_write_lock(&store, || {
                     let expected_source_versions =
                         tendi_core::skills::prepare_skill_update_persistence_for_workspace(
-                            &store,
-                            &cwd,
-                            &prepared,
+                            &store, &cwd, &prepared,
                         )?
                         .expected_source_versions;
                     store.validate_skill_source_versions_for_workspace(
@@ -1356,9 +1452,7 @@ fn main() -> Result<()> {
                     let result = (|| {
                         let persistence =
                             tendi_core::skills::prepare_skill_update_persistence_for_workspace(
-                                &store,
-                                &cwd,
-                                &prepared,
+                                &store, &cwd, &prepared,
                             )?;
                         store.persist_skill_update_persistence_for_workspace_checked(
                             &cwd,
@@ -1422,9 +1516,7 @@ fn main() -> Result<()> {
                             };
                         let applied = try_daemon_request(
                             &cwd,
-                            |runtime_client| {
-                                Ok(runtime_client.skills_distribute(applied_args))
-                            },
+                            |runtime_client| Ok(runtime_client.skills_distribute(applied_args)),
                             RuntimeClient::decode_skills_distribute_response,
                         )?
                         .ok_or_else(|| anyhow::anyhow!("daemon disappeared during skill link"))?;
@@ -1483,12 +1575,14 @@ fn main() -> Result<()> {
                 if !dry_run {
                     if let Some(value) = try_daemon_request(
                         &cwd,
-                        |runtime_client| Ok(runtime_client.bundled_skill_install(
+                        |runtime_client| {
+                            Ok(runtime_client.bundled_skill_install(
                             tendi_core::generated::runtime_contract::BundledSkillInstallRequest {
                                 agent: Some(runtime_agent_kind(agent)),
                                 overwrite: Some(overwrite),
                             },
-                        )),
+                        ))
+                        },
                         RuntimeClient::decode_bundled_skill_install_response,
                     )? {
                         if json {
@@ -1569,7 +1663,9 @@ fn main() -> Result<()> {
                 let store = tendi_core::storage::Store::open_default()?;
                 let scope_key = workspace_scope_key(&cwd)?;
                 if json {
-                    if let Some(payload) = store.normalized_snapshot_json_for_scope(&scope_key, "sessions")? {
+                    if let Some(payload) =
+                        store.normalized_snapshot_json_for_scope(&scope_key, "sessions")?
+                    {
                         println!("{payload}");
                         return Ok(());
                     }
@@ -1603,17 +1699,16 @@ fn main() -> Result<()> {
                             unix_now(),
                         )
                     })?;
-                    report = tendi_core::sessions::SessionScan {
-                        sessions,
-                        warnings,
-                    };
+                    report = tendi_core::sessions::SessionScan { sessions, warnings };
                 } else {
                     with_database_write_lock(&store, || {
                         store.resolve_session_projects_for_scope(&scope_key, &mut report.sessions)
                     })?;
                 }
                 if json {
-                    if let Some(payload) = store.normalized_snapshot_json_for_scope(&scope_key, "sessions")? {
+                    if let Some(payload) =
+                        store.normalized_snapshot_json_for_scope(&scope_key, "sessions")?
+                    {
                         println!("{payload}");
                     } else {
                         let stdout = std::io::stdout();
@@ -1683,17 +1778,24 @@ fn main() -> Result<()> {
         },
         Command::Rules { command } => match command {
             ListCommand::List { json } => {
-                if let Some(value) = try_daemon_json!(&cwd, rules_list, tendi_core::generated::runtime_contract::EmptyRequest {}, decode_rules_list_response)? {
-                    let report = tendi_core::RuleScan {
-                        rules: serde_json::from_value(value)?,
-                        warnings: Vec::new(),
-                    };
-                    if json {
-                        println!("{}", serde_json::to_string_pretty(&report)?);
-                    } else {
-                        print_rules(&report.rules)?;
+                if let Some(value) = try_daemon_json!(
+                    &cwd,
+                    rules_list,
+                    tendi_core::generated::runtime_contract::EmptyRequest {},
+                    decode_rules_list_response
+                )? {
+                    if daemon_list_has_rows(&value) {
+                        let report = tendi_core::RuleScan {
+                            rules: serde_json::from_value(value)?,
+                            warnings: Vec::new(),
+                        };
+                        if json {
+                            println!("{}", serde_json::to_string_pretty(&report)?);
+                        } else {
+                            print_rules(&report.rules)?;
+                        }
+                        return Ok(());
                     }
-                    return Ok(());
                 }
                 let store = tendi_core::storage::Store::open_default()?;
                 let report = ensure_projection(
@@ -1717,17 +1819,24 @@ fn main() -> Result<()> {
         },
         Command::Hooks { command } => match command {
             ListCommand::List { json } => {
-                if let Some(value) = try_daemon_json!(&cwd, hooks_list, tendi_core::generated::runtime_contract::EmptyRequest {}, decode_hooks_list_response)? {
-                    let report = tendi_core::HookScan {
-                        hooks: serde_json::from_value(value)?,
-                        warnings: Vec::new(),
-                    };
-                    if json {
-                        println!("{}", serde_json::to_string_pretty(&report)?);
-                    } else {
-                        print_hooks(&report.hooks)?;
+                if let Some(value) = try_daemon_json!(
+                    &cwd,
+                    hooks_list,
+                    tendi_core::generated::runtime_contract::EmptyRequest {},
+                    decode_hooks_list_response
+                )? {
+                    if daemon_list_has_rows(&value) {
+                        let report = tendi_core::HookScan {
+                            hooks: serde_json::from_value(value)?,
+                            warnings: Vec::new(),
+                        };
+                        if json {
+                            println!("{}", serde_json::to_string_pretty(&report)?);
+                        } else {
+                            print_hooks(&report.hooks)?;
+                        }
+                        return Ok(());
                     }
-                    return Ok(());
                 }
                 let store = tendi_core::storage::Store::open_default()?;
                 let report = ensure_projection(
@@ -1751,17 +1860,24 @@ fn main() -> Result<()> {
         },
         Command::Mcp { command } => match command {
             ListCommand::List { json } => {
-                if let Some(value) = try_daemon_json!(&cwd, mcp_list, tendi_core::generated::runtime_contract::EmptyRequest {}, decode_mcp_list_response)? {
-                    let report = tendi_core::McpScan {
-                        servers: serde_json::from_value(value)?,
-                        warnings: Vec::new(),
-                    };
-                    if json {
-                        println!("{}", serde_json::to_string_pretty(&report)?);
-                    } else {
-                        print_mcp(&report.servers)?;
+                if let Some(value) = try_daemon_json!(
+                    &cwd,
+                    mcp_list,
+                    tendi_core::generated::runtime_contract::EmptyRequest {},
+                    decode_mcp_list_response
+                )? {
+                    if daemon_list_has_rows(&value) {
+                        let report = tendi_core::McpScan {
+                            servers: serde_json::from_value(value)?,
+                            warnings: Vec::new(),
+                        };
+                        if json {
+                            println!("{}", serde_json::to_string_pretty(&report)?);
+                        } else {
+                            print_mcp(&report.servers)?;
+                        }
+                        return Ok(());
                     }
-                    return Ok(());
                 }
                 let store = tendi_core::storage::Store::open_default()?;
                 let report = ensure_projection(
@@ -1780,6 +1896,27 @@ fn main() -> Result<()> {
                     println!("{}", serde_json::to_string_pretty(&report.servers)?);
                 } else {
                     print_mcp(&report.servers)?;
+                }
+            }
+        },
+        Command::Assistant { command } => match command {
+            AssistantCommand::Ask { json } => {
+                let mut input = String::new();
+                std::io::stdin().read_to_string(&mut input)?;
+                let request: tendi_core::assistant::AssistantAskRequest =
+                    serde_json::from_str(&input)
+                        .context("assistant ask input must be a JSON object")?;
+                let response = tendi_core::assistant::ask(request);
+                if json {
+                    println!("{}", serde_json::to_string(&response)?);
+                } else if response.status == "completed" {
+                    println!("{}", response.answer);
+                } else {
+                    anyhow::bail!(
+                        response
+                            .error
+                            .unwrap_or_else(|| "assistant request failed".to_string())
+                    );
                 }
             }
         },
@@ -1894,7 +2031,9 @@ fn print_skill_restore_operations(
     Ok(())
 }
 
-fn print_backup_restore_operations(plan: &tendi_core::skill_backup::BackupRestorePlan) -> Result<()> {
+fn print_backup_restore_operations(
+    plan: &tendi_core::skill_backup::BackupRestorePlan,
+) -> Result<()> {
     let mut stdout = std::io::stdout().lock();
     writeln!(stdout, "sync version: {}", plan.revision)?;
     writeln!(stdout, "target: {}", plan.target_root.display())?;
@@ -1905,7 +2044,11 @@ fn print_backup_restore_operations(plan: &tendi_core::skill_backup::BackupRestor
             operation.status,
             operation.name,
             operation.target.display(),
-            operation.message.as_deref().map(|message| format!(" ({message})")).unwrap_or_default(),
+            operation
+                .message
+                .as_deref()
+                .map(|message| format!(" ({message})"))
+                .unwrap_or_default(),
         )?;
     }
     Ok(())
@@ -2303,9 +2446,10 @@ mod tests {
         ])
         .unwrap();
         let Command::Skills {
-            command: SkillCommand::Sync {
-                command: BackupCommand::Configure { remote_url, .. },
-            },
+            command:
+                SkillCommand::Sync {
+                    command: BackupCommand::Configure { remote_url, .. },
+                },
         } = cli.command
         else {
             panic!("unexpected command");
@@ -2316,9 +2460,8 @@ mod tests {
     #[test]
     fn generated_runtime_client_emits_json_rpc_method_and_params() {
         let mut client = RuntimeClient::new();
-        let request = client.sessions_snapshot(
-            tendi_core::generated::runtime_contract::EmptyRequest::default(),
-        );
+        let request = client
+            .sessions_snapshot(tendi_core::generated::runtime_contract::EmptyRequest::default());
         assert_eq!(request.jsonrpc, "2.0");
         assert_eq!(request.method, "sessions_snapshot");
         assert_eq!(request.params, serde_json::json!({}));

@@ -9,9 +9,9 @@ use serde_json::Value;
 use crate::{
     analytics::{AnalyticsCapabilities, SessionAnalyticsRecord},
     hooks::{HookDeleteRequest, HookRecord, HookSetEnabledRequest, HookSourceMatch},
-    mcp::{McpServerRecord, McpSetEnabledRequest},
+    mcp::{McpProbeCache, McpProbeRequest, McpServerRecord, McpSetEnabledRequest},
     rules::{self, RuleRecord},
-    session_skills::Evidence,
+    session_skills::{Evidence, SkillEvidenceCandidate},
     sessions::{
         self, SessionMetadata, SessionRecord, SessionScanCache, SessionTokenUsage,
         SessionWatchExpansion, SessionWatchTarget,
@@ -44,6 +44,26 @@ pub(crate) enum SessionPathRole {
     Transcript,
     Metadata,
     Index,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SessionMessageKind {
+    User,
+    Assistant,
+    Context,
+}
+
+pub(crate) fn default_session_message_kind(value: &Value) -> Option<SessionMessageKind> {
+    let role = value
+        .get("role")
+        .or_else(|| value.pointer("/message/role"))
+        .or_else(|| value.pointer("/payload/role"))
+        .and_then(Value::as_str)?;
+    match role {
+        "user" => Some(SessionMessageKind::User),
+        "assistant" => Some(SessionMessageKind::Assistant),
+        _ => None,
+    }
 }
 
 impl ProviderContext {
@@ -146,6 +166,10 @@ pub(crate) trait AgentProvider: Sync {
 
     fn session_scan_source_paths(&self, path: &Path) -> Vec<PathBuf> {
         vec![path.to_path_buf()]
+    }
+
+    fn session_message_kind(&self, value: &Value) -> Option<SessionMessageKind> {
+        default_session_message_kind(value)
     }
 
     fn skill_visibility_metadata(
@@ -340,6 +364,10 @@ pub(crate) trait AgentProvider: Sync {
         None
     }
 
+    fn assistant_ask_command(&self, _workspace: &Path, _prompt: &str) -> Option<SessionCommand> {
+        None
+    }
+
     fn resume_target_from_transcript_value(&self, _value: &Value) -> Option<&'static str> {
         None
     }
@@ -370,6 +398,14 @@ pub(crate) trait AgentProvider: Sync {
         _meta: &SessionMetadata,
     ) -> Option<bool> {
         None
+    }
+
+    fn session_user_message(&self, _value: &Value) -> Option<String> {
+        None
+    }
+
+    fn session_transcript_title_overrides_index(&self) -> bool {
+        false
     }
 
     fn update_session_metadata(
@@ -503,14 +539,40 @@ pub(crate) trait AgentProvider: Sync {
         Vec::new()
     }
 
+    fn extract_session_skill_evidence(&self, _value: &Value) -> Vec<SkillEvidenceCandidate> {
+        Vec::new()
+    }
+
+    fn extract_session_skill_evidence_from_source(
+        &self,
+        _path: &Path,
+    ) -> Result<Vec<SkillEvidenceCandidate>> {
+        Ok(Vec::new())
+    }
+
     fn scan_mcp(
         &self,
         _ctx: &ProviderContext,
         _servers: &mut Vec<McpServerRecord>,
         _warnings: &mut Vec<String>,
+        _probe_cache: &mut McpProbeCache,
     ) -> Result<()> {
         Ok(())
     }
+
+    fn probe_mcp(
+        &self,
+        _request: &McpProbeRequest,
+        _current: &McpServerRecord,
+        _probe_cache: &mut McpProbeCache,
+    ) -> Result<McpServerRecord> {
+        bail!(
+            "MCP connection check is not supported for {}",
+            self.storage_key()
+        )
+    }
+
+    fn prepare_mcp_probe(&self, _servers: &[McpServerRecord]) {}
 
     fn set_mcp_enabled(&self, _request: &McpSetEnabledRequest) -> Result<()> {
         bail!(
@@ -535,29 +597,30 @@ pub(crate) trait AgentProvider: Sync {
         _name: &str,
         _entry: &Value,
     ) -> Result<String> {
-        bail!("MCP entry restore is not supported for {}", self.storage_key())
+        bail!(
+            "MCP entry restore is not supported for {}",
+            self.storage_key()
+        )
     }
 
     fn mcp_status_after_toggle(&self, enabled: bool) -> &'static str;
 
-    fn delete_hooks(
-        &self,
-        _requests: &[HookDeleteRequest],
-        _source: &str,
-    ) -> Result<String> {
+    fn delete_hooks(&self, _requests: &[HookDeleteRequest], _source: &str) -> Result<String> {
         bail!("hook deletion is not supported for {}", self.storage_key())
     }
 
-    fn set_hook_enabled(
-        &self,
-        _request: &HookSetEnabledRequest,
-        _source: &str,
-    ) -> Result<String> {
-        bail!("hook enable/disable is not supported for {}", self.storage_key())
+    fn set_hook_enabled(&self, _request: &HookSetEnabledRequest, _source: &str) -> Result<String> {
+        bail!(
+            "hook enable/disable is not supported for {}",
+            self.storage_key()
+        )
     }
 
     fn backup_hook_entry(&self, _path: &Path, _identity: &HookSourceMatch) -> Result<Value> {
-        bail!("hook entry sync is not supported for {}", self.storage_key())
+        bail!(
+            "hook entry sync is not supported for {}",
+            self.storage_key()
+        )
     }
 
     fn restore_hook_entry(
@@ -566,7 +629,10 @@ pub(crate) trait AgentProvider: Sync {
         _identity: &HookSourceMatch,
         _entry: &Value,
     ) -> Result<String> {
-        bail!("hook entry restore is not supported for {}", self.storage_key())
+        bail!(
+            "hook entry restore is not supported for {}",
+            self.storage_key()
+        )
     }
 
     fn hook_read_only_reason(&self, path: &Path) -> Option<&'static str> {
@@ -763,6 +829,22 @@ pub fn plan_session_resume(session: &SessionRecord) -> Result<SessionResumePlan>
     })
 }
 
+pub fn plan_assistant_ask(
+    agent: AgentKind,
+    workspace: &Path,
+    prompt: &str,
+) -> Result<SessionCommand> {
+    let provider = agent_provider(agent);
+    provider
+        .assistant_ask_command(workspace, prompt)
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "{} does not expose a supported assistant command",
+                agent_display_name(agent)
+            )
+        })
+}
+
 pub fn active_session_writer(session: &SessionRecord) -> Result<Option<SessionWriter>> {
     agent_provider(session.agent).active_session_writer(session)
 }
@@ -869,7 +951,9 @@ mod tests {
         time::{SystemTime, UNIX_EPOCH},
     };
 
-    use super::{AgentKind, SessionRecord, codex, plan_session_resume, project_dirs};
+    use super::{
+        AgentKind, SessionRecord, codex, plan_assistant_ask, plan_session_resume, project_dirs,
+    };
 
     fn temp_dir(prefix: &str) -> PathBuf {
         std::env::temp_dir().join(format!(
@@ -995,6 +1079,66 @@ mod tests {
             plan.command.args,
             vec!["resume", "019eef10-7054-7a63-b9c8-fd16cc70cd53"]
         );
+    }
+
+    #[test]
+    fn assistant_commands_keep_provider_specific_cli_contracts() {
+        let workspace = PathBuf::from("/tmp/tendi-assistant");
+        let prompt = "Answer this";
+        let cases = [
+            (
+                AgentKind::Codex,
+                "codex",
+                vec!["-C", "/tmp/tendi-assistant", "exec"],
+            ),
+            (
+                AgentKind::Claude,
+                "claude",
+                vec!["--print", "--output-format", "stream-json"],
+            ),
+            (
+                AgentKind::Cursor,
+                "cursor",
+                vec!["agent", "--print", "--output-format", "stream-json"],
+            ),
+        ];
+
+        for (agent, executable, prefix) in cases {
+            let command = plan_assistant_ask(agent, &workspace, prompt).unwrap();
+            assert_eq!(command.executable, executable);
+            assert_eq!(command.cwd, Some(workspace.clone()));
+            assert_eq!(command.args.last().map(String::as_str), Some(prompt));
+            assert_eq!(command.args[..prefix.len()], prefix);
+
+            let expected_mode = match agent {
+                AgentKind::Codex => "--dangerously-bypass-approvals-and-sandbox",
+                AgentKind::Claude => "--dangerously-skip-permissions",
+                AgentKind::Cursor => "--yolo",
+                AgentKind::Shared => unreachable!("shared agents are not in assistant cases"),
+                AgentKind::Unknown => unreachable!("unknown agents are not in assistant cases"),
+            };
+            assert!(command.args.iter().any(|arg| arg == expected_mode));
+
+            if agent == AgentKind::Claude {
+                let prompt_index = command.args.len() - 1;
+                assert_eq!(command.args[prompt_index - 1], "--");
+                assert!(
+                    command
+                        .args
+                        .iter()
+                        .any(|arg| arg == "--include-partial-messages")
+                );
+            }
+            if agent == AgentKind::Cursor {
+                assert!(
+                    command
+                        .args
+                        .iter()
+                        .any(|arg| arg == "--stream-partial-output")
+                );
+            }
+        }
+        assert!(plan_assistant_ask(AgentKind::Unknown, &workspace, prompt).is_err());
     }
 
     #[test]

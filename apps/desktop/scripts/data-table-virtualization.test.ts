@@ -5,6 +5,9 @@ import test from "node:test";
 import { fixedVirtualRange, virtualRangeFor } from "../src/lib/virtualization.ts";
 
 const dataTable = await readFile(new URL("../src/components/DataTable.tsx", import.meta.url), "utf8");
+const dataTableCss = await readFile(new URL("../src/components/DataTable.css", import.meta.url), "utf8");
+const collapsibleAccordion = await readFile(new URL("../src/components/shared/CollapsibleAccordion.tsx", import.meta.url), "utf8");
+const tableColumns = await readFile(new URL("../src/lib/tableColumns.tsx", import.meta.url), "utf8");
 const virtualViewport = await readFile(new URL("../src/components/shared/useVirtualViewport.ts", import.meta.url), "utf8");
 const sessionsView = await readFile(new URL("../src/views/SessionsView.tsx", import.meta.url), "utf8");
 const trendChart = await readFile(new URL("../src/views/OverviewTrendChart.tsx", import.meta.url), "utf8");
@@ -68,6 +71,14 @@ test("clears the seek layer after the shared scroll position is committed", () =
   assert.match(dataTable, /useLayoutEffect\(\(\) => \{\s*setVirtualSeekVisible\(false\);[\s\S]*?scrollTop/);
 });
 
+test("commits a missed virtual window before the next paint", () => {
+  assert.match(dataTable, /if \(seekGap \|\| groupedSeekGap\) \{[\s\S]*?flushSync\(\(\) => \{[\s\S]*?syncScrollPosition\(\);/);
+});
+
+test("keeps the seek layer above frozen panes", () => {
+  assert.match(dataTableCss, /\.dataTableVirtualSeek\s*\{[\s\S]*?z-index:\s*var\(--z-header-rule\);/);
+});
+
 test("allows session rows to skip table virtualization", () => {
   assert.match(dataTable, /enableVirtualization = true/);
   assert.match(dataTable, /const virtualizedRows = enableVirtualization &&/);
@@ -86,6 +97,34 @@ test("synchronizes the virtual window with the browser scroll position after fil
   assert.match(virtualViewport, /const next = readScrollOffset\(\);[\s\S]*?setScrollOffset\(\(current\) => current === next/);
 });
 
+test("defers grouped scroll restoration until the group content is expanded", () => {
+  assert.match(dataTable, /const groupingReady = !grouping\[0\]/);
+  assert.match(dataTable, /storedPosition\.top > 0 && !groupingReady\) return undefined/);
+  assert.match(dataTable, /groupRows\.every\(\(group\) => expandedGroupSet\.has/);
+});
+
+test("disables only the initial grouped accordion animation", () => {
+  assert.match(dataTable, /initialGroupingMountRef\.current/);
+  assert.match(dataTable, /reduceMotion=\{initialGroupingMountRef\.current\}/);
+  assert.match(collapsibleAccordion, /reduceMotion = false/);
+  assert.match(collapsibleAccordion, /const reduce = \(useReducedMotion\(\) \?\? false\) \|\| reduceMotion/);
+});
+
+test("restores the table viewport with direct scroll offsets", () => {
+  const restoreEffectStart = dataTable.indexOf("const shouldRestore = Boolean(scrollRestorationKey");
+  const restoreEffectEnd = dataTable.indexOf("\n    } else if (resetRequested)", restoreEffectStart);
+  const restoreEffect = dataTable.slice(restoreEffectStart, restoreEffectEnd);
+
+  assert.ok(restoreEffectStart >= 0 && restoreEffectEnd > restoreEffectStart);
+  assert.match(restoreEffect, /scroll\.scrollTop =/);
+  assert.match(restoreEffect, /scroll\.scrollLeft =/);
+  assert.doesNotMatch(restoreEffect, /scroll\.scrollTo\(/);
+});
+
+test("keeps data-table viewport restoration instant even when smooth scrolling is configured elsewhere", () => {
+  assert.match(dataTableCss, /\.dataTableBodyScroll\s*\{[\s\S]*?scroll-behavior:\s*auto;/);
+});
+
 test("coalesces locator scroll events by reading the live DOM position", () => {
   assert.match(sessionsView, /onScroll=\{\(\) => \{\s*scheduleScrollSync\(\);/);
   assert.doesNotMatch(sessionsView, /const nextScrollTop = event\.currentTarget\.scrollTop/);
@@ -95,4 +134,14 @@ test("uses the shared viewport for horizontal chart virtualization", () => {
   assert.match(trendChart, /useVirtualViewport/);
   assert.match(trendChart, /axis: "horizontal"/);
   assert.match(trendChart, /scheduleScrollSync\(\);/);
+});
+
+test("keeps fixed-width frozen-table columns from sizing to cell content", () => {
+  assert.match(dataTable, /const scrollGridColumns = useMemo\(\s*\(\) => nonFrozenColumns\.map\(\(column\) => column\.width\)\.join\(" "\)/);
+  assert.doesNotMatch(dataTable, /responsiveColumnTrack/);
+});
+
+test("keeps MCP source details out of the table columns", () => {
+  const mcpColumns = tableColumns.slice(tableColumns.indexOf("export const mcpColumns"));
+  assert.doesNotMatch(mcpColumns, /key: "source"/);
 });

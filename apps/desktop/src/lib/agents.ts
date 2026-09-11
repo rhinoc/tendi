@@ -7,6 +7,10 @@ import type { AgentKind } from "./generated/runtime-types.ts";
 
 export { agentIcons } from "./agent/catalog.ts";
 
+const visibleAgentKeys = new Set(["codex", "claude", "cursor"]);
+
+export const ALL_AGENT_FILTER = "All";
+
 export function normalizedAgentKey(agent: unknown): string {
   return `${agent ?? ""}`.toLowerCase().replace(/[^a-z0-9]+/g, "");
 }
@@ -16,6 +20,10 @@ export function agentIdentityKey(agent: unknown): string {
   const definition = agentDefinition(key);
   if (definition) return definition.id;
   return key;
+}
+
+export function isVisibleAgent(agent: unknown): boolean {
+  return visibleAgentKeys.has(agentIdentityKey(agent));
 }
 
 export function isConcreteAgent(agent: unknown): boolean {

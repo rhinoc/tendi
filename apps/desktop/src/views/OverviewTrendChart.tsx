@@ -5,7 +5,7 @@ import { ChartLegend, type ChartLegendItem } from "../components/shared/chart/Ch
 import { ChartTooltipContent, type ChartTooltipDetail } from "../components/shared/chart/ChartTooltipContent.tsx";
 import { Tooltip } from "../components/shared/Tooltip.tsx";
 import { useVirtualViewport } from "../components/shared/useVirtualViewport.ts";
-import { agentDefinition, agentIdentityKey, agentDefinitions, formatDayGroupLabel, friendlyAgent, normalizedAgentKey } from "../lib/index.ts";
+import { agentDefinition, agentIdentityKey, agentDefinitions, EMPTY_DISPLAY_VALUE, formatDayGroupLabel, friendlyAgent, normalizedAgentKey } from "../lib/index.ts";
 import { AnalyticsGranularity, groupAnalyticsDays, stepAnalyticsGranularity, type AnalyticsPeriod, type OverviewAnalytics } from "../lib/analytics.ts";
 import { formatTokenCount } from "../lib/token-format.ts";
 import { fixedVirtualRange } from "../lib/virtualization.ts";
@@ -18,12 +18,10 @@ const TREND_EDGE_PADDING = 32;
 const TREND_WINDOW_OVERSCAN = 8;
 const TREND_VIRTUALIZATION_LIMIT = 80;
 const TREND_INITIAL_WINDOW_COLUMNS = 64;
-const TREND_ANIMATION_STAGGER_MS = 12;
-const TREND_RUNG_ANIMATION_STAGGER_MS = 8;
-const TREND_ANIMATION_MAX_DELAY_MS = 480;
 const TREND_LABEL_TARGET_GAP = 84;
 const TREND_DEFAULT_VIEWPORT_WIDTH = 640;
 const TREND_PLOT_HEIGHT = 184;
+const TREND_TOOLTIP_EXIT_SETTLE_MS = 120;
 const CACHE_RATE_MAX = 100;
 const CACHE_RATE_LOG_SCALE = Math.log1p(CACHE_RATE_MAX);
 
@@ -57,8 +55,7 @@ type BreakdownItem = {
 type TrendRung = {
   key: string;
   className: string;
-  isSegmentStart: boolean;
-  width: number;
+  path: string;
 };
 
 type TrendPeriodModel = {
@@ -442,14 +439,21 @@ export function buildTrendPeriodModel(
   const total = metricValue(period, metric);
   const totalRungs = metric === OverviewUsageMetric.Cache ? 0 : total ? Math.max(1, Math.round(total / rungUnit)) : 0;
   const segmentRungs = metric === OverviewUsageMetric.Cache ? [] : apportionRungs(segments.map((segment) => segment.value), totalRungs);
-  const rungs = segmentRungs.flatMap((count, segmentIndex) => (
-    Array.from({ length: count }, (_, rungIndex) => ({
-      key: `${segments[segmentIndex].key}-${rungIndex}`,
+  let rungOffset = 0;
+  const rungs = segmentRungs.flatMap((count, segmentIndex) => {
+    const commands = Array.from({ length: count }, (_, rungIndex) => {
+      const width = rungWidth(index, rungIndex, segmentIndex);
+      const y = totalRungs - rungOffset - rungIndex - 0.5;
+      const start = (100 - width) / 2;
+      return `M ${start} ${y} H ${start + width}`;
+    });
+    rungOffset += count;
+    return commands.length > 0 ? [{
+      key: segments[segmentIndex].key,
       className: segments[segmentIndex].className,
-      isSegmentStart: segmentIndex > 0 && rungIndex === 0,
-      width: rungWidth(index, rungIndex, segmentIndex),
-    }))
-  ));
+      path: commands.join(" "),
+    }] : [];
+  });
   const tooltipSegments = includeTooltip
     ? buildTrendTooltipSegments(period, metric, topCategories, segments)
     : [];
@@ -547,6 +551,8 @@ export const OverviewTrendChart = memo(function OverviewTrendChart({
   ), visible[0]);
   const [activeKey, setActiveKey] = useState(visible[visible.length - 1]?.key ?? "");
   const [hoveredKey, setHoveredKey] = useState<string | null>(null);
+  const [openTooltipKey, setOpenTooltipKey] = useState<string | null>(null);
+  const tooltipCloseTimerRef = useRef<number | null>(null);
   const barsRef = useRef<HTMLDivElement>(null);
   const loadRequestedRef = useRef(false);
   const scrollSnapshotRef = useRef<ScrollSnapshot | null>(null);
@@ -570,6 +576,13 @@ export const OverviewTrendChart = memo(function OverviewTrendChart({
   const pendingFocusIndexRef = useRef<number | null>(null);
   const zoomScaleRef = useRef(1);
   const zoomFocusTimestampRef = useRef<number | null>(null);
+
+  useEffect(() => () => {
+    if (tooltipCloseTimerRef.current !== null) {
+      window.clearTimeout(tooltipCloseTimerRef.current);
+    }
+  }, []);
+
   const windowStart = Math.min(trendWindow.start, Math.max(0, visible.length));
   const windowEnd = Math.max(windowStart, Math.min(trendWindow.end, visible.length));
   const windowed = visible.length > TREND_VIRTUALIZATION_LIMIT;
@@ -725,9 +738,9 @@ export const OverviewTrendChart = memo(function OverviewTrendChart({
         emptyState={(
           <div className={`overviewTrendPlotLayout${metric === OverviewUsageMetric.Tokens || metric === OverviewUsageMetric.Time ? " hasSecondaryMetric" : ""}`}>
             <div className="overviewTrendYAxis" aria-hidden="true">
-              <span>—</span>
-              <span>—</span>
-              <span>—</span>
+              <span>{EMPTY_DISPLAY_VALUE}</span>
+              <span>{EMPTY_DISPLAY_VALUE}</span>
+              <span>{EMPTY_DISPLAY_VALUE}</span>
             </div>
             <div className="overviewTrendViewport">
               <div
@@ -752,9 +765,9 @@ export const OverviewTrendChart = memo(function OverviewTrendChart({
             </div>
             {metric === OverviewUsageMetric.Tokens || metric === OverviewUsageMetric.Time ? (
               <div className="overviewTrendSecondaryYAxis" aria-hidden="true">
-                <span>—</span>
-                <span>—</span>
-                <span>—</span>
+                <span>{EMPTY_DISPLAY_VALUE}</span>
+                <span>{EMPTY_DISPLAY_VALUE}</span>
+                <span>{EMPTY_DISPLAY_VALUE}</span>
               </div>
             ) : null}
           </div>
@@ -928,7 +941,7 @@ export const OverviewTrendChart = memo(function OverviewTrendChart({
                   <path className="overviewTrendLinePath" d={cacheLinePath} />
                 </svg>
               ) : null}
-              {renderedModels.map(({ period, index, total, totalRungs, segments, rungs }, localIndex) => {
+              {renderedModels.map(({ period, index, total, totalRungs, segments, rungs }) => {
                 const isActive = period.key === activeKey;
                 const isHovered = period.key === hoveredKey;
                 const isPeak = period.key === peakPeriod.key;
@@ -945,6 +958,23 @@ export const OverviewTrendChart = memo(function OverviewTrendChart({
                   <Tooltip
                     key={period.key}
                     interactive
+                    open={openTooltipKey === period.key}
+                    onOpenChange={(open) => {
+                      if (tooltipCloseTimerRef.current !== null) {
+                        window.clearTimeout(tooltipCloseTimerRef.current);
+                        tooltipCloseTimerRef.current = null;
+                      }
+                      setOpenTooltipKey((current) => {
+                        if (open) return period.key;
+                        return current === period.key ? null : current;
+                      });
+                      if (!open) {
+                        tooltipCloseTimerRef.current = window.setTimeout(() => {
+                          tooltipCloseTimerRef.current = null;
+                          setHoveredKey((current) => current === period.key ? null : current);
+                        }, TREND_TOOLTIP_EXIT_SETTLE_MS);
+                      }
+                    }}
                     content={(
                       <ChartTooltipContent
                         title={period.label}
@@ -954,10 +984,10 @@ export const OverviewTrendChart = memo(function OverviewTrendChart({
                             <strong>
                               {metric === OverviewUsageMetric.Tokens
                                 ? tokensPerResponseValue === null
-                                  ? "— avg / response"
+                                  ? `${EMPTY_DISPLAY_VALUE} avg / response`
                                   : `${formatTokensPerResponse(tokensPerResponseValue)} avg / response`
                                 : averageTurnTimeValue === null
-                                  ? "— avg / turn"
+                                  ? `${EMPTY_DISPLAY_VALUE} avg / turn`
                                   : `${formatDuration(averageTurnTimeValue)} avg / turn`}
                             </strong>
                           </span>
@@ -993,11 +1023,11 @@ export const OverviewTrendChart = memo(function OverviewTrendChart({
                         ) : metric === OverviewUsageMetric.Time ? (
                             <p className="chartTooltipMeta">
                             {period.timedCompletedRuns.toLocaleString()} timed turns
-                            {` · Longest ${period.maxRunMs ? formatDuration(period.maxRunMs) : "—"}`}
+                            {` · Longest ${period.maxRunMs ? formatDuration(period.maxRunMs) : EMPTY_DISPLAY_VALUE}`}
                           </p>
                         ) : metric === OverviewUsageMetric.Turns ? (
                             <p className="chartTooltipMeta">
-                            Longest {period.maxRunMs ? `${Math.round(period.maxRunMs / 1000)}s` : "—"}
+                            Longest {period.maxRunMs ? `${Math.round(period.maxRunMs / 1000)}s` : EMPTY_DISPLAY_VALUE}
                           </p>
                         ) : null}
                       />
@@ -1013,8 +1043,16 @@ export const OverviewTrendChart = memo(function OverviewTrendChart({
                       className={`overviewTrendBarButton${isHovered ? " isHovered" : ""}${isPeak ? " isPeak" : ""}`}
                       onClick={() => handlePeriodClick(period)}
                       onFocus={() => setActiveKey(period.key)}
-                      onMouseEnter={() => setHoveredKey(period.key)}
-                      onMouseLeave={() => setHoveredKey(null)}
+                      onMouseEnter={() => {
+                        if (tooltipCloseTimerRef.current !== null) {
+                          window.clearTimeout(tooltipCloseTimerRef.current);
+                          tooltipCloseTimerRef.current = null;
+                        }
+                        setHoveredKey(period.key);
+                      }}
+                      onMouseLeave={() => {
+                        if (openTooltipKey !== period.key) setHoveredKey(null);
+                      }}
                       onKeyDown={(event) => moveSelection(event, index)}
                     >
                       {tokensPerResponseValue === null || !isHovered ? null : (
@@ -1046,20 +1084,16 @@ export const OverviewTrendChart = memo(function OverviewTrendChart({
                           aria-hidden="true"
                         >
                           <span className="overviewTrendRungs">
-                            {rungs.map((rung, rungIndex) => (
-                              <span
-                                key={rung.key}
-                                className={`overviewTrendRung ${rung.className}${rung.isSegmentStart ? " isSegmentStart" : ""}`}
-                                style={{
-                                  width: `${rung.width}%`,
-                                  animationDelay: `${Math.min(
-                                    localIndex * TREND_ANIMATION_STAGGER_MS
-                                      + rungIndex * TREND_RUNG_ANIMATION_STAGGER_MS,
-                                    TREND_ANIMATION_MAX_DELAY_MS,
-                                  )}ms`,
-                                }}
-                              />
-                            ))}
+                            <svg viewBox={`0 0 100 ${Math.max(1, totalRungs)}`} preserveAspectRatio="none">
+                              {rungs.map((rung) => (
+                                <path
+                                  key={rung.key}
+                                  className={`overviewTrendRungPath ${rung.className}`}
+                                  d={rung.path}
+                                  vectorEffect="non-scaling-stroke"
+                                />
+                              ))}
+                            </svg>
                           </span>
                           {showValueLabel ? <span className="overviewTrendValueLabel">{formatMetricValue(total, metric)}</span> : null}
                         </span>

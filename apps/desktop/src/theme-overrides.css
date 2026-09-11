@@ -470,8 +470,13 @@
   --control-border: color-mix(in oklch, var(--theme-text) 18%, transparent);
   --shadow-border: 0 0 0 1px color-mix(in oklch, var(--theme-text) 8%, transparent);
   --shadow-border-hover: 0 0 0 1px color-mix(in oklch, var(--theme-text) 14%, transparent);
-  --shadow-elevated: 0 0 0 1px color-mix(in oklch, var(--theme-text) 10%, transparent), 0 18px 48px color-mix(in oklch, var(--theme-overlay) 52%, transparent);
-  --shadow-menu: 0 0 0 1px color-mix(in oklch, var(--theme-text) 10%, transparent), 0 12px 36px color-mix(in oklch, var(--theme-overlay) 48%, transparent);
+  --shadow-color: var(--theme-overlay);
+  --shadow-floating-depth: 0 4px 10px color-mix(in oklch, var(--shadow-color) 32%, transparent);
+  --shadow-floating: 0 0 0 1px color-mix(in oklch, var(--theme-text) 10%, transparent), var(--shadow-floating-depth);
+  --shadow-elevated-depth: 0 18px 48px color-mix(in oklch, var(--shadow-color) 52%, transparent);
+  --shadow-menu-depth: 0 12px 36px color-mix(in oklch, var(--shadow-color) 48%, transparent);
+  --shadow-elevated: 0 0 0 1px color-mix(in oklch, var(--theme-text) 10%, transparent), var(--shadow-elevated-depth);
+  --shadow-menu: 0 0 0 1px color-mix(in oklch, var(--theme-text) 10%, transparent), var(--shadow-menu-depth);
   --row-frame-line: color-mix(in oklch, var(--theme-text) 14%, transparent);
   --row-frame-bg: color-mix(in oklch, var(--theme-text) 6%, transparent);
   --data-table-frozen-cell-hover-bg: var(--theme-sidebar);

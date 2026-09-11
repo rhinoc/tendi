@@ -2,13 +2,14 @@ import { Tooltip } from "../../components/shared/Tooltip.tsx";
 import { AlertCircle, ArrowLeft, ArrowRight, Check } from "lucide-react";
 
 import { ColumnCellVariant, ColumnDataType, type ColumnDef } from "../../components/DataTable.types";
-import { AsyncStatus, friendlyAgent, sessionCacheRate, SessionKind, sessionKind, sessionProject, sessionProjectGroupKey, sessionProjectGroupLabel, sessionResumeLabel, sessionResumeTargetForAgent, sessionResumeTargetForMenu, SessionResumeTarget, SessionSortKey, sortValue, summarizeSessionPreviewRecord, type SessionRecord, type SessionResumeState } from "../../lib/index.ts";
+import { AsyncStatus, EMPTY_DISPLAY_VALUE, friendlyAgent, sessionCacheRate, sessionTitleValue, SessionKind, sessionKind, sessionProject, sessionProjectGroupKey, sessionProjectGroupLabel, sessionResumeLabel, sessionResumeTargetForAgent, sessionResumeTargetForMenu, SessionResumeTarget, SessionSortKey, sortValue, summarizeSessionPreviewRecord, type SessionRecord, type SessionResumeState } from "../../lib/index.ts";
 import { cacheRateTone } from "../../lib/token-style.ts";
 import { AgentBadge } from "../../components/shared/AgentBadge.tsx";
 import { Badge } from "../../components/shared/Badge.tsx";
 import { LoadingIcon } from "../../components/shared/LoadingIcon.tsx";
 import { StatefulButton } from "../../components/shared/StatefulButton.tsx";
 import { SessionTitleText, TranscriptLinkText } from "../../components/shared/TranscriptLinkText.tsx";
+import { splitSearchQueryTerms } from "../../components/shared/text-ranges.ts";
 import { formatSessionTitle } from "../../lib/session-preview.ts";
 
 export type SessionTableRow = {
@@ -56,6 +57,7 @@ export function createSessionTableColumns<T extends SessionTableRow = SessionTab
   widths = {},
 }: CreateSessionTableColumnsOptions<T> = {}): ColumnDef<T>[] {
   const canResume = typeof resumeSession === "function";
+  const searchTerms = splitSearchQueryTerms(normalizedQuery);
   const columns: ColumnDef<T>[] = [
     {
       key: SessionSortKey.Title,
@@ -67,31 +69,31 @@ export function createSessionTableColumns<T extends SessionTableRow = SessionTab
       width: widths.title ?? "var(--data-freeze-column-width, 360px)",
       render: (session) => {
         const preview = summarizeSessionPreviewRecord(session as SessionRecord);
-        const displayTitle = `${session.title ?? ""}`;
+        const displayTitle = sessionTitleValue(session);
         const tooltipTitle = formatSessionTitle(displayTitle);
         return (
           <>
             <span className="sessionTitleWithKind">
               <Tooltip content={tooltipTitle} onlyWhenTruncated>
-                <span className="sessionTitleText"><SessionTitleText interactive={false} value={displayTitle} /></span>
+                <span className="sessionTitleText"><SessionTitleText interactive={false} query={normalizedQuery} queryTerms={searchTerms} value={displayTitle} /></span>
               </Tooltip>
               {sessionKind(session as SessionRecord) === SessionKind.Child ? <Badge tone="warning" uppercase>Child</Badge> : null}
             </span>
             {normalizedQuery && session.searchSnippet ? (
               <span className="dataCellSubLine">
                 <Tooltip content={session.searchSnippet.replace(/[⟦⟧]/g, "")} onlyWhenTruncated><span className="dataCellSub sessionSearchSnippet">
-                  <TranscriptLinkText interactive={false} query={normalizedQuery} value={session.searchSnippet.replace(/[⟦⟧]/g, "")} />
+                  <TranscriptLinkText interactive={false} query={normalizedQuery} queryTerms={searchTerms} value={session.searchSnippet.replace(/[⟦⟧]/g, "")} />
                 </span></Tooltip>
               </span>
             ) : (
               <span className="dataCellSubLine sessionPreviewSubLine">
                 <span className="sessionPreviewMessage">
                   <ArrowRight size={13} aria-hidden="true" />
-                  <span className="dataCellSub sessionPreviewText"><TranscriptLinkText interactive={false} value={preview?.userLast ?? "—"} /></span>
+                  <span className="dataCellSub sessionPreviewText"><TranscriptLinkText interactive={false} value={preview?.userLast ?? EMPTY_DISPLAY_VALUE} /></span>
                 </span>
                 <span className="sessionPreviewMessage">
                   <ArrowLeft size={13} aria-hidden="true" />
-                  <span className="dataCellSub sessionPreviewText"><TranscriptLinkText interactive={false} value={preview?.assistantLast ?? "—"} /></span>
+                  <span className="dataCellSub sessionPreviewText"><TranscriptLinkText interactive={false} value={preview?.assistantLast ?? EMPTY_DISPLAY_VALUE} /></span>
                 </span>
               </span>
             )}

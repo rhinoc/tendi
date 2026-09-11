@@ -50,7 +50,7 @@
 .actionBar.bottomBar button:not(.selectionCheckbox, .actionBarClearButton) {
   height: var(--data-table-selection-col);
   padding: 0 8px;
-  font-size: var(--text-sm);
+  font-size: var(--text-ui);
   border-radius: var(--radius-md);
 }
 

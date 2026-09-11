@@ -1,31 +1,35 @@
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { KeyboardEvent, PointerEvent, WheelEvent } from "react";
 
 import { formatSessionTitle } from "../../lib/session-preview.ts";
 import { useTrackpadZoom } from "../../lib/zoom-gesture.ts";
 import { LoadErrorState } from "../../components/shared/LoadErrorState.tsx";
 import { LoadingState } from "../../components/shared/LoadingState.tsx";
+import { cachedRelationshipLayout, requestRelationshipLayout } from "./skill-relationship-layout-client.ts";
+import {
+  buildRelationshipGraph,
+  RELATIONSHIP_VIEWBOX_HEIGHT as VIEWBOX_HEIGHT,
+  RELATIONSHIP_VIEWBOX_WIDTH as VIEWBOX_WIDTH,
+  relationshipHash as hashString,
+  relationshipNodeKey as nodeKey,
+  type LayoutNode,
+  type RelationshipGraph,
+  type RelationshipGraphEdge,
+  type RelationshipGraphNode,
+} from "./skill-relationship-layout.ts";
 
-const VIEWBOX_WIDTH = 1200;
-const VIEWBOX_HEIGHT = 660;
+export type { RelationshipGraphEdge, RelationshipGraphNode } from "./skill-relationship-layout.ts";
+
 const MAX_LABEL_LENGTH = 24;
 const MIN_LABEL_OPACITY = 0.42;
 const MAX_LABEL_OPACITY = 0.7;
 const PAN_OVERSCROLL_RATIO = 0.5;
 const GRAPH_ZOOM_MIN = 0.72;
 const GRAPH_ZOOM_MAX = 2.5;
+const GRAPH_LABEL_MAX_SCALE = 1.35;
 const TOUCH_PINCH_ZOOM_SPEED = 1.5;
 const EMPTY_GRAPH_NODES: RelationshipGraphNode[] = [];
-const GRAPH_LAYOUT = {
-  centerForce: 0.001,
-  degreeCenterForce: 0.0035,
-  repelForce: 1400,
-  collisionForce: 4.2,
-  linkForce: 0.015,
-  linkDistance: 150,
-  iterations: 220,
-  damping: 0.8,
-} as const;
+const EMPTY_GRAPH: RelationshipGraph = { nodes: [], edges: [] };
 
 export enum RelationshipGraphKind {
   Session = "session",
@@ -49,59 +53,6 @@ const RELATIONSHIP_KIND_LABELS = [
   { kind: RelationshipGraphKind.System, label: "System" },
   { kind: RelationshipGraphKind.Local, label: "Local" },
 ] as const;
-
-export type RelationshipGraphNode = {
-  /** Stable graph identity. Session graphs use a synthetic id. */
-  id?: string;
-  name: string;
-  label?: string;
-  description?: string;
-  kind?: string;
-  dependencies?: string[];
-  dependents?: string[];
-  dependencyIds?: string[];
-  dependentIds?: string[];
-};
-
-function nodeKey(node: { id?: string; name: string }) {
-  return node.id?.trim() || node.name;
-}
-
-function resolveNodeKey(
-  skills: RelationshipGraphNode[],
-  id: string,
-): string | undefined {
-  return skills.find((skill) => nodeKey(skill) === id) ? id : undefined;
-}
-
-function matchesFocus(node: RelationshipGraphNode, focus?: string) {
-  if (!focus) return false;
-  return nodeKey(node) === focus || node.name === focus;
-}
-
-export type RelationshipGraphEdge = {
-  from: string;
-  to: string;
-  key?: string;
-};
-
-type RelationshipEdge = {
-  from: string;
-  to: string;
-  key: string;
-};
-
-type LayoutNode = RelationshipGraphNode & {
-  degree: number;
-  radius: number;
-  x: number;
-  y: number;
-};
-
-type RelationshipGraph = {
-  nodes: LayoutNode[];
-  edges: RelationshipEdge[];
-};
 
 type PanInteraction = {
   pointerId: number;
@@ -128,87 +79,6 @@ type PinchInteraction = {
   focalWorldY: number;
 };
 
-function hashString(value: string) {
-  let hash = 2166136261;
-  for (let index = 0; index < value.length; index += 1) {
-    hash ^= value.charCodeAt(index);
-    hash = Math.imul(hash, 16777619);
-  }
-  return hash >>> 0;
-}
-
-function relationEdges(skills: RelationshipGraphNode[], explicitEdges?: RelationshipGraphEdge[]) {
-  const keys = new Set(skills.map((skill) => nodeKey(skill)));
-  const edges = new Map<string, RelationshipEdge>();
-  const addEdge = (from: string, to: string, suppliedKey?: string) => {
-    if (!keys.has(from) || !keys.has(to) || from === to) return;
-    const key = `${from}\u0000${to}`;
-    if (!edges.has(key)) edges.set(key, { from, to, key: suppliedKey ?? key });
-  };
-
-  if (explicitEdges) {
-    for (const edge of explicitEdges) addEdge(edge.from, edge.to, edge.key);
-    return [...edges.values()];
-  }
-
-  for (const skill of skills) {
-    const selfKey = nodeKey(skill);
-    if (skill.dependencyIds) {
-      for (const dependency of skill.dependencyIds) {
-        const dependencyKey = resolveNodeKey(skills, dependency);
-        if (dependencyKey) addEdge(dependencyKey, selfKey);
-      }
-    }
-    if (skill.dependentIds) {
-      for (const dependent of skill.dependentIds) {
-        const dependentKey = resolveNodeKey(skills, dependent);
-        if (dependentKey) addEdge(selfKey, dependentKey);
-      }
-    }
-  }
-
-  return [...edges.values()];
-}
-
-function connectedComponents(skills: RelationshipGraphNode[], edges: RelationshipEdge[]) {
-  const neighbors = new Map(skills.map((skill) => [nodeKey(skill), new Set<string>()]));
-  for (const edge of edges) {
-    neighbors.get(edge.from)?.add(edge.to);
-    neighbors.get(edge.to)?.add(edge.from);
-  }
-
-  const byKey = new Map(skills.map((skill) => [nodeKey(skill), skill]));
-  const visited = new Set<string>();
-  const components: RelationshipGraphNode[][] = [];
-  for (const skill of skills) {
-    const selfKey = nodeKey(skill);
-    if (visited.has(selfKey)) continue;
-    const component: RelationshipGraphNode[] = [];
-    const stack = [selfKey];
-    while (stack.length > 0) {
-      const key = stack.pop();
-      if (!key || visited.has(key)) continue;
-      visited.add(key);
-      const item = byKey.get(key);
-      if (item) component.push(item);
-      for (const neighbor of neighbors.get(key) ?? []) {
-        if (!visited.has(neighbor)) stack.push(neighbor);
-      }
-    }
-    components.push(component);
-  }
-
-  return components;
-}
-
-function clusterComponents(skills: RelationshipGraphNode[], edges: RelationshipEdge[]) {
-  const components = connectedComponents(skills, edges).sort((left, right) => right.length - left.length);
-  const connected = components.filter((component) => component.length > 1);
-  const isolated = components.filter((component) => component.length === 1).flat();
-  for (let index = 0; index < isolated.length; index += 12) connected.push(isolated.slice(index, index + 12));
-  return connected.length > 0 ? connected : components;
-}
-
 function isSessionNodeKind(kind?: string) {
   return kind === RelationshipGraphKind.Session || kind?.startsWith("session-") === true;
 }
@@ -233,77 +103,76 @@ function labelOpacityForNode(node: LayoutNode, compact: boolean) {
   return MIN_LABEL_OPACITY + (MAX_LABEL_OPACITY - MIN_LABEL_OPACITY) * sizeRatio;
 }
 
-function buildGraph(
-  skills: RelationshipGraphNode[],
-  explicitEdges?: RelationshipGraphEdge[],
+function labelScaleForZoom(zoom: number) {
+  return Math.min(1, GRAPH_LABEL_MAX_SCALE / zoom);
+}
+
+type RenderedRelationshipNode = LayoutNode & {
+  label: string;
+  labelOnRight: boolean;
+};
+
+function estimatedLabelWidth(label: string) {
+  return [...label].reduce((width, character) => width + (character.codePointAt(0)! > 0xff ? 15 : 8.2), 0);
+}
+
+function labelBoundsForNode(node: RenderedRelationshipNode, labelScale: number) {
+  const labelX = node.x + (node.labelOnRight ? node.radius + 7 : -node.radius - 7);
+  const width = estimatedLabelWidth(node.label) * labelScale;
+  const height = 20 * labelScale;
+  return {
+    left: node.labelOnRight ? labelX : labelX - width,
+    right: node.labelOnRight ? labelX + width : labelX,
+    top: node.y - height / 2,
+    bottom: node.y + height / 2,
+  };
+}
+
+function labelsOverlap(left: ReturnType<typeof labelBoundsForNode>, right: ReturnType<typeof labelBoundsForNode>) {
+  return left.left < right.right && right.left < left.right && left.top < right.bottom && right.top < left.bottom;
+}
+
+function isFocusedNode(node: LayoutNode, focusName?: string) {
+  return Boolean(focusName && (node.name === focusName || nodeKey(node) === focusName));
+}
+
+function visibleLabelKeys(
+  nodes: RenderedRelationshipNode[],
+  labelScale: number,
+  hoveredName: string | null,
   focusName?: string,
-  compact = false,
-): RelationshipGraph {
-  const edges = relationEdges(skills, explicitEdges);
-  const degree = new Map(skills.map((skill) => [nodeKey(skill), 0]));
-  for (const edge of edges) {
-    degree.set(edge.from, (degree.get(edge.from) ?? 0) + 1);
-    degree.set(edge.to, (degree.get(edge.to) ?? 0) + 1);
+  connectedNames?: Set<string> | null,
+) {
+  const ordered = [...nodes].sort((left, right) => {
+    const leftPriority = (nodeKey(left) === hoveredName ? 2 : 0) + (isFocusedNode(left, focusName) ? 1 : 0);
+    const rightPriority = (nodeKey(right) === hoveredName ? 2 : 0) + (isFocusedNode(right, focusName) ? 1 : 0);
+    return rightPriority - leftPriority
+      || right.degree - left.degree
+      || right.radius - left.radius
+      || left.label.localeCompare(right.label);
+  });
+  const visible = new Set<string>();
+  const visibleBounds: ReturnType<typeof labelBoundsForNode>[] = [];
+  for (const node of ordered) {
+    const bounds = labelBoundsForNode(node, labelScale);
+    const forced = connectedNames?.has(nodeKey(node)) === true
+      || nodeKey(node) === hoveredName
+      || isFocusedNode(node, focusName);
+    if (!forced && visibleBounds.some((visibleBound) => labelsOverlap(bounds, visibleBound))) continue;
+    visible.add(nodeKey(node));
+    visibleBounds.push(bounds);
   }
+  return visible;
+}
 
-  const clusters = clusterComponents(skills, edges);
-  const positions = new Map<string, { x: number; y: number }>();
-  const centerX = VIEWBOX_WIDTH / 2;
-  const centerY = VIEWBOX_HEIGHT / 2;
-  const satelliteRadius = Math.min(390, 288 + clusters.length * 12);
-
-  clusters.forEach((cluster, clusterIndex) => {
-    const angle = -Math.PI / 2 + ((clusterIndex - 1) / Math.max(1, clusters.length - 1)) * Math.PI * 2;
-    const clusterCenter = clusterIndex === 0 || clusters.length === 1
-      ? { x: centerX, y: centerY }
-      : {
-        x: centerX + Math.cos(angle) * satelliteRadius,
-        y: centerY + Math.sin(angle) * Math.min(218, satelliteRadius * 0.54),
-      };
-    const ordered = [...cluster].sort((left, right) => {
-      if (matchesFocus(left, focusName)) return -1;
-      if (matchesFocus(right, focusName)) return 1;
-      const degreeDelta = (degree.get(nodeKey(right)) ?? 0) - (degree.get(nodeKey(left)) ?? 0);
-      return degreeDelta || left.name.localeCompare(right.name);
-    });
-    const hub = ordered[0];
-    if (hub) positions.set(nodeKey(hub), clusterCenter);
-    if (ordered.length === 1) return;
-
-    const ringRadius = clusterIndex === 0 || clusters.length === 1
-      ? Math.min(compact ? 180 : 260, (compact ? 40 : 68) + Math.sqrt(ordered.length) * 34)
-      : Math.min(88, 22 + Math.sqrt(ordered.length) * 14);
-    const horizontalSpread = compact ? 1.45 : 1.2;
-    ordered.slice(1).forEach((skill, index) => {
-      const selfKey = nodeKey(skill);
-      const nodeAngle = -Math.PI / 2 + (index / (ordered.length - 1)) * Math.PI * 2;
-      const jitter = 0.9 + (hashString(selfKey) % 15) / 100;
-      positions.set(selfKey, {
-        x: clusterCenter.x + Math.cos(nodeAngle) * ringRadius * horizontalSpread * jitter,
-        y: clusterCenter.y + Math.sin(nodeAngle) * ringRadius * jitter,
-      });
-    });
-  });
-
-  const nodes = skills.map((skill) => {
-    const selfKey = nodeKey(skill);
-    const nodeDegree = degree.get(selfKey) ?? 0;
-    const position = positions.get(selfKey) ?? { x: centerX, y: centerY };
-    return {
-      ...skill,
-      degree: nodeDegree,
-      radius: matchesFocus(skill, focusName)
-        ? compact
-          ? Math.min(24, 13 + Math.sqrt(nodeDegree) * 2.2)
-          : Math.min(16, 8 + Math.sqrt(nodeDegree) * 1.6)
-        : compact
-          ? Math.min(14, 6 + Math.sqrt(nodeDegree) * 1.8)
-          : Math.min(9, 3.6 + Math.sqrt(nodeDegree) * 1.25),
-      ...position,
-    };
-  });
-
-  return { nodes: relaxedNodes(nodes, edges), edges };
+function labelOnRightForNode(node: LayoutNode, label: string) {
+  const outwardRight = node.x >= VIEWBOX_WIDTH / 2;
+  const labelX = node.x + (outwardRight ? node.radius + 7 : -node.radius - 7);
+  const width = estimatedLabelWidth(label);
+  const left = outwardRight ? labelX : labelX - width;
+  const right = outwardRight ? labelX + width : labelX;
+  if (left >= 16 && right <= VIEWBOX_WIDTH - 16) return outwardRight;
+  return !outwardRight;
 }
 
 export function buildRelationshipGraphForPerformance(
@@ -312,80 +181,64 @@ export function buildRelationshipGraphForPerformance(
   focusName?: string,
   compact = false,
 ) {
-  return buildGraph(skills, explicitEdges, focusName, compact);
+  return buildRelationshipGraph(skills, explicitEdges, focusName, compact);
 }
 
-function edgePath(from: LayoutNode, to: LayoutNode, key: string) {
+function edgeCurve(from: LayoutNode, to: LayoutNode, key: string) {
   const deltaX = to.x - from.x;
   const deltaY = to.y - from.y;
   const length = Math.max(1, Math.sqrt(deltaX * deltaX + deltaY * deltaY));
-  const curve = ((hashString(key) % 3) - 1) * Math.min(24, length * 0.08);
-  const controlX = (from.x + to.x) / 2 - (deltaY / length) * curve;
-  const controlY = (from.y + to.y) / 2 + (deltaX / length) * curve;
+  const curveFactor = (hashString(key) % 2001) / 1000 - 1;
+  const curve = curveFactor * Math.min(30, length * 0.1);
+  return {
+    controlX: (from.x + to.x) / 2 - (deltaY / length) * curve,
+    controlY: (from.y + to.y) / 2 + (deltaX / length) * curve,
+  };
+}
+
+function edgePoint(from: LayoutNode, to: LayoutNode, controlX: number, controlY: number, progress: number) {
+  const inverseProgress = 1 - progress;
+  return {
+    x: inverseProgress * inverseProgress * from.x
+      + 2 * inverseProgress * progress * controlX
+      + progress * progress * to.x,
+    y: inverseProgress * inverseProgress * from.y
+      + 2 * inverseProgress * progress * controlY
+      + progress * progress * to.y,
+  };
+}
+
+function edgeCenterlinePath(from: LayoutNode, to: LayoutNode, key: string) {
+  const { controlX, controlY } = edgeCurve(from, to, key);
   return `M ${from.x.toFixed(1)} ${from.y.toFixed(1)} Q ${controlX.toFixed(1)} ${controlY.toFixed(1)} ${to.x.toFixed(1)} ${to.y.toFixed(1)}`;
 }
 
-function relaxedNodes(nodes: LayoutNode[], edges: RelationshipEdge[]) {
-  const positioned = nodes.map((node) => ({ ...node, velocityX: 0, velocityY: 0 }));
-  const indexByKey = new Map(positioned.map((node, index) => [nodeKey(node), index]));
-  const maxDegree = Math.max(1, ...positioned.map((node) => node.degree));
-  const minX = 34;
-  const maxX = VIEWBOX_WIDTH - 34;
-  const minY = 28;
-  const maxY = VIEWBOX_HEIGHT - 28;
+function edgeRibbonPath(from: LayoutNode, to: LayoutNode, key: string, startWidth: number, endWidth: number) {
+  const { controlX, controlY } = edgeCurve(from, to, key);
+  const left: string[] = [];
+  const right: string[] = [];
+  const sampleCount = 14;
 
-  for (let iteration = 0; iteration < GRAPH_LAYOUT.iterations; iteration += 1) {
-    const forces = positioned.map(() => ({ x: 0, y: 0 }));
-    for (let leftIndex = 0; leftIndex < positioned.length; leftIndex += 1) {
-      const left = positioned[leftIndex];
-      for (let rightIndex = leftIndex + 1; rightIndex < positioned.length; rightIndex += 1) {
-        const right = positioned[rightIndex];
-        const deltaX = right.x - left.x;
-        const deltaY = right.y - left.y;
-        const distance = Math.max(1, Math.sqrt(deltaX * deltaX + deltaY * deltaY));
-        const minimumDistance = 26 + left.radius + right.radius;
-        const strength = distance < minimumDistance
-          ? GRAPH_LAYOUT.collisionForce + (minimumDistance - distance) * 0.18
-          : GRAPH_LAYOUT.repelForce / (distance * distance);
-        const forceX = (deltaX / distance) * strength;
-        const forceY = (deltaY / distance) * strength;
-        forces[leftIndex].x -= forceX;
-        forces[leftIndex].y -= forceY;
-        forces[rightIndex].x += forceX;
-        forces[rightIndex].y += forceY;
-      }
-    }
-
-    for (const edge of edges) {
-      const fromIndex = indexByKey.get(edge.from);
-      const toIndex = indexByKey.get(edge.to);
-      if (fromIndex === undefined || toIndex === undefined) continue;
-      const from = positioned[fromIndex];
-      const to = positioned[toIndex];
-      const deltaX = to.x - from.x;
-      const deltaY = to.y - from.y;
-      const distance = Math.max(1, Math.sqrt(deltaX * deltaX + deltaY * deltaY));
-      const strength = (distance - GRAPH_LAYOUT.linkDistance) * GRAPH_LAYOUT.linkForce;
-      const forceX = (deltaX / distance) * strength;
-      const forceY = (deltaY / distance) * strength;
-      forces[fromIndex].x += forceX;
-      forces[fromIndex].y += forceY;
-      forces[toIndex].x -= forceX;
-      forces[toIndex].y -= forceY;
-    }
-
-    positioned.forEach((node, index) => {
-      const centralPull = GRAPH_LAYOUT.centerForce + (node.degree / maxDegree) * GRAPH_LAYOUT.degreeCenterForce;
-      forces[index].x += (VIEWBOX_WIDTH / 2 - node.x) * centralPull;
-      forces[index].y += (VIEWBOX_HEIGHT / 2 - node.y) * centralPull;
-      node.velocityX = (node.velocityX + forces[index].x) * GRAPH_LAYOUT.damping;
-      node.velocityY = (node.velocityY + forces[index].y) * GRAPH_LAYOUT.damping;
-      node.x = Math.max(minX, Math.min(maxX, node.x + node.velocityX));
-      node.y = Math.max(minY, Math.min(maxY, node.y + node.velocityY));
-    });
+  for (let index = 0; index <= sampleCount; index += 1) {
+    const progress = index / sampleCount;
+    const point = edgePoint(from, to, controlX, controlY, progress);
+    const tangentX = 2 * ((1 - progress) * (controlX - from.x) + progress * (to.x - controlX));
+    const tangentY = 2 * ((1 - progress) * (controlY - from.y) + progress * (to.y - controlY));
+    const tangentLength = Math.max(1, Math.sqrt(tangentX * tangentX + tangentY * tangentY));
+    const halfWidth = (startWidth + (endWidth - startWidth) * progress) / 2;
+    const normalX = -tangentY / tangentLength;
+    const normalY = tangentX / tangentLength;
+    left.push(`${(point.x + normalX * halfWidth).toFixed(2)} ${(point.y + normalY * halfWidth).toFixed(2)}`);
+    right.push(`${(point.x - normalX * halfWidth).toFixed(2)} ${(point.y - normalY * halfWidth).toFixed(2)}`);
   }
 
-  return positioned.map(({ velocityX: _velocityX, velocityY: _velocityY, ...node }) => node);
+  return `M ${left.join(" L ")} L ${right.reverse().join(" L ")} Z`;
+}
+
+function edgeWidthForDegree(degree: number) {
+  if (degree >= 12) return 0.58;
+  if (degree >= 5) return 0.86;
+  return 1.22;
 }
 
 function graphViewBox(nodes: LayoutNode[], compact: boolean) {
@@ -478,6 +331,8 @@ export function SkillRelationshipMap({
   const panInteractionRef = useRef<PanInteraction | null>(null);
   const pointerPositionsRef = useRef(new Map<number, PointerPosition>());
   const pinchInteractionRef = useRef<PinchInteraction | null>(null);
+  const viewportFrameRef = useRef(0);
+  const pendingViewportRef = useRef<{ zoom?: number; pan: { x: number; y: number } } | null>(null);
   const graphNodes: RelationshipGraphNode[] = nodes ?? EMPTY_GRAPH_NODES;
   const graphInputKey = useMemo(() => JSON.stringify({
     compact,
@@ -494,7 +349,58 @@ export function SkillRelationshipMap({
     ]),
     edges: edges?.map((edge) => [edge.from, edge.to, edge.key ?? ""]),
   }), [compact, edges, focusName, graphNodes]);
-  const graph = useMemo(() => buildGraph(graphNodes, edges, focusName, compact), [graphInputKey]);
+  const [layoutState, setLayoutState] = useState<{
+    key: string;
+    graph: RelationshipGraph;
+    loading: boolean;
+    error: string;
+  }>({ key: "", graph: EMPTY_GRAPH, loading: false, error: "" });
+  useEffect(() => {
+    if (graphNodes.length === 0) {
+      setLayoutState({ key: graphInputKey, graph: EMPTY_GRAPH, loading: false, error: "" });
+      return;
+    }
+    const cached = cachedRelationshipLayout(graphInputKey);
+    if (cached) {
+      setLayoutState({ key: graphInputKey, graph: cached, loading: false, error: "" });
+      return;
+    }
+    let cancelled = false;
+    setLayoutState((current) => ({ ...current, key: graphInputKey, loading: true, error: "" }));
+    void requestRelationshipLayout({ key: graphInputKey, nodes: graphNodes, edges, focusName, compact })
+      .then((graph) => {
+        if (!cancelled) setLayoutState({ key: graphInputKey, graph, loading: false, error: "" });
+      })
+      .catch((layoutError) => {
+        if (!cancelled) setLayoutState((current) => ({
+          ...current,
+          key: graphInputKey,
+          loading: false,
+          error: layoutError instanceof Error ? layoutError.message : String(layoutError),
+        }));
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [graphInputKey]);
+  useEffect(() => () => {
+    if (viewportFrameRef.current !== 0) window.cancelAnimationFrame(viewportFrameRef.current);
+  }, []);
+  const graph = layoutState.graph;
+  const layoutLoading = layoutState.loading || layoutState.key !== graphInputKey;
+  const labelScale = labelScaleForZoom(zoom);
+  const scheduleViewport = (next: { zoom?: number; pan: { x: number; y: number } }) => {
+    pendingViewportRef.current = next;
+    if (viewportFrameRef.current !== 0) return;
+    viewportFrameRef.current = window.requestAnimationFrame(() => {
+      viewportFrameRef.current = 0;
+      const pendingViewport = pendingViewportRef.current;
+      pendingViewportRef.current = null;
+      if (!pendingViewport) return;
+      if (pendingViewport.zoom !== undefined) setZoom(pendingViewport.zoom);
+      setPan(pendingViewport.pan);
+    });
+  };
   const viewBox = useMemo(() => graphViewBox(graph.nodes, compact), [compact, graph.nodes]);
   const pannedViewBox = useMemo(() => zoomedViewBox(viewBox, zoom, pan), [pan, viewBox, zoom]);
   const renderedEdges = useMemo(() => {
@@ -502,13 +408,23 @@ export function SkillRelationshipMap({
     return graph.edges.flatMap((edge) => {
       const from = nodesByKey.get(edge.from);
       const to = nodesByKey.get(edge.to);
-      return from && to ? [{ key: edge.key, d: edgePath(from, to, edge.key), from: edge.from, to: edge.to }] : [];
+      const endpointDegree = from && to ? Math.max(from.degree, to.degree) : 0;
+      const density = endpointDegree >= 12 ? "high" : endpointDegree >= 5 ? "medium" : "low";
+      return from && to ? [{
+        key: edge.key,
+        d: edgeRibbonPath(from, to, edge.key, edgeWidthForDegree(from.degree), edgeWidthForDegree(to.degree)),
+        centerline: edgeCenterlinePath(from, to, edge.key),
+        from: edge.from,
+        to: edge.to,
+        congested: density === "high",
+        density,
+      }] : [];
     });
   }, [graph.edges, graph.nodes]);
   const renderedNodes = useMemo(() => graph.nodes.map((node) => ({
     ...node,
     label: shortName(relationshipNodeLabel(node)),
-    labelOnRight: node.x < VIEWBOX_WIDTH / 2,
+    labelOnRight: labelOnRightForNode(node, shortName(relationshipNodeLabel(node))),
   })), [graph.nodes]);
   const connectedNames = useMemo(() => {
     if (!hoveredName) return null;
@@ -519,6 +435,10 @@ export function SkillRelationshipMap({
     }
     return names;
   }, [graph.edges, hoveredName]);
+  const visibleLabels = useMemo(
+    () => visibleLabelKeys(renderedNodes, labelScale, hoveredName, focusName, connectedNames),
+    [connectedNames, focusName, hoveredName, labelScale, renderedNodes],
+  );
   const handleTrackpadZoom = useTrackpadZoom(({ factor, clientX, clientY, rect }) => {
     const bounds = viewBoxBounds(viewBox);
     const size = viewBoxSize(pannedViewBox);
@@ -645,8 +565,7 @@ export function SkillRelationshipMap({
         x: centeredX - (pinch.focalWorldX - pointerRatioX * nextWidth),
         y: centeredY - (pinch.focalWorldY - pointerRatioY * nextHeight),
       }, bounds, { width: nextWidth, height: nextHeight });
-      setZoom(nextZoom);
-      setPan(nextPan);
+      scheduleViewport({ zoom: nextZoom, pan: nextPan });
       setIsPanning(false);
       return;
     }
@@ -660,10 +579,10 @@ export function SkillRelationshipMap({
     interaction.moved = true;
     setIsPanning(true);
     const bounds = viewBoxBounds(viewBox);
-    setPan(clampPan({
+    scheduleViewport({ pan: clampPan({
       x: interaction.startPanX + (deltaX / rect.width) * interaction.viewBoxWidth,
       y: interaction.startPanY + (deltaY / rect.height) * interaction.viewBoxHeight,
-    }, bounds, { width: interaction.viewBoxWidth, height: interaction.viewBoxHeight }));
+    }, bounds, { width: interaction.viewBoxWidth, height: interaction.viewBoxHeight }) });
   };
   const handlePointerUp = (event: PointerEvent<SVGSVGElement>, activateNode = true) => {
     const wasPinching = pinchInteractionRef.current?.pointerIds.includes(event.pointerId) ?? false;
@@ -692,15 +611,20 @@ export function SkillRelationshipMap({
       onOpenSkill(name);
     }
   };
-  const hasGraphNodes = graphNodes.length > 0;
+  const hasGraphInput = graphNodes.length > 0;
+  const hasGraphNodes = graph.nodes.length > 0;
 
   return (
-    <section className={`skillRelationshipMap${compact ? " isCompact" : ""}`} aria-label="Skill relationships">
-      {loading && !hasGraphNodes ? (
+    <section
+      className={`skillRelationshipMap${compact ? " isCompact" : ""}`}
+      data-hovered={Boolean(hoveredName)}
+      aria-label="Skill relationships"
+    >
+      {(loading || layoutLoading) && !hasGraphNodes ? (
         <LoadingState label="Loading skill relationships" />
-      ) : error && !hasGraphNodes ? (
-        <LoadErrorState message={error} onRetry={onRetry} />
-      ) : !hasGraphNodes ? (
+      ) : (error || layoutState.error) && !hasGraphNodes ? (
+        <LoadErrorState message={error || layoutState.error} onRetry={onRetry} />
+      ) : !hasGraphInput ? (
         <div className="skillRelationshipEmpty">No skill relationships found.</div>
       ) : (
         <div className="skillRelationshipContent">
@@ -715,16 +639,39 @@ export function SkillRelationshipMap({
               onPointerMove={handlePointerMove}
               onPointerUp={handlePointerUp}
             >
+            <defs>
+              <marker
+                id="skillRelationshipArrow"
+                markerHeight="6"
+                markerUnits="userSpaceOnUse"
+                markerWidth="7"
+                orient="auto"
+                refX="6"
+                refY="3"
+                viewBox="0 0 7 6"
+              >
+                <path d="M 0 0 L 7 3 L 0 6 Z" fill="var(--line-strong)" />
+              </marker>
+            </defs>
             <g className="skillRelationshipEdges" aria-hidden="true">
               {renderedEdges.map((edge) => {
                 const active = !hoveredName || edge.from === hoveredName || edge.to === hoveredName;
                 return (
-                  <path
-                    className="skillRelationshipEdge"
-                    data-active={active}
-                    d={edge.d}
-                    key={edge.key}
-                  />
+                  <g key={edge.key}>
+                    <path
+                      className="skillRelationshipEdge"
+                      data-active={active}
+                      data-congested={edge.congested}
+                      data-density={edge.density}
+                      d={edge.d}
+                    />
+                    <path
+                      className="skillRelationshipEdgeDirection"
+                      data-active={active}
+                      d={edge.centerline}
+                      markerEnd="url(#skillRelationshipArrow)"
+                    />
+                  </g>
                 );
               })}
             </g>
@@ -733,6 +680,7 @@ export function SkillRelationshipMap({
                 const selfKey = nodeKey(node);
                 const active = !connectedNames || connectedNames.has(selfKey);
                 const labelOpacity = selfKey === hoveredName ? 1 : active ? labelOpacityForNode(node, compact) : 0.16;
+                const labelX = node.x + (node.labelOnRight ? node.radius + 7 : -node.radius - 7);
                 return (
                   <g
                     aria-label={`${relationshipKindLabel(node.kind) ? `${relationshipKindLabel(node.kind)}: ` : ""}${relationshipNodeLabel(node)}, ${node.degree} relationships`}
@@ -755,9 +703,10 @@ export function SkillRelationshipMap({
                       className="skillRelationshipLabel"
                       data-active={active}
                       dominantBaseline="middle"
-                      style={{ opacity: labelOpacity }}
+                      style={{ opacity: visibleLabels.has(selfKey) ? labelOpacity : 0 }}
                       textAnchor={node.labelOnRight ? "start" : "end"}
-                      x={node.x + (node.labelOnRight ? node.radius + 7 : -node.radius - 7)}
+                      transform={`translate(${labelX} ${node.y}) scale(${labelScale}) translate(${-labelX} ${-node.y})`}
+                      x={labelX}
                       y={node.y}
                     >
                       {node.label}
@@ -768,13 +717,13 @@ export function SkillRelationshipMap({
             </g>
             </svg>
           </div>
-          {loading ? (
+          {loading || layoutLoading ? (
             <div className="skillRelationshipStatusOverlay" aria-live="polite">
               <LoadingState label="Refreshing skill relationships" />
             </div>
-          ) : error ? (
+          ) : error || layoutState.error ? (
             <div className="skillRelationshipStatusOverlay">
-              <LoadErrorState message={error} onRetry={onRetry} />
+              <LoadErrorState message={error || layoutState.error} onRetry={onRetry} />
             </div>
           ) : null}
         </div>

@@ -7,6 +7,10 @@ export type PromptRecord = {
   updatedAt: string;
 };
 
+export function promptDisplayName(prompt: Pick<PromptRecord, "title"> | null | undefined): string {
+  return prompt?.title || "Prompt";
+}
+
 export function normalizePromptTags(value: string[]): string[] {
   const tags: string[] = [];
   for (const tag of value.flatMap((item) => item.split(","))) {

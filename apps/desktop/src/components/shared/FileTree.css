@@ -1,0 +1,228 @@
+.fileTree {
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  padding: 10px 8px;
+  border-right: 1px solid var(--line);
+  background: var(--file-tree-bg);
+  font-size: var(--text-ui);
+  overflow: auto;
+}
+
+.fileTree.collapsed {
+  padding: 12px 6px;
+  overflow: hidden;
+}
+
+.fileTreeBody {
+  height: 100%;
+  min-height: 100%;
+  display: flex;
+  flex-direction: column;
+}
+
+.fileTreeBody > .fileTreeLoading {
+  min-height: 0;
+  flex: 1 1 0;
+}
+
+.fileTree.collapsed .fileTreeHeader,
+.fileTree.collapsed .fileTreeToggle {
+  justify-content: center;
+  padding: 0;
+}
+
+.fileTreeHeader {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 6px;
+}
+
+.fileTreeToggle {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: var(--control-height);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: var(--radius-md);
+  color: var(--muted);
+  background: transparent;
+  cursor: pointer;
+  font-size: var(--text-ui);
+  font-weight: 500;
+}
+
+.fileTreeToggle:hover {
+  color: var(--text);
+}
+
+.fileTreeActions {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.fileTreeRows {
+  min-height: 0;
+  flex: 1 1 auto;
+}
+
+.fileTreeMotionRow {
+  width: 100%;
+  min-width: 0;
+}
+
+.fileItem {
+  position: relative;
+  width: 100%;
+  min-width: 0;
+  height: var(--control-height-row);
+  margin: 0;
+  padding: 0 8px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border: 0;
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+  font-size: var(--text-ui);
+  line-height: var(--leading-body);
+  outline: none;
+  transition: color 140ms ease, background-color 180ms ease;
+}
+
+.fileItem svg,
+.treeFileIcon {
+  flex: 0 0 auto;
+}
+
+.treeFileIcon {
+  position: relative;
+  z-index: 1;
+  width: 16px;
+  height: 16px;
+  display: grid;
+  place-items: center;
+  color: var(--muted);
+  transition: color 140ms ease;
+}
+
+.treeFileIconSwap {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+}
+
+.fileItem.fileTone-folder .treeFileIcon {
+  color: var(--amber);
+}
+
+.fileItem.fileTone-code .treeFileIcon {
+  color: var(--tone-info);
+}
+
+.fileItem.fileTone-style .treeFileIcon {
+  color: var(--syntax-number);
+}
+
+.fileItem.fileTone-data .treeFileIcon {
+  color: var(--amber);
+}
+
+.fileItem.fileTone-document .treeFileIcon {
+  color: var(--muted);
+}
+
+.fileItem.fileTone-file .treeFileIcon {
+  color: var(--faint);
+}
+
+.fileItemName {
+  min-width: 0;
+  flex: 1 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fileItem input {
+  min-width: 0;
+  width: 100%;
+  height: var(--control-height-compact);
+  padding: 0 6px;
+  border: 1px solid var(--control-border);
+  border-radius: var(--control-radius);
+  color: inherit;
+  background: var(--panel-bg);
+  font: inherit;
+  line-height: var(--leading-body);
+}
+
+.fileItem input:focus,
+.fileItem input:focus-visible {
+  border-color: var(--line-strong);
+  outline: none;
+}
+
+.treeChevron {
+  position: relative;
+  z-index: 1;
+  width: 16px;
+  height: 16px;
+  display: inline-grid;
+  place-items: center;
+  flex: 0 0 16px;
+  color: var(--faint);
+}
+
+.treeChevron.empty {
+  opacity: 0;
+}
+
+.treeChevron:not(.empty) {
+  cursor: pointer;
+}
+
+.treeChevron:not(.empty):hover {
+  color: var(--text);
+}
+
+.fileItem:hover {
+  color: var(--text);
+}
+
+.fileItem.selected {
+  background: var(--file-tree-selected-bg);
+  color: var(--text);
+  font-weight: 600;
+}
+
+.fileItem:focus-visible {
+  box-shadow: inset 0 0 0 2px var(--focus-ring);
+}
+
+.fileTreeHeaderChevronExpanded {
+  transform: rotate(90deg);
+}
+
+.fileTreeToggle svg {
+  transition: transform 180ms ease;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .fileItem,
+  .treeChevron,
+  .treeFileIcon,
+  .fileTreeToggle svg {
+    transition: none;
+  }
+}

@@ -10,6 +10,17 @@
     "skills_list": {},
     "skills_refresh": {},
     "sessions_snapshot": {},
+    "sessions_list": {
+      "query": "fixture",
+      "sortKey": "title",
+      "sortDirection": "asc",
+      "page": 0,
+      "pageSize": 1,
+      "showChildSessions": false,
+      "selectedProjectKeys": [
+        "fixture"
+      ]
+    },
     "sessions_scan_start": {},
     "sessions_search": {
       "query": "fixture"
@@ -30,7 +41,7 @@
       "agent": "codex"
     },
     "skill_session_links": {
-      "skillName": "fixture"
+      "skillId": "fixture"
     },
     "settings_get": {},
     "settings_save": {
@@ -49,6 +60,36 @@
       ],
       "configProfiles": {}
     },
+    "assistant_ask": {
+      "conversationId": "fixture",
+      "requestId": "fixture",
+      "message": "fixture",
+      "history": [
+        {
+          "role": "user",
+          "content": "fixture"
+        }
+      ],
+      "context": {
+        "pageId": "fixture",
+        "pageTitle": "fixture",
+        "filters": {},
+        "selection": "fixture",
+        "selectedContent": [
+          "fixture"
+        ],
+        "skill": {},
+        "session": {},
+        "tendi": {}
+      },
+      "agent": "fixture",
+      "workspace": "fixture",
+      "persistUserMessage": false
+    },
+    "assistant_cancel": {
+      "conversationId": "fixture"
+    },
+    "assistant_chat_sessions": {},
     "session_projects_list": {},
     "project_scan_scopes_list": {},
     "project_scan_scopes_save": {
@@ -145,6 +186,15 @@
       "path": "fixture"
     },
     "mcp_list": {},
+    "mcp_probe": {
+      "agent": "codex",
+      "path": "fixture",
+      "expectedTrustHash": "fixture",
+      "name": "fixture",
+      "serverPath": [
+        "fixture"
+      ]
+    },
     "mcp_set_enabled": {
       "agent": "codex",
       "path": "fixture",
@@ -361,6 +411,7 @@
     "skills_list": [],
     "skills_refresh": [],
     "sessions_snapshot": [],
+    "sessions_list": [],
     "sessions_scan_start": [],
     "sessions_search": [],
     "analytics_overview": [],
@@ -371,6 +422,9 @@
     "skill_session_links": [],
     "settings_get": [],
     "settings_save": [],
+    "assistant_ask": [],
+    "assistant_cancel": [],
+    "assistant_chat_sessions": [],
     "session_projects_list": [],
     "project_scan_scopes_list": [],
     "project_scan_scopes_save": [],
@@ -396,6 +450,7 @@
     "hook_review": [],
     "hook_source_read": [],
     "mcp_list": [],
+    "mcp_probe": [],
     "mcp_set_enabled": [],
     "mcp_set_enabled_many": [],
     "prompts_list": [],
@@ -753,6 +808,31 @@
         }
       ]
     },
+    "sessions_list": {
+      "revision": 0,
+      "rows": [
+        {
+          "id": "fixture",
+          "agent": "codex",
+          "path": "fixture"
+        }
+      ],
+      "projectOptions": [
+        {
+          "key": "fixture",
+          "label": "fixture",
+          "title": "fixture",
+          "count": 0
+        }
+      ],
+      "total": 0,
+      "childSessionCount": 0,
+      "page": 0,
+      "pageCount": 1,
+      "pageStart": 0,
+      "pageEnd": 0,
+      "groupCount": 0
+    },
     "sessions_scan_start": {
       "generation": 0,
       "started": false
@@ -972,6 +1052,31 @@
       ],
       "configProfiles": {}
     },
+    "assistant_ask": {
+      "answer": "fixture",
+      "status": "completed",
+      "usage": {},
+      "error": "fixture"
+    },
+    "assistant_cancel": {
+      "cancelled": false
+    },
+    "assistant_chat_sessions": [
+      {
+        "id": "fixture",
+        "messages": [
+          {
+            "role": "user",
+            "content": "fixture"
+          }
+        ],
+        "linkedSession": {
+          "id": "fixture",
+          "agent": "fixture",
+          "path": "fixture"
+        }
+      }
+    ],
     "session_projects_list": [
       {
         "id": "fixture",
@@ -1275,6 +1380,20 @@
         "trust_hash": "fixture"
       }
     ],
+    "mcp_probe": {
+      "updated": [
+        {
+          "agent": "codex",
+          "name": "fixture",
+          "scope": "fixture",
+          "transport": "fixture",
+          "enabled": false,
+          "status": "fixture",
+          "path": "fixture",
+          "trust_hash": "fixture"
+        }
+      ]
+    },
     "mcp_set_enabled": {
       "updated": [
         {
@@ -2541,6 +2660,11 @@
       "id": "invalid",
       "result": null
     },
+    "sessions_list": {
+      "jsonrpc": "1.0",
+      "id": "invalid",
+      "result": null
+    },
     "sessions_scan_start": {
       "jsonrpc": "1.0",
       "id": "invalid",
@@ -2587,6 +2711,21 @@
       "result": null
     },
     "settings_save": {
+      "jsonrpc": "1.0",
+      "id": "invalid",
+      "result": null
+    },
+    "assistant_ask": {
+      "jsonrpc": "1.0",
+      "id": "invalid",
+      "result": null
+    },
+    "assistant_cancel": {
+      "jsonrpc": "1.0",
+      "id": "invalid",
+      "result": null
+    },
+    "assistant_chat_sessions": {
       "jsonrpc": "1.0",
       "id": "invalid",
       "result": null
@@ -2712,6 +2851,11 @@
       "result": null
     },
     "mcp_list": {
+      "jsonrpc": "1.0",
+      "id": "invalid",
+      "result": null
+    },
+    "mcp_probe": {
       "jsonrpc": "1.0",
       "id": "invalid",
       "result": null
@@ -3086,6 +3230,23 @@
         "error": "fixture"
       }
     },
+    "skills://changed": {
+      "id": 1,
+      "event": "skills://changed",
+      "payload": {
+        "paths": [
+          "fixture"
+        ]
+      }
+    },
+    "projection://changed": {
+      "id": 1,
+      "event": "projection://changed",
+      "payload": {
+        "domain": "agents",
+        "error": "fixture"
+      }
+    },
     "config://changed": {
       "id": 1,
       "event": "config://changed",
@@ -3101,6 +3262,15 @@
       "event": "tendi://update-available",
       "payload": {
         "status": "up-to-date"
+      }
+    },
+    "assistant://stream": {
+      "id": 1,
+      "event": "assistant://stream",
+      "payload": {
+        "conversationId": "fixture",
+        "requestId": "fixture",
+        "kind": "fixture"
       }
     }
   },
@@ -3125,6 +3295,16 @@
       "event": "skills://updates",
       "payload": {}
     },
+    "skills://changed": {
+      "id": "invalid",
+      "event": "skills://changed",
+      "payload": {}
+    },
+    "projection://changed": {
+      "id": "invalid",
+      "event": "projection://changed",
+      "payload": {}
+    },
     "config://changed": {
       "id": "invalid",
       "event": "config://changed",
@@ -3133,6 +3313,11 @@
     "tendi://update-available": {
       "id": "invalid",
       "event": "tendi://update-available",
+      "payload": {}
+    },
+    "assistant://stream": {
+      "id": "invalid",
+      "event": "assistant://stream",
       "payload": {}
     }
   }

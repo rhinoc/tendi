@@ -12,11 +12,13 @@ if (typeof mock.module !== "function") {
   });
 
   const {
+    sessionResumeError,
     sessionResumeErrorMessage,
     sessionResumeLabel,
     sessionResumeTargetForMenu,
     sessionResumeTargetsForMenu,
   } = await import("../src/lib/session-resume.ts");
+  const { SessionResumeErrorAction, SessionResumeErrorCode } = await import("../src/lib/sessions.ts");
 
   test("offers both explicit resume targets only when both are supported", () => {
     assert.deepEqual(sessionResumeTargetsForMenu({ terminal: true, app: true }), ["terminal", "app"]);
@@ -43,5 +45,24 @@ if (typeof mock.module !== "function") {
     assert.equal(sessionResumeLabel("success", "terminal"), "Session opened in terminal");
     assert.equal(sessionResumeLabel("error", "auto"), "Could not open session");
     assert.equal(sessionResumeErrorMessage(), "Could not open session. Try again.");
+  });
+
+  test("uses actionable messages for classified resume failures", () => {
+    assert.equal(
+      sessionResumeErrorMessage(sessionResumeError(SessionResumeErrorCode.DesktopRuntimeRequired)),
+      "Session resume is only available in the Tendi desktop app.",
+    );
+    assert.equal(
+      sessionResumeErrorMessage(sessionResumeError(SessionResumeErrorCode.DesktopCommandFailed, null, true, SessionResumeErrorAction.Retry)),
+      "Tendi could not reach the desktop runtime. Restart Tendi and try again.",
+    );
+    assert.equal(
+      sessionResumeErrorMessage(sessionResumeError(SessionResumeErrorCode.WorktreeNotFound, "orca")),
+      "Could not open this session in Orca. Open this project in Orca first, or choose another terminal in Settings.",
+    );
+    assert.equal(
+      sessionResumeErrorMessage(sessionResumeError(SessionResumeErrorCode.TerminalLaunchFailed, "orca", true, SessionResumeErrorAction.Retry)),
+      "Could not open session in Orca. Try again.",
+    );
   });
 }

@@ -1,5 +1,5 @@
 use std::{
-    collections::HashSet,
+    collections::{BTreeMap, HashMap, HashSet},
     fs,
     path::{Path, PathBuf},
 };
@@ -7,6 +7,7 @@ use std::{
 use anyhow::Result;
 use anyhow::bail;
 use chrono::{DateTime, SecondsFormat};
+use rusqlite::{Connection, OpenFlags, types::ValueRef};
 use serde_json::Value;
 use walkdir::WalkDir;
 
@@ -17,6 +18,12 @@ use crate::transcript::{
 use super::*;
 
 pub(super) struct CursorProvider;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CursorPluginScope {
+    Global,
+    Project,
+}
 
 const CURSOR_SKILL_FRONTMATTER_KEY: &str = "disable-model-invocation";
 
@@ -33,11 +40,15 @@ fn infer_mcp_transport(spec: &Value) -> Option<String> {
         .or_else(|| spec.get("type"))
         .and_then(Value::as_str)
         .map(str::to_string)
-        .or_else(|| spec.get("command").and_then(Value::as_str).map(|_| "stdio".to_string()))
         .or_else(|| {
-            spec.get("url").and_then(Value::as_str).map(|url| {
-                if url.contains("/sse") { "sse" } else { "http" }.to_string()
-            })
+            spec.get("command")
+                .and_then(Value::as_str)
+                .map(|_| "stdio".to_string())
+        })
+        .or_else(|| {
+            spec.get("url")
+                .and_then(Value::as_str)
+                .map(|url| if url.contains("/sse") { "sse" } else { "http" }.to_string())
         })
 }
 
@@ -56,6 +67,24 @@ fn infer_mcp_enabled(spec: &Value) -> bool {
         .and_then(Value::as_bool)
         .unwrap_or(false)
         && spec.get("enabled").and_then(Value::as_bool).unwrap_or(true)
+}
+
+fn enrich_mcp_spec(
+    _name: &str,
+    spec: &Value,
+    transport: &str,
+    enabled: bool,
+    base_dir: Option<&Path>,
+    probe_cache: &mut crate::mcp::McpProbeCache,
+) -> crate::mcp::McpEnrichment {
+    crate::mcp::enrich_json_mcp_spec_with_headers_at_dir(
+        spec,
+        transport,
+        enabled,
+        &BTreeMap::new(),
+        base_dir,
+        probe_cache,
+    )
 }
 
 fn update_mcp_server(spec: &mut serde_json::Map<String, Value>, enabled: bool) -> bool {
@@ -101,6 +130,7 @@ fn profile_paths_for_root(root: &Path) -> Vec<PathBuf> {
 
 pub(crate) fn scan_project_mcp(
     root: &Path,
+    probe_cache: &mut crate::mcp::McpProbeCache,
     servers: &mut Vec<McpServerRecord>,
     warnings: &mut Vec<String>,
 ) {
@@ -113,12 +143,28 @@ pub(crate) fn scan_project_mcp(
         infer_mcp_transport,
         infer_mcp_enabled,
         infer_mcp_status,
+        enrich_mcp_spec,
+        probe_cache,
         servers,
         warnings,
     );
     if !root.is_dir() {
         return;
     }
+    let plugin_scopes = cursor_plugin_scope_map(root);
+    let runtime_servers = cursor_runtime_servers(root);
+    let mut plugin_server_ids = HashSet::new();
+    scan_cursor_plugin_mcp(
+        root,
+        &plugin_scopes,
+        &runtime_servers,
+        probe_cache,
+        &mut plugin_server_ids,
+        servers,
+        warnings,
+    );
+    let metadata_scopes = cursor_metadata_scopes(root);
+    let mut global_servers = HashSet::new();
     for entry in WalkDir::new(root)
         .follow_links(true)
         .max_depth(4)
@@ -130,8 +176,155 @@ pub(crate) fn scan_project_mcp(
         let Some(scope) = entry_scope(root, path) else {
             continue;
         };
-        scan_cursor_metadata_mcp(path, &scope, servers, warnings);
+        scan_cursor_metadata_mcp(
+            path,
+            &scope,
+            &plugin_scopes,
+            &metadata_scopes,
+            &plugin_server_ids,
+            &mut global_servers,
+            probe_cache,
+            servers,
+            warnings,
+        );
     }
+}
+
+fn cursor_state_db_path(projects_root: &Path) -> Option<PathBuf> {
+    let home = projects_root.parent()?.parent()?;
+    #[cfg(target_os = "macos")]
+    let path = home.join("Library/Application Support/Cursor/User/globalStorage/state.vscdb");
+    #[cfg(target_os = "linux")]
+    let path = home.join(".config/Cursor/User/globalStorage/state.vscdb");
+    #[cfg(target_os = "windows")]
+    let path = home.join("AppData/Roaming/Cursor/User/globalStorage/state.vscdb");
+    Some(path)
+}
+
+fn state_value_rows(
+    connection: &Connection,
+    table: &str,
+    key_filter: &str,
+) -> Vec<(String, Vec<u8>)> {
+    let query = format!("SELECT key, value FROM {table} WHERE key LIKE ?1");
+    let Ok(mut statement) = connection.prepare(&query) else {
+        return Vec::new();
+    };
+    let Ok(rows) = statement.query_map([key_filter], |row| {
+        let value = match row.get_ref(1)? {
+            ValueRef::Blob(value) | ValueRef::Text(value) => value.to_vec(),
+            ValueRef::Null => Vec::new(),
+            ValueRef::Integer(value) => value.to_string().into_bytes(),
+            ValueRef::Real(value) => value.to_string().into_bytes(),
+        };
+        Ok((row.get::<_, String>(0)?, value))
+    }) else {
+        return Vec::new();
+    };
+    rows.filter_map(Result::ok).collect()
+}
+
+fn parse_cursor_json(value: &[u8]) -> Option<Value> {
+    let text = std::str::from_utf8(value).ok()?;
+    let start = text.find(|character| character == '[' || character == '{')?;
+    serde_json::from_str(&text[start..]).ok()
+}
+
+fn collect_plugin_attributions(value: &Value, names_by_scope_id: &mut HashMap<String, String>) {
+    match value {
+        Value::Object(object) => {
+            let attribution = object.get("pluginAttribution").and_then(Value::as_object);
+            let subject = object.get("slashSubject").and_then(Value::as_object);
+            if let (Some(attribution), Some(subject)) = (attribution, subject) {
+                if subject.get("scope").and_then(Value::as_str) == Some("plugin")
+                    && let (Some(display_name), Some(scope_id)) = (
+                        attribution.get("displayName").and_then(Value::as_str),
+                        subject.get("scopeId").and_then(Value::as_str),
+                    )
+                {
+                    names_by_scope_id.insert(
+                        scope_id.to_string(),
+                        display_name.trim().to_ascii_lowercase(),
+                    );
+                }
+            }
+            for child in object.values() {
+                collect_plugin_attributions(child, names_by_scope_id);
+            }
+        }
+        Value::Array(values) => {
+            for child in values {
+                collect_plugin_attributions(child, names_by_scope_id);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn cursor_plugin_scope_map(projects_root: &Path) -> HashMap<String, CursorPluginScope> {
+    let Some(state_db) = cursor_state_db_path(projects_root) else {
+        return HashMap::new();
+    };
+    let Ok(connection) = Connection::open_with_flags(
+        state_db,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    ) else {
+        return HashMap::new();
+    };
+
+    let mut global_ids = HashSet::new();
+    let mut project_ids = HashSet::new();
+    for (_key, bytes) in state_value_rows(&connection, "ItemTable", "cursor.plugins.installedIds.%")
+    {
+        let Some(Value::Array(entries)) = parse_cursor_json(&bytes) else {
+            continue;
+        };
+        for entry in entries {
+            let Some(object) = entry.as_object() else {
+                continue;
+            };
+            let Some(id) = object.get("id").and_then(|value| {
+                value
+                    .as_str()
+                    .map(str::to_string)
+                    .or_else(|| value.as_u64().map(|value| value.to_string()))
+            }) else {
+                continue;
+            };
+            let is_user_source =
+                object
+                    .get("sources")
+                    .and_then(Value::as_array)
+                    .is_some_and(|sources| {
+                        sources.iter().any(|source| source.as_str() == Some("user"))
+                    });
+            if is_user_source {
+                global_ids.insert(id);
+            } else {
+                project_ids.insert(id);
+            }
+        }
+    }
+
+    let mut names_by_scope_id = HashMap::new();
+    for (_key, bytes) in state_value_rows(&connection, "cursorDiskKV", "slashMenuItems/%") {
+        if let Some(value) = parse_cursor_json(&bytes) {
+            collect_plugin_attributions(&value, &mut names_by_scope_id);
+        }
+    }
+
+    let mut scopes = HashMap::new();
+    for (scope_id, plugin_name) in names_by_scope_id {
+        let scope = if global_ids.contains(&scope_id) {
+            CursorPluginScope::Global
+        } else if project_ids.contains(&scope_id) {
+            CursorPluginScope::Project
+        } else {
+            continue;
+        };
+        scopes.insert(plugin_name, scope);
+    }
+    scopes
 }
 
 fn entry_scope(root: &Path, path: &Path) -> Option<String> {
@@ -144,9 +337,270 @@ fn entry_scope(root: &Path, path: &Path) -> Option<String> {
         .map(str::to_string)
 }
 
+fn cursor_metadata_scopes(root: &Path) -> HashMap<String, HashSet<String>> {
+    let mut scopes = HashMap::new();
+    for entry in WalkDir::new(root)
+        .follow_links(true)
+        .max_depth(4)
+        .into_iter()
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_type().is_file() && entry.file_name() == "SERVER_METADATA.json")
+    {
+        let path = entry.path();
+        let Some(scope) = entry_scope(root, path) else {
+            continue;
+        };
+        let Ok(text) = fs::read_to_string(path) else {
+            continue;
+        };
+        let Ok(value) = serde_json::from_str::<Value>(&text) else {
+            continue;
+        };
+        let Some(server_identifier) = value.get("serverIdentifier").and_then(Value::as_str) else {
+            continue;
+        };
+        scopes
+            .entry(server_identifier.to_string())
+            .or_insert_with(HashSet::new)
+            .insert(scope);
+    }
+    scopes
+}
+
+#[derive(Debug, Clone)]
+struct CursorRuntimeServer {
+    path: PathBuf,
+    text: String,
+    status: String,
+}
+
+fn cursor_runtime_servers(root: &Path) -> HashMap<String, CursorRuntimeServer> {
+    let mut servers = HashMap::new();
+    for entry in WalkDir::new(root)
+        .follow_links(true)
+        .max_depth(4)
+        .into_iter()
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_type().is_file() && entry.file_name() == "SERVER_METADATA.json")
+    {
+        let path = entry.path();
+        let Ok(text) = fs::read_to_string(path) else {
+            continue;
+        };
+        let Ok(value) = serde_json::from_str::<Value>(&text) else {
+            continue;
+        };
+        let Some(server_identifier) = value.get("serverIdentifier").and_then(Value::as_str) else {
+            continue;
+        };
+        let status = path
+            .parent()
+            .map(|parent| parent.join("STATUS.md"))
+            .and_then(|status_path| fs::read_to_string(status_path).ok())
+            .map(|text| {
+                if text.to_ascii_lowercase().contains("needs authentication") {
+                    "needs-auth"
+                } else {
+                    "configured"
+                }
+            })
+            .unwrap_or("configured")
+            .to_string();
+        servers
+            .entry(server_identifier.to_string())
+            .or_insert_with(|| CursorRuntimeServer {
+                path: path.to_path_buf(),
+                text,
+                status,
+            });
+    }
+    servers
+}
+
+fn cursor_plugin_cache_root(projects_root: &Path) -> Option<PathBuf> {
+    projects_root
+        .parent()
+        .map(|cursor_root| cursor_root.join("plugins/cache"))
+}
+
+fn cursor_plugin_mcp_sources(
+    manifest_path: &Path,
+    manifest: &Value,
+    plugin_root: &Path,
+    warnings: &mut Vec<String>,
+) -> Vec<(PathBuf, String, Value)> {
+    let entries = match manifest.get("mcpServers") {
+        Some(Value::Array(entries)) => entries.iter().collect::<Vec<_>>(),
+        Some(value) => vec![value],
+        None => {
+            let candidates = [plugin_root.join("mcp.json"), plugin_root.join(".mcp.json")];
+            let Some(path) = candidates.into_iter().find(|path| path.is_file()) else {
+                return Vec::new();
+            };
+            return read_cursor_plugin_mcp_source(&path, warnings);
+        }
+    };
+
+    entries
+        .into_iter()
+        .filter_map(|entry| match entry {
+            Value::String(relative) => {
+                let path = plugin_root.join(relative);
+                read_cursor_plugin_mcp_source(&path, warnings)
+                    .into_iter()
+                    .next()
+            }
+            Value::Object(_) => {
+                let value = serde_json::json!({ "mcpServers": entry });
+                Some((manifest_path.to_path_buf(), value.to_string(), value))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+fn read_cursor_plugin_mcp_source(
+    path: &Path,
+    warnings: &mut Vec<String>,
+) -> Vec<(PathBuf, String, Value)> {
+    let Ok(text) = fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    let Ok(value) = serde_json::from_str::<Value>(&text) else {
+        warnings.push(format!(
+            "{}: invalid Cursor plugin MCP JSON",
+            path.display()
+        ));
+        return Vec::new();
+    };
+    vec![(path.to_path_buf(), text, value)]
+}
+
+fn cursor_plugin_server_identifier(plugin_name: &str, server_name: &str) -> String {
+    format!("plugin-{plugin_name}-{server_name}")
+}
+
+fn scan_cursor_plugin_mcp(
+    root: &Path,
+    plugin_scopes: &HashMap<String, CursorPluginScope>,
+    runtime_servers: &HashMap<String, CursorRuntimeServer>,
+    probe_cache: &mut crate::mcp::McpProbeCache,
+    plugin_server_ids: &mut HashSet<String>,
+    servers: &mut Vec<McpServerRecord>,
+    warnings: &mut Vec<String>,
+) {
+    let Some(cache_root) = cursor_plugin_cache_root(root) else {
+        return;
+    };
+    for entry in WalkDir::new(cache_root)
+        .follow_links(true)
+        .max_depth(6)
+        .into_iter()
+        .filter_map(Result::ok)
+        .filter(|entry| {
+            entry.file_type().is_file()
+                && entry.file_name().to_str() == Some("plugin.json")
+                && entry
+                    .path()
+                    .parent()
+                    .and_then(Path::file_name)
+                    .and_then(|value| value.to_str())
+                    != Some(".claude-plugin")
+        })
+    {
+        let manifest_path = entry.path();
+        let Ok(manifest_text) = fs::read_to_string(manifest_path) else {
+            continue;
+        };
+        let Ok(manifest) = serde_json::from_str::<Value>(&manifest_text) else {
+            continue;
+        };
+        let Some(plugin_name) = manifest.get("name").and_then(Value::as_str) else {
+            continue;
+        };
+        let plugin_name_key = plugin_name.trim().to_ascii_lowercase();
+        if plugin_scopes.get(&plugin_name_key) != Some(&CursorPluginScope::Global) {
+            continue;
+        }
+        let Some(plugin_root) = cursor_plugin_root(manifest_path) else {
+            continue;
+        };
+        for (mcp_path, mcp_text, mcp_value) in
+            cursor_plugin_mcp_sources(manifest_path, &manifest, plugin_root, warnings)
+        {
+            let Some(mcp_servers) = mcp_value.get("mcpServers").and_then(Value::as_object) else {
+                continue;
+            };
+            for (server_name, server) in mcp_servers {
+                let server_identifier = cursor_plugin_server_identifier(plugin_name, server_name);
+                if !plugin_server_ids.insert(server_identifier.clone()) {
+                    continue;
+                }
+                let enrichment = cursor_plugin_enrichment_from_manifest(
+                    &manifest,
+                    plugin_root,
+                    server_name,
+                    server,
+                    probe_cache,
+                );
+                let runtime = runtime_servers.get(&server_identifier);
+                let path = runtime
+                    .map(|runtime| runtime.path.clone())
+                    .unwrap_or_else(|| mcp_path.clone());
+                let (trust_hash, mut status) = runtime
+                    .map(|runtime| {
+                        (
+                            crate::fsutil::sha256_text(&runtime.text),
+                            runtime.status.clone(),
+                        )
+                    })
+                    .unwrap_or_else(|| {
+                        (
+                            crate::fsutil::sha256_text(&mcp_text),
+                            "configured".to_string(),
+                        )
+                    });
+                if enrichment.needs_login {
+                    status = "need-login".to_string();
+                }
+                servers.push(McpServerRecord {
+                    agent: AgentKind::Cursor,
+                    name: enrichment
+                        .server_name
+                        .clone()
+                        .unwrap_or_else(|| server_name.to_string()),
+                    scope: "global".to_string(),
+                    transport: "cursor-plugin".to_string(),
+                    enabled: true,
+                    status,
+                    path,
+                    trust_hash,
+                    probe_cache_version: crate::mcp::MCP_PROBE_CACHE_VERSION,
+                    probe_state: crate::mcp::probe_state_for_enrichment(&enrichment),
+                    server_path: Vec::new(),
+                    read_only_reason: Some("Cursor plugin MCP cannot be changed".to_string()),
+                    server_name: enrichment.server_name,
+                    server_title: enrichment.server_title,
+                    server_version: enrichment.server_version,
+                    server_description: enrichment.server_description,
+                    server_website_url: enrichment.server_website_url,
+                    probe_error: enrichment.probe_error,
+                    icons: enrichment.icons,
+                    tools: enrichment.tools,
+                });
+            }
+        }
+    }
+}
+
 fn scan_cursor_metadata_mcp(
     path: &Path,
     scope: &str,
+    plugin_scopes: &HashMap<String, CursorPluginScope>,
+    metadata_scopes: &HashMap<String, HashSet<String>>,
+    plugin_server_ids: &HashSet<String>,
+    global_servers: &mut HashSet<String>,
+    probe_cache: &mut crate::mcp::McpProbeCache,
     servers: &mut Vec<McpServerRecord>,
     warnings: &mut Vec<String>,
 ) {
@@ -180,7 +634,7 @@ fn scan_cursor_metadata_mcp(
         return;
     };
     let status_path = path.parent().map(|parent| parent.join("STATUS.md"));
-    let status = status_path
+    let mut status = status_path
         .as_ref()
         .and_then(|path| fs::read_to_string(path).ok())
         .map(|text| {
@@ -190,19 +644,483 @@ fn scan_cursor_metadata_mcp(
                 "configured"
             }
         })
+        .unwrap_or("configured");
+    let enrichment = cursor_plugin_enrichment(
+        path,
+        value.get("serverIdentifier").and_then(Value::as_str),
+        probe_cache,
+    );
+    if enrichment.needs_login {
+        status = "need-login";
+    }
+    let server_identifier = value
+        .get("serverIdentifier")
+        .and_then(Value::as_str)
         .unwrap_or_default();
+    if plugin_server_ids.contains(server_identifier) {
+        return;
+    }
+    let scope_kind = enrichment
+        .plugin_name
+        .as_deref()
+        .map(|name| name.to_ascii_lowercase())
+        .and_then(|name| plugin_scopes.get(&name).copied())
+        .or_else(|| {
+            metadata_scopes
+                .get(server_identifier)
+                .filter(|scopes| scopes.len() > 1)
+                .map(|_| CursorPluginScope::Global)
+        });
+    let scope = match scope_kind {
+        Some(CursorPluginScope::Global) => {
+            if !global_servers.insert(server_identifier.to_string()) {
+                return;
+            }
+            "global".to_string()
+        }
+        Some(CursorPluginScope::Project) | None => scope.to_string(),
+    };
+    let name = enrichment
+        .server_name
+        .as_deref()
+        .unwrap_or(name)
+        .to_string();
     servers.push(McpServerRecord {
         agent: AgentKind::Cursor,
-        name: name.to_string(),
-        scope: scope.to_string(),
+        name,
+        scope,
         transport: "cursor-plugin".to_string(),
         enabled: true,
         status: status.to_string(),
         path: path.to_path_buf(),
         trust_hash: crate::fsutil::sha256_text(&text),
+        probe_cache_version: crate::mcp::MCP_PROBE_CACHE_VERSION,
+        probe_state: crate::mcp::probe_state_for_enrichment(&enrichment),
         server_path: Vec::new(),
         read_only_reason: Some("Cursor plugin metadata cannot be changed".to_string()),
+        server_name: enrichment.server_name,
+        server_title: enrichment.server_title,
+        server_version: enrichment.server_version,
+        server_description: enrichment.server_description,
+        server_website_url: enrichment.server_website_url,
+        probe_error: enrichment.probe_error,
+        icons: enrichment.icons,
+        tools: enrichment.tools,
     });
+}
+
+fn svg_data_uri(path: &Path) -> Option<String> {
+    let bytes = fs::read(path).ok()?;
+    let mut uri = String::from("data:image/svg+xml,");
+    for byte in bytes {
+        if matches!(byte, b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~') {
+            uri.push(byte as char);
+        } else {
+            uri.push('%');
+            uri.push_str(&format!("{byte:02X}"));
+        }
+    }
+    Some(uri)
+}
+
+fn cursor_plugin_root(manifest_path: &Path) -> Option<&Path> {
+    let parent = manifest_path.parent()?;
+    match parent.file_name().and_then(|value| value.to_str()) {
+        Some(".cursor-plugin") | Some(".claude-plugin") => parent.parent(),
+        _ => Some(parent),
+    }
+}
+
+fn is_cursor_plugin_path(path: &Path) -> bool {
+    let components = path.components().collect::<Vec<_>>();
+    components.windows(3).any(|window| {
+        window[0].as_os_str() == std::ffi::OsStr::new(".cursor")
+            && window[1].as_os_str() == std::ffi::OsStr::new("plugins")
+            && window[2].as_os_str() == std::ffi::OsStr::new("cache")
+    })
+}
+
+fn cursor_root_for_path(path: &Path) -> Option<PathBuf> {
+    path.ancestors()
+        .find(|ancestor| ancestor.file_name().and_then(|value| value.to_str()) == Some(".cursor"))
+        .map(Path::to_path_buf)
+}
+
+fn cursor_plugin_enrichment_from_manifest(
+    manifest: &Value,
+    plugin_root: &Path,
+    server_name: &str,
+    server: &Value,
+    probe_cache: &mut crate::mcp::McpProbeCache,
+) -> crate::mcp::McpEnrichment {
+    let plugin_name = manifest
+        .get("name")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let mut enrichment = crate::mcp::McpEnrichment {
+        plugin_name,
+        server_name: Some(server_name.to_string()),
+        server_title: manifest
+            .get("displayName")
+            .and_then(Value::as_str)
+            .or_else(|| manifest.get("name").and_then(Value::as_str))
+            .map(str::to_string),
+        server_version: manifest
+            .get("version")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        server_description: manifest
+            .get("description")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        server_website_url: manifest
+            .get("homepage")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        ..Default::default()
+    };
+    enrichment.tools = server
+        .get("_meta")
+        .and_then(Value::as_object)
+        .and_then(|meta| meta.get("ideToolTitles"))
+        .and_then(Value::as_object)
+        .into_iter()
+        .flat_map(|titles| titles.iter())
+        .map(|(name, title)| crate::mcp::McpTool {
+            name: name.clone(),
+            title: title.as_str().map(str::to_string),
+            description: None,
+            input_schema: None,
+            icons: Vec::new(),
+        })
+        .take(512)
+        .collect();
+    let icon_path = manifest
+        .get("logo")
+        .and_then(Value::as_str)
+        .map(|relative| plugin_root.join(relative))
+        .filter(|path| path.is_file())
+        .or_else(|| {
+            server
+                .get("_meta")
+                .and_then(Value::as_object)
+                .and_then(|meta| meta.get("ideToolIconPath"))
+                .and_then(Value::as_str)
+                .map(|relative| plugin_root.join(relative))
+                .filter(|path| path.is_file())
+        });
+    if let Some(icon_path) = icon_path {
+        if let Some(src) = svg_data_uri(&icon_path) {
+            enrichment.icons = vec![crate::mcp::McpIcon {
+                src,
+                mime_type: Some("image/svg+xml".to_string()),
+                sizes: vec!["any".to_string()],
+                theme: None,
+            }];
+        }
+    }
+    let live = infer_mcp_transport(server)
+        .map(|transport| {
+            enrich_mcp_spec(
+                server_name,
+                server,
+                &transport,
+                true,
+                Some(plugin_root),
+                probe_cache,
+            )
+        })
+        .unwrap_or_default();
+    merge_cursor_plugin_enrichment(enrichment, live)
+}
+
+fn cursor_runtime_tools(metadata_path: &Path) -> Vec<crate::mcp::McpTool> {
+    let Some(tools_dir) = metadata_path.parent().map(|parent| parent.join("tools")) else {
+        return Vec::new();
+    };
+    let mut tools = WalkDir::new(tools_dir)
+        .max_depth(1)
+        .into_iter()
+        .filter_map(Result::ok)
+        .filter(|entry| {
+            entry.file_type().is_file()
+                && entry.path().extension().and_then(|value| value.to_str()) == Some("json")
+        })
+        .filter_map(|entry| {
+            let value =
+                serde_json::from_str::<Value>(&fs::read_to_string(entry.path()).ok()?).ok()?;
+            let name = value.get("name").and_then(Value::as_str)?.trim();
+            if name.is_empty() {
+                return None;
+            }
+            Some(crate::mcp::McpTool {
+                name: name.to_string(),
+                title: value
+                    .get("title")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+                description: value
+                    .get("description")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+                input_schema: value
+                    .get("inputSchema")
+                    .or_else(|| value.get("input_schema"))
+                    .or_else(|| value.get("arguments"))
+                    .filter(|value| value.is_object())
+                    .cloned(),
+                icons: Vec::new(),
+            })
+        })
+        .collect::<Vec<_>>();
+    tools.sort_by(|left, right| left.name.cmp(&right.name));
+    tools.dedup_by(|left, right| left.name == right.name);
+    tools.truncate(512);
+    tools
+}
+
+fn merge_cursor_plugin_enrichment(
+    mut metadata: crate::mcp::McpEnrichment,
+    live: crate::mcp::McpEnrichment,
+) -> crate::mcp::McpEnrichment {
+    if live.probe_succeeded {
+        if live.server_name.is_some() {
+            metadata.server_name = live.server_name;
+        }
+        if live.server_title.is_some() {
+            metadata.server_title = live.server_title;
+        }
+        if live.server_version.is_some() {
+            metadata.server_version = live.server_version;
+        }
+        if live.server_description.is_some() {
+            metadata.server_description = live.server_description;
+        }
+        if live.server_website_url.is_some() {
+            metadata.server_website_url = live.server_website_url;
+        }
+        if !live.icons.is_empty() {
+            metadata.icons = live.icons;
+        }
+        if !live.tools.is_empty() {
+            let mut metadata_tools = metadata
+                .tools
+                .drain(..)
+                .map(|tool| (tool.name.clone(), tool))
+                .collect::<HashMap<_, _>>();
+            metadata.tools = live
+                .tools
+                .into_iter()
+                .map(|mut tool| {
+                    if let Some(metadata_tool) = metadata_tools.remove(&tool.name) {
+                        if tool.title.is_none() {
+                            tool.title = metadata_tool.title;
+                        }
+                        if tool.description.is_none() {
+                            tool.description = metadata_tool.description;
+                        }
+                        match (&mut tool.input_schema, metadata_tool.input_schema) {
+                            (Some(live_schema), Some(metadata_schema)) => {
+                                merge_cursor_schema_descriptions(live_schema, &metadata_schema);
+                            }
+                            (None, metadata_schema) => {
+                                tool.input_schema = metadata_schema;
+                            }
+                            _ => {}
+                        }
+                        if tool.icons.is_empty() {
+                            tool.icons = metadata_tool.icons;
+                        }
+                    }
+                    tool
+                })
+                .collect();
+        }
+    }
+    metadata.needs_login |= live.needs_login;
+    metadata.probe_succeeded |= live.probe_succeeded;
+    metadata.probe_error = live.probe_error;
+    metadata
+}
+
+fn merge_cursor_schema_descriptions(live: &mut Value, metadata: &Value) {
+    let (Some(live_object), Some(metadata_object)) = (live.as_object_mut(), metadata.as_object())
+    else {
+        return;
+    };
+
+    if live_object
+        .get("description")
+        .and_then(Value::as_str)
+        .is_none()
+    {
+        if let Some(description) = metadata_object
+            .get("description")
+            .filter(|value| value.is_string())
+        {
+            live_object.insert("description".to_string(), description.clone());
+        }
+    }
+
+    if let (Some(live_properties), Some(metadata_properties)) = (
+        live_object
+            .get_mut("properties")
+            .and_then(Value::as_object_mut),
+        metadata_object.get("properties").and_then(Value::as_object),
+    ) {
+        for (name, metadata_property) in metadata_properties {
+            if let Some(live_property) = live_properties.get_mut(name) {
+                merge_cursor_schema_descriptions(live_property, metadata_property);
+            }
+        }
+    }
+
+    for keyword in ["anyOf", "oneOf", "allOf"] {
+        let (Some(live_variants), Some(metadata_variants)) = (
+            live_object.get_mut(keyword).and_then(Value::as_array_mut),
+            metadata_object.get(keyword).and_then(Value::as_array),
+        ) else {
+            continue;
+        };
+        for (live_variant, metadata_variant) in live_variants.iter_mut().zip(metadata_variants) {
+            merge_cursor_schema_descriptions(live_variant, metadata_variant);
+        }
+    }
+}
+
+fn cursor_plugin_enrichment(
+    metadata_path: &Path,
+    server_identifier: Option<&str>,
+    probe_cache: &mut crate::mcp::McpProbeCache,
+) -> crate::mcp::McpEnrichment {
+    let runtime_tools = cursor_runtime_tools(metadata_path);
+    let enrichment = crate::mcp::McpEnrichment::default();
+    let Some(server_identifier) = server_identifier else {
+        let mut enrichment = enrichment;
+        enrichment.tools = runtime_tools;
+        return enrichment;
+    };
+    let Some(cursor_root) = cursor_root_for_path(metadata_path) else {
+        let mut enrichment = enrichment;
+        enrichment.tools = runtime_tools;
+        return enrichment;
+    };
+    let cache_root = cursor_root.join("plugins/cache/cursor-public");
+    let entries = WalkDir::new(cache_root)
+        .max_depth(5)
+        .into_iter()
+        .filter_map(Result::ok)
+        .filter(|entry| {
+            entry.file_type().is_file()
+                && entry.file_name().to_str() == Some("plugin.json")
+                && entry
+                    .path()
+                    .parent()
+                    .and_then(Path::file_name)
+                    .and_then(|value| value.to_str())
+                    == Some(".cursor-plugin")
+        });
+    for entry in entries {
+        let manifest_path = entry.path();
+        let Ok(manifest_text) = fs::read_to_string(manifest_path) else {
+            continue;
+        };
+        let Ok(manifest) = serde_json::from_str::<Value>(&manifest_text) else {
+            continue;
+        };
+        let Some(plugin_name) = manifest.get("name").and_then(Value::as_str) else {
+            continue;
+        };
+        let Some(plugin_root) = cursor_plugin_root(manifest_path) else {
+            continue;
+        };
+        for (_mcp_path, _mcp_text, mcp_value) in
+            cursor_plugin_mcp_sources(manifest_path, &manifest, plugin_root, &mut Vec::new())
+        {
+            let Some(servers) = mcp_value.get("mcpServers").and_then(Value::as_object) else {
+                continue;
+            };
+            for (server_name, server) in servers {
+                let expected = cursor_plugin_server_identifier(plugin_name, server_name);
+                if expected != server_identifier {
+                    continue;
+                }
+                let mut enrichment = cursor_plugin_enrichment_from_manifest(
+                    &manifest,
+                    plugin_root,
+                    server_name,
+                    server,
+                    probe_cache,
+                );
+                if enrichment.tools.is_empty() {
+                    enrichment.tools = runtime_tools.clone();
+                }
+                return enrichment;
+            }
+        }
+    }
+    let mut enrichment = enrichment;
+    enrichment.tools = runtime_tools;
+    enrichment
+}
+
+fn cursor_plugin_enrichment_for_source(
+    source_path: &Path,
+    server_name: &str,
+    probe_cache: &mut crate::mcp::McpProbeCache,
+) -> crate::mcp::McpEnrichment {
+    let Some(cursor_root) = cursor_root_for_path(source_path) else {
+        return crate::mcp::McpEnrichment::default();
+    };
+    let cache_root = cursor_root.join("plugins/cache/cursor-public");
+    for entry in WalkDir::new(cache_root)
+        .max_depth(5)
+        .into_iter()
+        .filter_map(Result::ok)
+        .filter(|entry| {
+            entry.file_type().is_file()
+                && entry.file_name().to_str() == Some("plugin.json")
+                && entry
+                    .path()
+                    .parent()
+                    .and_then(Path::file_name)
+                    .and_then(|value| value.to_str())
+                    == Some(".cursor-plugin")
+        })
+    {
+        let manifest_path = entry.path();
+        let Ok(manifest_text) = fs::read_to_string(manifest_path) else {
+            continue;
+        };
+        let Ok(manifest) = serde_json::from_str::<Value>(&manifest_text) else {
+            continue;
+        };
+        let Some(plugin_root) = cursor_plugin_root(manifest_path) else {
+            continue;
+        };
+        for (mcp_path, _mcp_text, mcp_value) in
+            cursor_plugin_mcp_sources(manifest_path, &manifest, plugin_root, &mut Vec::new())
+        {
+            if mcp_path != source_path {
+                continue;
+            }
+            let Some(server) = mcp_value
+                .get("mcpServers")
+                .and_then(Value::as_object)
+                .and_then(|servers| servers.get(server_name))
+            else {
+                continue;
+            };
+            return cursor_plugin_enrichment_from_manifest(
+                &manifest,
+                plugin_root,
+                server_name,
+                server,
+                probe_cache,
+            );
+        }
+    }
+    crate::mcp::McpEnrichment::default()
 }
 
 pub(super) fn apply_config_profile(command: &mut SessionCommand, profile: &str) -> Result<()> {
@@ -767,6 +1685,26 @@ impl super::AgentProvider for CursorProvider {
         })
     }
 
+    fn assistant_ask_command(&self, workspace: &Path, prompt: &str) -> Option<SessionCommand> {
+        Some(SessionCommand {
+            executable: "cursor".to_string(),
+            args: vec![
+                "agent".to_string(),
+                "--print".to_string(),
+                "--output-format".to_string(),
+                "stream-json".to_string(),
+                "--stream-partial-output".to_string(),
+                "--yolo".to_string(),
+                "--trust".to_string(),
+                "--workspace".to_string(),
+                workspace.display().to_string(),
+                prompt.to_string(),
+            ],
+            cwd: Some(workspace.to_path_buf()),
+            env: Vec::new(),
+        })
+    }
+
     fn session_requires_rescan(&self, session: &SessionRecord) -> Option<bool> {
         if session.started_at.is_some() && session.updated_at.is_some() {
             return None;
@@ -877,6 +1815,13 @@ impl super::AgentProvider for CursorProvider {
         crate::providers::shared::shared_tool_payloads(value)
     }
 
+    fn extract_session_skill_evidence_from_source(
+        &self,
+        path: &Path,
+    ) -> Result<Vec<SkillEvidenceCandidate>> {
+        Ok(cursor_sessions::cursor_store_skill_evidence_for_path(path))
+    }
+
     fn infer_session_project(&self, path: &Path, project: Option<PathBuf>) -> Option<PathBuf> {
         project.or_else(|| cursor_sessions::cursor_project_from_transcript_path(path))
     }
@@ -943,6 +1888,7 @@ impl super::AgentProvider for CursorProvider {
         ctx: &ProviderContext,
         servers: &mut Vec<McpServerRecord>,
         warnings: &mut Vec<String>,
+        probe_cache: &mut crate::mcp::McpProbeCache,
     ) -> Result<()> {
         if let Some(home) = &ctx.home {
             crate::mcp::scan_json_mcp(
@@ -953,6 +1899,8 @@ impl super::AgentProvider for CursorProvider {
                 infer_mcp_transport,
                 infer_mcp_enabled,
                 infer_mcp_status,
+                enrich_mcp_spec,
+                probe_cache,
                 servers,
                 warnings,
             );
@@ -964,10 +1912,17 @@ impl super::AgentProvider for CursorProvider {
                 infer_mcp_transport,
                 infer_mcp_enabled,
                 infer_mcp_status,
+                enrich_mcp_spec,
+                probe_cache,
                 servers,
                 warnings,
             );
-            scan_project_mcp(&home.join(".cursor/projects"), servers, warnings);
+            scan_project_mcp(
+                &home.join(".cursor/projects"),
+                probe_cache,
+                servers,
+                warnings,
+            );
         }
         for ancestor in ctx.project_dirs() {
             let scope = ancestor.display().to_string();
@@ -979,6 +1934,8 @@ impl super::AgentProvider for CursorProvider {
                 infer_mcp_transport,
                 infer_mcp_enabled,
                 infer_mcp_status,
+                enrich_mcp_spec,
+                probe_cache,
                 servers,
                 warnings,
             );
@@ -986,10 +1943,66 @@ impl super::AgentProvider for CursorProvider {
         Ok(())
     }
 
+    fn probe_mcp(
+        &self,
+        request: &McpProbeRequest,
+        current: &McpServerRecord,
+        probe_cache: &mut crate::mcp::McpProbeCache,
+    ) -> Result<McpServerRecord> {
+        let is_metadata_path = request.path.file_name().and_then(|value| value.to_str())
+            == Some("SERVER_METADATA.json");
+        if current.transport == "cursor-plugin" {
+            let text = fs::read_to_string(&request.path)?;
+            if crate::fsutil::sha256_text(&text) != request.expected_trust_hash {
+                bail!("MCP source changed; refresh MCP before checking its connection")
+            }
+            let enrichment = if is_metadata_path {
+                let value = serde_json::from_str::<Value>(&text)?;
+                cursor_plugin_enrichment(
+                    &request.path,
+                    value.get("serverIdentifier").and_then(Value::as_str),
+                    probe_cache,
+                )
+            } else {
+                cursor_plugin_enrichment_for_source(&request.path, &current.name, probe_cache)
+            };
+            if !enrichment.probe_succeeded && !enrichment.needs_login && enrichment.tools.is_empty()
+            {
+                bail!("Cursor plugin MCP did not return a live tool list")
+            }
+            if !enrichment.probe_succeeded && !enrichment.needs_login {
+                return Ok(current.clone());
+            }
+            return Ok(crate::mcp::apply_probe_enrichment(
+                current,
+                "cursor-plugin".to_string(),
+                current.enabled,
+                current.status.clone(),
+                enrichment,
+            ));
+        }
+        if is_metadata_path || is_cursor_plugin_path(&request.path) {
+            bail!("Cursor plugin MCP metadata cannot be checked as a standalone server")
+        }
+        if request.path.extension().and_then(|value| value.to_str()) != Some("json") {
+            bail!("Cursor MCP source must be JSON")
+        }
+        crate::mcp::probe_json_mcp_server(
+            request,
+            current,
+            infer_mcp_transport,
+            infer_mcp_enabled,
+            infer_mcp_status,
+            enrich_mcp_spec,
+            probe_cache,
+        )
+    }
+
     fn set_mcp_enabled(&self, request: &McpSetEnabledRequest) -> Result<()> {
         if request.path.file_name().and_then(|value| value.to_str()) == Some("SERVER_METADATA.json")
+            || is_cursor_plugin_path(&request.path)
         {
-            bail!("Cursor plugin MCP metadata is read-only");
+            bail!("Cursor plugin MCP source is read-only");
         }
         if request.path.extension().and_then(|value| value.to_str()) != Some("json") {
             bail!("Cursor MCP source must be JSON");
@@ -997,12 +2010,7 @@ impl super::AgentProvider for CursorProvider {
         crate::mcp::set_json_server_enabled(request, &["mcpServers"], update_mcp_server)
     }
 
-    fn backup_mcp_entry(
-        &self,
-        path: &Path,
-        server_path: &[String],
-        name: &str,
-    ) -> Result<Value> {
+    fn backup_mcp_entry(&self, path: &Path, server_path: &[String], name: &str) -> Result<Value> {
         if path.extension().and_then(|value| value.to_str()) != Some("json") {
             bail!("Cursor MCP source must be JSON");
         }
@@ -1026,22 +2034,19 @@ impl super::AgentProvider for CursorProvider {
         if enabled { "configured" } else { "disabled" }
     }
 
-    fn delete_hooks(
-        &self,
-        requests: &[HookDeleteRequest],
-        source: &str,
-    ) -> Result<String> {
-        if requests[0].path.extension().and_then(|value| value.to_str()) != Some("json") {
+    fn delete_hooks(&self, requests: &[HookDeleteRequest], source: &str) -> Result<String> {
+        if requests[0]
+            .path
+            .extension()
+            .and_then(|value| value.to_str())
+            != Some("json")
+        {
             bail!("Cursor hook source must be JSON");
         }
         crate::hooks::delete_json_hooks(requests, source)
     }
 
-    fn set_hook_enabled(
-        &self,
-        request: &HookSetEnabledRequest,
-        source: &str,
-    ) -> Result<String> {
+    fn set_hook_enabled(&self, request: &HookSetEnabledRequest, source: &str) -> Result<String> {
         if request.path.extension().and_then(|value| value.to_str()) != Some("json") {
             bail!("Cursor hook source must be JSON");
         }
@@ -1117,8 +2122,10 @@ mod tests {
     };
 
     use super::{
-        AgentProvider, CursorProvider, ProviderContext, cursor_event_timestamp, parse_transcript,
+        AgentProvider, CursorProvider, ProviderContext, cursor_event_timestamp,
+        cursor_runtime_tools, merge_cursor_plugin_enrichment, parse_transcript,
     };
+    use crate::mcp::{McpEnrichment, McpTool};
     use crate::skills::AgentKind;
     use rusqlite::Connection;
     use serde_json::json;
@@ -1172,8 +2179,7 @@ mod tests {
             .expect("write nested global rule");
         fs::write(global_rules.join("ignored.md"), "not a Cursor rule")
             .expect("write ignored global rule");
-        fs::write(project_rules.join("project.mdc"), "project rule")
-            .expect("write project rule");
+        fs::write(project_rules.join("project.mdc"), "project rule").expect("write project rule");
         fs::write(project.join(".cursorrules"), "legacy project rule")
             .expect("write legacy project rule");
         fs::write(project.join("CLAUDE.md"), "Claude-compatible project rule")
@@ -1248,8 +2254,9 @@ mod tests {
         };
         let mut servers = Vec::new();
         let mut warnings = Vec::new();
+        let mut probe_cache = crate::mcp::McpProbeCache::default();
         CursorProvider
-            .scan_mcp(&context, &mut servers, &mut warnings)
+            .scan_mcp(&context, &mut servers, &mut warnings, &mut probe_cache)
             .expect("scan Cursor MCP");
 
         assert!(warnings.is_empty(), "warnings: {warnings:#?}");
@@ -1259,6 +2266,90 @@ mod tests {
         assert_eq!(servers[0].path, path);
 
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn reads_cursor_runtime_tool_arguments_for_parameter_table() {
+        let root = temp_dir();
+        let metadata_path = root.join("SERVER_METADATA.json");
+        let tools_dir = root.join("tools");
+        fs::create_dir_all(&tools_dir).expect("create Cursor tool metadata directory");
+        fs::write(
+            &metadata_path,
+            r#"{"serverIdentifier":"cursor-ide-browser"}"#,
+        )
+        .expect("write Cursor server metadata");
+        fs::write(
+            tools_dir.join("browser_click.json"),
+            serde_json::to_string(&json!({
+                "name": "browser_click",
+                "arguments": {
+                    "type": "object",
+                    "properties": {"ref": {"type": "string"}},
+                    "required": ["ref"]
+                }
+            }))
+            .expect("serialize Cursor tool metadata"),
+        )
+        .expect("write Cursor tool metadata");
+
+        let tools = cursor_runtime_tools(&metadata_path);
+        assert_eq!(
+            tools[0]
+                .input_schema
+                .as_ref()
+                .and_then(|schema| schema.pointer("/properties/ref/type"))
+                .and_then(serde_json::Value::as_str),
+            Some("string")
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn preserves_cursor_parameter_descriptions_when_live_schema_omits_them() {
+        let metadata = McpEnrichment {
+            tools: vec![McpTool {
+                name: "accessibility_action".to_string(),
+                title: None,
+                description: Some("Invoke an accessibility action".to_string()),
+                input_schema: Some(json!({
+                    "type": "object",
+                    "properties": {
+                        "action": {
+                            "type": "string",
+                            "description": "The action to perform"
+                        }
+                    }
+                })),
+                icons: Vec::new(),
+            }],
+            ..McpEnrichment::default()
+        };
+        let live = McpEnrichment {
+            probe_succeeded: true,
+            tools: vec![McpTool {
+                name: "accessibility_action".to_string(),
+                title: None,
+                description: None,
+                input_schema: Some(json!({
+                    "type": "object",
+                    "properties": {"action": {"type": "string"}}
+                })),
+                icons: Vec::new(),
+            }],
+            ..McpEnrichment::default()
+        };
+
+        let merged = merge_cursor_plugin_enrichment(metadata, live);
+        assert_eq!(
+            merged.tools[0]
+                .input_schema
+                .as_ref()
+                .and_then(|schema| schema.pointer("/properties/action/description"))
+                .and_then(serde_json::Value::as_str),
+            Some("The action to perform")
+        );
     }
 
     #[test]
@@ -1390,5 +2481,4 @@ mod tests {
 
         let _ = fs::remove_dir_all(root);
     }
-
 }

@@ -276,6 +276,22 @@ export function transcriptItemType(item: TranscriptItem): string {
   return item.type;
 }
 
+export function transcriptContextPreview(body: string, tag?: string): string {
+  if (tag?.trim().toLowerCase() === "skill") {
+    const name = body.match(/<name>\s*([^<]+?)\s*<\/name>/i)?.[1]?.trim();
+    if (name) return name;
+  }
+
+  return body.split(/\r?\n/).find((line) => line.trim())?.trim() ?? "";
+}
+
+export function transcriptEvidenceSearchText(evidenceText: string): string {
+  const trimmed = evidenceText.trim();
+  return trimmed.endsWith("\n... truncated")
+    ? trimmed.slice(0, -"\n... truncated".length).trimEnd()
+    : trimmed;
+}
+
 export function groupTranscriptItems(items: TranscriptItem[]): TranscriptGroup[] {
   const grouped: TranscriptGroup[] = [];
   for (let index = 0; index < items.length; index += 1) {
@@ -500,10 +516,6 @@ function isSubagentNotification(text: string) {
   const normalized = text.replace(/\s+/g, " ").trim();
   return normalized === "Briefly inform the user about the task result and perform any follow-up actions (if needed)."
     || normalized.startsWith("The beginning of the above subagent result is already visible to the user. Perform any follow-up actions (if needed).");
-}
-
-export function isInternalContext(text: string) {
-  return splitInternalContextSegments(text).some((segment) => Boolean(segment.label));
 }
 
 function isThinkingContentItem(value: JsonObject) {

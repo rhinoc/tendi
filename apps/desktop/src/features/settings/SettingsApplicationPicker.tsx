@@ -1,13 +1,10 @@
-import { AlertCircle, Check, ChevronDown, Play } from "lucide-react";
-import { DropdownMenu } from "radix-ui";
-import { useRef, useState } from "react";
+import { AlertCircle, Check, Play } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
 
-import { IconButton } from "../../components/shared/IconButton.tsx";
 import { LoadingIcon } from "../../components/shared/LoadingIcon.tsx";
-import { MenuContent } from "../../components/shared/MenuContent.tsx";
+import { SelectControl } from "../../components/shared/SelectControl.tsx";
 import { StatefulButton } from "../../components/shared/StatefulButton.tsx";
 import { Toast } from "../../components/shared/Toast.tsx";
-import { useElementSize } from "../../components/shared/useElementSize.ts";
 import { AsyncStatus } from "../../lib/async-status.ts";
 
 export type SettingsApplicationOption = {
@@ -17,6 +14,13 @@ export type SettingsApplicationOption = {
 };
 
 type TestState = AsyncStatus;
+
+function displayValueForOption(options: SettingsApplicationOption[], value: string): string {
+  const selectedOption = options.find((option) => option.value === value);
+  return selectedOption
+    ? `${selectedOption.label}${selectedOption.available === false ? " (not found)" : ""}`
+    : value;
+}
 
 export type SettingsApplicationPickerProps = {
   id: string;
@@ -54,12 +58,19 @@ export function SettingsApplicationPicker({
   onCancel,
   onTest,
 }: SettingsApplicationPickerProps) {
-  const [menuOpen, setMenuOpen] = useState(false);
   const [testState, setTestState] = useState<TestState>(AsyncStatus.Idle);
+  const [inputValue, setInputValue] = useState(() => displayValueForOption(options, value));
+  const lastValueRef = useRef(value);
+  const localValueRef = useRef(value);
   const testRequestRef = useRef(0);
-  const { ref: applicationInputRef, size: applicationInputSize } = useElementSize<HTMLDivElement>({ width: 0, height: 0 });
-  const selectedOption = options.find((option) => option.value === value);
-  const displayValue = selectedOption?.label ?? value;
+
+  useEffect(() => {
+    if (value === lastValueRef.current) return;
+    lastValueRef.current = value;
+    if (value === localValueRef.current) return;
+    localValueRef.current = value;
+    setInputValue(displayValueForOption(options, value));
+  }, [options, value]);
 
   const resetTestState = () => {
     testRequestRef.current += 1;
@@ -67,8 +78,9 @@ export function SettingsApplicationPicker({
   };
 
   const chooseOption = (nextValue: string) => {
+    localValueRef.current = nextValue;
+    setInputValue(displayValueForOption(options, nextValue));
     onChange(nextValue);
-    setMenuOpen(false);
     resetTestState();
     void onSave(nextValue);
   };
@@ -95,62 +107,44 @@ export function SettingsApplicationPicker({
   return (
     <>
       <div className="settingsApplicationRow">
-        <div ref={applicationInputRef} className="settingsApplicationInput">
-          <input
-            id={id}
-            className="settingsSelect"
-            aria-label={ariaLabel}
-            placeholder={placeholder}
-            value={displayValue}
-            onChange={(event) => {
-              onChange(event.target.value);
+        <SelectControl
+          variant="editable"
+          className="settingsApplicationSelect"
+          contentClassName="settingsSelectContent"
+          label={ariaLabel}
+          value={value}
+          onValueChange={chooseOption}
+          options={options}
+          inputId={id}
+          inputAriaLabel={ariaLabel}
+          inputPlaceholder={placeholder}
+          menuAriaLabel={menuAriaLabel}
+          inputValue={inputValue}
+          onInputChange={(nextValue) => {
+            localValueRef.current = nextValue;
+            setInputValue(nextValue);
+            onChange(nextValue);
+            resetTestState();
+          }}
+          onInputBlur={() => {
+            void onSave(value);
+          }}
+          onInputKeyDown={(event) => {
+            if (event.key === "Enter") event.currentTarget.blur();
+            if (event.key === "Escape") {
+              localValueRef.current = savedValue;
+              setInputValue(displayValueForOption(options, savedValue));
+              onChange(savedValue);
+              onCancel();
               resetTestState();
-            }}
-            onBlur={() => {
-              void onSave(value);
-            }}
-            onKeyDown={(event) => {
-              if (event.key === "Enter") event.currentTarget.blur();
-              if (event.key === "Escape") {
-                onChange(savedValue);
-                onCancel();
-                resetTestState();
-              }
-            }}
-          />
-          <DropdownMenu.Root open={menuOpen} onOpenChange={setMenuOpen}>
-            <DropdownMenu.Trigger asChild>
-              <IconButton className="settingsApplicationMenuButton" aria-label={menuAriaLabel} type="button">
-                <ChevronDown size={14} />
-              </IconButton>
-            </DropdownMenu.Trigger>
-            <DropdownMenu.Portal>
-              <MenuContent
-                className="settingsSelectContent"
-                style={{ minWidth: applicationInputSize.width || undefined }}
-                align="end"
-                sideOffset={6}
-              >
-                {options.map((option) => (
-                  <DropdownMenu.Item
-                    className="skillMenuItem selectItemIndicatorRight"
-                    key={option.value}
-                    onSelect={() => chooseOption(option.value)}
-                  >
-                    <span className="selectItemLeadingIcon" aria-hidden="true">
-                      {option.value === value ? <Check className="selectItemIndicator" size={14} /> : null}
-                    </span>
-                    {option.available === false ? `${option.label} (not found)` : option.label}
-                  </DropdownMenu.Item>
-                ))}
-              </MenuContent>
-            </DropdownMenu.Portal>
-          </DropdownMenu.Root>
-        </div>
+            }
+          }}
+          showOptionTooltip={false}
+        />
         <StatefulButton
           size="sm"
-          width={30}
-          minWidth={30}
+          variant="primary"
+          iconOnly
           state={testState}
           aria-label={testLabel}
           disabled={!value.trim()}

@@ -1,6 +1,8 @@
 import type { ComponentPropsWithoutRef, ReactNode } from "react";
+import { X } from "lucide-react";
 import { Dialog } from "radix-ui";
 
+import { IconButton } from "./IconButton.tsx";
 import "./confirm-dialog.css";
 
 type DialogShellContentProps = Omit<ComponentPropsWithoutRef<typeof Dialog.Content>, "children" | "className" | "aria-describedby" | "data-no-drag" | "onMouseDown">
@@ -14,6 +16,8 @@ export type DialogShellProps = {
   className?: string;
   descriptionId?: string;
   dismissOnOutsideClick?: boolean;
+  showCloseButton?: boolean;
+  closeButtonLabel?: string;
   contentProps?: DialogShellContentProps;
 };
 
@@ -25,6 +29,8 @@ export function DialogShell({
   className = "confirmDialogPanel",
   descriptionId,
   dismissOnOutsideClick = false,
+  showCloseButton = false,
+  closeButtonLabel = "Close dialog",
   contentProps,
 }: DialogShellProps) {
   return (
@@ -48,6 +54,13 @@ export function DialogShell({
           onMouseDown={(event) => event.stopPropagation()}
         >
           {children}
+          {showCloseButton ? (
+            <Dialog.Close asChild>
+              <IconButton className="dialogCloseButton" aria-label={closeButtonLabel}>
+                <X size={15} aria-hidden="true" />
+              </IconButton>
+            </Dialog.Close>
+          ) : null}
         </Dialog.Content>
       </Dialog.Portal>
     </Dialog.Root>

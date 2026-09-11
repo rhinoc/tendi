@@ -80,18 +80,7 @@ export function createSkillCatalogRuntime(deps: {
   let forcedListInFlight: Promise<RawSkillRecord[] | null> | null = null;
   let refreshInFlight: Promise<SkillRefreshResponse | null> | null = null;
 
-  const refreshList = (force = false): Promise<RawSkillRecord[] | null> => {
-    if (!force && listInFlight) return listInFlight;
-    if (force && forcedListInFlight) return forcedListInFlight;
-    if (force && listInFlight) {
-      const queued = listInFlight.then(() => refreshList(), () => refreshList());
-      forcedListInFlight = queued;
-      void queued.finally(() => {
-        if (forcedListInFlight === queued) forcedListInFlight = null;
-      });
-      return queued;
-    }
-
+  const startListRefresh = (): Promise<RawSkillRecord[] | null> => {
     const revision = ++listRevision;
     const request = (async () => {
       try {
@@ -112,6 +101,20 @@ export function createSkillCatalogRuntime(deps: {
       if (listInFlight === request) listInFlight = null;
     });
     return request;
+  };
+
+  const refreshList = (force = false): Promise<RawSkillRecord[] | null> => {
+    if (!force && listInFlight) return listInFlight;
+    if (force && forcedListInFlight) return forcedListInFlight;
+    if (force && listInFlight) {
+      const queued = listInFlight.then(() => startListRefresh(), () => startListRefresh());
+      forcedListInFlight = queued;
+      void queued.finally(() => {
+        if (forcedListInFlight === queued) forcedListInFlight = null;
+      });
+      return queued;
+    }
+    return startListRefresh();
   };
 
   const refreshListAndUpdates = (): Promise<SkillRefreshResponse | null> => {

@@ -1,5 +1,4 @@
 import { Tooltip } from "./shared/Tooltip.tsx";
-import { Badge } from "./shared/Badge.tsx";
 import { Info } from "lucide-react";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 
@@ -16,6 +15,7 @@ import {
 } from "../lib/tokenizer-types.ts";
 import { tokenToneClass, type TokenTone } from "../lib/token-style.ts";
 import { TauriCommand, safeInvoke } from "../lib/tauri";
+import { logger } from "../lib/logger.ts";
 import "./TokenStatusBar.css";
 
 type TokenStatusBarProps = {
@@ -73,6 +73,8 @@ function tokenBreakdownNotes(segments: TokenSegmentProps[]) {
   return [...new Set(segments.flatMap((segment) => segment.notes ?? []))];
 }
 
+const TOKENIZER_WORKER_TIMEOUT_MS = 2_000;
+
 function openTokenizerUrl(event: React.MouseEvent<HTMLAnchorElement>) {
   event.preventDefault();
   event.stopPropagation();
@@ -115,7 +117,7 @@ export function TokenBreakdownPanel({ segments, usageSource = TokenUsageSource.E
             <tbody>
               {rows.map((row) => (
                 <tr key={`${row.bucket}-${row.label}`}>
-                  <td><Badge tone={row.bucket.toLowerCase() === "input" ? "info" : "warning"}>{row.bucket}</Badge></td>
+                  <td>{row.bucket}</td>
                   <Tooltip content={row.label} onlyWhenTruncated><td>{row.label}</td></Tooltip>
                   <td className={tokenToneClass(row.value)}>{tokenValue(row.value, usageSource)}</td>
                 </tr>
@@ -127,7 +129,7 @@ export function TokenBreakdownPanel({ segments, usageSource = TokenUsageSource.E
         <div className="tokenBreakdownSingle">
           {rows.length === 1 ? (
             <>
-              <Badge tone={rows[0].bucket.toLowerCase() === "input" ? "info" : "warning"}>{rows[0].bucket}</Badge>
+              <span>{rows[0].bucket}</span>
               <Tooltip content={rows[0].label} onlyWhenTruncated><span>{rows[0].label}</span></Tooltip>
               <strong className={tokenToneClass(rows[0].value)}>{tokenValue(rows[0].value, usageSource)}</strong>
             </>
@@ -183,22 +185,69 @@ export function TokenMetrics({ metrics }: { metrics: TokenMetricProps[] }) {
 export function TokenStatusBar({ activePath = "", content = "", selectionText = "", segments: providedSegments, metrics = [], usageSource = TokenUsageSource.Estimated, leadingSlot }: TokenStatusBarProps) {
   const workerRef = useRef<TokenizerWorkerClient | null>(null);
   const latestRequestRef = useRef(0);
+  const latestInputRef = useRef({ activePath, content, selectionText });
+  const timeoutRef = useRef<number | null>(null);
   const [estimatedSegments, setEstimatedSegments] = useState<TokenBreakdownSegment[] | null>(null);
+
+  latestInputRef.current = { activePath, content, selectionText };
+
+  const useMainThreadFallback = (reason: string, requestId = latestRequestRef.current) => {
+    void import("../lib/tokenizer.ts").then(({ markdownTokenStats }) => {
+      if (latestRequestRef.current !== requestId) return;
+      const input = latestInputRef.current;
+      const stats = markdownTokenStats(input.activePath, input.content, input.selectionText);
+      const segments: TokenBreakdownSegment[] = [];
+      if (stats.selection > 0) segments.push({ label: "Selection", value: stats.selection });
+      if (stats.isSkillMarkdown) {
+        segments.push({ label: "Desc", value: stats.description ?? 0 });
+        segments.push({ label: "Content", value: stats.content ?? 0 });
+      } else {
+        segments.push({ label: "File", value: stats.file });
+      }
+      setEstimatedSegments(segments);
+      logger.warn("tokenizer worker unavailable; used main-thread fallback", {
+        activePath: input.activePath,
+        reason,
+      });
+    }).catch((error) => {
+      if (latestRequestRef.current !== requestId) return;
+      const input = latestInputRef.current;
+      setEstimatedSegments([]);
+      logger.error("tokenizer estimate failed", {
+        activePath: input.activePath,
+        error,
+      });
+    });
+  };
 
   useEffect(() => {
     if (providedSegments) return;
-    const worker = createTokenizerWorker(
-      (response) => {
-        if (response.id !== latestRequestRef.current) return;
-        if (response.type === TokenizerWorkerResponseType.Result) setEstimatedSegments(response.segments);
-        else setEstimatedSegments((current) => current ?? []);
-      },
-      () => {
-        if (latestRequestRef.current > 0) setEstimatedSegments((current) => current ?? []);
-      },
-    );
+    let worker: TokenizerWorkerClient;
+    try {
+      worker = createTokenizerWorker(
+        (response) => {
+          if (response.id !== latestRequestRef.current) return;
+          if (timeoutRef.current !== null) {
+            window.clearTimeout(timeoutRef.current);
+            timeoutRef.current = null;
+          }
+          if (response.type === TokenizerWorkerResponseType.Result) setEstimatedSegments(response.segments);
+          else useMainThreadFallback(response.message, response.id);
+        },
+        (error) => {
+          if (latestRequestRef.current > 0) useMainThreadFallback(error.message);
+        },
+      );
+    } catch (error) {
+      useMainThreadFallback(error instanceof Error ? error.message : String(error), 0);
+      return;
+    }
     workerRef.current = worker;
     return () => {
+      if (timeoutRef.current !== null) {
+        window.clearTimeout(timeoutRef.current);
+        timeoutRef.current = null;
+      }
       workerRef.current = null;
       worker.dispose();
     };
@@ -206,12 +255,19 @@ export function TokenStatusBar({ activePath = "", content = "", selectionText = 
 
   useEffect(() => {
     if (providedSegments || !workerRef.current) return;
-    latestRequestRef.current = workerRef.current.request({
+    const requestId = workerRef.current.request({
       kind: TokenizerKind.Markdown,
       activePath,
       content,
       selectionText,
     });
+    latestRequestRef.current = requestId;
+    if (timeoutRef.current !== null) window.clearTimeout(timeoutRef.current);
+    timeoutRef.current = window.setTimeout(() => {
+      if (latestRequestRef.current !== requestId) return;
+      timeoutRef.current = null;
+      useMainThreadFallback("timeout", requestId);
+    }, TOKENIZER_WORKER_TIMEOUT_MS);
   }, [activePath, content, providedSegments, selectionText]);
 
   const segments = providedSegments ?? estimatedSegments ?? [];

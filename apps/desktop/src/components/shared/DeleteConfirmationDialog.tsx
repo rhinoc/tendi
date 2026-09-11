@@ -54,6 +54,7 @@ export function DeleteConfirmationDialog({
           loadingLabel={loadingLabel ?? selectionDeleteLoadingLabel(itemLabel, items.length)}
           variant="danger"
           aria-label={actionLabel}
+          autoFocus={!busy}
           onClick={onConfirm}
         >
           {actionLabel}

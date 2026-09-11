@@ -9,30 +9,47 @@
   align-items: center;
   gap: 8px;
   padding: 10px 11px;
-  border: 1px solid transparent;
-  border-radius: var(--radius-md);
-  box-shadow: var(--shadow-menu);
+  border: 1px solid var(--control-border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-menu-depth);
+  background: var(--panel-bg);
+  backdrop-filter: blur(14px);
   transform: translateX(-50%);
   animation: appToastIn 140ms var(--ease-out-soft);
 }
 
 .appToast--error {
-  color: var(--accent-contrast);
-  background: var(--danger);
+  color: var(--text);
 }
 
 .appToast--success {
-  color: var(--accent-contrast);
-  background: var(--green);
+  color: var(--text);
 }
 
 .appToast--info {
-  color: var(--chat-user-fg);
-  background: var(--chat-user-bg);
+  color: var(--text);
 }
 
 .appToastIcon {
   flex: 0 0 auto;
+  box-sizing: content-box;
+  padding: 4px;
+  border-radius: 999px;
+}
+
+.appToast--error .appToastIcon {
+  color: var(--danger);
+  background: var(--danger-soft);
+}
+
+.appToast--success .appToastIcon {
+  color: var(--green);
+  background: var(--green-soft);
+}
+
+.appToast--info .appToastIcon {
+  color: var(--tone-info);
+  background: var(--tone-info-soft);
 }
 
 .appToastMessage {
@@ -54,7 +71,7 @@
   color: inherit;
   background: color-mix(in oklch, currentColor 12%, transparent);
   font: inherit;
-  font-size: var(--text-sm);
+  font-size: var(--text-ui);
   line-height: var(--leading-ui);
   font-weight: 650;
   cursor: pointer;

@@ -13,7 +13,9 @@ import {
   sessionProject,
   sessionProjectGroupKey,
   sessionProjectOption,
+  SESSION_SEARCH_SORT,
   SessionSortKey,
+  sessionTimeMs,
   type SessionSkillLinkRecord,
   type SessionIdentityRecord,
   type SessionRecord,
@@ -27,6 +29,31 @@ export type SessionProjectOption = {
   label: string;
   title: string;
   count: number;
+};
+
+export type SessionListPageRequest = {
+  query: string;
+  agent?: string;
+  sort: SortState;
+  groupBy: string | null;
+  page: number;
+  pageSize: number;
+  showChildSessions: boolean;
+  selectedProjectKeys: string[];
+  locate?: Pick<SessionRecord, "id" | "agent" | "path">;
+};
+
+export type SessionListPageResult = {
+  revision: number;
+  rows: SessionRecord[];
+  projectOptions: SessionProjectOption[];
+  total: number;
+  childSessionCount: number;
+  page: number;
+  pageCount: number;
+  pageStart: number;
+  pageEnd: number;
+  groupCount: number | null;
 };
 
 export type GroupedSessionPage = {
@@ -95,14 +122,59 @@ export function normalizeSessionRows(rows: readonly RawDomainRow[]): SessionReco
   return rows.flatMap((row) => normalizeSession(row) ?? []);
 }
 
-export function sessionSearchCandidateRows(candidates: readonly SessionRecord[]): Pick<SessionRecord, "id" | "agent" | "path">[] {
-  return candidates
-    .filter((session) => agentIdentityKey(session.agent) !== "imported")
-    .map((session) => ({
-      id: session.id,
-      agent: agentIdentityKey(session.agent),
-      path: session.path,
-    }));
+function sessionListRowNeedsStoreUpdate(source: SessionRecord, row: SessionRecord): boolean {
+  return source.title !== row.title
+    || source.project !== row.project
+    || source.repository !== row.repository
+    || source.repositoryUrl !== row.repositoryUrl
+    || source.logicalProjectId !== row.logicalProjectId
+    || source.logicalProjectName !== row.logicalProjectName
+    || source.path !== row.path
+    || source.startedAt !== row.startedAt
+    || source.updatedAt !== row.updatedAt
+    || source.messages !== row.messages
+    || source.firstUserMessage !== row.firstUserMessage
+    || source.lastUserMessage !== row.lastUserMessage
+    || source.lastAssistantMessage !== row.lastAssistantMessage
+    || source.turnCount !== row.turnCount
+    || source.model !== row.model
+    || source.mode !== row.mode
+    || source.approvalMode !== row.approvalMode
+    || source.isRunEverything !== row.isRunEverything
+    || source.parentSessionId !== row.parentSessionId;
+}
+
+function shouldUseStoreSession(source: SessionRecord, row: SessionRecord): boolean {
+  const sourceUpdatedAt = sessionTimeMs(source.updatedAt);
+  const rowUpdatedAt = sessionTimeMs(row.updatedAt);
+  if (sourceUpdatedAt < rowUpdatedAt) return false;
+  if (sourceUpdatedAt > rowUpdatedAt) return true;
+  if (source.messages !== row.messages) {
+    return (source.messages ?? 0) >= (row.messages ?? 0);
+  }
+  return sessionListRowNeedsStoreUpdate(source, row);
+}
+
+/** Merge live scan events into the paged projection until its next read catches up. */
+export function mergeSessionListRows(
+  rows: readonly SessionRecord[],
+  storeSessions: readonly SessionRecord[],
+): SessionRecord[] {
+  if (rows.length === 0 || storeSessions.length === 0) return [...rows];
+  const sessionsByLogicalIdentity = new Map(
+    storeSessions.map((session) => [sessionLogicalIdentity(session), session]),
+  );
+  return rows.map((row) => {
+    const source = sessionsByLogicalIdentity.get(sessionLogicalIdentity(row));
+    if (!source || !shouldUseStoreSession(source, row)) return row;
+    if (row.searchScore === undefined && row.searchSnippet === undefined) return source;
+    return {
+      ...row,
+      ...source,
+      searchScore: row.searchScore,
+      searchSnippet: row.searchSnippet,
+    };
+  });
 }
 
 export function createImportedSessionRecord(input: {
@@ -393,10 +465,11 @@ export function selectSessionListView(input: SessionListControllerInput): Sessio
       return right.count - left.count || left.label.localeCompare(right.label) || left.title.localeCompare(right.title);
     });
   const projectKey = (session: SessionRecord) => projectKeyByRow.get(rowId(session)) ?? sessionProjectGroupKey(session);
+  const activeSort = input.remoteSearch && query ? input.searchSort ?? SESSION_SEARCH_SORT : input.sort;
   const inProject = (session: SessionRecord) => selected.size === 0 || selected.has(projectKey(session));
   const searchCandidates = listSessionItems
     .filter((session) => (input.showChildSessions || sessionKind(session) === SessionKind.Main) && inProject(session))
-    .sort((left, right) => compareSessions(left, right, input.searchSort ?? input.sort));
+    .sort((left, right) => compareSessions(left, right, activeSort));
   const searchRequestKey = query ? `${query}\0${searchCandidates.map(sessionIdentity).join("\0")}` : "";
   const searchResultRows = query && input.remoteSearch && input.searchRowsKey === searchRequestKey
     ? dedupeSessions(input.searchRows ?? [])
@@ -409,7 +482,6 @@ export function selectSessionListView(input: SessionListControllerInput): Sessio
       : listSessionItems.filter(inProject);
   const childSessionCount = matchedSessions.filter((session) => sessionKind(session) === SessionKind.Child).length;
   const filteredSessions = input.showChildSessions ? matchedSessions : matchedSessions.filter((session) => sessionKind(session) === SessionKind.Main);
-  const activeSort = input.remoteSearch && query ? input.searchSort ?? input.sort : input.sort;
   const sortedSessions = [...filteredSessions].sort((left, right) => compareSessions(left, right, activeSort));
   const groupedPages = buildGroupedSessionPages(sortedSessions, input.groupBy, input.pageSize);
   const pageCount = input.groupBy ? Math.max(1, groupedPages.length) : Math.max(1, Math.ceil(sortedSessions.length / input.pageSize));

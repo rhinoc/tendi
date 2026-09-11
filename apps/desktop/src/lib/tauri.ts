@@ -4,10 +4,11 @@ import { COMMAND_METADATA, TauriCommand as GeneratedTauriCommand, isDaemonComman
 import { RuntimeClient, RuntimeRemoteError } from "./generated/runtime-client.ts";
 import { RuntimeContractError, validateEvent, validateRequest, validateResult } from "./generated/runtime-validators.ts";
 import { RuntimeEventName } from "./generated/runtime-events.ts";
-import { omitUndefinedProperties, type DaemonEvent as RuntimeDaemonEvent } from "./runtime-contract.ts";
+import { omitUndefinedProperties, tauriCommandArgs, type DaemonEvent as RuntimeDaemonEvent } from "./runtime-contract.ts";
 
 import type { RawSkillRecord } from "./skills.ts";
 import { logger } from "./logger.ts";
+import { singleFlight, singleFlightKey } from "./single-flight.ts";
 
 export enum CliInstallState {
   Installed = "installed",
@@ -118,9 +119,8 @@ async function requestDaemon(request: JsonRpcRequest): Promise<JsonRpcResponse> 
 
 const runtimeClient = new RuntimeClient({ request: requestDaemon });
 
-export async function invokeCommand<C extends CommandName>(command: C, args?: RequestFor<C>): Promise<ResponseFor<C>> {
+async function invokeCommandDirect<C extends CommandName>(command: C, request: RequestFor<C>): Promise<ResponseFor<C>> {
   try {
-    const request = (args === undefined ? {} : omitUndefinedProperties(args)) as RequestFor<C>;
     if (isDaemonCommand(command)) {
       const method = commandName(command);
       const result = await runtimeClient.call(method, request);
@@ -134,7 +134,8 @@ export async function invokeCommand<C extends CommandName>(command: C, args?: Re
     }
     const method = commandName(command);
     validateRequest(method, request as RequestFor<CommandName>);
-    const result = await invoke<ResponseFor<C>>(command, args === undefined ? undefined : request);
+    // JSON-RPC puts the request object directly in params; Tauri extracts named command arguments.
+    const result = await invoke<ResponseFor<C>>(command, tauriCommandArgs(request));
     validateResult(method, result);
     return result;
   } catch (error) {
@@ -144,6 +145,13 @@ export async function invokeCommand<C extends CommandName>(command: C, args?: Re
     }
     throw error;
   }
+}
+
+export function invokeCommand<C extends CommandName>(command: C, args?: RequestFor<C>): Promise<ResponseFor<C>> {
+  const request = (args === undefined ? {} : omitUndefinedProperties(args)) as RequestFor<C>;
+  const invoke = () => invokeCommandDirect(command, request);
+  if (COMMAND_METADATA[command].execution !== "write") return invoke();
+  return singleFlight(singleFlightKey(`runtime-command:${command}`, request), invoke);
 }
 
 export async function safeInvoke<C extends CommandName>(command: C, args?: RequestFor<C>): Promise<ResponseFor<C> | null> {

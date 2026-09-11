@@ -36,6 +36,10 @@ pub trait RuntimeHandler {
         &self,
         request: runtime_schema::SessionsSnapshotRequest,
     ) -> Result<runtime_schema::SessionsSnapshotResponse, DaemonError>;
+    fn sessions_list(
+        &self,
+        request: runtime_schema::SessionsListRequest,
+    ) -> Result<runtime_schema::SessionsListResponse, DaemonError>;
     fn sessions_scan_start(
         &self,
         request: runtime_schema::SessionsScanStartRequest,
@@ -176,6 +180,10 @@ pub trait RuntimeHandler {
         &self,
         request: runtime_schema::McpListRequest,
     ) -> Result<runtime_schema::McpListResponse, DaemonError>;
+    fn mcp_probe(
+        &self,
+        request: runtime_schema::McpProbeRequest,
+    ) -> Result<runtime_schema::McpProbeResponse, DaemonError>;
     fn mcp_set_enabled(
         &self,
         request: runtime_schema::McpSetEnabledRequest,
@@ -500,6 +508,24 @@ impl RuntimeHandler for Daemon {
             let _ = request;
             Daemon::sessions_snapshot(self)
         }?;
+        let result = serde_json::to_value(result).map_err(|error| {
+            DaemonError::new(
+                "CONTRACT_VIOLATION",
+                format!("generated response encode failed: {error}"),
+            )
+        })?;
+        serde_json::from_value(result).map_err(|error| {
+            DaemonError::new(
+                "CONTRACT_VIOLATION",
+                format!("generated response decode failed: {error}"),
+            )
+        })
+    }
+    fn sessions_list(
+        &self,
+        request: runtime_schema::SessionsListRequest,
+    ) -> Result<runtime_schema::SessionsListResponse, DaemonError> {
+        let result = { Daemon::sessions_list(self, request) }?;
         let result = serde_json::to_value(result).map_err(|error| {
             DaemonError::new(
                 "CONTRACT_VIOLATION",
@@ -1169,6 +1195,24 @@ impl RuntimeHandler for Daemon {
             let _ = request;
             Daemon::mcp_list(self)
         }?;
+        let result = serde_json::to_value(result).map_err(|error| {
+            DaemonError::new(
+                "CONTRACT_VIOLATION",
+                format!("generated response encode failed: {error}"),
+            )
+        })?;
+        serde_json::from_value(result).map_err(|error| {
+            DaemonError::new(
+                "CONTRACT_VIOLATION",
+                format!("generated response decode failed: {error}"),
+            )
+        })
+    }
+    fn mcp_probe(
+        &self,
+        request: runtime_schema::McpProbeRequest,
+    ) -> Result<runtime_schema::McpProbeResponse, DaemonError> {
+        let result = { Daemon::mcp_probe(self, request) }?;
         let result = serde_json::to_value(result).map_err(|error| {
             DaemonError::new(
                 "CONTRACT_VIOLATION",
@@ -2018,6 +2062,22 @@ macro_rules! runtime_dispatch {
                     )
                 })
             }
+            "sessions_list" => {
+                let request: runtime_schema::SessionsListRequest =
+                    serde_json::from_value($args.clone()).map_err(|error| {
+                        DaemonError::new(
+                            "INVALID_PARAMS",
+                            format!("generated request decode failed: {error}"),
+                        )
+                    })?;
+                let result = RuntimeHandler::sessions_list($daemon, request)?;
+                serde_json::to_value(result).map_err(|error| {
+                    DaemonError::new(
+                        "CONTRACT_VIOLATION",
+                        format!("generated response encode failed: {error}"),
+                    )
+                })
+            }
             "sessions_scan_start" => {
                 let request: runtime_schema::SessionsScanStartRequest =
                     serde_json::from_value($args.clone()).map_err(|error| {
@@ -2571,6 +2631,22 @@ macro_rules! runtime_dispatch {
                         )
                     })?;
                 let result = RuntimeHandler::mcp_list($daemon, request)?;
+                serde_json::to_value(result).map_err(|error| {
+                    DaemonError::new(
+                        "CONTRACT_VIOLATION",
+                        format!("generated response encode failed: {error}"),
+                    )
+                })
+            }
+            "mcp_probe" => {
+                let request: runtime_schema::McpProbeRequest =
+                    serde_json::from_value($args.clone()).map_err(|error| {
+                        DaemonError::new(
+                            "INVALID_PARAMS",
+                            format!("generated request decode failed: {error}"),
+                        )
+                    })?;
+                let result = RuntimeHandler::mcp_probe($daemon, request)?;
                 serde_json::to_value(result).map_err(|error| {
                     DaemonError::new(
                         "CONTRACT_VIOLATION",

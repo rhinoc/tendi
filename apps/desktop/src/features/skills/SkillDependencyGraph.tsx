@@ -1,3 +1,5 @@
+import { resolveRelationshipNode } from "./skill-relationship-layout.ts";
+
 export type SkillDependencyRecord = {
   id?: string;
   name: string;
@@ -21,15 +23,19 @@ export type SkillDependencyGraphProps = {
   skills: SkillDependencyRecord[];
   title?: string;
   emptyLabel?: string;
-  onOpenSkill?: (name: string) => void;
+  onOpenSkill?: (skillId: string) => void;
 };
 
-function relationList(
-  ids: string[],
-  skills: SkillDependencyRecord[],
+export function skillRelationList(
+  references: readonly string[],
+  skills: readonly SkillDependencyRecord[],
 ) {
-  return ids
-    .flatMap((id) => skills.filter((item) => item.id === id))
+  const related = new Map<string, SkillDependencyRecord>();
+  for (const reference of references) {
+    const skill = resolveRelationshipNode(skills, reference);
+    if (skill?.id?.trim()) related.set(skill.id, skill);
+  }
+  return [...related.values()]
     .sort((left, right) => left.name.localeCompare(right.name));
 }
 
@@ -42,7 +48,7 @@ function SkillRelationSection({
   title: string;
   skills: SkillDependencyRecord[];
   emptyLabel: string;
-  onOpenSkill?: (name: string) => void;
+  onOpenSkill?: (skillId: string) => void;
 }) {
   return (
     <div className="skillGraphSection">
@@ -52,9 +58,9 @@ function SkillRelationSection({
           {skills.map((item) => (
             <button
               className="skillGraphNode"
-              key={item.id ?? item.name}
+              key={item.id ?? ""}
               disabled={!onOpenSkill}
-              onClick={() => onOpenSkill?.(item.id ?? item.name)}
+              onClick={() => item.id && onOpenSkill?.(item.id)}
             >
               <strong>{item.name}</strong>
               {item.description && <span>{item.description}</span>}
@@ -84,8 +90,8 @@ export function SkillDependencyGraph({
     );
   }
 
-  const dependencies = relationList(skill.dependencyIds ?? [], skills);
-  const dependents = relationList(skill.dependentIds ?? [], skills);
+  const dependencies = skillRelationList(skill.dependencyIds ?? [], skills);
+  const dependents = skillRelationList(skill.dependentIds ?? [], skills);
   const emptySide = dependencies.length === 0
     ? dependents.length === 0 ? SkillGraphEmptySide.Both : SkillGraphEmptySide.Dependencies
     : dependents.length === 0 ? SkillGraphEmptySide.Dependents : SkillGraphEmptySide.None;

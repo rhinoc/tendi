@@ -29,9 +29,11 @@ import { SelectControl } from "../components/shared/SelectControl.tsx";
 import { StatefulButton } from "../components/shared/StatefulButton.tsx";
 import { Toast } from "../components/shared/Toast.tsx";
 import { AsyncStatus } from "../lib/async-status.ts";
+import { useTabState } from "../lib/tab-state.ts";
+import { clearEditorDraft, getEditorDraft, updateEditorDraft, useEditorDraft, type EditorDraft } from "../lib/editor-draft-state.ts";
 import { SaveStatus } from "../lib/save-status.ts";
 import { CodeMirrorLanguage } from "../components/shared/CodeMirrorFileEditor.tsx";
-import { actionLabels, DaemonCommandError, selectionDeleteLabel, TableSelectionActionId, TauriCommand, compactDateTime, configSelectionActionIds, formatUserPath, friendlyAgent, logger, mergeThreeWay, normalizeConfigProfiles, safeInvoke, subscribeDaemonEvents } from "../lib/index.ts";
+import { actionLabels, configDisplayName, DaemonCommandError, selectionDeleteLabel, TableSelectionActionId, TauriCommand, compactDateTime, configSelectionActionIds, formatUserPath, friendlyAgent, logger, mergeThreeWay, normalizeConfigProfiles, safeInvoke, subscribeDaemonEvents } from "../lib/index.ts";
 import { resolveSelectValue } from "../lib/select-options.ts";
 import type { DaemonEvent } from "../lib/index.ts";
 import { RuntimeEventName } from "../lib/generated/runtime-events.ts";
@@ -71,6 +73,9 @@ type ConfigViewProps = {
   /** App-owned persisted profile state. ConfigView only presents and mutates this slice. */
   activeProfiles: Record<string, string>;
   onActiveProfilesChange: (profiles: Record<string, string>) => void;
+  locateConfigId?: string;
+  onLocateConfigComplete?: (id: string) => void;
+  onConfigRowsChange?: (rows: AgentConfigFile[]) => void;
 };
 
 function errorMessage(error: unknown): string {
@@ -137,14 +142,14 @@ function configSelectionActions(
   return configSelectionActionIds(selectedRows.length).map((id) => actions[id]);
 }
 
-export function ConfigView({ activeProfiles: activeProfilesProp, onActiveProfilesChange }: ConfigViewProps) {
+export function ConfigView({ activeProfiles: activeProfilesProp, onActiveProfilesChange, locateConfigId, onLocateConfigComplete, onConfigRowsChange }: ConfigViewProps) {
   const [configs, setConfigs] = useState<AgentConfigFile[]>([]);
-  const [activePath, setActivePath] = useState("");
-  const [selectedPath, setSelectedPath] = useState("");
+  const [activePath, setActivePath] = useTabState("config.activePath", "");
+  const [selectedPath, setSelectedPath] = useTabState("config.selectedPath", "");
   const [selected, setSelected] = useState<string[]>([]);
-  const [content, setContent] = useState("");
-  const [originalContent, setOriginalContent] = useState("");
-  const [sha256, setSha256] = useState("");
+  const configDraftKey = `configs:${activePath || "__none__"}`;
+  const draft = useEditorDraft(configDraftKey);
+  const { content, originalContent, sha256 } = draft;
   const [loadingConfig, setLoadingConfig] = useState(true);
   const [loadingConfigs, setLoadingConfigs] = useState(true);
   const [loadError, setLoadError] = useState("");
@@ -174,6 +179,10 @@ export function ConfigView({ activeProfiles: activeProfilesProp, onActiveProfile
   originalContentRef.current = originalContent;
   sha256Ref.current = sha256;
   activePathRef.current = activePath;
+  const updateActiveDraft = useCallback((update: EditorDraft | ((current: EditorDraft) => EditorDraft)) => {
+    const path = activePathRef.current;
+    if (path) updateEditorDraft(`configs:${path}`, update);
+  }, []);
   const activeConfig = configs.find((config) => config.path === activePath) ?? null;
   const keepActiveConfigVisible = Boolean(activeConfig && activePath === selectedPath);
   const dirty = content !== originalContent;
@@ -215,7 +224,7 @@ export function ConfigView({ activeProfiles: activeProfilesProp, onActiveProfile
         <div className="configAgentCell">
           <AgentOptionLabel agent={config.agent} variant="filter" collapsed />
           <span className="configAgentText">
-            <strong className="dataCellTitle">{config.label}</strong>
+            <strong className="dataCellTitle">{configDisplayName(config)}</strong>
             <span className="dataCellSubLine">
               <Tooltip content={formatUserPath(config.path)} onlyWhenTruncated><span className="dataCellSub">{formatUserPath(config.path)}</span></Tooltip>
             </span>
@@ -241,9 +250,7 @@ export function ConfigView({ activeProfiles: activeProfilesProp, onActiveProfile
     const local = contentRef.current;
     const base = originalContentRef.current;
     if (local === base) {
-      setContent(next.content);
-      setOriginalContent(next.content);
-      setSha256(next.sha256);
+      updateEditorDraft(`configs:${next.path}`, { content: next.content, originalContent: next.content, sha256: next.sha256 });
       setSaveError("");
     } else {
       setConflict({
@@ -277,9 +284,10 @@ export function ConfigView({ activeProfiles: activeProfilesProp, onActiveProfile
       setSelectedPath(next.path);
       setActivePath(next.path);
       if (config) setSelectedProfileValue(profileValueForConfig(config));
-      setContent(next.content);
-      setOriginalContent(next.content);
-      setSha256(next.sha256);
+      const cachedDraft = getEditorDraft(`configs:${next.path}`);
+      if (cachedDraft.content === cachedDraft.originalContent) {
+        updateEditorDraft(`configs:${next.path}`, { content: next.content, originalContent: next.content, sha256: next.sha256 });
+      }
       setConflict(null);
       setSaveError("");
       setConfigs((current) => current.map((config) => (
@@ -300,17 +308,16 @@ export function ConfigView({ activeProfiles: activeProfilesProp, onActiveProfile
     try {
       const next = await readAgentConfigs();
       setConfigs(next);
+      onConfigRowsChange?.(next);
       const selected = next.find((config) => config.path === activePath) ?? next[0];
       if (selected) {
         setSelectedProfileValue(profileValueForConfig(selected));
         await readConfig(selected.path, selected);
       } else {
         readRequestRef.current += 1;
+        if (activePathRef.current) clearEditorDraft(`configs:${activePathRef.current}`);
         setActivePath("");
         setSelectedPath("");
-        setContent("");
-        setOriginalContent("");
-        setSha256("");
         setConflict(null);
         setSaveError("");
         setContentError("");
@@ -403,18 +410,21 @@ export function ConfigView({ activeProfiles: activeProfilesProp, onActiveProfile
     setPendingPath("");
     setPendingReload(false);
     if (deleteTargets.length > 0) {
-      setContent(originalContent);
-      setSha256(sha256);
+      updateActiveDraft((current) => ({ ...current, content: current.originalContent }));
       setConflict(null);
       setSaveError("");
       setPendingDeleteConfirmConfigs(deleteTargets);
       return;
     }
     if (nextPath) {
+      updateActiveDraft((current) => ({ ...current, content: current.originalContent }));
       setSelectedProfileValue(profileValueForConfig(configs.find((config) => config.path === nextPath)));
       void readConfig(nextPath, configs.find((config) => config.path === nextPath));
     }
-    else if (shouldReload) void loadConfigs();
+    else if (shouldReload) {
+      updateActiveDraft((current) => ({ ...current, content: current.originalContent }));
+      void loadConfigs();
+    }
   };
 
   const requestDeleteConfigs = useCallback((items: AgentConfigFile[]) => {
@@ -449,6 +459,7 @@ export function ConfigView({ activeProfiles: activeProfilesProp, onActiveProfile
       }
       if (Array.isArray(result.configs)) {
         setConfigs(result.configs);
+        onConfigRowsChange?.(result.configs);
         const deletedActive = targets.some((config) => config.path === activePath);
         const selected = result.configs.find((config) => config.path === activePath)
           ?? result.configs[0];
@@ -456,11 +467,9 @@ export function ConfigView({ activeProfiles: activeProfilesProp, onActiveProfile
           if (selected) await readConfig(selected.path, selected);
           else {
             readRequestRef.current += 1;
+            if (activePathRef.current) clearEditorDraft(`configs:${activePathRef.current}`);
             setActivePath("");
             setSelectedPath("");
-            setContent("");
-            setOriginalContent("");
-            setSha256("");
             setConflict(null);
             setSaveError("");
             setContentError("");
@@ -561,9 +570,7 @@ export function ConfigView({ activeProfiles: activeProfilesProp, onActiveProfile
         content: nextContent,
       });
       const savedContent = typeof saved.content === "string" ? saved.content : nextContent;
-      setContent(savedContent);
-      setOriginalContent(savedContent);
-      setSha256(saved.sha256);
+      updateEditorDraft(`configs:${saved.path}`, { content: savedContent, originalContent: savedContent, sha256: saved.sha256 });
       setConflict(null);
       setConfigs((current) => current.map((config) => (
         config.path === saved.path ? { ...config, exists: true, updatedAt: saved.updatedAt } : config
@@ -591,9 +598,7 @@ export function ConfigView({ activeProfiles: activeProfilesProp, onActiveProfile
 
   const useDiskVersion = useCallback(() => {
     if (!conflict) return;
-    setContent(conflict.disk);
-    setOriginalContent(conflict.disk);
-    setSha256(conflict.diskSha256);
+    updateActiveDraft({ content: conflict.disk, originalContent: conflict.disk, sha256: conflict.diskSha256 });
     setConflict(null);
     setSaveError("");
   }, [conflict]);
@@ -601,9 +606,7 @@ export function ConfigView({ activeProfiles: activeProfilesProp, onActiveProfile
   const mergeConflict = useCallback(() => {
     if (!conflict) return;
     const merged = mergeThreeWay(conflict.base, content, conflict.disk);
-    setContent(merged.content);
-    setOriginalContent(conflict.disk);
-    setSha256(conflict.diskSha256);
+    updateActiveDraft({ content: merged.content, originalContent: conflict.disk, sha256: conflict.diskSha256 });
     setSaveError("");
     setConflict(merged.hasConflicts ? { ...conflict, local: merged.content, merged: true } : null);
   }, [conflict, content]);
@@ -684,9 +687,9 @@ export function ConfigView({ activeProfiles: activeProfilesProp, onActiveProfile
       </DialogShell>
       <Panel className="sessionListPanel configListPanel" defaultSize="36%" minSize="280px">
         <div className="sessionListPane configListPane">
-          <PageHeader title="Config" compact>
+          <PageHeader title="Configs" compact>
             <IconButton
-              aria-label="Reload config"
+              aria-label="Reload configs"
               aria-busy={loadingConfigs}
               disabled={loadingConfigs}
               onClick={reload}
@@ -700,12 +703,16 @@ export function ConfigView({ activeProfiles: activeProfilesProp, onActiveProfile
               rows={configs}
               columns={columns}
               getRowId={(config) => config.path}
-              getRowLabel={(config) => config.label}
+              getRowLabel={configDisplayName}
               selectable
               selectedIds={selected}
               onSelectionChange={setSelected}
+              onDeleteSelected={requestDeleteConfigs}
               enableMarquee
+              scrollRestorationKey="configs.list"
               onRowClick={(config) => chooseConfig(config.path)}
+              scrollToRowId={locateConfigId}
+              onScrollToRowComplete={onLocateConfigComplete}
               rowProps={(config) => ({
                 className: config.path === selectedPath ? "configRowActive" : "",
                 "aria-current": config.path === selectedPath ? "true" : undefined,
@@ -734,7 +741,7 @@ export function ConfigView({ activeProfiles: activeProfilesProp, onActiveProfile
           <header className="threadHeader configEditorHeader">
             <div className="threadTitleLine">
               <div className="configTitle">
-                <h2>{activeConfig?.label ?? "Config file"}</h2>
+                <h2>{configDisplayName(activeConfig)}</h2>
                 {!loadingConfig && activeConfig && dirty ? <Badge tone="warning">modified</Badge> : null}
               </div>
             </div>
@@ -789,7 +796,7 @@ export function ConfigView({ activeProfiles: activeProfilesProp, onActiveProfile
                   originalContent={originalContent}
                   language={activeConfig.format === AgentConfigFormat.Json ? CodeMirrorLanguage.Json : CodeMirrorLanguage.Toml}
                   onChange={(value) => {
-                    setContent(value);
+                    updateActiveDraft((current) => ({ ...current, content: value }));
                     setSaveError("");
                     if (conflict?.merged) {
                       if (isConflictMarkerContent(value)) setConflict((current) => current ? { ...current, local: value } : current);
@@ -799,7 +806,7 @@ export function ConfigView({ activeProfiles: activeProfilesProp, onActiveProfile
                   onSave={() => { void save(); }}
                   showConflictMarkers={Boolean(conflict?.merged) || isConflictMarkerContent(content)}
                   onConflictResolve={(value) => {
-                    setContent(value);
+                    updateActiveDraft((current) => ({ ...current, content: value }));
                     setSaveError("");
                     if (isConflictMarkerContent(value)) setConflict((current) => current ? { ...current, local: value } : current);
                     else setConflict(null);

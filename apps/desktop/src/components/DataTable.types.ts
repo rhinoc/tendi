@@ -62,6 +62,7 @@ export type DataTableProps<TRow> = {
   selectable?: boolean | ((row: TRow) => boolean);
   selectedIds?: string[];
   onSelectionChange?: (ids: string[]) => void;
+  onDeleteSelected?: (rows: TRow[]) => void;
   enableMarquee?: boolean;
   defaultGroupBy?: string | null;
   groupBy?: string | null;
@@ -74,6 +75,7 @@ export type DataTableProps<TRow> = {
   manualSorting?: boolean;
   rowHeight?: number;
   enableVirtualization?: boolean;
+  scrollRestorationKey?: string;
   scrollResetKey?: string;
   scrollToRowId?: string;
   onScrollToRowComplete?: (rowId: string) => void;

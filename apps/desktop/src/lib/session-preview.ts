@@ -1,4 +1,5 @@
 import { formatMarkdownLinkLabels, formatTranscriptText } from "./transcript-format.ts";
+import { EMPTY_DISPLAY_VALUE } from "./constants.ts";
 import type { SessionRecord } from "./sessions.ts";
 
 export type RecentSessionPreview = {
@@ -25,6 +26,10 @@ export function formatSessionTitle(value: string | null | undefined): string {
   return formatTranscriptText(formatMarkdownLinkLabels(value ?? ""));
 }
 
+export function sessionTitleValue(session: { title?: string | null } | null | undefined): string {
+  return session?.title ?? "";
+}
+
 export function summarizeSessionPreviewRecord(
   session: Pick<SessionRecord, "firstUserMessage" | "lastUserMessage" | "lastAssistantMessage">,
 ): RecentSessionPreview | null {
@@ -33,7 +38,7 @@ export function summarizeSessionPreviewRecord(
   const lastAssistant = session.lastAssistantMessage ?? "";
   if (!firstUser && !lastUser && !lastAssistant) return null;
   return {
-    userLast: lastUser || "—",
-    assistantLast: lastAssistant || "—",
+    userLast: lastUser || EMPTY_DISPLAY_VALUE,
+    assistantLast: lastAssistant || EMPTY_DISPLAY_VALUE,
   };
 }

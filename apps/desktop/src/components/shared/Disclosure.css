@@ -1,0 +1,74 @@
+.disclosure {
+  --disclosure-inline-padding: var(--transcript-inline-padding, 16px);
+  --disclosure-control-height: var(--transcript-control-height, var(--control-height-row));
+  min-width: 0;
+}
+
+.disclosureSummaryRow {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.disclosureSummary {
+  min-width: 0;
+  height: var(--disclosure-control-height);
+  flex: 1 1 auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 var(--disclosure-inline-padding);
+  border: 0;
+  color: inherit;
+  background: transparent;
+  cursor: pointer;
+  list-style: none;
+  text-align: start;
+}
+
+.disclosureSummary:hover {
+  background: var(--hover-fill);
+}
+
+.disclosure[data-summary-size="comfortable"] > .disclosureSummaryRow > .disclosureSummary {
+  height: auto;
+  padding: 8px;
+}
+
+.disclosureSummary:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: -2px;
+}
+
+.disclosureChevron {
+  flex: 0 0 auto;
+  color: var(--faint);
+  transition-property: transform;
+  transition-duration: 120ms;
+  transition-timing-function: ease-out;
+}
+
+.disclosure[data-state="open"] > .disclosureSummaryRow > .disclosureSummary > .disclosureChevron {
+  transform: rotate(90deg);
+}
+
+.disclosureDetails {
+  min-width: 0;
+  padding: 8px var(--disclosure-inline-padding) var(--disclosure-inline-padding);
+  border-top: 1px solid var(--line);
+}
+
+.disclosure[data-content-padding="compact"] > .disclosureDetails {
+  padding-top: 4px;
+}
+
+.disclosure[data-content-padding="inset"] > .disclosureDetails {
+  padding: 8px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .disclosureChevron {
+    transition: none;
+  }
+}

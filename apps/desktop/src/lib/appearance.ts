@@ -46,7 +46,61 @@ const APPEARANCE_CACHE_KEY = "tendi.appearance";
 const THEME_CACHE_KEY = "tendi.color-themes";
 const FONT_FAMILY_CACHE_KEY = "tendi.font-family";
 const SYSTEM_DARK_QUERY = "(prefers-color-scheme: dark)";
+const REDUCED_MOTION_QUERY = "(prefers-reduced-motion: reduce)";
+const THEME_TRANSITION_ATTRIBUTE = "themeTransition";
+const THEME_TRANSITION_ORIGIN_PROPERTY = "--theme-transition-origin";
+const DEFAULT_THEME_TRANSITION_ORIGIN = "50% 50%";
 let themeTransitionFrame: number | null = null;
+let themeTransitionRevision = 0;
+
+type ThemeViewTransition = {
+  finished: Promise<void>;
+};
+
+type ThemeTransitionDocument = Document & {
+  startViewTransition?: (updateCallback: () => void) => ThemeViewTransition;
+};
+
+export function getThemeTransitionOrigin(element: Element | null): string {
+  if (!element || window.innerWidth <= 0 || window.innerHeight <= 0) return DEFAULT_THEME_TRANSITION_ORIGIN;
+  const rect = element.getBoundingClientRect();
+  if (rect.width <= 0 || rect.height <= 0) return DEFAULT_THEME_TRANSITION_ORIGIN;
+  const x = ((rect.left + rect.width / 2) / window.innerWidth) * 100;
+  const y = ((rect.top + rect.height / 2) / window.innerHeight) * 100;
+  return `${x}% ${y}%`;
+}
+
+export function startThemeTransition(update: () => void, origin = DEFAULT_THEME_TRANSITION_ORIGIN): void {
+  const root = document.documentElement;
+  const transitionDocument = document as ThemeTransitionDocument;
+  const startViewTransition = transitionDocument.startViewTransition;
+  const transitionRevision = ++themeTransitionRevision;
+  const cleanup = () => {
+    if (transitionRevision !== themeTransitionRevision) return;
+    delete root.dataset[THEME_TRANSITION_ATTRIBUTE];
+    root.style.removeProperty(THEME_TRANSITION_ORIGIN_PROPERTY);
+  };
+  if (typeof startViewTransition !== "function" || window.matchMedia(REDUCED_MOTION_QUERY).matches) {
+    cleanup();
+    update();
+    return;
+  }
+
+  root.dataset[THEME_TRANSITION_ATTRIBUTE] = "circle";
+  root.style.setProperty(THEME_TRANSITION_ORIGIN_PROPERTY, origin);
+  let updateStarted = false;
+  try {
+    const transition = startViewTransition.call(transitionDocument, () => {
+      updateStarted = true;
+      update();
+    });
+    void transition.finished.then(cleanup, cleanup);
+  } catch (error) {
+    cleanup();
+    if (updateStarted) throw error;
+    update();
+  }
+}
 
 function suppressThemeTransitions(root: HTMLElement): void {
   root.dataset.themeChanging = "true";
@@ -116,10 +170,6 @@ export function applyFontFamily(fontFamily: FontFamily): void {
 export function resolveAppearance(appearance: Appearance): ResolvedAppearance {
   if (appearance !== Appearance.System) return appearance;
   return window.matchMedia(SYSTEM_DARK_QUERY).matches ? Appearance.Dark : Appearance.Light;
-}
-
-export function resolveColorTheme(appearance: Appearance, preferences: ThemePreferences): ColorTheme {
-  return preferences[resolveAppearance(appearance)];
 }
 
 export function applyAppearance(appearance: Appearance, preferences = readCachedThemePreferences()): void {

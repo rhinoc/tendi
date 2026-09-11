@@ -62,13 +62,9 @@
   align-items: center;
 }
 
-.settingsBackupSummaryActions.isLoading {
-  align-items: center;
-}
-
 .settingsBackupFormGrid {
   display: grid;
-  grid-template-columns: minmax(0, 1.7fr) minmax(160px, .8fr);
+  grid-template-columns: minmax(0, 1fr);
   gap: 8px;
 }
 
@@ -96,14 +92,15 @@
   box-sizing: border-box;
   height: var(--control-height);
   width: 100%;
-  padding: 0 8px;
-  border: 0;
-  border-radius: var(--radius-sm);
-  background: var(--control-fill);
+  padding: 0 var(--control-padding-x);
+  border: 1px solid var(--control-border);
+  border-radius: var(--control-radius);
+  background: var(--panel-bg);
   color: var(--text);
   font: inherit;
-  font-size: var(--text-sm);
+  font-size: var(--text-ui);
   line-height: var(--leading-ui);
+  transition: border-color 160ms var(--ease-out-soft);
 }
 
 .settingsTextInput::placeholder {
@@ -111,9 +108,8 @@
 }
 
 .settingsTextInput:focus {
-  background: var(--active-fill);
   outline: none;
-  box-shadow: 0 0 0 2px var(--focus-ring);
+  border-color: var(--line-strong);
 }
 
 .settingsBackupVersionCopy > span,
@@ -136,11 +132,31 @@
 
 .settingsBackupVersionList li {
   min-width: 0;
+  display: block;
+}
+
+.backupDisconnectContent {
+  display: flex;
+  align-items: center;
+}
+
+.backupHistoryItemCard {
+  overflow: hidden;
+  border-radius: 0;
+}
+
+.backupHistoryVersionRow {
+  min-width: 0;
   display: flex;
   align-items: center;
   gap: 12px;
-  min-height: 48px;
-  border-top: 1px solid var(--line);
+  min-height: var(--data-table-table-row-height);
+  padding-inline: 8px;
+}
+
+.backupHistoryVersionRow .settingsBackupVersionCopy > span {
+  font-size: var(--text-xs);
+  line-height: var(--leading-tight);
 }
 
 .settingsBackupVersionCopy {
@@ -148,6 +164,22 @@
   flex: 1 1 auto;
   display: grid;
   gap: 3px;
+}
+
+.settingsBackupVersionTitle {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.settingsBackupVersionTitle > svg {
+  flex: 0 0 auto;
+  color: var(--accent);
+}
+
+.settingsBackupVersionTitle strong {
+  min-width: 0;
 }
 
 .settingsBackupVersionCopy strong {
@@ -161,7 +193,7 @@
 
 .settingsBackupVersionCopy code {
   color: var(--text);
-  font-family: var(--font-mono);
+  font-family: inherit;
 }
 
 .settingsBackupEmpty {
@@ -171,7 +203,7 @@
 
 .backupDetailsDialog {
   width: min(620px, calc(100vw - 32px));
-  height: min(720px, calc(100vh - 64px));
+  height: min(560px, calc(100vh - 64px));
   display: flex;
   flex-direction: column;
 }
@@ -182,11 +214,9 @@
   flex: 1 1 auto;
   box-sizing: border-box;
   padding: 0 22px 20px;
-  overflow: hidden;
-}
-
-.backupDetailsCategoryBody {
-  overflow: auto;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
 }
 
 .backupDetailsHomeBody {
@@ -194,7 +224,14 @@
   flex-direction: column;
 }
 
-.backupDetailsHomeBody .backupHistorySection {
+.backupDetailsSectionLoading {
+  min-height: var(--control-height);
+  display: grid;
+  place-items: center;
+  color: var(--muted);
+}
+
+.backupDetailsHomeBody .backupDetailsAccordionSection {
   min-height: 0;
   display: flex;
   flex: 1 1 auto;
@@ -203,19 +240,14 @@
 
 .backupDetailsHomeBody .settingsBackupVersionList {
   min-height: 0;
-  max-height: none;
-  flex: 1 1 auto;
+  max-height: 280px;
+  flex: 0 1 auto;
 }
 
 .backupDetailsSection {
   display: grid;
   gap: 12px;
-  padding-top: 18px;
-}
-
-.backupDetailsSection + .backupDetailsSection {
-  margin-top: 18px;
-  border-top: 1px solid var(--line);
+  padding-top: 22px;
 }
 
 .backupDetailsSection h3 {
@@ -226,50 +258,51 @@
   line-height: var(--leading-ui);
 }
 
-.backupCategoryList,
 .backupContentItems {
   display: grid;
-  gap: 2px;
+  gap: 0;
 }
 
-.backupCategoryRow,
+.backupCategoryAccordion .backupContentItems {
+  padding-inline: 12px;
+}
+
 .backupContentItemRow {
   min-width: 0;
   display: flex;
   align-items: center;
-  gap: 10px;
-  min-height: 42px;
-}
-
-.backupContentItemRow {
+  min-height: var(--data-table-table-row-height);
+  gap: 12px;
   padding-inline: 8px;
 }
 
-.backupCategoryRow {
-  min-height: 32px;
+.backupCategoryAccordion {
+  min-width: 0;
+  flex: 0 0 auto;
+  --collapsible-heading-min-height: 44px;
+  --collapsible-trigger-min-height: 40px;
+  --collapsible-trigger-gap: 8px;
+  --collapsible-trigger-padding: 8px 12px;
+  --collapsible-leading-padding: 12px;
+  --collapsible-leading-trigger-padding: 8px;
+  --collapsible-content-padding: 0 0 4px;
+  --collapsible-content-overflow: auto;
+  --collapsible-content-max-height: 280px;
+  --collapsible-surface: transparent;
 }
 
-.backupCategoryDetail {
+.backupDetailsAccordionSection > :first-child {
+  --collapsible-content-padding: 0 16px 4px;
+}
+
+.backupDetailsAccordionSection [data-accordion-item="repository"],
+.backupDetailsAccordionSection [data-accordion-item="disconnect"] {
+  --collapsible-content-padding: 0 16px 16px;
+}
+
+.backupCategoryAccordionTitle {
   min-width: 0;
   flex: 1 1 auto;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 6px 0;
-  border: 0;
-  background: transparent;
-  color: var(--text);
-  text-align: left;
-  cursor: pointer;
-}
-
-.backupCategoryDetail:hover {
-  color: var(--accent);
-}
-
-.backupCategoryDetail > span {
-  min-width: 0;
   display: flex;
   align-items: baseline;
   gap: 8px;
@@ -281,21 +314,25 @@
   gap: 3px;
 }
 
-.backupContentItemRow:nth-child(even) {
-  background: var(--inset-fill);
+.backupContentItemRow .dataCellTitle {
+  font-size: var(--text-sm);
 }
 
-.backupCategoryDetail strong {
+.backupContentItemRow .dataCellSub {
+  font-size: var(--text-xs);
+}
+
+.backupCategoryAccordionTitle strong {
   overflow: hidden;
   color: var(--text);
-  font-size: var(--text-sm);
+  font-size: var(--text-ui);
   font-weight: 600;
   line-height: var(--leading-ui);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.backupCategoryDetail span span {
+.backupCategoryAccordionTitle > span {
   overflow: hidden;
   color: var(--muted);
   font-size: var(--text-xs);
@@ -343,7 +380,6 @@
 }
 
 @media (max-width: 760px) {
-  .settingsBackupFormGrid,
   .backupRestoreControls {
     grid-template-columns: 1fr;
   }

@@ -1,0 +1,182 @@
+.expandingArrowButton {
+  position: relative;
+  display: inline-flex;
+  height: 64px;
+  min-width: 288px;
+  align-items: center;
+  overflow: hidden;
+  border: 0;
+  border-radius: 22px;
+  padding: 6px;
+  color: var(--accent-contrast);
+  background: var(--accent);
+  box-shadow: none;
+  cursor: pointer;
+  font-size: var(--text-title);
+  font-weight: 500;
+  line-height: var(--leading-body);
+  user-select: none;
+}
+
+.expandingArrowButtonCompact {
+  height: var(--control-height);
+  min-width: var(--stateful-button-width);
+  border-radius: var(--radius-md);
+  padding: 3px;
+  font-size: var(--text-ui);
+  line-height: var(--leading-ui);
+}
+
+.expandingArrowButton:not(:disabled):active {
+  transform: scale(0.97);
+}
+
+.expandingArrowButton:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+
+.expandingArrowButton:disabled {
+  pointer-events: none;
+  cursor: default;
+  opacity: 0.5;
+}
+
+.expandingArrowButton.isBusy {
+  cursor: wait;
+  opacity: 1;
+}
+
+.expandingArrowButton.isBusy .expandingArrowButtonTrailItem {
+  --dot-blink-duration: 1.05s;
+  --dot-blink-delay: 0s;
+}
+
+.expandingArrowButton.isBusy .expandingArrowButtonTrailItem:nth-child(1) {
+  --dot-blink-duration: 0.92s;
+  --dot-blink-delay: -0.28s;
+}
+
+.expandingArrowButton.isBusy .expandingArrowButtonTrailItem:nth-child(2) {
+  --dot-blink-duration: 1.17s;
+  --dot-blink-delay: -0.63s;
+}
+
+.expandingArrowButton.isBusy .expandingArrowButtonTrailItem:nth-child(3) {
+  --dot-blink-duration: 0.84s;
+  --dot-blink-delay: -0.17s;
+}
+
+.expandingArrowButton.isBusy .expandingArrowButtonTrailItem:nth-child(4) {
+  --dot-blink-duration: 1.28s;
+  --dot-blink-delay: -0.91s;
+}
+
+.expandingArrowButton.isBusy .expandingArrowButtonTrailItem:nth-child(5) {
+  --dot-blink-duration: 0.99s;
+  --dot-blink-delay: -0.46s;
+}
+
+.expandingArrowButton.isBusy .expandingArrowButtonTrailItem svg circle {
+  animation: expandingArrowButtonDotBlink var(--dot-blink-duration) ease-in-out infinite;
+  animation-delay: var(--dot-blink-delay);
+}
+
+.expandingArrowButton.isBusy .expandingArrowButtonTrailItem circle:nth-child(2) {
+  animation-delay: calc(var(--dot-blink-delay) - 0.09s);
+}
+
+.expandingArrowButton.isBusy .expandingArrowButtonTrailItem circle:nth-child(3) {
+  animation-delay: calc(var(--dot-blink-delay) + 0.13s);
+}
+
+.expandingArrowButton.isBusy .expandingArrowButtonTrailItem circle:nth-child(4) {
+  animation-delay: calc(var(--dot-blink-delay) - 0.04s);
+}
+
+.expandingArrowButton.isBusy .expandingArrowButtonTrailItem circle:nth-child(5) {
+  animation-delay: calc(var(--dot-blink-delay) + 0.18s);
+}
+
+@keyframes expandingArrowButtonDotBlink {
+  0%, 100% { opacity: 0.28; }
+  42% { opacity: 1; }
+  68% { opacity: 0.46; }
+}
+
+.expandingArrowButtonAccent {
+  position: absolute;
+  inset: 6px auto 6px 6px;
+  z-index: 10;
+  display: block;
+  overflow: hidden;
+  border-radius: 16px;
+  color: var(--accent);
+  background: var(--accent-contrast);
+}
+
+.expandingArrowButtonCompact .expandingArrowButtonAccent {
+  inset: 3px auto 3px 3px;
+}
+
+.expandingArrowButtonChevron,
+.expandingArrowButtonTrail {
+  position: absolute;
+  inset: 0;
+}
+
+.expandingArrowButtonChevron {
+  display: grid;
+  place-items: center;
+}
+
+.expandingArrowButtonTrail {
+  display: flex;
+  align-items: center;
+  justify-content: space-around;
+  padding: 0 12px;
+}
+
+.expandingArrowButtonTrailItem {
+  display: inline-grid;
+  place-items: center;
+  color: inherit;
+}
+
+.expandingArrowButtonChevronIcon {
+  width: 20px;
+  height: 28px;
+}
+
+.expandingArrowButtonChevronIcon.compact {
+  width: 12px;
+  height: 17px;
+}
+
+.expandingArrowButtonLabel {
+  position: relative;
+  z-index: 0;
+  margin-left: 76px;
+  margin-right: 20px;
+  white-space: nowrap;
+  font-size: var(--text-title);
+  font-weight: 500;
+  letter-spacing: -0.02em;
+}
+
+.expandingArrowButtonCompact .expandingArrowButtonLabel {
+  margin-left: 38px;
+  margin-right: 10px;
+  font-size: var(--text-ui);
+  letter-spacing: normal;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .expandingArrowButton {
+    transition: none;
+  }
+
+  .expandingArrowButton.isBusy .expandingArrowButtonTrailItem svg circle {
+    animation: none;
+  }
+}

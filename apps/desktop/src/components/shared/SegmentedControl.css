@@ -1,29 +1,35 @@
 .segmentedControl {
-  width: min(100%, 280px);
+  width: max-content;
   max-width: 100%;
   display: inline-flex;
   align-items: center;
-  gap: var(--segmented-track-gap);
+  gap: 0;
   height: var(--control-height);
   padding: var(--segmented-track-padding);
   border: 0;
-  border-radius: var(--radius-md);
-  background: var(--control-fill);
+  border-radius: var(--segmented-track-radius);
+  background: var(--surface-2);
 }
 
 .segmentedControl[data-full-width="true"] {
   width: 100%;
 }
 
+.segmentedControl[data-full-width="true"] .segmentedControlItem {
+  width: 100%;
+  flex: 1 1 auto;
+}
+
 .segmentedControl[data-variant="icon"] {
   width: max-content;
   height: var(--control-height);
   padding: var(--segmented-track-padding);
+  border-radius: var(--segmented-track-radius);
 }
 
 .segmentedControlItem {
   min-width: 0;
-  flex: 1 1 0;
+  width: auto;
   height: var(--segmented-item-height);
   display: inline-flex;
   align-items: center;
@@ -31,15 +37,29 @@
   gap: 6px;
   padding: 0 10px;
   border: 0;
-  border-radius: var(--radius-sm);
+  border-radius: var(--segmented-item-radius);
   color: var(--muted);
   background: transparent;
   cursor: pointer;
   font: inherit;
-  font-size: var(--text-sm);
-  font-weight: 400;
+  font-size: var(--text-ui);
+  font-weight: 500;
   line-height: var(--leading-ui);
   white-space: nowrap;
+  outline: none;
+  position: relative;
+  z-index: 1;
+  isolation: isolate;
+  transition: color 160ms var(--ease-out-soft);
+}
+
+.segmentedControlIndicator {
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  border-radius: var(--segmented-item-radius);
+  background: var(--accent);
+  pointer-events: none;
 }
 
 .segmentedControl[data-variant="icon"] .segmentedControlItem {
@@ -48,17 +68,16 @@
   min-height: var(--segmented-item-height);
   flex: 0 0 var(--segmented-icon-item-size);
   padding: 0;
-  border-radius: var(--row-frame-radius);
+  border-radius: var(--segmented-item-radius);
 }
 
 .segmentedControlItem:hover {
   color: var(--text);
-  background: var(--hover-fill-strong);
 }
 
 .segmentedControlItem[data-state="on"] {
-  color: var(--text);
-  background: var(--selection-fill-strong);
+  color: var(--accent-contrast);
+  background: transparent;
   box-shadow: none;
 }
 
@@ -72,8 +91,8 @@
 }
 
 .segmentedControlItem:focus-visible {
-  outline: 2px solid var(--focus-ring);
-  outline-offset: -2px;
+  outline: 1px solid var(--focus-ring);
+  outline-offset: -1px;
 }
 
 .segmentedControlItem svg {
@@ -86,4 +105,10 @@
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .segmentedControlItem {
+    transition: none;
+  }
 }

@@ -34,3 +34,22 @@ export function findTextRanges(text: string, query: string): TextRange[] {
   }
   return ranges;
 }
+
+export function splitSearchQueryTerms(query: string): string[] {
+  return query.trim().split(/\s+/).filter(Boolean);
+}
+
+export function findTextRangesForQueryTerms(text: string, terms: readonly string[]): TextRange[] {
+  const ranges = terms.flatMap((term) => findTextRanges(text, term));
+  return ranges
+    .sort((left, right) => left.from - right.from || right.to - left.to)
+    .reduce<TextRange[]>((merged, range) => {
+      const previous = merged.at(-1);
+      if (!previous || range.from >= previous.to) {
+        merged.push(range);
+      } else {
+        previous.to = Math.max(previous.to, range.to);
+      }
+      return merged;
+    }, []);
+}

@@ -1,9 +1,5 @@
 /* Hooks tab — third-column detail body */
 
-.hookDetailPanel {
-  background: var(--editor-bg);
-}
-
 .hookSourceMeta {
   gap: 0;
 }
@@ -19,24 +15,6 @@
 
 .hookSourceMeta span:last-child {
   font-family: inherit;
-}
-
-.hookEventTitle {
-  min-width: 0;
-  display: flex;
-  align-items: center;
-  gap: 7px;
-}
-
-.hookEventTitle {
-  width: 100%;
-  max-width: 100%;
-  overflow: hidden;
-}
-
-.dataRow .dataCell:has(.dataCellSub) .hookEventTitle .dataCellTitle {
-  width: auto;
-  flex: 0 1 auto;
 }
 
 .hookReviewDialogDetails {
@@ -234,20 +212,21 @@
 
 .hookConfigCodeMirror {
   min-height: 140px;
-  max-height: 420px;
+  height: auto !important;
 }
 
 .hookConfigCodeMirror .cm-editor {
   min-height: 140px;
-  max-height: 420px;
+  height: auto !important;
 }
 
 .hookConfigCodeMirror .cm-scroller {
-  max-height: 420px;
-  overflow: auto;
+  height: auto !important;
+  overflow: visible;
 }
 
 .hookConfigCodeMirror .cm-content {
+  min-height: 0;
   padding: 12px 14px 14px;
 }
 

@@ -19,12 +19,7 @@ export const DOMAIN_KEYS = [
 
 export const RUNTIME_DOMAIN_KEYS = [
   RuntimeDomainKey.Agents,
-  RuntimeDomainKey.Skills,
-  RuntimeDomainKey.Prompts,
-  RuntimeDomainKey.Sessions,
-  RuntimeDomainKey.Rules,
-  RuntimeDomainKey.Hooks,
-  RuntimeDomainKey.Mcp,
+  ...DOMAIN_KEYS,
 ] as const;
 
 export type DomainKey = Exclude<RuntimeDomainKey, RuntimeDomainKey.Agents>;

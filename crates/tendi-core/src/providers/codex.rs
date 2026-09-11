@@ -2,12 +2,14 @@ use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
     env,
     fs::{self, OpenOptions, TryLockError},
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
+    sync::{LazyLock, Mutex},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Value, json};
 use serde_yaml::Value as YamlValue;
 use sha2::Digest;
 use toml::Value as TomlValue;
@@ -28,17 +30,22 @@ use super::*;
 pub(super) struct CodexProvider;
 
 const CODEX_EXTERNAL_SOURCE_PREFIX: &str = "__codex_external__/";
+const CODEX_PLUGIN_READ_ONLY_REASON: &str = "Codex plugin MCP is managed by the plugin";
 
 fn infer_mcp_transport(spec: &Value) -> Option<String> {
     spec.get("transport")
         .or_else(|| spec.get("type"))
         .and_then(Value::as_str)
         .map(str::to_string)
-        .or_else(|| spec.get("command").and_then(Value::as_str).map(|_| "stdio".to_string()))
         .or_else(|| {
-            spec.get("url").and_then(Value::as_str).map(|url| {
-                if url.contains("/sse") { "sse" } else { "http" }.to_string()
-            })
+            spec.get("command")
+                .and_then(Value::as_str)
+                .map(|_| "stdio".to_string())
+        })
+        .or_else(|| {
+            spec.get("url")
+                .and_then(Value::as_str)
+                .map(|url| if url.contains("/sse") { "sse" } else { "http" }.to_string())
         })
 }
 
@@ -59,16 +66,517 @@ fn infer_mcp_enabled(spec: &Value) -> bool {
         && spec.get("enabled").and_then(Value::as_bool).unwrap_or(true)
 }
 
+fn enrich_mcp_spec(
+    name: &str,
+    spec: &Value,
+    transport: &str,
+    enabled: bool,
+    base_dir: Option<&Path>,
+    probe_cache: &mut crate::mcp::McpProbeCache,
+) -> crate::mcp::McpEnrichment {
+    if !probe_cache.allows_probe() {
+        return crate::mcp::McpEnrichment::default();
+    }
+    let probe_spec = codex_plugin_probe_spec(spec, base_dir);
+    let headers = codex_mcp_auth_headers(name, spec, transport);
+    let extra_env = codex_mcp_probe_env(spec, base_dir);
+    crate::mcp::enrich_json_mcp_spec_with_headers_at_dir_and_options(
+        &probe_spec,
+        transport,
+        enabled,
+        &headers,
+        &extra_env,
+        codex_mcp_probe_timeout(spec),
+        base_dir,
+        probe_cache,
+    )
+}
+
+fn enrich_mcp_toml_spec(
+    name: &str,
+    spec: &TomlValue,
+    transport: &str,
+    enabled: bool,
+    base_dir: Option<&Path>,
+    probe_cache: &mut crate::mcp::McpProbeCache,
+) -> crate::mcp::McpEnrichment {
+    if !probe_cache.allows_probe() {
+        return crate::mcp::McpEnrichment::default();
+    }
+    let headers = codex_mcp_auth_headers_from_toml(name, spec, transport);
+    crate::mcp::enrich_toml_mcp_spec_with_headers_at_dir_and_options(
+        spec,
+        transport,
+        enabled,
+        &headers,
+        &BTreeMap::new(),
+        codex_mcp_probe_timeout_from_toml(spec),
+        base_dir,
+        probe_cache,
+    )
+}
+
+fn codex_mcp_probe_timeout(spec: &Value) -> Option<Duration> {
+    spec.get("startup_timeout_sec")
+        .and_then(Value::as_u64)
+        .filter(|seconds| *seconds > 0)
+        .map(Duration::from_secs)
+}
+
+fn codex_mcp_probe_timeout_from_toml(spec: &TomlValue) -> Option<Duration> {
+    spec.get("startup_timeout_sec")
+        .and_then(TomlValue::as_integer)
+        .and_then(|seconds| u64::try_from(seconds).ok())
+        .filter(|seconds| *seconds > 0)
+        .map(Duration::from_secs)
+}
+
+fn codex_home_from_mcp_base_dir(base_dir: Option<&Path>) -> Option<PathBuf> {
+    base_dir
+        .and_then(|path| {
+            path.ancestors().find(|ancestor| {
+                ancestor.file_name().and_then(|value| value.to_str()) == Some("plugins")
+            })
+        })
+        .and_then(Path::parent)
+        .map(Path::to_path_buf)
+}
+
+fn codex_plugin_icon(manifest: &Value, plugin_root: &Path) -> Option<crate::mcp::McpIcon> {
+    let interface = manifest
+        .get("interface")
+        .or_else(|| manifest.pointer("/extensions/com.openai/interface"));
+    interface
+        .and_then(|value| {
+            ["composerIcon", "logo", "logoDark"]
+                .iter()
+                .find_map(|key| value.get(*key).and_then(Value::as_str))
+        })
+        .and_then(|relative| crate::mcp::mcp_icon_from_file(&plugin_root.join(relative)))
+}
+
+fn codex_repl_command(codex_home: &Path) -> Option<String> {
+    codex_repl_server(codex_home)?
+        .get("command")
+        .and_then(TomlValue::as_str)
+        .map(str::to_string)
+}
+
+fn codex_repl_server(codex_home: &Path) -> Option<toml::map::Map<String, TomlValue>> {
+    let text = fs::read_to_string(codex_home.join("config.toml")).ok()?;
+    let value = toml::from_str::<TomlValue>(&text).ok()?;
+    value
+        .get("mcp_servers")
+        .and_then(TomlValue::as_table)
+        .and_then(|servers| {
+            servers.values().find_map(|server| {
+                let server = server.as_table()?;
+                let environment = server.get("env").and_then(TomlValue::as_table)?;
+                environment
+                    .contains_key("NODE_REPL_NODE_PATH")
+                    .then(|| server.clone())
+            })
+        })
+}
+
+fn codex_repl_environment(codex_home: &Path) -> BTreeMap<String, String> {
+    codex_repl_server(codex_home)
+        .and_then(|server| server.get("env").cloned())
+        .and_then(|env| env.as_table().cloned())
+        .map(|env| {
+            env.into_iter()
+                .filter_map(|(name, value)| value.as_str().map(|value| (name, value.to_string())))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn codex_repl_node_path(codex_home: &Path) -> Option<String> {
+    codex_repl_server(codex_home).and_then(|server| {
+        server
+            .get("env")
+            .and_then(TomlValue::as_table)
+            .and_then(|env| env.get("NODE_REPL_NODE_PATH"))
+            .and_then(TomlValue::as_str)
+            .map(str::to_string)
+    })
+}
+
+fn is_codex_plugin_launcher_spec(spec: &Value, base_dir: Option<&Path>) -> bool {
+    base_dir.is_some_and(is_codex_plugin_path)
+        && spec
+            .get("args")
+            .and_then(Value::as_array)
+            .is_some_and(|args| {
+                args.iter()
+                    .filter_map(Value::as_str)
+                    .any(|arg| arg.ends_with("scripts/launch.mjs"))
+            })
+}
+
+fn codex_plugin_probe_spec(spec: &Value, base_dir: Option<&Path>) -> Value {
+    if !is_codex_plugin_launcher_spec(spec, base_dir) {
+        return spec.clone();
+    }
+
+    let mut normalized = spec.clone();
+    let Some(object) = normalized.as_object_mut() else {
+        return normalized;
+    };
+    if !object.contains_key("cwd") {
+        if let Some(base_dir) = base_dir {
+            object.insert(
+                "cwd".to_string(),
+                Value::String(base_dir.display().to_string()),
+            );
+        }
+    }
+    if let Some(codex_home) =
+        base_dir.and_then(|base_dir| codex_home_from_mcp_base_dir(Some(base_dir)))
+        && let Some(node_path) = codex_repl_node_path(&codex_home)
+    {
+        object.insert("command".to_string(), Value::String(node_path));
+    }
+    normalized
+}
+
+fn codex_mcp_probe_env(spec: &Value, base_dir: Option<&Path>) -> BTreeMap<String, String> {
+    let mut env_values = BTreeMap::new();
+    if let Some(names) = spec.get("env_vars").and_then(Value::as_array) {
+        for name in names.iter().filter_map(Value::as_str) {
+            if let Ok(value) = env::var(name) {
+                env_values.insert(name.to_string(), value);
+            }
+        }
+    }
+
+    let codex_home = codex_home_from_mcp_base_dir(base_dir);
+    if let Some(codex_home) = codex_home.as_ref() {
+        env_values
+            .entry("CODEX_HOME".to_string())
+            .or_insert_with(|| codex_home.display().to_string());
+        if is_codex_plugin_launcher_spec(spec, base_dir) {
+            for (name, value) in codex_repl_environment(codex_home) {
+                env_values.entry(name).or_insert(value);
+            }
+            if let Some(value) = codex_repl_command(codex_home) {
+                env_values.insert("CUA_REPL_NODE_REPL_PATH".to_string(), value);
+            } else if let Ok(value) = env::var("CUA_REPL_NODE_REPL_PATH") {
+                env_values
+                    .entry("CUA_REPL_NODE_REPL_PATH".to_string())
+                    .or_insert(value);
+            }
+        }
+    }
+    env_values
+}
+
+const CODEX_MCP_OAUTH_SERVICE: &str = "Codex MCP Credentials";
+const CODEX_MCP_OAUTH_REFRESH_SKEW_MS: u64 = 30_000;
+
+#[cfg(target_os = "macos")]
+static CODEX_MCP_KEYRING_BATCH_CACHE: LazyLock<Mutex<Option<HashMap<String, String>>>> =
+    LazyLock::new(|| Mutex::new(None));
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+enum CodexMcpOAuthStore {
+    Auto,
+    File,
+    Keyring,
+}
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct CodexMcpAccessTokenCacheKey {
+    store: CodexMcpOAuthStore,
+    name: String,
+    url: String,
+}
+
+static CODEX_MCP_ACCESS_TOKEN_CACHE: LazyLock<
+    Mutex<HashMap<CodexMcpAccessTokenCacheKey, Option<String>>>,
+> = LazyLock::new(|| Mutex::new(HashMap::new()));
+
+fn codex_mcp_auth_headers(name: &str, spec: &Value, transport: &str) -> BTreeMap<String, String> {
+    let Some(url) = spec
+        .get("url")
+        .or_else(|| spec.get("serverUrl"))
+        .and_then(Value::as_str)
+    else {
+        return BTreeMap::new();
+    };
+    codex_mcp_auth_headers_for_url(name, url, transport)
+}
+
+fn codex_mcp_auth_headers_from_toml(
+    name: &str,
+    spec: &TomlValue,
+    transport: &str,
+) -> BTreeMap<String, String> {
+    let Some(url) = spec
+        .get("url")
+        .or_else(|| spec.get("server_url"))
+        .and_then(TomlValue::as_str)
+    else {
+        return BTreeMap::new();
+    };
+    codex_mcp_auth_headers_for_url(name, url, transport)
+}
+
+fn codex_mcp_auth_headers_for_url(
+    name: &str,
+    url: &str,
+    transport: &str,
+) -> BTreeMap<String, String> {
+    if transport == "stdio" {
+        return BTreeMap::new();
+    }
+    let Some(access_token) = load_codex_mcp_access_token(name, url) else {
+        return BTreeMap::new();
+    };
+    BTreeMap::from([(
+        "Authorization".to_string(),
+        format!("Bearer {access_token}"),
+    )])
+}
+
+fn codex_mcp_oauth_store() -> CodexMcpOAuthStore {
+    let Some(config_path) = codex_home_from_system().map(|home| home.join("config.toml")) else {
+        return CodexMcpOAuthStore::Auto;
+    };
+    let Ok(text) = fs::read_to_string(config_path) else {
+        return CodexMcpOAuthStore::Auto;
+    };
+    match toml::from_str::<TomlValue>(&text)
+        .ok()
+        .and_then(|value| value.get("mcp_oauth_credentials_store").cloned())
+        .and_then(|value| value.as_str().map(str::to_ascii_lowercase))
+        .as_deref()
+    {
+        Some("file") => CodexMcpOAuthStore::File,
+        Some("keyring") => CodexMcpOAuthStore::Keyring,
+        _ => CodexMcpOAuthStore::Auto,
+    }
+}
+
+fn load_codex_mcp_access_token(name: &str, url: &str) -> Option<String> {
+    let store = codex_mcp_oauth_store();
+    load_codex_mcp_access_token_cached(
+        CodexMcpAccessTokenCacheKey {
+            store,
+            name: name.to_string(),
+            url: url.to_string(),
+        },
+        || load_codex_mcp_access_token_uncached(name, url, store),
+    )
+}
+
+fn load_codex_mcp_access_token_cached<F>(
+    key: CodexMcpAccessTokenCacheKey,
+    load: F,
+) -> Option<String>
+where
+    F: FnOnce() -> Option<String>,
+{
+    let Ok(mut cache) = CODEX_MCP_ACCESS_TOKEN_CACHE.lock() else {
+        return load();
+    };
+    if let Some(token) = cache.get(&key) {
+        return token.clone();
+    }
+
+    // Keep the mutex held while reading the credential. Concurrent MCP probes
+    // must not all enter the macOS Keychain prompt before the first lookup is
+    // cached. Cache misses too, so a denied/missing item does not re-prompt on
+    // every projection refresh.
+    let token = load();
+    cache.insert(key, token.clone());
+    token
+}
+
+fn load_codex_mcp_access_token_uncached(
+    name: &str,
+    url: &str,
+    store: CodexMcpOAuthStore,
+) -> Option<String> {
+    match store {
+        CodexMcpOAuthStore::File => load_codex_mcp_file_token(name, url),
+        CodexMcpOAuthStore::Keyring => load_codex_mcp_keyring_token(name, url),
+        CodexMcpOAuthStore::Auto => {
+            load_codex_mcp_keyring_token(name, url).or_else(|| load_codex_mcp_file_token(name, url))
+        }
+    }
+}
+
+fn load_codex_mcp_file_token(name: &str, url: &str) -> Option<String> {
+    let home = codex_home_from_system()?;
+    load_codex_mcp_file_token_from_home(&home, name, url)
+}
+
+fn load_codex_mcp_file_token_from_home(home: &Path, name: &str, url: &str) -> Option<String> {
+    let text = fs::read_to_string(home.join(".credentials.json")).ok()?;
+    let store = serde_json::from_str::<BTreeMap<String, Value>>(&text).ok()?;
+    store.values().find_map(|entry| {
+        let server_url = entry.get("server_url").and_then(Value::as_str)?;
+        let server_name = entry.get("server_name").and_then(Value::as_str)?;
+        if server_url != url || !codex_server_names_match(name, server_name) {
+            return None;
+        }
+        let access_token = entry.get("access_token").and_then(Value::as_str)?;
+        token_if_current(access_token, entry.get("expires_at"))
+    })
+}
+
+fn load_codex_mcp_keyring_token(name: &str, url: &str) -> Option<String> {
+    #[cfg(target_os = "macos")]
+    {
+        let keys = codex_mcp_store_keys(name, url);
+        if let Ok(cache) = CODEX_MCP_KEYRING_BATCH_CACHE.lock() {
+            if let Some(credentials) = cache.as_ref() {
+                return keys.iter().find_map(|key| {
+                    credentials
+                        .get(key)
+                        .and_then(|serialized| parse_codex_mcp_keyring_token(name, url, serialized))
+                });
+            }
+        }
+
+        for key in keys {
+            let Ok(entry) = keyring::Entry::new(CODEX_MCP_OAUTH_SERVICE, &key) else {
+                continue;
+            };
+            let Ok(serialized) = entry.get_password() else {
+                continue;
+            };
+            if let Some(token) = parse_codex_mcp_keyring_token(name, url, &serialized) {
+                return Some(token);
+            }
+        }
+    }
+    None
+}
+
+#[cfg(target_os = "macos")]
+fn parse_codex_mcp_keyring_token(name: &str, url: &str, serialized: &str) -> Option<String> {
+    let value = serde_json::from_str::<Value>(serialized).ok()?;
+    let server_url = value.get("url").and_then(Value::as_str).unwrap_or_default();
+    let server_name = value
+        .get("server_name")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if server_url != url || !codex_server_names_match(name, server_name) {
+        return None;
+    }
+    let access_token = value
+        .get("token_response")
+        .and_then(|token| token.get("access_token"))
+        .and_then(Value::as_str)?;
+    token_if_current(access_token, value.get("expires_at"))
+}
+
+#[cfg(target_os = "macos")]
+fn prefetch_codex_mcp_keyring_tokens() {
+    let Ok(mut cache) = CODEX_MCP_KEYRING_BATCH_CACHE.lock() else {
+        return;
+    };
+    if cache.is_some() {
+        return;
+    }
+    let Some(credentials) = load_codex_mcp_keyring_tokens() else {
+        return;
+    };
+    *cache = Some(credentials);
+}
+
+#[cfg(target_os = "macos")]
+fn load_codex_mcp_keyring_tokens() -> Option<HashMap<String, String>> {
+    use security_framework::{
+        item::{ItemClass, ItemSearchOptions, Limit},
+        os::macos::keychain::{SecKeychain, SecPreferencesDomain},
+    };
+
+    let keychain = SecKeychain::default_for_domain(SecPreferencesDomain::User).ok()?;
+    let mut options = ItemSearchOptions::new();
+    options
+        .keychains(std::slice::from_ref(&keychain))
+        .class(ItemClass::generic_password())
+        .service(CODEX_MCP_OAUTH_SERVICE)
+        .load_attributes(true)
+        .load_data(true)
+        .limit(Limit::All);
+
+    let items = options.search().ok()?;
+    let mut credentials = HashMap::new();
+    for item in items {
+        let Some(attributes) = item.simplify_dict() else {
+            continue;
+        };
+        let Some(account) = attributes.get("acct") else {
+            continue;
+        };
+        let Some(serialized) = attributes.get("v_Data") else {
+            continue;
+        };
+        credentials.insert(account.clone(), serialized.clone());
+    }
+    Some(credentials)
+}
+
+fn codex_server_names_match(config_name: &str, stored_name: &str) -> bool {
+    config_name == stored_name
+        || config_name.strip_prefix("local:") == Some(stored_name)
+        || stored_name.strip_prefix("local:") == Some(config_name)
+}
+
+fn token_if_current(access_token: &str, expires_at: Option<&Value>) -> Option<String> {
+    if access_token.trim().is_empty() {
+        return None;
+    }
+    let current = expires_at.and_then(Value::as_u64).is_none_or(|expires_at| {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+        now.saturating_add(CODEX_MCP_OAUTH_REFRESH_SKEW_MS) < expires_at
+    });
+    current.then(|| access_token.to_string())
+}
+
+#[cfg(target_os = "macos")]
+fn codex_mcp_store_keys(name: &str, url: &str) -> Vec<String> {
+    let name = name.strip_prefix("local:").unwrap_or(name);
+    let encoded_url = serde_json::to_string(url).unwrap_or_else(|_| format!("\"{url}\""));
+    let payloads = [
+        format!(r#"{{"type":"http","url":{encoded_url},"headers":{{}}}}"#),
+        format!(r#"{{"headers":{{}},"type":"http","url":{encoded_url}}}"#),
+    ];
+    payloads
+        .into_iter()
+        .map(|payload| {
+            let digest = sha2::Sha256::digest(payload.as_bytes());
+            let hash = digest
+                .iter()
+                .take(8)
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>();
+            format!("{name}|{hash}")
+        })
+        .collect()
+}
+
 fn infer_mcp_toml_transport(spec: &TomlValue) -> Option<String> {
     spec.get("transport")
         .or_else(|| spec.get("type"))
         .and_then(TomlValue::as_str)
         .map(str::to_string)
-        .or_else(|| spec.get("command").and_then(TomlValue::as_str).map(|_| "stdio".to_string()))
         .or_else(|| {
-            spec.get("url").and_then(TomlValue::as_str).map(|url| {
-                if url.contains("/sse") { "sse" } else { "http" }.to_string()
-            })
+            spec.get("command")
+                .and_then(TomlValue::as_str)
+                .map(|_| "stdio".to_string())
+        })
+        .or_else(|| {
+            spec.get("url")
+                .and_then(TomlValue::as_str)
+                .map(|url| if url.contains("/sse") { "sse" } else { "http" }.to_string())
         })
 }
 
@@ -127,6 +635,90 @@ const CODEX_INTERNAL_CONTEXT_MARKERS: [InternalContextMarker; 1] = [(
     "Codex internal",
     Some("</codex_internal_context>"),
 )];
+const CODEX_GOAL_CONTEXT_PREFIX: &str = "<codex_internal_context source=\"goal\">";
+const CODEX_CONTEXT_CLOSE: &str = "</codex_internal_context>";
+const CODEX_SELECTED_SKILL_KIND: &str = "skills.selected_skill_instructions";
+
+fn is_codex_selected_skill(value: &Value) -> bool {
+    if value.pointer("/payload/type").and_then(Value::as_str) != Some("message")
+        || value.pointer("/payload/role").and_then(Value::as_str) != Some("user")
+    {
+        return false;
+    }
+
+    let has_skill_content_kind = value
+        .pointer("/payload/internal_chat_message_metadata_passthrough/content_item_kinds")
+        .and_then(Value::as_array)
+        .is_some_and(|kinds| {
+            kinds
+                .iter()
+                .any(|kind| kind.as_str() == Some(CODEX_SELECTED_SKILL_KIND))
+        });
+    if has_skill_content_kind {
+        return true;
+    }
+
+    extract_raw_content_text(value.pointer("/payload/content"))
+        .is_some_and(|text| is_codex_skill_wrapper(&text))
+}
+
+fn codex_selected_skill_candidate(value: &Value) -> Option<SkillEvidenceCandidate> {
+    if !is_codex_selected_skill(value) {
+        return None;
+    }
+    let text = extract_raw_content_text(value.pointer("/payload/content"))?;
+    let name = xml_tag_value(&text, "name");
+    let path = xml_tag_value(&text, "path");
+    (name.is_some() || path.is_some()).then(|| SkillEvidenceCandidate {
+        name,
+        path,
+        evidence: Evidence {
+            kind: "explicit_skill".to_string(),
+            text,
+            time: value
+                .get("timestamp")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+        },
+        confidence: "explicit",
+    })
+}
+
+fn xml_tag_value(text: &str, tag: &str) -> Option<String> {
+    let start_tag = format!("<{tag}>");
+    let end_tag = format!("</{tag}>");
+    let start = text.find(&start_tag)? + start_tag.len();
+    let end = text[start..].find(&end_tag)? + start;
+    let value = text[start..end].trim();
+    (!value.is_empty()).then(|| value.to_string())
+}
+
+fn is_codex_skill_wrapper(text: &str) -> bool {
+    let text = text.trim();
+    text.starts_with("<skill>")
+        && text.ends_with("</skill>")
+        && xml_tag_value(text, "name").is_some()
+        && xml_tag_value(text, "path").is_some()
+}
+
+fn extract_goal_objective(value: &Value) -> Option<String> {
+    let payload = value.get("payload")?;
+    if payload.get("type").and_then(Value::as_str) != Some("message")
+        || payload.get("role").and_then(Value::as_str) != Some("user")
+    {
+        return None;
+    }
+    let content = extract_raw_content_text(payload.get("content"))?;
+    let context_start = content.find(CODEX_GOAL_CONTEXT_PREFIX)? + CODEX_GOAL_CONTEXT_PREFIX.len();
+    let context = &content[context_start..];
+    let context_end = context.find(CODEX_CONTEXT_CLOSE)?;
+    let context = &context[..context_end];
+    let objective_start = context.find("<objective>")? + "<objective>".len();
+    let objective = &context[objective_start..];
+    let objective_end = objective.find("</objective>")?;
+    let objective = objective[..objective_end].trim();
+    (!objective.is_empty()).then(|| objective.to_string())
+}
 
 pub(crate) fn scan_session_index(
     path: &Path,
@@ -955,7 +1547,127 @@ fn render_codex_skill_config(before: &str, skill_file: &Path, enabled: bool) -> 
         config["enabled"] = value(enabled);
         configs.push(config);
     }
-    Ok(crate::fsutil::preserve_newline_style(before, doc.to_string()))
+    Ok(crate::fsutil::preserve_newline_style(
+        before,
+        doc.to_string(),
+    ))
+}
+
+fn legacy_codex_skill_target(
+    path: &Path,
+    legacy_skill_root: &Path,
+    canonical_skill_root: &Path,
+) -> Option<PathBuf> {
+    let relative = path.strip_prefix(legacy_skill_root).ok()?;
+    if relative.as_os_str().is_empty()
+        || relative
+            .components()
+            .any(|component| matches!(component, Component::CurDir | Component::ParentDir))
+        || path.exists()
+    {
+        return None;
+    }
+    let target = canonical_skill_root.join(relative);
+    target.is_file().then_some(target)
+}
+
+fn migrate_codex_skill_config_paths(
+    before: &str,
+    legacy_skill_root: &Path,
+    canonical_skill_root: &Path,
+) -> Result<String> {
+    let mut doc = if before.trim().is_empty() {
+        DocumentMut::new()
+    } else {
+        before.parse::<DocumentMut>()?
+    };
+    let Some(skills) = doc.get_mut("skills").and_then(Item::as_table_mut) else {
+        return Ok(before.to_string());
+    };
+    let Some(configs) = skills
+        .get_mut("config")
+        .and_then(Item::as_array_of_tables_mut)
+    else {
+        return Ok(before.to_string());
+    };
+
+    let original = configs.iter().cloned().collect::<Vec<_>>();
+    let original_paths = original
+        .iter()
+        .filter_map(|config| config.get("path").and_then(Item::as_str))
+        .map(PathBuf::from)
+        .collect::<Vec<_>>();
+    let mut migrated_targets = BTreeSet::new();
+    let mut changed = false;
+    let mut migrated = Vec::with_capacity(original.len());
+
+    for mut config in original {
+        let Some(path) = config.get("path").and_then(Item::as_str) else {
+            migrated.push(config);
+            continue;
+        };
+        let Some(target) =
+            legacy_codex_skill_target(Path::new(path), legacy_skill_root, canonical_skill_root)
+        else {
+            migrated.push(config);
+            continue;
+        };
+
+        let target_keys = path_lookup_keys(&target);
+        let has_canonical_entry = original_paths.iter().any(|existing| {
+            path_lookup_keys(existing)
+                .iter()
+                .any(|key| target_keys.iter().any(|target_key| key == target_key))
+        });
+        let target_key = target
+            .canonicalize()
+            .unwrap_or_else(|_| target.to_path_buf());
+        if has_canonical_entry || !migrated_targets.insert(target_key) {
+            changed = true;
+            continue;
+        }
+
+        config["path"] = value(target.to_string_lossy().to_string());
+        changed = true;
+        migrated.push(config);
+    }
+
+    if !changed {
+        return Ok(before.to_string());
+    }
+    *configs = migrated.into_iter().collect();
+    Ok(crate::fsutil::preserve_newline_style(
+        before,
+        doc.to_string(),
+    ))
+}
+
+pub(crate) fn migrate_legacy_global_skill_config() -> Result<()> {
+    let Some(home) = dirs::home_dir() else {
+        return Ok(());
+    };
+    let Some(codex_home) = codex_home_from_system() else {
+        return Ok(());
+    };
+    let config_path = codex_home.join("config.toml");
+    let before = match fs::read_to_string(&config_path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("failed to read Codex config {}", config_path.display()));
+        }
+    };
+    let after = migrate_codex_skill_config_paths(
+        &before,
+        &codex_home.join("skills"),
+        &home.join(".agents/skills"),
+    )?;
+    if before == after {
+        return Ok(());
+    }
+    crate::fsutil::atomic_write(&config_path, &after)
+        .with_context(|| format!("failed to migrate Codex config {}", config_path.display()))
 }
 
 fn plan_codex_skill_config(
@@ -1028,8 +1740,10 @@ pub(crate) fn policy_matches_visibility_change(
     if expected.is_empty() || current.is_empty() {
         return Ok(expected == current);
     }
-    Ok(serde_yaml::from_str::<YamlValue>(&expected)?
-        == serde_yaml::from_str::<YamlValue>(current)?)
+    Ok(
+        serde_yaml::from_str::<YamlValue>(&expected)?
+            == serde_yaml::from_str::<YamlValue>(current)?,
+    )
 }
 
 #[cfg(test)]
@@ -1461,7 +2175,14 @@ pub(crate) fn session_title(path: &Path) -> Option<String> {
         {
             continue;
         }
-        if let Some(title) = crate::sessions::extract_session_title(&value) {
+        if let Some(title) = extract_goal_objective(&value)
+            .and_then(|objective| crate::sessions::clean_title(&objective))
+        {
+            return provider_title.or(Some(title));
+        }
+        if let Some(title) =
+            crate::sessions::extract_session_title_for_agent(AgentKind::Codex, &value)
+        {
             return provider_title.or(Some(title));
         }
     }
@@ -1516,9 +2237,7 @@ pub(super) fn active_session_writer(session: &SessionRecord) -> Result<Option<Se
             })?;
             Ok(None)
         }
-        Err(TryLockError::WouldBlock) => {
-            Ok(Some(SessionWriter { lock_path }))
-        }
+        Err(TryLockError::WouldBlock) => Ok(Some(SessionWriter { lock_path })),
         Err(TryLockError::Error(error)) => Err(error).with_context(|| {
             format!(
                 "failed to inspect Codex writer lock {}",
@@ -1573,12 +2292,425 @@ pub(super) fn codex_plugin_enabled_by_id(codex_home: &Path) -> BTreeMap<String, 
     plugins
         .iter()
         .filter_map(|(id, value)| {
-            value
-                .get("enabled")
-                .and_then(TomlValue::as_bool)
-                .map(|enabled| (id.to_string(), enabled))
+            value.as_table().map(|value| {
+                (
+                    id.to_string(),
+                    value
+                        .get("enabled")
+                        .and_then(TomlValue::as_bool)
+                        .unwrap_or(true),
+                )
+            })
         })
         .collect()
+}
+
+fn codex_plugin_mcp_enabled_by_id(codex_home: &Path) -> BTreeMap<(String, String), bool> {
+    let Ok(text) = fs::read_to_string(codex_home.join("config.toml")) else {
+        return BTreeMap::new();
+    };
+    let Ok(value) = toml::from_str::<TomlValue>(&text) else {
+        return BTreeMap::new();
+    };
+    let Some(plugins) = value.get("plugins").and_then(TomlValue::as_table) else {
+        return BTreeMap::new();
+    };
+    plugins
+        .iter()
+        .flat_map(|(plugin_id, plugin)| {
+            plugin
+                .get("mcp_servers")
+                .and_then(TomlValue::as_table)
+                .into_iter()
+                .flat_map(move |servers| {
+                    servers.iter().filter_map(move |(server_name, server)| {
+                        server
+                            .get("enabled")
+                            .and_then(TomlValue::as_bool)
+                            .map(|enabled| {
+                                ((plugin_id.to_string(), server_name.to_string()), enabled)
+                            })
+                    })
+                })
+        })
+        .collect()
+}
+
+fn codex_plugin_root(manifest_path: &Path) -> Option<&Path> {
+    let parent = manifest_path.parent()?;
+    match parent.file_name().and_then(|value| value.to_str()) {
+        Some(".codex-plugin") => parent.parent(),
+        Some(".claude-plugin") => None,
+        _ => Some(parent),
+    }
+}
+
+fn codex_plugin_id(codex_home: &Path, plugin_root: &Path, manifest: &Value) -> Option<String> {
+    let relative = plugin_root
+        .strip_prefix(codex_home.join("plugins/cache"))
+        .ok()?;
+    let mut parts = relative
+        .components()
+        .filter_map(|part| part.as_os_str().to_str());
+    let marketplace = parts.next()?;
+    let plugin_directory = parts.next()?;
+    let plugin_name = manifest
+        .get("name")
+        .and_then(Value::as_str)
+        .filter(|name| !name.trim().is_empty())
+        .unwrap_or(plugin_directory);
+    Some(format!("{plugin_name}@{marketplace}"))
+}
+
+fn codex_plugin_directory_id(codex_home: &Path, plugin_root: &Path) -> Option<String> {
+    let relative = plugin_root
+        .strip_prefix(codex_home.join("plugins/cache"))
+        .ok()?;
+    let mut parts = relative
+        .components()
+        .filter_map(|part| part.as_os_str().to_str());
+    let marketplace = parts.next()?;
+    let plugin_directory = parts.next()?;
+    Some(format!("{plugin_directory}@{marketplace}"))
+}
+
+fn codex_plugin_manifest_paths(codex_home: &Path) -> Vec<PathBuf> {
+    let cache = codex_home.join("plugins/cache");
+    if !cache.is_dir() {
+        return Vec::new();
+    }
+    let mut paths = WalkDir::new(&cache)
+        .follow_links(false)
+        .max_depth(6)
+        .into_iter()
+        .filter_entry(|entry| !is_skipped_plugin_entry(entry.path()))
+        .filter_map(Result::ok)
+        .filter(|entry| {
+            if entry.file_type().is_dir() {
+                return true;
+            }
+            if entry.file_name() != "plugin.json" {
+                return false;
+            }
+            let Ok(relative) = entry.path().strip_prefix(&cache) else {
+                return false;
+            };
+            let components = relative.components().collect::<Vec<_>>();
+            (components.len() == 4 && components[3].as_os_str() == "plugin.json")
+                || (components.len() == 5
+                    && components[3].as_os_str() == ".codex-plugin"
+                    && components[4].as_os_str() == "plugin.json")
+        })
+        .filter(|entry| entry.file_type().is_file())
+        .map(|entry| entry.into_path())
+        .collect::<Vec<_>>();
+    paths.sort_by_key(|path| {
+        if path
+            .parent()
+            .and_then(Path::file_name)
+            .and_then(|value| value.to_str())
+            == Some(".codex-plugin")
+        {
+            1
+        } else {
+            0
+        }
+    });
+    paths
+}
+
+fn read_codex_plugin_mcp_source(
+    path: &Path,
+    warnings: &mut Vec<String>,
+) -> Option<(PathBuf, String, Value)> {
+    let Ok(text) = fs::read_to_string(path) else {
+        return None;
+    };
+    let Ok(value) = serde_json::from_str::<Value>(&text) else {
+        warnings.push(format!("{}: invalid Codex plugin MCP JSON", path.display()));
+        return None;
+    };
+    Some((path.to_path_buf(), text, value))
+}
+
+fn codex_plugin_mcp_sources(
+    manifest_path: &Path,
+    manifest_text: &str,
+    manifest: &Value,
+    plugin_root: &Path,
+    plugin_name: &str,
+    warnings: &mut Vec<String>,
+) -> Vec<(PathBuf, String, Value)> {
+    let Some(declaration) = manifest.get("mcpServers") else {
+        return [plugin_root.join("mcp.json"), plugin_root.join(".mcp.json")]
+            .into_iter()
+            .find_map(|path| read_codex_plugin_mcp_source(&path, warnings))
+            .into_iter()
+            .collect();
+    };
+    match declaration {
+        Value::String(relative) => {
+            read_codex_plugin_mcp_source(&plugin_root.join(relative), warnings)
+                .into_iter()
+                .collect()
+        }
+        Value::Object(object) => {
+            let value = if is_mcp_server_spec(object) {
+                json!({"mcpServers": {plugin_name: declaration}})
+            } else {
+                json!({"mcpServers": declaration})
+            };
+            vec![(
+                manifest_path.to_path_buf(),
+                manifest_text.to_string(),
+                value,
+            )]
+        }
+        Value::Array(entries) => entries
+            .iter()
+            .flat_map(|entry| match entry {
+                Value::String(relative) => {
+                    read_codex_plugin_mcp_source(&plugin_root.join(relative), warnings)
+                        .into_iter()
+                        .collect::<Vec<_>>()
+                }
+                Value::Object(object) => {
+                    let value = if is_mcp_server_spec(object) {
+                        json!({"mcpServers": {plugin_name: entry}})
+                    } else {
+                        json!({"mcpServers": entry})
+                    };
+                    vec![(
+                        manifest_path.to_path_buf(),
+                        manifest_text.to_string(),
+                        value,
+                    )]
+                }
+                _ => Vec::new(),
+            })
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+fn is_mcp_server_spec(object: &serde_json::Map<String, Value>) -> bool {
+    ["command", "url", "serverUrl", "type", "transport"]
+        .iter()
+        .any(|key| object.contains_key(*key))
+}
+
+fn codex_plugin_mcp_entries(
+    value: &Value,
+    fallback_name: &str,
+) -> Vec<(String, Value, Vec<String>)> {
+    let Some(object) = value.as_object() else {
+        return Vec::new();
+    };
+    if let Some(servers) = object.get("mcpServers").and_then(Value::as_object) {
+        if is_mcp_server_spec(servers) {
+            return vec![(
+                fallback_name.to_string(),
+                Value::Object(servers.clone()),
+                vec!["mcpServers".to_string()],
+            )];
+        }
+        return servers
+            .iter()
+            .map(|(name, spec)| (name.clone(), spec.clone(), vec!["mcpServers".to_string()]))
+            .collect();
+    }
+    object
+        .iter()
+        .filter(|(name, spec)| name.as_str() != "$schema" && spec.is_object())
+        .map(|(name, spec)| (name.clone(), spec.clone(), Vec::new()))
+        .collect()
+}
+
+fn codex_plugin_enrichment(
+    manifest: &Value,
+    plugin_root: &Path,
+    plugin_name: &str,
+    server_name: &str,
+    spec: &Value,
+) -> crate::mcp::McpEnrichment {
+    let interface = manifest
+        .get("interface")
+        .or_else(|| manifest.pointer("/extensions/com.openai/interface"));
+    let display_name = interface
+        .and_then(|value| value.get("displayName"))
+        .and_then(Value::as_str)
+        .or_else(|| manifest.get("displayName").and_then(Value::as_str))
+        .or_else(|| manifest.get("name").and_then(Value::as_str));
+    let description = interface
+        .and_then(|value| value.get("longDescription"))
+        .and_then(Value::as_str)
+        .or_else(|| manifest.get("description").and_then(Value::as_str));
+    let website = interface
+        .and_then(|value| value.get("websiteURL"))
+        .and_then(Value::as_str)
+        .or_else(|| manifest.get("homepage").and_then(Value::as_str));
+    let icon = codex_plugin_icon(manifest, plugin_root);
+    crate::mcp::McpEnrichment {
+        plugin_name: Some(plugin_name.to_string()),
+        server_name: Some(server_name.to_string()),
+        server_title: display_name.map(str::to_string),
+        server_version: manifest
+            .get("version")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        server_description: description.map(str::to_string),
+        server_website_url: website.map(str::to_string),
+        icons: icon.into_iter().collect(),
+        tools: spec
+            .get("enabled_tools")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flat_map(|tools| tools.iter())
+            .filter_map(Value::as_str)
+            .map(|name| crate::mcp::McpTool {
+                name: name.to_string(),
+                title: None,
+                description: None,
+                input_schema: None,
+                icons: Vec::new(),
+            })
+            .take(512)
+            .collect(),
+        ..Default::default()
+    }
+}
+
+pub(crate) fn scan_codex_plugin_mcp(
+    codex_home: &Path,
+    servers: &mut Vec<McpServerRecord>,
+    warnings: &mut Vec<String>,
+) {
+    let plugin_enabled = codex_plugin_enabled_by_id(codex_home);
+    let server_enabled = codex_plugin_mcp_enabled_by_id(codex_home);
+    let mut scanned_plugins = BTreeSet::new();
+    for manifest_path in codex_plugin_manifest_paths(codex_home) {
+        let Ok(manifest_text) = fs::read_to_string(&manifest_path) else {
+            continue;
+        };
+        let Ok(manifest) = serde_json::from_str::<Value>(&manifest_text) else {
+            continue;
+        };
+        let Some(plugin_root) = codex_plugin_root(&manifest_path) else {
+            continue;
+        };
+        let Some(plugin_id) = codex_plugin_id(codex_home, plugin_root, &manifest) else {
+            continue;
+        };
+        let enabled = plugin_enabled.get(&plugin_id).copied().or_else(|| {
+            codex_plugin_directory_id(codex_home, plugin_root)
+                .and_then(|id| plugin_enabled.get(&id).copied())
+        });
+        let Some(plugin_enabled) = enabled else {
+            continue;
+        };
+        let Some(plugin_name) = manifest.get("name").and_then(Value::as_str) else {
+            continue;
+        };
+        let sources = codex_plugin_mcp_sources(
+            &manifest_path,
+            &manifest_text,
+            &manifest,
+            plugin_root,
+            plugin_name,
+            warnings,
+        );
+        if sources.is_empty() || !scanned_plugins.insert(plugin_id.clone()) {
+            continue;
+        }
+        for (path, text, value) in sources {
+            for (server_name, spec, server_path) in codex_plugin_mcp_entries(&value, plugin_name) {
+                let Some(transport) = infer_mcp_transport(&spec) else {
+                    warnings.push(format!(
+                        "{}: MCP server {server_name} has no recognized transport",
+                        path.display()
+                    ));
+                    continue;
+                };
+                let effective_enabled = plugin_enabled
+                    && server_enabled
+                        .get(&(plugin_id.clone(), server_name.clone()))
+                        .copied()
+                        .unwrap_or_else(|| infer_mcp_enabled(&spec));
+                let enrichment = codex_plugin_enrichment(
+                    &manifest,
+                    plugin_root,
+                    plugin_name,
+                    &server_name,
+                    &spec,
+                );
+                servers.push(crate::mcp::build_mcp_server_record(
+                    &path,
+                    AgentKind::Codex,
+                    "global",
+                    &text,
+                    &server_path,
+                    &server_name,
+                    transport,
+                    effective_enabled,
+                    if effective_enabled {
+                        "configured".to_string()
+                    } else {
+                        "disabled".to_string()
+                    },
+                    enrichment,
+                    Some(CODEX_PLUGIN_READ_ONLY_REASON.to_string()),
+                ));
+            }
+        }
+    }
+}
+
+fn filter_codex_config_servers_shadowed_by_plugins(
+    servers: &mut Vec<McpServerRecord>,
+    plugin_servers: &[McpServerRecord],
+) {
+    let plugin_names = plugin_servers
+        .iter()
+        .map(|server| server.name.as_str())
+        .collect::<BTreeSet<_>>();
+    servers.retain(|server| !plugin_names.contains(server.name.as_str()));
+}
+
+fn is_codex_plugin_path(path: &Path) -> bool {
+    let components = path.components().collect::<Vec<_>>();
+    components.windows(2).any(|window| {
+        window[0].as_os_str() == std::ffi::OsStr::new("plugins")
+            && window[1].as_os_str() == std::ffi::OsStr::new("cache")
+    })
+}
+
+fn preserve_codex_plugin_identity(
+    current: &McpServerRecord,
+    mut updated: McpServerRecord,
+) -> McpServerRecord {
+    let is_plugin = current.read_only_reason.as_deref() == Some(CODEX_PLUGIN_READ_ONLY_REASON);
+    if !is_plugin {
+        return updated;
+    }
+
+    updated.server_name = current.server_name.clone();
+    updated.server_title = current.server_title.clone();
+    updated.server_version = current.server_version.clone();
+    updated.server_description = current.server_description.clone();
+    updated.server_website_url = current.server_website_url.clone();
+    if updated.icons.is_empty() {
+        updated.icons = current.icons.clone();
+    }
+    updated
+}
+
+fn codex_mcp_base_dir(path: &Path) -> Option<&Path> {
+    let parent = path.parent()?;
+    if parent.file_name().and_then(|value| value.to_str()) == Some(".codex-plugin") {
+        parent.parent()
+    } else {
+        Some(parent)
+    }
 }
 
 pub(super) fn codex_plugin_id_for_skill_root(
@@ -1647,7 +2779,9 @@ fn codex_model_instructions_file(path: &Path) -> Option<PathBuf> {
     Some(if configured.is_absolute() {
         configured
     } else {
-        path.parent().unwrap_or_else(|| Path::new(".")).join(configured)
+        path.parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join(configured)
     })
 }
 
@@ -1655,9 +2789,11 @@ fn codex_model_instructions_files(ctx: &ProviderContext) -> Vec<(String, PathBuf
     let mut files = Vec::new();
     let mut seen = BTreeSet::new();
     let candidates = std::iter::once(("global".to_string(), codex_home(ctx).join("config.toml")))
-        .chain(ctx.project_dirs().iter().map(|dir| {
-            ("project".to_string(), dir.join(".codex/config.toml"))
-        }));
+        .chain(
+            ctx.project_dirs()
+                .iter()
+                .map(|dir| ("project".to_string(), dir.join(".codex/config.toml"))),
+        );
     for (scope, config_path) in candidates {
         let Some(instructions_path) = codex_model_instructions_file(&config_path) else {
             continue;
@@ -1794,6 +2930,12 @@ fn collect_codex_item(value: &Value, items: &mut Vec<TranscriptItem>) {
         Some("message") => {
             let role = payload.get("role").and_then(Value::as_str).unwrap_or("");
             let content = payload.get("content");
+            if is_codex_selected_skill(value) {
+                if let Some(body) = extract_raw_content_text(content) {
+                    push_item(items, "context", body, Some("Skill".to_string()), time);
+                }
+                return;
+            }
             if role == "developer" || role == "system" {
                 if let Some(body) = extract_raw_content_text(content) {
                     push_item(
@@ -1815,6 +2957,12 @@ fn collect_codex_item(value: &Value, items: &mut Vec<TranscriptItem>) {
             }
             if role != "user" && role != "assistant" {
                 return;
+            }
+            if role == "user" {
+                if let Some(objective) = extract_goal_objective(value) {
+                    push_item(items, "user", objective, None, time);
+                    return;
+                }
             }
             collect_message_content_with_markers(
                 content,
@@ -2478,6 +3626,23 @@ impl super::AgentProvider for CodexProvider {
         })
     }
 
+    fn assistant_ask_command(&self, workspace: &Path, prompt: &str) -> Option<SessionCommand> {
+        Some(SessionCommand {
+            executable: "codex".to_string(),
+            args: vec![
+                "-C".to_string(),
+                workspace.display().to_string(),
+                "exec".to_string(),
+                "--ephemeral".to_string(),
+                "--json".to_string(),
+                "--dangerously-bypass-approvals-and-sandbox".to_string(),
+                prompt.to_string(),
+            ],
+            cwd: Some(workspace.to_path_buf()),
+            env: Vec::new(),
+        })
+    }
+
     fn validate_session_resume(&self, session: &SessionRecord) -> Result<()> {
         validate_session_writer(session)
     }
@@ -2514,6 +3679,14 @@ impl super::AgentProvider for CodexProvider {
         Some(session_line_requires_metadata_parse(prefix, meta))
     }
 
+    fn session_user_message(&self, value: &Value) -> Option<String> {
+        extract_goal_objective(value)
+    }
+
+    fn session_transcript_title_overrides_index(&self) -> bool {
+        true
+    }
+
     fn update_session_metadata(
         &self,
         value: &Value,
@@ -2545,6 +3718,14 @@ impl super::AgentProvider for CodexProvider {
 
     fn parse_transcript_value(&self, value: &Value, items: &mut Vec<TranscriptItem>) {
         parse_transcript(value, items);
+    }
+
+    fn session_message_kind(&self, value: &Value) -> Option<SessionMessageKind> {
+        if is_codex_selected_skill(value) {
+            Some(SessionMessageKind::Context)
+        } else {
+            default_session_message_kind(value)
+        }
     }
 
     fn transcript_internal_context_markers(
@@ -2607,6 +3788,10 @@ impl super::AgentProvider for CodexProvider {
         tool_payloads(value)
     }
 
+    fn extract_session_skill_evidence(&self, value: &Value) -> Vec<SkillEvidenceCandidate> {
+        codex_selected_skill_candidate(value).into_iter().collect()
+    }
+
     fn infer_session_project(&self, _path: &Path, project: Option<PathBuf>) -> Option<PathBuf> {
         project
     }
@@ -2624,9 +3809,11 @@ impl super::AgentProvider for CodexProvider {
         ctx: &ProviderContext,
         servers: &mut Vec<McpServerRecord>,
         warnings: &mut Vec<String>,
+        probe_cache: &mut crate::mcp::McpProbeCache,
     ) -> Result<()> {
         if let Some(home) = &ctx.home {
             let root = codex_home(ctx);
+            let mut config_servers = Vec::new();
             crate::mcp::scan_toml_mcp(
                 &root.join("config.toml"),
                 self.kind(),
@@ -2635,9 +3822,18 @@ impl super::AgentProvider for CodexProvider {
                 infer_mcp_toml_transport,
                 infer_mcp_toml_enabled,
                 infer_mcp_toml_status,
-                servers,
+                enrich_mcp_toml_spec,
+                probe_cache,
+                &mut config_servers,
                 warnings,
             );
+            let plugin_start = servers.len();
+            scan_codex_plugin_mcp(&root, servers, warnings);
+            filter_codex_config_servers_shadowed_by_plugins(
+                &mut config_servers,
+                &servers[plugin_start..],
+            );
+            servers.extend(config_servers);
             let _ = home;
         }
         for ancestor in ctx.project_dirs() {
@@ -2650,6 +3846,8 @@ impl super::AgentProvider for CodexProvider {
                 infer_mcp_transport,
                 infer_mcp_enabled,
                 infer_mcp_status,
+                enrich_mcp_spec,
+                probe_cache,
                 servers,
                 warnings,
             );
@@ -2661,6 +3859,8 @@ impl super::AgentProvider for CodexProvider {
                 infer_mcp_toml_transport,
                 infer_mcp_toml_enabled,
                 infer_mcp_toml_status,
+                enrich_mcp_toml_spec,
+                probe_cache,
                 servers,
                 warnings,
             );
@@ -2668,13 +3868,60 @@ impl super::AgentProvider for CodexProvider {
         Ok(())
     }
 
-    fn set_mcp_enabled(&self, request: &McpSetEnabledRequest) -> Result<()> {
-        match request.path.extension().and_then(|value| value.to_str()) {
-            Some("toml") => crate::mcp::set_toml_server_enabled(
+    fn probe_mcp(
+        &self,
+        request: &McpProbeRequest,
+        current: &McpServerRecord,
+        probe_cache: &mut crate::mcp::McpProbeCache,
+    ) -> Result<McpServerRecord> {
+        let updated = match request.path.extension().and_then(|value| value.to_str()) {
+            Some("toml") => crate::mcp::probe_toml_mcp_server(
                 request,
+                current,
                 "mcp_servers",
-                update_mcp_toml_server,
+                infer_mcp_toml_transport,
+                infer_mcp_toml_enabled,
+                infer_mcp_toml_status,
+                enrich_mcp_toml_spec,
+                probe_cache,
             ),
+            Some("json") => crate::mcp::probe_json_mcp_server_at_dir(
+                request,
+                current,
+                infer_mcp_transport,
+                infer_mcp_enabled,
+                infer_mcp_status,
+                enrich_mcp_spec,
+                codex_mcp_base_dir(&request.path),
+                probe_cache,
+            ),
+            _ => bail!("Codex MCP source must be JSON or TOML"),
+        }?;
+        Ok(preserve_codex_plugin_identity(current, updated))
+    }
+
+    fn prepare_mcp_probe(&self, servers: &[McpServerRecord]) {
+        #[cfg(target_os = "macos")]
+        if servers.iter().any(|server| {
+            matches!(
+                server.transport.as_str(),
+                "http" | "sse" | "streamable-http"
+            )
+        }) {
+            prefetch_codex_mcp_keyring_tokens();
+        }
+        #[cfg(not(target_os = "macos"))]
+        let _ = servers;
+    }
+
+    fn set_mcp_enabled(&self, request: &McpSetEnabledRequest) -> Result<()> {
+        if is_codex_plugin_path(&request.path) {
+            bail!(CODEX_PLUGIN_READ_ONLY_REASON);
+        }
+        match request.path.extension().and_then(|value| value.to_str()) {
+            Some("toml") => {
+                crate::mcp::set_toml_server_enabled(request, "mcp_servers", update_mcp_toml_server)
+            }
             Some("json") => crate::mcp::set_json_server_enabled(
                 request,
                 &["mcpServers"],
@@ -2684,12 +3931,7 @@ impl super::AgentProvider for CodexProvider {
         }
     }
 
-    fn backup_mcp_entry(
-        &self,
-        path: &Path,
-        server_path: &[String],
-        name: &str,
-    ) -> Result<Value> {
+    fn backup_mcp_entry(&self, path: &Path, server_path: &[String], name: &str) -> Result<Value> {
         match path.extension().and_then(|value| value.to_str()) {
             Some("toml") => crate::mcp::read_toml_server_entry(path, "mcp_servers", name),
             Some("json") => crate::mcp::read_json_server_entry_at_path(path, server_path, name),
@@ -2706,12 +3948,9 @@ impl super::AgentProvider for CodexProvider {
     ) -> Result<String> {
         match path.extension().and_then(|value| value.to_str()) {
             Some("toml") => crate::mcp::merge_toml_server_entry(path, "mcp_servers", name, entry),
-            Some("json") => crate::mcp::merge_json_server_entry_at_path(
-                path,
-                server_path,
-                name,
-                entry,
-            ),
+            Some("json") => {
+                crate::mcp::merge_json_server_entry_at_path(path, server_path, name, entry)
+            }
             _ => bail!("Codex MCP source must be JSON or TOML"),
         }
     }
@@ -2720,23 +3959,19 @@ impl super::AgentProvider for CodexProvider {
         if enabled { "configured" } else { "disabled" }
     }
 
-    fn delete_hooks(
-        &self,
-        requests: &[HookDeleteRequest],
-        source: &str,
-    ) -> Result<String> {
-        match requests[0].path.extension().and_then(|value| value.to_str()) {
+    fn delete_hooks(&self, requests: &[HookDeleteRequest], source: &str) -> Result<String> {
+        match requests[0]
+            .path
+            .extension()
+            .and_then(|value| value.to_str())
+        {
             Some("json") => crate::hooks::delete_json_hooks(requests, source),
             Some("toml") => crate::hooks::delete_toml_hooks(requests, source),
             _ => bail!("Codex hook source must be JSON or TOML"),
         }
     }
 
-    fn set_hook_enabled(
-        &self,
-        request: &HookSetEnabledRequest,
-        source: &str,
-    ) -> Result<String> {
+    fn set_hook_enabled(&self, request: &HookSetEnabledRequest, source: &str) -> Result<String> {
         match request.path.extension().and_then(|value| value.to_str()) {
             Some("json") => crate::hooks::set_json_hook_enabled(request, source),
             Some("toml") => crate::hooks::set_toml_hook_enabled(request, source),
@@ -2889,15 +4124,27 @@ impl super::AgentProvider for CodexProvider {
 
 #[cfg(test)]
 mod tests {
+    use serde_json::json;
     use std::{
         fs,
         path::PathBuf,
-        time::{SystemTime, UNIX_EPOCH},
+        time::{Duration, SystemTime, UNIX_EPOCH},
+    };
+    use toml::Value as TomlValue;
+
+    use crate::{
+        mcp::{McpProbeState, McpServerRecord},
+        providers::SessionMessageKind,
+        skills::AgentKind,
     };
 
     use super::{
-        hook_current_hash, parse_codex_hook_file, render_codex_policy, AgentProvider,
-        CodexProvider, ProviderContext, SkillVisibility,
+        AgentProvider, CODEX_MCP_ACCESS_TOKEN_CACHE, CODEX_PLUGIN_READ_ONLY_REASON,
+        CodexMcpAccessTokenCacheKey, CodexMcpOAuthStore, CodexProvider, ProviderContext,
+        SkillVisibility, codex_mcp_probe_env, codex_mcp_probe_timeout, codex_plugin_probe_spec,
+        filter_codex_config_servers_shadowed_by_plugins, hook_current_hash,
+        load_codex_mcp_access_token_cached, parse_codex_hook_file, preserve_codex_plugin_identity,
+        render_codex_policy,
     };
 
     fn temp_dir() -> PathBuf {
@@ -2909,6 +4156,69 @@ mod tests {
                 .expect("system time before epoch")
                 .as_nanos()
         ))
+    }
+
+    #[test]
+    fn selected_skill_message_is_context_and_emits_skill_evidence() {
+        let value = json!({
+            "type": "response_item",
+            "timestamp": "2026-06-24T10:00:00Z",
+            "payload": {
+                "type": "message",
+                "role": "user",
+                "content": [{
+                    "type": "input_text",
+                    "text": "<skill>\n<name>foo</name>\n<path>/tmp/foo/SKILL.md</path>\n</skill>"
+                }],
+                "internal_chat_message_metadata_passthrough": {
+                    "content_item_kinds": ["skills.selected_skill_instructions"]
+                }
+            }
+        });
+
+        assert_eq!(
+            CodexProvider.session_message_kind(&value),
+            Some(SessionMessageKind::Context)
+        );
+        let evidence = super::codex_selected_skill_candidate(&value).expect("skill evidence");
+        assert_eq!(evidence.name.as_deref(), Some("foo"));
+        assert_eq!(evidence.path.as_deref(), Some("/tmp/foo/SKILL.md"));
+
+        let mut items = Vec::new();
+        super::parse_transcript(&value, &mut items);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].kind, "context");
+        assert_eq!(items[0].tag.as_deref(), Some("Skill"));
+    }
+
+    #[test]
+    fn skill_wrapper_without_metadata_is_context_and_emits_skill_evidence() {
+        let value = json!({
+            "type": "response_item",
+            "timestamp": "2026-08-31T06:32:20.291Z",
+            "payload": {
+                "type": "message",
+                "role": "user",
+                "content": [{
+                    "type": "input_text",
+                    "text": "<skill>\n<name>datafinder</name>\n<path>/tmp/datafinder/SKILL.md</path>\n---\nname: datafinder\n---</skill>"
+                }]
+            }
+        });
+
+        assert_eq!(
+            CodexProvider.session_message_kind(&value),
+            Some(SessionMessageKind::Context)
+        );
+        let evidence = super::codex_selected_skill_candidate(&value).expect("skill evidence");
+        assert_eq!(evidence.name.as_deref(), Some("datafinder"));
+        assert_eq!(evidence.path.as_deref(), Some("/tmp/datafinder/SKILL.md"));
+
+        let mut items = Vec::new();
+        super::parse_transcript(&value, &mut items);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].kind, "context");
+        assert_eq!(items[0].tag.as_deref(), Some("Skill"));
     }
 
     #[test]
@@ -2941,6 +4251,127 @@ mod tests {
         assert_eq!(rules[0].path, instructions);
 
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn codex_plugin_probe_inherits_runtime_environment_and_timeout() {
+        let root = temp_dir();
+        let codex_home = root.join(".codex");
+        let plugin_root = codex_home.join("plugins/cache/openai-bundled/demo/1.0");
+        fs::create_dir_all(&plugin_root).expect("create plugin root");
+        fs::write(
+            codex_home.join("config.toml"),
+            "[mcp_servers.runtime]\ncommand = \"/tmp/node-repl\"\n\n[mcp_servers.runtime.env]\nNODE_REPL_NODE_PATH = \"/tmp/node\"\nNODE_REPL_NODE_MODULE_DIRS = \"/tmp/node-modules\"\n",
+        )
+        .expect("write Codex config");
+        let spec = serde_json::json!({
+            "command": "node",
+            "args": ["scripts/launch.mjs"],
+            "env_vars": ["PATH"],
+            "startup_timeout_sec": 120
+        });
+
+        let env = codex_mcp_probe_env(&spec, Some(&plugin_root));
+        assert_eq!(
+            env.get("CODEX_HOME"),
+            Some(&codex_home.display().to_string())
+        );
+        assert_eq!(
+            env.get("CUA_REPL_NODE_REPL_PATH"),
+            Some(&"/tmp/node-repl".to_string())
+        );
+        assert_eq!(
+            env.get("NODE_REPL_NODE_MODULE_DIRS"),
+            Some(&"/tmp/node-modules".to_string())
+        );
+        let path = std::env::var("PATH").expect("PATH is available in the test process");
+        assert_eq!(env.get("PATH"), Some(&path));
+        assert_eq!(
+            codex_mcp_probe_timeout(&spec),
+            Some(Duration::from_secs(120))
+        );
+        let normalized = codex_plugin_probe_spec(&spec, Some(&plugin_root));
+        assert_eq!(normalized["command"], "/tmp/node");
+        assert_eq!(normalized["cwd"], plugin_root.display().to_string());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn codex_config_entry_is_shadowed_by_matching_plugin_server() {
+        let server = |name: &str| McpServerRecord {
+            agent: AgentKind::Codex,
+            name: name.to_string(),
+            scope: "global".to_string(),
+            transport: "stdio".to_string(),
+            enabled: false,
+            status: "disabled".to_string(),
+            path: PathBuf::new(),
+            trust_hash: "hash".to_string(),
+            probe_cache_version: 0,
+            probe_state: McpProbeState::Unknown,
+            server_path: vec!["mcp_servers".to_string()],
+            read_only_reason: None,
+            server_name: None,
+            server_title: None,
+            server_version: None,
+            server_description: None,
+            server_website_url: None,
+            probe_error: None,
+            icons: Vec::new(),
+            tools: Vec::new(),
+        };
+        let mut config_servers = vec![server("plugin_server"), server("custom")];
+        filter_codex_config_servers_shadowed_by_plugins(
+            &mut config_servers,
+            &[server("plugin_server")],
+        );
+        assert_eq!(
+            config_servers
+                .iter()
+                .map(|server| server.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["custom"]
+        );
+    }
+
+    #[test]
+    fn codex_plugin_probe_keeps_manifest_identity() {
+        let current = McpServerRecord {
+            agent: AgentKind::Codex,
+            name: "server".to_string(),
+            scope: "global".to_string(),
+            transport: "stdio".to_string(),
+            enabled: true,
+            status: "configured".to_string(),
+            path: PathBuf::from("/tmp/.codex/plugins/cache/demo/server/1/.mcp.json"),
+            trust_hash: "hash".to_string(),
+            probe_cache_version: 0,
+            probe_state: McpProbeState::Unknown,
+            server_path: vec!["mcpServers".to_string()],
+            read_only_reason: Some(CODEX_PLUGIN_READ_ONLY_REASON.to_string()),
+            server_name: Some("server".to_string()),
+            server_title: Some("Plugin".to_string()),
+            server_version: Some("1".to_string()),
+            server_description: Some("Plugin description".to_string()),
+            server_website_url: Some("https://example.com".to_string()),
+            probe_error: None,
+            icons: Vec::new(),
+            tools: Vec::new(),
+        };
+        let mut probed = current.clone();
+        probed.server_name = Some("rmcp".to_string());
+        probed.server_title = None;
+        probed.server_version = Some("1.5.0".to_string());
+
+        let normalized = preserve_codex_plugin_identity(&current, probed);
+
+        assert_eq!(normalized.server_name.as_deref(), Some("server"));
+        assert_eq!(normalized.server_title.as_deref(), Some("Plugin"));
+        assert_eq!(normalized.server_version.as_deref(), Some("1"));
+        assert_eq!(
+            normalized.server_description.as_deref(),
+            Some("Plugin description")
+        );
     }
 
     #[test]
@@ -3044,5 +4475,135 @@ mod tests {
         assert!(after.contains("value = 'keep'\r\n"));
         assert!(after.contains("enabled = true\r\n"));
         assert!(!after.replace("\r\n", "").contains('\n'));
+    }
+
+    #[test]
+    fn codex_skill_config_migration_removes_stale_legacy_entry() {
+        let root = temp_dir();
+        let legacy_root = root.join(".codex/skills");
+        let canonical_root = root.join(".agents/skills");
+        let legacy_file = legacy_root.join("bugfix-loop/SKILL.md");
+        let canonical_file = canonical_root.join("bugfix-loop/SKILL.md");
+        fs::create_dir_all(canonical_file.parent().expect("canonical parent"))
+            .expect("create canonical skill");
+        fs::write(&canonical_file, "---\nname: bugfix-loop\n---\n").expect("write skill");
+        let before = format!(
+            "[[skills.config]]\npath = {:?}\nenabled = true\n\n[[skills.config]]\npath = {:?}\nenabled = false\n",
+            legacy_file.display().to_string(),
+            canonical_file.display().to_string(),
+        );
+
+        let after = super::migrate_codex_skill_config_paths(&before, &legacy_root, &canonical_root)
+            .expect("migrate Codex skill config");
+        let value = toml::from_str::<TomlValue>(&after).expect("parse migrated config");
+        let configs = value
+            .get("skills")
+            .and_then(|skills| skills.get("config"))
+            .and_then(TomlValue::as_array)
+            .expect("migrated skill config entries");
+        let canonical_path = canonical_file.to_string_lossy().into_owned();
+        assert_eq!(configs.len(), 1);
+        assert_eq!(
+            configs[0].get("path").and_then(TomlValue::as_str),
+            Some(canonical_path.as_str())
+        );
+        assert_eq!(
+            configs[0].get("enabled").and_then(TomlValue::as_bool),
+            Some(false)
+        );
+        assert!(!after.contains(legacy_file.to_string_lossy().as_ref()));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn reuses_codex_file_mcp_oauth_token_for_matching_server() {
+        let root = temp_dir();
+        let codex_home = root.join(".codex");
+        fs::create_dir_all(&codex_home).expect("create Codex home");
+        fs::write(
+            codex_home.join(".credentials.json"),
+            r#"{
+  "figma|credential-key": {
+    "server_name": "figma",
+    "server_url": "https://mcp.figma.com/mcp",
+    "client_id": "client",
+    "access_token": "access-token"
+  }
+}"#,
+        )
+        .expect("write OAuth credentials");
+
+        assert_eq!(
+            super::load_codex_mcp_file_token_from_home(
+                &codex_home,
+                "figma",
+                "https://mcp.figma.com/mcp",
+            )
+            .as_deref(),
+            Some("access-token")
+        );
+        assert!(
+            super::load_codex_mcp_file_token_from_home(
+                &codex_home,
+                "other",
+                "https://mcp.figma.com/mcp",
+            )
+            .is_none()
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn caches_codex_mcp_access_token_lookup_result() {
+        let key = CodexMcpAccessTokenCacheKey {
+            store: CodexMcpOAuthStore::Keyring,
+            name: format!("cache-test-{}", std::process::id()),
+            url: "https://cache-test.invalid/mcp".to_string(),
+        };
+        CODEX_MCP_ACCESS_TOKEN_CACHE
+            .lock()
+            .expect("lock Codex MCP credential cache")
+            .remove(&key);
+
+        let lookups = std::cell::Cell::new(0);
+        let first = load_codex_mcp_access_token_cached(key.clone(), || {
+            lookups.set(lookups.get() + 1);
+            Some("cached-token".to_string())
+        });
+        let second = load_codex_mcp_access_token_cached(key.clone(), || {
+            lookups.set(lookups.get() + 1);
+            Some("unexpected-second-token".to_string())
+        });
+
+        assert_eq!(first.as_deref(), Some("cached-token"));
+        assert_eq!(second.as_deref(), Some("cached-token"));
+        assert_eq!(lookups.get(), 1);
+        CODEX_MCP_ACCESS_TOKEN_CACHE
+            .lock()
+            .expect("lock Codex MCP credential cache")
+            .remove(&key);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn parses_codex_mcp_keyring_token_from_batch_item() {
+        let serialized = serde_json::json!({
+            "server_name": "figma",
+            "url": "https://mcp.figma.com/mcp",
+            "token_response": { "access_token": "access-token" }
+        })
+        .to_string();
+
+        assert_eq!(
+            super::parse_codex_mcp_keyring_token(
+                "figma",
+                "https://mcp.figma.com/mcp",
+                &serialized,
+            )
+            .as_deref(),
+            Some("access-token")
+        );
     }
 }

@@ -117,7 +117,7 @@
   align-items: center;
   gap: 6px;
   min-width: 0;
-  min-height: var(--badge-height);
+  min-height: calc(var(--badge-height) + 2px);
 }
 
 .overviewInventoryValue {
@@ -401,26 +401,23 @@
 }
 
 .overviewTrendRungs {
-  display: flex;
+  position: relative;
+  display: block;
   width: 100%;
   height: 100%;
-  flex-direction: column-reverse;
-  align-items: center;
-  justify-content: space-between;
 }
 
-.overviewTrendRung {
+.overviewTrendRungs > svg {
   display: block;
-  flex: 0 0 2px;
-  min-width: 8px;
-  border-radius: 999px;
-  opacity: 0;
-  transform-origin: center;
-  animation: overviewRungReveal 440ms var(--ease-out-soft) both;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
 }
 
-.overviewTrendRung.isSegmentStart {
-  margin-block-end: 3px;
+.overviewTrendRungPath {
+  fill: none;
+  stroke-linecap: round;
+  stroke-width: 2px;
 }
 
 .overviewTrendValueLabel {
@@ -460,20 +457,20 @@
   background: var(--chart-hero);
 }
 
-.overviewTrendRung.category0,
 .chartLegendSwatch.category0 { background: var(--chart-cat-0); }
-.overviewTrendRung.category1,
 .chartLegendSwatch.category1 { background: var(--chart-cat-1); }
-.overviewTrendRung.category2,
 .chartLegendSwatch.category2 { background: var(--chart-cat-2); }
-.overviewTrendRung.category3,
 .chartLegendSwatch.category3 { background: var(--chart-cat-3); }
-.overviewTrendRung.categoryOther,
 .chartLegendSwatch.categoryOther { background: var(--chart-other, var(--faint)); }
 .chartLegendSwatch.tokensPerResponse { background: var(--chart-line); }
 .chartLegendSwatch.averageTurnTime { background: var(--chart-line); }
-.overviewTrendRung.duration,
 .chartLegendSwatch.duration { background: var(--chart-hero); }
+.overviewTrendRungPath.category0 { stroke: var(--chart-cat-0); }
+.overviewTrendRungPath.category1 { stroke: var(--chart-cat-1); }
+.overviewTrendRungPath.category2 { stroke: var(--chart-cat-2); }
+.overviewTrendRungPath.category3 { stroke: var(--chart-cat-3); }
+.overviewTrendRungPath.categoryOther { stroke: var(--chart-other, var(--faint)); }
+.overviewTrendRungPath.duration { stroke: var(--chart-hero); }
 .overviewTrendTooltipValues {
   display: flex;
   flex-direction: column;
@@ -495,20 +492,20 @@
   font-weight: 750;
 }
 
-.overviewTrendRung.agentCodex,
 .chartLegendSwatch.agentCodex { background: var(--agent-codex, var(--chart-cat-0)); }
-.overviewTrendRung.agentClaude,
 .chartLegendSwatch.agentClaude { background: var(--agent-claude, var(--chart-cat-1)); }
-.overviewTrendRung.agentCursor,
 .chartLegendSwatch.agentCursor { background: var(--agent-cursor, var(--chart-cat-2)); }
-.overviewTrendRung.agentOther,
 .chartLegendSwatch.agentOther { background: var(--chart-other, var(--faint)); }
-.overviewTrendRung.statusCompleted,
 .chartLegendSwatch.statusCompleted { background: var(--tone-ok); }
-.overviewTrendRung.statusAborted,
 .chartLegendSwatch.statusAborted { background: var(--tone-alert); }
-.overviewTrendRung.statusUnclosed,
 .chartLegendSwatch.statusUnclosed { background: var(--tone-warn); }
+.overviewTrendRungPath.agentCodex { stroke: var(--agent-codex, var(--chart-cat-0)); }
+.overviewTrendRungPath.agentClaude { stroke: var(--agent-claude, var(--chart-cat-1)); }
+.overviewTrendRungPath.agentCursor { stroke: var(--agent-cursor, var(--chart-cat-2)); }
+.overviewTrendRungPath.agentOther { stroke: var(--chart-other, var(--faint)); }
+.overviewTrendRungPath.statusCompleted { stroke: var(--tone-ok); }
+.overviewTrendRungPath.statusAborted { stroke: var(--tone-alert); }
+.overviewTrendRungPath.statusUnclosed { stroke: var(--tone-warn); }
 
 .overviewTrendXAxis {
   height: 24px;
@@ -658,7 +655,7 @@
   background: transparent;
   color: var(--link);
   font: inherit;
-  font-size: var(--text-sm);
+  font-size: var(--text-ui);
   font-weight: 600;
   cursor: pointer;
 }
@@ -824,11 +821,6 @@
 
 @keyframes overviewBarRise {
   from { transform: scaleY(0); opacity: 0; }
-}
-
-@keyframes overviewRungReveal {
-  from { transform: scaleX(0); opacity: 0; }
-  to { transform: scaleX(1); opacity: 1; }
 }
 
 @keyframes overviewTickReveal {

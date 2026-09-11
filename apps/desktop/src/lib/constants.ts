@@ -10,6 +10,7 @@ import {
   Webhook,
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
+import { RuntimeDomainKey, type DomainKey } from "./domain.ts";
 
 export enum AppPage {
   Overview = "overview",
@@ -25,18 +26,26 @@ export enum AppPage {
 }
 
 export type NavItem = { id: Exclude<AppPage, AppPage.SkillDetail>; label: string; icon: LucideIcon };
+type DomainPage = Exclude<AppPage, AppPage.Overview | AppPage.Config | AppPage.Settings | AppPage.SkillDetail>;
+export type DomainNavItem = { id: DomainPage; domain: DomainKey; label: string; icon: LucideIcon };
+
+export const DOMAIN_NAV_ITEMS = [
+  { id: AppPage.Skills, domain: RuntimeDomainKey.Skills, label: "Skills", icon: Sparkles },
+  { id: AppPage.Sessions, domain: RuntimeDomainKey.Sessions, label: "Sessions", icon: MessagesSquare },
+  { id: AppPage.Rules, domain: RuntimeDomainKey.Rules, label: "Rules", icon: ScrollText },
+  { id: AppPage.Mcp, domain: RuntimeDomainKey.Mcp, label: "MCPs", icon: Server },
+  { id: AppPage.Hooks, domain: RuntimeDomainKey.Hooks, label: "Hooks", icon: Webhook },
+  { id: AppPage.Prompts, domain: RuntimeDomainKey.Prompts, label: "Prompts", icon: MessageSquareText },
+] as const satisfies ReadonlyArray<DomainNavItem>;
 
 export const navItems: NavItem[] = [
   { id: AppPage.Overview, label: "Overview", icon: LayoutDashboard },
-  { id: AppPage.Skills, label: "Skills", icon: Sparkles },
-  { id: AppPage.Sessions, label: "Sessions", icon: MessagesSquare },
-  { id: AppPage.Rules, label: "Rules", icon: ScrollText },
-  { id: AppPage.Mcp, label: "MCP", icon: Server },
-  { id: AppPage.Hooks, label: "Hooks", icon: Webhook },
-  { id: AppPage.Prompts, label: "Prompts", icon: MessageSquareText },
-  { id: AppPage.Config, label: "Config", icon: FileCode },
+  ...DOMAIN_NAV_ITEMS.map(({ id, label, icon }) => ({ id, label, icon })),
+  { id: AppPage.Config, label: "Configs", icon: FileCode },
   { id: AppPage.Settings, label: "Settings", icon: Settings },
 ];
+
+export const EMPTY_DISPLAY_VALUE = "—";
 
 export const SIDEBAR_SIZE = "200px";
 /** Aligns traffic-light top/left inset with expanded sidebar tab icons (`.nav` 10px + `.navItem` 10px). */
@@ -56,7 +65,7 @@ export const RULE_FREEZE_COLUMN: FreezeColumnConfig = { defaultWidth: 292, min: 
 
 export const HOOK_FREEZE_COLUMN: FreezeColumnConfig = { defaultWidth: 330, min: 220, max: 560 };
 
-export const MCP_FREEZE_COLUMN: FreezeColumnConfig = { defaultWidth: 96, min: 78, max: 160 };
+export const MCP_FREEZE_COLUMN: FreezeColumnConfig = { defaultWidth: 220, min: 160, max: 420 };
 
 
 export const MARQUEE_DRAG_THRESHOLD = 4;

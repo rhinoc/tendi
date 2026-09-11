@@ -8,6 +8,8 @@ import { prosemirrorTextRanges } from "./codemirror-search.ts";
 
 export type TiptapMarkdownPreviewProps = {
   content: string;
+  stripFrontmatter?: boolean;
+  immediatelyRender?: boolean;
   searchQuery?: string;
   searchIndex?: number;
   onSearchMatchCount?: (count: number) => void;
@@ -16,13 +18,18 @@ export type TiptapMarkdownPreviewProps = {
 
 export function TiptapMarkdownPreview({
   content,
+  stripFrontmatter = true,
+  immediatelyRender = false,
   searchQuery = "",
   searchIndex = 0,
   onSearchMatchCount,
   onSelectionChange,
 }: TiptapMarkdownPreviewProps) {
-  const parts = useMemo(() => splitMarkdownFrontmatter(content), [content]);
-  const lastBodyRef = useRef(parts.body);
+  const body = useMemo(
+    () => stripFrontmatter ? splitMarkdownFrontmatter(content).body : content,
+    [content, stripFrontmatter],
+  );
+  const lastBodyRef = useRef(body);
   const emitSelection = useCallback((editorInstance: Editor | null) => {
     if (!editorInstance) {
       onSelectionChange?.("");
@@ -37,18 +44,18 @@ export function TiptapMarkdownPreview({
   }, [onSelectionChange]);
   const editor = useEditor({
     extensions: tiptapExtensions,
-    content: parts.body,
+    content: body,
     contentType: "markdown",
     editable: false,
-    immediatelyRender: false,
+    immediatelyRender,
     onSelectionUpdate: ({ editor: nextEditor }) => emitSelection(nextEditor),
   });
 
   useEffect(() => {
-    if (!editor || parts.body === lastBodyRef.current) return;
-    lastBodyRef.current = parts.body;
-    editor.commands.setContent(parts.body, { contentType: "markdown", emitUpdate: false });
-  }, [editor, parts]);
+    if (!editor || body === lastBodyRef.current) return;
+    lastBodyRef.current = body;
+    editor.commands.setContent(body, { contentType: "markdown", emitUpdate: false });
+  }, [body, editor]);
 
   useEffect(() => {
     editor?.setEditable(false);
@@ -56,11 +63,11 @@ export function TiptapMarkdownPreview({
 
   useEffect(() => {
     emitSelection(editor);
-  }, [editor, emitSelection, parts.body]);
+  }, [body, editor, emitSelection]);
 
   const searchMatches = useMemo(
     () => editor ? prosemirrorTextRanges(editor.state.doc, searchQuery) : [],
-    [content, editor, searchQuery],
+    [body, editor, searchQuery],
   );
 
   useEffect(() => {

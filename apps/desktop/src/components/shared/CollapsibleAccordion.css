@@ -1,0 +1,157 @@
+.collapsibleAccordion {
+  --collapsible-heading-min-height: 44px;
+  --collapsible-trigger-min-height: 44px;
+  --collapsible-trigger-gap: 12px;
+  --collapsible-trigger-padding: 8px 16px;
+  --collapsible-leading-padding: 16px;
+  --collapsible-leading-trigger-padding: 8px;
+  --collapsible-content-padding: 12px 16px;
+  --collapsible-content-overflow: hidden;
+  --collapsible-content-max-height: none;
+  --collapsible-item-overflow: hidden;
+  --collapsible-surface: var(--surface-2);
+  --collapsible-chevron-size: 24px;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+}
+
+.collapsibleAccordionItem {
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: var(--collapsible-item-overflow);
+  background: var(--collapsible-surface);
+  color: var(--text);
+}
+
+.collapsibleAccordionHeading {
+  min-width: 0;
+  min-height: var(--collapsible-heading-min-height);
+  display: flex;
+  align-items: stretch;
+  margin: 0;
+}
+
+.collapsibleAccordionLeading {
+  display: grid;
+  flex: 0 0 auto;
+  padding-left: var(--collapsible-leading-padding);
+  place-items: center;
+}
+
+.collapsibleAccordionTrigger {
+  width: 100%;
+  min-width: 0;
+  min-height: var(--collapsible-trigger-min-height);
+  display: flex;
+  flex: 1 1 auto;
+  align-items: center;
+  gap: var(--collapsible-trigger-gap);
+  padding: var(--collapsible-trigger-padding);
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: var(--text-ui);
+  font-weight: 500;
+  line-height: var(--leading-ui);
+  text-align: left;
+  cursor: pointer;
+  outline: none;
+}
+
+.collapsibleAccordionLeading + .collapsibleAccordionTrigger {
+  padding-left: var(--collapsible-leading-trigger-padding);
+}
+
+.collapsibleAccordionTrigger:hover,
+.collapsibleAccordionTrigger:focus-visible {
+  background: transparent;
+}
+
+.collapsibleAccordionTrigger:focus-visible {
+  outline: none;
+}
+
+.collapsibleAccordionTrigger:disabled {
+  cursor: default;
+}
+
+.collapsibleAccordionHeading:has(:focus-visible) {
+  background: var(--hover-fill);
+}
+
+.collapsibleAccordionTitle {
+  min-width: 0;
+  flex: 1 1 auto;
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.collapsibleAccordionContent {
+  min-height: 0;
+  flex: 0 1 auto;
+  max-height: var(--collapsible-content-max-height);
+  overflow: var(--collapsible-content-overflow);
+}
+
+.collapsibleAccordionContentInner {
+  min-height: 0;
+  padding: var(--collapsible-content-padding);
+  display: flex;
+  flex-direction: column;
+}
+
+.collapsibleAccordionChevron {
+  display: grid;
+  width: var(--collapsible-chevron-size);
+  height: var(--collapsible-chevron-size);
+  flex: 0 0 auto;
+  place-items: center;
+  color: var(--muted);
+}
+
+.collapsibleAccordion[data-accordion-variant="data-table"] {
+  --collapsible-heading-min-height: 34px;
+  --collapsible-trigger-min-height: 34px;
+  --collapsible-trigger-gap: 5px;
+  --collapsible-trigger-padding: 0;
+  --collapsible-content-padding: 0;
+  --collapsible-content-overflow: visible;
+  --collapsible-item-overflow: visible;
+  --collapsible-surface: transparent;
+  --collapsible-chevron-size: 14px;
+}
+
+.collapsibleAccordion[data-accordion-density="compact"] {
+  --collapsible-trigger-min-height: 40px;
+}
+
+.collapsibleAccordion[data-accordion-content-padding="none"] {
+  --collapsible-content-padding: 0;
+}
+
+.collapsibleAccordion[data-accordion-content-padding="compact"] {
+  --collapsible-content-padding: 0 0 4px;
+}
+
+.collapsibleAccordion[data-accordion-content-padding="inset"] {
+  --collapsible-content-padding: 0 16px 16px;
+}
+
+.collapsibleAccordion[data-accordion-content-overflow="visible"] {
+  --collapsible-content-overflow: visible;
+}
+
+.collapsibleAccordion[data-accordion-content-overflow="auto"] {
+  --collapsible-content-overflow: auto;
+}
+
+.collapsibleAccordion[data-accordion-surface="transparent"] {
+  --collapsible-surface: transparent;
+}

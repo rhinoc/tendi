@@ -1,8 +1,7 @@
 import { useMemo } from "react";
-import { Waypoints, X } from "lucide-react";
+import { X } from "lucide-react";
 import { Dialog } from "radix-ui";
 
-import { LoadingIcon } from "../../components/shared/LoadingIcon.tsx";
 import { LoadingState } from "../../components/shared/LoadingState.tsx";
 import { LoadErrorState } from "../../components/shared/LoadErrorState.tsx";
 import { IconButton } from "../../components/shared/IconButton.tsx";
@@ -19,21 +18,6 @@ function linkedSessionId(link: LinkedSessionLink): string | undefined {
   return id || undefined;
 }
 
-export type LinkedSessionsIndexStatus = {
-  indexed?: number;
-  total?: number;
-  failed?: number;
-  running?: boolean;
-  pending?: number;
-};
-
-export type LinkedSessionsSummaryProps = {
-  links: LinkedSessionLink[];
-  loading: boolean;
-  status?: LinkedSessionsIndexStatus;
-  onOpen: () => void;
-};
-
 export type LinkedSessionsDrawerProps = {
   open: boolean;
   onOpenChange: (open: boolean) => void;
@@ -43,29 +27,6 @@ export type LinkedSessionsDrawerProps = {
   onRetry?: () => void;
   onOpenSession?: (session: LinkedSessionLink | LinkedSessionRow) => void;
 };
-
-export function LinkedSessionsSummary({ links, loading, status, onOpen }: LinkedSessionsSummaryProps) {
-  const indexed = Number(status?.indexed ?? 0);
-  const total = Number(status?.total ?? 0);
-  const failed = Number(status?.failed ?? 0);
-  const indexing = Boolean(status?.running || (status?.pending ?? 0) > 0);
-  return (
-    <section className="linkedSessionsSummary">
-      <div>
-        <span>{dialogCopy.recentSessionsLabel}</span>
-        <strong>{loading && links.length === 0 ? "..." : links.length}</strong>
-      </div>
-      <div className="linkedSessionsMeta">
-        {total > 0 ? <span>{indexed}/{total} indexed</span> : <span>No indexed sessions</span>}
-        {indexing ? <span role="status" aria-label="Indexing"><LoadingIcon size={14} /></span> : null}
-        {failed > 0 ? <span>{failed} failed</span> : null}
-      </div>
-      <IconButton onClick={onOpen} aria-label="Open recent sessions chart">
-        <Waypoints size={15} />
-      </IconButton>
-    </section>
-  );
-}
 
 export function LinkedSessionsDrawer({ open, onOpenChange, links, loading, error = "", onRetry, onOpenSession }: LinkedSessionsDrawerProps) {
   const visibleRows = useMemo(
@@ -85,7 +46,7 @@ export function LinkedSessionsDrawer({ open, onOpenChange, links, loading, error
       const projectKey = sessionProjectGroupKey(session);
       return {
         key: JSON.stringify([session.agent, session.id, session.path, link.skill_name, link.skill_path]),
-        skillKey: link.skill_name,
+        skillKey: link.skill_path,
         skillLabel: link.skill_name,
         sessionLabel: displayedTitle,
         projectKey,

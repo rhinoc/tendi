@@ -1,4 +1,6 @@
-use super::{TerminalProvider, app_available, open_command_file, terminal_script};
+use super::{
+    TerminalLaunchError, TerminalProvider, app_available, open_command_file, terminal_script,
+};
 
 pub(crate) struct GhosttyProvider;
 
@@ -12,7 +14,8 @@ impl TerminalProvider for GhosttyProvider {
     fn application_name(&self) -> String {
         "Ghostty".to_string()
     }
-    fn launch(&self, command: &tendi_core::SessionCommand) -> Result<(), String> {
+    fn launch(&self, command: &tendi_core::SessionCommand) -> Result<(), TerminalLaunchError> {
         open_command_file("Ghostty", &terminal_script(command))
+            .map_err(TerminalLaunchError::launch_failed)
     }
 }

@@ -5,11 +5,11 @@ use std::{
     process::{Command, Output},
 };
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use sha2::{Digest, Sha256};
 use walkdir::WalkDir;
 
-use crate::{git, skills::SkillSourceRecord, storage::Store, SkillInstallScope, SkillTarget};
+use crate::{SkillInstallScope, SkillTarget, git, skills::SkillSourceRecord, storage::Store};
 
 const BACKUP_MANIFEST_VERSION: u32 = 1;
 const MAX_SKILL_BYTES: u64 = 100 * 1024 * 1024;
@@ -561,9 +561,8 @@ pub fn apply_backup_restore_without_database(
                 fs::create_dir_all(parent)?;
             }
             if artifact.entry_key.is_empty() {
-                fs::write(&operation.target, content).with_context(|| {
-                    format!("failed to restore {}", operation.target.display())
-                })?;
+                fs::write(&operation.target, content)
+                    .with_context(|| format!("failed to restore {}", operation.target.display()))?;
             } else {
                 let entry = serde_json::from_slice::<serde_json::Value>(&content)
                     .with_context(|| format!("invalid sync entry {}", artifact.name))?;
@@ -578,14 +577,14 @@ pub fn apply_backup_restore_without_database(
                         &entry,
                     )?,
                     "hooks" => {
-                        let identity = crate::hooks::hook_source_match_from_key(&artifact.entry_key)?;
+                        let identity =
+                            crate::hooks::hook_source_match_from_key(&artifact.entry_key)?;
                         provider.restore_hook_entry(&operation.target, &identity, &entry)?
                     }
                     _ => bail!("unsupported entry sync category {}", artifact.category),
                 };
-                crate::fsutil::atomic_write(&operation.target, &merged).with_context(|| {
-                    format!("failed to restore {}", operation.target.display())
-                })?;
+                crate::fsutil::atomic_write(&operation.target, &merged)
+                    .with_context(|| format!("failed to restore {}", operation.target.display()))?;
             }
         }
         operation.status = "restored".to_string();
@@ -613,7 +612,8 @@ pub fn adopt_skill_for_backup(
     name: impl Into<String>,
 ) -> Result<SkillSourceRecord> {
     let record = skill_backup_record_for_adoption(skill_path, name)?;
-    store.upsert_skill_source_records_for_workspace(workspace_root, std::slice::from_ref(&record))?;
+    store
+        .upsert_skill_source_records_for_workspace(workspace_root, std::slice::from_ref(&record))?;
     Ok(record)
 }
 
@@ -736,34 +736,37 @@ pub fn backup_statuses_for_paths(
 pub fn backup_catalog(store: &Store, cwd: &Path) -> Result<BackupCatalog> {
     let mut catalog = BackupCatalog::default();
     if let Some(scan) = store.list_skills_cached_for_workspace(cwd)? {
-        let mut skills = BTreeMap::<String, (BTreeSet<String>, String)>::new();
+        let mut skills = Vec::new();
         for skill in scan.skills {
-            let global_paths = skill
+            let Some(global_path) = skill
                 .paths
                 .iter()
                 .filter(|path| path.scope == "global")
-                .map(|path| path.path.display().to_string())
-                .collect::<BTreeSet<_>>();
-            if !global_paths.is_empty() && !skill.is_system {
-                skills.insert(
-                    skill.name,
-                    (global_paths, skill.description.unwrap_or_default()),
-                );
+                .map(|path| path.path.clone())
+                .next()
+            else {
+                continue;
+            };
+            if skill.is_system {
+                continue;
             }
-        }
-        catalog.skills = skills
-            .into_iter()
-            .map(|(name, (_paths, detail))| BackupCatalogItem {
-                id: format!("skill:{name}"),
-                label: name,
+            let detail = match skill.description.unwrap_or_default().trim() {
+                "" => global_path.display().to_string(),
+                description => format!("{description} · {}", global_path.display()),
+            };
+            skills.push(BackupCatalogItem {
+                id: format!("skill:{}", skill.id),
+                label: skill.name,
                 detail,
-                source_path: None,
+                source_path: Some(global_path),
                 agent: None,
                 source_key: None,
                 entry_key: None,
                 entry_selector: Vec::new(),
-            })
-            .collect();
+            });
+        }
+        skills.sort_by(|left, right| left.label.cmp(&right.label).then(left.id.cmp(&right.id)));
+        catalog.skills = skills;
     }
 
     catalog.mcp = catalog_entry_items(
@@ -817,17 +820,17 @@ pub fn backup_catalog(store: &Store, cwd: &Path) -> Result<BackupCatalog> {
                 crate::providers::agent_provider(hook.agent).is_global_hook_path(&hook.path)
                     && hook.read_only_reason.is_none()
             })
-        .map(|hook| {
-            let entry_key = crate::hooks::hook_source_match_key(&hook);
-            let detail = hook
-                .command
-                .clone()
-                .or_else(|| hook.url.clone())
-                .or_else(|| hook.prompt.clone())
-                .unwrap_or_default();
-            let label = hook.event;
-            (hook.agent, hook.path, label, detail, entry_key, Vec::new())
-        })
+            .map(|hook| {
+                let entry_key = crate::hooks::hook_source_match_key(&hook);
+                let detail = hook
+                    .command
+                    .clone()
+                    .or_else(|| hook.url.clone())
+                    .or_else(|| hook.prompt.clone())
+                    .unwrap_or_default();
+                let label = hook.event;
+                (hook.agent, hook.path, label, detail, entry_key, Vec::new())
+            })
             .collect::<Vec<_>>(),
         "hooks",
     );
@@ -872,10 +875,8 @@ fn catalog_source_files(
     sources: Vec<(crate::skills::AgentKind, PathBuf, String, String)>,
     category: &str,
 ) -> Vec<BackupCatalogItem> {
-    let mut grouped = BTreeMap::<
-        (crate::skills::AgentKind, PathBuf),
-        BTreeMap<String, BTreeSet<String>>,
-    >::new();
+    let mut grouped =
+        BTreeMap::<(crate::skills::AgentKind, PathBuf), BTreeMap<String, BTreeSet<String>>>::new();
     for (agent, path, title, subtitle) in sources {
         grouped
             .entry((agent, path))
@@ -1128,6 +1129,7 @@ pub fn build_manifest(
     let mut skills = Vec::new();
     let mut excluded = Vec::new();
     let mut source_paths = BTreeMap::new();
+    let mut seen_installations = BTreeSet::new();
 
     for record in records {
         let name = record.skill_name.trim();
@@ -1143,6 +1145,14 @@ pub fn build_manifest(
             continue;
         }
 
+        let canonical_path = record
+            .skill_path
+            .canonicalize()
+            .unwrap_or_else(|_| record.skill_path.clone());
+        if !seen_installations.insert(canonical_path) {
+            continue;
+        }
+
         let files = match backup_files(&record.skill_path) {
             Ok(files) => files,
             Err(error) => {
@@ -1153,14 +1163,6 @@ pub fn build_manifest(
                 continue;
             }
         };
-        if skills
-            .iter()
-            .any(|skill: &BackupSkill| skill.files == files)
-        {
-            // Exact copies share one canonical directory, even if different agents
-            // discover them at different local paths.
-            continue;
-        }
         let base_id = backup_skill_id(record);
         let content_id = sha256_hex(
             serde_json::to_string(&files)
@@ -1218,13 +1220,28 @@ pub fn build_backup_manifest(
         .filter(|item| category_item_selected(&config.contents.skills, &item.id))
         .map(|item| item.id.as_str())
         .collect::<BTreeSet<_>>();
+    let selected_skill_paths = catalog
+        .skills
+        .iter()
+        .filter(|item| skill_ids.contains(item.id.as_str()))
+        .filter_map(|item| item.source_path.as_ref())
+        .map(|path| (path.canonicalize().unwrap_or_else(|_| path.clone()), path))
+        .collect::<BTreeMap<_, _>>();
     let records = store
         .skill_source_records_for_workspace(cwd)?
         .into_iter()
         .filter(|record| {
-            config.contents.skills.enabled
-                && (catalog.skills.is_empty()
-                    || skill_ids.contains(format!("skill:{}", record.skill_name).as_str()))
+            if !config.contents.skills.enabled {
+                return false;
+            }
+            if catalog.skills.is_empty() {
+                return true;
+            }
+            let path = record
+                .skill_path
+                .canonicalize()
+                .unwrap_or_else(|_| record.skill_path.clone());
+            selected_skill_paths.contains_key(&path)
         })
         .collect::<Vec<_>>();
     let mut manifest = build_manifest(
@@ -1284,8 +1301,8 @@ pub fn build_backup_manifest(
                 (file_name, content)
             };
             let entry_key = item.entry_key.clone().unwrap_or_default();
-            let selector = serde_json::to_string(&item.entry_selector)
-                .expect("MCP server path serializes");
+            let selector =
+                serde_json::to_string(&item.entry_selector).expect("MCP server path serializes");
             let identity = format!(
                 "{category}:{}:{source_key}:{selector}:{entry_key}",
                 agent.label()
@@ -1553,8 +1570,8 @@ fn verify_snapshot_artifact(artifact: &BackupArtifact, target: &Path) -> Result<
 }
 
 fn copy_artifact_files(artifact: &BackupArtifact, source: &Path, target: &Path) -> Result<()> {
-    let content = fs::read(source)
-        .with_context(|| format!("failed to read {}", source.display()))?;
+    let content =
+        fs::read(source).with_context(|| format!("failed to read {}", source.display()))?;
     write_artifact_files(artifact, &content, target)
 }
 
@@ -1643,7 +1660,11 @@ pub fn validate_manifest(manifest: &BackupManifest) -> Result<()> {
                 artifact.category
             );
         }
-        if artifact.entry_selector.iter().any(|component| component.is_empty()) {
+        if artifact
+            .entry_selector
+            .iter()
+            .any(|component| component.is_empty())
+        {
             bail!(
                 "backup manifest artifact {} contains an invalid MCP server path",
                 artifact.name
@@ -2083,8 +2104,8 @@ fn capture_checkout_manifest(
             .join(&artifact.category)
             .join(&artifact.id)
             .join(safe_relative_path(&file.path)?);
-        let content = fs::read(&source)
-            .with_context(|| format!("failed to read {}", source.display()))?;
+        let content =
+            fs::read(&source).with_context(|| format!("failed to read {}", source.display()))?;
         if sha256_hex(&content) != file.sha256 || content.len() as u64 != file.size {
             let _ = fs::remove_dir_all(&temporary_root);
             bail!("backup artifact content did not match its manifest");
@@ -2299,18 +2320,19 @@ mod tests {
     };
 
     use super::{
-        adopt_skill_for_backup, backup_now, backup_statuses_for_paths, backup_versions,
-        build_manifest, catalog_source_files, current_machine_name, discover_git_repository_root,
-        ensure_checkout,
-        is_remote_repository, normalize_remote_url, sync_checkout_for_restore,
-        validate_manifest, write_snapshot,
-        BackupBuildOptions, BackupConfig, BackupManifest,
+        BackupBuildOptions, BackupConfig, BackupManifest, adopt_skill_for_backup, backup_catalog,
+        backup_now, backup_statuses_for_paths, backup_versions, build_manifest,
+        catalog_source_files, current_machine_name, discover_git_repository_root, ensure_checkout,
+        is_remote_repository, normalize_remote_url, sync_checkout_for_restore, validate_manifest,
+        write_snapshot,
     };
     use crate::{
-        skills::{AgentKind, SkillSourceRecord},
+        SkillInstallScope, SkillTarget,
+        skills::{
+            AgentKind, SkillPath, SkillRecord, SkillRoot, SkillScan, SkillSourceRecord,
+            SkillVisibility,
+        },
         storage::Store,
-        SkillInstallScope,
-        SkillTarget,
     };
 
     #[test]
@@ -2349,6 +2371,45 @@ mod tests {
     }
 
     #[test]
+    fn backup_catalog_keeps_same_name_installations_separate() {
+        let root = temp_dir("tendi-skill-backup-catalog");
+        let first = root.join("global/first-review");
+        let second = root.join("global/second-review");
+        write_skill(&first, "review");
+        write_skill(&second, "review");
+        let store = Store::open(root.join("tendi.sqlite3")).unwrap();
+        let scan = SkillScan {
+            roots: vec![SkillRoot {
+                path: root.join("global"),
+                scope: "global".to_string(),
+                agent: AgentKind::Shared,
+                plugin_id: None,
+                plugin_enabled: None,
+            }],
+            skills: vec![
+                skill_record("review", &first),
+                skill_record("review", &second),
+            ],
+            warnings: Vec::new(),
+        };
+        store.save_skills_for_workspace(&root, &scan).unwrap();
+
+        let catalog = backup_catalog(&store, &root).unwrap();
+        assert_eq!(catalog.skills.len(), 2);
+        assert_ne!(catalog.skills[0].id, catalog.skills[1].id);
+        assert!(catalog.skills.iter().all(|item| item.label == "review"));
+        assert!(
+            catalog
+                .skills
+                .iter()
+                .all(|item| item.detail.contains("global/"))
+        );
+
+        drop(store);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn manifest_contains_only_managed_non_project_skills_and_snapshot_is_self_contained() {
         let root = temp_dir("tendi-skill-backup-manifest");
         let global = root.join("global/review");
@@ -2380,21 +2441,27 @@ mod tests {
         let snapshot = root.join("snapshot");
         write_snapshot(&manifest, &snapshot).unwrap();
         assert!(snapshot.join("manifest.json").is_file());
-        assert!(snapshot
-            .join("skills")
-            .join(&manifest.skills[0].id)
-            .join("SKILL.md")
-            .is_file());
-        assert!(snapshot
-            .join("skills")
-            .join(&manifest.skills[0].id)
-            .join("helper.ts")
-            .is_file());
-        assert!(!snapshot
-            .join("skills")
-            .join(&manifest.skills[0].id)
-            .join("node_modules")
-            .exists());
+        assert!(
+            snapshot
+                .join("skills")
+                .join(&manifest.skills[0].id)
+                .join("SKILL.md")
+                .is_file()
+        );
+        assert!(
+            snapshot
+                .join("skills")
+                .join(&manifest.skills[0].id)
+                .join("helper.ts")
+                .is_file()
+        );
+        assert!(
+            !snapshot
+                .join("skills")
+                .join(&manifest.skills[0].id)
+                .join("node_modules")
+                .exists()
+        );
 
         fs::remove_dir_all(root).unwrap();
     }
@@ -2448,7 +2515,7 @@ mod tests {
     }
 
     #[test]
-    fn matching_skill_content_is_canonicalized_without_storing_local_paths() {
+    fn matching_skill_content_keeps_independent_installations() {
         let root = temp_dir("tendi-skill-backup-canonical");
         let first = root.join("one/review");
         let second = root.join("two/review");
@@ -2472,12 +2539,14 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(manifest.skills.len(), 2);
+        assert_eq!(manifest.skills.len(), 3);
         assert!(manifest.skills.iter().any(|skill| skill.id == "review"));
-        assert!(manifest
-            .skills
-            .iter()
-            .any(|skill| skill.id.starts_with("review-")));
+        assert!(
+            manifest
+                .skills
+                .iter()
+                .any(|skill| skill.id.starts_with("review-"))
+        );
         let serialized = serde_json::to_string(&manifest).unwrap();
         assert!(!serialized.contains(&first.display().to_string()));
         assert!(!serialized.contains(&second.display().to_string()));
@@ -2678,11 +2747,13 @@ mod tests {
 
         write_snapshot(&manifest, &snapshot).unwrap();
 
-        assert!(snapshot
-            .join("rules")
-            .join(&artifact_id)
-            .join("AGENTS.md")
-            .is_file());
+        assert!(
+            snapshot
+                .join("rules")
+                .join(&artifact_id)
+                .join("AGENTS.md")
+                .is_file()
+        );
         assert!(!snapshot.join("global").exists());
         fs::remove_dir_all(root).unwrap();
     }
@@ -2708,10 +2779,8 @@ mod tests {
             .unwrap();
         backup_now(&first_store, &root).unwrap();
 
-        let second_config = BackupConfig::new(
-            remote.display().to_string(),
-            root.join("second-checkout"),
-        );
+        let second_config =
+            BackupConfig::new(remote.display().to_string(), root.join("second-checkout"));
         let manifest = sync_checkout_for_restore(&second_config).unwrap();
 
         assert_eq!(manifest.unwrap().skills[0].name, "review");
@@ -2972,16 +3041,20 @@ mod tests {
         let report = backup_now(&second_store, &root).unwrap();
 
         assert_eq!(report.manifest.skills.len(), 2);
-        assert!(report
-            .manifest
-            .skills
-            .iter()
-            .any(|skill| skill.name == "review"));
-        assert!(report
-            .manifest
-            .skills
-            .iter()
-            .any(|skill| skill.name == "draft"));
+        assert!(
+            report
+                .manifest
+                .skills
+                .iter()
+                .any(|skill| skill.name == "review")
+        );
+        assert!(
+            report
+                .manifest
+                .skills
+                .iter()
+                .any(|skill| skill.name == "draft")
+        );
         let remote_manifest = Command::new("git")
             .args([
                 "--git-dir",
@@ -3018,10 +3091,7 @@ mod tests {
         run_git(&root, &["init", "--bare", "remote.git"]);
 
         let first_checkout = root.join("first-checkout");
-        let first_config = BackupConfig::new(
-            remote.display().to_string(),
-            first_checkout.clone(),
-        );
+        let first_config = BackupConfig::new(remote.display().to_string(), first_checkout.clone());
         let first_store = Store::open(root.join("first.sqlite3")).unwrap();
         first_store
             .upsert_skill_source_records_for_workspace(&root, &[source("review", &first_skill)])
@@ -3047,7 +3117,9 @@ mod tests {
         )
         .unwrap();
         let local_only = build_manifest(
-            &first_store.skill_source_records_for_workspace(&root).unwrap(),
+            &first_store
+                .skill_source_records_for_workspace(&root)
+                .unwrap(),
             &BackupBuildOptions {
                 device_label: "First Mac".to_string(),
             },
@@ -3061,11 +3133,13 @@ mod tests {
 
         assert!(report.pushed);
         assert_eq!(report.manifest.skills.len(), 3);
-        assert!(report
-            .manifest
-            .skills
-            .iter()
-            .all(|skill| skill.name == "review"));
+        assert!(
+            report
+                .manifest
+                .skills
+                .iter()
+                .all(|skill| skill.name == "review")
+        );
         assert!(!super::checkout_has_conflicts(&first_checkout));
         drop(second_store);
         drop(first_store);
@@ -3197,6 +3271,52 @@ mod tests {
             source_relative_path: None,
             update_status: "local".to_string(),
             origin: "tendi-install".to_string(),
+        }
+    }
+
+    fn skill_record(name: &str, path: &Path) -> SkillRecord {
+        let id = format!("skill@path:{}", path.canonicalize().unwrap().display());
+        SkillRecord {
+            id: id.clone(),
+            installation_id: id,
+            name: name.to_string(),
+            description: Some(format!("{name} description")),
+            tags: Vec::new(),
+            dependencies: Vec::new(),
+            dependents: Vec::new(),
+            dependency_ids: Vec::new(),
+            dependent_ids: Vec::new(),
+            visibility: SkillVisibility::Auto,
+            agents: vec![AgentKind::Shared],
+            paths: vec![SkillPath {
+                path: path.to_path_buf(),
+                root: path.parent().unwrap().to_path_buf(),
+                scope: "global".to_string(),
+                agent: AgentKind::Shared,
+                install_target: "shared".to_string(),
+                source_kind: "local".to_string(),
+                source: None,
+                source_ref: None,
+                source_version: None,
+                source_relative_path: None,
+                symlink_status: "direct".to_string(),
+                update_status: "local".to_string(),
+                sha256: String::new(),
+                tags: Vec::new(),
+                tendi_visibility: None,
+                effective_visibility: SkillVisibility::Auto,
+                provider_allow_implicit_invocation: None,
+                provider_skill_enabled: None,
+                provider_disable_model_invocation: None,
+                plugin_id: None,
+                plugin_enabled: None,
+            }],
+            source_summary: "local".to_string(),
+            install_targets: vec!["shared".to_string()],
+            update_status: "local".to_string(),
+            is_system: false,
+            ctime: None,
+            mtime: None,
         }
     }
 

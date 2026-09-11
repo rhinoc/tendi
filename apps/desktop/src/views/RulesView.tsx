@@ -7,6 +7,8 @@ import { Group as PanelGroup, Panel } from "react-resizable-panels";
 import { DataTable } from "../components/DataTable.tsx";
 import { ColumnDataType, type ColumnDef, type SortState } from "../components/DataTable.types";
 import { SortDirection } from "../lib/sort.ts";
+import { useTabState } from "../lib/tab-state.ts";
+import { updateEditorDraft, useEditorDraft } from "../lib/editor-draft-state.ts";
 import { DiffLineKind } from "../lib/diff.ts";
 import { AgentChips } from "../components/shared/AgentChips.tsx";
 import { CopyButton } from "../components/shared/CopyButton.tsx";
@@ -29,7 +31,7 @@ import { SearchField } from "../components/shared/SearchField.tsx";
 import { Toast } from "../components/shared/Toast.tsx";
 import type { SkillDependencyRecord } from "../features/skills/SkillDependencyGraph.tsx";
 import { ruleColumns as sharedRuleColumns } from "../lib/tableColumns.tsx";
-import { actionLabels, copiedPathLabel, copyPathLabel, revealPathLabel, RULE_FREEZE_COLUMN, RuleScope, selectionDeleteErrorLabel, selectionDeleteLabel, TableSelectionActionId, TauriCommand, diffPreview, formatUserPath, friendlyAgent, ruleAgents, ruleKey, ruleSelectionActionIds, ruleSortValue, ruleTitle, safeInvoke, scopeColumn, suppressNextClick, type ProjectSummary, type RuleRecord } from "../lib/index.ts";
+import { actionLabels, copiedPathLabel, copyPathLabel, EMPTY_DISPLAY_VALUE, revealPathLabel, RULE_FREEZE_COLUMN, RuleScope, scopeColumnFromValue, selectionDeleteErrorLabel, selectionDeleteLabel, TableSelectionActionId, TauriCommand, diffPreview, formatUserPath, friendlyAgent, ruleAgents, ruleKey, ruleSelectionActionIds, ruleSortValue, ruleTitle, safeInvoke, scopeNameForValue, suppressNextClick, type ProjectSummary, type RuleRecord } from "../lib/index.ts";
 import { selectRuleListView } from "../controllers/rule-controller.ts";
 import { readRule, saveRule, SkillScope, type CatalogMutationResponse } from "../lib/runtime-gateway.ts";
 
@@ -117,15 +119,15 @@ function normalizeSkillName(value: string) {
 }
 
 function preferReferencedSkill(matches: SkillDependencyRecord[], rule: RuleRecord) {
-  if (matches.length <= 1) return matches[0];
+  if (matches.length === 1) return matches[0];
   if (rule.scope === RuleScope.Project) {
-    const project = matches.find((skill) =>
+    const projectMatches = matches.filter((skill) =>
       (skill.paths ?? []).some((path) => path.scope === SkillScope.Project),
     );
-    if (project) return project;
+    if (projectMatches.length === 1) return projectMatches[0];
   }
-  return matches.find((skill) => (skill.paths ?? []).every((path) => path.scope !== SkillScope.Project))
-    ?? matches[0];
+  const globalMatches = matches.filter((skill) => (skill.paths ?? []).every((path) => path.scope !== SkillScope.Project));
+  return globalMatches.length === 1 ? globalMatches[0] : undefined;
 }
 
 function ruleSkillRefs(content: string, skills: SkillDependencyRecord[], rule: RuleRecord | null) {
@@ -142,7 +144,8 @@ function ruleSkillRefs(content: string, skills: SkillDependencyRecord[], rule: R
     const candidates = byName.get(normalizeSkillName(match[1]));
     if (!candidates?.length) continue;
     const preferred = preferReferencedSkill(candidates, rule);
-    refs.set(preferred.id ?? preferred.name, preferred);
+    if (!preferred?.id) continue;
+    refs.set(preferred.id, preferred);
   }
   return [...refs.values()].sort((left, right) => left.name.localeCompare(right.name));
 }
@@ -154,7 +157,7 @@ function RuleInfoMenu({
 }: {
   rule: RuleRecord;
   referencedSkills: SkillDependencyRecord[];
-  onOpenSkill?: (name: string) => void;
+  onOpenSkill?: (skillId: string) => void;
 }) {
   const title = ruleTitle(rule);
   const path = ruleSourcePath(rule);
@@ -190,23 +193,22 @@ function RuleInfoMenu({
             {path && (
               <InfoSection label="Path" className="ruleInfoPath">
                   <Tooltip content={displayPath} onlyWhenTruncated><code>{displayPath}</code></Tooltip>
-                  <button
+                  <IconButton
                     aria-label={revealPathLabel("rule")}
-                    className="appButton appButton-icon"
                     onClick={() => safeInvoke(TauriCommand.RevealInFinder, { path })}
                   >
                     <FolderOpen size={13} />
-                  </button>
-                  <CopyButton className="appButton appButton-icon" value={path} copyLabel={copyPathLabel("rule")} copiedLabel={copiedPathLabel("rule")} />
+                  </IconButton>
+                  <CopyButton iconOnly value={path} copyLabel={copyPathLabel("rule")} copiedLabel={copiedPathLabel("rule")} />
               </InfoSection>
             )}
             {referencedSkills.length > 0 && (
               <InfoSection label="Referenced skills" valueLine={false}>
                 <div className="ruleInfoSkillRefs">
                   {referencedSkills.map((skill) => (
-                    <Tooltip key={skill.id ?? skill.name} content={skill.description}><button
-                      disabled={!onOpenSkill}
-                      onClick={() => onOpenSkill?.(skill.id ?? skill.name)}
+                    <Tooltip key={skill.id} content={skill.description}><button
+                      disabled={!onOpenSkill || !skill.id}
+                      onClick={() => skill.id && onOpenSkill?.(skill.id)}
                     >
                       {skill.name}
                     </button></Tooltip>
@@ -228,6 +230,8 @@ export function RulesView({
   onOpenSkill,
   onDeleteRules,
   onRuleSaved,
+  locateRuleId,
+  onLocateRuleComplete,
   projects,
 }: {
   rows: RuleRecord[];
@@ -236,37 +240,51 @@ export function RulesView({
   loadError?: string;
   hasRows?: boolean;
   onRetry?: () => void;
-  onOpenSkill?: (name: string) => void;
+  onOpenSkill?: (skillId: string) => void;
   onDeleteRules?: (paths: string[]) => Promise<CatalogMutationResponse>;
   onRuleSaved?: (path: string, sha256: string) => void;
+  locateRuleId?: string;
+  onLocateRuleComplete?: (id: string) => void;
   projects?: ProjectSummary[];
 }) {
   const projectList = projects ?? [];
-  const [query, setQuery] = useState("");
+  const [query, setQuery] = useTabState("rules.query", "");
   const ruleView = useMemo(() => selectRuleListView(rows, query), [query, rows]);
   const { items: ruleItems, tableRows } = ruleView;
-  const [activeKey, setActiveKey] = useState(ruleItems[0]?.key ?? "");
+  const [activeKey, setActiveKey] = useTabState("rules.activeKey", ruleItems[0]?.key ?? "");
   const [selected, setSelected] = useState<string[]>([]);
-  const [sort, setSort] = useState<SortState>({ key: "order", direction: SortDirection.Asc });
-  const [draft, setDraft] = useState({ content: "", originalContent: "", sha256: "" });
+  const [sort, setSort] = useTabState<SortState>("rules.sort", { key: "order", direction: SortDirection.Asc });
   const [loading, setLoading] = useState(false);
-  const [detailCollapsed, setDetailCollapsed] = useState(false);
+  const [detailCollapsed, setDetailCollapsed] = useTabState("rules.detailCollapsed", false);
   const [showDiscardDialog, setShowDiscardDialog] = useState(false);
   const [pendingKey, setPendingKey] = useState("");
   const [pendingDeleteRows, setPendingDeleteRows] = useState<RuleTableRow[]>([]);
   const [pendingDeleteConfirmRows, setPendingDeleteConfirmRows] = useState<RuleTableRow[]>([]);
   const [deleting, setDeleting] = useState(false);
   const [deleteError, setDeleteError] = useState("");
+  const [ruleLocatorRequest, setRuleLocatorRequest] = useState("");
   const loadedRulePathRef = useRef("");
   const [ruleLoadError, setRuleLoadError] = useState("");
   const [ruleLoadAttempt, setRuleLoadAttempt] = useState(0);
   const normalizedQuery = query.trim().toLowerCase();
+  useEffect(() => {
+    if (!locateRuleId) return;
+    setQuery("");
+    setRuleLocatorRequest(locateRuleId);
+  }, [locateRuleId]);
+  const completeRuleLocator = useCallback((id: string) => {
+    setRuleLocatorRequest((current) => current === id ? "" : current);
+    onLocateRuleComplete?.(id);
+  }, [onLocateRuleComplete]);
   const activeItem = useMemo(() => ruleItems.find((item) => item.key === activeKey), [activeKey, ruleItems]);
   const activeRule = activeItem?.rule ?? null;
+  const ruleDraftKey = `rules:${activeRule?.path ?? "__none__"}`;
+  const draft = useEditorDraft(ruleDraftKey);
   const content = draft.content;
   const hasLoadedRule = Boolean(
     activeRule
-      && loadedRulePathRef.current === activeRule.path,
+      && (loadedRulePathRef.current === activeRule.path
+        || draft.content !== draft.originalContent && Boolean(draft.sha256)),
   );
   const deferredContent = useDeferredValue(content);
   const referencedSkills = useMemo(
@@ -276,6 +294,8 @@ export function RulesView({
   const dirty = content !== draft.originalContent;
   const dirtyRef = useRef(dirty);
   dirtyRef.current = dirty;
+  const draftRef = useRef(draft);
+  draftRef.current = draft;
   const diffLines = useMemo(
     () => loading || !dirty ? [] : diffPreview(draft.originalContent, deferredContent),
     [deferredContent, dirty, draft.originalContent, loading],
@@ -341,7 +361,7 @@ export function RulesView({
         return (
           <>
             <span className="dataCellTitle">{ruleTitle(row.rule)}</span>
-            <Tooltip content={displayPath} onlyWhenTruncated><span className="dataCellSub">{displayPath || "-"}</span></Tooltip>
+            <Tooltip content={displayPath} onlyWhenTruncated><span className="dataCellSub">{displayPath || EMPTY_DISPLAY_VALUE}</span></Tooltip>
           </>
         );
       },
@@ -364,8 +384,8 @@ export function RulesView({
           next.groupBy = (row) => row.rule.kind;
           next.value = (row) => row.rule.kind;
         } else if (column.key === "scope") {
-          next.groupBy = (row) => row.rule.scope;
-          next.value = (row) => row.rule.scope;
+          next.groupBy = (row) => scopeNameForValue(row.rule.scope);
+          next.value = (row) => scopeNameForValue(row.rule.scope);
         } else if (column.render) {
           next.render = (row) => column.render?.({ ...row.rule });
         } else if (column.value) {
@@ -375,7 +395,7 @@ export function RulesView({
         }
         return next;
       }),
-    ...(projectList.length > 0 ? [scopeColumn<RuleTableRow>(projectList, (row) => ruleSourcePath(row.rule))] : []),
+    ...(projectList.length > 0 ? [scopeColumnFromValue<RuleTableRow>((row) => row.rule.scope)] : []),
     {
       key: "actions",
       header: "",
@@ -408,18 +428,21 @@ export function RulesView({
     const rulePath = activeRule?.path ?? "";
     if (!rulePath) {
       loadedRulePathRef.current = "";
-      setDraft({ content: "", originalContent: "", sha256: "" });
       setRuleLoadError("");
       setLoading(false);
       return () => { cancelled = true; };
     }
-    if (dirtyRef.current && loadedRulePathRef.current === rulePath) {
+    const resourceKey = `rules:${rulePath}`;
+    if (dirtyRef.current && draftRef.current.sha256) {
+      loadedRulePathRef.current = rulePath;
+      setRuleLoadError("");
+      setLoading(false);
       return () => { cancelled = true; };
     }
     const sameRule = loadedRulePathRef.current === rulePath;
     if (!sameRule) {
       loadedRulePathRef.current = "";
-      setDraft({ content: "", originalContent: "", sha256: "" });
+      updateEditorDraft(resourceKey, { content: "", originalContent: "", sha256: "" });
     }
     setLoading(true);
     setRuleLoadError("");
@@ -428,13 +451,13 @@ export function RulesView({
         const result = await readRule(rulePath);
         if (cancelled) return;
         loadedRulePathRef.current = rulePath;
-        setDraft({ content: result.content, originalContent: result.content, sha256: result.sha256 });
+        updateEditorDraft(resourceKey, { content: result.content, originalContent: result.content, sha256: result.sha256 });
         setRuleLoadError("");
       } catch {
         if (cancelled) return;
         if (!sameRule) {
           loadedRulePathRef.current = "";
-          setDraft({ content: "", originalContent: "", sha256: "" });
+          updateEditorDraft(resourceKey, { content: "", originalContent: "", sha256: "" });
         }
         setRuleLoadError("Could not load rule. Try again.");
       } finally {
@@ -454,7 +477,7 @@ export function RulesView({
     });
     if (typeof result?.sha256 === "string") {
       const savedContent = typeof result.content === "string" ? result.content : content;
-      setDraft({ content: savedContent, originalContent: savedContent, sha256: result.sha256 });
+      updateEditorDraft(`rules:${activeRule.path}`, { content: savedContent, originalContent: savedContent, sha256: result.sha256 });
       if (activeRule?.path) onRuleSaved?.(activeRule.path, result.sha256);
     }
   }, [activeRule?.path, content, dirty, draft.sha256, onRuleSaved]);
@@ -485,11 +508,12 @@ export function RulesView({
     const deleteTargets = pendingDeleteRows;
     setPendingDeleteRows([]);
     if (deleteTargets.length > 0) {
-      setDraft((current) => ({ ...current, content: current.originalContent }));
+      updateEditorDraft(ruleDraftKey, (current) => ({ ...current, content: current.originalContent }));
       setPendingDeleteConfirmRows(deleteTargets);
       return;
     }
     if (pendingKey) {
+      updateEditorDraft(ruleDraftKey, (current) => ({ ...current, content: current.originalContent }));
       setActiveKey(pendingKey);
       setDetailCollapsed(false);
       setPendingKey("");
@@ -533,12 +557,16 @@ export function RulesView({
               selectable
               selectedIds={selected}
               onSelectionChange={setSelected}
+              onDeleteSelected={requestDeleteRules}
               enableMarquee
+              scrollRestorationKey="rules.list"
               defaultSort={{ key: "order", direction: SortDirection.Asc }}
               sort={sort}
               onSortChange={setSort}
               freezeColumn={RULE_FREEZE_COLUMN}
               onRowClick={(row) => openRule(row.key)}
+              scrollToRowId={ruleLocatorRequest}
+              onScrollToRowComplete={completeRuleLocator}
               rowContextMenu={rowContextMenu}
               bottomBar={bottomBar}
               bottomBarActionsClassName="selectionActions"
@@ -565,10 +593,11 @@ export function RulesView({
         railLabel={activeRule ? ruleTitle(activeRule) : "Rule detail"}
         hasSelection={Boolean(activeRule)}
         emptyState={<EmptyState compact title="Select a rule to view its contents." />}
-        hostClassName="ruleEditorPanelHost"
+        variant="ruleEditor"
       >
         {activeRule ? (
           <DetailPanel
+            variant="ruleEditor"
             title={ruleTitle(activeRule)}
             collapseLabel="Collapse rule detail"
             onCollapse={() => setDetailCollapsed(true)}
@@ -597,7 +626,7 @@ export function RulesView({
                     originalContent={draft.originalContent}
                     copyablePath
                     onSave={save}
-                    onChange={(nextContent: string) => setDraft((current) => ({ ...current, content: nextContent }))}
+                    onChange={(nextContent: string) => updateEditorDraft(ruleDraftKey, (current) => ({ ...current, content: nextContent }))}
                   />
                 </Suspense>
                 {loading ? (

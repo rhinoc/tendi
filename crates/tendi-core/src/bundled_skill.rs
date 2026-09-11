@@ -242,10 +242,7 @@ mod tests {
         time::{SystemTime, UNIX_EPOCH},
     };
 
-    use super::{
-        SKILL_MARKDOWN, mark_prompt_handled_at, plan_install_at, remove_at,
-        status_at,
-    };
+    use super::{SKILL_MARKDOWN, mark_prompt_handled_at, plan_install_at, remove_at, status_at};
     use crate::skills::{AgentKind, apply_changes};
 
     const OPENAI_YAML: &str = include_str!("../../../skills/tendi/agents/openai.yaml");
@@ -358,5 +355,4 @@ mod tests {
         );
         fs::remove_dir_all(root).unwrap();
     }
-
 }
