@@ -19,6 +19,7 @@ export type SettingsPayload = {
 };
 
 export type SettingsState = Omit<SettingsPayload, "configProfiles">;
+export type SettingsPatch = Partial<SettingsState>;
 
 export function normalizeConfigProfiles(value: unknown): Record<string, string> {
   if (!value || typeof value !== "object" || Array.isArray(value)) return {};

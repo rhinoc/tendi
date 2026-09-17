@@ -175,6 +175,75 @@ function labelOnRightForNode(node: LayoutNode, label: string) {
   return !outwardRight;
 }
 
+function roundedTrianglePath(node: RenderedRelationshipNode) {
+  // A triangle has less filled area than a circle at the same radius, so it
+  // needs a larger footprint to carry the same visual weight.
+  const triangleHeight = node.radius * 1.55;
+  const halfWidth = triangleHeight * Math.sqrt(3) / 2;
+  const vertices = [
+    { x: node.x, y: node.y - triangleHeight },
+    { x: node.x + halfWidth, y: node.y + triangleHeight / 2 },
+    { x: node.x - halfWidth, y: node.y + triangleHeight / 2 },
+  ];
+  const cornerOffset = Math.min(6, triangleHeight * 0.32);
+  const edgeLength = triangleHeight * Math.sqrt(3);
+  const edgeRatio = cornerOffset / edgeLength;
+  const roundedVertices = vertices.map((vertex, index) => {
+    const previous = vertices[(index + vertices.length - 1) % vertices.length];
+    const next = vertices[(index + 1) % vertices.length];
+    return {
+      start: {
+        x: vertex.x + (previous.x - vertex.x) * edgeRatio,
+        y: vertex.y + (previous.y - vertex.y) * edgeRatio,
+      },
+      end: {
+        x: vertex.x + (next.x - vertex.x) * edgeRatio,
+        y: vertex.y + (next.y - vertex.y) * edgeRatio,
+      },
+      vertex,
+    };
+  });
+
+  const [first, ...rest] = roundedVertices;
+  return [
+    `M ${first.start.x.toFixed(2)} ${first.start.y.toFixed(2)}`,
+    `Q ${first.vertex.x.toFixed(2)} ${first.vertex.y.toFixed(2)} ${first.end.x.toFixed(2)} ${first.end.y.toFixed(2)}`,
+    ...rest.flatMap((roundedVertex) => [
+      `L ${roundedVertex.start.x.toFixed(2)} ${roundedVertex.start.y.toFixed(2)}`,
+      `Q ${roundedVertex.vertex.x.toFixed(2)} ${roundedVertex.vertex.y.toFixed(2)} ${roundedVertex.end.x.toFixed(2)} ${roundedVertex.end.y.toFixed(2)}`,
+    ]),
+    "Z",
+  ].join(" ");
+}
+
+function relationshipNodeShape(node: RenderedRelationshipNode) {
+  if (node.kind === RelationshipGraphKind.System) {
+    return (
+      <path
+        className="skillRelationshipNode skillRelationshipSystemNode"
+        d={roundedTrianglePath(node)}
+        strokeLinejoin="round"
+      />
+    );
+  }
+  if (node.kind !== RelationshipGraphKind.Wrapper) {
+    return <circle className="skillRelationshipNode" cx={node.x} cy={node.y} r={node.radius} />;
+  }
+  const side = node.radius * Math.SQRT2;
+  const offset = side / 2;
+  return (
+    <rect
+      className="skillRelationshipNode skillRelationshipWrapperNode"
+      height={side}
+      rx={Math.min(3, node.radius * 0.28)}
+      transform={`rotate(45 ${node.x} ${node.y})`}
+      width={side}
+      x={node.x - offset}
+      y={node.y - offset}
+    />
+  );
+}
+
 export function buildRelationshipGraphForPerformance(
   skills: RelationshipGraphNode[],
   explicitEdges?: RelationshipGraphEdge[],
@@ -698,7 +767,7 @@ export function SkillRelationshipMap({
                     role={onOpenSkill ? "button" : undefined}
                     tabIndex={onOpenSkill ? 0 : undefined}
                   >
-                    <circle className="skillRelationshipNode" cx={node.x} cy={node.y} r={node.radius} />
+                    {relationshipNodeShape(node)}
                     <text
                       className="skillRelationshipLabel"
                       data-active={active}

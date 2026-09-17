@@ -2,6 +2,7 @@ import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type Keyb
 import { createPortal } from "react-dom";
 import { ArrowDown, ArrowUp, CornerDownLeft, Search } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
+import { Dialog } from "radix-ui";
 
 import {
   filterCommandPaletteItems,
@@ -42,6 +43,7 @@ export function CommandPalette({
   const [activeIndex, setActiveIndex] = useState(0);
   const inputRef = useRef<HTMLInputElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
+  const restoreFocusRef = useRef<HTMLElement | null>(null);
   const listId = useId();
   const filteredItems = useMemo(() => filterCommandPaletteItems(items, query), [items, query]);
   const { scrollOffset, readViewportSize, scheduleScrollSync, syncScrollPosition } = useVirtualViewport(
@@ -107,12 +109,6 @@ export function CommandPalette({
         event.stopPropagation();
         onScopeChange(event.shiftKey ? "all" : "current");
         onOpenChange(true);
-        return;
-      }
-      if (event.key === "Escape") {
-        if (!open) return;
-        event.preventDefault();
-        onOpenChange(false);
       }
     };
     window.addEventListener("keydown", onKeyDown, true);
@@ -151,24 +147,31 @@ export function CommandPalette({
     }
   };
 
-  if (!open || typeof document === "undefined") return null;
+  if (typeof document === "undefined") return null;
 
   return createPortal(
-    <div className="commandPaletteRoot">
-      <button
-        type="button"
-        className="commandPaletteOverlay"
-        aria-label="Close command palette"
-        onClick={() => onOpenChange(false)}
-      />
-      <div className="commandPaletteLayer">
-        <section
-          className="commandPalettePanel"
-          role="dialog"
-          aria-modal="true"
-          aria-label="Search content"
-          onClick={(event) => event.stopPropagation()}
-        >
+    <Dialog.Root open={open} onOpenChange={onOpenChange}>
+      <Dialog.Portal>
+        <div className="commandPaletteRoot">
+          <Dialog.Overlay className="commandPaletteOverlay" />
+          <div className="commandPaletteLayer">
+            <Dialog.Content
+              className="commandPalettePanel"
+              onOpenAutoFocus={(event) => {
+                const activeElement = document.activeElement;
+                restoreFocusRef.current = activeElement instanceof HTMLElement ? activeElement : null;
+                event.preventDefault();
+                inputRef.current?.focus();
+              }}
+              onCloseAutoFocus={(event) => {
+                event.preventDefault();
+                const target = restoreFocusRef.current;
+                restoreFocusRef.current = null;
+                if (target?.isConnected) target.focus();
+              }}
+              onMouseDown={(event) => event.stopPropagation()}
+            >
+              <Dialog.Title className="dialogVisuallyHidden">Search content</Dialog.Title>
           <div className="commandPaletteSearchRow">
             <Search size={17} aria-hidden="true" />
             <input
@@ -246,9 +249,11 @@ export function CommandPalette({
             <span><kbd>⌘ P</kbd> This page</span>
             <span><kbd>⇧ ⌘ P</kbd> All pages</span>
           </footer>
-        </section>
-      </div>
-    </div>,
+            </Dialog.Content>
+          </div>
+        </div>
+      </Dialog.Portal>
+    </Dialog.Root>,
     document.body,
   );
 }

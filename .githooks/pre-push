@@ -2,4 +2,5 @@
 set -eu
 
 repo_root=$(git rev-parse --show-toplevel)
+node "$repo_root/scripts/check-layer-boundaries.mjs"
 exec node "$repo_root/scripts/perf-check.mjs" --fast

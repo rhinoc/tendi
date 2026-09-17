@@ -171,6 +171,14 @@ export function ConfigView({ activeProfiles: activeProfilesProp, onActiveProfile
   const [conflict, setConflict] = useState<ConfigConflict | null>(null);
   const [saveError, setSaveError] = useState("");
   const readRequestRef = useRef(0);
+  const externalReadRequestRef = useRef(0);
+  const configListRequestRef = useRef(0);
+  const configListRevisionRef = useRef(0);
+  const configListInFlightRef = useRef(false);
+  const configReadInFlightRef = useRef(false);
+  const configMutationDepthRef = useRef(0);
+  const configRefreshQueuedRef = useRef(false);
+  const loadConfigsRef = useRef<() => Promise<void>>(() => Promise.resolve());
   const contentRef = useRef(content);
   const originalContentRef = useRef(originalContent);
   const sha256Ref = useRef(sha256);
@@ -182,6 +190,32 @@ export function ConfigView({ activeProfiles: activeProfilesProp, onActiveProfile
   const updateActiveDraft = useCallback((update: EditorDraft | ((current: EditorDraft) => EditorDraft)) => {
     const path = activePathRef.current;
     if (path) updateEditorDraft(`configs:${path}`, update);
+  }, []);
+  const beginConfigMutation = useCallback(() => {
+    if (configMutationDepthRef.current === 0 && configListInFlightRef.current) {
+      configRefreshQueuedRef.current = true;
+    }
+    configMutationDepthRef.current += 1;
+    configListRevisionRef.current += 1;
+    // Cancel both a stale config list and an in-flight editor read. Their
+    // responses were started before this mutation and cannot be authoritative.
+    configListRequestRef.current += 1;
+    externalReadRequestRef.current += 1;
+    if (configReadInFlightRef.current) {
+      configReadInFlightRef.current = false;
+      setLoadingConfig(false);
+    }
+    readRequestRef.current += 1;
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      configMutationDepthRef.current -= 1;
+      if (configMutationDepthRef.current === 0 && configRefreshQueuedRef.current) {
+        configRefreshQueuedRef.current = false;
+        void loadConfigsRef.current();
+      }
+    };
   }, []);
   const activeConfig = configs.find((config) => config.path === activePath) ?? null;
   const keepActiveConfigVisible = Boolean(activeConfig && activePath === selectedPath);
@@ -199,6 +233,9 @@ export function ConfigView({ activeProfiles: activeProfilesProp, onActiveProfile
     [configs, profileAgent],
   );
   const activeProfiles = activeProfilesProp;
+  const activeProfilesRef = useRef(activeProfiles);
+  activeProfilesRef.current = activeProfiles;
+  const profileRevisionRef = useRef<Record<string, number>>({});
   const activeProfile = profileAgent ? activeProfiles[profileAgent] ?? "" : "";
   const profileOptions = useMemo(() => [
     { value: BASE_PROFILE_VALUE, label: "Base config" },
@@ -212,8 +249,20 @@ export function ConfigView({ activeProfiles: activeProfilesProp, onActiveProfile
     : BASE_PROFILE_VALUE;
   const resolvedSelectedProfileValue = resolveSelectValue(selectedProfileValue, profileOptions);
   const profileSelectionChanged = resolvedSelectedProfileValue !== activeProfileValue;
-  const updateActiveProfiles = useCallback((next: Record<string, string>) => {
-    onActiveProfilesChange(next);
+  const beginProfileChange = useCallback((agents: string[]) => Object.fromEntries(agents.map((agent) => {
+    const revision = (profileRevisionRef.current[agent] ?? 0) + 1;
+    profileRevisionRef.current[agent] = revision;
+    return [agent, revision];
+  })), []);
+  const updateActiveProfiles = useCallback((next: Record<string, string>, ticket: Record<string, number>) => {
+    const merged = { ...activeProfilesRef.current };
+    for (const [agent, revision] of Object.entries(ticket)) {
+      if (profileRevisionRef.current[agent] !== revision) continue;
+      if (next[agent] === undefined) delete merged[agent];
+      else merged[agent] = next[agent];
+    }
+    activeProfilesRef.current = merged;
+    onActiveProfilesChange(merged);
   }, [onActiveProfilesChange]);
   const columns = useMemo<ColumnDef<AgentConfigFile>[]>(() => [
     {
@@ -266,15 +315,31 @@ export function ConfigView({ activeProfiles: activeProfilesProp, onActiveProfile
     }
   }, []);
   const readExternalSnapshot = useCallback(async (path: string) => {
+    const isActivePath = path === activePathRef.current;
+    const requestId = isActivePath ? ++readRequestRef.current : ++externalReadRequestRef.current;
+    configReadInFlightRef.current = true;
+    const isCurrent = () => isActivePath
+      ? requestId === readRequestRef.current
+      : requestId === externalReadRequestRef.current;
     try {
       const next = await readAgentConfig(path);
-      if (next.path === activePathRef.current) applyExternalSnapshot(next);
+      if (!isCurrent()) return;
+      if (isActivePath) {
+        applyExternalSnapshot(next);
+      } else {
+        setConfigs((current) => current.map((config) => (
+          config.path === next.path ? { ...config, exists: next.exists, updatedAt: next.updatedAt } : config
+        )));
+      }
     } catch (error) {
-      setSaveError(errorMessage(error));
+      if (isCurrent() && isActivePath) setSaveError(errorMessage(error));
+    } finally {
+      if (isCurrent()) configReadInFlightRef.current = false;
     }
   }, [applyExternalSnapshot]);
   const readConfig = useCallback(async (path: string, config?: AgentConfigFile) => {
     const requestId = ++readRequestRef.current;
+    configReadInFlightRef.current = true;
     setSelectedPath(path);
     setLoadingConfig(true);
     setContentError("");
@@ -297,16 +362,27 @@ export function ConfigView({ activeProfiles: activeProfilesProp, onActiveProfile
       if (requestId !== readRequestRef.current) return;
       setContentError(errorMessage(error));
     } finally {
-      if (requestId === readRequestRef.current) setLoadingConfig(false);
+      if (requestId === readRequestRef.current) {
+        configReadInFlightRef.current = false;
+        setLoadingConfig(false);
+      }
     }
   }, []);
 
   const loadConfigs = useCallback(async () => {
+    if (configMutationDepthRef.current > 0) {
+      configRefreshQueuedRef.current = true;
+      return;
+    }
+    const requestId = ++configListRequestRef.current;
+    const snapshotRevision = configListRevisionRef.current;
+    configListInFlightRef.current = true;
     setLoadingConfigs(true);
     setLoadingConfig(true);
     setLoadError("");
     try {
       const next = await readAgentConfigs();
+      if (requestId !== configListRequestRef.current || snapshotRevision !== configListRevisionRef.current || configMutationDepthRef.current > 0) return;
       setConfigs(next);
       onConfigRowsChange?.(next);
       const selected = next.find((config) => config.path === activePath) ?? next[0];
@@ -324,12 +400,18 @@ export function ConfigView({ activeProfiles: activeProfilesProp, onActiveProfile
         setLoadingConfig(false);
       }
     } catch (error) {
-      setLoadError(errorMessage(error));
-      setLoadingConfig(false);
+      if (requestId === configListRequestRef.current) {
+        setLoadError(errorMessage(error));
+        setLoadingConfig(false);
+      }
     } finally {
-      setLoadingConfigs(false);
+      if (requestId === configListRequestRef.current) {
+        configListInFlightRef.current = false;
+        setLoadingConfigs(false);
+      }
     }
   }, [activePath, readConfig]);
+  loadConfigsRef.current = loadConfigs;
 
   useEffect(() => {
     void loadConfigs();
@@ -350,7 +432,11 @@ export function ConfigView({ activeProfiles: activeProfilesProp, onActiveProfile
     });
     void subscribeDaemonEvents((event: DaemonEvent) => {
       if (disposed || event.event !== RuntimeEventName.ConfigChanged || !isConfigSnapshot(event.payload)) return;
-      applyExternalSnapshot(event.payload);
+      if (configMutationDepthRef.current > 0) {
+        configRefreshQueuedRef.current = true;
+        return;
+      }
+      void readExternalSnapshot(event.payload.path);
     }).then((dispose) => {
       if (disposed) dispose();
       else unsubscribe = dispose;
@@ -361,7 +447,7 @@ export function ConfigView({ activeProfiles: activeProfilesProp, onActiveProfile
       disposed = true;
       unsubscribe?.();
     };
-  }, [activePath, applyExternalSnapshot]);
+  }, [activePath, readExternalSnapshot]);
 
   useEffect(() => {
     setSelected((current) => current.filter((path) => configs.some((config) => config.path === path)));
@@ -444,19 +530,13 @@ export function ConfigView({ activeProfiles: activeProfilesProp, onActiveProfile
     if (targets.length === 0 || deleting) return;
     setDeleting(true);
     setDeleteError("");
+    const profileTicket = beginProfileChange([...new Set(targets.filter((config) => config.profile).map((config) => config.agent))]);
+    const releaseMutation = beginConfigMutation();
     try {
       const result = await deleteAgentConfigs(targets.map((config) => config.path));
       setPendingDeleteConfirmConfigs([]);
       setSelected([]);
-      if (result.configProfiles) {
-        updateActiveProfiles(normalizeConfigProfiles(result.configProfiles));
-      } else {
-        const nextProfiles = { ...activeProfiles };
-        for (const config of targets) {
-          if (config.profile && nextProfiles[config.agent] === config.profile) delete nextProfiles[config.agent];
-        }
-        updateActiveProfiles(nextProfiles);
-      }
+      updateActiveProfiles(normalizeConfigProfiles(result.configProfiles), profileTicket);
       if (Array.isArray(result.configs)) {
         setConfigs(result.configs);
         onConfigRowsChange?.(result.configs);
@@ -482,9 +562,10 @@ export function ConfigView({ activeProfiles: activeProfilesProp, onActiveProfile
     } catch (error) {
       setDeleteError(errorMessage(error));
     } finally {
+      releaseMutation();
       setDeleting(false);
     }
-  }, [activePath, activeProfiles, deleting, pendingDeleteConfirmConfigs, readConfig, updateActiveProfiles]);
+  }, [activePath, beginConfigMutation, beginProfileChange, deleting, pendingDeleteConfirmConfigs, readConfig, updateActiveProfiles]);
 
   const rowContextMenu = useCallback((config: AgentConfigFile, { selectedRows, selected: isSelected }: { selectedRows: AgentConfigFile[]; selected: boolean }) => {
     const actionRows = isSelected ? selectedRows : [config];
@@ -510,16 +591,19 @@ export function ConfigView({ activeProfiles: activeProfilesProp, onActiveProfile
       return;
     }
     setProfileSwitching(true);
+    const profileTicket = beginProfileChange([agent]);
+    const releaseMutation = beginConfigMutation();
     try {
       const next = await setConfigProfile(agent, profile);
-      updateActiveProfiles(next.configProfiles);
+      updateActiveProfiles(next.configProfiles, profileTicket);
       if (target.path !== activePath) await readConfig(target.path, target);
     } catch (error) {
       logger.error("failed to activate config profile", { error: errorMessage(error), agent });
     } finally {
+      releaseMutation();
       setProfileSwitching(false);
     }
-  }, [activePath, configs, dirty, profileSwitching, readConfig, updateActiveProfiles]);
+  }, [activePath, beginConfigMutation, beginProfileChange, configs, dirty, profileSwitching, readConfig, updateActiveProfiles]);
 
   const openProfileDialog = () => {
     if (!profileAgent) return;
@@ -537,6 +621,7 @@ export function ConfigView({ activeProfiles: activeProfilesProp, onActiveProfile
     }
     setProfileSaving(true);
     setProfileError("");
+    const releaseMutation = beginConfigMutation();
     try {
       const created = await createConfigProfile({
         agent: profileAgent,
@@ -555,14 +640,16 @@ export function ConfigView({ activeProfiles: activeProfilesProp, onActiveProfile
     } catch (error) {
       setProfileError(errorMessage(error));
     } finally {
+      releaseMutation();
       setProfileSaving(false);
     }
-  }, [content, profileAgent, profileName]);
+  }, [beginConfigMutation, content, profileAgent, profileName]);
 
   const saveContent = useCallback(async (path: string, nextContent: string, expectedSha256: string) => {
     if (saving) return false;
     setSaving(true);
     setSaveError("");
+    const releaseMutation = beginConfigMutation();
     try {
       const saved = await saveAgentConfig({
         path,
@@ -587,9 +674,10 @@ export function ConfigView({ activeProfiles: activeProfilesProp, onActiveProfile
       }
       return false;
     } finally {
+      releaseMutation();
       setSaving(false);
     }
-  }, [applyExternalSnapshot, readExternalSnapshot, saving]);
+  }, [applyExternalSnapshot, beginConfigMutation, readExternalSnapshot, saving]);
 
   const save = useCallback(async () => {
     if (!activeConfig || !dirty || saving || conflict || isConflictMarkerContent(content)) return;

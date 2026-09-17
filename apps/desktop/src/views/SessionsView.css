@@ -176,6 +176,7 @@
   min-width: 0;
   padding: 20px 16px 64px;
   overflow: auto;
+  overflow-anchor: none;
   -webkit-user-select: text;
   user-select: text;
 }
@@ -227,6 +228,10 @@
   color: var(--disabled);
   border-color: var(--line);
   box-shadow: 0 1px 3px color-mix(in oklch, var(--overlay-scrim) 18%, transparent);
+}
+
+.transcriptScrollControls .threadPanelToggle:disabled {
+  transform: translateX(-50%);
 }
 
 .transcriptItemShell {
@@ -330,20 +335,6 @@
   transform: scaleX(1);
 }
 
-.sessionLocatorRow:has(+ .sessionLocatorRow:hover) .sessionLocatorMarker,
-.sessionLocatorRow:hover + .sessionLocatorRow .sessionLocatorMarker,
-.sessionLocatorRow:has(+ .sessionLocatorRow:focus-visible) .sessionLocatorMarker,
-.sessionLocatorRow:focus-visible + .sessionLocatorRow .sessionLocatorMarker {
-  transform: scaleX(0.7);
-}
-
-.sessionLocatorRow:has(+ .sessionLocatorRow + .sessionLocatorRow:hover) .sessionLocatorMarker,
-.sessionLocatorRow:hover + .sessionLocatorRow + .sessionLocatorRow .sessionLocatorMarker,
-.sessionLocatorRow:has(+ .sessionLocatorRow + .sessionLocatorRow:focus-visible) .sessionLocatorMarker,
-.sessionLocatorRow:focus-visible + .sessionLocatorRow + .sessionLocatorRow .sessionLocatorMarker {
-  transform: scaleX(0.4);
-}
-
 .sessionLocatorPreview {
   width: min(320px, calc(100vw - 96px));
   padding: 8px;
@@ -380,6 +371,20 @@
   font-weight: 400;
   line-height: var(--leading-tight);
   -webkit-line-clamp: 3;
+}
+
+.sessionLocatorRow:has(+ .sessionLocatorRow:hover) .sessionLocatorMarker,
+.sessionLocatorRow:hover + .sessionLocatorRow .sessionLocatorMarker,
+.sessionLocatorRow:has(+ .sessionLocatorRow:focus-visible) .sessionLocatorMarker,
+.sessionLocatorRow:focus-visible + .sessionLocatorRow .sessionLocatorMarker {
+  transform: scaleX(0.7);
+}
+
+.sessionLocatorRow:has(+ .sessionLocatorRow + .sessionLocatorRow:hover) .sessionLocatorMarker,
+.sessionLocatorRow:hover + .sessionLocatorRow + .sessionLocatorRow .sessionLocatorMarker,
+.sessionLocatorRow:has(+ .sessionLocatorRow + .sessionLocatorRow:focus-visible) .sessionLocatorMarker,
+.sessionLocatorRow:focus-visible + .sessionLocatorRow + .sessionLocatorRow .sessionLocatorMarker {
+  transform: scaleX(0.4);
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -714,6 +719,8 @@
   border-radius: var(--transcript-surface-radius);
   background: var(--chat-assistant-bg);
   color: var(--text);
+  font-size: var(--text-ui);
+  line-height: var(--leading-body);
   overflow-wrap: anywhere;
   word-break: break-all;
   -webkit-user-select: text;
@@ -960,6 +967,16 @@
 .transcriptPanel .badge {
   flex: 0 0 auto;
   border-radius: var(--radius-sm);
+}
+
+.transcriptPanel .toolCall .badge,
+.transcriptPanel .toolCallGroup .badge {
+  border: 0;
+}
+
+.transcriptPanel .toolCall.nested .badge,
+.transcriptPanel .toolCallGroup .toolCallDuration {
+  border-radius: var(--transcript-nested-radius);
 }
 
 .transcriptPanel .toolCallDuration {

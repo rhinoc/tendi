@@ -1,4 +1,3 @@
-import { Tooltip } from "./Tooltip.tsx";
 import { Check, ChevronDown, ChevronRight, PanelLeftClose, PanelLeftOpen } from "lucide-react";
 import { DropdownMenu } from "radix-ui";
 
@@ -48,19 +47,17 @@ function SidebarFilter({
 
   return (
     <DropdownMenu.Root>
-      <Tooltip content={collapsed ? selectedFilterLabel : undefined}>
-        <DropdownMenu.Trigger asChild>
-          <button type="button" className="selectControlTrigger" aria-label="Agent and scope filters">
-            <AgentOptionLabel
-              agent={agentFilter}
-              label={selectedFilterLabel}
-              variant="filter"
-              collapsed={collapsed}
-            />
-            {!collapsed ? <ChevronDown size={14} /> : null}
-          </button>
-        </DropdownMenu.Trigger>
-      </Tooltip>
+      <DropdownMenu.Trigger asChild>
+        <button type="button" className="selectControlTrigger" aria-label={collapsed ? selectedFilterLabel : "Agent and scope filters"}>
+          <AgentOptionLabel
+            agent={agentFilter}
+            label={selectedFilterLabel}
+            variant="filter"
+            collapsed={collapsed}
+          />
+          {!collapsed ? <ChevronDown size={14} /> : null}
+        </button>
+      </DropdownMenu.Trigger>
       <DropdownMenu.Portal>
         <MenuContent
           className="selectControlContent agentSelectContent"
@@ -185,31 +182,29 @@ export function Sidebar<TView extends string = string>({
                 onMouseEnter={() => onPrefetchView?.(item.id as TView)}
                 onMouseLeave={() => onCancelPrefetchView?.(item.id as TView)}
               >
-                <Tooltip content={collapsed ? (item.id === AppPage.Settings && updateAvailable ? "Settings — update available" : item.label) : undefined}>
-                  <button
-                    type="button"
-                    className={`navItem ${view === item.id ? "active" : ""}`}
-                    onClick={() => setView(item.id as TView)}
-                    onFocus={() => onPrefetchView?.(item.id as TView)}
-                    onBlur={() => onCancelPrefetchView?.(item.id as TView)}
-                    aria-label={item.id === AppPage.Settings && updateAvailable ? "Settings, update available" : item.label}
-                    aria-current={view === item.id ? "page" : undefined}
+                <button
+                  type="button"
+                  className={`navItem ${view === item.id ? "active" : ""}`}
+                  onClick={() => setView(item.id as TView)}
+                  onFocus={() => onPrefetchView?.(item.id as TView)}
+                  onBlur={() => onCancelPrefetchView?.(item.id as TView)}
+                  aria-label={item.id === AppPage.Settings && updateAvailable ? "Settings, update available" : item.label}
+                  aria-current={view === item.id ? "page" : undefined}
+                >
+                  {view === item.id ? (
+                    <span className="navSelectedPill" aria-hidden="true" />
+                  ) : null}
+                  <span className="navItemIcon" aria-hidden="true"><Icon size={16} /></span>
+                  <span
+                    className={`navItemLabel ${collapsed ? "isCollapsed" : ""}`}
+                    aria-hidden={collapsed}
                   >
-                    {view === item.id ? (
-                      <span className="navSelectedPill" aria-hidden="true" />
-                    ) : null}
-                    <span className="navItemIcon" aria-hidden="true"><Icon size={16} /></span>
-                    <span
-                      className={`navItemLabel ${collapsed ? "isCollapsed" : ""}`}
-                      aria-hidden={collapsed}
-                    >
-                      {item.label}
-                    </span>
-                    {item.id === AppPage.Settings ? (
-                      <Badge tone="warning" className="navItemBadge" data-visible={updateAvailable} aria-hidden="true">New</Badge>
-                    ) : null}
-                  </button>
-                </Tooltip>
+                    {item.label}
+                  </span>
+                  {item.id === AppPage.Settings ? (
+                    <Badge tone="warning" className="navItemBadge" data-visible={updateAvailable} aria-hidden="true">New</Badge>
+                  ) : null}
+                </button>
               </li>
             );
           })}

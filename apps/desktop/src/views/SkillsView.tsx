@@ -9,10 +9,12 @@ import {
   Copy,
   Delete as DeleteKeyIcon,
   ArrowRightLeft,
+  CircleFadingArrowUp,
   Eye,
   FolderOpen,
   Hammer,
   List,
+  Package,
   PackagePlus,
   Plus,
   RefreshCw,
@@ -50,7 +52,7 @@ import { SelectControl } from "../components/shared/SelectControl.tsx";
 import { Toast } from "../components/shared/Toast.tsx";
 import { RelationshipGraphKind, SkillRelationshipMap } from "../features/skills/SkillRelationshipMap.tsx";
 import { SkillLocationDialog } from "../features/skills/SkillLocationDialog.tsx";
-import { SKILL_BADGE_TONES } from "../features/skills/skill-badge-tones.ts";
+import { SkillWrapperScopeDialog } from "../features/skills/SkillWrapperScopeDialog.tsx";
 import { Visibility } from "../features/skills/Visibility.tsx";
 import { DataTable } from "../components/DataTable.tsx";
 import { ColumnDataType, type ColumnDef, type SortState } from "../components/DataTable.types";
@@ -421,12 +423,13 @@ export function BulkSkillActionsMenuItems({ Menu, selectedSkills, onApplyUpdates
 export type SkillMainCellProps = {
   skill: NormalizedSkill;
   openSkill: (skill: NormalizedSkill) => void;
+  onManageWrapperScope: (skill: NormalizedSkill) => void;
   onApplyUpdates: (names: string[]) => void;
 };
 
-export function SkillMainCell({ skill, openSkill, onApplyUpdates }: SkillMainCellProps) {
+export function SkillMainCell({ skill, openSkill, onManageWrapperScope, onApplyUpdates }: SkillMainCellProps) {
   const sourceDetails = skillSourceDetails(skill);
-  const sourceAction = skillSourceAction(skill, sourceDetails);
+  const sourceAction = skill.section === "Local" ? null : skillSourceAction(skill, sourceDetails);
   return (
     <div className="skillMain">
       <div className="skillTitleRow">
@@ -438,8 +441,20 @@ export function SkillMainCell({ skill, openSkill, onApplyUpdates }: SkillMainCel
           }}
         >
           <span className="skillNameText">{skillDisplayName(skill)}</span>
-          {skill.isWrapper && <Badge tone={SKILL_BADGE_TONES.wrapper}>wrapper</Badge>}
         </button>
+        {skill.isWrapper && (
+          <button
+            className="skillSourceButton skillWrapperButton"
+            type="button"
+            aria-label={`Manage wrapper scope for ${skillDisplayName(skill)}`}
+            onClick={(event) => {
+              event.stopPropagation();
+              onManageWrapperScope(skill);
+            }}
+          >
+            <Package size={16} aria-hidden="true" />
+          </button>
+        )}
         {sourceAction && (
           <button
             className="skillSourceButton"
@@ -453,18 +468,17 @@ export function SkillMainCell({ skill, openSkill, onApplyUpdates }: SkillMainCel
           </button>
         )}
         {skill.updateAvailability === SkillUpdateAvailability.UpdateAvailable && (
-          <Badge
-            as="button"
-            tone={SKILL_BADGE_TONES.update}
+          <button
+            className="skillSourceButton skillUpdateButton"
             type="button"
-            aria-label={`View update for ${skillDisplayName(skill)}`}
+            aria-label={`Update ${skillDisplayName(skill)}`}
             onClick={(event) => {
               event.stopPropagation();
               onApplyUpdates([skill.id]);
             }}
           >
-            Update
-          </Badge>
+            <CircleFadingArrowUp size={16} aria-hidden="true" />
+          </button>
         )}
       </div>
       <button
@@ -690,6 +704,7 @@ export type AddSkillDialogProps = {
   onClose: () => void;
   onPreviewError: (message: string) => void;
   onInstalled: (result: SkillInstallResult) => void;
+  onBeginMutation: () => () => void;
   onRequestWrapper: (skills: SkillWrapperSelection[]) => void;
   installedAgentKeys: string[];
   targetOptions: SkillTargetOption[];
@@ -708,7 +723,7 @@ export type SkillTargetOption = {
   globalPath?: string;
 };
 
-export function AddSkillDialog({ open, onOpenChange, trigger, onClose, onPreviewError, onInstalled, onRequestWrapper, installedAgentKeys, targetOptions, initialSource = "", sourceLocked = false, title = "Add skills" }: AddSkillDialogProps) {
+export function AddSkillDialog({ open, onOpenChange, trigger, onClose, onPreviewError, onInstalled, onBeginMutation, onRequestWrapper, installedAgentKeys, targetOptions, initialSource = "", sourceLocked = false, title = "Add skills" }: AddSkillDialogProps) {
   const lockedSource = sourceLocked && Boolean(initialSource.trim());
   const [source, setSource] = useState(initialSource);
   const [sourcePageBeforePreview, setSourcePageBeforePreview] = useState<SkillSourcePageSnapshot<MarketplaceSource> | null>(null);
@@ -1041,27 +1056,32 @@ export function AddSkillDialog({ open, onOpenChange, trigger, onClose, onPreview
         throw new Error("Some selected skills already exist at this destination. Choose Replace existing skills and try again.");
       }
       setBusyAction(SkillAddBusyAction.Install);
-      const result = await installSkillAdd({
-        source: source.trim(),
-        target: resolvedTarget,
-        scope: SkillScope.Global,
-        skills: selected,
-        copy,
-        overwrite: replaceExisting,
-        visibility,
-        previewId: previewResponse.previewId,
-        dryRun: false,
-      });
-      onInstalled(result);
-      if (createWrapper && selectedRoots.length > 1) {
-        const selectedRootSet = new Set(selectedRoots);
-        onRequestWrapper(available
-          .filter((skill) => selectedRootSet.has(skill.name))
-          .map((skill) => ({
-            id: skill.name,
-            name: skill.name,
-            description: skill.description,
-          })));
+      const releaseMutation = onBeginMutation();
+      try {
+        const result = await installSkillAdd({
+          source: source.trim(),
+          target: resolvedTarget,
+          scope: SkillScope.Global,
+          skills: selected,
+          copy,
+          overwrite: replaceExisting,
+          visibility,
+          previewId: previewResponse.previewId,
+          dryRun: false,
+        });
+        onInstalled(result);
+        if (createWrapper && selectedRoots.length > 1) {
+          const selectedRootSet = new Set(selectedRoots);
+          onRequestWrapper(available
+            .filter((skill) => selectedRootSet.has(skill.name))
+            .map((skill) => ({
+              id: skill.name,
+              name: skill.name,
+              description: skill.description,
+            })));
+        }
+      } finally {
+        releaseMutation();
       }
       closeDialog();
     } catch (installError) {
@@ -1569,6 +1589,7 @@ export type SkillsViewProps = {
   onApplyUpdates: (names: string[], onApplied?: () => void) => void;
   onDeleteSkills: (names: string[], onApplied?: () => void) => void;
   onAddInstalled: (result: SkillInstallResult) => void;
+  onBeginMutation: () => () => void;
   installedAgentKeys: string[];
   targetOptions: SkillTargetOption[];
   projects?: ProjectSummary[];
@@ -1589,6 +1610,7 @@ export function SkillsView({
   onApplyUpdates,
   onDeleteSkills,
   onAddInstalled,
+  onBeginMutation,
   installedAgentKeys,
   targetOptions,
   projects = [],
@@ -1599,6 +1621,8 @@ export function SkillsView({
   const [sort, setSort] = useTabState<SortState | null>("skills.sort", { key: "mtime", direction: SortDirection.Desc });
   const [groupBy, setGroupBy] = useTabState<string | null>("skills.groupBy", "origin");
   const [showWrapper, setShowWrapper] = useState(false);
+  const [wrapperScopeDialogOpen, setWrapperScopeDialogOpen] = useState(false);
+  const [wrapperScopeSkillId, setWrapperScopeSkillId] = useState("");
   const [showAddSkill, setShowAddSkill] = useState(false);
   const [skillAddError, setSkillAddError] = useState("");
   const [installedWrapperSkills, setInstalledWrapperSkills] = useState<SkillWrapperSelection[]>([]);
@@ -1614,6 +1638,10 @@ export function SkillsView({
       return skill ? [skill] : [];
     });
   }, [locationSkillIds, skillItems]);
+  const wrapperScopeSkill = useMemo(
+    () => skillItems.find((skill) => skill.id === wrapperScopeSkillId) ?? null,
+    [skillItems, wrapperScopeSkillId],
+  );
   const normalizedQuery = query.trim().toLowerCase();
   const skillListView = useMemo(() => selectSkillListView(skillItems, query, selected), [query, selected, skillItems]);
   const { visibleSkills, selectedSkills } = skillListView;
@@ -1643,10 +1671,16 @@ export function SkillsView({
     setSelected([]);
     setShowWrapper(false);
     setInstalledWrapperSkills([]);
+    setWrapperScopeDialogOpen(false);
+    setWrapperScopeSkillId("");
   }, []);
   const openWrapper = useCallback((skill: NormalizedSkill) => {
     setSelected([skill.id]);
     setShowWrapper(true);
+  }, []);
+  const openWrapperScope = useCallback((skill: NormalizedSkill) => {
+    setWrapperScopeSkillId(skill.id);
+    setWrapperScopeDialogOpen(true);
   }, []);
   const setVisibilityAndClear = useCallback(async (names: string[], visibility: SkillVisibility) => {
     await onSetVisibility(names, visibility);
@@ -1737,7 +1771,7 @@ export function SkillsView({
       type: ColumnDataType.Text,
       sortValue: (skill) => skill.name.toLowerCase(),
       width: "minmax(250px, 1fr)",
-      render: (skill) => <SkillMainCell skill={skill} openSkill={openSkill} onApplyUpdates={applyUpdatesAndClear} />,
+      render: (skill) => <SkillMainCell skill={skill} openSkill={openSkill} onManageWrapperScope={openWrapperScope} onApplyUpdates={applyUpdatesAndClear} />,
     },
     {
       key: "agents",
@@ -1792,7 +1826,7 @@ export function SkillsView({
       width: "40px",
       render: (skill) => <SkillActionsCell skill={skill} onApplyUpdates={applyUpdatesAndClear} onDeleteSkills={deleteSkillsAndClear} onManageLocations={openManageLocations} onCreateWrapper={openWrapper} onSetVisibility={setVisibilityAndClear} />,
     },
-  ], [applyUpdatesAndClear, deleteSkillsAndClear, openManageLocations, openSkill, openWrapper, projects, setVisibilityAndClear]);
+  ], [applyUpdatesAndClear, deleteSkillsAndClear, openManageLocations, openSkill, openWrapper, openWrapperScope, projects, setVisibilityAndClear]);
 
   const rowContextMenu = useCallback((skill: SkillTableRow, { selectedRows, selected: isSelected }: { selectedRows: SkillTableRow[]; selected: boolean }) => {
     const showBulk = isSelected && selectedRows.length > 1;
@@ -1864,6 +1898,7 @@ export function SkillsView({
           onClose={() => setShowAddSkill(false)}
           onPreviewError={setSkillAddError}
           onInstalled={handleInstalled}
+          onBeginMutation={onBeginMutation}
           installedAgentKeys={installedAgentKeys}
           targetOptions={targetOptions}
           onRequestWrapper={(skills) => {
@@ -1932,6 +1967,16 @@ export function SkillsView({
         }}
         onApplyWrapper={applyWrapperAndClear}
       />
+      <SkillWrapperScopeDialog
+        open={wrapperScopeDialogOpen}
+        wrapper={wrapperScopeSkill}
+        skills={skillItems}
+        onOpenChange={(open) => {
+          setWrapperScopeDialogOpen(open);
+          if (!open) setWrapperScopeSkillId("");
+        }}
+        onApplyWrapper={applyWrapperAndClear}
+      />
       <SkillLocationDialog
         open={locationDialogOpen}
         skills={locationSkills}
@@ -1948,6 +1993,7 @@ export function SkillsView({
           scheduleLocationDialogCleanup();
         }}
         onApplied={applyLocationsAndClear}
+        onBeginMutation={onBeginMutation}
       />
       </section>
     </>

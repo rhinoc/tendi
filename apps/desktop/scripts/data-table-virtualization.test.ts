@@ -136,6 +136,12 @@ test("uses the shared viewport for horizontal chart virtualization", () => {
   assert.match(trendChart, /scheduleScrollSync\(\);/);
 });
 
+test("keeps chart tooltip and zoom ownership in their shared primitives", () => {
+  assert.doesNotMatch(trendChart, /open=\{openTooltipKey/);
+  assert.doesNotMatch(trendChart, /tooltipCloseTimerRef/);
+  assert.match(trendChart, /stepAnalyticsGranularity\(granularity, direction\)/);
+});
+
 test("keeps fixed-width frozen-table columns from sizing to cell content", () => {
   assert.match(dataTable, /const scrollGridColumns = useMemo\(\s*\(\) => nonFrozenColumns\.map\(\(column\) => column\.width\)\.join\(" "\)/);
   assert.doesNotMatch(dataTable, /responsiveColumnTrack/);

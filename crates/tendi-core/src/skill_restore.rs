@@ -100,7 +100,10 @@ pub fn plan_project_skill_restore(cwd: &Path, store: &Store) -> Result<SkillRest
 
     for (name, entry_value) in lock.skills {
         let target_path = target_root.join(sanitize_restore_name(&name)?);
-        if store.skill_source_record(&target_path)?.is_some() {
+        if store
+            .skill_source_record_for_workspace(&project_root, &target_path)?
+            .is_some()
+        {
             operations.push(SkillRestoreOperation {
                 name,
                 target: target_path,
@@ -181,7 +184,7 @@ pub fn apply_project_skill_restore(
     store: &Store,
 ) -> Result<SkillRestoreReport> {
     let result = apply_project_skill_restore_without_database(plan)?;
-    store.upsert_skill_source_records(&result.source_records)?;
+    store.upsert_skill_source_records_for_workspace(&plan.project_root, &result.source_records)?;
     Ok(result.report)
 }
 
@@ -478,7 +481,7 @@ mod tests {
         assert_eq!(report.operations[0].status, "restored");
         assert!(root.join(".agents/skills/demo/SKILL.md").is_file());
         let record = store
-            .skill_source_record(&plan.target_root.join("demo"))
+            .skill_source_record_for_workspace(&plan.project_root, &plan.target_root.join("demo"))
             .unwrap()
             .unwrap();
         assert_eq!(
@@ -519,12 +522,15 @@ mod tests {
             origin: "tendi-install".to_string(),
         };
         store
-            .upsert_skill_source_records(&[database.clone()])
+            .upsert_skill_source_records_for_workspace(&root, &[database.clone()])
             .unwrap();
 
         let plan = plan_project_skill_restore(&root, &store).unwrap();
         assert_eq!(plan.operations[0].status, "skipped-database");
-        let persisted = store.skill_source_record(&target).unwrap().unwrap();
+        let persisted = store
+            .skill_source_record_for_workspace(&root, &target)
+            .unwrap()
+            .unwrap();
         assert_eq!(persisted.source, database.source);
 
         fs::remove_dir_all(root).unwrap();

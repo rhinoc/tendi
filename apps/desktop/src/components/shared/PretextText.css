@@ -1,0 +1,112 @@
+.pretextText {
+  min-width: 0;
+  color: inherit;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.pretextTextManual {
+  white-space: normal;
+}
+
+.pretextTextLine {
+  min-height: var(--leading-body);
+  white-space: pre;
+}
+
+.pretextTextLine > a,
+.pretextTextLine > span {
+  white-space: pre;
+}
+
+.pretextText > :first-child {
+  margin-top: 0;
+}
+
+.pretextText > :last-child {
+  margin-bottom: 0;
+}
+
+.pretextText p,
+.pretextText h1,
+.pretextText h2,
+.pretextText h3,
+.pretextText h4,
+.pretextText h5,
+.pretextText h6,
+.pretextText ul,
+.pretextText ol,
+.pretextText blockquote,
+.pretextText pre {
+  margin: 0 0 10px;
+}
+
+.pretextText p {
+  white-space: inherit;
+}
+
+.pretextText h1,
+.pretextText h2,
+.pretextText h3,
+.pretextText h4,
+.pretextText h5,
+.pretextText h6 {
+  line-height: var(--leading-ui);
+}
+
+.pretextText h1 {
+  font-size: var(--text-title);
+}
+
+.pretextText h2 {
+  font-size: var(--text-body);
+}
+
+.pretextText h3,
+.pretextText h4,
+.pretextText h5,
+.pretextText h6 {
+  font-size: var(--text-sm);
+}
+
+.pretextText ul,
+.pretextText ol {
+  padding-left: 20px;
+}
+
+.pretextText blockquote {
+  border-left: 3px solid var(--focus-ring);
+  padding-left: 10px;
+  color: color-mix(in oklch, currentColor 78%, transparent);
+}
+
+.pretextText code {
+  padding: 2px 4px;
+  border-radius: 4px;
+  color: inherit;
+  background: color-mix(in oklch, currentColor 10%, transparent);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+}
+
+.pretextText pre {
+  overflow-x: auto;
+  padding: 10px;
+  border: 1px solid color-mix(in oklch, currentColor 14%, transparent);
+  border-radius: 8px;
+  background: color-mix(in oklch, currentColor 8%, transparent);
+  white-space: pre;
+}
+
+.pretextText pre code {
+  padding: 0;
+  background: transparent;
+}
+
+.pretextText a {
+  color: inherit;
+  font-weight: 600;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}

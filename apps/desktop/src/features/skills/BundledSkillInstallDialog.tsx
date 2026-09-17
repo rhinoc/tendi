@@ -45,6 +45,7 @@ export function BundledSkillInstallDialog({
               loadingLabel="Setting up"
               variant="primary"
               aria-label="Set up"
+              autoFocus={!busy}
               onClick={onInstall}
             >
               Set up

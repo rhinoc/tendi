@@ -44,22 +44,7 @@
       "skillId": "fixture"
     },
     "settings_get": {},
-    "settings_save": {
-      "appearance": "fixture",
-      "fontFamily": "fixture",
-      "lightTheme": "fixture",
-      "darkTheme": "fixture",
-      "appIcon": "fixture",
-      "terminal": "fixture",
-      "sessionResumeTarget": "fixture",
-      "missingSessionProjectPolicy": "fixture",
-      "editor": "fixture",
-      "developerMode": false,
-      "additionalSessionRoots": [
-        "fixture"
-      ],
-      "configProfiles": {}
-    },
+    "settings_save": {},
     "assistant_ask": {
       "conversationId": "fixture",
       "requestId": "fixture",
@@ -90,6 +75,11 @@
       "conversationId": "fixture"
     },
     "assistant_chat_sessions": {},
+    "tokenizer_count": {
+      "texts": [
+        "fixture"
+      ]
+    },
     "session_projects_list": {},
     "project_scan_scopes_list": {},
     "project_scan_scopes_save": {
@@ -142,80 +132,44 @@
     },
     "hooks_list": {},
     "hook_delete": {
-      "agent": "codex",
-      "path": "fixture",
-      "expectedTrustHash": "fixture",
-      "event": "fixture"
+      "id": "fixture"
     },
     "hook_delete_many": {
-      "requests": [
-        {
-          "agent": "codex",
-          "path": "fixture",
-          "expectedTrustHash": "fixture",
-          "event": "fixture"
-        }
+      "ids": [
+        "fixture"
       ]
     },
     "hook_set_enabled": {
-      "agent": "codex",
-      "path": "fixture",
-      "expectedTrustHash": "fixture",
-      "event": "fixture",
+      "id": "fixture",
       "enabled": false
     },
     "hook_set_enabled_many": {
       "requests": [
         {
-          "agent": "codex",
-          "path": "fixture",
-          "expectedTrustHash": "fixture",
-          "event": "fixture",
+          "id": "fixture",
           "enabled": false
         }
       ]
     },
     "hook_review": {
-      "agent": "codex",
-      "path": "fixture",
-      "expectedTrustHash": "fixture",
-      "event": "fixture"
+      "id": "fixture"
     },
     "hook_source_read": {
-      "agent": "codex",
-      "path": "fixture"
+      "id": "fixture"
     },
     "mcp_list": {},
     "mcp_probe": {
-      "agent": "codex",
-      "path": "fixture",
-      "expectedTrustHash": "fixture",
-      "name": "fixture",
-      "serverPath": [
-        "fixture"
-      ]
+      "id": "fixture"
     },
     "mcp_set_enabled": {
-      "agent": "codex",
-      "path": "fixture",
-      "expectedTrustHash": "fixture",
-      "name": "fixture",
-      "enabled": false,
-      "serverPath": [
-        "fixture"
-      ]
+      "id": "fixture",
+      "enabled": false
     },
     "mcp_set_enabled_many": {
       "requests": [
         {
-          "agent": "codex",
-          "path": "fixture",
-          "expectedTrustHash": "fixture",
-          "name": "fixture",
-          "enabled": false,
-          "serverPath": [
-            "fixture"
-          ]
+          "id": "fixture",
+          "enabled": false
         }
       ]
     },
@@ -425,6 +379,7 @@
     "assistant_ask": [],
     "assistant_cancel": [],
     "assistant_chat_sessions": [],
+    "tokenizer_count": [],
     "session_projects_list": [],
     "project_scan_scopes_list": [],
     "project_scan_scopes_save": [],
@@ -547,6 +502,7 @@
             "dependentIds": [
               "fixture"
             ],
+            "is_wrapper": false,
             "visibility": "auto",
             "agents": [
               "codex"
@@ -612,6 +568,7 @@
       "hooks": {
         "hooks": [
           {
+            "id": "fixture",
             "agent": "codex",
             "event": "fixture",
             "enabled": false,
@@ -627,6 +584,7 @@
       "mcp": {
         "servers": [
           {
+            "id": "fixture",
             "agent": "codex",
             "name": "fixture",
             "scope": "fixture",
@@ -713,6 +671,7 @@
         "dependentIds": [
           "fixture"
         ],
+        "is_wrapper": false,
         "visibility": "auto",
         "agents": [
           "codex"
@@ -763,6 +722,7 @@
           "dependentIds": [
             "fixture"
           ],
+          "is_wrapper": false,
           "visibility": "auto",
           "agents": [
             "codex"
@@ -877,6 +837,13 @@
           "reasoningOutputTokens": 0,
           "totalTokens": 0
         },
+        "cost": {
+          "inputUsd": 0,
+          "cachedInputUsd": 0,
+          "cacheWriteInputUsd": 0,
+          "outputUsd": 0,
+          "totalUsd": 0
+        },
         "responses": 0,
         "sessions": 0,
         "runs": {
@@ -903,6 +870,13 @@
             "reasoningOutputTokens": 0,
             "totalTokens": 0
           },
+          "cost": {
+            "inputUsd": 0,
+            "cachedInputUsd": 0,
+            "cacheWriteInputUsd": 0,
+            "outputUsd": 0,
+            "totalUsd": 0
+          },
           "responses": 0,
           "sessions": 0,
           "sessionsByAgent": {},
@@ -921,7 +895,36 @@
               "model": "fixture",
               "totalTokens": 0,
               "totalMs": 0,
-              "completedRuns": 0
+              "completedRuns": 0,
+              "cost": {
+                "inputUsd": 0,
+                "cachedInputUsd": 0,
+                "cacheWriteInputUsd": 0,
+                "outputUsd": 0,
+                "totalUsd": 0
+              }
+            }
+          ],
+          "projects": [
+            {
+              "id": "fixture",
+              "name": "fixture",
+              "usage": {
+                "inputTokens": 0,
+                "cachedInputTokens": 0,
+                "cacheWriteInputTokens": 0,
+                "outputTokens": 0,
+                "reasoningOutputTokens": 0,
+                "totalTokens": 0
+              },
+              "responses": 0,
+              "cost": {
+                "inputUsd": 0,
+                "cachedInputUsd": 0,
+                "cacheWriteInputUsd": 0,
+                "outputUsd": 0,
+                "totalUsd": 0
+              }
             }
           ],
           "tools": [
@@ -1077,6 +1080,11 @@
         }
       }
     ],
+    "tokenizer_count": {
+      "counts": [
+        0
+      ]
+    },
     "session_projects_list": [
       {
         "id": "fixture",
@@ -1238,6 +1246,7 @@
     },
     "hooks_list": [
       {
+        "id": "fixture",
         "agent": "codex",
         "event": "fixture",
         "enabled": false,
@@ -1249,6 +1258,7 @@
     "hook_delete": {
       "updated": [
         {
+          "id": "fixture",
           "agent": "codex",
           "event": "fixture",
           "enabled": false,
@@ -1259,6 +1269,7 @@
       ],
       "deleted": [
         {
+          "id": "fixture",
           "agent": "codex",
           "event": "fixture",
           "enabled": false,
@@ -1271,6 +1282,7 @@
     "hook_delete_many": {
       "updated": [
         {
+          "id": "fixture",
           "agent": "codex",
           "event": "fixture",
           "enabled": false,
@@ -1281,6 +1293,7 @@
       ],
       "deleted": [
         {
+          "id": "fixture",
           "agent": "codex",
           "event": "fixture",
           "enabled": false,
@@ -1293,6 +1306,7 @@
     "hook_set_enabled": {
       "updated": [
         {
+          "id": "fixture",
           "agent": "codex",
           "event": "fixture",
           "enabled": false,
@@ -1303,6 +1317,7 @@
       ],
       "deleted": [
         {
+          "id": "fixture",
           "agent": "codex",
           "event": "fixture",
           "enabled": false,
@@ -1315,6 +1330,7 @@
     "hook_set_enabled_many": {
       "updated": [
         {
+          "id": "fixture",
           "agent": "codex",
           "event": "fixture",
           "enabled": false,
@@ -1325,6 +1341,7 @@
       ],
       "deleted": [
         {
+          "id": "fixture",
           "agent": "codex",
           "event": "fixture",
           "enabled": false,
@@ -1337,6 +1354,7 @@
     "hook_review": {
       "updated": [
         {
+          "id": "fixture",
           "agent": "codex",
           "event": "fixture",
           "enabled": false,
@@ -1347,6 +1365,7 @@
       ],
       "deleted": [
         {
+          "id": "fixture",
           "agent": "codex",
           "event": "fixture",
           "enabled": false,
@@ -1370,6 +1389,7 @@
     },
     "mcp_list": [
       {
+        "id": "fixture",
         "agent": "codex",
         "name": "fixture",
         "scope": "fixture",
@@ -1383,6 +1403,7 @@
     "mcp_probe": {
       "updated": [
         {
+          "id": "fixture",
           "agent": "codex",
           "name": "fixture",
           "scope": "fixture",
@@ -1397,6 +1418,7 @@
     "mcp_set_enabled": {
       "updated": [
         {
+          "id": "fixture",
           "agent": "codex",
           "name": "fixture",
           "scope": "fixture",
@@ -1411,6 +1433,7 @@
     "mcp_set_enabled_many": {
       "updated": [
         {
+          "id": "fixture",
           "agent": "codex",
           "name": "fixture",
           "scope": "fixture",
@@ -1713,6 +1736,7 @@
           "dependentIds": [
             "fixture"
           ],
+          "is_wrapper": false,
           "visibility": "auto",
           "agents": [
             "codex"
@@ -1762,6 +1786,7 @@
           "dependentIds": [
             "fixture"
           ],
+          "is_wrapper": false,
           "visibility": "auto",
           "agents": [
             "codex"
@@ -1826,6 +1851,7 @@
           "dependentIds": [
             "fixture"
           ],
+          "is_wrapper": false,
           "visibility": "auto",
           "agents": [
             "codex"
@@ -1875,6 +1901,7 @@
           "dependentIds": [
             "fixture"
           ],
+          "is_wrapper": false,
           "visibility": "auto",
           "agents": [
             "codex"
@@ -2020,6 +2047,7 @@
           "dependentIds": [
             "fixture"
           ],
+          "is_wrapper": false,
           "visibility": "auto",
           "agents": [
             "codex"
@@ -2076,6 +2104,7 @@
           "dependentIds": [
             "fixture"
           ],
+          "is_wrapper": false,
           "visibility": "auto",
           "agents": [
             "codex"
@@ -2129,6 +2158,7 @@
           "dependentIds": [
             "fixture"
           ],
+          "is_wrapper": false,
           "visibility": "auto",
           "agents": [
             "codex"
@@ -2179,6 +2209,7 @@
         "dependentIds": [
           "fixture"
         ],
+        "is_wrapper": false,
         "visibility": "auto",
         "agents": [
           "codex"
@@ -2328,6 +2359,7 @@
           "dependentIds": [
             "fixture"
           ],
+          "is_wrapper": false,
           "visibility": "auto",
           "agents": [
             "codex"
@@ -2726,6 +2758,11 @@
       "result": null
     },
     "assistant_chat_sessions": {
+      "jsonrpc": "1.0",
+      "id": "invalid",
+      "result": null
+    },
+    "tokenizer_count": {
       "jsonrpc": "1.0",
       "id": "invalid",
       "result": null
@@ -3190,6 +3227,7 @@
             "dependentIds": [
               "fixture"
             ],
+            "is_wrapper": false,
             "visibility": "auto",
             "agents": [
               "codex"

@@ -1,6 +1,6 @@
 use std::{collections::BTreeMap, fs, path::Path};
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use serde_json::Value;
 use walkdir::WalkDir;
 
@@ -14,6 +14,40 @@ use crate::{analytics::AnalyticsCapabilities, skills::SkillVisibility, time::tim
 use super::*;
 
 pub(super) struct ClaudeProvider;
+
+fn claude_analytics_pricing(model: &str) -> Option<crate::analytics::cost::AnalyticsPricing> {
+    let model = model.trim().to_ascii_lowercase();
+    // Standard Claude API rates per million tokens. Cache writes use the
+    // documented 5-minute 1.25x multiplier; transcript usage has no TTL bit.
+    let (input, cached, output) = if model.contains("fable") || model.contains("mythos") {
+        (10.0, 0.25, 50.0)
+    } else if model.contains("opus-5")
+        || model.contains("opus-4-8")
+        || model.contains("opus-4-7")
+        || model.contains("opus-4-6")
+        || model.contains("opus-4-5")
+    {
+        (5.0, 0.5, 25.0)
+    } else if model.contains("opus") {
+        (15.0, 1.5, 75.0)
+    } else if model.contains("sonnet-5") {
+        (2.0, 0.2, 10.0)
+    } else if model.contains("sonnet") {
+        (3.0, 0.3, 15.0)
+    } else if model.contains("haiku-4-5") {
+        (1.0, 0.1, 5.0)
+    } else if model.contains("haiku") {
+        (0.8, 0.08, 4.0)
+    } else {
+        return None;
+    };
+    Some(crate::analytics::cost::AnalyticsPricing::new(
+        input,
+        cached,
+        input * 1.25,
+        output,
+    ))
+}
 
 const CLAUDE_USER_MCP_SOURCE_KEY: &str = "__claude_user_mcp__.json";
 const CLAUDE_SKILL_FRONTMATTER_KEY: &str = "disable-model-invocation";
@@ -706,11 +740,7 @@ pub(super) fn tool_payloads(value: &Value) -> Vec<(&Value, Evidence)> {
 }
 
 pub(super) fn may_contain_search_message(line: &str) -> bool {
-    let hint = crate::transcript::search_json_hint(line);
-    matches!(
-        crate::transcript::json_string_hint(hint, "\"type\""),
-        Some("user" | "assistant")
-    ) && !hint.contains("\"tool_result\"")
+    line.contains('\\') || line.contains("\"user\"") || line.contains("\"assistant\"")
 }
 
 fn collect_claude_item(value: &Value, items: &mut Vec<TranscriptItem>) {
@@ -968,30 +998,6 @@ impl super::AgentProvider for ClaudeProvider {
         })
     }
 
-    fn skill_frontmatter_satisfies(
-        &self,
-        meta: &serde_yaml::Mapping,
-        visibility: SkillVisibility,
-    ) -> bool {
-        crate::skills::skill_frontmatter_satisfies_with_provider_key(
-            meta,
-            visibility,
-            Some(CLAUDE_SKILL_FRONTMATTER_KEY),
-        )
-    }
-
-    fn render_skill_frontmatter(
-        &self,
-        before: &str,
-        visibility: SkillVisibility,
-    ) -> Result<String> {
-        crate::skills::render_skill_frontmatter_with_provider_key(
-            before,
-            visibility,
-            Some(CLAUDE_SKILL_FRONTMATTER_KEY),
-        )
-    }
-
     fn skill_frontmatter_visibility_key(&self) -> Option<&'static str> {
         Some(CLAUDE_SKILL_FRONTMATTER_KEY)
     }
@@ -1236,6 +1242,10 @@ impl super::AgentProvider for ClaudeProvider {
         may_contain_search_message(line)
     }
 
+    fn transcript_search_append_version(&self) -> Option<&'static str> {
+        Some("claude-search-jsonl-v1")
+    }
+
     fn recognizes_transcript(&self, value: &Value) -> bool {
         (is_assistant_message(value) && value.get("message").is_some())
             || (value.get("type").and_then(Value::as_str) == Some("user")
@@ -1251,6 +1261,15 @@ impl super::AgentProvider for ClaudeProvider {
             duration: true,
             rate_limit_history: false,
         }
+    }
+
+    fn analytics_cost(
+        &self,
+        model: &str,
+        usage: crate::analytics::AnalyticsTokenUsage,
+    ) -> Option<crate::analytics::AnalyticsCost> {
+        claude_analytics_pricing(model)
+            .map(|pricing| crate::analytics::cost::calculate(usage, pricing))
     }
 
     fn parse_analytics_line(&self, line: &str, record: &mut SessionAnalyticsRecord) {
@@ -1485,6 +1504,12 @@ impl super::AgentProvider for ClaudeProvider {
         }
     }
 
+    fn hook_review_resource_paths(&self, source: &Path) -> Result<Vec<PathBuf>> {
+        let state = crate::hooks::tendi_hook_review_state_path()
+            .context("Tendi data directory is unavailable")?;
+        Ok(vec![source.to_path_buf(), state])
+    }
+
     fn review_hook(&self, hook: &HookRecord) -> Result<()> {
         crate::hooks::review_hook_with_tendi_state(hook)
     }
@@ -1619,16 +1644,6 @@ mod tests {
 
         assert_eq!(metadata.disable_model_invocation, Some(true));
         assert_eq!(metadata.provider_visibility, SkillVisibility::Manual);
-
-        let meta = frontmatter.as_mapping().expect("mapping frontmatter");
-        assert!(!ClaudeProvider.skill_frontmatter_satisfies(meta, SkillVisibility::Auto));
-        assert!(ClaudeProvider.skill_frontmatter_satisfies(meta, SkillVisibility::Manual));
-
-        let rendered = ClaudeProvider
-            .render_skill_frontmatter("---\nname: demo\n---\n\n# Demo\n", SkillVisibility::Manual)
-            .expect("render Claude skill frontmatter");
-        assert!(rendered.contains("disable-model-invocation: true"));
-        assert!(!rendered.contains("tendi:"));
     }
 
     #[test]

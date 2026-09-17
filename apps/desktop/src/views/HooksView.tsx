@@ -52,7 +52,6 @@ import {
   hookSearchText,
   hookSelectionActionIds,
   hookSourcePath,
-  hookTrustHash,
   hookTypeLabel,
   isWebSource,
   selectionDeleteErrorLabel,
@@ -157,18 +156,21 @@ function hookOperationError(result: CatalogMutationResponse | undefined): string
 
 export function HookDetailRow({ label, value, mono = false, copyable = false }: HookDetailRowProps) {
   const text = `${value ?? ""}`;
-  const content = (
-    <div className={`hookDetailValue ${mono ? "mono" : ""}`}>
-      <span>{text || EMPTY_DISPLAY_VALUE}</span>
-      {copyable && text ? (
-        <CopyButton className="hookCopyButton" value={text} copyLabel={copyValueLabel(label)} copiedLabel={copiedValueLabel(label)} />
-      ) : null}
-    </div>
-  );
   return (
     <div className="hookDetailRow">
       <span className="hookDetailLabel">{label}</span>
-      {isWebSource(text.trim()) ? content : <Tooltip content={text || undefined} onlyWhenTruncated>{content}</Tooltip>}
+      <div className={`hookDetailValue ${mono ? "mono" : ""}`}>
+        {isWebSource(text.trim()) ? (
+          <span>{text || EMPTY_DISPLAY_VALUE}</span>
+        ) : (
+          <Tooltip content={text || undefined} onlyWhenTruncated>
+            <span>{text || EMPTY_DISPLAY_VALUE}</span>
+          </Tooltip>
+        )}
+        {copyable && text ? (
+          <CopyButton className="hookCopyButton" value={text} copyLabel={copyValueLabel(label)} copiedLabel={copiedValueLabel(label)} />
+        ) : null}
+      </div>
     </div>
   );
 }
@@ -427,33 +429,43 @@ export function HooksView({ rows, loadingRows = false, loadError = "", hasRows =
     setDeleteError("");
     if (targets.length > 1 && onDeleteHooks) {
       setDeletingKey("batch");
-      const result = await onDeleteHooks(targets.map((item) => item.hook));
-      const deleteResultError = hookOperationError(result);
-      if (deleteResultError) setDeleteError(deleteResultError);
-      else if (!result) setDeleteError(selectionDeleteErrorLabel("hook", targets.length));
-      setDeletingKey("");
-      setSelected([]);
+      try {
+        const result = await onDeleteHooks(targets.map((item) => item.hook));
+        const deleteResultError = hookOperationError(result);
+        if (deleteResultError) setDeleteError(deleteResultError);
+        else if (!result) setDeleteError(selectionDeleteErrorLabel("hook", targets.length));
+      } catch (error) {
+        setDeleteError(`${error}`);
+      } finally {
+        setDeletingKey("");
+        setSelected([]);
+      }
       return;
     }
-    for (const item of targets) {
-      const identity = hookDeleteIdentity(item.hook);
-      if (!identity) continue;
-      const hook = rows.find((row) => hookDeleteIdentity(row) === identity);
-      if (!hook) continue;
-      setDeletingKey(identity);
-      const result = await onDeleteHook?.(hook);
-      const deleteResultError = hookOperationError(result);
-      if (deleteResultError) {
-        setDeleteError(deleteResultError);
-        break;
+    try {
+      for (const item of targets) {
+        const identity = hookDeleteIdentity(item.hook);
+        if (!identity) continue;
+        const hook = rows.find((row) => hookDeleteIdentity(row) === identity);
+        if (!hook) continue;
+        setDeletingKey(identity);
+        const result = await onDeleteHook?.(hook);
+        const deleteResultError = hookOperationError(result);
+        if (deleteResultError) {
+          setDeleteError(deleteResultError);
+          break;
+        }
+        if (!result) {
+          setDeleteError(selectionDeleteErrorLabel("hook", 1));
+          break;
+        }
       }
-      if (!result) {
-        setDeleteError(selectionDeleteErrorLabel("hook", 1));
-        break;
-      }
+    } catch (error) {
+      setDeleteError(`${error}`);
+    } finally {
+      setDeletingKey("");
+      setSelected([]);
     }
-    setDeletingKey("");
-    setSelected([]);
   }, [deletingKey, onDeleteHook, onDeleteHooks, pendingDeleteItems, rows]);
   const pendingDeleteLoadingLabel = selectionDeleteLoadingLabel("hook", pendingDeleteItems.length);
   const pendingDeleteMessage = pendingDeleteItems.length === 1
@@ -616,20 +628,7 @@ export function HooksView({ rows, loadingRows = false, loadError = "", hasRows =
       data: current.key === activeSourceIdentity ? current.data : null,
       error: "",
     }));
-    readHookSource({
-      agent: activeHook.agent,
-      path,
-      expectedTrustHash: hookTrustHash(activeHook),
-      event: activeHook.event,
-      matcher: activeHook.matcher ?? null,
-      hookType: activeHook.hook_type ?? null,
-      command: activeHook.command ?? null,
-      url: activeHook.url ?? null,
-      prompt: activeHook.prompt ?? null,
-      filter: activeHook.filter ?? null,
-      statusMessage: activeHook.status_message ?? null,
-      enabled: activeHook.enabled,
-    })
+    readHookSource({ id: activeHook.id })
       .then((data) => {
         if (!cancelled) setSourceState({ key: activeSourceIdentity, loading: false, data, error: "" });
       })
@@ -831,6 +830,7 @@ export function HooksView({ rows, loadingRows = false, loadError = "", hasRows =
               loadingLabel={pendingDeleteLoadingLabel}
               variant="danger"
               aria-label={pendingDeleteItems.length === 1 ? "Delete hook" : "Delete hooks"}
+              autoFocus={!deletingKey}
               onClick={() => void confirmDeleteHooks()}
             >
               {pendingDeleteItems.length === 1 ? "Delete hook" : "Delete hooks"}
@@ -858,6 +858,7 @@ export function HooksView({ rows, loadingRows = false, loadError = "", hasRows =
               loadingLabel="Approving hook"
               variant="primary"
               aria-label="Approve hook"
+              autoFocus={!reviewingKey}
               onClick={() => void confirmReviewHook()}
             >
               Approve

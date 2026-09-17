@@ -43,6 +43,7 @@ export type SkillLocationDialogProps = {
   targetOptions?: SkillTargetOption[];
   onOpenChange: (open: boolean) => void;
   onApplied: (skills?: RawSkillRecord[], options?: { patch?: boolean; deleted?: string[] }) => void | Promise<void>;
+  onBeginMutation: () => () => void;
 };
 
 function sourcePathForSkill(skill: NormalizedSkill, initialAgent: string | undefined, singleSkill: boolean): string {
@@ -75,6 +76,7 @@ export function SkillLocationDialog({
   targetOptions = [],
   onOpenChange,
   onApplied,
+  onBeginMutation,
 }: SkillLocationDialogProps) {
   const selectedSkills = useMemo(
     () => skills?.length ? skills : skill ? [skill] : [],
@@ -174,6 +176,7 @@ export function SkillLocationDialog({
     if (!canApply) return;
     setBusy(SkillLocationBusyAction.Apply);
     setError("");
+    const releaseMutation = onBeginMutation();
     try {
       let updatedSkills: RawSkillRecord[] = [];
       let deleted: string[] = [];
@@ -197,10 +200,11 @@ export function SkillLocationDialog({
         deleted = response.deleted ?? [];
       }
       onOpenChange(false);
-      await onApplied(updatedSkills, { patch: true, deleted: deleted.length > 0 ? deleted : undefined });
+      await onApplied(updatedSkills.length > 0 ? updatedSkills : undefined, { patch: true, deleted: deleted.length > 0 ? deleted : undefined });
     } catch (applyError) {
       setError(String(applyError));
     } finally {
+      releaseMutation();
       setBusy(SkillLocationBusyAction.Idle);
     }
   };
@@ -241,7 +245,7 @@ export function SkillLocationDialog({
                 {(value, label) => <AgentOptionLabel agent={value} label={label} />}
               </MultiSelectValue>
             </MultiSelectTrigger>
-            <MultiSelectContent className="skillLocationMenu selectControlContent">
+            <MultiSelectContent>
               <MultiSelectList ariaLabel="Locations" className="selectViewport">
                 {visibleTargets.map((option) => (
                   <MultiSelectItem
@@ -255,11 +259,6 @@ export function SkillLocationDialog({
                     <span className="skillLocationTargetDetails">
                       <AgentOptionLabel agent={option.id} label={option.displayName} />
                       {option.globalPath ? <span className="skillLocationTargetPath">({formatUserPath(option.globalPath)})</span> : null}
-                      {selectedSkills.length > 1 && (currentTargetCounts.get(option.id) ?? 0) > 0 ? (
-                        <span className="skillLocationTargetCount">
-                          {currentTargetCounts.get(option.id)}/{selectedSkills.length}
-                        </span>
-                      ) : null}
                     </span>
                   </MultiSelectItem>
                 ))}

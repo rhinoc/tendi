@@ -7,6 +7,30 @@ export type AnalyticsTokenUsage = {
   totalTokens: number;
 };
 
+export type AnalyticsCost = {
+  inputUsd: number;
+  cachedInputUsd: number;
+  cacheWriteInputUsd: number;
+  outputUsd: number;
+  totalUsd: number;
+};
+
+export type AnalyticsProjectUsage = {
+  id: string;
+  name: string;
+  usage: AnalyticsTokenUsage;
+  responses: number;
+  cost: AnalyticsCost;
+};
+
+export type AnalyticsModelUsage = {
+  model: string;
+  totalTokens: number;
+  totalMs: number;
+  completedRuns: number;
+  cost: AnalyticsCost;
+};
+
 export type AnalyticsCapabilities = {
   tokenUsage: boolean;
   reasoningTokens: boolean;
@@ -48,13 +72,15 @@ export type AnalyticsCallUsage = {
 export type AnalyticsDay = {
   date: string;
   usage: AnalyticsTokenUsage;
+  cost: AnalyticsCost;
   responses: number;
   sessions: number;
   sessionsByAgent: Record<string, number>;
   runs: AnalyticsRunSummary;
   aborted: number;
   compacted: number;
-  models: Array<{ model: string; totalTokens: number; totalMs: number; completedRuns: number }>;
+  models: AnalyticsModelUsage[];
+  projects: AnalyticsProjectUsage[];
   tools: AnalyticsCallUsage[];
   skills: AnalyticsCallUsage[];
   rateLimits: Record<string, number>;
@@ -83,6 +109,7 @@ export type OverviewAnalytics = {
   capabilities: Array<{ agent: string } & AnalyticsCapabilities>;
   summary: {
     usage: AnalyticsTokenUsage;
+    cost: AnalyticsCost;
     responses: number;
     sessions: number;
     runs: AnalyticsRunSummary;
@@ -126,6 +153,7 @@ export type AnalyticsPeriod = {
   inputTokens: number;
   cachedInputTokens: number;
   totalTokens: number;
+  cost: AnalyticsCost;
   responses: number;
   sessions: number;
   sessionsByAgent: Record<string, number>;
@@ -138,16 +166,52 @@ export type AnalyticsPeriod = {
   maxRunMs: number;
   aborted: number;
   compacted: number;
-  models: Array<{ model: string; totalTokens: number; totalMs: number; completedRuns: number }>;
+  models: AnalyticsModelUsage[];
+  projects: AnalyticsProjectUsage[];
   tools: AnalyticsCallUsage[];
   skills: AnalyticsCallUsage[];
 };
 
 type AnalyticsPeriodAccumulator = AnalyticsPeriod & {
-  modelMap: Map<string, { model: string; totalTokens: number; totalMs: number; completedRuns: number }>;
+  modelMap: Map<string, AnalyticsModelUsage>;
+  projectMap: Map<string, AnalyticsProjectUsage>;
   toolMap: Map<string, AnalyticsCallUsage>;
   skillMap: Map<string, AnalyticsCallUsage>;
 };
+
+function addTokenUsage(target: AnalyticsTokenUsage, source: AnalyticsTokenUsage) {
+  target.inputTokens += source.inputTokens;
+  target.cachedInputTokens += source.cachedInputTokens;
+  target.cacheWriteInputTokens += source.cacheWriteInputTokens;
+  target.outputTokens += source.outputTokens;
+  target.reasoningOutputTokens += source.reasoningOutputTokens;
+  target.totalTokens += source.totalTokens;
+}
+
+function addCost(target: AnalyticsCost, source: AnalyticsCost) {
+  target.inputUsd += source.inputUsd;
+  target.cachedInputUsd += source.cachedInputUsd;
+  target.cacheWriteInputUsd += source.cacheWriteInputUsd;
+  target.outputUsd += source.outputUsd;
+  target.totalUsd += source.totalUsd;
+}
+
+function addProjectUsage(target: Map<string, AnalyticsProjectUsage>, projects: AnalyticsProjectUsage[]) {
+  for (const project of projects) {
+    const current = target.get(project.id);
+    if (current) {
+      addTokenUsage(current.usage, project.usage);
+      current.responses += project.responses;
+      addCost(current.cost, project.cost);
+    } else {
+      target.set(project.id, {
+        ...project,
+        usage: { ...project.usage },
+        cost: { ...project.cost },
+      });
+    }
+  }
+}
 
 function callUsageKey(call: Pick<AnalyticsCallUsage, "name" | "server">): string {
   return `${call.server}\0${call.name}`;
@@ -204,6 +268,7 @@ export function groupAnalyticsDays(
       inputTokens: 0,
       cachedInputTokens: 0,
       totalTokens: 0,
+      cost: { inputUsd: 0, cachedInputUsd: 0, cacheWriteInputUsd: 0, outputUsd: 0, totalUsd: 0 },
       responses: 0,
       sessions: 0,
       sessionsByAgent: {},
@@ -217,15 +282,18 @@ export function groupAnalyticsDays(
       aborted: 0,
       compacted: 0,
       models: [],
+      projects: [],
       tools: [],
       skills: [],
-      modelMap: new Map<string, { model: string; totalTokens: number; totalMs: number; completedRuns: number }>(),
+      modelMap: new Map<string, AnalyticsModelUsage>(),
+      projectMap: new Map<string, AnalyticsProjectUsage>(),
       toolMap: new Map<string, AnalyticsCallUsage>(),
       skillMap: new Map<string, AnalyticsCallUsage>(),
     };
     period.inputTokens += day.usage.inputTokens;
     period.cachedInputTokens += day.usage.cachedInputTokens;
     period.totalTokens += day.usage.totalTokens;
+    addCost(period.cost, day.cost);
     period.responses += day.responses;
     // Daily buckets contain distinct sessions. For wider buckets, keep the
     // the peak day and its agent breakdown instead of double-counting sessions
@@ -249,20 +317,25 @@ export function groupAnalyticsDays(
         totalTokens: 0,
         totalMs: 0,
         completedRuns: 0,
+        cost: { inputUsd: 0, cachedInputUsd: 0, cacheWriteInputUsd: 0, outputUsd: 0, totalUsd: 0 },
       };
       current.totalTokens += model.totalTokens;
       current.totalMs += model.totalMs;
       current.completedRuns += model.completedRuns;
+      addCost(current.cost, model.cost);
       period.modelMap.set(model.model, current);
     }
+    addProjectUsage(period.projectMap, day.projects);
     addCallUsage(period.toolMap, day.tools);
     addCallUsage(period.skillMap, day.skills);
     grouped.set(key, period);
   }
-  return [...grouped.values()].map(({ modelMap, toolMap, skillMap, ...period }) => ({
+  return [...grouped.values()].map(({ modelMap, projectMap, toolMap, skillMap, ...period }) => ({
     ...period,
     models: [...modelMap.values()]
       .sort((left, right) => right.totalTokens - left.totalTokens),
+    projects: [...projectMap.values()]
+      .sort((left, right) => right.usage.totalTokens - left.usage.totalTokens || left.name.localeCompare(right.name)),
     tools: sortedCallUsage(toolMap.values()),
     skills: sortedCallUsage(skillMap.values()),
   }));

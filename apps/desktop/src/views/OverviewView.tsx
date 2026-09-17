@@ -21,12 +21,11 @@ import { LoadingIcon } from "../components/shared/LoadingIcon.tsx";
 import { PageHeader } from "../components/shared/PageHeader.tsx";
 import { Toast } from "../components/shared/Toast.tsx";
 import { SelectControl } from "../components/shared/SelectControl.tsx";
-import { Tooltip } from "../components/shared/Tooltip.tsx";
 import { SessionTitleText, TranscriptLinkText } from "../components/shared/TranscriptLinkText.tsx";
 import { SKILL_BADGE_TONES } from "../features/skills/skill-badge-tones.ts";
 import { sessionProject, type SessionRecord } from "../lib/sessions.ts";
 import { summarizeSessionUsage } from "../lib/overview.ts";
-import { formatSessionTitle, summarizeSessionPreviewRecord } from "../lib/session-preview.ts";
+import { summarizeSessionPreviewRecord } from "../lib/session-preview.ts";
 import { formatRelativeTime } from "../lib/strings.ts";
 import { dialogCopy } from "../lib/dialog-copy.ts";
 import {
@@ -35,12 +34,9 @@ import {
   selectAnalyticsGranularity,
 } from "../lib/analytics.ts";
 import { invokeAnalyticsOverview } from "../lib/runtime-gateway.ts";
+import { logger } from "../lib/logger.ts";
 import { OpenInEditorMenuItem } from "../components/shared/DataTableMenus.tsx";
-import {
-  OverviewOlderLoadReason,
-  OverviewTrendChart,
-  OverviewUsageMetric,
-} from "./OverviewTrendChart.tsx";
+import { OverviewTrendChart, OverviewUsageMetric } from "./OverviewTrendChart.tsx";
 import { desktopStore, selectAnalyticsDisplayValue, selectAnalyticsValue, useDesktopStore } from "../store/desktop-store.ts";
 import { ALL_AGENT_FILTER, DOMAIN_NAV_ITEMS, EMPTY_DISPLAY_VALUE, RuntimeDomainKey } from "../lib/index.ts";
 import type { DomainKey } from "../lib/index.ts";
@@ -65,6 +61,7 @@ export type OverviewViewProps = {
 
 const ANALYTICS_DEFAULT_RANGE_DAYS = 30;
 const MAX_ANALYTICS_DAYS = 365;
+const ANALYTICS_REVISION_SETTLE_MS = 400;
 const ANALYTICS_LOAD_STEPS = [ANALYTICS_DEFAULT_RANGE_DAYS, 90, 182, MAX_ANALYTICS_DAYS] as const;
 let retainedAnalyticsRange = ANALYTICS_DEFAULT_RANGE_DAYS;
 let retainedUsageMetric: OverviewUsageMetric = OverviewUsageMetric.Tokens;
@@ -72,6 +69,8 @@ const USAGE_METRICS = [
   OverviewUsageMetric.Sessions,
   OverviewUsageMetric.Turns,
   OverviewUsageMetric.Tokens,
+  OverviewUsageMetric.Projects,
+  OverviewUsageMetric.Cost,
   OverviewUsageMetric.Cache,
   OverviewUsageMetric.Time,
   OverviewUsageMetric.Tools,
@@ -81,6 +80,8 @@ const USAGE_METRIC_LABELS: Record<OverviewUsageMetric, string> = {
   [OverviewUsageMetric.Sessions]: "Sessions",
   [OverviewUsageMetric.Turns]: "Turns",
   [OverviewUsageMetric.Tokens]: "Tokens",
+  [OverviewUsageMetric.Projects]: "Projects",
+  [OverviewUsageMetric.Cost]: "Cost",
   [OverviewUsageMetric.Cache]: "Cache",
   [OverviewUsageMetric.Time]: "Time",
   [OverviewUsageMetric.Tools]: "Tools",
@@ -98,8 +99,45 @@ function inclusiveDaysSince(date: string): number {
   return Math.max(1, Math.floor((todayUtc - firstUtc) / 86_400_000) + 1);
 }
 
+function previousCalendarDate(date: string): string {
+  const value = new Date(`${date}T00:00:00Z`);
+  value.setUTCDate(value.getUTCDate() - 1);
+  return value.toISOString().slice(0, 10);
+}
+
 function overviewAnalyticsCacheKey(agent: string, days: number, analyticsRevision: number) {
   return `${agent}:${days}:${analyticsRevision}`;
+}
+
+function mergeAnalyticsDays(
+  existing: OverviewAnalytics | null,
+  incoming: OverviewAnalytics,
+  requestedRange: number,
+): OverviewAnalytics {
+  if (!existing || existing.days.length === 0) {
+    return incoming;
+  }
+  const daysByDate = new Map(existing.days.map((day) => [day.date, day]));
+  for (const day of incoming.days) daysByDate.set(day.date, day);
+  const capabilitiesByAgent = new Map(existing.capabilities.map((capability) => [capability.agent, { ...capability }]));
+  for (const capability of incoming.capabilities) {
+    const current = capabilitiesByAgent.get(capability.agent);
+    if (!current) capabilitiesByAgent.set(capability.agent, { ...capability });
+    else {
+      current.tokenUsage ||= capability.tokenUsage;
+      current.reasoningTokens ||= capability.reasoningTokens;
+      current.explicitRuns ||= capability.explicitRuns;
+      current.duration ||= capability.duration;
+      current.rateLimitHistory ||= capability.rateLimitHistory;
+    }
+  }
+  return {
+    ...incoming,
+    daysRequested: Math.max(requestedRange, incoming.daysRequested, existing.daysRequested),
+    days: [...daysByDate.values()].sort((left, right) => left.date.localeCompare(right.date)),
+    capabilities: [...capabilitiesByAgent.values()],
+    warnings: [...new Set([...existing.warnings, ...incoming.warnings])],
+  };
 }
 
 function AnalyticsLoadingState({
@@ -161,14 +199,21 @@ export const OverviewView = memo(function OverviewView({
   const [analyticsLoading, setAnalyticsLoading] = useState(!analytics);
   const analyticsProgress = useDesktopStore((state) => state.analytics.progress);
   const [analyticsError, setAnalyticsError] = useState("");
-  const [preparingAnalyticsRange, setPreparingAnalyticsRange] = useState(false);
   const automaticGranularity = selectAnalyticsGranularity(analytics?.days.length ?? analyticsRange);
   const [granularityOverride, setGranularityOverride] = useState<AnalyticsGranularity | null>(null);
   const granularity = granularityOverride ?? automaticGranularity;
   const [usageMetric, setUsageMetric] = useState<OverviewUsageMetric>(retainedUsageMetric);
   const analyticsRequestRef = useRef(0);
   const analyticsRef = useRef<OverviewAnalytics | null>(analytics);
+  const analyticsLatestRevisionRef = useRef(analyticsRevision);
+  const analyticsLoadRef = useRef<((refreshTranscripts?: boolean, showLoading?: boolean) => Promise<void>) | null>(null);
+  const analyticsQueryInFlightRef = useRef(false);
+  const analyticsQueryRevisionRef = useRef<number | null>(null);
+  const analyticsRevisionRefreshPendingRef = useRef<number | null>(null);
+  const analyticsCoalescedRevisionCountRef = useRef(0);
+  const analyticsRevisionTimerRef = useRef<number | null>(null);
   analyticsRef.current = analytics;
+  analyticsLatestRevisionRef.current = analyticsRevision;
   const loadingOlderAnalytics = Boolean(analytics && analytics.daysRequested < analyticsRange);
   const firstAvailableDate = analytics?.coverage.first;
   const firstLoadedDate = analytics?.days[0]?.date;
@@ -181,18 +226,48 @@ export const OverviewView = memo(function OverviewView({
     && firstLoadedDate
     && firstAvailableDate < firstLoadedDate
   );
-  const loadOlderAnalytics = useCallback((reason: OverviewOlderLoadReason) => {
+  const loadOlderAnalytics = useCallback((minimumRange?: number) => {
     if (analyticsRange >= analyticsTargetRange) return;
-    if (reason === OverviewOlderLoadReason.Auto) setPreparingAnalyticsRange(true);
     setAnalyticsRange((current) => {
       if (current >= analyticsTargetRange) return current;
       const step = ANALYTICS_LOAD_STEPS.find((days) => days > current);
-      const next = Math.min(step ?? analyticsTargetRange, analyticsTargetRange);
+      const next = minimumRange === undefined
+        ? Math.min(step ?? analyticsTargetRange, analyticsTargetRange)
+        : Math.min(analyticsTargetRange, Math.max(current + 1, Math.ceil(minimumRange)));
       retainedAnalyticsRange = next;
       return next;
     });
   }, [analyticsRange, analyticsTargetRange]);
+  const scheduleAnalyticsRevisionRefresh = useCallback(() => {
+    if (analyticsRevisionTimerRef.current !== null) {
+      window.clearTimeout(analyticsRevisionTimerRef.current);
+    }
+    analyticsRevisionTimerRef.current = window.setTimeout(() => {
+      analyticsRevisionTimerRef.current = null;
+      void analyticsLoadRef.current?.(false, false);
+    }, ANALYTICS_REVISION_SETTLE_MS);
+  }, []);
   const loadAnalytics = useCallback(async (refreshTranscripts = false, showLoading = refreshTranscripts) => {
+    if (analyticsQueryInFlightRef.current) {
+      const queryRevision = analyticsQueryRevisionRef.current;
+      if (!refreshTranscripts && queryRevision !== null && analyticsRevision > queryRevision) {
+        analyticsRevisionRefreshPendingRef.current = Math.max(
+          analyticsRevisionRefreshPendingRef.current ?? analyticsRevision,
+          analyticsRevision,
+        );
+        analyticsCoalescedRevisionCountRef.current += 1;
+        logger.info("overview analytics refresh coalesced", {
+          requestedRevision: analyticsRevision,
+          inFlightRevision: queryRevision,
+          refreshTranscripts,
+        });
+      }
+      return;
+    }
+    if (refreshTranscripts && analyticsRevisionTimerRef.current !== null) {
+      window.clearTimeout(analyticsRevisionTimerRef.current);
+      analyticsRevisionTimerRef.current = null;
+    }
     const request = ++analyticsRequestRef.current;
     const cacheKey = overviewAnalyticsCacheKey(agentFilter, analyticsRange, analyticsRevision);
     const queryKey = { agent: agentFilter, range: analyticsRange, revision: analyticsRevision };
@@ -200,7 +275,6 @@ export const OverviewView = memo(function OverviewView({
     if (!refreshTranscripts && cached) {
       analyticsRef.current = cached;
       setAnalyticsLoading(false);
-      setPreparingAnalyticsRange(false);
       return;
     }
     if (refreshTranscripts) {
@@ -211,48 +285,92 @@ export const OverviewView = memo(function OverviewView({
       desktopStore.actions.setAnalyticsProgress(null);
     }
     setAnalyticsError("");
+    const loadedDays = analyticsRef.current?.daysRequested ?? 0;
+    const isOlderRangeQuery = !refreshTranscripts && analyticsRange > loadedDays && loadedDays > 0;
+    const queryDays = isOlderRangeQuery
+      ? analyticsRange - loadedDays
+      : analyticsRange;
+    const existingFirstDate = isOlderRangeQuery
+      ? analyticsRef.current?.days[0]?.date
+      : undefined;
+    const queryEndDate = existingFirstDate ? previousCalendarDate(existingFirstDate) : undefined;
     const args = {
       agent: agentFilter === ALL_AGENT_FILTER ? null : agentFilter,
-      days: analyticsRange,
-      rankDays: Math.min(30, analyticsRange),
+      days: queryDays,
+      rankDays: Math.min(30, queryDays),
       refreshTranscripts,
+      ...(queryEndDate ? { endDate: queryEndDate } : {}),
     };
-    let query = refreshTranscripts ? undefined : overviewAnalyticsQueries.get(cacheKey);
+    const queryCacheKey = `${cacheKey}:${queryDays}:${queryEndDate ?? "today"}`;
+    let query = refreshTranscripts ? undefined : overviewAnalyticsQueries.get(queryCacheKey);
     if (!query) {
       query = invokeAnalyticsOverview(args);
       if (!refreshTranscripts) {
         const pendingQuery = query;
-        overviewAnalyticsQueries.set(cacheKey, pendingQuery);
+        overviewAnalyticsQueries.set(queryCacheKey, pendingQuery);
         void pendingQuery.then(() => {
-          if (overviewAnalyticsQueries.get(cacheKey) === pendingQuery) {
-            overviewAnalyticsQueries.delete(cacheKey);
+          if (overviewAnalyticsQueries.get(queryCacheKey) === pendingQuery) {
+            overviewAnalyticsQueries.delete(queryCacheKey);
           }
         });
       }
     }
-    const result = await query;
-    if (request !== analyticsRequestRef.current) return;
-    if (result) {
-      desktopStore.actions.setAnalyticsValue(result, queryKey);
-      analyticsRef.current = result;
-      setPreparingAnalyticsRange(false);
-    }
-    else {
-      setAnalyticsError((current) => current || "Analytics could not be loaded");
-      setPreparingAnalyticsRange(false);
-      const loadedDays = analyticsRef.current?.daysRequested;
-      if (loadedDays && analyticsRange > loadedDays) {
-        retainedAnalyticsRange = loadedDays;
-        setAnalyticsRange(loadedDays);
+    const startedAt = performance.now();
+    const coalescedRevisionCount = analyticsCoalescedRevisionCountRef.current;
+    analyticsCoalescedRevisionCountRef.current = 0;
+    analyticsQueryInFlightRef.current = true;
+    analyticsQueryRevisionRef.current = analyticsRevision;
+    logger.info("overview analytics query started", {
+      requestedRevision: analyticsRevision,
+      agent: agentFilter,
+      days: queryDays,
+      requestedRange: analyticsRange,
+      endDate: queryEndDate,
+      refreshTranscripts,
+      coalescedRevisionCount,
+    });
+    let resultRevision = analyticsRevision;
+    try {
+      const result = await query;
+      resultRevision = result?.revision ?? analyticsRevision;
+      if (request !== analyticsRequestRef.current) return;
+      if (result) {
+        const merged = mergeAnalyticsDays(analyticsRef.current, result, analyticsRange);
+        desktopStore.actions.setAnalyticsValue(merged, { ...queryKey, revision: resultRevision });
+        analyticsRef.current = merged;
       }
+      else {
+        setAnalyticsError((current) => current || "Analytics could not be loaded");
+        const loadedDays = analyticsRef.current?.daysRequested;
+        if (loadedDays && analyticsRange > loadedDays) {
+          retainedAnalyticsRange = loadedDays;
+          setAnalyticsRange(loadedDays);
+        }
+      }
+      setAnalyticsLoading(false);
+    } finally {
+      analyticsQueryInFlightRef.current = false;
+      analyticsQueryRevisionRef.current = null;
+      const pendingRevision = analyticsRevisionRefreshPendingRef.current;
+      const latestRevision = Math.max(analyticsLatestRevisionRef.current, pendingRevision ?? analyticsRevision);
+      const shouldRefreshLatestRevision = request === analyticsRequestRef.current
+        && !refreshTranscripts
+        && latestRevision > resultRevision;
+      logger.info("overview analytics query completed", {
+        requestedRevision: analyticsRevision,
+        resultRevision,
+        latestRevision,
+        durationMs: Math.round(performance.now() - startedAt),
+        coalescedRevisionCount,
+        refreshLatestRevision: shouldRefreshLatestRevision,
+      });
+      analyticsRevisionRefreshPendingRef.current = null;
+      if (shouldRefreshLatestRevision) scheduleAnalyticsRevisionRefresh();
     }
-    setAnalyticsLoading(false);
-  }, [agentFilter, analyticsRange, analyticsRevision]);
-  const showAnalyticsLoading = !analyticsRevisionError && (
-    preparingAnalyticsRange || (analyticsLoading && !analytics)
-  );
+  }, [agentFilter, analyticsRange, analyticsRevision, scheduleAnalyticsRevisionRefresh]);
+  analyticsLoadRef.current = loadAnalytics;
+  const showAnalyticsLoading = !analyticsRevisionError && analyticsLoading && !analytics;
   const analyticsRefreshing = analyticsLoading
-    || preparingAnalyticsRange
     || analyticsProgress?.running === true;
   useEffect(() => {
     setGranularityOverride(null);
@@ -260,8 +378,34 @@ export const OverviewView = memo(function OverviewView({
 
   useEffect(() => {
     if (!analyticsRevisionReady) return;
-    void loadAnalytics(false, analyticsRef.current === null);
-  }, [analyticsRevisionReady, loadAnalytics]);
+    if (analyticsQueryInFlightRef.current) {
+      const queryRevision = analyticsQueryRevisionRef.current;
+      if (queryRevision !== null && analyticsRevision > queryRevision) {
+        analyticsRevisionRefreshPendingRef.current = Math.max(
+          analyticsRevisionRefreshPendingRef.current ?? analyticsRevision,
+          analyticsRevision,
+        );
+        analyticsCoalescedRevisionCountRef.current += 1;
+        logger.info("overview analytics revision coalesced while query is in flight", {
+          revision: analyticsRevision,
+          inFlightRevision: queryRevision,
+          coalescedRevisionCount: analyticsCoalescedRevisionCountRef.current,
+        });
+      }
+      return;
+    }
+    if (analyticsRef.current === null) {
+      void loadAnalytics(false, true);
+      return;
+    }
+    scheduleAnalyticsRevisionRefresh();
+  }, [analyticsRevision, analyticsRevisionReady, loadAnalytics, scheduleAnalyticsRevisionRefresh]);
+
+  useEffect(() => () => {
+    if (analyticsRevisionTimerRef.current !== null) {
+      window.clearTimeout(analyticsRevisionTimerRef.current);
+    }
+  }, []);
 
   const updateSkillCount = skillUpdateCount;
 
@@ -340,24 +484,17 @@ export const OverviewView = memo(function OverviewView({
           </div>
 
           {analyticsRevisionError && !analytics ? (
-            <>
-              <div className="overviewAnalyticsEmpty">
-                <strong>Analytics unavailable</strong>
-                <p>No transcript analytics are available yet.</p>
-                {onRetryAnalyticsRevision ? (
-                  <Button type="button" variant="ghost" size="sm" className="overviewRetryButton" onClick={() => void onRetryAnalyticsRevision()}>
-                    Retry analytics
-                  </Button>
-                ) : null}
-              </div>
-              <Toast tone="error" message={`Analytics refresh failed. ${analyticsRevisionError}`} />
-            </>
+            <Toast
+              tone="error"
+              message={`Analytics refresh failed. ${analyticsRevisionError}`}
+              action={onRetryAnalyticsRevision ? { label: "Retry analytics", onClick: () => { void onRetryAnalyticsRevision(); } } : undefined}
+            />
           ) : showAnalyticsLoading ? (
             <AnalyticsLoadingState
               progress={analyticsProgress}
             />
           ) : null}
-          {analytics && !preparingAnalyticsRange ? (
+          {analytics ? (
             <>
               <OverviewTrendChart
                 analytics={analytics}
@@ -370,17 +507,20 @@ export const OverviewView = memo(function OverviewView({
               />
               {analytics.warnings.length ? <p className="overviewAnalyticsWarning">{analytics.warnings.length} transcript files could not be fully analyzed.</p> : null}
             </>
-          ) : analyticsRevisionError ? null : showAnalyticsLoading ? null : (
-            <>
-              <div className="overviewAnalyticsEmpty">
-                <strong>Analytics unavailable</strong>
-                <p>{analyticsError ? "Analytics could not be loaded." : "No transcript analytics are available yet."}</p>
-                <Button type="button" variant="ghost" size="sm" className="overviewRetryButton" onClick={() => void loadAnalytics(true)}>
-                  Retry analytics
-                </Button>
-              </div>
-              {analyticsError ? <Toast tone="error" message={`Analytics refresh failed. ${analyticsError}`} /> : null}
-            </>
+          ) : analyticsRevisionError ? null : showAnalyticsLoading ? null : analyticsError ? (
+            <Toast
+              tone="error"
+              message={`Analytics refresh failed. ${analyticsError}`}
+              action={{ label: "Retry analytics", onClick: () => { void loadAnalytics(true); } }}
+            />
+          ) : (
+            <div className="overviewAnalyticsEmpty">
+              <strong>Analytics unavailable</strong>
+              <p>No transcript analytics are available yet.</p>
+              <Button type="button" variant="ghost" size="sm" className="overviewRetryButton" onClick={() => void loadAnalytics(true)}>
+                Retry analytics
+              </Button>
+            </div>
           )}
           {analyticsError && analytics ? (
             <Toast tone="error" message={`Refresh failed. Existing analytics are still shown. ${analyticsError}`} />
@@ -418,9 +558,7 @@ export const OverviewView = memo(function OverviewView({
                           <span className="overviewSessionRowHeader">
                             <span className="overviewSessionTitleLine">
                               <AgentBadge agent={session.agent} small />
-                              <Tooltip content={formatSessionTitle(displayTitle)} onlyWhenTruncated>
-                                <span className="overviewSessionRowTitle"><SessionTitleText interactive={false} value={displayTitle} /></span>
-                              </Tooltip>
+                              <span className="overviewSessionRowTitle"><SessionTitleText interactive={false} value={displayTitle} /></span>
                             </span>
                             <span className="overviewSessionUpdated">{formatRelativeTime(session.updatedAt) || EMPTY_DISPLAY_VALUE}</span>
                           </span>

@@ -1,6 +1,6 @@
 import { basename, compactDateTime } from "./strings.ts";
 import { compareTimestamps, timestampMs } from "./time.ts";
-import { agentIdentityKey, friendlyAgent, normalizedAgentKey } from "./agents.ts";
+import { agentIdentityKey, normalizedAgentKey } from "./agents.ts";
 import { agentDefinition } from "./agent/index.ts";
 import { sessionProjectOptionForPaths, type MissingSessionProjectPolicy, type ProjectSummary, type SessionProjectSummary } from "./projects.ts";
 import { SortDirection } from "./sort.ts";
@@ -265,14 +265,17 @@ export function sessionRepositoryPath(session: Pick<SessionRecord, "repository" 
   return isAbsolutePath(repositoryPath) ? repositoryPath : "";
 }
 
-export function sessionLaunchPayload(session: Pick<SessionRecord, "id" | "agent" | "title" | "project" | "projectPath" | "path">) {
+export function sessionLaunchPayload(
+  session: Pick<SessionRecord, "id" | "agent" | "project" | "projectPath" | "path">,
+  options: { reconcile?: boolean } = {},
+) {
   const projectPath = sessionWorkspacePath(session);
   return {
     id: session.id,
     agent: session.agent,
-    title: session.title ?? null,
     project: projectPath || null,
     path: session.path,
+    ...(options.reconcile ? { reconcile: true } : {}),
   };
 }
 

@@ -257,6 +257,8 @@ fn read_bytes_streaming(
 struct AssistantStreamParser {
     agent_message_item_ids: HashSet<String>,
     tool_item_ids: HashSet<String>,
+    tool_ids_by_content_block_index: HashMap<u64, String>,
+    tool_input_buffers_by_id: HashMap<String, String>,
     tool_names_by_id: HashMap<String, String>,
 }
 
@@ -292,15 +294,57 @@ impl AssistantStreamParser {
                 if let Some(tool) = event.get("content_block") {
                     let label = tool_label(tool);
                     if let Some(id) = tool_id(tool) {
+                        if let Some(index) = event.get("index").and_then(Value::as_u64) {
+                            self.tool_ids_by_content_block_index
+                                .insert(index, id.clone());
+                        }
+                        self.tool_input_buffers_by_id
+                            .insert(id.clone(), String::new());
                         self.tool_names_by_id.insert(id, label.clone());
                     }
-                    return vec![stream_event(
+                    return vec![stream_tool_event(
                         conversation_id,
                         "tool-call",
                         tool_input(tool),
                         Some(label),
+                        tool_id(tool),
                     )];
                 }
+            }
+            if event_type == "content_block_delta"
+                && event.pointer("/delta/type").and_then(Value::as_str) == Some("input_json_delta")
+            {
+                let Some(index) = event.get("index").and_then(Value::as_u64) else {
+                    return Vec::new();
+                };
+                let Some(partial_json) =
+                    event.pointer("/delta/partial_json").and_then(Value::as_str)
+                else {
+                    return Vec::new();
+                };
+                let Some(id) = self.tool_ids_by_content_block_index.get(&index).cloned() else {
+                    return Vec::new();
+                };
+                let input = self.tool_input_buffers_by_id.entry(id.clone()).or_default();
+                input.push_str(partial_json);
+                let Ok(parsed) = serde_json::from_str::<Value>(input) else {
+                    return Vec::new();
+                };
+                let Some(command) = tool_input(&parsed) else {
+                    return Vec::new();
+                };
+                let label = self
+                    .tool_names_by_id
+                    .get(&id)
+                    .cloned()
+                    .unwrap_or_else(|| "Tool call".to_string());
+                return vec![stream_tool_event(
+                    conversation_id,
+                    "tool-call",
+                    Some(command),
+                    Some(label),
+                    Some(id),
+                )];
             }
             if event_type == "content_block_delta"
                 && event.pointer("/delta/type").and_then(Value::as_str) == Some("text_delta")
@@ -327,6 +371,12 @@ impl AssistantStreamParser {
                 )];
             }
             if !event_type.is_empty() {
+                if event_type == "content_block_stop"
+                    && let Some(index) = event.get("index").and_then(Value::as_u64)
+                    && let Some(id) = self.tool_ids_by_content_block_index.remove(&index)
+                {
+                    self.tool_input_buffers_by_id.remove(&id);
+                }
                 return vec![stream_event(
                     conversation_id,
                     "progress",
@@ -360,13 +410,14 @@ impl AssistantStreamParser {
                         .and_then(|id| self.tool_names_by_id.get(id))
                         .cloned()
                         .unwrap_or_else(|| "Tool result".to_string());
-                    events.push(stream_event(
+                    events.push(stream_tool_event(
                         conversation_id,
                         "tool-result",
                         item.get("content")
                             .or_else(|| item.get("result"))
                             .and_then(value_text),
                         Some(label),
+                        id,
                     ));
                 }
             }
@@ -378,11 +429,16 @@ impl AssistantStreamParser {
                     .and_then(|id| self.tool_names_by_id.get(id))
                     .cloned()
                     .unwrap_or_else(|| "Tool result".to_string());
-                events.push(stream_event(
+                events.push(stream_tool_event(
                     conversation_id,
                     "tool-result",
                     Some(result),
                     Some(label),
+                    object
+                        .get("toolUseID")
+                        .or_else(|| object.get("tool_use_id"))
+                        .and_then(Value::as_str)
+                        .map(str::to_string),
                 ));
             }
             if !events.is_empty() {
@@ -408,28 +464,31 @@ impl AssistantStreamParser {
                     }
                     let mut events = Vec::new();
                     if is_new {
-                        events.push(stream_event(
+                        events.push(stream_tool_event(
                             conversation_id,
                             "tool-call",
                             tool_input(&Value::Object(item.clone())),
                             Some(label.clone()),
+                            tool_id(&Value::Object(item.clone())),
                         ));
                     }
                     if matches!(event_type, "item.updated" | "item.completed") {
                         if let Some(result) = tool_output(&Value::Object(item.clone())) {
-                            events.push(stream_event(
+                            events.push(stream_tool_event(
                                 conversation_id,
                                 "tool-result",
                                 Some(result),
                                 Some(label.clone()),
+                                tool_id(&Value::Object(item.clone())),
                             ));
                         } else if event_type == "item.completed" && tool_item_has_result(item_type)
                         {
-                            events.push(stream_event(
+                            events.push(stream_tool_event(
                                 conversation_id,
                                 "tool-result",
                                 None,
                                 Some(label),
+                                tool_id(&Value::Object(item.clone())),
                             ));
                         }
                     }
@@ -466,11 +525,12 @@ impl AssistantStreamParser {
                 if let Some(id) = tool_id(payload) {
                     self.tool_names_by_id.insert(id, label.clone());
                 }
-                return vec![stream_event(
+                return vec![stream_tool_event(
                     conversation_id,
                     "tool-call",
                     tool_input(payload),
                     Some(label),
+                    tool_id(payload),
                 )];
             }
             if is_tool_result_item_type(payload_type) {
@@ -479,11 +539,12 @@ impl AssistantStreamParser {
                     .and_then(|id| self.tool_names_by_id.get(id))
                     .cloned()
                     .unwrap_or_else(|| "Tool result".to_string());
-                return vec![stream_event(
+                return vec![stream_tool_event(
                     conversation_id,
                     "tool-result",
                     tool_output(payload),
                     Some(label),
+                    tool_id(payload),
                 )];
             }
         }
@@ -587,11 +648,12 @@ impl AssistantStreamParser {
                     if let Some(id) = tool_id(item) {
                         self.tool_names_by_id.insert(id, label.clone());
                     }
-                    events.push(stream_event(
+                    events.push(stream_tool_event(
                         conversation_id,
                         "tool-call",
                         tool_input(item),
                         Some(label),
+                        tool_id(item),
                     ));
                 }
                 _ => {}
@@ -669,6 +731,9 @@ fn tool_input(value: &Value) -> Option<String> {
         let Some(input) = value.get(key) else {
             continue;
         };
+        if input.as_object().is_some_and(|object| object.is_empty()) {
+            continue;
+        }
         if let Some(text) = input.as_str() {
             if let Ok(parsed) = serde_json::from_str::<Value>(text)
                 && let Some(command) = tool_input(&parsed)
@@ -765,7 +830,20 @@ fn stream_event(
         kind: kind.to_string(),
         text,
         detail,
+        tool_call_id: None,
     }
+}
+
+fn stream_tool_event(
+    conversation_id: &str,
+    kind: &str,
+    text: Option<String>,
+    detail: Option<String>,
+    tool_call_id: Option<String>,
+) -> AssistantStreamEvent {
+    let mut event = stream_event(conversation_id, kind, text, detail);
+    event.tool_call_id = tool_call_id;
+    event
 }
 
 fn emit_stream_event(
@@ -1046,9 +1124,7 @@ fn persist_chat_message(
     linked_session: Option<&AssistantSessionLink>,
     message: AssistantMessage,
 ) -> Result<()> {
-    store.with_database_write_lock_retry(|| {
-        store.append_assistant_chat_message(conversation_id, workspace, linked_session, &message)
-    })
+    store.append_assistant_chat_message(conversation_id, workspace, linked_session, &message)
 }
 
 fn context_session_link(context: &Value) -> Option<AssistantSessionLink> {
@@ -1357,6 +1433,7 @@ mod tests {
         assert_eq!(events[0].kind, "tool-call");
         assert_eq!(events[0].detail.as_deref(), Some("Shell command"));
         assert_eq!(events[0].text.as_deref(), Some("printf fixture"));
+        assert_eq!(events[0].tool_call_id.as_deref(), Some("tool-1"));
 
         let events = parser.events(
             "conversation",
@@ -1365,6 +1442,7 @@ mod tests {
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].kind, "tool-result");
         assert_eq!(events[0].text.as_deref(), Some("fixture"));
+        assert_eq!(events[0].tool_call_id.as_deref(), Some("tool-1"));
     }
 
     #[test]
@@ -1378,6 +1456,7 @@ mod tests {
         assert_eq!(events[0].kind, "tool-call");
         assert_eq!(events[0].detail.as_deref(), Some("Bash"));
         assert_eq!(events[0].text.as_deref(), Some("printf fixture"));
+        assert_eq!(events[0].tool_call_id.as_deref(), Some("tool-1"));
 
         let events = parser.events(
             "conversation",
@@ -1387,6 +1466,37 @@ mod tests {
         assert_eq!(events[0].kind, "tool-result");
         assert_eq!(events[0].detail.as_deref(), Some("Bash"));
         assert_eq!(events[0].text.as_deref(), Some("fixture"));
+        assert_eq!(events[0].tool_call_id.as_deref(), Some("tool-1"));
+    }
+
+    #[test]
+    fn streams_claude_tool_input_json_deltas() {
+        let mut parser = AssistantStreamParser::default();
+        let events = parser.events(
+            "conversation",
+            r#"{"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"tool-1","name":"Bash","input":{}}}}"#,
+        );
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].kind, "tool-call");
+        assert_eq!(events[0].detail.as_deref(), Some("Bash"));
+        assert_eq!(events[0].text, None);
+        assert_eq!(events[0].tool_call_id.as_deref(), Some("tool-1"));
+
+        let events = parser.events(
+            "conversation",
+            r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"command\":\"printf "}}}"#,
+        );
+        assert!(events.is_empty());
+
+        let events = parser.events(
+            "conversation",
+            r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"fixture\"}"}}}"#,
+        );
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].kind, "tool-call");
+        assert_eq!(events[0].detail.as_deref(), Some("Bash"));
+        assert_eq!(events[0].text.as_deref(), Some("printf fixture"));
+        assert_eq!(events[0].tool_call_id.as_deref(), Some("tool-1"));
     }
 
     #[test]

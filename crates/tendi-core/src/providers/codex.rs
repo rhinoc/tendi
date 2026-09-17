@@ -29,6 +29,42 @@ use super::*;
 
 pub(super) struct CodexProvider;
 
+fn codex_analytics_pricing(model: &str) -> Option<crate::analytics::cost::AnalyticsPricing> {
+    let model = model.trim().to_ascii_lowercase();
+    let (input, cached, output) = if model.contains("o4-mini") {
+        (1.1, 0.275, 4.4)
+    } else if model.contains("o3") {
+        (2.0, 0.5, 8.0)
+    } else if model.contains("gpt-4.1") {
+        (2.0, 0.5, 8.0)
+    } else if model.contains("gpt-4o") {
+        (2.5, 1.25, 10.0)
+    } else if model.contains("codex-mini") {
+        (0.25, 0.025, 2.0)
+    } else if model.contains("gpt-6-astra") {
+        (10.0, 1.0, 50.0)
+    } else if model.contains("gpt-5.6-sol") {
+        (4.0, 0.4, 20.0)
+    } else if model.contains("gpt-5.6-terra") {
+        (2.0, 0.2, 12.0)
+    } else if model.contains("gpt-5.6-luna") {
+        (0.2, 0.02, 1.2)
+    } else if model.contains("gpt-5.5") {
+        (5.0, 0.5, 30.0)
+    } else if model.contains("gpt-5.4") {
+        (2.5, 0.25, 15.0)
+    } else if model.contains("gpt-5.2") {
+        (1.75, 0.175, 14.0)
+    } else if model.contains("gpt-5") || model.contains("codex") {
+        (1.25, 0.125, 10.0)
+    } else {
+        return None;
+    };
+    Some(crate::analytics::cost::AnalyticsPricing::new(
+        input, cached, input, output,
+    ))
+}
+
 const CODEX_EXTERNAL_SOURCE_PREFIX: &str = "__codex_external__/";
 const CODEX_PLUGIN_READ_ONLY_REASON: &str = "Codex plugin MCP is managed by the plugin";
 
@@ -1092,6 +1128,7 @@ pub(crate) fn hook_current_hash(
 }
 
 pub(crate) fn write_trusted_hash(path: &Path, key: &str, trusted_hash: &str) -> Result<()> {
+    let _resources = crate::coordination::acquire_file_resources(&[path.to_path_buf()])?;
     let original = fs::read_to_string(path)
         .with_context(|| format!("failed to read Codex config {}", path.display()))?;
     let escaped_key = key.replace('\\', "\\\\").replace('"', "\\\"");
@@ -1571,7 +1608,7 @@ fn legacy_codex_skill_target(
     target.is_file().then_some(target)
 }
 
-fn migrate_codex_skill_config_paths(
+fn rewrite_codex_skill_config_paths(
     before: &str,
     legacy_skill_root: &Path,
     canonical_skill_root: &Path,
@@ -1597,19 +1634,19 @@ fn migrate_codex_skill_config_paths(
         .filter_map(|config| config.get("path").and_then(Item::as_str))
         .map(PathBuf::from)
         .collect::<Vec<_>>();
-    let mut migrated_targets = BTreeSet::new();
+    let mut rewritten_targets = BTreeSet::new();
     let mut changed = false;
-    let mut migrated = Vec::with_capacity(original.len());
+    let mut rewritten = Vec::with_capacity(original.len());
 
     for mut config in original {
         let Some(path) = config.get("path").and_then(Item::as_str) else {
-            migrated.push(config);
+            rewritten.push(config);
             continue;
         };
         let Some(target) =
             legacy_codex_skill_target(Path::new(path), legacy_skill_root, canonical_skill_root)
         else {
-            migrated.push(config);
+            rewritten.push(config);
             continue;
         };
 
@@ -1622,27 +1659,27 @@ fn migrate_codex_skill_config_paths(
         let target_key = target
             .canonicalize()
             .unwrap_or_else(|_| target.to_path_buf());
-        if has_canonical_entry || !migrated_targets.insert(target_key) {
+        if has_canonical_entry || !rewritten_targets.insert(target_key) {
             changed = true;
             continue;
         }
 
         config["path"] = value(target.to_string_lossy().to_string());
         changed = true;
-        migrated.push(config);
+        rewritten.push(config);
     }
 
     if !changed {
         return Ok(before.to_string());
     }
-    *configs = migrated.into_iter().collect();
+    *configs = rewritten.into_iter().collect();
     Ok(crate::fsutil::preserve_newline_style(
         before,
         doc.to_string(),
     ))
 }
 
-pub(crate) fn migrate_legacy_global_skill_config() -> Result<()> {
+pub(crate) fn rewrite_legacy_global_skill_config() -> Result<()> {
     let Some(home) = dirs::home_dir() else {
         return Ok(());
     };
@@ -1650,6 +1687,8 @@ pub(crate) fn migrate_legacy_global_skill_config() -> Result<()> {
         return Ok(());
     };
     let config_path = codex_home.join("config.toml");
+    let _resources =
+        crate::coordination::acquire_file_resources(std::slice::from_ref(&config_path))?;
     let before = match fs::read_to_string(&config_path) {
         Ok(text) => text,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
@@ -1658,7 +1697,7 @@ pub(crate) fn migrate_legacy_global_skill_config() -> Result<()> {
                 .with_context(|| format!("failed to read Codex config {}", config_path.display()));
         }
     };
-    let after = migrate_codex_skill_config_paths(
+    let after = rewrite_codex_skill_config_paths(
         &before,
         &codex_home.join("skills"),
         &home.join(".agents/skills"),
@@ -1667,7 +1706,7 @@ pub(crate) fn migrate_legacy_global_skill_config() -> Result<()> {
         return Ok(());
     }
     crate::fsutil::atomic_write(&config_path, &after)
-        .with_context(|| format!("failed to migrate Codex config {}", config_path.display()))
+        .with_context(|| format!("failed to rewrite Codex config {}", config_path.display()))
 }
 
 fn plan_codex_skill_config(
@@ -2013,10 +2052,7 @@ pub(super) fn resume_target_from_transcript_value(value: &Value) -> Option<&'sta
 fn session_line_has_content(prefix: &str) -> bool {
     match crate::sessions::json_string_field(prefix, "\"type\"") {
         Some("session_meta" | "turn_context" | "world_state") => false,
-        Some("response_item") => !matches!(
-            crate::sessions::json_string_field(prefix, "\"role\""),
-            Some("developer" | "system")
-        ),
+        Some("response_item") => false,
         Some("event_msg") => [
             "user_message",
             "agent_message",
@@ -2878,13 +2914,12 @@ pub(super) fn tool_payloads(value: &Value) -> Vec<(&Value, Evidence)> {
 }
 
 pub(super) fn may_contain_search_message(line: &str) -> bool {
-    let hint = crate::transcript::search_json_hint(line);
-    crate::transcript::json_string_hint(hint, "\"type\"") == Some("response_item")
-        && matches!(
-            crate::transcript::json_string_hint(hint, "\"role\""),
-            Some("user" | "assistant")
-        )
-        && hint.contains("\"message\"")
+    // JSON object order is not semantic: nested content can precede root type.
+    // Escaped field/value spellings are delegated to the real parser as well.
+    line.contains('\\')
+        || (line.contains("\"response_item\"")
+            && line.contains("\"message\"")
+            && (line.contains("\"user\"") || line.contains("\"assistant\"")))
 }
 
 fn collect_codex_item(value: &Value, items: &mut Vec<TranscriptItem>) {
@@ -3418,6 +3453,20 @@ impl super::AgentProvider for CodexProvider {
         Ok(changes)
     }
 
+    fn skill_mutation_resource_paths(
+        &self,
+        skill_dir: &Path,
+        update_provider_config: bool,
+    ) -> Vec<PathBuf> {
+        let mut paths = vec![skill_dir.to_path_buf()];
+        if update_provider_config {
+            if let Some(home) = codex_home_from_system() {
+                paths.push(home.join("config.toml"));
+            }
+        }
+        paths
+    }
+
     fn is_managed_skill_file(&self, relative_path: &str) -> bool {
         relative_path == "agents/openai.yaml" || relative_path.ends_with("/agents/openai.yaml")
     }
@@ -3626,6 +3675,19 @@ impl super::AgentProvider for CodexProvider {
         })
     }
 
+    fn session_resume_repair_commands(&self, session: &SessionRecord) -> Vec<SessionCommand> {
+        let project = absolute_project(session);
+        ["archive", "unarchive"]
+            .into_iter()
+            .map(|operation| SessionCommand {
+                executable: "codex".to_string(),
+                args: vec![operation.to_string(), session.id.clone()],
+                cwd: project.clone(),
+                env: Vec::new(),
+            })
+            .collect()
+    }
+
     fn assistant_ask_command(&self, workspace: &Path, prompt: &str) -> Option<SessionCommand> {
         Some(SessionCommand {
             executable: "codex".to_string(),
@@ -3759,6 +3821,10 @@ impl super::AgentProvider for CodexProvider {
         may_contain_search_message(line)
     }
 
+    fn transcript_search_append_version(&self) -> Option<&'static str> {
+        Some("codex-search-jsonl-v1")
+    }
+
     fn recognizes_transcript(&self, value: &Value) -> bool {
         matches!(
             value.get("type").and_then(Value::as_str),
@@ -3778,6 +3844,15 @@ impl super::AgentProvider for CodexProvider {
             duration: true,
             rate_limit_history: true,
         }
+    }
+
+    fn analytics_cost(
+        &self,
+        model: &str,
+        usage: crate::analytics::AnalyticsTokenUsage,
+    ) -> Option<crate::analytics::AnalyticsCost> {
+        codex_analytics_pricing(model)
+            .map(|pricing| crate::analytics::cost::calculate(usage, pricing))
     }
 
     fn parse_analytics_line(&self, line: &str, record: &mut SessionAnalyticsRecord) {
@@ -4097,6 +4172,11 @@ impl super::AgentProvider for CodexProvider {
         };
         let states = load_hook_review_states(&home.join("config.toml"));
         apply_hook_review_states(hooks, &states);
+    }
+
+    fn hook_review_resource_paths(&self, source: &Path) -> Result<Vec<PathBuf>> {
+        let home = codex_home_from_system().context("Codex home directory is unavailable")?;
+        Ok(vec![source.to_path_buf(), home.join("config.toml")])
     }
 
     fn review_hook(&self, hook: &HookRecord) -> Result<()> {
@@ -4478,7 +4558,7 @@ mod tests {
     }
 
     #[test]
-    fn codex_skill_config_migration_removes_stale_legacy_entry() {
+    fn codex_skill_config_rewrite_removes_stale_legacy_entry() {
         let root = temp_dir();
         let legacy_root = root.join(".codex/skills");
         let canonical_root = root.join(".agents/skills");
@@ -4493,14 +4573,14 @@ mod tests {
             canonical_file.display().to_string(),
         );
 
-        let after = super::migrate_codex_skill_config_paths(&before, &legacy_root, &canonical_root)
-            .expect("migrate Codex skill config");
-        let value = toml::from_str::<TomlValue>(&after).expect("parse migrated config");
+        let after = super::rewrite_codex_skill_config_paths(&before, &legacy_root, &canonical_root)
+            .expect("rewrite Codex skill config");
+        let value = toml::from_str::<TomlValue>(&after).expect("parse rewritten config");
         let configs = value
             .get("skills")
             .and_then(|skills| skills.get("config"))
             .and_then(TomlValue::as_array)
-            .expect("migrated skill config entries");
+            .expect("rewritten skill config entries");
         let canonical_path = canonical_file.to_string_lossy().into_owned();
         assert_eq!(configs.len(), 1);
         assert_eq!(

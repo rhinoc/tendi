@@ -122,7 +122,7 @@ export function createSessionTableColumns<T extends SessionTableRow = SessionTab
         const resolvedTarget = sessionResumeTargetForMenu(configuredTarget, resumeTargetForSession?.(session as T));
         const label = sessionResumeLabel(state, resolvedTarget);
         return (
-          <Tooltip content={label}><StatefulButton
+          <StatefulButton
             size="sm"
             width={16}
             minWidth={16}
@@ -142,7 +142,7 @@ export function createSessionTableColumns<T extends SessionTableRow = SessionTab
             errorContent={<AlertCircle size={14} aria-hidden="true" />}
           >
             <AgentBadge agent={friendlyAgent(session.agent)} />
-          </StatefulButton></Tooltip>
+          </StatefulButton>
         );
       },
     },

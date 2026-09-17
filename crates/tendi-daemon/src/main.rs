@@ -35,6 +35,16 @@ fn main() -> std::io::Result<()> {
         }
         index += 1;
     }
+    let startup_store =
+        tendi_core::storage::Store::open_default().map_err(std::io::Error::other)?;
+    let project_roots = startup_store
+        .list_projects()
+        .map_err(std::io::Error::other)?
+        .into_iter()
+        .map(|project| project.root_path)
+        .collect::<Vec<_>>();
+    tendi_core::initialize_workspace(&startup_store, &workspace, &project_roots)
+        .map_err(std::io::Error::other)?;
     let daemon = tendi_daemon::Daemon::new(workspace.clone());
     let listener = TcpListener::bind(("127.0.0.1", port))?;
     logger.info(

@@ -66,16 +66,22 @@ fn collect_edits(
 ) -> Result<()> {
     match (&node.kind, before, after) {
         (JsonNodeKind::Object(members), Value::Object(before), Value::Object(after)) => {
-            for (index, member) in members.iter().enumerate() {
+            let removed_indices = members
+                .iter()
+                .enumerate()
+                .filter_map(|(index, member)| (!after.contains_key(&member.key)).then_some(index))
+                .collect::<Vec<_>>();
+
+            for member in members {
                 let before_value = before
                     .get(&member.key)
                     .with_context(|| format!("JSON source key {} is missing", member.key))?;
-                match after.get(&member.key) {
-                    Some(after_value) => {
-                        collect_edits(source, &member.value, before_value, after_value, edits)?;
-                    }
-                    None => edits.push(remove_object_member(source, members, index)),
+                if let Some(after_value) = after.get(&member.key) {
+                    collect_edits(source, &member.value, before_value, after_value, edits)?;
                 }
+            }
+            for (start_index, end_index) in contiguous_ranges(&removed_indices) {
+                edits.push(remove_object_members(members, start_index, end_index));
             }
             for (key, value) in after {
                 if !before.contains_key(key) {
@@ -147,23 +153,41 @@ fn removed_array_index(before: &[Value], after: &[Value]) -> Option<usize> {
         .find(|index| before[..*index] == after[..*index] && before[index + 1..] == after[*index..])
 }
 
-fn remove_object_member(source: &str, members: &[JsonMember], index: usize) -> JsonEdit {
-    let member = &members[index];
-    let (start, end) = if index + 1 < members.len() {
-        (member.key_start, members[index + 1].key_start)
-    } else if index > 0 {
-        (members[index - 1].value.end, member.value.end)
+fn contiguous_ranges(indices: &[usize]) -> Vec<(usize, usize)> {
+    let Some(&first) = indices.first() else {
+        return Vec::new();
+    };
+
+    let mut ranges = Vec::new();
+    let mut start = first;
+    let mut end = first;
+    for &index in &indices[1..] {
+        if index == end + 1 {
+            end = index;
+        } else {
+            ranges.push((start, end));
+            start = index;
+            end = index;
+        }
+    }
+    ranges.push((start, end));
+    ranges
+}
+
+fn remove_object_members(members: &[JsonMember], start_index: usize, end_index: usize) -> JsonEdit {
+    let first = &members[start_index];
+    let last = &members[end_index];
+    let (start, end) = if end_index + 1 < members.len() {
+        (first.key_start, members[end_index + 1].key_start)
+    } else if start_index > 0 {
+        (members[start_index - 1].value.end, last.value.end)
     } else {
-        (member.key_start, member.value.end)
+        (first.key_start, last.value.end)
     };
     JsonEdit {
         start,
         end,
-        replacement: if index == 0 && members.len() == 1 {
-            source[start..start].to_string()
-        } else {
-            String::new()
-        },
+        replacement: String::new(),
     }
 }
 
@@ -533,6 +557,39 @@ mod tests {
         assert_eq!(
             patch_json_text(source, &before, &after).unwrap(),
             "{\n  \"keep\": true,\n  \"items\": [\n    {\"name\": \"one\"},\n    {\"name\":\"two\"}\n  ]\n}\n"
+        );
+    }
+
+    #[test]
+    fn patches_multiple_object_member_removals_without_overlapping_edits() {
+        let source =
+            "{\n  \"keep\": true,\n  \"remove_before_last\": 1,\n  \"remove_last\": 2\n}\n";
+        let before = json!({
+            "keep": true,
+            "remove_before_last": 1,
+            "remove_last": 2
+        });
+        let after = json!({"keep": true});
+
+        assert_eq!(
+            patch_json_text(source, &before, &after).unwrap(),
+            "{\n  \"keep\": true\n}\n"
+        );
+    }
+
+    #[test]
+    fn patches_non_contiguous_object_member_removals() {
+        let source = "{\n  \"remove_first\": 1,\n  \"keep\": 2,\n  \"remove_last\": 3\n}\n";
+        let before = json!({
+            "remove_first": 1,
+            "keep": 2,
+            "remove_last": 3
+        });
+        let after = json!({"keep": 2});
+
+        assert_eq!(
+            patch_json_text(source, &before, &after).unwrap(),
+            "{\n  \"keep\": 2\n}\n"
         );
     }
 }

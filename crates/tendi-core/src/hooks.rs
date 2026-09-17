@@ -2,7 +2,6 @@ use std::{
     collections::{HashMap, HashSet},
     fs,
     path::{Path, PathBuf},
-    sync::{LazyLock, Mutex, MutexGuard},
 };
 
 use anyhow::{Context, Result, bail};
@@ -15,14 +14,6 @@ use crate::{
     fsutil::{atomic_write, sha256_file, sha256_text},
     skills::AgentKind,
 };
-
-static HOOK_MUTATION_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
-
-fn lock_hook_mutation() -> Result<MutexGuard<'static, ()>> {
-    HOOK_MUTATION_LOCK
-        .lock()
-        .map_err(|_| anyhow::anyhow!("hook mutation authority is unavailable"))
-}
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct HookRecord {
@@ -105,6 +96,32 @@ pub(crate) fn hook_source_match_from_key(key: &str) -> Result<HookSourceMatch> {
     serde_json::from_str(key).context("invalid hook sync entry key")
 }
 
+/// Returns the stable identity of a hook within the current provider scan.
+///
+/// The identity describes where the hook is declared and its structural
+/// position/content, but deliberately excludes mutable state (`enabled`) and
+/// the source snapshot hash (`trust_hash`). Those values can change without
+/// changing which hook the caller means to address.
+pub fn hook_record_id(hook: &HookRecord) -> String {
+    serde_json::to_string(&(
+        hook.agent,
+        hook.path.to_string_lossy(),
+        &hook.event,
+        &hook.matcher,
+        &hook.hook_type,
+        &hook.command,
+        &hook.url,
+        &hook.prompt,
+        &hook.filter,
+        &hook.status_message,
+    ))
+    .expect("hook identity serializes")
+}
+
+pub fn hook_matches_id(hook: &HookRecord, id: &str) -> bool {
+    !id.trim().is_empty() && hook_record_id(hook) == id
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct HookDeleteRequest {
     pub agent: AgentKind,
@@ -151,7 +168,7 @@ pub struct HookReviewRequest {
     pub status_message: Option<String>,
 }
 
-fn tendi_hook_review_state_path() -> Option<PathBuf> {
+pub(crate) fn tendi_hook_review_state_path() -> Option<PathBuf> {
     dirs::data_dir()
         .or_else(|| dirs::home_dir().map(|home| home.join("Library/Application Support")))
         .map(|base| base.join("tendi/hook-reviews.json"))
@@ -168,19 +185,7 @@ fn load_tendi_hook_review_states() -> HashMap<String, String> {
 }
 
 fn hook_review_identity(hook: &HookRecord) -> String {
-    serde_json::to_string(&(
-        hook.agent,
-        hook.path.to_string_lossy(),
-        &hook.event,
-        &hook.matcher,
-        &hook.hook_type,
-        &hook.command,
-        &hook.url,
-        &hook.prompt,
-        &hook.filter,
-        &hook.status_message,
-    ))
-    .unwrap_or_default()
+    hook_record_id(hook)
 }
 
 fn hook_source_is_managed(hook: &HookRecord) -> bool {
@@ -222,7 +227,12 @@ pub fn delete_hook(request: HookDeleteRequest) -> Result<()> {
 }
 
 pub fn delete_hooks(requests: Vec<HookDeleteRequest>) -> Result<()> {
-    let _mutation = lock_hook_mutation()?;
+    let _resources = crate::coordination::acquire_file_resources(
+        &requests
+            .iter()
+            .map(|request| request.path.clone())
+            .collect::<Vec<_>>(),
+    )?;
     let mut requests_by_path = HashMap::<PathBuf, Vec<HookDeleteRequest>>::new();
     for request in requests {
         requests_by_path
@@ -286,7 +296,12 @@ pub fn set_hooks_enabled(requests: Vec<HookSetEnabledRequest>) -> Result<()> {
     if requests.is_empty() {
         return Ok(());
     }
-    let _mutation = lock_hook_mutation()?;
+    let _resources = crate::coordination::acquire_file_resources(
+        &requests
+            .iter()
+            .map(|request| request.path.clone())
+            .collect::<Vec<_>>(),
+    )?;
     let mut requests_by_path = HashMap::<PathBuf, Vec<HookSetEnabledRequest>>::new();
     for request in requests {
         ensure_deletable_hook_path(request.agent, &request.path)?;
@@ -479,8 +494,13 @@ pub fn refresh_hook_scan_after_set_enabled_many(
 /// The target source is re-read so the expected hash and provider-specific
 /// review metadata are current; other hook sources are not traversed.
 pub fn review_hook_from_scan(scan: HookScan, request: HookReviewRequest) -> Result<HookScan> {
-    let _mutation = lock_hook_mutation()?;
+    let paths = hook_review_resource_paths(request.agent, &request.path)?;
+    let _resources = crate::coordination::acquire_file_resources(&paths)?;
     review_hook_from_scan_inner(scan, request)
+}
+
+pub fn hook_review_resource_paths(agent: AgentKind, source: &Path) -> Result<Vec<PathBuf>> {
+    crate::providers::agent_provider(agent).hook_review_resource_paths(source)
 }
 
 fn review_hook_from_scan_inner(mut scan: HookScan, request: HookReviewRequest) -> Result<HookScan> {
@@ -505,6 +525,7 @@ fn review_hook_from_scan_inner(mut scan: HookScan, request: HookReviewRequest) -
 
 pub(crate) fn review_hook_with_tendi_state(hook: &HookRecord) -> Result<()> {
     let path = tendi_hook_review_state_path().context("Tendi data directory is unavailable")?;
+    let _resources = crate::coordination::acquire_file_resources(std::slice::from_ref(&path))?;
     let mut states = load_tendi_hook_review_states();
     states.insert(hook_review_identity(hook), hook.trust_hash.clone());
     atomic_write(
@@ -2254,7 +2275,8 @@ mod tests {
 
     use super::{
         HookReviewRequest, HookScan, HookSourceMatch, apply_tendi_hook_review_states,
-        hook_review_identity, merge_hook_entry, read_hook_entry, scan_hook_file,
+        hook_matches_id, hook_record_id, hook_review_identity, merge_hook_entry, read_hook_entry,
+        scan_hook_file,
     };
     use crate::{
         providers::{claude::scan_claude_component_file, codex::scan_codex_config_hooks},
@@ -2353,6 +2375,60 @@ mod tests {
         assert_eq!(hooks[0].command.as_deref(), Some("/bin/echo checked"));
         assert!(!hooks[0].enabled);
         assert!(!hooks[0].trust_hash.is_empty());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn hook_record_id_is_stable_for_state_changes_and_changes_for_structure() {
+        let root = std::env::temp_dir().join(format!(
+            "tendi-hook-id-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("system time before epoch")
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).expect("create temp root");
+        let path = root.join("hooks.json");
+        fs::write(
+            &path,
+            r#"{
+  "hooks": {
+    "PreToolUse": [{
+      "matcher": "Bash",
+      "hooks": [{ "type": "command", "command": "/bin/echo one" }]
+    }]
+  }
+}"#,
+        )
+        .expect("write hooks");
+
+        let mut hooks = Vec::new();
+        let mut warnings = Vec::new();
+        scan_hook_file(&path, AgentKind::Codex, &mut hooks, &mut warnings);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        let hook = hooks.into_iter().next().expect("scan one hook");
+        let id = hook_record_id(&hook);
+        assert!(hook_matches_id(&hook, &id));
+
+        let mut state_changed = hook.clone();
+        state_changed.enabled = !state_changed.enabled;
+        state_changed.trust_hash = "sha256:changed".to_string();
+        assert_eq!(hook_record_id(&state_changed), id);
+        assert!(hook_matches_id(&state_changed, &id));
+
+        let mut handler_changed = hook.clone();
+        handler_changed.command = Some("/bin/echo two".to_string());
+        assert_ne!(hook_record_id(&handler_changed), id);
+
+        let mut event_changed = hook.clone();
+        event_changed.event = "PostToolUse".to_string();
+        assert_ne!(hook_record_id(&event_changed), id);
+
+        let mut path_changed = hook;
+        path_changed.path = root.join("other-hooks.json");
+        assert_ne!(hook_record_id(&path_changed), id);
+
         let _ = fs::remove_dir_all(root);
     }
 
@@ -2931,6 +3007,48 @@ command = "/bin/echo stop"
         assert!(warnings.is_empty(), "{warnings:?}");
         assert!(hooks.is_empty(), "{hooks:?}");
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn deletes_hooks_from_multiple_json_event_members() {
+        let source = r#"{
+  "hooks": {
+    "Keep": [{ "type": "command", "command": "keep" }],
+    "DeleteBeforeLast": [{ "type": "command", "command": "before-last" }],
+    "DeleteLast": [{ "type": "command", "command": "last" }]
+  }
+}"#;
+        let request = |event: &str, command: &str| super::HookDeleteRequest {
+            agent: AgentKind::Codex,
+            path: PathBuf::from("hooks.json"),
+            expected_trust_hash: String::new(),
+            event: event.to_string(),
+            matcher: None,
+            hook_type: Some("command".to_string()),
+            command: Some(command.to_string()),
+            url: None,
+            prompt: None,
+            filter: None,
+            status_message: None,
+        };
+
+        let result = super::delete_json_hooks(
+            &[
+                request("DeleteBeforeLast", "before-last"),
+                request("DeleteLast", "last"),
+            ],
+            source,
+        )
+        .expect("delete hooks");
+
+        assert_eq!(
+            result,
+            r#"{
+  "hooks": {
+    "Keep": [{ "type": "command", "command": "keep" }]
+  }
+}"#
+        );
     }
 
     #[test]

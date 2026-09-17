@@ -12,6 +12,10 @@ use serde_json::Value;
 
 use crate::{providers::agent_provider, skills::AgentKind, time::timestamp_ms};
 
+#[path = "transcript_search.rs"]
+mod search;
+pub(crate) use search::{SearchCheckpoint, read_search_delta};
+
 #[derive(Debug, Clone, Serialize)]
 pub struct TranscriptItem {
     pub kind: String,
@@ -946,6 +950,7 @@ pub(crate) fn parse_search_transcript(path: &Path, agent: AgentKind) -> Result<T
     Ok(TranscriptScan { items, warnings })
 }
 
+#[cfg(test)]
 pub(crate) fn for_each_search_item<F>(
     path: &Path,
     agent: AgentKind,
@@ -956,17 +961,13 @@ where
 {
     let file =
         fs::File::open(path).with_context(|| format!("failed to read {}", path.display()))?;
+    let source_size = file.metadata()?.len();
     let inherited_history_start_ordinal = transcript_inherited_history_start_ordinal(path, agent)?;
     let mut warnings = Vec::new();
 
-    for (index, line) in BufReader::new(file).lines().enumerate() {
-        let line = match line {
-            Ok(line) => line,
-            Err(err) => {
-                warnings.push(format!("{}:{}: {err}", path.display(), index + 1));
-                continue;
-            }
-        };
+    for (index, line) in BufReader::new(file.take(source_size)).lines().enumerate() {
+        let line =
+            line.with_context(|| format!("failed to read {}:{}", path.display(), index + 1))?;
         if line.trim().is_empty() || !agent_provider(agent).transcript_search_hint(&line) {
             continue;
         }
@@ -1473,28 +1474,6 @@ fn transcript_item_contains(item: &TranscriptItem, needle: &str) -> bool {
     ]
     .into_iter()
     .any(|value| value.to_lowercase().contains(needle))
-}
-
-const SEARCH_MESSAGE_HINT_BYTES: usize = 16 * 1024;
-
-pub(crate) fn search_json_hint(line: &str) -> &str {
-    let mut end = line.len().min(SEARCH_MESSAGE_HINT_BYTES);
-    while !line.is_char_boundary(end) {
-        end -= 1;
-    }
-    &line[..end]
-}
-
-pub(crate) fn json_string_hint<'a>(line: &'a str, marker: &str) -> Option<&'a str> {
-    let start = line.find(marker)? + marker.len();
-    let value = line[start..].trim_start().strip_prefix(':')?.trim_start();
-    let value = value.strip_prefix('"')?;
-    let end = value.find('"')?;
-    if value[..end].contains('\\') {
-        None
-    } else {
-        Some(&value[..end])
-    }
 }
 
 pub(crate) fn collect_shared_item(value: &Value, items: &mut Vec<TranscriptItem>) {

@@ -21,6 +21,7 @@ serde.workspace = true
 serde_json.workspace = true
 zip.workspace = true
 tauri = { version = "2", features = ["macos-private-api"] }
+tiktoken-rs.workspace = true
 window-vibrancy = "0.7.1"
 tauri-plugin-updater = "2.10.1"
 

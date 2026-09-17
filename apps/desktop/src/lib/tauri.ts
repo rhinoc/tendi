@@ -63,6 +63,10 @@ export const UPDATE_AVAILABLE_EVENT = RuntimeEventName.TendiUpdateAvailable;
 export const TauriCommand = GeneratedTauriCommand;
 export type TauriCommand = CommandName;
 
+export enum DaemonErrorCode {
+  Conflict = "CONFLICT",
+}
+
 type TauriWindow = Window & {
   __TAURI_INTERNALS__?: {
     invoke?: unknown;
@@ -120,10 +124,13 @@ async function requestDaemon(request: JsonRpcRequest): Promise<JsonRpcResponse> 
 const runtimeClient = new RuntimeClient({ request: requestDaemon });
 
 async function invokeCommandDirect<C extends CommandName>(command: C, request: RequestFor<C>): Promise<ResponseFor<C>> {
+  const startedAt = performance.now();
+  let succeeded = false;
   try {
     if (isDaemonCommand(command)) {
       const method = commandName(command);
       const result = await runtimeClient.call(method, request);
+      succeeded = true;
       return result as ResponseFor<C>;
     }
     if (!isTauriRuntime()) {
@@ -137,6 +144,7 @@ async function invokeCommandDirect<C extends CommandName>(command: C, request: R
     // JSON-RPC puts the request object directly in params; Tauri extracts named command arguments.
     const result = await invoke<ResponseFor<C>>(command, tauriCommandArgs(request));
     validateResult(method, result);
+    succeeded = true;
     return result;
   } catch (error) {
     logger.error("tendi command failed", { command, error });
@@ -144,14 +152,27 @@ async function invokeCommandDirect<C extends CommandName>(command: C, request: R
       throw new DaemonCommandError(error.kind ?? "DAEMON_ERROR", error.message, undefined, error.code);
     }
     throw error;
+  } finally {
+    const durationMs = performance.now() - startedAt;
+    if (durationMs >= 100 || !succeeded) {
+      logger.info("tendi command completed", {
+        command,
+        durationMs,
+        succeeded,
+        execution: COMMAND_METADATA[command].execution,
+      });
+    }
   }
 }
 
 export function invokeCommand<C extends CommandName>(command: C, args?: RequestFor<C>): Promise<ResponseFor<C>> {
   const request = (args === undefined ? {} : omitUndefinedProperties(args)) as RequestFor<C>;
   const invoke = () => invokeCommandDirect(command, request);
-  if (COMMAND_METADATA[command].execution !== "write") return invoke();
-  return singleFlight(singleFlightKey(`runtime-command:${command}`, request), invoke);
+  const key = singleFlightKey(`runtime-command:${command}`, request);
+  // Reads are snapshots, so callers sharing the same request can safely await
+  // one in-flight RPC. This covers App bootstrap plus a page mounting at the
+  // same time without retaining stale data after the request completes.
+  return singleFlight(key, invoke);
 }
 
 export async function safeInvoke<C extends CommandName>(command: C, args?: RequestFor<C>): Promise<ResponseFor<C> | null> {

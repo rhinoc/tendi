@@ -1,5 +1,6 @@
-import { AnimatePresence, motion, useReducedMotion } from "motion/react";
+import { motion, useReducedMotion } from "motion/react";
 import { Check, ChevronsUpDown, Search, X } from "lucide-react";
+import { DismissableLayer } from "radix-ui/internal";
 import {
   createContext,
   type ChangeEventHandler,
@@ -27,6 +28,7 @@ type RegisteredMultiSelectItem = {
   label: string;
   keywords: string[];
   disabled: boolean;
+  order: number;
   id: string;
   ref: RefObject<HTMLButtonElement | null>;
 };
@@ -130,6 +132,7 @@ export function MultiSelect({
       if (
         existing?.label === item.label
         && existing.disabled === item.disabled
+        && existing.order === item.order
         && existing.id === item.id
         && existing.ref === item.ref
         && existing.keywords.join("\u0000") === item.keywords.join("\u0000")
@@ -148,10 +151,12 @@ export function MultiSelect({
     });
   }, []);
   const filterValue = query.trim().toLocaleLowerCase();
-  const visibleItems = useMemo(() => Array.from(items.values()).filter((item) => {
-    if (!filterValue) return true;
-    return [item.value, item.label, ...item.keywords].join(" ").toLocaleLowerCase().includes(filterValue);
-  }), [filterValue, items]);
+  const visibleItems = useMemo(() => Array.from(items.values())
+    .filter((item) => {
+      if (!filterValue) return true;
+      return [item.value, item.label, ...item.keywords].join(" ").toLocaleLowerCase().includes(filterValue);
+    })
+    .sort((left, right) => left.order - right.order), [filterValue, items]);
   const enabledVisibleItems = useMemo(() => visibleItems.filter((item) => !item.disabled), [visibleItems]);
   const visibleValues = useMemo(() => new Set(visibleItems.map((item) => item.value)), [visibleItems]);
   const resolvedActiveValue = activeValue && enabledVisibleItems.some((item) => item.value === activeValue)
@@ -268,12 +273,18 @@ export function MultiSelectTrigger({ children, className = "" }: MultiSelectTrig
       tabIndex={context.disabled ? -1 : 0}
       aria-haspopup="listbox"
       aria-expanded={context.open}
+      aria-disabled={context.disabled || undefined}
       aria-controls={context.listId}
       onPointerDown={(event) => {
         const target = event.target as HTMLElement;
         if (context.disabled || target === context.inputRef.current || target.closest("[data-multi-select-remove]")) return;
         event.preventDefault();
         context.inputRef.current?.focus({ preventScroll: true });
+        context.setOpen(true);
+      }}
+      onClick={(event) => {
+        const target = event.target as HTMLElement;
+        if (context.disabled || target === context.inputRef.current || target.closest("[data-multi-select-remove]")) return;
         context.setOpen(true);
       }}
       onKeyDown={(event) => {
@@ -313,43 +324,113 @@ export function MultiSelectValue({
   hidePlaceholderWhenOpen = true,
 }: MultiSelectValueProps) {
   const context = useMultiSelectContext("MultiSelectValue");
+  const valuesRef = useRef<HTMLDivElement>(null);
+  const measurementRef = useRef<HTMLDivElement>(null);
+  const [visibleCount, setVisibleCount] = useState(0);
   const showPlaceholder = context.values.length === 0 && (!hidePlaceholderWhenOpen || !context.open);
+  const updateVisibleCount = useCallback(() => {
+    const valuesElement = valuesRef.current;
+    const measurementElement = measurementRef.current;
+    if (!valuesElement || !measurementElement) return;
+    const availableWidth = valuesElement.clientWidth;
+    const valueWidths = [...measurementElement.querySelectorAll<HTMLElement>("[data-multi-select-value-measure]")]
+      .map((element) => element.getBoundingClientRect().width);
+    const overflowWidths = new Map(
+      [...measurementElement.querySelectorAll<HTMLElement>("[data-multi-select-overflow-measure]")]
+        .map((element) => [Number(element.dataset.hiddenCount), element.getBoundingClientRect().width]),
+    );
+    const gap = Number.parseFloat(getComputedStyle(measurementElement).columnGap) || 0;
+    let nextCount = context.values.length;
+    for (let count = context.values.length; count >= 0; count -= 1) {
+      const hiddenCount = context.values.length - count;
+      const itemCount = count + (hiddenCount > 0 ? 1 : 0);
+      const totalWidth = valueWidths.slice(0, count).reduce((total, width) => total + width, 0)
+        + (hiddenCount > 0 ? overflowWidths.get(hiddenCount) ?? 0 : 0)
+        + Math.max(0, itemCount - 1) * gap;
+      if (totalWidth <= availableWidth) {
+        nextCount = count;
+        break;
+      }
+    }
+    setVisibleCount((current) => current === nextCount ? current : nextCount);
+  }, [context.labelFor, context.values, children]);
+  useLayoutEffect(() => {
+    updateVisibleCount();
+    const valuesElement = valuesRef.current;
+    const measurementElement = measurementRef.current;
+    const observer = typeof ResizeObserver === "function" ? new ResizeObserver(updateVisibleCount) : null;
+    if (valuesElement) observer?.observe(valuesElement);
+    if (measurementElement) observer?.observe(measurementElement);
+    return () => observer?.disconnect();
+  }, [updateVisibleCount]);
+  const visibleValues = context.values.slice(0, visibleCount);
+  const hiddenValueCount = context.values.length - visibleValues.length;
   return (
-    <div className={`multiSelectValues ${className}`.trim()}>
-      <AnimatePresence initial={false} mode="popLayout">
-        {showPlaceholder ? <span key="multi-select-placeholder" className="multiSelectPlaceholder">{placeholder}</span> : null}
+    <div ref={valuesRef} className={`multiSelectValues ${className}`.trim()}>
+      {showPlaceholder ? <span key="multi-select-placeholder" className="multiSelectPlaceholder">{placeholder}</span> : null}
+      {visibleValues.map((value) => {
+        const label = context.labelFor(value);
+        return (
+          <motion.span
+            layout={context.reduce ? false : "position"}
+            key={`multi-select-value-${value}`}
+            initial={false}
+            animate={{ opacity: 1, transform: "translateY(0)" }}
+            transition={context.reduce ? { duration: 0 } : { layout: SPRING_PANEL, opacity: { duration: 0.12, ease: EASE_OUT }, transform: { duration: 0.12, ease: EASE_OUT } }}
+            className="multiSelectValue"
+          >
+            <span className="multiSelectValueLabel">{children ? children(value, label) : label}</span>
+            <button
+              type="button"
+              data-multi-select-remove=""
+              aria-label={`Remove ${label}`}
+              disabled={context.disabled}
+              onPointerDown={(event) => event.stopPropagation()}
+              onClick={(event) => {
+                event.stopPropagation();
+                context.remove(value);
+                context.inputRef.current?.focus({ preventScroll: true });
+              }}
+              className="multiSelectRemove"
+            >
+              <X size={12} aria-hidden="true" />
+            </button>
+          </motion.span>
+        );
+      })}
+      {hiddenValueCount > 0 ? (
+        <span
+          key="multi-select-overflow"
+          className="multiSelectValue multiSelectValueOverflow"
+          aria-label={`${hiddenValueCount} more selected`}
+        >
+          {hiddenValueCount}+
+        </span>
+      ) : null}
+      <div ref={measurementRef} className="multiSelectValuesMeasure" aria-hidden="true">
         {context.values.map((value) => {
           const label = context.labelFor(value);
           return (
-            <motion.span
-              layout={context.reduce ? false : "position"}
-              key={`multi-select-value-${value}`}
-              initial={{ opacity: 0, transform: context.reduce ? "translateY(0)" : "translateY(2px)" }}
-              animate={{ opacity: 1, transform: "translateY(0)" }}
-              exit={context.reduce ? { opacity: 0 } : { opacity: 0, clipPath: "inset(0 0 0 100% round 0.5rem)" }}
-              transition={context.reduce ? { duration: 0 } : { layout: SPRING_PANEL, opacity: { duration: 0.12, ease: EASE_OUT }, transform: { duration: 0.12, ease: EASE_OUT } }}
-              className="multiSelectValue"
-            >
+            <span key={`multi-select-measure-${value}`} data-multi-select-value-measure="" className="multiSelectValue">
               <span className="multiSelectValueLabel">{children ? children(value, label) : label}</span>
-              <button
-                type="button"
-                data-multi-select-remove=""
-                aria-label={`Remove ${label}`}
-                disabled={context.disabled}
-                onPointerDown={(event) => event.stopPropagation()}
-                onClick={(event) => {
-                  event.stopPropagation();
-                  context.remove(value);
-                  context.inputRef.current?.focus({ preventScroll: true });
-                }}
-                className="multiSelectRemove"
-              >
-                <X size={12} aria-hidden="true" />
-              </button>
-            </motion.span>
+              <span className="multiSelectRemove"><X size={12} aria-hidden="true" /></span>
+            </span>
           );
         })}
-      </AnimatePresence>
+        {context.values.map((_, index) => {
+          const hiddenCount = index + 1;
+          return (
+            <span
+              key={`multi-select-overflow-measure-${hiddenCount}`}
+              data-multi-select-overflow-measure=""
+              data-hidden-count={hiddenCount}
+              className="multiSelectValue multiSelectValueOverflow"
+            >
+              {hiddenCount}+
+            </span>
+          );
+        })}
+      </div>
     </div>
   );
 }
@@ -439,7 +520,7 @@ export function MultiSelectInput({
   );
 }
 
-type MultiSelectPosition = { left: number; top: number; width: number; side: "top" | "bottom" };
+type MultiSelectPosition = { left: number; top: number; width: number; height: number; side: "top" | "bottom" };
 
 function useMultiSelectPosition(
   triggerRef: RefObject<HTMLDivElement | null>,
@@ -453,15 +534,26 @@ function useMultiSelectPosition(
     if (!trigger || !content) return;
     const rect = trigger.getBoundingClientRect();
     const width = rect.width;
-    const height = Math.min(content.scrollHeight, window.innerHeight - 24);
-    const below = window.innerHeight - (rect.top + rect.height);
-    const above = rect.top;
-    const side: MultiSelectPosition["side"] = below < height + 6 && above > below ? "top" : "bottom";
+    const viewportPadding = 8;
+    const gap = 6;
+    const list = content.querySelector<HTMLElement>('[role="listbox"]');
+    const contentHeight = Math.max(content.scrollHeight, list?.scrollHeight ?? 0);
+    const desiredHeight = Math.min(contentHeight, window.innerHeight - viewportPadding * 2);
+    const below = Math.max(0, window.innerHeight - rect.bottom - gap - viewportPadding);
+    const side: MultiSelectPosition["side"] = "bottom";
+    const height = Math.min(desiredHeight, below);
     const desiredLeft = rect.left;
     const left = Math.min(Math.max(desiredLeft, 8), Math.max(8, window.innerWidth - width - 8));
-    const top = side === "bottom" ? rect.top + rect.height + 6 : rect.top - height - 6;
-    const next = { left, top, width, side };
-    setPosition((current) => current && current.left === left && current.top === top && current.width === width && current.side === side ? current : next);
+    const top = Math.min(rect.bottom + gap, window.innerHeight - viewportPadding - height);
+    const next = { left, top, width, height, side };
+    setPosition((current) => current
+      && current.left === left
+      && current.top === top
+      && current.width === width
+      && current.height === height
+      && current.side === side
+      ? current
+      : next);
   }, [contentRef, triggerRef]);
   useLayoutEffect(() => {
     update();
@@ -488,7 +580,21 @@ export function MultiSelectContent({ children, className = "" }: MultiSelectCont
   const context = useMultiSelectContext("MultiSelectContent");
   const position = useMultiSelectPosition(context.triggerRef, context.contentRef, context.open);
   if (typeof document === "undefined") return null;
-  return createPortal(
+  const handleWheelCapture = (event: React.WheelEvent<HTMLDivElement>) => {
+    const content = event.currentTarget;
+    const maxScrollTop = content.scrollHeight - content.clientHeight;
+    if (maxScrollTop <= 0) return;
+    const delta = event.deltaMode === WheelEvent.DOM_DELTA_LINE
+      ? event.deltaY * 16
+      : event.deltaMode === WheelEvent.DOM_DELTA_PAGE
+        ? event.deltaY * content.clientHeight
+        : event.deltaY;
+    const nextScrollTop = Math.min(maxScrollTop, Math.max(0, content.scrollTop + delta));
+    if (nextScrollTop === content.scrollTop) return;
+    event.preventDefault();
+    content.scrollTop = nextScrollTop;
+  };
+  const content = (
     <motion.div
       ref={context.contentRef}
       data-state={context.open ? "open" : "closed"}
@@ -501,6 +607,7 @@ export function MultiSelectContent({ children, className = "" }: MultiSelectCont
         left: position?.left ?? 0,
         top: position?.top ?? 0,
         width: position?.width ?? 0,
+        height: position?.height,
         visibility: position ? "visible" : "hidden",
         pointerEvents: context.open && position ? "auto" : "none",
         transformOrigin: position?.side === "top" ? "bottom center" : "top center",
@@ -508,9 +615,13 @@ export function MultiSelectContent({ children, className = "" }: MultiSelectCont
       initial={false}
       animate={{ opacity: context.open ? 1 : 0, y: context.open ? 0 : -4, scale: context.open ? 1 : 0.985 }}
       transition={context.reduce ? { duration: 0 } : { duration: 0.18, ease: EASE_OUT }}
+      onWheelCapture={handleWheelCapture}
     >
       {children}
-    </motion.div>,
+    </motion.div>
+  );
+  return createPortal(
+    <DismissableLayer.Branch asChild>{content}</DismissableLayer.Branch>,
     document.body,
   );
 }
@@ -528,6 +639,7 @@ export type MultiSelectItemProps = {
   textValue?: string;
   keywords?: string[];
   disabled?: boolean;
+  order?: number;
   onSelect?: (value: string) => void;
   className?: string;
 };
@@ -538,6 +650,7 @@ export function MultiSelectItem({
   textValue,
   keywords = [],
   disabled = false,
+  order = Number.MAX_SAFE_INTEGER,
   onSelect,
   className = "",
 }: MultiSelectItemProps) {
@@ -552,9 +665,9 @@ export function MultiSelectItem({
   const active = context.activeValue === value;
 
   useLayoutEffect(() => {
-    context.registerItem({ value, label, keywords: normalizedKeywords, disabled, id, ref: itemRef });
+    context.registerItem({ value, label, keywords: normalizedKeywords, disabled, order, id, ref: itemRef });
     return () => context.unregisterItem(value);
-  }, [context.registerItem, context.unregisterItem, disabled, id, label, normalizedKeywords, value]);
+  }, [context.registerItem, context.unregisterItem, disabled, id, label, normalizedKeywords, order, value]);
 
   if (!visible) return null;
   return (

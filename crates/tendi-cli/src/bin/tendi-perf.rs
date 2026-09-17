@@ -716,6 +716,7 @@ fn fixture_skill(root: &Path, index: usize) -> SkillRecord {
         dependents: Vec::new(),
         dependency_ids: Vec::new(),
         dependent_ids: Vec::new(),
+        is_wrapper: false,
         visibility: SkillVisibility::Auto,
         agents: vec![AgentKind::Shared],
         paths: vec![SkillPath {

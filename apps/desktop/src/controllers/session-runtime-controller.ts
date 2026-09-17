@@ -71,7 +71,32 @@ export function useSessionRuntimeController(
   const pendingRecentSessions = useRef(new Map<string, RawDomainRow>());
   const pendingWatchSessions = useRef(new Map<string, RawDomainRow>());
   const pendingDeletedSessions = useRef(new Map<string, SessionIdentityRecord>());
+  const projectionRefreshes = useRef(new Map<string, {
+    pending: boolean;
+    promise: Promise<void>;
+  }>());
   const disposed = useRef(false);
+
+  const refreshProjectionFromEvent = useCallback((domain: string): Promise<void> => {
+    const existing = projectionRefreshes.current.get(domain);
+    if (existing) {
+      existing.pending = true;
+      return existing.promise;
+    }
+
+    const entry = { pending: false, promise: Promise.resolve() };
+    const run = async () => {
+      do {
+        entry.pending = false;
+        await refreshProjection(domain);
+      } while (entry.pending);
+    };
+    entry.promise = run().finally(() => {
+      if (projectionRefreshes.current.get(domain) === entry) projectionRefreshes.current.delete(domain);
+    });
+    projectionRefreshes.current.set(domain, entry);
+    return entry.promise;
+  }, [refreshProjection]);
 
   const setSessionLoadError = useCallback(() => {
     const hasRows = desktopStore.getSnapshot().catalogs.data.sessions.length > 0;
@@ -213,6 +238,9 @@ export function useSessionRuntimeController(
       if (disposed.current) return;
       const previousEventId = lastDaemonEventId.current;
       lastDaemonEventId.current = event.id;
+      const isCurrentScopeEvent = !event.scopeKey
+        || !sessionScopeKey.current
+        || event.scopeKey === sessionScopeKey.current;
       if (event.event === RuntimeEventName.SessionsScan) {
         if (previousEventId !== null && event.id > previousEventId + 1) {
           const scanEvent = event.payload;
@@ -244,11 +272,9 @@ export function useSessionRuntimeController(
       } else if (event.event === RuntimeEventName.SkillsUpdates) {
         const payload = event.payload;
         if (payload.status === SkillUpdateEventStatus.Completed) {
-          if (Array.isArray(payload.skills)) {
-            desktopStore.actions.replaceSkills(payload.skills);
-            desktopStore.actions.markDomainLoaded(RuntimeDomainKey.Skills);
-            desktopStore.actions.setDomainError(RuntimeDomainKey.Skills, "");
-          }
+          // An update check only produces reports; it does not mutate the
+          // skill projection. Do not replace or refresh the list here: doing
+          // so makes a background check reorder the visible table later.
           desktopStore.actions.setSkillUpdateReports(payload.updates);
           setSkillUpdateError("");
         } else {
@@ -256,10 +282,12 @@ export function useSessionRuntimeController(
         }
         setCheckingSkillUpdates(false);
       } else if (event.event === RuntimeEventName.SkillsChanged) {
+        if (!isCurrentScopeEvent) return;
         void refreshSkills().catch((error) => {
           logger.warn("skills watcher refresh failed", { error });
         });
       } else if (event.event === RuntimeEventName.ProjectionChanged) {
+        if (!isCurrentScopeEvent) return;
         if (event.payload.error) {
           logger.warn("projection refresh failed", {
             domain: event.payload.domain,
@@ -268,7 +296,7 @@ export function useSessionRuntimeController(
           setProjectionError(event.payload.domain, event.payload.error);
           return;
         }
-        void refreshProjection(event.payload.domain).catch((error) => {
+        void refreshProjectionFromEvent(event.payload.domain).catch((error) => {
           logger.warn("projection snapshot refresh failed", {
             domain: event.payload.domain,
             error,
@@ -296,7 +324,7 @@ export function useSessionRuntimeController(
       for (const waiters of sessionScanWaiters.current.values()) waiters.forEach((resolve) => resolve());
       sessionScanWaiters.current.clear();
     };
-  }, [finishSessionScanWaiters, handleSessionScanEvent, refreshProjection, refreshSkills, resyncSessionSnapshot, setAnalyticsRevision, setAnalyticsRevisionError, setAnalyticsRevisionReady, setCheckingSkillUpdates, setProjectionError, setSkillUpdateError]);
+  }, [finishSessionScanWaiters, handleSessionScanEvent, refreshProjectionFromEvent, refreshSkills, resyncSessionSnapshot, setAnalyticsRevision, setAnalyticsRevisionError, setAnalyticsRevisionReady, setCheckingSkillUpdates, setProjectionError, setSkillUpdateError]);
 
   const refreshSessionsFromScan = useCallback(() => {
     setSessionRefreshError("");

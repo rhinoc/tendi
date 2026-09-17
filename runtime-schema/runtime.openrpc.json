@@ -30,10 +30,11 @@
     { "name": "session_skill_links", "params": [{ "name": "request", "required": true, "schema": { "$ref": "#/components/schemas/SessionSkillLinksRequest" } }], "result": { "name": "result", "schema": { "$ref": "#/components/schemas/SessionSkillLinkList" } }, "x-tendi": { "owner": "daemon", "wire": "jsonrpc", "clients": ["desktop"], "execution": "read", "typedHandler": true } },
     { "name": "skill_session_links", "params": [{ "name": "request", "required": true, "schema": { "$ref": "#/components/schemas/SkillSessionLinksRequest" } }], "result": { "name": "result", "schema": { "$ref": "#/components/schemas/SessionSkillLinkList" } }, "x-tendi": { "owner": "daemon", "wire": "jsonrpc", "clients": ["desktop"], "execution": "read", "typedHandler": true } },
     { "name": "settings_get", "params": [], "result": { "name": "result", "schema": { "$ref": "#/components/schemas/AppSettings" } }, "x-tendi": { "owner": "daemon", "wire": "jsonrpc", "clients": ["desktop"], "execution": "read", "typedHandler": true } },
-    { "name": "settings_save", "params": [{ "name": "request", "required": true, "schema": { "$ref": "#/components/schemas/AppSettings" } }], "result": { "name": "result", "schema": { "$ref": "#/components/schemas/AppSettings" } }, "x-tendi": { "owner": "daemon", "wire": "jsonrpc", "clients": ["desktop"], "execution": "write", "typedHandler": true } },
+    { "name": "settings_save", "params": [{ "name": "request", "required": true, "schema": { "$ref": "#/components/schemas/AppSettingsPatch" } }], "result": { "name": "result", "schema": { "$ref": "#/components/schemas/AppSettings" } }, "x-tendi": { "owner": "daemon", "wire": "jsonrpc", "clients": ["desktop"], "execution": "write", "typedHandler": true } },
     { "name": "assistant_ask", "params": [{ "name": "request", "required": true, "schema": { "$ref": "#/components/schemas/AssistantAskRequest" } }], "result": { "name": "result", "schema": { "$ref": "#/components/schemas/AssistantAskResponse" } }, "x-tendi": { "owner": "desktop", "wire": "tauri", "clients": ["desktop"], "execution": "write" } },
     { "name": "assistant_cancel", "params": [{ "name": "request", "required": true, "schema": { "$ref": "#/components/schemas/AssistantCancelRequest" } }], "result": { "name": "result", "schema": { "$ref": "#/components/schemas/AssistantCancelResponse" } }, "x-tendi": { "owner": "desktop", "wire": "tauri", "clients": ["desktop"], "execution": "write" } },
     { "name": "assistant_chat_sessions", "params": [], "result": { "name": "result", "schema": { "$ref": "#/components/schemas/AssistantChatSessionList" } }, "x-tendi": { "owner": "desktop", "wire": "tauri", "clients": ["desktop"], "execution": "read" } },
+    { "name": "tokenizer_count", "params": [{ "name": "request", "required": true, "schema": { "$ref": "#/components/schemas/TokenizerCountRequest" } }], "result": { "name": "result", "schema": { "$ref": "#/components/schemas/TokenizerCountResponse" } }, "x-tendi": { "owner": "desktop", "wire": "tauri", "clients": ["desktop"], "execution": "read" } },
     { "name": "session_projects_list", "params": [], "result": { "name": "result", "schema": { "$ref": "#/components/schemas/SessionProjectSummaryList" } }, "x-tendi": { "owner": "daemon", "wire": "jsonrpc", "clients": ["desktop"], "execution": "read", "typedHandler": true } },
     { "name": "project_scan_scopes_list", "params": [], "result": { "name": "result", "schema": { "$ref": "#/components/schemas/ProjectScanScopeList" } }, "x-tendi": { "owner": "daemon", "wire": "jsonrpc", "clients": ["desktop"], "execution": "read", "typedHandler": true } },
     { "name": "project_scan_scopes_save", "params": [{ "name": "request", "required": true, "schema": { "$ref": "#/components/schemas/ProjectScanScopesSaveRequest" } }], "result": { "name": "result", "schema": { "$ref": "#/components/schemas/ProjectScanScopeList" } }, "x-tendi": { "owner": "daemon", "wire": "jsonrpc", "clients": ["desktop"], "execution": "write", "typedHandler": true } },
@@ -704,45 +705,23 @@
       },
       "HookDeleteRequest": {
         "type": "object",
-        "properties": {
-          "agent": { "$ref": "#/components/schemas/AgentKind" },
-          "path": { "type": "string", "minLength": 1 },
-          "expectedTrustHash": { "type": "string", "minLength": 1 },
-          "event": { "type": "string", "minLength": 1 },
-          "matcher": { "type": ["string", "null"] },
-          "hookType": { "type": ["string", "null"] },
-          "command": { "type": ["string", "null"] },
-          "url": { "type": ["string", "null"] },
-          "prompt": { "type": ["string", "null"] },
-          "filter": { "type": ["string", "null"] },
-          "statusMessage": { "type": ["string", "null"] }
-        },
-        "required": ["agent", "path", "expectedTrustHash", "event"],
+        "properties": { "id": { "type": "string", "minLength": 1 } },
+        "required": ["id"],
         "additionalProperties": false
       },
       "HookDeleteManyRequest": {
         "type": "object",
-        "properties": { "requests": { "type": "array", "items": { "$ref": "#/components/schemas/HookDeleteRequest" } } },
-        "required": ["requests"],
+        "properties": { "ids": { "$ref": "#/components/schemas/StringList" } },
+        "required": ["ids"],
         "additionalProperties": false
       },
       "HookSetEnabledRequest": {
         "type": "object",
         "properties": {
-          "agent": { "$ref": "#/components/schemas/AgentKind" },
-          "path": { "type": "string", "minLength": 1 },
-          "expectedTrustHash": { "type": "string", "minLength": 1 },
-          "event": { "type": "string", "minLength": 1 },
-          "matcher": { "type": ["string", "null"] },
-          "hookType": { "type": ["string", "null"] },
-          "command": { "type": ["string", "null"] },
-          "url": { "type": ["string", "null"] },
-          "prompt": { "type": ["string", "null"] },
-          "filter": { "type": ["string", "null"] },
-          "statusMessage": { "type": ["string", "null"] },
+          "id": { "type": "string", "minLength": 1 },
           "enabled": { "type": "boolean" }
         },
-        "required": ["agent", "path", "expectedTrustHash", "event", "enabled"],
+        "required": ["id", "enabled"],
         "additionalProperties": false
       },
       "HookSetEnabledManyRequest": {
@@ -753,64 +732,29 @@
       },
       "HookReviewRequest": {
         "type": "object",
-        "properties": {
-          "agent": { "$ref": "#/components/schemas/AgentKind" },
-          "path": { "type": "string", "minLength": 1 },
-          "expectedTrustHash": { "type": "string", "minLength": 1 },
-          "event": { "type": "string", "minLength": 1 },
-          "matcher": { "type": ["string", "null"] },
-          "hookType": { "type": ["string", "null"] },
-          "command": { "type": ["string", "null"] },
-          "url": { "type": ["string", "null"] },
-          "prompt": { "type": ["string", "null"] },
-          "filter": { "type": ["string", "null"] },
-          "statusMessage": { "type": ["string", "null"] }
-        },
-        "required": ["agent", "path", "expectedTrustHash", "event"],
+        "properties": { "id": { "type": "string", "minLength": 1 } },
+        "required": ["id"],
         "additionalProperties": false
       },
       "HookSourceReadRequest": {
         "type": "object",
-        "properties": {
-          "agent": { "$ref": "#/components/schemas/AgentKind" },
-          "path": { "type": "string", "minLength": 1 },
-          "expectedTrustHash": { "type": "string" },
-          "event": { "type": ["string", "null"] },
-          "matcher": { "type": ["string", "null"] },
-          "hookType": { "type": ["string", "null"] },
-          "command": { "type": ["string", "null"] },
-          "url": { "type": ["string", "null"] },
-          "prompt": { "type": ["string", "null"] },
-          "filter": { "type": ["string", "null"] },
-          "statusMessage": { "type": ["string", "null"] },
-          "enabled": { "type": ["boolean", "null"] }
-        },
-        "required": ["agent", "path"],
+        "properties": { "id": { "type": "string", "minLength": 1 } },
+        "required": ["id"],
         "additionalProperties": false
       },
       "McpSetEnabledRequest": {
         "type": "object",
         "properties": {
-          "agent": { "$ref": "#/components/schemas/AgentKind" },
-          "path": { "type": "string", "minLength": 1 },
-          "expectedTrustHash": { "type": "string", "minLength": 1 },
-          "name": { "type": "string", "minLength": 1 },
-          "enabled": { "type": "boolean" },
-          "serverPath": { "$ref": "#/components/schemas/StringList" }
+          "id": { "type": "string", "minLength": 1 },
+          "enabled": { "type": "boolean" }
         },
-        "required": ["agent", "path", "expectedTrustHash", "name", "enabled", "serverPath"],
+        "required": ["id", "enabled"],
         "additionalProperties": false
       },
       "McpProbeRequest": {
         "type": "object",
-        "properties": {
-          "agent": { "$ref": "#/components/schemas/AgentKind" },
-          "path": { "type": "string", "minLength": 1 },
-          "expectedTrustHash": { "type": "string", "minLength": 1 },
-          "name": { "type": "string", "minLength": 1 },
-          "serverPath": { "$ref": "#/components/schemas/StringList" }
-        },
-        "required": ["agent", "path", "expectedTrustHash", "name", "serverPath"],
+        "properties": { "id": { "type": "string", "minLength": 1 } },
+        "required": ["id"],
         "additionalProperties": false
       },
       "McpSetEnabledManyRequest": {
@@ -1016,43 +960,43 @@
       },
       "SkillFilesRequest": {
         "type": "object",
-        "properties": { "skillId": { "type": "string", "minLength": 1 }, "skillPath": { "type": ["string", "null"] } },
+        "properties": { "skillId": { "type": "string", "minLength": 1 }, "locationId": { "type": ["string", "null"] } },
         "required": ["skillId"],
         "additionalProperties": false
       },
       "SkillFileReadRequest": {
         "type": "object",
-        "properties": { "skillId": { "type": "string", "minLength": 1 }, "relativePath": { "type": "string", "minLength": 1 }, "skillPath": { "type": ["string", "null"] } },
+        "properties": { "skillId": { "type": "string", "minLength": 1 }, "relativePath": { "type": "string", "minLength": 1 }, "locationId": { "type": ["string", "null"] } },
         "required": ["skillId", "relativePath"],
         "additionalProperties": false
       },
       "SkillFileSaveRequest": {
         "type": "object",
-        "properties": { "skillId": { "type": "string", "minLength": 1 }, "relativePath": { "type": "string", "minLength": 1 }, "expectedSha256": { "type": "string", "minLength": 1 }, "content": { "type": "string" }, "skillPath": { "type": ["string", "null"] } },
+        "properties": { "skillId": { "type": "string", "minLength": 1 }, "relativePath": { "type": "string", "minLength": 1 }, "expectedSha256": { "type": "string", "minLength": 1 }, "content": { "type": "string" }, "locationId": { "type": ["string", "null"] } },
         "required": ["skillId", "relativePath", "expectedSha256", "content"],
         "additionalProperties": false
       },
       "SkillFileCreateRequest": {
         "type": "object",
-        "properties": { "skillId": { "type": "string", "minLength": 1 }, "relativePath": { "type": "string", "minLength": 1 }, "skillPath": { "type": ["string", "null"] } },
+        "properties": { "skillId": { "type": "string", "minLength": 1 }, "relativePath": { "type": "string", "minLength": 1 }, "locationId": { "type": ["string", "null"] } },
         "required": ["skillId", "relativePath"],
         "additionalProperties": false
       },
       "SkillFolderCreateRequest": {
         "type": "object",
-        "properties": { "skillId": { "type": "string", "minLength": 1 }, "relativePath": { "type": "string", "minLength": 1 }, "skillPath": { "type": ["string", "null"] } },
+        "properties": { "skillId": { "type": "string", "minLength": 1 }, "relativePath": { "type": "string", "minLength": 1 }, "locationId": { "type": ["string", "null"] } },
         "required": ["skillId", "relativePath"],
         "additionalProperties": false
       },
       "SkillPathRenameRequest": {
         "type": "object",
-        "properties": { "skillId": { "type": "string", "minLength": 1 }, "fromRelativePath": { "type": "string", "minLength": 1 }, "toRelativePath": { "type": "string", "minLength": 1 }, "skillPath": { "type": ["string", "null"] } },
+        "properties": { "skillId": { "type": "string", "minLength": 1 }, "fromRelativePath": { "type": "string", "minLength": 1 }, "toRelativePath": { "type": "string", "minLength": 1 }, "locationId": { "type": ["string", "null"] } },
         "required": ["skillId", "fromRelativePath", "toRelativePath"],
         "additionalProperties": false
       },
       "SkillPathDeleteRequest": {
         "type": "object",
-        "properties": { "skillId": { "type": "string", "minLength": 1 }, "relativePath": { "type": "string", "minLength": 1 }, "skillPath": { "type": ["string", "null"] } },
+        "properties": { "skillId": { "type": "string", "minLength": 1 }, "relativePath": { "type": "string", "minLength": 1 }, "locationId": { "type": ["string", "null"] } },
         "required": ["skillId", "relativePath"],
         "additionalProperties": false
       },
@@ -1076,7 +1020,7 @@
       },
       "SessionResumeRequest": {
         "type": "object",
-        "properties": { "id": { "type": "string", "minLength": 1 }, "agent": { "type": "string", "minLength": 1 }, "title": { "type": ["string", "null"] }, "project": { "type": ["string", "null"] }, "path": { "type": "string", "minLength": 1 } },
+        "properties": { "id": { "type": "string", "minLength": 1 }, "agent": { "type": "string", "minLength": 1 }, "project": { "type": ["string", "null"] }, "path": { "type": "string", "minLength": 1 }, "reconcile": { "type": "boolean" } },
         "required": ["id", "agent", "path"],
         "additionalProperties": false
       },
@@ -1193,6 +1137,7 @@
       "SkillPath": {
         "type": "object",
         "properties": {
+          "locationId": { "type": "string" },
           "path": { "type": "string" },
           "root": { "type": "string" },
           "scope": { "type": "string" },
@@ -1230,6 +1175,7 @@
           "dependents": { "type": "array", "items": { "type": "string" } },
           "dependencyIds": { "type": "array", "items": { "type": "string" } },
           "dependentIds": { "type": "array", "items": { "type": "string" } },
+          "is_wrapper": { "type": "boolean" },
           "visibility": { "$ref": "#/components/schemas/SkillVisibility" },
           "agents": { "type": "array", "items": { "$ref": "#/components/schemas/AgentKind" } },
           "paths": { "type": "array", "items": { "$ref": "#/components/schemas/SkillPath" } },
@@ -1240,7 +1186,7 @@
           "ctime": { "type": ["string", "null"] },
           "mtime": { "type": ["string", "null"] }
         },
-        "required": ["id", "installationId", "name", "tags", "dependencies", "dependents", "dependencyIds", "dependentIds", "visibility", "agents", "paths", "source_summary", "install_targets", "update_status", "is_system"],
+        "required": ["id", "installationId", "name", "tags", "dependencies", "dependents", "dependencyIds", "dependentIds", "is_wrapper", "visibility", "agents", "paths", "source_summary", "install_targets", "update_status", "is_system"],
         "additionalProperties": false
       },
       "SkillRecordList": {
@@ -1643,9 +1589,43 @@
           "requestId": { "type": "string", "minLength": 1 },
           "kind": { "type": "string", "minLength": 1 },
           "text": { "type": "string" },
-          "detail": { "type": "string" }
+          "detail": { "type": "string" },
+          "toolCallId": { "type": "string", "minLength": 1 }
         },
         "required": ["conversationId", "requestId", "kind"],
+        "additionalProperties": false
+      },
+      "AppSettingsPatch": {
+        "type": "object",
+        "properties": {
+          "appearance": { "type": "string" },
+          "fontFamily": { "type": "string" },
+          "lightTheme": { "type": "string" },
+          "darkTheme": { "type": "string" },
+          "appIcon": { "type": "string" },
+          "terminal": { "type": "string" },
+          "sessionResumeTarget": { "type": "string" },
+          "missingSessionProjectPolicy": { "type": "string" },
+          "editor": { "type": "string" },
+          "developerMode": { "type": "boolean" },
+          "additionalSessionRoots": { "type": "array", "items": { "type": "string" } }
+        },
+        "additionalProperties": false
+      },
+      "TokenizerCountRequest": {
+        "type": "object",
+        "properties": {
+          "texts": { "type": "array", "items": { "type": "string" } }
+        },
+        "required": ["texts"],
+        "additionalProperties": false
+      },
+      "TokenizerCountResponse": {
+        "type": "object",
+        "properties": {
+          "counts": { "type": "array", "items": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 } }
+        },
+        "required": ["counts"],
         "additionalProperties": false
       },
       "AppSettings": {
@@ -1720,6 +1700,7 @@
       "HookRecord": {
         "type": "object",
         "properties": {
+          "id": { "type": "string" },
           "agent": { "$ref": "#/components/schemas/AgentKind" },
           "event": { "type": "string" },
           "matcher": { "type": ["string", "null"] },
@@ -1735,7 +1716,7 @@
           "needs_review": { "type": "boolean" },
           "read_only_reason": { "type": ["string", "null"] }
         },
-        "required": ["agent", "event", "enabled", "path", "trust_hash", "needs_review"],
+        "required": ["id", "agent", "event", "enabled", "path", "trust_hash", "needs_review"],
         "additionalProperties": false
       },
       "HookRecordList": {
@@ -1768,6 +1749,7 @@
       "McpServerRecord": {
         "type": "object",
         "properties": {
+          "id": { "type": "string" },
           "agent": { "$ref": "#/components/schemas/AgentKind" },
           "name": { "type": "string" },
           "scope": { "type": "string" },
@@ -1789,7 +1771,7 @@
           "icons": { "type": "array", "items": { "$ref": "#/components/schemas/McpIcon" } },
           "tools": { "type": "array", "items": { "$ref": "#/components/schemas/McpTool" } }
         },
-        "required": ["agent", "name", "scope", "transport", "enabled", "status", "path", "trust_hash"],
+        "required": ["id", "agent", "name", "scope", "transport", "enabled", "status", "path", "trust_hash"],
         "additionalProperties": false
       },
       "McpServerRecordList": {
@@ -1819,7 +1801,8 @@
           "agent": { "type": ["string", "null"] },
           "days": { "type": "integer", "minimum": 1, "maximum": 365 },
           "rankDays": { "type": "integer", "minimum": 1, "maximum": 730 },
-          "refreshTranscripts": { "type": "boolean" }
+          "refreshTranscripts": { "type": "boolean" },
+          "endDate": { "type": ["string", "null"] }
         },
         "required": ["agent", "days", "rankDays", "refreshTranscripts"],
         "additionalProperties": false
@@ -1835,6 +1818,30 @@
           "totalTokens": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 }
         },
         "required": ["inputTokens", "cachedInputTokens", "cacheWriteInputTokens", "outputTokens", "reasoningOutputTokens", "totalTokens"],
+        "additionalProperties": false
+      },
+      "AnalyticsCost": {
+        "type": "object",
+        "properties": {
+          "inputUsd": { "type": "number" },
+          "cachedInputUsd": { "type": "number" },
+          "cacheWriteInputUsd": { "type": "number" },
+          "outputUsd": { "type": "number" },
+          "totalUsd": { "type": "number" }
+        },
+        "required": ["inputUsd", "cachedInputUsd", "cacheWriteInputUsd", "outputUsd", "totalUsd"],
+        "additionalProperties": false
+      },
+      "AnalyticsProjectUsage": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string" },
+          "name": { "type": "string" },
+          "usage": { "$ref": "#/components/schemas/AnalyticsTokenUsage" },
+          "responses": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
+          "cost": { "$ref": "#/components/schemas/AnalyticsCost" }
+        },
+        "required": ["id", "name", "usage", "responses", "cost"],
         "additionalProperties": false
       },
       "AnalyticsCapabilities": {
@@ -1868,9 +1875,10 @@
           "model": { "type": "string" },
           "totalTokens": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
           "totalMs": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
-          "completedRuns": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 }
+          "completedRuns": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
+          "cost": { "$ref": "#/components/schemas/AnalyticsCost" }
         },
-        "required": ["model", "totalTokens", "totalMs", "completedRuns"],
+        "required": ["model", "totalTokens", "totalMs", "completedRuns", "cost"],
         "additionalProperties": false
       },
       "AnalyticsCallUsage": {
@@ -1888,6 +1896,7 @@
         "properties": {
           "date": { "type": "string" },
           "usage": { "$ref": "#/components/schemas/AnalyticsTokenUsage" },
+          "cost": { "$ref": "#/components/schemas/AnalyticsCost" },
           "responses": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
           "sessions": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
           "sessionsByAgent": { "type": "object", "additionalProperties": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 } },
@@ -1895,11 +1904,12 @@
           "aborted": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
           "compacted": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
           "models": { "type": "array", "items": { "$ref": "#/components/schemas/AnalyticsModelUsage" } },
+          "projects": { "type": "array", "items": { "$ref": "#/components/schemas/AnalyticsProjectUsage" } },
           "tools": { "type": "array", "items": { "$ref": "#/components/schemas/AnalyticsCallUsage" } },
           "skills": { "type": "array", "items": { "$ref": "#/components/schemas/AnalyticsCallUsage" } },
           "rateLimits": { "type": "object", "additionalProperties": { "type": "number" } }
         },
-        "required": ["date", "usage", "responses", "sessions", "sessionsByAgent", "runs", "aborted", "compacted", "models", "tools", "skills", "rateLimits"],
+        "required": ["date", "usage", "cost", "responses", "sessions", "sessionsByAgent", "runs", "aborted", "compacted", "models", "projects", "tools", "skills", "rateLimits"],
         "additionalProperties": false
       },
       "AnalyticsRankItem": {
@@ -1931,6 +1941,7 @@
         "type": "object",
         "properties": {
           "usage": { "$ref": "#/components/schemas/AnalyticsTokenUsage" },
+          "cost": { "$ref": "#/components/schemas/AnalyticsCost" },
           "responses": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
           "sessions": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
           "runs": { "$ref": "#/components/schemas/AnalyticsRunSummary" },
@@ -1939,7 +1950,7 @@
           "compacted": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
           "compactedSessions": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 }
         },
-        "required": ["usage", "responses", "sessions", "runs", "aborted", "abortedRate", "compacted", "compactedSessions"],
+        "required": ["usage", "cost", "responses", "sessions", "runs", "aborted", "abortedRate", "compacted", "compactedSessions"],
         "additionalProperties": false
       },
       "AnalyticsCoverage": {

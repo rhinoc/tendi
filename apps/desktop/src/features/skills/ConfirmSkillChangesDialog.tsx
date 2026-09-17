@@ -243,9 +243,6 @@ function SkillUpdateDiffPreview({
             onItemToggle={(item) => {
               if (item.kind === "folder") toggleFolder(item.id);
             }}
-            renderItem={(item, row) => (
-              <Tooltip content={formatUserPath(item.id)} onlyWhenTruncated>{row}</Tooltip>
-            )}
             renderTrailing={(item) => {
               const updateFile = filesByPath.get(item.id);
               if (!updateFile || !hasFileDiff(updateFile)) return null;

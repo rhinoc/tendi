@@ -247,6 +247,9 @@ fn save_config(
     expected_sha256: &str,
     content: &str,
 ) -> Result<AgentConfigWriteResult> {
+    validate_config(&config.format, content)?;
+    let _resources =
+        crate::coordination::acquire_file_resources(std::slice::from_ref(&config.path))?;
     let current = if config.path.is_file() {
         fs::read_to_string(&config.path)
             .with_context(|| format!("failed to read {}", config.path.display()))?
@@ -259,7 +262,6 @@ fn save_config(
         }
         .into());
     }
-    validate_config(&config.format, content)?;
     atomic_write(&config.path, content)?;
     let updated_at = file_updated_at(&config.path);
     Ok(AgentConfigWriteResult {
@@ -275,6 +277,12 @@ fn delete_configs_for_home(home: &Path, paths: &[PathBuf]) -> Result<()> {
         .iter()
         .map(|path| resolve_config_for_path(home, path))
         .collect::<Result<Vec<_>>>()?;
+    let _resources = crate::coordination::acquire_file_resources(
+        &configs
+            .iter()
+            .map(|config| config.path.clone())
+            .collect::<Vec<_>>(),
+    )?;
     for config in &configs {
         if !config.path.is_file() {
             bail!("config file not found: {}", config.path.display());
@@ -298,6 +306,7 @@ fn create_profile_for_roots(
         .ok_or_else(|| anyhow::anyhow!("config profiles are not supported for this agent"))?;
     let path = config_profile_path_for_roots(agent, home, name)?;
     validate_config(format, content)?;
+    let _resources = crate::coordination::acquire_file_resources(std::slice::from_ref(&path))?;
     if fs::symlink_metadata(&path).is_ok() {
         bail!("config profile already exists: {name}");
     }
@@ -352,6 +361,83 @@ mod tests {
         let codex_home = home.join("custom-codex");
         let configs = configs_for_roots_with_codex_home(&home, &codex_home);
         assert_eq!(configs[0].path, codex_home.join("config.toml"));
+    }
+
+    #[test]
+    fn file_resources_serialize_config_save_with_hook_review_and_recheck_hash() {
+        let home = temp_home("cross-domain-cas");
+        fs::create_dir_all(home.join(".codex")).unwrap();
+        let path = home.join(".codex/config.toml");
+        let before = "model = \"original\"\n";
+        fs::write(&path, before).unwrap();
+        let lease =
+            crate::coordination::acquire_file_resources(std::slice::from_ref(&path)).unwrap();
+        let config = resolve_config_for_roots(&home, &home.join(".codex"), &path).unwrap();
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            done_tx
+                .send(save_config(
+                    &config,
+                    &sha256_text(before),
+                    "model = \"edited\"\n",
+                ))
+                .unwrap();
+        });
+        started_rx.recv().unwrap();
+        assert!(
+            done_rx
+                .recv_timeout(std::time::Duration::from_millis(100))
+                .is_err()
+        );
+        crate::providers::codex::write_trusted_hash(&path, "source:hook", "sha256:trusted")
+            .unwrap();
+        drop(lease);
+        let result = done_rx
+            .recv_timeout(std::time::Duration::from_secs(3))
+            .unwrap();
+        assert!(
+            result
+                .unwrap_err()
+                .downcast_ref::<ConfigChangedError>()
+                .is_some()
+        );
+        worker.join().unwrap();
+        let current = fs::read_to_string(&path).unwrap();
+        assert!(current.contains("model = \"original\""));
+        assert!(current.contains("sha256:trusted"));
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn file_resources_allow_unrelated_provider_config_save() {
+        let home = temp_home("independent-config");
+        fs::create_dir_all(home.join(".codex")).unwrap();
+        fs::create_dir_all(home.join(".claude")).unwrap();
+        let busy = home.join(".codex/config.toml");
+        fs::write(&busy, "model = \"busy\"\n").unwrap();
+        let independent = home.join(".claude/settings.json");
+        fs::write(&independent, "{}\n").unwrap();
+        let lease = crate::coordination::acquire_file_resources(&[busy]).unwrap();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let config = resolve_config_for_path(&home, &independent).unwrap();
+        let worker = std::thread::spawn(move || {
+            done_tx
+                .send(save_config(
+                    &config,
+                    &sha256_text("{}\n"),
+                    "{\"permissions\":{}}\n",
+                ))
+                .unwrap();
+        });
+        done_rx
+            .recv_timeout(std::time::Duration::from_secs(3))
+            .unwrap()
+            .unwrap();
+        worker.join().unwrap();
+        drop(lease);
+        fs::remove_dir_all(home).unwrap();
     }
 
     #[test]

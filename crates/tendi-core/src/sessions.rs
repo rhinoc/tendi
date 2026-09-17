@@ -198,16 +198,86 @@ impl SessionScanCache {
         agent: AgentKind,
         path: &Path,
     ) -> Option<(SessionRecord, u64)> {
-        let entry = self.entry_for_path(agent, path)?;
-        let (file_mtime, file_size) = file_state(path)?;
-        let cached_size = u64::try_from(entry.file_size).ok()?;
+        let logger = crate::logging::global();
+        let Some(entry) = self.entry_for_path(agent, path) else {
+            logger.debug(
+                "session scan append cache decision",
+                serde_json::json!({
+                    "agent": agent.label(),
+                    "path": path,
+                    "eligible": false,
+                    "reason": "no_cache_entry",
+                }),
+            );
+            return None;
+        };
+        let Some((file_mtime, file_size)) = file_state(path) else {
+            logger.debug(
+                "session scan append cache decision",
+                serde_json::json!({
+                    "agent": agent.label(),
+                    "path": path,
+                    "eligible": false,
+                    "reason": "file_state_unavailable",
+                    "cachedMtime": entry.file_mtime,
+                    "cachedSize": entry.file_size,
+                }),
+            );
+            return None;
+        };
+        let Some(cached_size) = u64::try_from(entry.file_size).ok() else {
+            logger.debug(
+                "session scan append cache decision",
+                serde_json::json!({
+                    "agent": agent.label(),
+                    "path": path,
+                    "eligible": false,
+                    "reason": "invalid_cached_size",
+                    "cachedMtime": entry.file_mtime,
+                    "cachedSize": entry.file_size,
+                    "currentMtime": file_mtime,
+                    "currentSize": file_size,
+                }),
+            );
+            return None;
+        };
         let current_size = u64::try_from(file_size).ok()?;
-        if current_size <= cached_size
-            || file_mtime < entry.file_mtime
-            || !is_line_boundary(path, cached_size)
-            || !self.additional_file_states_current(entry)
-            || session_requires_rescan(&entry.session)
-        {
+        let line_boundary = is_line_boundary(path, cached_size);
+        let additional_files_current = self.additional_file_states_current(entry);
+        let requires_rescan = session_requires_rescan(&entry.session);
+        let reason = if current_size <= cached_size {
+            "not_appended"
+        } else if file_mtime < entry.file_mtime {
+            "mtime_regressed"
+        } else if !line_boundary {
+            "cached_offset_not_on_line_boundary"
+        } else if !additional_files_current {
+            "additional_source_changed"
+        } else if requires_rescan {
+            "session_requires_rescan"
+        } else {
+            "eligible"
+        };
+        let fields = serde_json::json!({
+            "agent": agent.label(),
+            "path": path,
+            "sessionId": entry.session.id,
+            "eligible": reason == "eligible",
+            "reason": reason,
+            "cachedMtime": entry.file_mtime,
+            "cachedSize": cached_size,
+            "currentMtime": file_mtime,
+            "currentSize": current_size,
+            "lineBoundary": line_boundary,
+            "additionalFilesCurrent": additional_files_current,
+            "requiresRescan": requires_rescan,
+        });
+        if reason != "eligible" && current_size > cached_size {
+            logger.info("session scan append cache rejected", fields);
+        } else {
+            logger.debug("session scan append cache decision", fields);
+        }
+        if reason != "eligible" {
             return None;
         }
         Some((entry.session.clone(), cached_size))
@@ -804,16 +874,35 @@ fn scan_detected_jsonl_session(
     sessions: &mut Vec<SessionRecord>,
     cache: Option<&SessionScanCache>,
 ) {
+    let logger = crate::logging::global();
     let Some(agent) = cache
         .and_then(|cache| cache.agent_for_path(path))
         .or_else(|| detect_jsonl_agent(path))
     else {
+        logger.debug(
+            "session scan skipped unrecognized jsonl",
+            serde_json::json!({ "path": path }),
+        );
         return;
     };
     if let Some(session) = cache
         .and_then(|cache| cache.session_if_current(agent, path))
         .filter(session_is_known_non_empty)
     {
+        logger.debug(
+            "session scan cache hit",
+            serde_json::json!({
+                "agent": agent.label(),
+                "path": path,
+                "sessionId": &session.id,
+                "strategy": "cached",
+                "messageCount": session.message_count,
+                "assistantLastPresent": session
+                    .last_assistant_message
+                    .as_ref()
+                    .is_some_and(|message| !message.is_empty()),
+            }),
+        );
         sessions.push(session);
         return;
     }
@@ -821,10 +910,42 @@ fn scan_detected_jsonl_session(
         if let Some((session, offset)) =
             cache.and_then(|cache| cache.session_if_appended(agent, path))
         {
+            let session_id = session.id.clone();
+            logger.info(
+                "session scan append started",
+                serde_json::json!({
+                    "agent": agent.label(),
+                    "path": path,
+                    "sessionId": &session_id,
+                    "offset": offset,
+                }),
+            );
             if let Some(session) = scan_jsonl_meta_from_offset(path, offset, session) {
+                logger.info(
+                    "session scan append completed",
+                    serde_json::json!({
+                        "agent": agent.label(),
+                        "path": path,
+                        "sessionId": &session.id,
+                        "messageCount": session.message_count,
+                        "assistantLastPresent": session
+                            .last_assistant_message
+                            .as_ref()
+                            .is_some_and(|message| !message.is_empty()),
+                    }),
+                );
                 sessions.push(session);
                 return;
             }
+            logger.warn(
+                "session scan append produced no session",
+                serde_json::json!({
+                    "agent": agent.label(),
+                    "path": path,
+                    "sessionId": &session_id,
+                    "offset": offset,
+                }),
+            );
         }
     }
     let meta = scan_jsonl_meta_for_agent(path, Some(agent));
@@ -837,7 +958,7 @@ fn scan_detected_jsonl_session(
         return;
     };
     let project = provider.infer_session_project(path, meta.project);
-    sessions.push(SessionRecord {
+    let session = SessionRecord {
         id,
         agent,
         title: meta.title,
@@ -860,7 +981,21 @@ fn scan_detected_jsonl_session(
         is_run_everything: None,
         parent_session_id: meta.parent_session_id,
         token_usage: meta.token_usage,
-    });
+    };
+    logger.debug(
+        "session scan full parse completed",
+        serde_json::json!({
+            "agent": agent.label(),
+            "path": path,
+            "sessionId": &session.id,
+            "messageCount": session.message_count,
+            "assistantLastPresent": session
+                .last_assistant_message
+                .as_ref()
+                .is_some_and(|message| !message.is_empty()),
+        }),
+    );
+    sessions.push(session);
 }
 
 fn detect_jsonl_agent(path: &Path) -> Option<AgentKind> {
@@ -1131,9 +1266,10 @@ fn scan_jsonl_meta_lines<I, S>(
         }
         meta.message_count = meta.message_count.map(|count| count + 1);
         let prefix = metadata_hint_prefix(line);
-        meta.has_content |= provider
+        let line_has_content = provider
             .and_then(|provider| provider.session_line_has_content(prefix))
             .unwrap_or_else(|| fallback_line_has_session_content(prefix));
+        meta.has_content |= line_has_content;
         if !provider
             .and_then(|provider| provider.session_line_requires_metadata_parse(prefix, meta))
             .unwrap_or_else(|| {
@@ -1157,16 +1293,18 @@ fn scan_jsonl_meta_lines<I, S>(
                 }
             }
         }
+        let user_message = provider.and_then(|provider| provider.session_user_message(&value));
+        let message = provider
+            .map(|provider| extract_session_message_for_agent(provider.kind(), &value))
+            .unwrap_or_else(|| extract_session_message(&value));
+        meta.has_content |= user_message.is_some() || message.is_some();
         if crate::transcript::is_inherited_transcript_value(&value, inherited_history_start_ordinal)
         {
             continue;
         }
-        if let Some(body) = provider.and_then(|provider| provider.session_user_message(&value)) {
+        if let Some(body) = user_message {
             record_user_session_metadata(meta, &body);
         }
-        let message = provider
-            .map(|provider| extract_session_message_for_agent(provider.kind(), &value))
-            .unwrap_or_else(|| extract_session_message(&value));
         if let Some((role, body)) = message {
             match role {
                 "user" => record_user_session_metadata(meta, &body),
@@ -1374,18 +1512,6 @@ pub(crate) fn apply_time_bounds(meta: &mut SessionMetadata, timestamp: &str) {
     }
 }
 
-pub(crate) fn extract_session_title(value: &Value) -> Option<String> {
-    extract_session_title_for_agent(infer_session_value_agent(value), value)
-}
-
-fn infer_session_value_agent(value: &Value) -> AgentKind {
-    if value.get("type").and_then(Value::as_str) == Some("response_item") {
-        AgentKind::Codex
-    } else {
-        AgentKind::Unknown
-    }
-}
-
 pub(crate) fn extract_session_title_for_agent(agent: AgentKind, value: &Value) -> Option<String> {
     if crate::providers::agent_provider(agent).session_message_kind(value)
         != Some(crate::providers::SessionMessageKind::User)
@@ -1400,6 +1526,14 @@ pub(crate) fn extract_session_title_for_agent(agent: AgentKind, value: &Value) -
             .or_else(|| value.pointer("/payload/content")),
     )?;
     clean_title(&text)
+}
+
+fn infer_session_value_agent(value: &Value) -> AgentKind {
+    if value.get("type").and_then(Value::as_str) == Some("response_item") {
+        AgentKind::Codex
+    } else {
+        AgentKind::Unknown
+    }
 }
 
 pub(crate) fn extract_session_message(value: &Value) -> Option<(&'static str, String)> {
@@ -1812,7 +1946,7 @@ mod tests {
     use super::{
         SESSION_PREVIEW_MAX_CHARS, SessionRecord, SessionRepositoryResolver, SessionScanCache,
         SessionScanCacheEntry, SessionScanSourceState, clean_preview_text, clean_title,
-        compare_timestamps, extract_session_message, extract_session_title, file_state,
+        compare_timestamps, extract_session_message, extract_session_title_for_agent, file_state,
         infer_session_project, infer_session_resume_target, is_session_candidate_path,
         merge_sessions, normalize_session_projects, repository_from_git_snapshot,
         scan_additional_session_roots, scan_jsonl_meta_for_agent, scan_jsonl_sessions,
@@ -2149,6 +2283,29 @@ mod tests {
     }
 
     #[test]
+    fn skips_codex_session_with_only_injected_context_until_real_message_arrives() {
+        let root = temp_dir("tendi-context-only-codex-session-test");
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("rollout-context-only-session-id.jsonl");
+        let context = r##"{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"# AGENTS.md instructions\n<INSTRUCTIONS>hidden</INSTRUCTIONS>"}]}}"##;
+        fs::write(&path, context).unwrap();
+
+        let mut sessions = Vec::new();
+        scan_codex_jsonl(&root, &mut sessions, None);
+        assert!(sessions.is_empty());
+        assert!(!scan_jsonl_meta_for_agent(&path, Some(AgentKind::Codex)).has_content);
+
+        let user_message = r#"{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Fix the session title"}]}}"#;
+        fs::write(&path, format!("{context}\n{user_message}\n")).unwrap();
+
+        scan_codex_jsonl(&root, &mut sessions, None);
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].title.as_deref(), Some("Fix the session title"));
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn cached_empty_codex_session_is_rechecked_instead_of_reused() {
         let root = temp_dir("tendi-cached-empty-codex-session-test");
         fs::create_dir_all(&root).unwrap();
@@ -2412,11 +2569,11 @@ mod tests {
         });
 
         assert_eq!(
-            extract_session_title(&cursor),
+            extract_session_title_for_agent(AgentKind::Cursor, &cursor),
             Some("Fix the install progress UI".to_string())
         );
         assert_eq!(
-            extract_session_title(&codex),
+            extract_session_title_for_agent(AgentKind::Codex, &codex),
             Some("sessions 页面修一下标题".to_string())
         );
         let codex_with_injected_context = json!({
@@ -2432,7 +2589,7 @@ mod tests {
             }
         });
         assert_eq!(
-            extract_session_title(&codex_with_injected_context),
+            extract_session_title_for_agent(AgentKind::Codex, &codex_with_injected_context),
             Some("The real user request".to_string())
         );
         let codex_with_embedded_context = json!({
@@ -2444,7 +2601,7 @@ mod tests {
             }
         });
         assert_eq!(
-            extract_session_title(&codex_with_embedded_context),
+            extract_session_title_for_agent(AgentKind::Codex, &codex_with_embedded_context),
             Some("Real request".to_string())
         );
 
@@ -2462,7 +2619,10 @@ mod tests {
                 }
             }
         });
-        assert_eq!(extract_session_title(&codex_selected_skill), None);
+        assert_eq!(
+            extract_session_title_for_agent(AgentKind::Codex, &codex_selected_skill),
+            None
+        );
         assert_eq!(extract_session_message(&codex_selected_skill), None);
         assert_eq!(
             clean_title(

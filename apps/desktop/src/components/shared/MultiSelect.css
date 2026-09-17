@@ -47,6 +47,7 @@
 }
 
 .multiSelectTriggerValues {
+  position: relative;
   min-width: 0;
   flex: 1 1 auto;
   min-height: 22px;
@@ -59,7 +60,25 @@
 }
 
 .multiSelectValues {
-  display: contents;
+  min-width: 0;
+  width: 100%;
+  flex: 1 1 auto;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  overflow: hidden;
+}
+
+.multiSelectValuesMeasure {
+  position: absolute;
+  top: 0;
+  left: 0;
+  display: flex;
+  gap: 6px;
+  width: max-content;
+  visibility: hidden;
+  pointer-events: none;
 }
 
 .multiSelectChevron {
@@ -76,7 +95,7 @@
 .multiSelectValue {
   min-width: 0;
   max-width: 100%;
-  flex: 0 1 auto;
+  flex: 0 0 auto;
   height: 20px;
   display: inline-flex;
   align-items: center;
@@ -90,6 +109,12 @@
   font-size: var(--text-xs);
   font-weight: 500;
   overflow: hidden;
+}
+
+.multiSelectValueOverflow {
+  flex: 0 0 auto;
+  padding-inline: 6px;
+  color: var(--muted);
 }
 
 .multiSelectValueLabel {
@@ -180,8 +205,9 @@
   position: fixed;
   z-index: calc(var(--z-dialog) + 1);
   box-sizing: border-box;
-  max-height: min(360px, calc(100vh - 24px));
-  overflow: hidden;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
   border: 1px solid var(--control-border);
   border-radius: var(--radius-lg);
   background: var(--panel-bg);
@@ -192,15 +218,19 @@
 }
 
 .multiSelectList {
-  max-height: min(320px, calc(100vh - 80px));
-  overflow-y: auto;
-  overscroll-behavior: contain;
+  width: 100%;
+  max-height: none;
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  overflow: visible;
   padding: 4px;
-  scrollbar-width: none;
 }
 
-.multiSelectList::-webkit-scrollbar {
-  display: none;
+.multiSelectList.selectViewport {
+  max-height: none;
+  overflow: visible;
 }
 
 .multiSelectItem {

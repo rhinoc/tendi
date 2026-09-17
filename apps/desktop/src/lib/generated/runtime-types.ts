@@ -505,79 +505,30 @@ export type RuleFileDeleteManyRequest = {
   paths: StringList;
 };
 export type HookDeleteRequest = {
-  agent: AgentKind;
-  path: string;
-  expectedTrustHash: string;
-  event: string;
-  matcher?: string | null;
-  hookType?: string | null;
-  command?: string | null;
-  url?: string | null;
-  prompt?: string | null;
-  filter?: string | null;
-  statusMessage?: string | null;
+  id: string;
 };
 export type HookDeleteManyRequest = {
-  requests: HookDeleteRequest[];
+  ids: StringList;
 };
 export type HookSetEnabledRequest = {
-  agent: AgentKind;
-  path: string;
-  expectedTrustHash: string;
-  event: string;
-  matcher?: string | null;
-  hookType?: string | null;
-  command?: string | null;
-  url?: string | null;
-  prompt?: string | null;
-  filter?: string | null;
-  statusMessage?: string | null;
+  id: string;
   enabled: boolean;
 };
 export type HookSetEnabledManyRequest = {
   requests: HookSetEnabledRequest[];
 };
 export type HookReviewRequest = {
-  agent: AgentKind;
-  path: string;
-  expectedTrustHash: string;
-  event: string;
-  matcher?: string | null;
-  hookType?: string | null;
-  command?: string | null;
-  url?: string | null;
-  prompt?: string | null;
-  filter?: string | null;
-  statusMessage?: string | null;
+  id: string;
 };
 export type HookSourceReadRequest = {
-  agent: AgentKind;
-  path: string;
-  expectedTrustHash?: string;
-  event?: string | null;
-  matcher?: string | null;
-  hookType?: string | null;
-  command?: string | null;
-  url?: string | null;
-  prompt?: string | null;
-  filter?: string | null;
-  statusMessage?: string | null;
-  enabled?: boolean | null;
+  id: string;
 };
 export type McpSetEnabledRequest = {
-  agent: AgentKind;
-  path: string;
-  expectedTrustHash: string;
-  name: string;
+  id: string;
   enabled: boolean;
-  serverPath: StringList;
 };
 export type McpProbeRequest = {
-  agent: AgentKind;
-  path: string;
-  expectedTrustHash: string;
-  name: string;
-  serverPath: StringList;
+  id: string;
 };
 export type McpSetEnabledManyRequest = {
   requests: McpSetEnabledRequest[];
@@ -709,40 +660,40 @@ export type SkillsMarketplaceSearchRequest = {
 };
 export type SkillFilesRequest = {
   skillId: string;
-  skillPath?: string | null;
+  locationId?: string | null;
 };
 export type SkillFileReadRequest = {
   skillId: string;
   relativePath: string;
-  skillPath?: string | null;
+  locationId?: string | null;
 };
 export type SkillFileSaveRequest = {
   skillId: string;
   relativePath: string;
   expectedSha256: string;
   content: string;
-  skillPath?: string | null;
+  locationId?: string | null;
 };
 export type SkillFileCreateRequest = {
   skillId: string;
   relativePath: string;
-  skillPath?: string | null;
+  locationId?: string | null;
 };
 export type SkillFolderCreateRequest = {
   skillId: string;
   relativePath: string;
-  skillPath?: string | null;
+  locationId?: string | null;
 };
 export type SkillPathRenameRequest = {
   skillId: string;
   fromRelativePath: string;
   toRelativePath: string;
-  skillPath?: string | null;
+  locationId?: string | null;
 };
 export type SkillPathDeleteRequest = {
   skillId: string;
   relativePath: string;
-  skillPath?: string | null;
+  locationId?: string | null;
 };
 export type AppIconSetRequest = {
   icon: string;
@@ -756,9 +707,9 @@ export type EditorAppTestRequest = {
 export type SessionResumeRequest = {
   id: string;
   agent: string;
-  title?: string | null;
   project?: string | null;
   path: string;
+  reconcile?: boolean;
 };
 export type OpenInEditorRequest = {
   path: string;
@@ -815,6 +766,7 @@ export type AgentRecord = {
 export type AgentRecordList = AgentRecord[];
 export type SkillVisibility = "auto" | "manual" | "off" | "mixed";
 export type SkillPath = {
+  locationId?: string;
   path: string;
   root: string;
   scope: string;
@@ -847,6 +799,7 @@ export type SkillRecord = {
   dependents: string[];
   dependencyIds: string[];
   dependentIds: string[];
+  is_wrapper: boolean;
   visibility: SkillVisibility;
   agents: AgentKind[];
   paths: SkillPath[];
@@ -1089,6 +1042,26 @@ export type AssistantStreamEvent = {
   kind: string;
   text?: string;
   detail?: string;
+  toolCallId?: string;
+};
+export type AppSettingsPatch = {
+  appearance?: string;
+  fontFamily?: string;
+  lightTheme?: string;
+  darkTheme?: string;
+  appIcon?: string;
+  terminal?: string;
+  sessionResumeTarget?: string;
+  missingSessionProjectPolicy?: string;
+  editor?: string;
+  developerMode?: boolean;
+  additionalSessionRoots?: string[];
+};
+export type TokenizerCountRequest = {
+  texts: string[];
+};
+export type TokenizerCountResponse = {
+  counts: number[];
 };
 export type AppSettings = {
   appearance: string;
@@ -1131,6 +1104,7 @@ export type RuleRecord = {
 };
 export type RuleRecordList = RuleRecord[];
 export type HookRecord = {
+  id: string;
   agent: AgentKind;
   event: string;
   matcher?: string | null;
@@ -1161,6 +1135,7 @@ export type McpTool = {
   icons?: McpIcon[];
 };
 export type McpServerRecord = {
+  id: string;
   agent: AgentKind;
   name: string;
   scope: string;
@@ -1197,6 +1172,7 @@ export type AnalyticsOverviewRequest = {
   days: number;
   rankDays: number;
   refreshTranscripts: boolean;
+  endDate?: string | null;
 };
 export type AnalyticsTokenUsage = {
   inputTokens: number;
@@ -1205,6 +1181,20 @@ export type AnalyticsTokenUsage = {
   outputTokens: number;
   reasoningOutputTokens: number;
   totalTokens: number;
+};
+export type AnalyticsCost = {
+  inputUsd: number;
+  cachedInputUsd: number;
+  cacheWriteInputUsd: number;
+  outputUsd: number;
+  totalUsd: number;
+};
+export type AnalyticsProjectUsage = {
+  id: string;
+  name: string;
+  usage: AnalyticsTokenUsage;
+  responses: number;
+  cost: AnalyticsCost;
 };
 export type AnalyticsCapabilities = {
   tokenUsage: boolean;
@@ -1226,6 +1216,7 @@ export type AnalyticsModelUsage = {
   totalTokens: number;
   totalMs: number;
   completedRuns: number;
+  cost: AnalyticsCost;
 };
 export type AnalyticsCallUsage = {
   name: string;
@@ -1235,6 +1226,7 @@ export type AnalyticsCallUsage = {
 export type AnalyticsDay = {
   date: string;
   usage: AnalyticsTokenUsage;
+  cost: AnalyticsCost;
   responses: number;
   sessions: number;
   sessionsByAgent: Record<string, number>;
@@ -1242,6 +1234,7 @@ export type AnalyticsDay = {
   aborted: number;
   compacted: number;
   models: AnalyticsModelUsage[];
+  projects: AnalyticsProjectUsage[];
   tools: AnalyticsCallUsage[];
   skills: AnalyticsCallUsage[];
   rateLimits: Record<string, number>;
@@ -1263,6 +1256,7 @@ export type AnalyticsProviderCapability = {
 };
 export type AnalyticsOverviewSummary = {
   usage: AnalyticsTokenUsage;
+  cost: AnalyticsCost;
   responses: number;
   sessions: number;
   runs: AnalyticsRunSummary;
@@ -1474,7 +1468,7 @@ export type JsonRpcError = { code: number; message: string; data?: JsonRpcErrorD
 export type JsonRpcResponse = { jsonrpc: "2.0"; id: JsonRpcId; result?: JsonValue; error?: JsonRpcError };
 export type RuntimeEventEnvelope = { id: number; event: string; payload: JsonValue; scopeKey?: string; domain?: string; operationId?: string; baseRevision?: number; revision?: number; sourceVersion?: string | null };
 
-export type CommandName = "scan" | "agents_list" | "bundled_skill_status" | "bundled_skill_install" | "bundled_skill_remove" | "bundled_skill_prompt_dismiss" | "skills_list" | "skills_refresh" | "sessions_snapshot" | "sessions_list" | "sessions_scan_start" | "sessions_search" | "analytics_overview" | "analytics_revision" | "session_skill_index_status" | "session_skill_index_run" | "session_skill_links" | "skill_session_links" | "settings_get" | "settings_save" | "assistant_ask" | "assistant_cancel" | "assistant_chat_sessions" | "session_projects_list" | "project_scan_scopes_list" | "project_scan_scopes_save" | "projects_list" | "projects_scan" | "terminal_apps_list" | "agent_configs_list" | "agent_config_watch" | "agent_config_read" | "agent_config_save" | "agent_configs_delete_many" | "config_profile_create" | "config_profile_set" | "rules_list" | "rule_file_read" | "rule_file_save" | "rule_file_delete_many" | "hooks_list" | "hook_delete" | "hook_delete_many" | "hook_set_enabled" | "hook_set_enabled_many" | "hook_review" | "hook_source_read" | "mcp_list" | "mcp_probe" | "mcp_set_enabled" | "mcp_set_enabled_many" | "prompts_list" | "prompt_save" | "prompts_delete_many" | "session_transcript" | "session_transcript_locator" | "session_transcript_search" | "skills_targets" | "skills_backup_status" | "skills_backup_configure" | "skills_backup_sync" | "skills_backup_now" | "skills_backup_versions" | "skills_backup_restore" | "skills_backup_adopt" | "skills_backup_adopt_many" | "skills_backup_disconnect" | "skills_add" | "skills_add_preview_read" | "skills_distribute" | "skills_remove_locations" | "skills_set" | "skills_wrap" | "skills_updates" | "skills_updates_cancel" | "skills_update" | "skills_update_many" | "skills_delete_many" | "skills_marketplace_search" | "skill_files" | "skill_file_read" | "skill_file_save" | "skill_file_create" | "skill_folder_create" | "skill_path_rename" | "skill_path_delete" | "app_icon_set" | "cli_status" | "cli_install" | "cli_remove" | "terminal_app_test" | "editor_app_test" | "session_resume_target" | "session_resume_in_terminal" | "open_in_editor" | "reveal_in_finder" | "logs_export" | "open_url" | "check_for_updates" | "install_update";
+export type CommandName = "scan" | "agents_list" | "bundled_skill_status" | "bundled_skill_install" | "bundled_skill_remove" | "bundled_skill_prompt_dismiss" | "skills_list" | "skills_refresh" | "sessions_snapshot" | "sessions_list" | "sessions_scan_start" | "sessions_search" | "analytics_overview" | "analytics_revision" | "session_skill_index_status" | "session_skill_index_run" | "session_skill_links" | "skill_session_links" | "settings_get" | "settings_save" | "assistant_ask" | "assistant_cancel" | "assistant_chat_sessions" | "tokenizer_count" | "session_projects_list" | "project_scan_scopes_list" | "project_scan_scopes_save" | "projects_list" | "projects_scan" | "terminal_apps_list" | "agent_configs_list" | "agent_config_watch" | "agent_config_read" | "agent_config_save" | "agent_configs_delete_many" | "config_profile_create" | "config_profile_set" | "rules_list" | "rule_file_read" | "rule_file_save" | "rule_file_delete_many" | "hooks_list" | "hook_delete" | "hook_delete_many" | "hook_set_enabled" | "hook_set_enabled_many" | "hook_review" | "hook_source_read" | "mcp_list" | "mcp_probe" | "mcp_set_enabled" | "mcp_set_enabled_many" | "prompts_list" | "prompt_save" | "prompts_delete_many" | "session_transcript" | "session_transcript_locator" | "session_transcript_search" | "skills_targets" | "skills_backup_status" | "skills_backup_configure" | "skills_backup_sync" | "skills_backup_now" | "skills_backup_versions" | "skills_backup_restore" | "skills_backup_adopt" | "skills_backup_adopt_many" | "skills_backup_disconnect" | "skills_add" | "skills_add_preview_read" | "skills_distribute" | "skills_remove_locations" | "skills_set" | "skills_wrap" | "skills_updates" | "skills_updates_cancel" | "skills_update" | "skills_update_many" | "skills_delete_many" | "skills_marketplace_search" | "skill_files" | "skill_file_read" | "skill_file_save" | "skill_file_create" | "skill_folder_create" | "skill_path_rename" | "skill_path_delete" | "app_icon_set" | "cli_status" | "cli_install" | "cli_remove" | "terminal_app_test" | "editor_app_test" | "session_resume_target" | "session_resume_in_terminal" | "open_in_editor" | "reveal_in_finder" | "logs_export" | "open_url" | "check_for_updates" | "install_update";
 export const TauriCommand = {
   Scan: "scan",
   AgentsList: "agents_list",
@@ -1499,6 +1493,7 @@ export const TauriCommand = {
   AssistantAsk: "assistant_ask",
   AssistantCancel: "assistant_cancel",
   AssistantChatSessions: "assistant_chat_sessions",
+  TokenizerCount: "tokenizer_count",
   SessionProjectsList: "session_projects_list",
   ProjectScanScopesList: "project_scan_scopes_list",
   ProjectScanScopesSave: "project_scan_scopes_save",
@@ -1610,12 +1605,13 @@ export type SessionSkillLinksResponse = SessionSkillLinkList;
 export type SkillSessionLinksResponse = SessionSkillLinkList;
 export type SettingsGetRequest = EmptyRequest;
 export type SettingsGetResponse = AppSettings;
-export type SettingsSaveRequest = AppSettings;
+export type SettingsSaveRequest = AppSettingsPatch;
 export type SettingsSaveResponse = AppSettings;
 
 
 export type AssistantChatSessionsRequest = EmptyRequest;
 export type AssistantChatSessionsResponse = AssistantChatSessionList;
+
 export type SessionProjectsListRequest = EmptyRequest;
 export type SessionProjectsListResponse = SessionProjectSummaryList;
 export type ProjectScanScopesListRequest = EmptyRequest;
@@ -1736,6 +1732,7 @@ export type RuntimeRequests = {
   "assistant_ask": AssistantAskRequest;
   "assistant_cancel": AssistantCancelRequest;
   "assistant_chat_sessions": AssistantChatSessionsRequest;
+  "tokenizer_count": TokenizerCountRequest;
   "session_projects_list": SessionProjectsListRequest;
   "project_scan_scopes_list": ProjectScanScopesListRequest;
   "project_scan_scopes_save": ProjectScanScopesSaveRequest;
@@ -1838,6 +1835,7 @@ export type RuntimeResponses = {
   "assistant_ask": AssistantAskResponse;
   "assistant_cancel": AssistantCancelResponse;
   "assistant_chat_sessions": AssistantChatSessionsResponse;
+  "tokenizer_count": TokenizerCountResponse;
   "session_projects_list": SessionProjectsListResponse;
   "project_scan_scopes_list": ProjectScanScopesListResponse;
   "project_scan_scopes_save": ProjectScanScopesSaveResponse;
@@ -1942,6 +1940,7 @@ export const COMMAND_METADATA = {
   "assistant_ask": { owner: "desktop", wire: "tauri", clients: ["desktop"], execution: "write", serializedWrite: true, internal: false, deprecated: false },
   "assistant_cancel": { owner: "desktop", wire: "tauri", clients: ["desktop"], execution: "write", serializedWrite: true, internal: false, deprecated: false },
   "assistant_chat_sessions": { owner: "desktop", wire: "tauri", clients: ["desktop"], execution: "read", serializedWrite: false, internal: false, deprecated: false },
+  "tokenizer_count": { owner: "desktop", wire: "tauri", clients: ["desktop"], execution: "read", serializedWrite: false, internal: false, deprecated: false },
   "session_projects_list": { owner: "daemon", wire: "jsonrpc", clients: ["desktop"], execution: "read", serializedWrite: false, internal: false, deprecated: false },
   "project_scan_scopes_list": { owner: "daemon", wire: "jsonrpc", clients: ["desktop"], execution: "read", serializedWrite: false, internal: false, deprecated: false },
   "project_scan_scopes_save": { owner: "daemon", wire: "jsonrpc", clients: ["desktop"], execution: "write", serializedWrite: true, internal: false, deprecated: false },
@@ -2029,5 +2028,5 @@ export function isDesktopCommand(command: string): command is CommandName {
 }
 export const PROTOCOL_VERSION = 2;
 export const SCHEMA_VERSION = 1;
-export const RUNTIME_CONTRACT_FINGERPRINT = "e9a5feda453d0f8ae64e057bd42006e5a1732fbeb5cd27e9e79a46a0d1a963e3";
+export const RUNTIME_CONTRACT_FINGERPRINT = "81be9570295a07ebb0f7ed62df9572e9a4bd990b3abd425658e3528062164c0d";
 export const RUNTIME_ERROR_CODES = {"INVALID_REQUEST":-32600,"METHOD_NOT_FOUND":-32601,"INVALID_PARAMS":-32602,"INVALID_ARGUMENT":-32602,"INTERNAL":-32603,"CORE_ERROR":-32603,"CONFLICT":-32002,"UNAUTHORIZED":-32003,"UNSUPPORTED_TRANSPORT":-32004,"CONTRACT_VIOLATION":-32005,"DAEMON_ERROR":-32001} as const;

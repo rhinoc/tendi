@@ -117,6 +117,7 @@ function buildReport() {
     sha256: `rule-sha-${i + 1}`,
   }));
   const hooks = Array.from({ length: 12 }, (_, i) => ({
+    id: `hook-${i + 1}`,
     event: `event-${i + 1}`,
     agent: ["cursor", "codex", "claude"][i % 3],
     matcher: "*",
@@ -128,6 +129,7 @@ function buildReport() {
     hook_type: "command",
   }));
   const mcp = Array.from({ length: 12 }, (_, i) => ({
+    id: `mcp-${i + 1}`,
     agent: i < 2 ? "cursor" : ["cursor", "codex", "claude"][i % 3],
     name: i < 2 ? "cursor-app-control" : `mcp-server-${i + 1}`,
     scope: i < 2 ? `project-${i + 1}` : "global",
@@ -2302,6 +2304,7 @@ try {
           reasoningOutputTokens: 0,
           totalTokens: 19,
         };
+        const cost = { inputUsd: 0.01, cachedInputUsd: 0.001, cacheWriteInputUsd: 0, outputUsd: 0.02, totalUsd: 0.031 };
         const runs = { started: 1, completed: 1, unclosed: 0, totalMs: 100, maxMs: 100, timedCompleted: 0 };
         const analytics = {
           revision: 1,
@@ -2325,6 +2328,7 @@ try {
           }],
           summary: {
             usage,
+            cost,
             responses: 1,
             sessions: 1,
             runs,
@@ -2336,6 +2340,7 @@ try {
           days: [{
             date: "2026-06-29",
             usage,
+            cost,
             responses: 1,
             sessions: 1,
             sessionsByAgent: { codex: 1 },
@@ -2343,11 +2348,12 @@ try {
             aborted: 0,
             compacted: 0,
             models: [
-              { model: "mock-model-alpha-with-a-deliberately-long-name-for-horizontal-overflow", totalTokens: 8, totalMs: 0, completedRuns: 0 },
-              { model: "mock-model-beta-with-a-deliberately-long-name-for-horizontal-overflow", totalTokens: 5, totalMs: 0, completedRuns: 0 },
-              { model: "mock-model-gamma-with-a-deliberately-long-name-for-horizontal-overflow", totalTokens: 4, totalMs: 0, completedRuns: 0 },
-              { model: "mock-model-delta-with-a-deliberately-long-name-for-horizontal-overflow", totalTokens: 2, totalMs: 0, completedRuns: 0 },
+              { model: "mock-model-alpha-with-a-deliberately-long-name-for-horizontal-overflow", totalTokens: 8, totalMs: 0, completedRuns: 0, cost },
+              { model: "mock-model-beta-with-a-deliberately-long-name-for-horizontal-overflow", totalTokens: 5, totalMs: 0, completedRuns: 0, cost },
+              { model: "mock-model-gamma-with-a-deliberately-long-name-for-horizontal-overflow", totalTokens: 4, totalMs: 0, completedRuns: 0, cost },
+              { model: "mock-model-delta-with-a-deliberately-long-name-for-horizontal-overflow", totalTokens: 2, totalMs: 0, completedRuns: 0, cost },
             ],
+            projects: [{ id: "project-1", name: "Tendi", usage, responses: 1, cost }],
             tools: [],
             skills: [],
             rateLimits: {},

@@ -4,6 +4,7 @@ mod custom;
 mod ghostty;
 mod iterm;
 mod orca;
+mod superset;
 mod terminal;
 mod warp;
 
@@ -104,6 +105,7 @@ fn providers() -> Vec<Box<dyn TerminalProvider>> {
         Box::new(ghostty::GhosttyProvider),
         Box::new(warp::WarpProvider),
         Box::new(orca::OrcaProvider),
+        Box::new(superset::SupersetProvider),
     ]
 }
 
@@ -120,13 +122,22 @@ pub(super) fn app_available(paths: &[&str]) -> bool {
 }
 
 pub(super) fn terminal_script(command: &tendi_core::SessionCommand) -> String {
+    shell_script(command, "exec ")
+}
+
+pub(super) fn terminal_input_script(command: &tendi_core::SessionCommand) -> String {
+    shell_script(command, "")
+}
+
+fn shell_script(command: &tendi_core::SessionCommand, command_prefix: &str) -> String {
     match &command.cwd {
         Some(cwd) => format!(
-            "cd {} && exec {}",
+            "cd {} && {}{}",
             shell_quote(&cwd.display().to_string()),
+            command_prefix,
             shell_command(command)
         ),
-        None => format!("exec {}", shell_command(command)),
+        None => format!("{}{}", command_prefix, shell_command(command)),
     }
 }
 

@@ -8,6 +8,7 @@ tauri::generate_handler![
     assistant_ask,
     assistant_cancel,
     assistant_chat_sessions,
+    tokenizer_count,
     app_icon_set,
     cli_status,
     cli_install,

@@ -64,6 +64,15 @@ test("generated validators enforce empty request and safe revision fields", () =
 });
 
 test("accepts structured session resume failures", () => {
+  validateRequest("session_resume_target", {
+    session: { id: "session-1", agent: "codex", path: "/tmp/session.jsonl" },
+  });
+  validateRequest("session_resume_in_terminal", {
+    session: { id: "session-1", agent: "codex", path: "/tmp/session.jsonl", reconcile: true },
+  });
+  assert.throws(() => validateRequest("session_resume_target", {
+    session: { id: "session-1", agent: "codex", path: "/tmp/session.jsonl", title: "stale UI title" },
+  }), RuntimeContractError);
   validateResult("session_resume_in_terminal", {
     status: "failed",
     error: {

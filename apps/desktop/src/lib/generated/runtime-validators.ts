@@ -2293,156 +2293,41 @@ const SCHEMAS: Record<string, Record<string, unknown>> = {
   "HookDeleteRequest": {
     "type": "object",
     "properties": {
-      "agent": {
-        "$ref": "#/components/schemas/AgentKind"
-      },
-      "path": {
+      "id": {
         "type": "string",
         "minLength": 1
-      },
-      "expectedTrustHash": {
-        "type": "string",
-        "minLength": 1
-      },
-      "event": {
-        "type": "string",
-        "minLength": 1
-      },
-      "matcher": {
-        "type": [
-          "string",
-          "null"
-        ]
-      },
-      "hookType": {
-        "type": [
-          "string",
-          "null"
-        ]
-      },
-      "command": {
-        "type": [
-          "string",
-          "null"
-        ]
-      },
-      "url": {
-        "type": [
-          "string",
-          "null"
-        ]
-      },
-      "prompt": {
-        "type": [
-          "string",
-          "null"
-        ]
-      },
-      "filter": {
-        "type": [
-          "string",
-          "null"
-        ]
-      },
-      "statusMessage": {
-        "type": [
-          "string",
-          "null"
-        ]
       }
     },
     "required": [
-      "agent",
-      "path",
-      "expectedTrustHash",
-      "event"
+      "id"
     ],
     "additionalProperties": false
   },
   "HookDeleteManyRequest": {
     "type": "object",
     "properties": {
-      "requests": {
-        "type": "array",
-        "items": {
-          "$ref": "#/components/schemas/HookDeleteRequest"
-        }
+      "ids": {
+        "$ref": "#/components/schemas/StringList"
       }
     },
     "required": [
-      "requests"
+      "ids"
     ],
     "additionalProperties": false
   },
   "HookSetEnabledRequest": {
     "type": "object",
     "properties": {
-      "agent": {
-        "$ref": "#/components/schemas/AgentKind"
-      },
-      "path": {
+      "id": {
         "type": "string",
         "minLength": 1
-      },
-      "expectedTrustHash": {
-        "type": "string",
-        "minLength": 1
-      },
-      "event": {
-        "type": "string",
-        "minLength": 1
-      },
-      "matcher": {
-        "type": [
-          "string",
-          "null"
-        ]
-      },
-      "hookType": {
-        "type": [
-          "string",
-          "null"
-        ]
-      },
-      "command": {
-        "type": [
-          "string",
-          "null"
-        ]
-      },
-      "url": {
-        "type": [
-          "string",
-          "null"
-        ]
-      },
-      "prompt": {
-        "type": [
-          "string",
-          "null"
-        ]
-      },
-      "filter": {
-        "type": [
-          "string",
-          "null"
-        ]
-      },
-      "statusMessage": {
-        "type": [
-          "string",
-          "null"
-        ]
       },
       "enabled": {
         "type": "boolean"
       }
     },
     "required": [
-      "agent",
-      "path",
-      "expectedTrustHash",
-      "event",
+      "id",
       "enabled"
     ],
     "additionalProperties": false
@@ -2465,209 +2350,56 @@ const SCHEMAS: Record<string, Record<string, unknown>> = {
   "HookReviewRequest": {
     "type": "object",
     "properties": {
-      "agent": {
-        "$ref": "#/components/schemas/AgentKind"
-      },
-      "path": {
+      "id": {
         "type": "string",
         "minLength": 1
-      },
-      "expectedTrustHash": {
-        "type": "string",
-        "minLength": 1
-      },
-      "event": {
-        "type": "string",
-        "minLength": 1
-      },
-      "matcher": {
-        "type": [
-          "string",
-          "null"
-        ]
-      },
-      "hookType": {
-        "type": [
-          "string",
-          "null"
-        ]
-      },
-      "command": {
-        "type": [
-          "string",
-          "null"
-        ]
-      },
-      "url": {
-        "type": [
-          "string",
-          "null"
-        ]
-      },
-      "prompt": {
-        "type": [
-          "string",
-          "null"
-        ]
-      },
-      "filter": {
-        "type": [
-          "string",
-          "null"
-        ]
-      },
-      "statusMessage": {
-        "type": [
-          "string",
-          "null"
-        ]
       }
     },
     "required": [
-      "agent",
-      "path",
-      "expectedTrustHash",
-      "event"
+      "id"
     ],
     "additionalProperties": false
   },
   "HookSourceReadRequest": {
     "type": "object",
     "properties": {
-      "agent": {
-        "$ref": "#/components/schemas/AgentKind"
-      },
-      "path": {
+      "id": {
         "type": "string",
         "minLength": 1
-      },
-      "expectedTrustHash": {
-        "type": "string"
-      },
-      "event": {
-        "type": [
-          "string",
-          "null"
-        ]
-      },
-      "matcher": {
-        "type": [
-          "string",
-          "null"
-        ]
-      },
-      "hookType": {
-        "type": [
-          "string",
-          "null"
-        ]
-      },
-      "command": {
-        "type": [
-          "string",
-          "null"
-        ]
-      },
-      "url": {
-        "type": [
-          "string",
-          "null"
-        ]
-      },
-      "prompt": {
-        "type": [
-          "string",
-          "null"
-        ]
-      },
-      "filter": {
-        "type": [
-          "string",
-          "null"
-        ]
-      },
-      "statusMessage": {
-        "type": [
-          "string",
-          "null"
-        ]
-      },
-      "enabled": {
-        "type": [
-          "boolean",
-          "null"
-        ]
       }
     },
     "required": [
-      "agent",
-      "path"
+      "id"
     ],
     "additionalProperties": false
   },
   "McpSetEnabledRequest": {
     "type": "object",
     "properties": {
-      "agent": {
-        "$ref": "#/components/schemas/AgentKind"
-      },
-      "path": {
-        "type": "string",
-        "minLength": 1
-      },
-      "expectedTrustHash": {
-        "type": "string",
-        "minLength": 1
-      },
-      "name": {
+      "id": {
         "type": "string",
         "minLength": 1
       },
       "enabled": {
         "type": "boolean"
-      },
-      "serverPath": {
-        "$ref": "#/components/schemas/StringList"
       }
     },
     "required": [
-      "agent",
-      "path",
-      "expectedTrustHash",
-      "name",
-      "enabled",
-      "serverPath"
+      "id",
+      "enabled"
     ],
     "additionalProperties": false
   },
   "McpProbeRequest": {
     "type": "object",
     "properties": {
-      "agent": {
-        "$ref": "#/components/schemas/AgentKind"
-      },
-      "path": {
+      "id": {
         "type": "string",
         "minLength": 1
-      },
-      "expectedTrustHash": {
-        "type": "string",
-        "minLength": 1
-      },
-      "name": {
-        "type": "string",
-        "minLength": 1
-      },
-      "serverPath": {
-        "$ref": "#/components/schemas/StringList"
       }
     },
     "required": [
-      "agent",
-      "path",
-      "expectedTrustHash",
-      "name",
-      "serverPath"
+      "id"
     ],
     "additionalProperties": false
   },
@@ -3250,7 +2982,7 @@ const SCHEMAS: Record<string, Record<string, unknown>> = {
         "type": "string",
         "minLength": 1
       },
-      "skillPath": {
+      "locationId": {
         "type": [
           "string",
           "null"
@@ -3273,7 +3005,7 @@ const SCHEMAS: Record<string, Record<string, unknown>> = {
         "type": "string",
         "minLength": 1
       },
-      "skillPath": {
+      "locationId": {
         "type": [
           "string",
           "null"
@@ -3304,7 +3036,7 @@ const SCHEMAS: Record<string, Record<string, unknown>> = {
       "content": {
         "type": "string"
       },
-      "skillPath": {
+      "locationId": {
         "type": [
           "string",
           "null"
@@ -3330,7 +3062,7 @@ const SCHEMAS: Record<string, Record<string, unknown>> = {
         "type": "string",
         "minLength": 1
       },
-      "skillPath": {
+      "locationId": {
         "type": [
           "string",
           "null"
@@ -3354,7 +3086,7 @@ const SCHEMAS: Record<string, Record<string, unknown>> = {
         "type": "string",
         "minLength": 1
       },
-      "skillPath": {
+      "locationId": {
         "type": [
           "string",
           "null"
@@ -3382,7 +3114,7 @@ const SCHEMAS: Record<string, Record<string, unknown>> = {
         "type": "string",
         "minLength": 1
       },
-      "skillPath": {
+      "locationId": {
         "type": [
           "string",
           "null"
@@ -3407,7 +3139,7 @@ const SCHEMAS: Record<string, Record<string, unknown>> = {
         "type": "string",
         "minLength": 1
       },
-      "skillPath": {
+      "locationId": {
         "type": [
           "string",
           "null"
@@ -3470,12 +3202,6 @@ const SCHEMAS: Record<string, Record<string, unknown>> = {
         "type": "string",
         "minLength": 1
       },
-      "title": {
-        "type": [
-          "string",
-          "null"
-        ]
-      },
       "project": {
         "type": [
           "string",
@@ -3485,6 +3211,9 @@ const SCHEMAS: Record<string, Record<string, unknown>> = {
       "path": {
         "type": "string",
         "minLength": 1
+      },
+      "reconcile": {
+        "type": "boolean"
       }
     },
     "required": [
@@ -3800,6 +3529,9 @@ const SCHEMAS: Record<string, Record<string, unknown>> = {
   "SkillPath": {
     "type": "object",
     "properties": {
+      "locationId": {
+        "type": "string"
+      },
       "path": {
         "type": "string"
       },
@@ -3968,6 +3700,9 @@ const SCHEMAS: Record<string, Record<string, unknown>> = {
           "type": "string"
         }
       },
+      "is_wrapper": {
+        "type": "boolean"
+      },
       "visibility": {
         "$ref": "#/components/schemas/SkillVisibility"
       },
@@ -4020,6 +3755,7 @@ const SCHEMAS: Record<string, Record<string, unknown>> = {
       "dependents",
       "dependencyIds",
       "dependentIds",
+      "is_wrapper",
       "visibility",
       "agents",
       "paths",
@@ -5222,12 +4958,90 @@ const SCHEMAS: Record<string, Record<string, unknown>> = {
       },
       "detail": {
         "type": "string"
+      },
+      "toolCallId": {
+        "type": "string",
+        "minLength": 1
       }
     },
     "required": [
       "conversationId",
       "requestId",
       "kind"
+    ],
+    "additionalProperties": false
+  },
+  "AppSettingsPatch": {
+    "type": "object",
+    "properties": {
+      "appearance": {
+        "type": "string"
+      },
+      "fontFamily": {
+        "type": "string"
+      },
+      "lightTheme": {
+        "type": "string"
+      },
+      "darkTheme": {
+        "type": "string"
+      },
+      "appIcon": {
+        "type": "string"
+      },
+      "terminal": {
+        "type": "string"
+      },
+      "sessionResumeTarget": {
+        "type": "string"
+      },
+      "missingSessionProjectPolicy": {
+        "type": "string"
+      },
+      "editor": {
+        "type": "string"
+      },
+      "developerMode": {
+        "type": "boolean"
+      },
+      "additionalSessionRoots": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        }
+      }
+    },
+    "additionalProperties": false
+  },
+  "TokenizerCountRequest": {
+    "type": "object",
+    "properties": {
+      "texts": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        }
+      }
+    },
+    "required": [
+      "texts"
+    ],
+    "additionalProperties": false
+  },
+  "TokenizerCountResponse": {
+    "type": "object",
+    "properties": {
+      "counts": {
+        "type": "array",
+        "items": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        }
+      }
+    },
+    "required": [
+      "counts"
     ],
     "additionalProperties": false
   },
@@ -5416,6 +5230,9 @@ const SCHEMAS: Record<string, Record<string, unknown>> = {
   "HookRecord": {
     "type": "object",
     "properties": {
+      "id": {
+        "type": "string"
+      },
       "agent": {
         "$ref": "#/components/schemas/AgentKind"
       },
@@ -5484,6 +5301,7 @@ const SCHEMAS: Record<string, Record<string, unknown>> = {
       }
     },
     "required": [
+      "id",
       "agent",
       "event",
       "enabled",
@@ -5553,6 +5371,9 @@ const SCHEMAS: Record<string, Record<string, unknown>> = {
   "McpServerRecord": {
     "type": "object",
     "properties": {
+      "id": {
+        "type": "string"
+      },
       "agent": {
         "$ref": "#/components/schemas/AgentKind"
       },
@@ -5628,6 +5449,7 @@ const SCHEMAS: Record<string, Record<string, unknown>> = {
       }
     },
     "required": [
+      "id",
       "agent",
       "name",
       "scope",
@@ -5707,6 +5529,12 @@ const SCHEMAS: Record<string, Record<string, unknown>> = {
       },
       "refreshTranscripts": {
         "type": "boolean"
+      },
+      "endDate": {
+        "type": [
+          "string",
+          "null"
+        ]
       }
     },
     "required": [
@@ -5758,6 +5586,64 @@ const SCHEMAS: Record<string, Record<string, unknown>> = {
       "outputTokens",
       "reasoningOutputTokens",
       "totalTokens"
+    ],
+    "additionalProperties": false
+  },
+  "AnalyticsCost": {
+    "type": "object",
+    "properties": {
+      "inputUsd": {
+        "type": "number"
+      },
+      "cachedInputUsd": {
+        "type": "number"
+      },
+      "cacheWriteInputUsd": {
+        "type": "number"
+      },
+      "outputUsd": {
+        "type": "number"
+      },
+      "totalUsd": {
+        "type": "number"
+      }
+    },
+    "required": [
+      "inputUsd",
+      "cachedInputUsd",
+      "cacheWriteInputUsd",
+      "outputUsd",
+      "totalUsd"
+    ],
+    "additionalProperties": false
+  },
+  "AnalyticsProjectUsage": {
+    "type": "object",
+    "properties": {
+      "id": {
+        "type": "string"
+      },
+      "name": {
+        "type": "string"
+      },
+      "usage": {
+        "$ref": "#/components/schemas/AnalyticsTokenUsage"
+      },
+      "responses": {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 9007199254740991
+      },
+      "cost": {
+        "$ref": "#/components/schemas/AnalyticsCost"
+      }
+    },
+    "required": [
+      "id",
+      "name",
+      "usage",
+      "responses",
+      "cost"
     ],
     "additionalProperties": false
   },
@@ -5853,13 +5739,17 @@ const SCHEMAS: Record<string, Record<string, unknown>> = {
         "type": "integer",
         "minimum": 0,
         "maximum": 9007199254740991
+      },
+      "cost": {
+        "$ref": "#/components/schemas/AnalyticsCost"
       }
     },
     "required": [
       "model",
       "totalTokens",
       "totalMs",
-      "completedRuns"
+      "completedRuns",
+      "cost"
     ],
     "additionalProperties": false
   },
@@ -5893,6 +5783,9 @@ const SCHEMAS: Record<string, Record<string, unknown>> = {
       },
       "usage": {
         "$ref": "#/components/schemas/AnalyticsTokenUsage"
+      },
+      "cost": {
+        "$ref": "#/components/schemas/AnalyticsCost"
       },
       "responses": {
         "type": "integer",
@@ -5931,6 +5824,12 @@ const SCHEMAS: Record<string, Record<string, unknown>> = {
           "$ref": "#/components/schemas/AnalyticsModelUsage"
         }
       },
+      "projects": {
+        "type": "array",
+        "items": {
+          "$ref": "#/components/schemas/AnalyticsProjectUsage"
+        }
+      },
       "tools": {
         "type": "array",
         "items": {
@@ -5953,6 +5852,7 @@ const SCHEMAS: Record<string, Record<string, unknown>> = {
     "required": [
       "date",
       "usage",
+      "cost",
       "responses",
       "sessions",
       "sessionsByAgent",
@@ -5960,6 +5860,7 @@ const SCHEMAS: Record<string, Record<string, unknown>> = {
       "aborted",
       "compacted",
       "models",
+      "projects",
       "tools",
       "skills",
       "rateLimits"
@@ -6036,6 +5937,9 @@ const SCHEMAS: Record<string, Record<string, unknown>> = {
       "usage": {
         "$ref": "#/components/schemas/AnalyticsTokenUsage"
       },
+      "cost": {
+        "$ref": "#/components/schemas/AnalyticsCost"
+      },
       "responses": {
         "type": "integer",
         "minimum": 0,
@@ -6070,6 +5974,7 @@ const SCHEMAS: Record<string, Record<string, unknown>> = {
     },
     "required": [
       "usage",
+      "cost",
       "responses",
       "sessions",
       "runs",
@@ -7165,10 +7070,11 @@ const REQUEST_SCHEMAS: Record<CommandName, string> = {
   "session_skill_links": "SessionSkillLinksRequest",
   "skill_session_links": "SkillSessionLinksRequest",
   "settings_get": "EmptyRequest",
-  "settings_save": "AppSettings",
+  "settings_save": "AppSettingsPatch",
   "assistant_ask": "AssistantAskRequest",
   "assistant_cancel": "AssistantCancelRequest",
   "assistant_chat_sessions": "EmptyRequest",
+  "tokenizer_count": "TokenizerCountRequest",
   "session_projects_list": "EmptyRequest",
   "project_scan_scopes_list": "EmptyRequest",
   "project_scan_scopes_save": "ProjectScanScopesSaveRequest",
@@ -7271,6 +7177,7 @@ const RESULT_SCHEMAS: Record<CommandName, string> = {
   "assistant_ask": "AssistantAskResponse",
   "assistant_cancel": "AssistantCancelResponse",
   "assistant_chat_sessions": "AssistantChatSessionList",
+  "tokenizer_count": "TokenizerCountResponse",
   "session_projects_list": "SessionProjectSummaryList",
   "project_scan_scopes_list": "ProjectScanScopeList",
   "project_scan_scopes_save": "ProjectScanScopeList",

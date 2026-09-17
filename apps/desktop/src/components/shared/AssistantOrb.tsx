@@ -1,22 +1,20 @@
 import { ArrowUp, ArrowUpRight, Menu, MessageSquare, Pin, Square, SquarePen, X } from "lucide-react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
-import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from "react";
-import { createPortal } from "react-dom";
+import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type FormEvent, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
 
 import type { AssistantChatSession, AssistantContext, AssistantMessage, AssistantStreamEvent } from "../../lib/generated/runtime-types.ts";
 import { assistantAskRequest, assistantPromptSuggestions, canMarkAssistantReplyRead, persistAssistantAgent, readAssistantAgent, type AssistantPromptSuggestion } from "../../lib/assistant.ts";
 import { agentIdentityKey, isVisibleAgent } from "../../lib/agents.ts";
-import { BLOUB_LOADING_SHAPE_PATHS, bloubLoadingShapeSequence, BloubFaceEngine, type BloubFaceFrame, type BloubFaceMood } from "../../lib/bloub-face.ts";
+import { BLOUB_LOADING_SHAPE_PATHS, bloubLoadingShapeSequence, BloubFaceEngine, type BloubFaceFrame, type BloubFaceLookDirection, type BloubFaceMood } from "../../lib/bloub-face.ts";
 import { askAssistantStream, cancelAssistant, loadAssistantChatSessions } from "../../lib/runtime-gateway.ts";
 import { logger } from "../../lib/logger.ts";
 import { AgentOptionLabel } from "./AgentOptionLabel.tsx";
 import { Button } from "./Button.tsx";
 import { EmptyState } from "./EmptyState.tsx";
 import { IconButton } from "./IconButton.tsx";
-import { LoadingIcon } from "./LoadingIcon.tsx";
 import { SelectControl, type SelectOption } from "./SelectControl.tsx";
 import { SharedLayoutBg } from "./SharedLayoutBg.tsx";
-import { TiptapMarkdownPreview } from "./TiptapMarkdownPreview.tsx";
+import { PretextText } from "./PretextText.tsx";
 import { ToolCall } from "./ToolCall.tsx";
 import { Toast } from "./Toast.tsx";
 import "./AssistantOrb.css";
@@ -33,6 +31,7 @@ type AssistantMessageFrom = "user" | "assistant";
 type AssistantToolStatus = "running" | "complete" | "error" | "cancelled";
 type AssistantToolActivity = {
   id: string;
+  toolCallId: string;
   title: string;
   input: string;
   output: string;
@@ -41,6 +40,210 @@ type AssistantToolActivity = {
 
 const ASSISTANT_SESSION_TITLE_LIMIT = 52;
 const ASSISTANT_PINNED_STORAGE_KEY = "tendi.assistant.pinned";
+const ASSISTANT_ORB_POSITION_STORAGE_KEY = "tendi.assistant.orb-position";
+const ASSISTANT_ORB_PATH_POSITION_STORAGE_KEY = "tendi.assistant.orb-path-position";
+const ASSISTANT_ORB_PATH_RADIUS = 40;
+const ASSISTANT_ORB_TRIGGER_CENTER_X = 32;
+const ASSISTANT_ORB_TRIGGER_CENTER_Y = 40;
+const ASSISTANT_ORB_ATTACH_OFFSET = 32;
+// The attached orb exposes only the inward half of its body. Move bloub's
+// complete eye pair into that half so the black eyes stay on the light body.
+const ASSISTANT_ORB_FACE_EDGE_INSET = 4;
+const ASSISTANT_ORB_BOTTOM_FACE_EDGE_INSET = 8;
+const ASSISTANT_ORB_DRAG_THRESHOLD = 4;
+const ASSISTANT_ORB_KEYBOARD_STEP = 24;
+const ASSISTANT_PANEL_WIDTH = 360;
+const ASSISTANT_PANEL_HEIGHT = 540;
+const ASSISTANT_PANEL_DESKTOP_SIDE_INSET = 24;
+const ASSISTANT_PANEL_MOBILE_SIDE_INSET = 20;
+const ASSISTANT_PANEL_DESKTOP_EDGE_MARGIN = 14;
+const ASSISTANT_PANEL_MOBILE_EDGE_MARGIN = 8;
+const clampUnit = (value: number) => Math.min(1, Math.max(0, value));
+
+type AssistantOrbEdge = "right" | "bottom" | "left";
+type AssistantOrbPathLayout = {
+  edge: AssistantOrbEdge;
+  hostLeft: number;
+  hostTop: number;
+  rotation: number;
+  x: number;
+  y: number;
+};
+type AssistantOrbPathMetrics = {
+  cornerLength: number;
+  horizontalLength: number;
+  radius: number;
+  totalLength: number;
+  verticalLength: number;
+};
+type AssistantOrbDragSession = {
+  pointerId: number;
+  startClientX: number;
+  startClientY: number;
+  pointerPathOffset: number;
+  moved: boolean;
+};
+
+function clampNumber(value: number, minimum: number, maximum: number): number {
+  return Math.min(maximum, Math.max(minimum, value));
+}
+
+function assistantOrbPathMetrics(
+  viewportWidth = typeof window === "undefined" ? 0 : window.innerWidth,
+  viewportHeight = typeof window === "undefined" ? 0 : window.innerHeight,
+): AssistantOrbPathMetrics {
+  const width = Math.max(1, viewportWidth);
+  const height = Math.max(1, viewportHeight);
+  const radius = Math.min(ASSISTANT_ORB_PATH_RADIUS, width / 2, height / 2);
+  const verticalLength = Math.max(0, height - radius * 2);
+  const horizontalLength = Math.max(0, width - radius * 2);
+  const cornerLength = Math.PI * radius / 2;
+  return {
+    cornerLength,
+    horizontalLength,
+    radius,
+    totalLength: verticalLength * 2 + horizontalLength + cornerLength * 2,
+    verticalLength,
+  };
+}
+
+function assistantOrbPathDistanceForProgress(
+  progress: number,
+  viewportWidth = typeof window === "undefined" ? 0 : window.innerWidth,
+  viewportHeight = typeof window === "undefined" ? 0 : window.innerHeight,
+): number {
+  return clampUnit(progress) * assistantOrbPathMetrics(viewportWidth, viewportHeight).totalLength;
+}
+
+function assistantOrbPathLayout(
+  progress: number,
+  viewportWidth = typeof window === "undefined" ? 0 : window.innerWidth,
+  viewportHeight = typeof window === "undefined" ? 0 : window.innerHeight,
+): AssistantOrbPathLayout {
+  const metrics = assistantOrbPathMetrics(viewportWidth, viewportHeight);
+  const width = Math.max(1, viewportWidth);
+  const height = Math.max(1, viewportHeight);
+  let distance = assistantOrbPathDistanceForProgress(progress, viewportWidth, viewportHeight);
+  let x = width;
+  let y = metrics.radius;
+  let rotation = 0;
+  let edge: AssistantOrbEdge = "right";
+
+  if (distance <= metrics.verticalLength) {
+    y += distance;
+  } else {
+    distance -= metrics.verticalLength;
+    if (distance <= metrics.cornerLength && metrics.radius > 0) {
+      const angle = distance / metrics.radius;
+      x = width - metrics.radius + metrics.radius * Math.cos(angle);
+      y = height - metrics.radius + metrics.radius * Math.sin(angle);
+      rotation = angle * 180 / Math.PI;
+      edge = "bottom";
+    } else {
+      distance -= metrics.cornerLength;
+      if (distance <= metrics.horizontalLength) {
+        x = width - metrics.radius - distance;
+        y = height;
+        rotation = 90;
+        edge = "bottom";
+      } else {
+        distance -= metrics.horizontalLength;
+        if (distance <= metrics.cornerLength && metrics.radius > 0) {
+          const angle = Math.PI / 2 + distance / metrics.radius;
+          x = metrics.radius + metrics.radius * Math.cos(angle);
+          y = height - metrics.radius + metrics.radius * Math.sin(angle);
+          rotation = angle * 180 / Math.PI;
+          edge = "left";
+        } else {
+          distance -= metrics.cornerLength;
+          y = height - metrics.radius - Math.min(metrics.verticalLength, distance);
+          x = 0;
+          rotation = 180;
+          edge = "left";
+        }
+      }
+    }
+  }
+
+  const radians = rotation * Math.PI / 180;
+  return {
+    edge,
+    hostLeft: x - ASSISTANT_ORB_TRIGGER_CENTER_X - ASSISTANT_ORB_ATTACH_OFFSET * Math.cos(radians),
+    hostTop: y - ASSISTANT_ORB_TRIGGER_CENTER_Y - ASSISTANT_ORB_ATTACH_OFFSET * Math.sin(radians),
+    rotation,
+    x,
+    y,
+  };
+}
+
+function assistantOrbPathDistanceForPointer(
+  clientX: number,
+  clientY: number,
+  viewportWidth = typeof window === "undefined" ? 0 : window.innerWidth,
+  viewportHeight = typeof window === "undefined" ? 0 : window.innerHeight,
+): number {
+  const metrics = assistantOrbPathMetrics(viewportWidth, viewportHeight);
+  const width = Math.max(1, viewportWidth);
+  const height = Math.max(1, viewportHeight);
+  const candidates: Array<{ distance: number; squaredDistance: number }> = [];
+  const addLineCandidate = (x: number, y: number, distance: number) => {
+    candidates.push({ distance, squaredDistance: (clientX - x) ** 2 + (clientY - y) ** 2 });
+  };
+  const addArcCandidate = (centerX: number, centerY: number, startAngle: number, endAngle: number, distanceOffset: number) => {
+    const angle = clampNumber(Math.atan2(clientY - centerY, clientX - centerX), startAngle, endAngle);
+    const x = centerX + metrics.radius * Math.cos(angle);
+    const y = centerY + metrics.radius * Math.sin(angle);
+    candidates.push({
+      distance: distanceOffset + metrics.radius * (angle - startAngle),
+      squaredDistance: (clientX - x) ** 2 + (clientY - y) ** 2,
+    });
+  };
+
+  const rightY = clampNumber(clientY, metrics.radius, height - metrics.radius);
+  addLineCandidate(width, rightY, rightY - metrics.radius);
+  addArcCandidate(width - metrics.radius, height - metrics.radius, 0, Math.PI / 2, metrics.verticalLength);
+
+  const bottomX = clampNumber(clientX, metrics.radius, width - metrics.radius);
+  addLineCandidate(bottomX, height, metrics.verticalLength + metrics.cornerLength + width - metrics.radius - bottomX);
+  addArcCandidate(metrics.radius, height - metrics.radius, Math.PI / 2, Math.PI, metrics.verticalLength + metrics.cornerLength + metrics.horizontalLength);
+
+  const leftY = clampNumber(clientY, metrics.radius, height - metrics.radius);
+  addLineCandidate(0, leftY, metrics.verticalLength + metrics.cornerLength + metrics.horizontalLength + metrics.cornerLength + height - metrics.radius - leftY);
+  return candidates.reduce((closest, candidate) => (
+    candidate.squaredDistance < closest.squaredDistance ? candidate : closest
+  )).distance;
+}
+
+function readAssistantOrbPosition(): number {
+  const defaultPosition = (() => {
+    const metrics = assistantOrbPathMetrics();
+    return metrics.totalLength > 0 ? metrics.verticalLength / 2 / metrics.totalLength : 0;
+  })();
+  if (typeof window === "undefined") return defaultPosition;
+  try {
+    const pathPosition = Number.parseFloat(window.localStorage.getItem(ASSISTANT_ORB_PATH_POSITION_STORAGE_KEY) ?? "");
+    if (Number.isFinite(pathPosition)) return clampUnit(pathPosition);
+    const legacyPosition = Number.parseFloat(window.localStorage.getItem(ASSISTANT_ORB_POSITION_STORAGE_KEY) ?? "");
+    if (Number.isFinite(legacyPosition)) {
+      const metrics = assistantOrbPathMetrics();
+      return metrics.totalLength > 0
+        ? metrics.verticalLength * clampUnit(legacyPosition) / metrics.totalLength
+        : 0;
+    }
+  } catch {
+    // The default position remains the source of truth if browser storage is unavailable.
+  }
+  return defaultPosition;
+}
+
+function persistAssistantOrbPosition(position: number): void {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.setItem(ASSISTANT_ORB_PATH_POSITION_STORAGE_KEY, String(clampUnit(position)));
+  } catch {
+    // The in-memory state remains the source of truth if browser storage is unavailable.
+  }
+}
 
 function readAssistantPinned(): boolean {
   if (typeof window === "undefined") return false;
@@ -166,7 +369,6 @@ const PANEL_EXIT_TRANSITION = {
   duration: 0.18,
   ease: "easeOut",
 } as const;
-const clampUnit = (value: number) => Math.min(1, Math.max(0, value));
 const mixNumber = (from: number, to: number, amount: number) => from + (to - from) * amount;
 const easeLiquid = (value: number) => (
   value < 0.5
@@ -218,13 +420,13 @@ function attachedOrbPath(cx: number, progress: number) {
   ].join(" ");
 }
 
-function AssistantOrbFace({ mood, lookInward = false }: { mood: BloubFaceMood; lookInward?: boolean }) {
+function AssistantOrbFace({ mood, lookDirection }: { mood: BloubFaceMood; lookDirection?: BloubFaceLookDirection }) {
   const reduceMotion = useReducedMotion() ?? false;
   const engineRef = useRef<BloubFaceEngine | null>(null);
   const clockRef = useRef(0);
   const eyeRefs = useRef<Array<SVGPathElement | null>>([]);
   const dotRefs = useRef<Array<SVGCircleElement | null>>([]);
-  if (!engineRef.current) engineRef.current = new BloubFaceEngine(mood, lookInward);
+  if (!engineRef.current) engineRef.current = new BloubFaceEngine(mood, lookDirection);
   const initialFrameRef = useRef<BloubFaceFrame | null>(null);
   if (!initialFrameRef.current) initialFrameRef.current = engineRef.current.sample(0, reduceMotion);
 
@@ -248,9 +450,9 @@ function AssistantOrbFace({ mood, lookInward = false }: { mood: BloubFaceMood; l
 
   useLayoutEffect(() => {
     const now = clockRef.current;
-    engineRef.current?.setMood(mood, now, lookInward);
+    engineRef.current?.setMood(mood, now, lookDirection);
     applyFrame(engineRef.current!.sample(now, reduceMotion));
-  }, [applyFrame, lookInward, mood, reduceMotion]);
+  }, [applyFrame, lookDirection, mood, reduceMotion]);
 
   useEffect(() => {
     if (reduceMotion) return undefined;
@@ -327,11 +529,17 @@ function AssistantOrbPendantShape({ fromShapeIndex, shapeIndex }: { fromShapeInd
 function AssistantOrbTrigger({
   onCaptureContext,
   onOpen,
+  onOrbPositionChange,
+  orbRotation,
+  orbPosition,
   notification,
   shapeIndex,
 }: {
   onCaptureContext: () => void;
   onOpen: () => void;
+  onOrbPositionChange: (position: number) => void;
+  orbRotation: number;
+  orbPosition: number;
   notification: boolean;
   shapeIndex: number;
 }) {
@@ -339,7 +547,10 @@ function AssistantOrbTrigger({
   const [hovered, setHovered] = useState(false);
   const [focused, setFocused] = useState(false);
   const [progress, setProgress] = useState(0);
+  const [dragging, setDragging] = useState(false);
   const progressRef = useRef(0);
+  const dragRef = useRef<AssistantOrbDragSession | null>(null);
+  const suppressClickRef = useRef(false);
   const expanded = hovered || focused;
 
   useEffect(() => {
@@ -373,17 +584,113 @@ function AssistantOrbTrigger({
   const detachedPath = BLOUB_LOADING_SHAPE_PATHS[shapeIndex % BLOUB_LOADING_SHAPE_PATHS.length] ?? BLOUB_LOADING_SHAPE_PATHS[0];
   const detached = progress >= ORB_BREAK_AT;
   const faceDetached = progress >= 0.98;
-  const mood: BloubFaceMood = notification ? "surpris" : faceDetached ? "attentif" : "neutre";
+  const pathLayout = assistantOrbPathLayout(orbPosition);
+  const faceLookDirection: BloubFaceLookDirection = pathLayout.edge === "right"
+    ? "left"
+    : pathLayout.edge === "bottom"
+      ? "up"
+      : "right";
+  // Keep the edge correction only while the liquid is attached. Once the
+  // button moves inward, the complete face has room and must return to the
+  // bloub center instead of remaining offset from the body.
+  const attachmentInset = clampNumber(
+    (cx - ORB_OPEN_X) / (ORB_REST_X - ORB_OPEN_X),
+    0,
+    1,
+  );
+  const faceOffset = pathLayout.edge === "right"
+    ? { x: -ASSISTANT_ORB_FACE_EDGE_INSET * attachmentInset, y: 0 }
+    : pathLayout.edge === "bottom"
+      ? { x: 0, y: -ASSISTANT_ORB_BOTTOM_FACE_EDGE_INSET * attachmentInset }
+      : { x: ASSISTANT_ORB_FACE_EDGE_INSET * attachmentInset, y: 0 };
+  const mood: BloubFaceMood = notification || dragging ? "surpris" : faceDetached ? "attentif" : "neutre";
   const handlePointerEnter = () => {
     setHovered(true);
   };
   const handlePointerLeave = () => {
     setHovered(false);
   };
+  const handlePointerDown = (event: ReactPointerEvent<HTMLButtonElement>) => {
+    if (event.button !== 0) return;
+    const viewportWidth = window.innerWidth || 1;
+    const viewportHeight = window.innerHeight || 1;
+    dragRef.current = {
+      pointerId: event.pointerId,
+      startClientY: event.clientY,
+      startClientX: event.clientX,
+      pointerPathOffset: assistantOrbPathDistanceForProgress(orbPosition, viewportWidth, viewportHeight)
+        - assistantOrbPathDistanceForPointer(event.clientX, event.clientY, viewportWidth, viewportHeight),
+      moved: false,
+    };
+    setDragging(false);
+    event.currentTarget.setPointerCapture?.(event.pointerId);
+  };
+  const handlePointerMove = (event: ReactPointerEvent<HTMLButtonElement>) => {
+    const drag = dragRef.current;
+    if (!drag || drag.pointerId !== event.pointerId || event.buttons === 0) return;
+    const deltaX = event.clientX - drag.startClientX;
+    const deltaY = event.clientY - drag.startClientY;
+    if (!drag.moved && Math.hypot(deltaX, deltaY) < ASSISTANT_ORB_DRAG_THRESHOLD) return;
+    if (!drag.moved) {
+      drag.moved = true;
+      setDragging(true);
+    }
+    const viewportWidth = window.innerWidth || 1;
+    const viewportHeight = window.innerHeight || 1;
+    const metrics = assistantOrbPathMetrics(viewportWidth, viewportHeight);
+    const pointerDistance = assistantOrbPathDistanceForPointer(event.clientX, event.clientY, viewportWidth, viewportHeight);
+    onOrbPositionChange(clampUnit((pointerDistance + drag.pointerPathOffset) / metrics.totalLength));
+  };
+  const finishPointerDrag = (event: ReactPointerEvent<HTMLButtonElement>) => {
+    const drag = dragRef.current;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    dragRef.current = null;
+    setDragging(false);
+    if (drag.moved) {
+      suppressClickRef.current = true;
+      window.setTimeout(() => {
+        suppressClickRef.current = false;
+      }, 0);
+    }
+    if (event.currentTarget.hasPointerCapture?.(event.pointerId)) {
+      event.currentTarget.releasePointerCapture?.(event.pointerId);
+    }
+  };
+  const handleKeyDown = (event: ReactKeyboardEvent<HTMLButtonElement>) => {
+    if (!["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+    event.preventDefault();
+    const metrics = assistantOrbPathMetrics();
+    const currentDistance = assistantOrbPathDistanceForProgress(orbPosition);
+    const step = event.shiftKey ? ASSISTANT_ORB_KEYBOARD_STEP * 2 : ASSISTANT_ORB_KEYBOARD_STEP;
+    const delta = pathLayout.edge === "right"
+      ? event.key === "ArrowDown" ? step : event.key === "ArrowUp" ? -step : null
+      : pathLayout.edge === "bottom"
+        ? event.key === "ArrowLeft" ? step : event.key === "ArrowRight" ? -step : null
+        : event.key === "ArrowUp" ? step : event.key === "ArrowDown" ? -step : null;
+    if (event.key !== "Home" && event.key !== "End" && delta === null) return;
+    const nextDistance = event.key === "Home"
+      ? 0
+      : event.key === "End"
+        ? metrics.totalLength
+        : currentDistance + delta!;
+    onOrbPositionChange(clampUnit(nextDistance / metrics.totalLength));
+  };
+  const handleClick = () => {
+    if (suppressClickRef.current) {
+      suppressClickRef.current = false;
+      return;
+    }
+    onOpen();
+  };
 
   return (
     <div
       className="assistantOrbTriggerArea"
+      style={{
+        "--assistant-orb-rotation": `${orbRotation}deg`,
+        "--assistant-orb-face-offset-x": `${faceOffset.x}px`,
+        "--assistant-orb-face-offset-y": `${faceOffset.y}px`,
+      } as CSSProperties}
       data-state={progress >= ORB_BREAK_AT ? "detached" : progress > 0 ? "stretching" : "attached"}
       onPointerEnter={handlePointerEnter}
       onPointerLeave={handlePointerLeave}
@@ -411,16 +718,22 @@ function AssistantOrbTrigger({
       <button
         type="button"
         className="assistantOrbButton"
+        data-dragging={dragging ? "true" : undefined}
         style={{ left: cx - ORB_RADIUS }}
-        aria-label="Open Tendi assistant"
+        aria-label="Open Tendi assistant. Drag along the right, bottom, or left edge to reposition."
         aria-expanded={false}
         onFocus={() => setFocused(true)}
         onBlur={() => setFocused(false)}
         onMouseDown={onCaptureContext}
-        onClick={onOpen}
+        onPointerDown={handlePointerDown}
+        onPointerMove={handlePointerMove}
+        onPointerUp={finishPointerDrag}
+        onPointerCancel={finishPointerDrag}
+        onKeyDown={handleKeyDown}
+        onClick={handleClick}
       >
         <span className="assistantOrbMark" aria-hidden="true">
-          <AssistantOrbFace mood={mood} lookInward={!faceDetached} />
+          <AssistantOrbFace mood={mood} lookDirection={faceDetached ? undefined : faceLookDirection} />
         </span>
       </button>
     </div>
@@ -500,8 +813,8 @@ function AgentMessageBubbleContent({ children }: { children: ReactNode }) {
   );
 }
 
-function AgentMessageMarkdown({ content }: { content: string }) {
-  return <TiptapMarkdownPreview content={content} stripFrontmatter={false} immediatelyRender />;
+function AgentMessagePretext({ content }: { content: string }) {
+  return <PretextText content={content} />;
 }
 
 function AgentStreamingResponse({
@@ -543,15 +856,13 @@ function updateAssistantToolActivities(
 ): AssistantToolActivity[] {
   if (event.kind !== "tool-call" && event.kind !== "tool-result") return current;
   const title = event.detail?.trim() || "Tool call";
-  const matchingRunningIndex = (() => {
-    for (let index = current.length - 1; index >= 0; index -= 1) {
-      if (current[index].status === "running" && (title === "Tool call" || current[index].title === title)) return index;
-    }
-    return -1;
-  })();
+  const toolCallId = event.toolCallId?.trim() || "";
   if (event.kind === "tool-call") {
-    if (matchingRunningIndex >= 0) {
-      return current.map((activity, index) => index === matchingRunningIndex
+    const matchingIndex = toolCallId
+      ? current.findIndex((activity) => activity.toolCallId === toolCallId)
+      : -1;
+    if (matchingIndex >= 0) {
+      return current.map((activity, index) => index === matchingIndex
         ? { ...activity, input: event.text?.trim() || activity.input }
         : activity);
     }
@@ -559,6 +870,7 @@ function updateAssistantToolActivities(
       ...current,
       {
         id: `${requestId}-${current.length}`,
+        toolCallId,
         title,
         input: event.text?.trim() || "",
         output: "",
@@ -566,8 +878,11 @@ function updateAssistantToolActivities(
       },
     ];
   }
-  if (matchingRunningIndex >= 0) {
-    return current.map((activity, index) => index === matchingRunningIndex
+  const matchingIndex = toolCallId
+    ? current.findIndex((activity) => activity.toolCallId === toolCallId)
+    : current.findIndex((activity) => activity.status === "running" && (title === "Tool call" || activity.title === title));
+  if (matchingIndex >= 0) {
+    return current.map((activity, index) => index === matchingIndex
       ? { ...activity, output: event.text?.trim() || activity.output, status: "complete" }
       : activity);
   }
@@ -575,6 +890,7 @@ function updateAssistantToolActivities(
     ...current,
     {
       id: `${requestId}-${current.length}`,
+      toolCallId,
       title,
       input: "",
       output: event.text?.trim() || "",
@@ -626,6 +942,7 @@ export function AssistantOrb({ agent, agentLabel, agentOptions, workspace, getCo
   const reduceMotion = useReducedMotion() ?? false;
   const [open, setOpen] = useState(false);
   const [pinned, setPinned] = useState(readAssistantPinned);
+  const [orbPosition, setOrbPosition] = useState(readAssistantOrbPosition);
   const [selectedAgent, setSelectedAgent] = useState(() => readAssistantAgent() || agent);
   const [draft, setDraft] = useState("");
   const [sessions, setSessions] = useState<AssistantChatSession[]>([]);
@@ -679,6 +996,10 @@ export function AssistantOrb({ agent, agentLabel, agentOptions, workspace, getCo
   useEffect(() => {
     persistAssistantPinned(pinned);
   }, [pinned]);
+
+  useEffect(() => {
+    persistAssistantOrbPosition(orbPosition);
+  }, [orbPosition]);
 
   useEffect(() => {
     let cancelled = false;
@@ -886,7 +1207,11 @@ export function AssistantOrb({ agent, agentLabel, agentOptions, workspace, getCo
     if (!open || !messageContentRef.current || typeof ResizeObserver === "undefined") return undefined;
     const observer = new ResizeObserver(() => {
       if (followMessagesRef.current) {
-        scrollMessagesToEnd(window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth");
+        // Streaming text changes the content height for every delta. Re-starting
+        // a smooth scroll for each resize makes the viewport visibly oscillate.
+        // Snap to the live edge while the content is growing; smooth scrolling
+        // is still used for discrete message/session changes above.
+        scrollMessagesToEnd("auto");
       }
     });
     observer.observe(messageContentRef.current);
@@ -1060,16 +1385,61 @@ export function AssistantOrb({ agent, agentLabel, agentOptions, workspace, getCo
     return () => observer.disconnect();
   }, [resizeComposer]);
 
+  const orbLayout = assistantOrbPathLayout(orbPosition);
+  const viewportWidth = typeof window === "undefined" ? 0 : window.innerWidth;
+  const viewportHeight = typeof window === "undefined" ? 0 : window.innerHeight;
+  const isMobileViewport = viewportWidth <= 700;
+  const panelEdgeMargin = isMobileViewport
+    ? ASSISTANT_PANEL_MOBILE_EDGE_MARGIN
+    : ASSISTANT_PANEL_DESKTOP_EDGE_MARGIN;
+  const panelSideInset = isMobileViewport
+    ? ASSISTANT_PANEL_MOBILE_SIDE_INSET
+    : ASSISTANT_PANEL_DESKTOP_SIDE_INSET;
+  const panelWidth = Math.min(
+    ASSISTANT_PANEL_WIDTH,
+    Math.max(1, viewportWidth - (isMobileViewport ? 16 : 28)),
+  );
+  const panelHeight = Math.min(
+    ASSISTANT_PANEL_HEIGHT,
+    Math.max(1, viewportHeight - (isMobileViewport ? 16 : 28)),
+  );
+  const panelTopMaximum = Math.max(panelEdgeMargin, viewportHeight - panelHeight - panelEdgeMargin);
+  const panelTop = clampNumber(
+    orbLayout.y - panelHeight / 2,
+    panelEdgeMargin,
+    panelTopMaximum,
+  );
+  const panelLeftMaximum = Math.max(panelEdgeMargin, viewportWidth - panelWidth - panelEdgeMargin);
+  const panelBottomLeft = clampNumber(
+    orbLayout.x - panelWidth / 2,
+    panelEdgeMargin,
+    panelLeftMaximum,
+  );
+  const panelLeft = orbLayout.edge === "right"
+    ? Math.max(panelEdgeMargin, viewportWidth - panelWidth - panelSideInset)
+    : orbLayout.edge === "left"
+      ? Math.min(panelSideInset, panelLeftMaximum)
+      : panelBottomLeft;
+
   return (
     <div
       ref={assistantHostRef}
-      className={`assistantOrbHost${open ? " isOpen" : ""}`}
+      className="assistantOrbHost"
+      style={{
+        "--assistant-orb-host-left": `${orbLayout.hostLeft}px`,
+        "--assistant-orb-host-top": `${orbLayout.hostTop}px`,
+        "--assistant-orb-rotation": `${orbLayout.rotation}deg`,
+        "--assistant-panel-top": `${panelTop}px`,
+        "--assistant-panel-left": `${panelLeft}px`,
+        "--assistant-panel-width": `${panelWidth}px`,
+        "--assistant-panel-height": `${panelHeight}px`,
+      } as CSSProperties}
     >
-      <AnimatePresence initial={false} mode="wait">
+      <AnimatePresence initial={false}>
         {open ? (
           <motion.section
             key="assistant-panel"
-            className="assistantChatPanel"
+            className={`assistantChatPanel assistantChatPanel--${orbLayout.edge}`}
             aria-label="Tendi assistant chat"
             initial={reduceMotion ? { opacity: 0 } : { opacity: 0, scale: 0.96, borderRadius: PANEL_INITIAL_RADIUS }}
             animate={reduceMotion ? { opacity: 1 } : { opacity: 1, scale: 1, borderRadius: PANEL_RADIUS }}
@@ -1179,10 +1549,10 @@ export function AssistantOrb({ agent, agentLabel, agentOptions, workspace, getCo
                           <AgentMessageBubbleContent>
                             {message.role === "assistant" ? (
                               <AgentStreamingResponse status="complete">
-                                <AgentMessageMarkdown content={message.content} />
+                                <AgentMessagePretext content={message.content} />
                               </AgentStreamingResponse>
                             ) : (
-                              <AgentMessageMarkdown content={message.content} />
+                              <AgentMessagePretext content={message.content} />
                             )}
                           </AgentMessageBubbleContent>
                         </AgentMessageBubble>
@@ -1205,7 +1575,7 @@ export function AssistantOrb({ agent, agentLabel, agentOptions, workspace, getCo
                         <AgentMessageBubble variant="assistant">
                           <AgentMessageBubbleContent>
                             <AgentStreamingResponse status="streaming">
-                              <AgentMessageMarkdown content={streamingAnswer} />
+                              <AgentMessagePretext content={streamingAnswer} />
                             </AgentStreamingResponse>
                           </AgentMessageBubbleContent>
                         </AgentMessageBubble>
@@ -1349,13 +1719,16 @@ export function AssistantOrb({ agent, agentLabel, agentOptions, workspace, getCo
             <AssistantOrbTrigger
               onCaptureContext={captureContextBeforeFocus}
               onOpen={openAssistant}
+              onOrbPositionChange={setOrbPosition}
+              orbRotation={orbLayout.rotation}
+              orbPosition={orbPosition}
               notification={notification}
               shapeIndex={bloubShapeIndex}
             />
           </motion.div>
         )}
       </AnimatePresence>
-      {error && typeof document !== "undefined" ? createPortal(<Toast tone="error" message={error} onDismiss={() => setError("")} />, document.body) : null}
+      {error ? <Toast tone="error" message={error} onDismiss={() => setError("")} /> : null}
     </div>
   );
 }

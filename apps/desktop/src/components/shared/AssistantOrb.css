@@ -1,12 +1,12 @@
 .assistantOrbHost {
   position: absolute;
   z-index: var(--z-drawer);
-  top: 50%;
-  right: 0;
+  top: var(--assistant-orb-host-top, 50%);
+  left: var(--assistant-orb-host-left, auto);
+  right: auto;
   display: flex;
   align-items: center;
   justify-content: flex-end;
-  transform: translateY(-50%);
   pointer-events: none;
 }
 
@@ -20,6 +20,8 @@
   width: 64px;
   height: 80px;
   overflow: hidden;
+  transform: rotate(var(--assistant-orb-rotation, 0deg));
+  transform-origin: center;
   touch-action: pan-y;
 }
 
@@ -62,9 +64,15 @@
   color: var(--content-bg);
   background: transparent;
   box-shadow: none;
-  cursor: pointer;
+  cursor: grab;
+  touch-action: none;
+  user-select: none;
   transition: box-shadow 140ms ease-out;
   will-change: left;
+}
+
+.assistantOrbButton[data-dragging="true"] {
+  cursor: grabbing;
 }
 
 .assistantOrbTriggerArea[data-state="stretching"] .assistantOrbLiquid {
@@ -81,6 +89,7 @@
   width: 100%;
   height: 100%;
   place-items: center;
+  transform: rotate(calc(-1 * var(--assistant-orb-rotation, 0deg)));
 }
 
 .assistantOrbFace {
@@ -89,6 +98,10 @@
   height: 100%;
   overflow: visible;
   color: currentColor;
+  transform: translate(
+    var(--assistant-orb-face-offset-x, 0px),
+    var(--assistant-orb-face-offset-y, 0px)
+  );
 }
 
 .assistantOrbFaceEye,
@@ -97,18 +110,28 @@
 }
 
 .assistantChatPanel {
-  position: relative;
-  width: min(360px, calc(100vw - 28px));
-  height: min(540px, calc(100vh - 28px));
+  position: fixed;
+  top: var(--assistant-panel-top, 14px);
+  left: var(--assistant-panel-left, 14px);
+  width: var(--assistant-panel-width, min(360px, calc(100vw - 28px)));
+  height: var(--assistant-panel-height, min(540px, calc(100vh - 28px)));
   display: flex;
   flex-direction: column;
-  margin-right: 24px;
+  margin: 0;
   border-radius: calc(16px + 8px);
   background: var(--panel-bg);
   box-shadow: var(--shadow-elevated);
   overflow: hidden;
   transform-origin: right center;
   touch-action: pan-y;
+}
+
+.assistantChatPanel--left {
+  transform-origin: left center;
+}
+
+.assistantChatPanel--bottom {
+  transform-origin: center bottom;
 }
 
 .assistantChatHeader {
@@ -403,194 +426,13 @@
   user-select: text;
 }
 
+.assistantMessageBubbleText .pretextText p {
+  color: inherit;
+}
+
 .assistantMessageBubbleText * {
   -webkit-user-select: text;
   user-select: text;
-}
-
-.assistantMessageBubbleText .tiptapEditorShell {
-  min-height: 0;
-  display: block;
-  background: transparent;
-}
-
-.assistantMessageBubbleText .tiptapEditorHost,
-.assistantMessageBubbleText .tiptapEditor {
-  min-height: 0;
-  display: block;
-  overflow: visible;
-}
-
-.assistantMessageBubbleText .tiptapEditor .ProseMirror {
-  min-height: 0;
-  padding: 0;
-  color: inherit;
-  font-size: var(--text-sm);
-  line-height: var(--leading-title);
-  white-space: pre-wrap;
-}
-
-.assistantMessageBubbleText .tiptapEditor .ProseMirror > :first-child {
-  margin-top: 0;
-}
-
-.assistantMessageBubbleText .tiptapEditor .ProseMirror > :last-child {
-  margin-bottom: 0;
-}
-
-.assistantMessageBubbleText .tiptapEditor .ProseMirror p {
-  color: inherit;
-}
-
-.assistantMessageBubbleText .tiptapEditor .ProseMirror h1,
-.assistantMessageBubbleText .tiptapEditor .ProseMirror h2,
-.assistantMessageBubbleText .tiptapEditor .ProseMirror h3,
-.assistantMessageBubbleText .tiptapEditor .ProseMirror h4,
-.assistantMessageBubbleText .tiptapEditor .ProseMirror h5,
-.assistantMessageBubbleText .tiptapEditor .ProseMirror h6 {
-  margin: 0 0 8px;
-  padding: 0;
-  border: 0;
-  line-height: var(--leading-ui);
-}
-
-.assistantMessageBubbleText .tiptapEditor .ProseMirror h1 {
-  font-size: var(--text-title);
-}
-
-.assistantMessageBubbleText .tiptapEditor .ProseMirror h2 {
-  font-size: var(--text-body);
-}
-
-.assistantMessageBubbleText .tiptapEditor .ProseMirror h3,
-.assistantMessageBubbleText .tiptapEditor .ProseMirror h4,
-.assistantMessageBubbleText .tiptapEditor .ProseMirror h5,
-.assistantMessageBubbleText .tiptapEditor .ProseMirror h6 {
-  font-size: var(--text-sm);
-}
-
-.assistantMessageBubbleText .tiptapEditor .ProseMirror p,
-.assistantMessageBubbleText .tiptapEditor .ProseMirror ul,
-.assistantMessageBubbleText .tiptapEditor .ProseMirror ol,
-.assistantMessageBubbleText .tiptapEditor .ProseMirror blockquote,
-.assistantMessageBubbleText .tiptapEditor .ProseMirror pre {
-  margin: 0 0 10px;
-}
-
-.assistantMessageBubbleText .tiptapEditor .ProseMirror ul,
-.assistantMessageBubbleText .tiptapEditor .ProseMirror ol {
-  padding-left: 20px;
-}
-
-.assistantMessageBubbleText .tiptapEditor .ProseMirror blockquote {
-  border-left: 3px solid var(--focus-ring);
-  padding-left: 10px;
-  color: color-mix(in oklch, currentColor 78%, transparent);
-}
-
-.assistantMessageBubbleText .tiptapEditor .ProseMirror code {
-  padding: 2px 4px;
-  border-radius: 4px;
-  color: inherit;
-  background: color-mix(in oklch, currentColor 10%, transparent);
-  font-family: var(--font-mono);
-  font-size: var(--text-xs);
-}
-
-.assistantMessageBubbleText .tiptapEditor .ProseMirror pre {
-  overflow-x: auto;
-  padding: 10px;
-  border: 1px solid color-mix(in oklch, currentColor 14%, transparent);
-  border-radius: 8px;
-  background: color-mix(in oklch, currentColor 8%, transparent);
-}
-
-.assistantMessageBubbleText .tiptapEditor .ProseMirror pre code {
-  padding: 0;
-  background: transparent;
-  white-space: pre;
-}
-
-.assistantMessageBubbleText .tiptapEditor .ProseMirror a {
-  color: inherit;
-  font-weight: 600;
-  text-decoration: underline;
-  text-underline-offset: 3px;
-}
-
-.assistantMessageBubbleText .tiptapEditor .ProseMirror .tableWrapper {
-  max-width: 100%;
-  overflow-x: auto;
-  margin: 0 0 10px;
-}
-
-.assistantMessageBubbleText .tiptapEditor .ProseMirror table {
-  width: max-content;
-  min-width: 100%;
-  border-collapse: collapse;
-  table-layout: auto;
-}
-
-.assistantMessageBubbleText .tiptapEditor .ProseMirror th,
-.assistantMessageBubbleText .tiptapEditor .ProseMirror td {
-  min-width: 0;
-  padding: 5px 7px;
-  border: 1px solid color-mix(in oklch, currentColor 14%, transparent);
-  text-align: left;
-  vertical-align: top;
-}
-
-.assistantMessageBubbleText .tiptapEditor .ProseMirror th {
-  font-weight: 700;
-  background: color-mix(in oklch, currentColor 8%, transparent);
-}
-
-.assistantMessageBubbleText .tiptapEditor .ProseMirror td {
-  background: transparent;
-}
-
-.assistantMessageBubbleText .tiptapEditor .ProseMirror th > *,
-.assistantMessageBubbleText .tiptapEditor .ProseMirror td > * {
-  margin-bottom: 0;
-}
-
-.assistantMessageBubbleText .tiptapEditor .ProseMirror ul[data-type="taskList"] {
-  padding-left: 0;
-  list-style: none;
-}
-
-.assistantMessageBubbleText .tiptapEditor .ProseMirror ul[data-type="taskList"] li {
-  display: flex;
-  align-items: flex-start;
-  gap: 7px;
-}
-
-.assistantMessageBubbleText .tiptapEditor .ProseMirror ul[data-type="taskList"] li > label {
-  flex: 0 0 auto;
-  padding-top: 2px;
-  user-select: none;
-}
-
-.assistantMessageBubbleText .tiptapEditor .ProseMirror ul[data-type="taskList"] li > div {
-  min-width: 0;
-  flex: 1;
-}
-
-.assistantMessageBubbleText .tiptapEditor .ProseMirror ul[data-type="taskList"] li p {
-  margin-bottom: 0;
-}
-
-.assistantMessageBubbleText .tiptapEditor .ProseMirror ul[data-type="taskList"] li input[type="checkbox"] {
-  width: 13px;
-  height: 13px;
-  margin: 0;
-  accent-color: var(--accent);
-}
-
-.assistantMessageBubbleText .tiptapEditor .ProseMirror hr {
-  margin: 10px 0;
-  border: 0;
-  border-top: 1px solid color-mix(in oklch, currentColor 18%, transparent);
 }
 
 .assistantMessageBubbleText a {
@@ -1039,13 +881,8 @@
 }
 
 @media (max-width: 700px) {
-  .assistantOrbHost {
-    right: 0;
-  }
-
   .assistantChatPanel {
-    width: min(360px, calc(100vw - 16px));
-    height: min(540px, calc(100vh - 16px));
-    margin-right: 20px;
+    width: var(--assistant-panel-width, min(360px, calc(100vw - 16px)));
+    height: var(--assistant-panel-height, min(540px, calc(100vh - 16px)));
   }
 }

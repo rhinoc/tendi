@@ -5,17 +5,19 @@ Baseline: [`vercel-labs/skills`](https://github.com/vercel-labs/skills) `1.5.22`
 
 ## Source database and lock migration
 
-Tendi owns source provenance in SQLite's `skill_sources` table. It can migrate both lock formats
+Tendi owns source provenance in SQLite's `scoped_skill_sources` table. It can import both lock formats
 written by `skills`:
 
 - Global v3: `$XDG_STATE_HOME/skills/.skill-lock.json`, falling back to
   `~/.agents/.skill-lock.json`.
 - Project v1: `skills-lock.json` in the active project.
 
-The database is authoritative per installed path. Scanning and project restore first query
-`skill_sources`. If a row exists, Tendi does not use that skill's lock entry. If a row is absent,
-Tendi may import the lock entry once, including `source`, `sourceUrl`, `sourceType`, `ref`,
-`skillPath`, `skillFolderHash`, and `computedHash`. Tendi never rewrites either lock format.
+The database is authoritative per installed path. Startup workspace initialization imports
+matching lock records into the scoped source table before runtime scanning begins, including
+`source`,
+`sourceUrl`, `sourceType`, `ref`, `skillPath`, `skillFolderHash`, and `computedHash`. After the
+scoped migration marker is written, runtime scanning reads the database only; it does not fall
+back to either lock format or import from it. Tendi never rewrites either lock format.
 
 Source rows survive ordinary scan disappearance, so a temporary missing path cannot make a stale
 lock authoritative again. Explicit uninstall removes the exact installed-path row; a later

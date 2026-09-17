@@ -5,7 +5,7 @@ pub use serde_json::Value;
 pub const PROTOCOL_VERSION: u64 = 2;
 pub const SCHEMA_VERSION: u64 = 1;
 pub const RUNTIME_CONTRACT_FINGERPRINT: &str =
-    "e9a5feda453d0f8ae64e057bd42006e5a1732fbeb5cd27e9e79a46a0d1a963e3";
+    "81be9570295a07ebb0f7ed62df9572e9a4bd990b3abd425658e3528062164c0d";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -726,55 +726,15 @@ pub struct RuleFileDeleteManyRequest {
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct HookDeleteRequest {
-    pub agent: AgentKind,
-    pub path: String,
-    #[serde(rename = "expectedTrustHash")]
-    pub expected_trust_hash: String,
-    pub event: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub matcher: Option<String>,
-    #[serde(rename = "hookType")]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub hook_type: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub command: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub url: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub prompt: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub filter: Option<String>,
-    #[serde(rename = "statusMessage")]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub status_message: Option<String>,
+    pub id: String,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct HookDeleteManyRequest {
-    pub requests: Vec<HookDeleteRequest>,
+    pub ids: StringList,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct HookSetEnabledRequest {
-    pub agent: AgentKind,
-    pub path: String,
-    #[serde(rename = "expectedTrustHash")]
-    pub expected_trust_hash: String,
-    pub event: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub matcher: Option<String>,
-    #[serde(rename = "hookType")]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub hook_type: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub command: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub url: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub prompt: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub filter: Option<String>,
-    #[serde(rename = "statusMessage")]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub status_message: Option<String>,
+    pub id: String,
     pub enabled: bool,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -783,76 +743,20 @@ pub struct HookSetEnabledManyRequest {
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct HookReviewRequest {
-    pub agent: AgentKind,
-    pub path: String,
-    #[serde(rename = "expectedTrustHash")]
-    pub expected_trust_hash: String,
-    pub event: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub matcher: Option<String>,
-    #[serde(rename = "hookType")]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub hook_type: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub command: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub url: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub prompt: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub filter: Option<String>,
-    #[serde(rename = "statusMessage")]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub status_message: Option<String>,
+    pub id: String,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct HookSourceReadRequest {
-    pub agent: AgentKind,
-    pub path: String,
-    #[serde(rename = "expectedTrustHash")]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub expected_trust_hash: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub event: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub matcher: Option<String>,
-    #[serde(rename = "hookType")]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub hook_type: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub command: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub url: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub prompt: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub filter: Option<String>,
-    #[serde(rename = "statusMessage")]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub status_message: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub enabled: Option<bool>,
+    pub id: String,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct McpSetEnabledRequest {
-    pub agent: AgentKind,
-    pub path: String,
-    #[serde(rename = "expectedTrustHash")]
-    pub expected_trust_hash: String,
-    pub name: String,
+    pub id: String,
     pub enabled: bool,
-    #[serde(rename = "serverPath")]
-    pub server_path: StringList,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct McpProbeRequest {
-    pub agent: AgentKind,
-    pub path: String,
-    #[serde(rename = "expectedTrustHash")]
-    pub expected_trust_hash: String,
-    pub name: String,
-    #[serde(rename = "serverPath")]
-    pub server_path: StringList,
+    pub id: String,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct McpSetEnabledManyRequest {
@@ -1084,9 +988,9 @@ pub struct SkillsMarketplaceSearchRequest {
 pub struct SkillFilesRequest {
     #[serde(rename = "skillId")]
     pub skill_id: String,
-    #[serde(rename = "skillPath")]
+    #[serde(rename = "locationId")]
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub skill_path: Option<String>,
+    pub location_id: Option<String>,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SkillFileReadRequest {
@@ -1094,9 +998,9 @@ pub struct SkillFileReadRequest {
     pub skill_id: String,
     #[serde(rename = "relativePath")]
     pub relative_path: String,
-    #[serde(rename = "skillPath")]
+    #[serde(rename = "locationId")]
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub skill_path: Option<String>,
+    pub location_id: Option<String>,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SkillFileSaveRequest {
@@ -1107,9 +1011,9 @@ pub struct SkillFileSaveRequest {
     #[serde(rename = "expectedSha256")]
     pub expected_sha256: String,
     pub content: String,
-    #[serde(rename = "skillPath")]
+    #[serde(rename = "locationId")]
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub skill_path: Option<String>,
+    pub location_id: Option<String>,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SkillFileCreateRequest {
@@ -1117,9 +1021,9 @@ pub struct SkillFileCreateRequest {
     pub skill_id: String,
     #[serde(rename = "relativePath")]
     pub relative_path: String,
-    #[serde(rename = "skillPath")]
+    #[serde(rename = "locationId")]
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub skill_path: Option<String>,
+    pub location_id: Option<String>,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SkillFolderCreateRequest {
@@ -1127,9 +1031,9 @@ pub struct SkillFolderCreateRequest {
     pub skill_id: String,
     #[serde(rename = "relativePath")]
     pub relative_path: String,
-    #[serde(rename = "skillPath")]
+    #[serde(rename = "locationId")]
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub skill_path: Option<String>,
+    pub location_id: Option<String>,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SkillPathRenameRequest {
@@ -1139,9 +1043,9 @@ pub struct SkillPathRenameRequest {
     pub from_relative_path: String,
     #[serde(rename = "toRelativePath")]
     pub to_relative_path: String,
-    #[serde(rename = "skillPath")]
+    #[serde(rename = "locationId")]
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub skill_path: Option<String>,
+    pub location_id: Option<String>,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SkillPathDeleteRequest {
@@ -1149,9 +1053,9 @@ pub struct SkillPathDeleteRequest {
     pub skill_id: String,
     #[serde(rename = "relativePath")]
     pub relative_path: String,
-    #[serde(rename = "skillPath")]
+    #[serde(rename = "locationId")]
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub skill_path: Option<String>,
+    pub location_id: Option<String>,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AppIconSetRequest {
@@ -1170,10 +1074,10 @@ pub struct SessionResumeRequest {
     pub id: String,
     pub agent: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub title: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub project: Option<String>,
     pub path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reconcile: Option<bool>,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct OpenInEditorRequest {
@@ -1283,6 +1187,9 @@ pub enum SkillVisibility {
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SkillPath {
+    #[serde(rename = "locationId")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub location_id: Option<String>,
     pub path: String,
     pub root: String,
     pub scope: String,
@@ -1330,6 +1237,7 @@ pub struct SkillRecord {
     pub dependency_ids: Vec<String>,
     #[serde(rename = "dependentIds")]
     pub dependent_ids: Vec<String>,
+    pub is_wrapper: bool,
     pub visibility: SkillVisibility,
     pub agents: Vec<AgentKind>,
     pub paths: Vec<SkillPath>,
@@ -1716,6 +1624,50 @@ pub struct AssistantStreamEvent {
     pub text: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
+    #[serde(rename = "toolCallId")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<String>,
+}
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AppSettingsPatch {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub appearance: Option<String>,
+    #[serde(rename = "fontFamily")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub font_family: Option<String>,
+    #[serde(rename = "lightTheme")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub light_theme: Option<String>,
+    #[serde(rename = "darkTheme")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dark_theme: Option<String>,
+    #[serde(rename = "appIcon")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub app_icon: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub terminal: Option<String>,
+    #[serde(rename = "sessionResumeTarget")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_resume_target: Option<String>,
+    #[serde(rename = "missingSessionProjectPolicy")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub missing_session_project_policy: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub editor: Option<String>,
+    #[serde(rename = "developerMode")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub developer_mode: Option<bool>,
+    #[serde(rename = "additionalSessionRoots")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub additional_session_roots: Option<Vec<String>>,
+}
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TokenizerCountRequest {
+    pub texts: Vec<String>,
+}
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TokenizerCountResponse {
+    pub counts: Vec<u64>,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AppSettings {
@@ -1777,6 +1729,7 @@ pub struct RuleRecord {
 pub type RuleRecordList = Vec<RuleRecord>;
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct HookRecord {
+    pub id: String,
     pub agent: AgentKind,
     pub event: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1825,6 +1778,7 @@ pub struct McpTool {
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct McpServerRecord {
+    pub id: String,
     pub agent: AgentKind,
     pub name: String,
     pub scope: String,
@@ -1877,6 +1831,9 @@ pub struct AnalyticsOverviewRequest {
     pub rank_days: u64,
     #[serde(rename = "refreshTranscripts")]
     pub refresh_transcripts: bool,
+    #[serde(rename = "endDate")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub end_date: Option<String>,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AnalyticsTokenUsage {
@@ -1892,6 +1849,27 @@ pub struct AnalyticsTokenUsage {
     pub reasoning_output_tokens: u64,
     #[serde(rename = "totalTokens")]
     pub total_tokens: u64,
+}
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AnalyticsCost {
+    #[serde(rename = "inputUsd")]
+    pub input_usd: f64,
+    #[serde(rename = "cachedInputUsd")]
+    pub cached_input_usd: f64,
+    #[serde(rename = "cacheWriteInputUsd")]
+    pub cache_write_input_usd: f64,
+    #[serde(rename = "outputUsd")]
+    pub output_usd: f64,
+    #[serde(rename = "totalUsd")]
+    pub total_usd: f64,
+}
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AnalyticsProjectUsage {
+    pub id: String,
+    pub name: String,
+    pub usage: AnalyticsTokenUsage,
+    pub responses: u64,
+    pub cost: AnalyticsCost,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AnalyticsCapabilities {
@@ -1926,6 +1904,7 @@ pub struct AnalyticsModelUsage {
     pub total_ms: u64,
     #[serde(rename = "completedRuns")]
     pub completed_runs: u64,
+    pub cost: AnalyticsCost,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AnalyticsCallUsage {
@@ -1937,6 +1916,7 @@ pub struct AnalyticsCallUsage {
 pub struct AnalyticsDay {
     pub date: String,
     pub usage: AnalyticsTokenUsage,
+    pub cost: AnalyticsCost,
     pub responses: u64,
     pub sessions: u64,
     #[serde(rename = "sessionsByAgent")]
@@ -1945,6 +1925,7 @@ pub struct AnalyticsDay {
     pub aborted: u64,
     pub compacted: u64,
     pub models: Vec<AnalyticsModelUsage>,
+    pub projects: Vec<AnalyticsProjectUsage>,
     pub tools: Vec<AnalyticsCallUsage>,
     pub skills: Vec<AnalyticsCallUsage>,
     #[serde(rename = "rateLimits")]
@@ -1974,6 +1955,7 @@ pub struct AnalyticsProviderCapability {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AnalyticsOverviewSummary {
     pub usage: AnalyticsTokenUsage,
+    pub cost: AnalyticsCost,
     pub responses: u64,
     pub sessions: u64,
     pub runs: AnalyticsRunSummary,
@@ -2512,11 +2494,12 @@ pub type SessionSkillLinksResponse = SessionSkillLinkList;
 pub type SkillSessionLinksResponse = SessionSkillLinkList;
 pub type SettingsGetRequest = EmptyRequest;
 pub type SettingsGetResponse = AppSettings;
-pub type SettingsSaveRequest = AppSettings;
+pub type SettingsSaveRequest = AppSettingsPatch;
 pub type SettingsSaveResponse = AppSettings;
 
 pub type AssistantChatSessionsRequest = EmptyRequest;
 pub type AssistantChatSessionsResponse = AssistantChatSessionList;
+
 pub type SessionProjectsListRequest = EmptyRequest;
 pub type SessionProjectsListResponse = SessionProjectSummaryList;
 pub type ProjectScanScopesListRequest = EmptyRequest;
@@ -2653,6 +2636,8 @@ pub enum CommandRequest {
     AssistantCancel(AssistantCancelRequest),
     #[serde(rename = "assistant_chat_sessions")]
     AssistantChatSessions(AssistantChatSessionsRequest),
+    #[serde(rename = "tokenizer_count")]
+    TokenizerCount(TokenizerCountRequest),
     #[serde(rename = "session_projects_list")]
     SessionProjectsList(SessionProjectsListRequest),
     #[serde(rename = "project_scan_scopes_list")]
@@ -2857,6 +2842,8 @@ pub enum CommandResult {
     AssistantCancel(AssistantCancelResponse),
     #[serde(rename = "assistant_chat_sessions")]
     AssistantChatSessions(AssistantChatSessionsResponse),
+    #[serde(rename = "tokenizer_count")]
+    TokenizerCount(TokenizerCountResponse),
     #[serde(rename = "session_projects_list")]
     SessionProjectsList(SessionProjectsListResponse),
     #[serde(rename = "project_scan_scopes_list")]
@@ -3037,6 +3024,7 @@ pub enum CommandName {
     AssistantAsk,
     AssistantCancel,
     AssistantChatSessions,
+    TokenizerCount,
     SessionProjectsList,
     ProjectScanScopesList,
     ProjectScanScopesSave,
@@ -3141,6 +3129,7 @@ impl CommandName {
             "assistant_ask" => Some(Self::AssistantAsk),
             "assistant_cancel" => Some(Self::AssistantCancel),
             "assistant_chat_sessions" => Some(Self::AssistantChatSessions),
+            "tokenizer_count" => Some(Self::TokenizerCount),
             "session_projects_list" => Some(Self::SessionProjectsList),
             "project_scan_scopes_list" => Some(Self::ProjectScanScopesList),
             "project_scan_scopes_save" => Some(Self::ProjectScanScopesSave),
@@ -3246,6 +3235,7 @@ impl CommandName {
             Self::AssistantAsk => "assistant_ask",
             Self::AssistantCancel => "assistant_cancel",
             Self::AssistantChatSessions => "assistant_chat_sessions",
+            Self::TokenizerCount => "tokenizer_count",
             Self::SessionProjectsList => "session_projects_list",
             Self::ProjectScanScopesList => "project_scan_scopes_list",
             Self::ProjectScanScopesSave => "project_scan_scopes_save",
@@ -3532,6 +3522,15 @@ pub fn command_metadata(name: &str) -> Option<CommandMetadata> {
             execution: Execution::Read,
             serialized_write: false,
             requires_params: false,
+            internal: false,
+            deprecated: false,
+        }),
+        "tokenizer_count" => Some(CommandMetadata {
+            name: "tokenizer_count",
+            owner: Owner::Desktop,
+            execution: Execution::Read,
+            serialized_write: false,
+            requires_params: true,
             internal: false,
             deprecated: false,
         }),
@@ -4297,7 +4296,7 @@ pub fn validate_request(name: &str, args: &Value) -> Result<(), String> {
                 .map_err(|error| format!("request is invalid: {error}"))?;
         }
         "settings_save" => {
-            serde_json::from_value::<AppSettings>(args.clone())
+            serde_json::from_value::<AppSettingsPatch>(args.clone())
                 .map_err(|error| format!("request is invalid: {error}"))?;
         }
         "assistant_ask" => {
@@ -4306,6 +4305,10 @@ pub fn validate_request(name: &str, args: &Value) -> Result<(), String> {
         }
         "assistant_cancel" => {
             serde_json::from_value::<AssistantCancelRequest>(args.clone())
+                .map_err(|error| format!("request is invalid: {error}"))?;
+        }
+        "tokenizer_count" => {
+            serde_json::from_value::<TokenizerCountRequest>(args.clone())
                 .map_err(|error| format!("request is invalid: {error}"))?;
         }
         "project_scan_scopes_save" => {
@@ -4736,6 +4739,11 @@ pub fn validate_result(name: &str, value: &Value) -> Result<(), String> {
         }
         "assistant_chat_sessions" => {
             serde_json::from_value::<AssistantChatSessionList>(value.clone())
+                .map_err(|error| format!("result is invalid: {error}"))?;
+            Ok(())
+        }
+        "tokenizer_count" => {
+            serde_json::from_value::<TokenizerCountResponse>(value.clone())
                 .map_err(|error| format!("result is invalid: {error}"))?;
             Ok(())
         }

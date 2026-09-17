@@ -4,7 +4,7 @@ use std::{
     io::{BufRead, BufReader, Read, Write},
     path::{Path, PathBuf},
     process::{ChildStdin, Command, Stdio},
-    sync::{LazyLock, Mutex, MutexGuard, mpsc},
+    sync::mpsc,
     thread,
     time::Duration,
 };
@@ -21,8 +21,6 @@ use crate::{
     fsutil::{atomic_write, sha256_text},
     skills::AgentKind,
 };
-
-static MCP_MUTATION_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
 #[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "kebab-case")]
@@ -83,6 +81,28 @@ pub struct McpServerRecord {
     pub icons: Vec<McpIcon>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tools: Vec<McpTool>,
+}
+
+/// Returns the stable identity of an MCP server record.
+///
+/// The JSON tuple deliberately contains only the provider, configured server
+/// name, source file, and nested server path. It matches the existing
+/// desktop row-key encoding so callers can adopt this core-owned ID
+/// without changing persisted locators. Mutable configuration and probe
+/// metadata are intentionally excluded.
+pub fn mcp_server_id(server: &McpServerRecord) -> String {
+    serde_json::to_string(&(
+        server.agent,
+        &server.name,
+        server.path.to_string_lossy(),
+        &server.server_path,
+    ))
+    .expect("MCP server identity fields must be serializable")
+}
+
+/// Returns whether `id` identifies `server`.
+pub fn mcp_server_matches_id(server: &McpServerRecord, id: &str) -> bool {
+    !id.trim().is_empty() && mcp_server_id(server) == id
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -1619,6 +1639,8 @@ pub fn mcp_server_requires_probe(server: &McpServerRecord) -> bool {
 }
 
 pub fn set_server_enabled(request: McpSetEnabledRequest) -> Result<String> {
+    let _resources =
+        crate::coordination::acquire_file_resources(std::slice::from_ref(&request.path))?;
     crate::providers::agent_provider(request.agent).set_mcp_enabled(&request)?;
     let text = fs::read_to_string(&request.path)?;
     Ok(sha256_text(&text))
@@ -1635,12 +1657,22 @@ pub fn probe_server(request: McpProbeRequest, current: McpServerRecord) -> Resul
     provider.probe_mcp(&request, &current, &mut probe_cache)
 }
 
+/// Validate the preparation input immediately before publishing a probe result.
+/// The publishing owner retains the source resource lease through its commit.
+pub fn verify_probe_source(path: &Path, expected: &str) -> Result<()> {
+    if crate::fsutil::sha256_file(path)? != expected {
+        anyhow::bail!("MCP source changed while probing; probe the current configuration again");
+    }
+    Ok(())
+}
+
 pub(crate) fn set_json_server_enabled(
     request: &McpSetEnabledRequest,
     server_keys: &[&str],
     update_server: fn(&mut serde_json::Map<String, Value>, bool) -> bool,
 ) -> Result<()> {
-    let _mutation = lock_mcp_mutation()?;
+    let _resources =
+        crate::coordination::acquire_file_resources(std::slice::from_ref(&request.path))?;
     let text = fs::read_to_string(&request.path)?;
     if request.expected_trust_hash.is_empty() || sha256_text(&text) != request.expected_trust_hash {
         anyhow::bail!("MCP source changed");
@@ -1678,7 +1710,8 @@ pub(crate) fn set_toml_server_enabled(
     server_key: &str,
     update_server: fn(&mut dyn TableLike, bool) -> bool,
 ) -> Result<()> {
-    let _mutation = lock_mcp_mutation()?;
+    let _resources =
+        crate::coordination::acquire_file_resources(std::slice::from_ref(&request.path))?;
     let text = fs::read_to_string(&request.path)?;
     if request.expected_trust_hash.is_empty() || sha256_text(&text) != request.expected_trust_hash {
         anyhow::bail!("MCP source changed");
@@ -1865,12 +1898,6 @@ fn toml_tables_equal(left: &dyn TableLike, right: &dyn TableLike) -> bool {
                 .get(key)
                 .is_some_and(|other| toml_items_equal(item, other))
         })
-}
-
-fn lock_mcp_mutation() -> Result<MutexGuard<'static, ()>> {
-    MCP_MUTATION_LOCK
-        .lock()
-        .map_err(|_| anyhow::anyhow!("MCP mutation authority is unavailable"))
 }
 
 fn update_json_server(
@@ -2297,13 +2324,102 @@ mod tests {
 
     use super::{
         McpProbeCache, McpProbeRequest, McpProbeState, McpServerRecord, McpSetEnabledRequest,
-        enrichment_from_responses, merge_json_server_entry_at_path, merge_toml_server_entry,
-        probe_server, resolve_sse_endpoint, response_value, scan_mcp_for_project_roots,
-        scan_toml_mcp, set_server_enabled,
+        enrichment_from_responses, mcp_server_id, mcp_server_matches_id,
+        merge_json_server_entry_at_path, merge_toml_server_entry, probe_server,
+        resolve_sse_endpoint, response_value, scan_mcp_for_project_roots, scan_toml_mcp,
+        set_server_enabled,
     };
     use crate::{fsutil::sha256_text, skills::AgentKind};
     use rusqlite::params;
     use toml::Value as TomlValue;
+
+    fn identity_test_server() -> McpServerRecord {
+        McpServerRecord {
+            agent: AgentKind::Codex,
+            name: "docs".to_string(),
+            scope: "global".to_string(),
+            transport: "stdio".to_string(),
+            enabled: true,
+            status: "configured".to_string(),
+            path: std::path::PathBuf::from("/tmp/codex/config.toml"),
+            trust_hash: "source-v1".to_string(),
+            probe_cache_version: super::MCP_PROBE_CACHE_VERSION,
+            probe_state: McpProbeState::Ready,
+            server_path: vec!["mcp_servers".to_string()],
+            read_only_reason: None,
+            server_name: Some("Docs".to_string()),
+            server_title: Some("Documentation".to_string()),
+            server_version: Some("1.0.0".to_string()),
+            server_description: Some("A docs server".to_string()),
+            server_website_url: Some("https://example.com".to_string()),
+            probe_error: None,
+            icons: Vec::new(),
+            tools: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn mcp_server_id_is_stable_and_ignores_mutable_metadata() {
+        let server = identity_test_server();
+        let id = mcp_server_id(&server);
+        let mut changed = server.clone();
+        changed.enabled = false;
+        changed.status = "need-login".to_string();
+        changed.trust_hash = "source-v2".to_string();
+        changed.probe_cache_version = 0;
+        changed.probe_state = McpProbeState::Failed;
+        changed.read_only_reason = Some("managed by provider".to_string());
+        changed.server_name = Some("Changed display name".to_string());
+        changed.server_title = Some("Changed title".to_string());
+        changed.server_version = Some("2.0.0".to_string());
+        changed.server_description = Some("Changed description".to_string());
+        changed.server_website_url = Some("https://changed.example.com".to_string());
+        changed.probe_error = Some("connection failed".to_string());
+        changed.icons.push(super::McpIcon {
+            src: "https://example.com/icon.svg".to_string(),
+            mime_type: None,
+            sizes: Vec::new(),
+            theme: None,
+        });
+        changed.tools.push(super::McpTool {
+            name: "search".to_string(),
+            title: None,
+            description: None,
+            input_schema: None,
+            icons: Vec::new(),
+        });
+
+        assert_eq!(mcp_server_id(&server), id);
+        assert_eq!(mcp_server_id(&changed), id);
+        assert!(mcp_server_matches_id(&server, &id));
+        assert!(mcp_server_matches_id(&changed, &id));
+        assert!(!mcp_server_matches_id(&server, " "));
+    }
+
+    #[test]
+    fn mcp_server_id_distinguishes_each_identity_component() {
+        let server = identity_test_server();
+        let id = mcp_server_id(&server);
+
+        let mut different_agent = server.clone();
+        different_agent.agent = AgentKind::Claude;
+        let mut different_path = server.clone();
+        different_path.path = std::path::PathBuf::from("/tmp/claude/config.json");
+        let mut different_server_path = server.clone();
+        different_server_path.server_path = vec!["projects".to_string(), "mcp".to_string()];
+        let mut different_name = server.clone();
+        different_name.name = "search".to_string();
+
+        for different in [
+            different_agent,
+            different_path,
+            different_server_path,
+            different_name,
+        ] {
+            assert_ne!(mcp_server_id(&different), id);
+            assert!(!mcp_server_matches_id(&different, &id));
+        }
+    }
 
     #[test]
     fn reads_standard_server_metadata_icons_and_tools() {

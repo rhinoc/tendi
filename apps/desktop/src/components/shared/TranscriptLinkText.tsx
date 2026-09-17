@@ -17,7 +17,7 @@ export type SessionTitleTextProps = Omit<TranscriptLinkTextProps, "value"> & {
   value: string | null | undefined;
 };
 
-function highlightText(value: string, query: string, queryTerms?: readonly string[]): ReactNode {
+export function highlightTranscriptText(value: string, query: string, queryTerms?: readonly string[]): ReactNode {
   const ranges = queryTerms?.length
     ? findTextRangesForQueryTerms(value, queryTerms)
     : findTextRanges(value, query);
@@ -42,13 +42,13 @@ function openLink(event: ReactMouseEvent<HTMLAnchorElement>, url: string) {
 
 export function TranscriptLinkText({ interactive = true, query = "", queryTerms, value }: TranscriptLinkTextProps) {
   const tokens = transcriptLinkTokens(value);
-  if (tokens.length === 0) return highlightText(value, query, queryTerms);
+  if (tokens.length === 0) return highlightTranscriptText(value, query, queryTerms);
 
   const nodes: ReactNode[] = [];
   let offset = 0;
   const needles = queryTerms?.length ? queryTerms : [query];
   tokens.forEach((token, index) => {
-    if (token.start > offset) nodes.push(highlightText(value.slice(offset, token.start), query, queryTerms));
+    if (token.start > offset) nodes.push(highlightTranscriptText(value.slice(offset, token.start), query, queryTerms));
     const label = transcriptLinkLabel(token.url, token.label);
     const isSearchMatch = needles.some((needle) => {
       const normalizedNeedle = needle.trim().toLowerCase();
@@ -57,7 +57,7 @@ export function TranscriptLinkText({ interactive = true, query = "", queryTerms,
     const linkContent = (
       <span className="transcriptLinkContent">
         <Link2 aria-hidden="true" className="transcriptLinkIcon" size={12} strokeWidth={2} />
-        <span className="transcriptLinkLabel">{highlightText(label, query, queryTerms)}</span>
+        <span className="transcriptLinkLabel">{highlightTranscriptText(label, query, queryTerms)}</span>
       </span>
     );
     const link = interactive ? (
@@ -78,7 +78,7 @@ export function TranscriptLinkText({ interactive = true, query = "", queryTerms,
     if (token.trailing) nodes.push(token.trailing);
     offset = token.end;
   });
-  if (offset < value.length) nodes.push(highlightText(value.slice(offset), query, queryTerms));
+  if (offset < value.length) nodes.push(highlightTranscriptText(value.slice(offset), query, queryTerms));
   return nodes;
 }
 

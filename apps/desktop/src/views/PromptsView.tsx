@@ -38,12 +38,11 @@ import { DataTable } from "../components/DataTable.tsx";
 import { ColumnDataType, type ColumnDef } from "../components/DataTable.types";
 import type { DataTableMenuComponents } from "../components/shared/DataTableMenus.tsx";
 import { actionLabels, copiedValueLabel, copyValueLabel, promptActionLabels, promptDisplayName, selectionCopiedLabel, selectionCopyLabel, selectionDeleteLabel, TableSelectionActionId, compactDateTime, normalizePromptTags, promptPreview, promptSelectionActionIds, promptTagsLabel, suppressNextClick, type PromptRecord } from "../lib/index.ts";
-import { deletePrompts, savePrompt as savePromptCommand } from "../lib/runtime-gateway.ts";
 import type { RawDomainRow } from "../controllers/controller-types.ts";
 
 const PromptBodyEditor = lazy(() => import("../features/prompts/PromptBodyEditor.tsx").then(({ PromptBodyEditor: component }) => ({ default: component })));
 
-type PromptDraft = {
+export type PromptDraft = {
   id?: string;
   title: string;
   tags: string[];
@@ -211,13 +210,13 @@ type PromptsViewProps = {
   loadError?: string;
   hasRows?: boolean;
   onRefreshPrompts: () => void | Promise<void>;
-  onPromptSaved?: (prompt: RawDomainRow) => void;
-  onPromptsDeleted?: (ids: string[]) => void;
+  onSavePrompt: (draft: PromptDraft) => Promise<RawDomainRow | null>;
+  onDeletePrompts: (ids: string[]) => Promise<boolean>;
   locatePromptId?: string;
   onLocatePromptComplete?: (id: string) => void;
 };
 
-export function PromptsView({ prompts, loadingPrompts = false, loadError = "", hasRows = false, onRefreshPrompts, onPromptSaved, onPromptsDeleted, locatePromptId, onLocatePromptComplete }: PromptsViewProps) {
+export function PromptsView({ prompts, loadingPrompts = false, loadError = "", hasRows = false, onRefreshPrompts, onSavePrompt, onDeletePrompts, locatePromptId, onLocatePromptComplete }: PromptsViewProps) {
   const [selected, setSelected] = useState<string[]>([]);
   const [query, setQuery] = useTabState("prompts.query", "");
   const [editingPrompt, setEditingPrompt] = useState<PromptRecord | null>(null);
@@ -260,19 +259,13 @@ export function PromptsView({ prompts, loadingPrompts = false, loadError = "", h
     if (saving) return;
     setSaving(true);
     setDialogError("");
-    const result = await savePromptCommand({
-      id: draft.id ?? null,
-      title: draft.title,
-      tags: normalizePromptTags(draft.tags),
-      body: draft.body,
-    });
+    const result = await onSavePrompt({ ...draft, tags: normalizePromptTags(draft.tags) });
     setSaving(false);
     if (!result) {
       setDialogError(promptActionLabels.saveFailed);
       return;
     }
     setDialogOpen(false);
-    onPromptSaved?.(result && typeof result.body !== "string" ? { ...result, body: draft.body } : result);
   };
   const copyPrompts = useCallback(async (items: PromptRecord[]) => {
     const text = items.map((prompt) => prompt.body).filter(Boolean).join("\n\n");
@@ -286,14 +279,13 @@ export function PromptsView({ prompts, loadingPrompts = false, loadError = "", h
     if (pendingIds.length === 0) return;
     setDeletingPromptIds((current) => Array.from(new Set([...current, ...pendingIds])));
     try {
-      const result = await deletePrompts(pendingIds);
+      const result = await onDeletePrompts(pendingIds);
       if (!result) return;
       setSelected((current) => current.filter((id) => !pendingIds.includes(id)));
-      onPromptsDeleted?.(pendingIds);
     } finally {
       setDeletingPromptIds((current) => current.filter((id) => !pendingIds.includes(id)));
     }
-  }, [deletingPromptIds, onPromptsDeleted]);
+  }, [deletingPromptIds, onDeletePrompts]);
   const requestDeletePrompts = useCallback((items: PromptRecord[]) => {
     const ids = items
       .map((prompt) => prompt.id)

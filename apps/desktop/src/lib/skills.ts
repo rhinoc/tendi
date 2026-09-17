@@ -38,6 +38,7 @@ export const allSkillVisibilities = [
 ] as const;
 
 export type NormalizedSkillPath = NonNullable<SkillLike["paths"]>[number] & {
+  location_id?: string;
   path: string;
   root: string;
   scope: string;
@@ -215,6 +216,7 @@ export function normalizeSkill(skill: Record<string, unknown>): NormalizedSkill 
     || typeof skill.source_summary !== "string"
     || typeof skill.update_status !== "string"
     || typeof skill.is_system !== "boolean"
+    || typeof skill.is_wrapper !== "boolean"
   ) return undefined;
   const rawAgents = skill.agents;
   const agents = rawAgents
@@ -250,6 +252,7 @@ export function normalizeSkill(skill: Record<string, unknown>): NormalizedSkill 
     if ((path.source_kind as string).trim().toLowerCase() === "unknown") return [];
     return [{
       ...path,
+      location_id: typeof path.locationId === "string" ? path.locationId : undefined,
       path: path.path as string,
       root: path.root as string,
       scope: path.scope as string,
@@ -272,7 +275,7 @@ export function normalizeSkill(skill: Record<string, unknown>): NormalizedSkill 
     dependents,
     dependencyIds,
     dependentIds,
-    isWrapper: tags.includes("wrapper"),
+    isWrapper: skill.is_wrapper,
     agents: uniqueAgents,
     visibility,
     isSystem,

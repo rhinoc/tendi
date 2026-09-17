@@ -57,6 +57,19 @@ node scripts/perf-check.mjs --full
 The second run reports percentage changes against `target/perf/baseline.json`. Static limits are
 still authoritative, so deleting `target` does not disable the gate.
 
+## Git pre-commit gate
+
+The repository-managed `.githooks/pre-commit` runs the layer-boundary check and the unused-code
+check. The latter treats Rust `dead_code` warnings and unused desktop TypeScript locals or
+parameters as errors. Run the unused-code check directly when iterating:
+
+```sh
+node scripts/check-unused-code.mjs
+```
+
+The check covers the whole workspace, including test targets, so it catches dead code that is only
+referenced from tests.
+
 ## Git pre-push gate
 
 This repository includes `.githooks/pre-push`. Enable repository-managed hooks once per clone:

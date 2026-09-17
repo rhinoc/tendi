@@ -48,6 +48,7 @@ export class RuntimeClient {
   async assistantAsk(request: RequestFor<"assistant_ask">): Promise<ResponseFor<"assistant_ask">> { return this.call("assistant_ask", request); }
   async assistantCancel(request: RequestFor<"assistant_cancel">): Promise<ResponseFor<"assistant_cancel">> { return this.call("assistant_cancel", request); }
   async assistantChatSessions(request: RequestFor<"assistant_chat_sessions">): Promise<ResponseFor<"assistant_chat_sessions">> { return this.call("assistant_chat_sessions", request); }
+  async tokenizerCount(request: RequestFor<"tokenizer_count">): Promise<ResponseFor<"tokenizer_count">> { return this.call("tokenizer_count", request); }
   async sessionProjectsList(request: RequestFor<"session_projects_list">): Promise<ResponseFor<"session_projects_list">> { return this.call("session_projects_list", request); }
   async projectScanScopesList(request: RequestFor<"project_scan_scopes_list">): Promise<ResponseFor<"project_scan_scopes_list">> { return this.call("project_scan_scopes_list", request); }
   async projectScanScopesSave(request: RequestFor<"project_scan_scopes_save">): Promise<ResponseFor<"project_scan_scopes_save">> { return this.call("project_scan_scopes_save", request); }

@@ -19,6 +19,29 @@ const SKILL_MARKDOWN: &str = include_str!("../../../skills/tendi/SKILL.md");
 const GUIDE_MARKDOWN: &str = include_str!("../../../skill-guides/tendi.md");
 const PROMPT_MARKER: &str = "bundled-skill-prompt-v1";
 
+#[derive(Debug, Clone, Copy)]
+pub enum BundledSkillOperation {
+    Install(AgentKind),
+    Remove(AgentKind),
+    DismissPrompt,
+    PrepareSource,
+}
+
+/// Pure resource declaration shared by scheduler admission and core mutation.
+pub fn operation_resource_paths(operation: BundledSkillOperation) -> Result<Vec<PathBuf>> {
+    Ok(match operation {
+        BundledSkillOperation::Install(agent) => vec![
+            global_agent_skill_root(agent)?.join(SKILL_NAME),
+            prompt_marker_path()?,
+        ],
+        BundledSkillOperation::Remove(agent) => {
+            vec![global_agent_skill_root(agent)?.join(SKILL_NAME)]
+        }
+        BundledSkillOperation::DismissPrompt => vec![prompt_marker_path()?],
+        BundledSkillOperation::PrepareSource => vec![source_path()?],
+    })
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BundledSkillStatus {
@@ -52,10 +75,17 @@ pub fn guide_markdown() -> &'static str {
     GUIDE_MARKDOWN
 }
 
-pub fn install_source_path() -> Result<PathBuf> {
+pub fn source_path() -> Result<PathBuf> {
     let db = default_db_path()?;
     let parent = db.parent().context("Tendi data directory is unavailable")?;
-    let source = parent.join("sources/tendi-bundled");
+    Ok(parent.join("sources/tendi-bundled"))
+}
+
+pub fn install_source_path() -> Result<PathBuf> {
+    let source = source_path()?;
+    let _resources = crate::coordination::acquire_file_resources(&operation_resource_paths(
+        BundledSkillOperation::PrepareSource,
+    )?)?;
     for (relative, content) in desired_files(AgentKind::Shared) {
         let path = source.join(relative);
         if read_optional(&path)?.is_none() {
@@ -81,7 +111,15 @@ pub fn install(
     dry_run: bool,
 ) -> Result<BundledSkillInstallReport> {
     let marker = prompt_marker_path()?;
-    let plan = plan_install(agent)?;
+    let target = global_agent_skill_root(agent)?.join(SKILL_NAME);
+    let _resources = if dry_run {
+        None
+    } else {
+        Some(crate::coordination::acquire_file_resources(
+            &operation_resource_paths(BundledSkillOperation::Install(agent))?,
+        )?)
+    };
+    let plan = plan_install_at(&target, agent)?;
     if plan.requires_overwrite && !overwrite {
         bail!(
             "{} contains different content; inspect it and rerun with --overwrite to replace the bundled files",
@@ -102,12 +140,19 @@ pub fn install(
 pub fn remove(agent: AgentKind) -> Result<BundledSkillStatus> {
     let target = global_agent_skill_root(agent)?.join(SKILL_NAME);
     let marker = prompt_marker_path()?;
+    let _resources = crate::coordination::acquire_file_resources(&operation_resource_paths(
+        BundledSkillOperation::Remove(agent),
+    )?)?;
     remove_at(&target, agent)?;
     status_at(&target, &marker, agent)
 }
 
 pub fn dismiss_prompt() -> Result<()> {
-    mark_prompt_handled_at(&prompt_marker_path()?)
+    let marker = prompt_marker_path()?;
+    let _resources = crate::coordination::acquire_file_resources(&operation_resource_paths(
+        BundledSkillOperation::DismissPrompt,
+    )?)?;
+    mark_prompt_handled_at(&marker)
 }
 
 fn prompt_marker_path() -> Result<PathBuf> {

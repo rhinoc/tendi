@@ -113,6 +113,10 @@ impl Logger {
         let _ = self.log(Level::Debug, message, fields);
     }
 
+    pub fn debug_enabled(&self) -> bool {
+        Level::Debug >= self.inner.min_level
+    }
+
     pub fn info(&self, message: &str, fields: Value) {
         let _ = self.log(Level::Info, message, fields);
     }

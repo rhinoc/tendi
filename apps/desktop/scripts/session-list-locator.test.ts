@@ -72,3 +72,10 @@ test("uses logical row identity while keeping source-sensitive identity separate
   assert.doesNotMatch(sessionsView, /preserveLocatedSessionPageRef/);
   assert.match(sessionsView, /scrollResetKey=\{`\$\{pageContextKey\}\\u0000\$\{boundedCurrentPage\}`\}/);
 });
+
+test("keeps transcript scroll identity stable when a source path changes", () => {
+  assert.match(sessionsView, /useTranscriptVirtualizer\([\s\S]*?sessionExternalKey\(session\),\s*scrollRestorationReady/);
+  assert.match(sessionsView, /const activeSessionLogicalKey = useMemo\(\(\) =>/);
+  assert.match(sessionsView, /if \(logicalIdentityChanged\) setItems\(\[\]\);/);
+  assert.match(sessionsCss, /\.transcript\s*\{[\s\S]*overflow-anchor:\s*none;/);
+});

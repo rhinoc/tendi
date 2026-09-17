@@ -18,6 +18,7 @@ export interface TooltipProps {
   onlyWhenTruncated?: boolean;
   open?: boolean;
   onOpenChange?: (open: boolean) => void;
+  delayDuration?: number;
   side?: TooltipContentProps["side"];
   align?: TooltipContentProps["align"];
   sideOffset?: TooltipContentProps["sideOffset"];
@@ -39,7 +40,7 @@ function isTruncated(element: HTMLElement | null) {
   });
 }
 
-type TooltipPopupProps = Omit<TooltipProps, "children" | "onlyWhenTruncated" | "open" | "onOpenChange">;
+type TooltipPopupProps = Omit<TooltipProps, "children" | "onlyWhenTruncated" | "open" | "onOpenChange" | "delayDuration">;
 
 function TooltipPopup({
   content,
@@ -78,6 +79,7 @@ function TruncatedTooltip({
   interactive,
   open,
   onOpenChange,
+  delayDuration,
   ...popupProps
 }: Omit<TooltipProps, "onlyWhenTruncated">) {
   const [internalOpen, setInternalOpen] = useState(false);
@@ -87,6 +89,7 @@ function TruncatedTooltip({
   return (
     <RadixTooltip.Root
       open={isControlled ? open : internalOpen}
+      delayDuration={delayDuration}
       onOpenChange={(nextOpen) => {
         const allowedOpen = nextOpen && isTruncated(triggerRef.current);
         if (!isControlled) setInternalOpen(allowedOpen);
@@ -106,6 +109,7 @@ export function Tooltip({
   onlyWhenTruncated = false,
   open,
   onOpenChange,
+  delayDuration,
   ...popupProps
 }: TooltipProps) {
   if (content === null || content === undefined || content === false || content === "") {
@@ -119,6 +123,7 @@ export function Tooltip({
         interactive={interactive}
         open={open}
         onOpenChange={onOpenChange}
+        delayDuration={delayDuration}
         {...popupProps}
       >
         {children}
@@ -127,7 +132,7 @@ export function Tooltip({
   }
 
   return (
-    <RadixTooltip.Root open={open} onOpenChange={onOpenChange}>
+    <RadixTooltip.Root open={open} delayDuration={delayDuration} onOpenChange={onOpenChange}>
       <RadixTooltip.Trigger asChild>{children}</RadixTooltip.Trigger>
       <TooltipPopup content={content} interactive={interactive} {...popupProps} />
     </RadixTooltip.Root>

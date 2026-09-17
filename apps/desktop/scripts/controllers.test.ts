@@ -316,6 +316,7 @@ if (typeof mock.module !== "function") {
 
   test("keeps canonical hook rows while applying a typed mutation result", () => {
     const raw = toRawDomainRows([{
+      id: "hook-1",
       agent: " codex ",
       event: " session-start ",
       path: " /hooks.json ",
@@ -325,6 +326,7 @@ if (typeof mock.module !== "function") {
     }], "test hook rows")[0];
     const current = emptyRuntimeData();
     current.hooks = [{
+      id: "hook-1",
       agent: "codex",
       event: "session-start",
       path: "/hooks.json",
@@ -341,6 +343,7 @@ if (typeof mock.module !== "function") {
 
   test("keeps canonical MCP rows while applying a typed mutation result", () => {
     const raw = toRawDomainRows([{
+      id: "mcp-1",
       agent: " codex ",
       name: " server ",
       scope: " global ",
@@ -352,6 +355,7 @@ if (typeof mock.module !== "function") {
     }], "test MCP rows")[0];
     const current = emptyRuntimeData();
     current.mcp = [{
+      id: "mcp-1",
       agent: "codex",
       name: "server",
       scope: "global",

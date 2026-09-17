@@ -1,4 +1,3 @@
-import { Tooltip } from "../../components/shared/Tooltip.tsx";
 import { Badge } from "../../components/shared/Badge.tsx";
 import { lazy, Suspense, useCallback, useDeferredValue, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { FilePlus, FolderPlus, Waypoints } from "lucide-react";
@@ -47,7 +46,6 @@ import { EditorStatePlaceholder } from "../../components/shared/EditorStatePlace
 import { FileTreeContextMenuItems } from "./FileTreeContextMenuItems.tsx";
 import { skillFileTreeTone } from "./skill-file-tree.ts";
 import { IconButton } from "../../components/shared/IconButton.tsx";
-import { LoadingState } from "../../components/shared/LoadingState.tsx";
 import { MarkdownFilePane, type DiffStats } from "../../components/shared/MarkdownFilePane.tsx";
 import { ResizeSeparator } from "../../components/shared/ResizeSeparator.tsx";
 import { Toast } from "../../components/shared/Toast.tsx";
@@ -78,12 +76,13 @@ export type SkillEditorViewProps = {
   onOpenSession?: (link: Record<string, unknown>) => void;
   onOpenSkill?: (skillId: string) => void;
   onSaved?: (skills?: RawSkillRecord[]) => void;
+  onBeginMutation: () => () => void;
 };
 
-export function SkillEditorView({ skill, skills, back, onReadSkillIndexStatus, skillIndexStatus, onOpenSession, onOpenSkill, onSaved }: SkillEditorViewProps) {
+export function SkillEditorView({ skill, skills, back, onReadSkillIndexStatus, skillIndexStatus, onOpenSession, onOpenSkill, onSaved, onBeginMutation }: SkillEditorViewProps) {
   const currentSkill = skill;
   const skillLocation = currentSkill.paths.find((path) => path.path);
-  const skillPath = skillLocation?.path;
+  const locationId = skillLocation?.location_id;
   const skillContentHash = skillLocation?.sha256;
   const readOnly = isReadOnlySkillSource(currentSkill);
   const editorState = useSkillEditorState(currentSkill.id);
@@ -148,12 +147,12 @@ export function SkillEditorView({ skill, skills, back, onReadSkillIndexStatus, s
       setLoadingContent(true);
       const fileListRead = readSkillFiles({
         skillId: currentSkill.id,
-        skillPath,
+        locationId,
       });
       const initialContentRead = readSkillFile({
         skillId: currentSkill.id,
         relativePath: "SKILL.md",
-        skillPath,
+        locationId,
       });
       const [fileListResult, initialContentResult] = await Promise.allSettled([fileListRead, initialContentRead]);
       if (fileListResult.status === "rejected") {
@@ -200,7 +199,7 @@ export function SkillEditorView({ skill, skills, back, onReadSkillIndexStatus, s
     return () => {
       cancelled = true;
     };
-  }, [currentSkill.id, skillContentHash, skillPath]);
+  }, [currentSkill.id, skillContentHash, locationId]);
 
   useEffect(() => {
     setSaveState(SaveStatus.Idle);
@@ -217,7 +216,7 @@ export function SkillEditorView({ skill, skills, back, onReadSkillIndexStatus, s
       const fileRead = readSkillFile({
         skillId: currentSkill.id,
         relativePath: activePath,
-        skillPath,
+        locationId,
       });
       let result: SkillFileReadResponse;
       try {
@@ -248,12 +247,13 @@ export function SkillEditorView({ skill, skills, back, onReadSkillIndexStatus, s
       cancelled = true;
       setLoadingContent(false);
     };
-  }, [activePath, currentSkill.id, drafts, loadingFiles, skillPath]);
+  }, [activePath, currentSkill.id, drafts, loadingFiles, locationId]);
 
   const save = useCallback(async () => {
     if (readOnly || !dirty || !original.sha256 || saveState === SaveStatus.Saving) return;
     setSaveState(SaveStatus.Saving);
     setSaveError("");
+    const releaseMutation = onBeginMutation();
     try {
       const result = await saveSkillFile({
         skillId: currentSkill.id,
@@ -275,8 +275,10 @@ export function SkillEditorView({ skill, skills, back, onReadSkillIndexStatus, s
       const message = error instanceof Error ? error.message : `${error}`;
       setSaveError(message);
       setSaveState(SaveStatus.Error);
+    } finally {
+      releaseMutation();
     }
-  }, [activePath, content, currentSkill.id, dirty, onSaved, original.sha256, readOnly, saveState]);
+  }, [activePath, content, currentSkill.id, dirty, onBeginMutation, onSaved, original.sha256, readOnly, saveState]);
   const rows = useMemo(() => buildFileTreeRows(files, collapsedFolders), [collapsedFolders, files]);
   const selectedEntry = useMemo(
     () => files.find((file) => file.kind === "file" && file.name === selectedPath)
@@ -315,7 +317,7 @@ export function SkillEditorView({ skill, skills, back, onReadSkillIndexStatus, s
     try {
       result = await readSkillFiles({
         skillId: currentSkill.id,
-        skillPath,
+        locationId,
       });
       setFileError("");
     } catch (error) {
@@ -370,19 +372,21 @@ export function SkillEditorView({ skill, skills, back, onReadSkillIndexStatus, s
     const nextPath = joinRelativePath(parentPath(entry.name), nextName);
     setRenamingPath("");
     if (nextPath === entry.name) return;
-    let result: SkillFileMutationResponse;
+    const releaseMutation = onBeginMutation();
     try {
-      result = await renameSkillPath({
-        skillId: currentSkill.id,
-        fromRelativePath: entry.name,
-        toRelativePath: nextPath,
-        skillPath,
-      });
-    } catch (error) {
-      setFileError(error instanceof Error ? error.message : `${error}`);
-      return;
-    }
-    setDrafts((current) => {
+      let result: SkillFileMutationResponse;
+      try {
+        result = await renameSkillPath({
+          skillId: currentSkill.id,
+          fromRelativePath: entry.name,
+          toRelativePath: nextPath,
+          locationId,
+        });
+      } catch (error) {
+        setFileError(error instanceof Error ? error.message : `${error}`);
+        return;
+      }
+      setDrafts((current) => {
       const next: Record<string, SkillDraft> = {};
       for (const [path, draft] of Object.entries(current)) {
         if (path === entry.name || path.startsWith(`${entry.name}/`)) {
@@ -392,8 +396,8 @@ export function SkillEditorView({ skill, skills, back, onReadSkillIndexStatus, s
         }
       }
       return next;
-    });
-    setCreatedPaths((current) => {
+      });
+      setCreatedPaths((current) => {
       const next = new Set(current);
       for (const path of current) {
         if (path === entry.name || path.startsWith(`${entry.name}/`)) {
@@ -402,35 +406,40 @@ export function SkillEditorView({ skill, skills, back, onReadSkillIndexStatus, s
         }
       }
       return next;
-    });
-    if (activePath === entry.name || activePath.startsWith(`${entry.name}/`)) {
-      setActivePath(`${nextPath}${activePath.slice(entry.name.length)}`);
+      });
+      if (activePath === entry.name || activePath.startsWith(`${entry.name}/`)) {
+        setActivePath(`${nextPath}${activePath.slice(entry.name.length)}`);
+      }
+      if (!applyMutationFiles(result, nextPath)) await reloadFiles(nextPath);
+      if (result.skills) onSaved?.(result.skills);
+    } finally {
+      releaseMutation();
     }
-    if (!applyMutationFiles(result, nextPath)) await reloadFiles(nextPath);
-    if (result.skills) onSaved?.(result.skills);
   };
   const createEntry = async (kind: "file" | "folder", baseEntry: SkillFileEntry | null = selectedEntry) => {
     if (readOnly) return;
     const parent = baseEntry?.kind === "folder" ? baseEntry.name : parentPath(baseEntry?.name ?? activePath);
     const relativePath = uniqueChildPath(files, parent, kind);
-    let result: SkillFileMutationResponse | null = null;
+    const releaseMutation = onBeginMutation();
     try {
-      if (kind === "folder") {
-        result = await createSkillFolder({ skillId: currentSkill.id, relativePath, skillPath });
-      } else {
-        result = await createSkillFile({ skillId: currentSkill.id, relativePath, skillPath });
+      let result: SkillFileMutationResponse | null = null;
+      try {
+        if (kind === "folder") {
+          result = await createSkillFolder({ skillId: currentSkill.id, relativePath, locationId });
+        } else {
+          result = await createSkillFile({ skillId: currentSkill.id, relativePath, locationId });
+        }
+      } catch (error) {
+        setFileError(error instanceof Error ? error.message : `${error}`);
+        return;
       }
-    } catch (error) {
-      setFileError(error instanceof Error ? error.message : `${error}`);
-      return;
-    }
-    if (kind === "folder") {
+      if (kind === "folder") {
       setCollapsedFolders((current) => {
         const next = new Set(current);
         if (parent) next.delete(parent);
         return next;
       });
-    } else {
+      } else {
       const createdSha256 = result?.sha256;
       if (typeof createdSha256 === "string") {
         setActivePath(relativePath);
@@ -439,38 +448,46 @@ export function SkillEditorView({ skill, skills, back, onReadSkillIndexStatus, s
           [relativePath]: { content: "", originalContent: "", sha256: createdSha256 },
         }));
       }
+      }
+      setCreatedPaths((current) => new Set(current).add(relativePath));
+      if (!applyMutationFiles(result, relativePath)) await reloadFiles(relativePath);
+      if (result?.skills) onSaved?.(result.skills);
+      beginRename({ name: relativePath, kind: kind as SkillFileEntry["kind"] });
+    } finally {
+      releaseMutation();
     }
-    setCreatedPaths((current) => new Set(current).add(relativePath));
-    if (!applyMutationFiles(result, relativePath)) await reloadFiles(relativePath);
-    if (result?.skills) onSaved?.(result.skills);
-    beginRename({ name: relativePath, kind: kind as SkillFileEntry["kind"] });
   };
   const performDeleteEntry = async (entry: SkillFileEntry) => {
     if (readOnly || !entry || entry.name === "SKILL.md") return;
-    let result: SkillFileMutationResponse;
+    const releaseMutation = onBeginMutation();
     try {
-      result = await deleteSkillPath({ skillId: currentSkill.id, relativePath: entry.name, skillPath });
-    } catch (error) {
-      setFileError(error instanceof Error ? error.message : `${error}`);
-      return;
-    }
-    const next = applyMutationFiles(result, activePath === entry.name ? "" : activePath)
-      ?? await reloadFiles(activePath === entry.name ? "" : activePath);
-    if (activePath === entry.name || entry.kind === "folder" && activePath.startsWith(`${entry.name}/`)) {
-      const nextFile = preferredSkillFileName(next);
-      setActivePath(nextFile ?? "");
-    }
-    setDrafts((current) => Object.fromEntries(
-      Object.entries(current).filter(([path]) => path !== entry.name && !path.startsWith(`${entry.name}/`)),
-    ));
-    setCreatedPaths((current) => {
-      const nextCreated = new Set(current);
-      for (const path of current) {
-        if (path === entry.name || path.startsWith(`${entry.name}/`)) nextCreated.delete(path);
+      let result: SkillFileMutationResponse;
+      try {
+        result = await deleteSkillPath({ skillId: currentSkill.id, relativePath: entry.name, locationId });
+      } catch (error) {
+        setFileError(error instanceof Error ? error.message : `${error}`);
+        return;
       }
-      return nextCreated;
-    });
-    if (result.skills) onSaved?.(result.skills);
+      const next = applyMutationFiles(result, activePath === entry.name ? "" : activePath)
+        ?? await reloadFiles(activePath === entry.name ? "" : activePath);
+      if (activePath === entry.name || entry.kind === "folder" && activePath.startsWith(`${entry.name}/`)) {
+        const nextFile = preferredSkillFileName(next);
+        setActivePath(nextFile ?? "");
+      }
+      setDrafts((current) => Object.fromEntries(
+        Object.entries(current).filter(([path]) => path !== entry.name && !path.startsWith(`${entry.name}/`)),
+      ));
+      setCreatedPaths((current) => {
+        const nextCreated = new Set(current);
+        for (const path of current) {
+          if (path === entry.name || path.startsWith(`${entry.name}/`)) nextCreated.delete(path);
+        }
+        return nextCreated;
+      });
+      if (result.skills) onSaved?.(result.skills);
+    } finally {
+      releaseMutation();
+    }
   };
   const requestDeleteEntry = (entry: SkillFileEntry | null = selectedEntry) => {
     if (readOnly || !entry || entry.name === "SKILL.md") return;
@@ -630,6 +647,7 @@ export function SkillEditorView({ skill, skills, back, onReadSkillIndexStatus, s
                 <DialogActionButton variant="secondary" onClick={() => setShowDiscardDialog(false)}>Cancel</DialogActionButton>
                 <DialogActionButton
                   variant="danger"
+                  autoFocus
                   onClick={() => {
                     setShowDiscardDialog(false);
                     discardChanges();
@@ -731,9 +749,7 @@ export function SkillEditorView({ skill, skills, back, onReadSkillIndexStatus, s
               if (!file || renamingPath === item.id) return row;
               return (
                 <ContextMenu.Root>
-                  <Tooltip content={file.name} onlyWhenTruncated>
-                    <ContextMenu.Trigger asChild>{row}</ContextMenu.Trigger>
-                  </Tooltip>
+                  <ContextMenu.Trigger asChild>{row}</ContextMenu.Trigger>
                   <ContextMenu.Portal>
                     <ContextMenu.Content className="menuContent" {...({ sideOffset: 6 } as Record<string, unknown>)}>
                       <FileTreeContextMenuItems

@@ -14,7 +14,13 @@ use sha2::{Digest, Sha256};
 
 use crate::{sessions::SessionRecord, skills::AgentKind, time::parse_timestamp};
 
-const ANALYTICS_PARSER_VERSION: u32 = 11;
+pub(crate) mod cost;
+pub(crate) mod projects;
+
+pub use cost::AnalyticsCost;
+pub use projects::{AnalyticsProjectIdentity, AnalyticsProjectUsage};
+
+const ANALYTICS_PARSER_VERSION: u32 = 12;
 
 #[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -125,6 +131,8 @@ pub struct SessionAnalytics {
     pub session_id: String,
     pub agent: AgentKind,
     pub session_path: PathBuf,
+    #[serde(default)]
+    pub project: Option<AnalyticsProjectIdentity>,
     pub capabilities: Option<AnalyticsCapabilities>,
     pub responses: Vec<AnalyticsResponseUsage>,
     pub runs: Vec<AnalyticsRun>,
@@ -142,6 +150,7 @@ impl Default for SessionAnalytics {
             session_id: String::new(),
             agent: AgentKind::Unknown,
             session_path: PathBuf::new(),
+            project: None,
             capabilities: None,
             responses: Vec::new(),
             runs: Vec::new(),
@@ -226,6 +235,10 @@ pub(crate) fn overview_record(record: &SessionAnalyticsRecord) -> SessionAnalyti
         };
         let day = days.entry(date).or_default();
         day.usage.add_assign(response.usage);
+        let cost = crate::providers::agent_provider(analytics.agent)
+            .analytics_cost(&response.model, response.usage)
+            .unwrap_or_default();
+        day.cost.add_assign(cost);
         day.responses += 1;
         day.has_response_or_run = true;
         if !response.model.trim().is_empty() {
@@ -237,6 +250,7 @@ pub(crate) fn overview_record(record: &SessionAnalyticsRecord) -> SessionAnalyti
             model_usage.total_tokens = model_usage
                 .total_tokens
                 .saturating_add(response.usage.total_tokens);
+            model_usage.cost.add_assign(cost);
             model_usage.responses += 1;
         }
     }
@@ -310,6 +324,7 @@ pub(crate) fn overview_record(record: &SessionAnalyticsRecord) -> SessionAnalyti
         session_id: analytics.session_id.clone(),
         agent: analytics.agent,
         session_path: analytics.session_path.clone(),
+        project: analytics.project.clone(),
         capabilities: analytics.capabilities(),
         first,
         last,
@@ -329,6 +344,7 @@ pub(crate) fn overview_record(record: &SessionAnalyticsRecord) -> SessionAnalyti
 #[derive(Default)]
 struct SessionAnalyticsOverviewDayAccumulator {
     usage: AnalyticsTokenUsage,
+    cost: AnalyticsCost,
     responses: u64,
     runs: Vec<AnalyticsRunContribution>,
     aborted: u64,
@@ -344,6 +360,7 @@ impl SessionAnalyticsOverviewDayAccumulator {
     fn finish(self) -> SessionAnalyticsOverviewDay {
         SessionAnalyticsOverviewDay {
             usage: self.usage,
+            cost: self.cost,
             responses: self.responses,
             runs: self.runs,
             aborted: self.aborted,
@@ -422,6 +439,8 @@ pub(crate) struct SessionAnalyticsOverviewRecord {
     pub session_id: String,
     pub agent: AgentKind,
     pub session_path: PathBuf,
+    #[serde(default)]
+    pub project: Option<AnalyticsProjectIdentity>,
     pub capabilities: AnalyticsCapabilities,
     pub first: Option<String>,
     pub last: Option<String>,
@@ -432,6 +451,8 @@ pub(crate) struct SessionAnalyticsOverviewRecord {
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
 pub(crate) struct SessionAnalyticsOverviewDay {
     pub usage: AnalyticsTokenUsage,
+    #[serde(default)]
+    pub cost: AnalyticsCost,
     pub responses: u64,
     pub runs: Vec<AnalyticsRunContribution>,
     pub aborted: u64,
@@ -448,6 +469,8 @@ pub(crate) struct SessionAnalyticsOverviewModel {
     pub model: String,
     pub total_tokens: u64,
     pub responses: u64,
+    #[serde(default)]
+    pub cost: AnalyticsCost,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -491,6 +514,7 @@ pub struct AnalyticsModelUsage {
     pub total_tokens: u64,
     pub total_ms: u64,
     pub completed_runs: u64,
+    pub cost: AnalyticsCost,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -506,6 +530,7 @@ pub struct AnalyticsCallUsage {
 pub struct AnalyticsDay {
     pub date: String,
     pub usage: AnalyticsTokenUsage,
+    pub cost: AnalyticsCost,
     pub responses: u64,
     pub sessions: usize,
     pub sessions_by_agent: BTreeMap<AgentKind, usize>,
@@ -513,6 +538,7 @@ pub struct AnalyticsDay {
     pub aborted: u64,
     pub compacted: u64,
     pub models: Vec<AnalyticsModelUsage>,
+    pub projects: Vec<AnalyticsProjectUsage>,
     pub tools: Vec<AnalyticsCallUsage>,
     pub skills: Vec<AnalyticsCallUsage>,
     pub rate_limits: BTreeMap<u32, f64>,
@@ -540,6 +566,7 @@ pub struct AnalyticsProviderCapability {
 #[serde(rename_all = "camelCase")]
 pub struct AnalyticsOverviewSummary {
     pub usage: AnalyticsTokenUsage,
+    pub cost: AnalyticsCost,
     pub responses: u64,
     pub sessions: usize,
     pub runs: AnalyticsRunSummary,
@@ -578,11 +605,13 @@ pub struct OverviewAnalytics {
 #[derive(Default)]
 struct DayAccumulator {
     usage: AnalyticsTokenUsage,
+    cost: AnalyticsCost,
     responses: u64,
     runs: AnalyticsRunSummary,
     aborted: u64,
     compacted: u64,
     models: BTreeMap<String, ModelUsageAccumulator>,
+    projects: BTreeMap<String, projects::ProjectUsageAccumulator>,
     tools: BTreeMap<(String, String), u64>,
     skills: BTreeMap<String, u64>,
     rate_limits: BTreeMap<u32, f64>,
@@ -595,6 +624,7 @@ struct ModelUsageAccumulator {
     total_tokens: u64,
     total_ms: u64,
     completed_runs: u64,
+    cost: AnalyticsCost,
 }
 
 #[derive(Default)]
@@ -659,6 +689,18 @@ pub(crate) fn aggregate_overview(
             }
             let slot = by_day.entry(date.to_string()).or_default();
             slot.usage.add_assign(response.usage);
+            let cost = crate::providers::agent_provider(analytics.agent)
+                .analytics_cost(&response.model, response.usage)
+                .unwrap_or_default();
+            slot.cost.add_assign(cost);
+            if let Some(project) = analytics.project.as_ref() {
+                slot.projects.entry(project.id.clone()).or_default().add(
+                    &project.name,
+                    response.usage,
+                    1,
+                    cost,
+                );
+            }
             slot.responses += 1;
             record_session(slot, analytics.agent, &identity);
             if !response.model.trim().is_empty() {
@@ -666,6 +708,11 @@ pub(crate) fn aggregate_overview(
                     .entry(response.model.trim().to_string())
                     .or_default()
                     .total_tokens += response.usage.total_tokens;
+                slot.models
+                    .get_mut(response.model.trim())
+                    .expect("model accumulator was just inserted")
+                    .cost
+                    .add_assign(cost);
             }
         }
         for run in analytics.snapshot_runs(&record.state) {
@@ -781,6 +828,7 @@ pub(crate) fn aggregate_overview(
         days.push(AnalyticsDay {
             date: key,
             usage: slot.usage,
+            cost: slot.cost,
             responses: slot.responses,
             sessions: slot.sessions.len(),
             sessions_by_agent: slot
@@ -792,6 +840,7 @@ pub(crate) fn aggregate_overview(
             aborted: slot.aborted,
             compacted: slot.compacted,
             models: slot.models.into_iter().map(finish_model_usage).collect(),
+            projects: projects::finish_projects(slot.projects),
             tools: slot
                 .tools
                 .into_iter()
@@ -823,6 +872,7 @@ pub(crate) fn aggregate_overview(
     let mut summary_sessions = BTreeSet::new();
     for day in &days {
         summary.usage.add_assign(day.usage);
+        summary.cost.add_assign(day.cost);
         summary.responses += day.responses;
         add_run_summary(&mut summary.runs, &day.runs);
         summary.aborted += day.aborted;
@@ -882,15 +932,26 @@ pub(crate) fn aggregate_overview(
     }
 }
 
+#[cfg(test)]
 pub(crate) fn aggregate_overview_records(
     records: &[SessionAnalyticsOverviewRecord],
     days_requested: u32,
     rank_days: u32,
     warnings: Vec<String>,
 ) -> OverviewAnalytics {
+    aggregate_overview_records_until(records, days_requested, rank_days, None, warnings)
+}
+
+pub(crate) fn aggregate_overview_records_until(
+    records: &[SessionAnalyticsOverviewRecord],
+    days_requested: u32,
+    rank_days: u32,
+    end_date: Option<NaiveDate>,
+    warnings: Vec<String>,
+) -> OverviewAnalytics {
     let days_requested = days_requested.clamp(1, 365);
     let rank_days = rank_days.clamp(1, 730);
-    let today = Local::now().date_naive();
+    let today = end_date.unwrap_or_else(|| Local::now().date_naive());
     let since = today - Duration::days(i64::from(days_requested.saturating_sub(1)));
     let rank_since = today - Duration::days(i64::from(rank_days.saturating_sub(1)));
     let mut by_day = BTreeMap::<String, DayAccumulator>::new();
@@ -934,6 +995,15 @@ pub(crate) fn aggregate_overview_records(
             }
             let slot = by_day.entry(date.clone()).or_default();
             slot.usage.add_assign(contribution.usage);
+            slot.cost.add_assign(contribution.cost);
+            if let Some(project) = record.project.as_ref() {
+                slot.projects.entry(project.id.clone()).or_default().add(
+                    &project.name,
+                    contribution.usage,
+                    contribution.responses,
+                    contribution.cost,
+                );
+            }
             slot.responses += contribution.responses;
             if contribution.responses > 0
                 || !contribution.runs.is_empty()
@@ -950,6 +1020,11 @@ pub(crate) fn aggregate_overview_records(
                         .entry(model.model.trim().to_string())
                         .or_default()
                         .total_tokens += model.total_tokens;
+                    slot.models
+                        .get_mut(model.model.trim())
+                        .expect("model accumulator was just inserted")
+                        .cost
+                        .add_assign(model.cost);
                 }
             }
             for run in &contribution.runs {
@@ -1003,6 +1078,7 @@ pub(crate) fn aggregate_overview_records(
         days.push(AnalyticsDay {
             date: key,
             usage: slot.usage,
+            cost: slot.cost,
             responses: slot.responses,
             sessions: slot.sessions.len(),
             sessions_by_agent: slot
@@ -1014,6 +1090,7 @@ pub(crate) fn aggregate_overview_records(
             aborted: slot.aborted,
             compacted: slot.compacted,
             models: slot.models.into_iter().map(finish_model_usage).collect(),
+            projects: projects::finish_projects(slot.projects),
             tools: slot
                 .tools
                 .into_iter()
@@ -1044,6 +1121,7 @@ pub(crate) fn aggregate_overview_records(
     let mut summary_sessions = BTreeSet::new();
     for day in &days {
         summary.usage.add_assign(day.usage);
+        summary.cost.add_assign(day.cost);
         summary.responses += day.responses;
         add_run_summary(&mut summary.runs, &day.runs);
         summary.aborted += day.aborted;
@@ -1110,6 +1188,7 @@ fn finish_model_usage((model, usage): (String, ModelUsageAccumulator)) -> Analyt
         total_tokens: usage.total_tokens,
         total_ms: usage.total_ms,
         completed_runs: usage.completed_runs,
+        cost: usage.cost,
     }
 }
 
@@ -1435,6 +1514,7 @@ fn empty_record(
             session_id: session.id.clone(),
             agent: session.agent,
             session_path: session.path.clone(),
+            project: projects::identity_for_session(session),
             capabilities: Some(capabilities),
             ..SessionAnalytics::default()
         },
@@ -2657,6 +2737,55 @@ mod tests {
         assert_eq!(overview.tools.len(), 2);
         assert_eq!(overview.tools[0].name, "search");
         assert_ne!(overview.tools[0].server, overview.tools[1].server);
+    }
+
+    #[test]
+    fn overview_groups_cost_and_usage_by_project() {
+        let timestamp = Local::now().to_rfc3339();
+        let usage = AnalyticsTokenUsage {
+            input_tokens: 10,
+            cached_input_tokens: 2,
+            output_tokens: 4,
+            total_tokens: 14,
+            ..AnalyticsTokenUsage::default()
+        };
+        let record = SessionAnalyticsRecord {
+            analytics: SessionAnalytics {
+                session_id: "project-session".to_string(),
+                agent: AgentKind::Codex,
+                session_path: PathBuf::from("/tmp/project-session.jsonl"),
+                project: Some(AnalyticsProjectIdentity {
+                    id: "project-1".to_string(),
+                    name: "Tendi".to_string(),
+                }),
+                responses: vec![AnalyticsResponseUsage {
+                    index: 1,
+                    timestamp,
+                    model: "gpt-5".to_string(),
+                    usage,
+                    cumulative: usage,
+                }],
+                ..SessionAnalytics::default()
+            },
+            state: AnalyticsParserState::default(),
+            file_mtime: 0,
+            file_size: 0,
+        };
+
+        let overview = aggregate_overview(std::slice::from_ref(&record), 1, 1, Vec::new());
+        let projected = aggregate_overview_records(&[overview_record(&record)], 1, 1, Vec::new());
+        let project = &overview.days[0].projects[0];
+
+        assert_eq!(project.id, "project-1");
+        assert_eq!(project.name, "Tendi");
+        assert_eq!(project.usage, usage);
+        assert!(project.cost.total_usd > 0.0);
+        assert_eq!(overview.days[0].cost, project.cost);
+        assert_eq!(
+            serde_json::to_value(&overview.days).unwrap(),
+            serde_json::to_value(&projected.days).unwrap()
+        );
+        assert_eq!(overview.summary.cost, projected.summary.cost);
     }
 
     #[test]

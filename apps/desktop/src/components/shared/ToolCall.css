@@ -15,6 +15,7 @@
 }
 
 .toolCall.nested {
+  --tool-call-inline-padding: 8px;
   --disclosure-inline-padding: 8px;
   margin: 0;
   border-radius: var(--tool-call-nested-radius);
@@ -53,6 +54,13 @@
   background: var(--hover-fill);
 }
 
+/* The summary row is the hover surface for the whole tool call, including
+   the optional linked-session action. Keep the nested disclosure trigger
+   transparent so its hover does not composite a second translucent layer. */
+.toolCallDisclosure:hover {
+  background: transparent;
+}
+
 .toolCallStatusIcon {
   width: 15px;
   height: 15px;
@@ -78,7 +86,7 @@
   flex: 1 1 auto;
   overflow: hidden;
   color: var(--text);
-  font-family: var(--font-mono);
+  font-family: inherit;
   font-size: var(--text-sm);
   font-weight: 400;
   text-overflow: ellipsis;
@@ -123,8 +131,8 @@
 .toolCallLabel {
   margin-bottom: 4px;
   color: var(--faint);
-  font-size: var(--text-sm);
-  font-weight: 400;
+  font-size: var(--text-xs);
+  font-weight: 600;
   letter-spacing: 0.04em;
   text-transform: uppercase;
 }

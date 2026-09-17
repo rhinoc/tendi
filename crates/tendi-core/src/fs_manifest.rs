@@ -26,6 +26,9 @@ pub struct FsManifestEntry {
     pub parser_version: String,
     pub last_seen_at: i64,
     pub parse_status: String,
+    /// Physical ownership for cross-workspace invalidation, resolved during
+    /// scan preparation rather than while holding the database writer.
+    pub resource_path: Option<PathBuf>,
 }
 
 /// Return the stable workspace identity used by projection context rows.

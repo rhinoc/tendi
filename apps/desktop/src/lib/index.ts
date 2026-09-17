@@ -177,8 +177,11 @@ export { AnalyticsGranularity, AnalyticsRefreshPhase, groupAnalyticsDays } from 
 export type {
   AnalyticsCallUsage,
   AnalyticsCapabilities,
+  AnalyticsCost,
   AnalyticsDay,
+  AnalyticsModelUsage,
   AnalyticsPeriod,
+  AnalyticsProjectUsage,
   AnalyticsRankItem,
   AnalyticsTokenUsage,
   OverviewAnalytics,
@@ -236,7 +239,7 @@ export {
 } from "./hooks.ts";
 export type { HookRecord, HookMutationDelta } from "./hooks.ts";
 
-export { mcpDisplayName, mcpNeedsLogin, mcpRowKey, mcpSourcePath, mcpStatusLabel, normalizeMcp, isMcpMutationDelta } from "./mcp.ts";
+export { mcpDisplayName, mcpRowKey, mcpSourcePath, normalizeMcp, isMcpMutationDelta } from "./mcp.ts";
 export type { McpRecord, McpMutationDelta } from "./mcp.ts";
 
 export {
@@ -352,7 +355,7 @@ export {
   startWindowDrag,
 } from "./window-drag.ts";
 
-export { DaemonCommandError, TauriCommand, UPDATE_AVAILABLE_EVENT, invokeCommand, isTauriRuntime, safeInvoke, subscribeDaemonEvents, copyText } from "./tauri.ts";
+export { DaemonCommandError, DaemonErrorCode, TauriCommand, UPDATE_AVAILABLE_EVENT, invokeCommand, isTauriRuntime, safeInvoke, subscribeDaemonEvents, copyText } from "./tauri.ts";
 export { CliInstallState, DesktopUpdateStatus, UpdateCheckStatus } from "./tauri.ts";
 export { assertRuntimeEventPayload } from "./generated/runtime-events.ts";
 export type {

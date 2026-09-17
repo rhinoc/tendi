@@ -42,10 +42,12 @@ import { findTextRanges } from "../components/shared/text-ranges.ts";
 import { RelationshipGraphKind, SkillRelationshipMap } from "../features/skills/SkillRelationshipMap.tsx";
 import { createSessionTableColumns } from "../features/sessions/createSessionTableColumns.tsx";
 import { SessionTitleText, TranscriptLinkText } from "../components/shared/TranscriptLinkText.tsx";
+import { PretextText } from "../components/shared/PretextText.tsx";
 import "./SessionsView.css";
 import { cacheRateTone } from "../lib/token-style.ts";
 import { TokenUsageSource } from "../lib/tokenizer-types.ts";
 import { planSessionListLocation, SessionListLocationPlan, shouldShowSessionListLocator } from "../lib/session-list-locator.ts";
+import { measureTranscriptTextHeight, type TranscriptTextLayout } from "../lib/pretext-layout.ts";
 import { fixedVirtualRange, virtualRangeFor } from "../lib/virtualization.ts";
 import {
   SESSION_FREEZE_COLUMN,
@@ -150,6 +152,11 @@ type TranscriptItemRecord = {
   startedAtMs?: number;
 };
 
+type TranscriptLoadMoreResult = {
+  items: TranscriptItemRecord[];
+  status: "loaded" | "exhausted" | "failed" | "cancelled";
+};
+
 const SESSION_SEARCH_DEBOUNCE_MS = 300;
 const SESSION_LOCATOR_MIN_ITEMS = 4;
 const SESSION_REFRESH_ERROR = "Could not refresh sessions. Try again.";
@@ -171,7 +178,10 @@ enum ImportFeedbackState {
   Error = "error",
 }
 type ResumeFeedbackState = AsyncStatus.Loading | AsyncStatus.Success | AsyncStatus.Error;
-type PendingResumeConflict = { session: SessionRecord };
+type PendingResumeConflict = {
+  session: SessionRecord;
+  target?: Exclude<SessionResumeTarget, SessionResumeTarget.Auto>;
+};
 
 type TranscriptImportWorkerResponse =
   | { ok: true; result: JsonlTranscriptParseResult }
@@ -369,8 +379,10 @@ type SessionLocatorItem = {
 const TRANSCRIPT_VIRTUAL_THRESHOLD = 120;
 const TRANSCRIPT_VIRTUAL_OVERSCAN = 12;
 const TRANSCRIPT_DEFAULT_ITEM_HEIGHT = 96;
-const TRANSCRIPT_ITEM_VERTICAL_INSET = 6;
-const TRANSCRIPT_BUBBLE_TOP_INSET = 22;
+const TRANSCRIPT_ITEM_VERTICAL_INSET = 8;
+const TRANSCRIPT_BUBBLE_TOP_INSET = 20;
+const TRANSCRIPT_CHAT_VERTICAL_CHROME = 66;
+const TRANSCRIPT_CHAT_FALLBACK_BODY_HEIGHT = 60;
 const SESSION_TABLE_ROW_HEIGHT = 72;
 const SESSION_LOCATOR_ROW_HEIGHT = 10;
 const SESSION_LOCATOR_OVERSCAN = 16;
@@ -379,7 +391,33 @@ function isChatTranscriptType(type: string | undefined) {
   return type === "user" || type === "assistant";
 }
 
-function estimatedTranscriptItemHeight(item: TranscriptItemRecord, previousItem?: TranscriptItemRecord): number {
+function parseCssPixels(value: string, fallback: number) {
+  const parsed = Number.parseFloat(value);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function transcriptTextLayoutFor(root: HTMLDivElement | null, viewportWidth: number): TranscriptTextLayout | null {
+  if (!root || viewportWidth <= 0) return null;
+  const styles = getComputedStyle(root);
+  const fontSize = parseCssPixels(styles.getPropertyValue("--text-ui"), 14);
+  const lineHeight = parseCssPixels(styles.getPropertyValue("--leading-body"), 20);
+  const horizontalPadding = parseCssPixels(styles.getPropertyValue("--transcript-inline-padding"), 16);
+  const font = `${styles.fontWeight || "400"} ${fontSize}px ${styles.fontFamily}`;
+  const maxBubbleWidth = Math.min(viewportWidth * 0.8, 600);
+  return {
+    contentWidth: Math.max(1, maxBubbleWidth - horizontalPadding * 2 - 2),
+    font,
+    linkFont: `600 ${fontSize}px ${styles.fontFamily}`,
+    lineHeight,
+    letterSpacing: styles.letterSpacing === "normal" ? 0 : parseCssPixels(styles.letterSpacing, 0),
+  };
+}
+
+function estimatedTranscriptItemHeight(
+  item: TranscriptItemRecord,
+  previousItem?: TranscriptItemRecord,
+  textLayout?: TranscriptTextLayout | null,
+): number {
   const type = transcriptItemType(item);
   const previousType = previousItem ? transcriptItemType(previousItem) : undefined;
   const topInset = isChatTranscriptType(type) && !isChatTranscriptType(previousType)
@@ -388,7 +426,9 @@ function estimatedTranscriptItemHeight(item: TranscriptItemRecord, previousItem?
   switch (type) {
     case "user":
     case "assistant":
-      return 120 + TRANSCRIPT_ITEM_VERTICAL_INSET + topInset;
+      return TRANSCRIPT_CHAT_VERTICAL_CHROME
+        + (textLayout ? (measureTranscriptTextHeight(item.body, textLayout) ?? TRANSCRIPT_CHAT_FALLBACK_BODY_HEIGHT) : TRANSCRIPT_CHAT_FALLBACK_BODY_HEIGHT)
+        + topInset;
     case TranscriptGroupType.ToolGroup:
       return 52 + TRANSCRIPT_ITEM_VERTICAL_INSET;
     case "thinking":
@@ -446,6 +486,7 @@ function useTranscriptVirtualizer(
   const virtualized = items.length >= TRANSCRIPT_VIRTUAL_THRESHOLD;
   const scrollRestorationKey = `sessions.transcript:${resetKey}`;
   const {
+    size: viewportSize,
     scrollOffset,
     scrollOffsetRef,
     readViewportSize,
@@ -459,7 +500,7 @@ function useTranscriptVirtualizer(
       refreshKey: items,
       readSize: (element) => ({ width: element.clientWidth, height: element.clientHeight }),
       isValidSize: ({ height }) => height > 0,
-      isEqual: (current, next) => current.height === next.height,
+      isEqual: (current, next) => current.width === next.width && current.height === next.height,
     },
   );
   const [measurementVersion, setMeasurementVersion] = useState(0);
@@ -467,6 +508,7 @@ function useTranscriptVirtualizer(
   const measuredNodesRef = useRef(new Map<number, HTMLElement>());
   const resizeObserverRef = useRef<ResizeObserver | null>(null);
   const stickToBottomRef = useRef(false);
+  const stickToBottomFrameRef = useRef<number | null>(null);
   const restoredScrollKeyRef = useRef<string | undefined>(undefined);
   const scrollRestorationKeyRef = useRef(scrollRestorationKey);
 
@@ -477,14 +519,22 @@ function useTranscriptVirtualizer(
     });
   }, [scrollRestorationKey]);
 
+  const transcriptTextLayout = useMemo(
+    () => virtualized ? transcriptTextLayoutFor(rootRef.current, viewportSize.width) : null,
+    [rootRef, viewportSize.width, virtualized],
+  );
+  const estimatedHeights = useMemo(
+    () => items.map((item, index) => estimatedTranscriptItemHeight(item, items[index - 1], transcriptTextLayout)),
+    [items, transcriptTextLayout],
+  );
   const offsets = useMemo(() => {
     const next = new Array<number>(items.length + 1).fill(0);
     for (let index = 0; index < items.length; index += 1) {
       next[index + 1] = next[index]
-        + (measuredHeightsRef.current.get(index) ?? estimatedTranscriptItemHeight(items[index], items[index - 1]));
+        + (measuredHeightsRef.current.get(index) ?? estimatedHeights[index] ?? TRANSCRIPT_DEFAULT_ITEM_HEIGHT);
     }
     return next;
-  }, [items, measurementVersion]);
+  }, [estimatedHeights, items.length, measurementVersion]);
   const offsetsRef = useRef(offsets);
   offsetsRef.current = offsets;
   const measured = useMemo(
@@ -493,7 +543,7 @@ function useTranscriptVirtualizer(
   );
   const viewportHeight = readViewportSize();
 
-  useLayoutEffect(() => {
+  const scrollToCurrentBottom = useCallback(() => {
     if (!stickToBottomRef.current) return;
     const root = rootRef.current;
     if (!root) return;
@@ -501,7 +551,28 @@ function useTranscriptVirtualizer(
     if (Math.abs(root.scrollTop - nextScrollTop) <= 1) return;
     root.scrollTop = nextScrollTop;
     syncScrollPosition();
-  }, [items.length, offsets, rootRef, syncScrollPosition, viewportHeight]);
+  }, [rootRef, syncScrollPosition]);
+
+  const scheduleStickToBottom = useCallback(() => {
+    if (stickToBottomFrameRef.current !== null) return;
+    stickToBottomFrameRef.current = window.requestAnimationFrame(() => {
+      stickToBottomFrameRef.current = null;
+      scrollToCurrentBottom();
+    });
+  }, [scrollToCurrentBottom]);
+
+  const cancelStickToBottom = useCallback(() => {
+    stickToBottomRef.current = false;
+    if (stickToBottomFrameRef.current !== null) {
+      window.cancelAnimationFrame(stickToBottomFrameRef.current);
+      stickToBottomFrameRef.current = null;
+    }
+  }, []);
+
+  useLayoutEffect(() => {
+    if (!stickToBottomRef.current) return;
+    scheduleStickToBottom();
+  }, [items.length, offsets, scheduleStickToBottom, viewportHeight]);
 
   useLayoutEffect(() => {
     const root = rootRef.current;
@@ -513,12 +584,12 @@ function useTranscriptVirtualizer(
     }
     scrollRestorationKeyRef.current = scrollRestorationKey;
     measuredHeightsRef.current.clear();
-    stickToBottomRef.current = false;
+    cancelStickToBottom();
     restoredScrollKeyRef.current = undefined;
     if (root) root.scrollTop = 0;
     syncScrollPosition();
     setMeasurementVersion((current) => current + 1);
-  }, [resetKey, rootRef, scrollRestorationKey, syncScrollPosition]);
+  }, [cancelStickToBottom, resetKey, rootRef, scrollRestorationKey, syncScrollPosition]);
 
   useLayoutEffect(() => {
     if (!scrollRestorationReady) return;
@@ -549,12 +620,24 @@ function useTranscriptVirtualizer(
       rememberScrollPosition(root);
       if (virtualized) scheduleScrollSync();
     };
+    const onUserScrollStart = () => cancelStickToBottom();
     syncScrollPosition();
     root.addEventListener("scroll", onScroll, { passive: true });
-    return () => root.removeEventListener("scroll", onScroll);
-  }, [rememberScrollPosition, rootRef, scheduleScrollSync, syncScrollPosition, virtualized]);
+    root.addEventListener("wheel", onUserScrollStart, { passive: true });
+    root.addEventListener("touchstart", onUserScrollStart, { passive: true });
+    root.addEventListener("pointerdown", onUserScrollStart, { passive: true });
+    return () => {
+      root.removeEventListener("scroll", onScroll);
+      root.removeEventListener("wheel", onUserScrollStart);
+      root.removeEventListener("touchstart", onUserScrollStart);
+      root.removeEventListener("pointerdown", onUserScrollStart);
+    };
+  }, [cancelStickToBottom, rememberScrollPosition, rootRef, scheduleScrollSync, syncScrollPosition, virtualized]);
 
   useEffect(() => () => {
+    if (stickToBottomFrameRef.current !== null) {
+      window.cancelAnimationFrame(stickToBottomFrameRef.current);
+    }
     const root = rootRef.current;
     if (root) setTabScrollPosition(scrollRestorationKeyRef.current, {
       top: root.scrollTop,
@@ -563,16 +646,7 @@ function useTranscriptVirtualizer(
   }, [rootRef]);
 
   useEffect(() => {
-    if (!virtualized) return;
-    const root = rootRef.current;
-    if (!root) return;
-    if (Math.abs(scrollOffset - Math.max(0, root.scrollHeight - root.clientHeight)) > 2) {
-      stickToBottomRef.current = false;
-    }
-  }, [rootRef, scrollOffset, virtualized]);
-
-  useEffect(() => {
-    if (!virtualized || typeof ResizeObserver === "undefined") return undefined;
+    if (items.length === 0 || typeof ResizeObserver === "undefined") return undefined;
     const observer = new ResizeObserver((entries) => {
       const layout = offsetsRef.current;
       let changed = false;
@@ -583,17 +657,24 @@ function useTranscriptVirtualizer(
         const nextHeight = entry.contentRect.height;
         if (nextHeight <= 0) continue;
         const previousHeight = measuredHeightsRef.current.get(index)
-          ?? (items[index] ? estimatedTranscriptItemHeight(items[index], items[index - 1]) : TRANSCRIPT_DEFAULT_ITEM_HEIGHT);
+          ?? estimatedHeights[index]
+          ?? TRANSCRIPT_DEFAULT_ITEM_HEIGHT;
         if (Math.abs(previousHeight - nextHeight) < 1) continue;
         measuredHeightsRef.current.set(index, nextHeight);
         changed = true;
-        if (layout[index] < scrollOffsetRef.current) anchorDelta += nextHeight - previousHeight;
+        if (virtualized && layout[index] < scrollOffsetRef.current) anchorDelta += nextHeight - previousHeight;
       }
       if (!changed) return;
       const root = rootRef.current;
-      if (root && anchorDelta !== 0) root.scrollTop += anchorDelta;
-      syncScrollPosition();
-      setMeasurementVersion((current) => current + 1);
+      if (root && stickToBottomRef.current) {
+        scheduleStickToBottom();
+      } else if (virtualized && root && anchorDelta !== 0) {
+        root.scrollTop += anchorDelta;
+      }
+      if (virtualized) {
+        syncScrollPosition();
+        setMeasurementVersion((current) => current + 1);
+      }
     });
     resizeObserverRef.current = observer;
     for (const node of measuredNodesRef.current.values()) observer.observe(node);
@@ -601,7 +682,7 @@ function useTranscriptVirtualizer(
       observer.disconnect();
       resizeObserverRef.current = null;
     };
-  }, [items, rootRef, syncScrollPosition, virtualized, scrollOffsetRef]);
+  }, [estimatedHeights, items, rootRef, scheduleStickToBottom, syncScrollPosition, virtualized, scrollOffsetRef]);
 
   const measureItem = useCallback((index: number, node: HTMLElement | null) => {
     const previous = measuredNodesRef.current.get(index);
@@ -623,12 +704,12 @@ function useTranscriptVirtualizer(
     const root = rootRef.current;
     if (!root || items.length === 0) return;
     if (!Number.isSafeInteger(index) || index < 0 || index >= items.length) return;
-    stickToBottomRef.current = false;
+    cancelStickToBottom();
     const top = offsetsRef.current[index] ?? 0;
     root.scrollTo({ top, behavior });
     rememberScrollPosition(root);
     syncScrollPosition();
-  }, [items.length, rememberScrollPosition, rootRef, syncScrollPosition]);
+  }, [cancelStickToBottom, items.length, rememberScrollPosition, rootRef, syncScrollPosition]);
 
   const scrollToBottom = useCallback((behavior: ScrollBehavior = "auto") => {
     const root = rootRef.current;
@@ -638,7 +719,8 @@ function useTranscriptVirtualizer(
     root.scrollTo({ top, behavior });
     rememberScrollPosition(root);
     syncScrollPosition();
-  }, [rememberScrollPosition, rootRef, syncScrollPosition]);
+    scheduleStickToBottom();
+  }, [rememberScrollPosition, rootRef, scheduleStickToBottom, syncScrollPosition]);
 
   return {
     virtualized,
@@ -956,7 +1038,7 @@ export function TranscriptPanel({
   onOpenSession: (session: SessionRecord) => void;
   onOpenSkill?: (skillPath: string) => void;
   onLoadSkills?: () => void;
-  onLoadMore: () => Promise<TranscriptItemRecord[] | null>;
+  onLoadMore: () => Promise<TranscriptLoadMoreResult>;
   onLoadAll: () => Promise<void>;
   onReportError?: (message: string) => void;
   searchTranscript?: (session: SessionRecord, query: string, scopes: TranscriptSearchScopes) => Promise<TranscriptSearchResult | null>;
@@ -986,7 +1068,7 @@ export function TranscriptPanel({
   } = useTranscriptVirtualizer(
     transcriptItems,
     transcriptRef,
-    `${session.agent}:${session.id}:${session.path}`,
+    sessionExternalKey(session),
     scrollRestorationReady,
   );
   const searchInputRef = useRef<HTMLInputElement | null>(null);
@@ -1215,7 +1297,7 @@ export function TranscriptPanel({
   useEffect(() => {
     const frame = window.requestAnimationFrame(updateTranscriptScrollEdges);
     return () => window.cancelAnimationFrame(frame);
-  }, [hasMore, loading, loadingMore, transcriptItems, updateTranscriptScrollEdges]);
+  }, [hasMore, loading, loadingMore, transcriptItems, transcriptRenderRangeKey, updateTranscriptScrollEdges]);
   useLayoutEffect(() => {
     const snapshot = transcriptSearchScrollSnapshotRef.current;
     if (!snapshot || searchOpen) return;
@@ -1264,35 +1346,43 @@ export function TranscriptPanel({
   }, [transcriptFocusRequest, transcriptItems, transcriptRenderRangeKey]);
   const ensureSearchHitLoaded = useCallback(async (hit: TranscriptSearchHit) => {
     let loadedItems = transcriptItemsRef.current;
-    let previousLength = -1;
+    let previousRawLength = items.length;
     while (groupTranscriptItems(loadedItems).length <= hit.groupIndex) {
-      if (loadedItems.length === previousLength) break;
-      previousLength = loadedItems.length;
-      const nextItems = await onLoadMore();
-      if (!nextItems) break;
-      loadedItems = nextItems;
-      transcriptItemsRef.current = nextItems;
+      const next = await onLoadMore();
+      loadedItems = groupTranscriptItems(next.items) as TranscriptItemRecord[];
+      transcriptItemsRef.current = loadedItems;
+      if (next.status !== "loaded") break;
+      if (next.items.length <= previousRawLength) break;
+      previousRawLength = next.items.length;
     }
-  }, [onLoadMore]);
+  }, [items.length, onLoadMore]);
   const ensureTranscriptIndexLoaded = useCallback(async (targetIndex: number) => {
-    if (!Number.isSafeInteger(targetIndex) || targetIndex < 0) return false;
-    let loadedItems = transcriptItemsRef.current;
-    let previousLength = -1;
-    while (groupTranscriptItems(loadedItems).length <= targetIndex) {
-      if (loadedItems.length === previousLength) break;
-      previousLength = loadedItems.length;
-      const nextItems = await onLoadMore();
-      if (!nextItems) break;
-      loadedItems = nextItems;
-      transcriptItemsRef.current = nextItems;
+    if (!Number.isSafeInteger(targetIndex) || targetIndex < 0) {
+      return { loaded: false, status: "exhausted" as const };
     }
-    return groupTranscriptItems(loadedItems).length > targetIndex;
-  }, [onLoadMore]);
+    let loadedItems = transcriptItemsRef.current;
+    let previousRawLength = items.length;
+    let status: TranscriptLoadMoreResult["status"] = "loaded";
+    while (groupTranscriptItems(loadedItems).length <= targetIndex) {
+      const next = await onLoadMore();
+      status = next.status;
+      loadedItems = groupTranscriptItems(next.items) as TranscriptItemRecord[];
+      transcriptItemsRef.current = loadedItems;
+      if (next.status !== "loaded") break;
+      if (next.items.length <= previousRawLength) {
+        status = "exhausted";
+        break;
+      }
+      previousRawLength = next.items.length;
+    }
+    return {
+      loaded: groupTranscriptItems(loadedItems).length > targetIndex,
+      status,
+    };
+  }, [items.length, onLoadMore]);
   const scrollTranscriptToTop = useCallback(() => {
-    const root = transcriptRef.current;
-    if (!root) return;
-    root.scrollTo({ top: 0, behavior: "smooth" });
-  }, []);
+    scrollTranscriptToIndex(0, "smooth");
+  }, [scrollTranscriptToIndex]);
   useLayoutEffect(() => {
     if (!pendingTranscriptBottom) return;
     scrollTranscriptToBottom();
@@ -1314,15 +1404,15 @@ export function TranscriptPanel({
     try {
       let loadedItems = transcriptItemsRef.current;
       let target = findSkillEvidenceTarget(loadedItems, link);
-      let previousLength = loadedItems.length;
+      let previousRawLength = items.length;
       while (!target) {
-        const nextItems = await onLoadMore();
-        if (!nextItems) break;
-        loadedItems = groupTranscriptItems(nextItems) as TranscriptItemRecord[];
+        const next = await onLoadMore();
+        loadedItems = groupTranscriptItems(next.items) as TranscriptItemRecord[];
         transcriptItemsRef.current = loadedItems;
-        if (loadedItems.length <= previousLength) break;
-        previousLength = loadedItems.length;
         target = findSkillEvidenceTarget(loadedItems, link);
+        if (next.status !== "loaded") break;
+        if (next.items.length <= previousRawLength) break;
+        previousRawLength = next.items.length;
       }
       if (target) {
         focusTranscriptTarget(target);
@@ -1332,15 +1422,15 @@ export function TranscriptPanel({
     } finally {
       setJumpingSkillPath("");
     }
-  }, [focusTranscriptTarget, jumpingSkillPath, onLoadMore, onReportError]);
+  }, [focusTranscriptTarget, items.length, jumpingSkillPath, onLoadMore, onReportError]);
   const selectLocatorItem = useCallback((key: string, behavior?: ScrollBehavior) => {
     const index = transcriptIndexFromKey(key);
     if (index === null) return;
     keyboardNavigationScopeRef.current = KeyboardNavigationScope.Detail;
     transcriptNavigationKeyRef.current = key;
-    void ensureTranscriptIndexLoaded(index).then((loaded) => {
-      if (loaded) focusTranscriptTarget({ key, index }, false, behavior);
-      else onReportError?.("Could not locate this message in the transcript.");
+    void ensureTranscriptIndexLoaded(index).then((result) => {
+      if (result.loaded) focusTranscriptTarget({ key, index }, false, behavior);
+      else if (result.status === "exhausted") onReportError?.("Could not locate this message in the transcript.");
     });
   }, [ensureTranscriptIndexLoaded, focusTranscriptTarget, keyboardNavigationScopeRef, onReportError]);
   const visibleUserMessageIndex = useCallback(() => {
@@ -1384,8 +1474,8 @@ export function TranscriptPanel({
     }
     setPendingUserMessageTarget({ key: target.key, index: target.index, sessionKey: navigationSessionKey });
     const loadTarget = async () => {
-      const loaded = await ensureTranscriptIndexLoaded(target.index);
-      if (!loaded) {
+      const result = await ensureTranscriptIndexLoaded(target.index);
+      if (!result.loaded) {
         setPendingUserMessageTarget((current) => (
           current?.key === target.key && current.sessionKey === navigationSessionKey ? null : current
         ));
@@ -1862,19 +1952,19 @@ const SessionLocatorRow = memo(function SessionLocatorRow({
 }) {
   return (
     <AppTooltip
-      open={previewOpen}
       content={(
         <>
           <strong><TranscriptLinkText interactive={false} value={formatTranscriptPreview(item.label) || EMPTY_DISPLAY_VALUE} /></strong>
           {item.response ? <span><TranscriptLinkText interactive={false} value={formatTranscriptPreview(item.response) || EMPTY_DISPLAY_VALUE} /></span> : null}
         </>
       )}
-      className="sessionLocatorPreview"
-      unstyled
+      open={previewOpen}
       side="right"
       align="center"
       sideOffset={-6}
       collisionPadding={8}
+      className="sessionLocatorPreview"
+      unstyled
     >
       <button
         type="button"
@@ -1909,16 +1999,14 @@ export function SessionRelationsPopover({
 
   return (
     <Popover.Root>
-      <AppTooltip content={`${relationCount} related session${relationCount === 1 ? "" : "s"}`}>
-        <Popover.Trigger asChild>
-          <IconButton
-            className="threadPanelToggle"
-            aria-label={`Show ${relationCount} related session${relationCount === 1 ? "" : "s"}`}
-          >
-            <GitFork size={15} />
-          </IconButton>
-        </Popover.Trigger>
-      </AppTooltip>
+      <Popover.Trigger asChild>
+        <IconButton
+          className="threadPanelToggle"
+          aria-label={`Show ${relationCount} related session${relationCount === 1 ? "" : "s"}`}
+        >
+          <GitFork size={15} />
+        </IconButton>
+      </Popover.Trigger>
       <Popover.Portal>
         <Popover.Content
           className="sessionRelationsPopover hasChart"
@@ -2389,7 +2477,7 @@ export const TranscriptItem = memo(function TranscriptItem({
     <div className={`chatLine ${isUser ? "fromUser" : "fromAgent"} ${addTopSpacing ? "withTopSpacing" : ""} ${highlighted ? "transcriptTarget" : ""}`} data-transcript-key={itemKey}>
       <div className="chatMessage">
         <div className="bubble">
-          <p><TranscriptLinkText query={searchQuery} value={body} /></p>
+          <PretextText content={body} markdown={false} query={searchQuery} />
         </div>
         <div className="bubbleFooter">
           {item.time?.trim() ? <time>{item.time}</time> : <span />}
@@ -2496,7 +2584,7 @@ export function ContextBlock({
       summary={(
         <>
           <Badge tone="neutral">{label}</Badge>
-          <AppTooltip content={preview} onlyWhenTruncated><span className="thinkingPreview">{highlightTranscriptText(preview, searchQuery)}</span></AppTooltip>
+          <span className="thinkingPreview">{highlightTranscriptText(preview, searchQuery)}</span>
           {item.time ? <time>{item.time}</time> : null}
         </>
       )}
@@ -2535,7 +2623,7 @@ export function ThinkingBlock({
       summary={(
         <>
           <Badge tone="neutral">{type}</Badge>
-          <AppTooltip content={preview} onlyWhenTruncated><span className="thinkingPreview">{highlightTranscriptText(preview, searchQuery)}</span></AppTooltip>
+          <span className="thinkingPreview">{highlightTranscriptText(preview, searchQuery)}</span>
           {item.time ? <time>{item.time}</time> : null}
         </>
       )}
@@ -2664,6 +2752,7 @@ export function SessionsView({
   onResumeSession?: (
     session: SessionRecord,
     target?: Exclude<SessionResumeTarget, SessionResumeTarget.Auto>,
+    options?: { reconcile?: boolean },
   ) => Promise<SessionResumeOutcome | null | undefined>;
   resolveSessionResumeTarget: (session: SessionRecord) => Promise<Exclude<SessionResumeTarget, SessionResumeTarget.Auto>>;
   sessionResumeTarget: SessionResumeTarget;
@@ -2717,6 +2806,7 @@ export function SessionsView({
   const [refreshActionError, setRefreshActionError] = useState("");
   const [resumeFeedback, setResumeFeedback] = useState<Record<string, ResumeFeedbackState>>({});
   const [pendingResumeConflict, setPendingResumeConflict] = useState<PendingResumeConflict | null>(null);
+  const [repairingResume, setRepairingResume] = useState(false);
   const [sessionToast, setSessionToast] = useState("");
   const [detailCollapsed, setDetailCollapsed] = useTabState("sessions.detailCollapsed", false);
   const [sessionLocatorRequest, setSessionLocatorRequest] = useState("");
@@ -2761,12 +2851,17 @@ export function SessionsView({
   const transcriptRequestAuthorityRef = useRef(createLatestRequestAuthority());
   const transcriptCacheRef = useRef(new Map<string, TranscriptPage>());
   const loadedTranscriptIdentityRef = useRef("");
+  const loadedTranscriptLogicalIdentityRef = useRef("");
   const transcriptLocatorRequestAuthorityRef = useRef(createLatestRequestAuthority());
   const transcriptLocatorCacheRef = useRef(new Map<string, TranscriptLocatorPage>());
   const pendingTranscriptLocatorRef = useRef<{ key: string; session: SessionRecord } | null>(null);
   const transcriptLocatorInFlightRef = useRef<{ key: string; promise: Promise<void> } | null>(null);
   const transcriptSourceVersionRef = useRef("");
-  const loadMoreTranscriptInFlightRef = useRef<{ key: string; promise: Promise<TranscriptItemRecord[] | null> } | null>(null);
+  const transcriptInitialLoadInFlightRef = useRef<{
+    key: string;
+    promise: Promise<TranscriptLoadMoreResult["status"]>;
+  } | null>(null);
+  const loadMoreTranscriptInFlightRef = useRef<{ key: string; promise: Promise<TranscriptLoadMoreResult> } | null>(null);
   const loadAllTranscriptInFlightRef = useRef<{ key: string; promise: Promise<void> } | null>(null);
   const normalizedInputQuery = query.trim().toLowerCase();
   const normalizedQuery = debouncedQuery;
@@ -3306,6 +3401,7 @@ export function SessionsView({
   const resumeSession = useCallback(async (
     session: SessionRecord,
     target?: Exclude<SessionResumeTarget, SessionResumeTarget.Auto>,
+    options?: { reconcile?: boolean },
   ) => {
     if (session.agent === IMPORTED_SESSION_AGENT) {
       finishResumeFeedback(session.id, AsyncStatus.Error);
@@ -3320,12 +3416,13 @@ export function SessionsView({
     dismissSessionError();
     setResumeFeedback((current) => ({ ...current, [session.id]: AsyncStatus.Loading }));
     try {
-      const result = await onResumeSession(session, target);
+      const result = await onResumeSession(session, target, options);
       if (result?.status === SessionResumeOutcomeStatus.ActiveWriter) {
         clearResumeFeedback(session.id);
-        setPendingResumeConflict({ session });
+        setPendingResumeConflict({ session, target });
       } else if (result?.status === SessionResumeOutcomeStatus.Launched) {
         finishResumeFeedback(session.id, AsyncStatus.Success);
+        setPendingResumeConflict(null);
       } else if (result?.status === SessionResumeOutcomeStatus.Failed) {
         finishResumeFeedback(session.id, AsyncStatus.Error);
         showSessionError(sessionResumeErrorMessage(result.error));
@@ -3353,10 +3450,24 @@ export function SessionsView({
       ));
     }
   }, [clearResumeFeedback, dismissSessionError, finishResumeFeedback, onResumeSession, showSessionError]);
+  const repairAndResume = useCallback(async () => {
+    if (!pendingResumeConflict || repairingResume) return;
+    setRepairingResume(true);
+    try {
+      await resumeSession(
+        pendingResumeConflict.session,
+        pendingResumeConflict.target,
+        { reconcile: true },
+      );
+    } finally {
+      setRepairingResume(false);
+    }
+  }, [pendingResumeConflict, repairingResume, resumeSession]);
   const cancelResumeConflict = useCallback(() => {
+    if (repairingResume) return;
     if (pendingResumeConflict) clearResumeFeedback(pendingResumeConflict.session.id);
     setPendingResumeConflict(null);
-  }, [clearResumeFeedback, pendingResumeConflict]);
+  }, [clearResumeFeedback, pendingResumeConflict, repairingResume]);
   const getResumeState = useCallback((session: SessionRecord): SessionResumeState => (
     resumeFeedback[session.id] ?? AsyncStatus.Idle
   ), [resumeFeedback]);
@@ -3460,6 +3571,9 @@ export function SessionsView({
     setDetailCollapsed(false);
   }, [locateSessionInList]);
   const activeImportedTranscript = activeSession ? importedTranscripts[activeSession.id] : undefined;
+  const activeSessionLogicalKey = useMemo(() => (
+    activeSession ? sessionExternalKey(activeSession) : ""
+  ), [activeSession?.agent, activeSession?.id]);
   const activeSessionTranscriptKey = useMemo(() => (
     activeSession
       ? `${activeSession.agent}:${activeSession.path}:${activeSession.id}`
@@ -3606,21 +3720,25 @@ export function SessionsView({
     transcriptLocatorRequestAuthorityRef.current.begin();
     pendingTranscriptLocatorRef.current = null;
     const identityChanged = loadedTranscriptIdentityRef.current !== activeSessionTranscriptKey;
+    const logicalIdentityChanged = loadedTranscriptLogicalIdentityRef.current !== activeSessionLogicalKey;
     if (identityChanged) {
       loadedTranscriptIdentityRef.current = activeSessionTranscriptKey;
+      loadedTranscriptLogicalIdentityRef.current = activeSessionLogicalKey;
       transcriptSourceVersionRef.current = "";
-      transcriptItemsRef.current = [];
+      if (logicalIdentityChanged) transcriptItemsRef.current = [];
       nextTranscriptCursorRef.current = undefined;
-      setItems([]);
+      if (logicalIdentityChanged) setItems([]);
       setTranscriptLocatorState(null);
       setNextTranscriptCursor(undefined);
     }
     loadMoreTranscriptInFlightRef.current = null;
     loadAllTranscriptInFlightRef.current = null;
+    transcriptInitialLoadInFlightRef.current = null;
     setLoadingMoreTranscript(false);
     setLoading(Boolean(transcriptSession));
     if (!transcriptSession) {
       loadedTranscriptIdentityRef.current = "";
+      loadedTranscriptLogicalIdentityRef.current = "";
       return;
     }
     if (activeImportedTranscript) {
@@ -3650,8 +3768,12 @@ export function SessionsView({
     }
     const knownSourceVersion = transcriptSourceVersionRef.current || cached?.sourceVersion;
     const previousTranscriptItemCount = transcriptItemsRef.current.length;
-    loadTranscript(transcriptSession, undefined, knownSourceVersion).then(async (page) => {
-      if (!transcriptRequestAuthorityRef.current.isCurrent(requestRevision)) return;
+    let initialLoadStatus: TranscriptLoadMoreResult["status"] = "loaded";
+    const initialLoadPromise = loadTranscript(transcriptSession, undefined, knownSourceVersion).then(async (page) => {
+      if (!transcriptRequestAuthorityRef.current.isCurrent(requestRevision)) {
+        initialLoadStatus = "cancelled";
+        return;
+      }
       if (page.unchanged) {
         transcriptSourceVersionRef.current = page.sourceVersion || knownSourceVersion || "";
         queueTranscriptLocator(transcriptSession, activeSessionTranscriptKey);
@@ -3667,12 +3789,18 @@ export function SessionsView({
         let latestSourceVersion = page.sourceVersion;
         while (nextCursor) {
           const nextPage = await loadTranscript(transcriptSession, nextCursor);
-          if (!transcriptRequestAuthorityRef.current.isCurrent(requestRevision)) return;
+          if (!transcriptRequestAuthorityRef.current.isCurrent(requestRevision)) {
+            initialLoadStatus = "cancelled";
+            return;
+          }
           if (nextPage.restartRequired) {
             if (restartCount >= 1) throw new Error("Transcript changed while refreshing");
             restartCount += 1;
             const restarted = await loadTranscript(transcriptSession);
-            if (!transcriptRequestAuthorityRef.current.isCurrent(requestRevision)) return;
+            if (!transcriptRequestAuthorityRef.current.isCurrent(requestRevision)) {
+              initialLoadStatus = "cancelled";
+              return;
+            }
             allItems = [...restarted.items];
             allWarnings = [...restarted.warnings];
             latestSourceVersion = restarted.sourceVersion;
@@ -3730,6 +3858,7 @@ export function SessionsView({
       setNextTranscriptCursor(pageToCache.nextCursor);
       queueTranscriptLocator(transcriptSession, activeSessionTranscriptKey);
     }).catch((error) => {
+      initialLoadStatus = "failed";
       if (transcriptRequestAuthorityRef.current.isCurrent(requestRevision)) {
         logger.warn("sessions transcript load failed", {
           requestRevision,
@@ -3744,31 +3873,63 @@ export function SessionsView({
       if (transcriptRequestAuthorityRef.current.isCurrent(requestRevision)) {
         setLoading(false);
       }
+    }).then(() => initialLoadStatus);
+    transcriptInitialLoadInFlightRef.current = {
+      key: activeSessionTranscriptKey,
+      promise: initialLoadPromise,
+    };
+    void initialLoadPromise.then(() => {
+      if (transcriptInitialLoadInFlightRef.current?.promise === initialLoadPromise) {
+        transcriptInitialLoadInFlightRef.current = null;
+      }
     });
     return () => {
       transcriptRequestAuthorityRef.current.invalidate(requestRevision);
     };
-  }, [activeImportedTranscript, activeSessionTranscriptKey, activeSessionTranscriptRefreshKey, loadTranscript, queueTranscriptLocator, showSessionError]);
+  }, [activeImportedTranscript, activeSessionLogicalKey, activeSessionTranscriptKey, activeSessionTranscriptRefreshKey, loadTranscript, queueTranscriptLocator, showSessionError]);
   useEffect(() => {
     if (!activeSession || activeImportedTranscript) return;
     queueTranscriptLocator(activeSession, activeSessionTranscriptKey);
   }, [activeImportedTranscript, activeSession, activeSessionTranscriptKey, queueTranscriptLocator]);
-  const loadMoreTranscript = useCallback((): Promise<TranscriptItemRecord[] | null> => {
+  const loadMoreTranscript = useCallback((): Promise<TranscriptLoadMoreResult> => {
     const requestKey = activeSessionTranscriptKey;
     const existing = loadMoreTranscriptInFlightRef.current;
     if (existing?.key === requestKey) return existing.promise;
+
+    const initial = transcriptInitialLoadInFlightRef.current;
+    if (initial?.key === requestKey) {
+      return initial.promise.then((status) => {
+        if (transcriptInitialLoadInFlightRef.current?.promise === initial.promise) {
+          transcriptInitialLoadInFlightRef.current = null;
+        }
+        if (status !== "loaded") {
+          return { items: transcriptItemsRef.current, status };
+        }
+        if (!activeSession || !nextTranscriptCursorRef.current) {
+          return { items: transcriptItemsRef.current, status: "exhausted" as const };
+        }
+        return loadMoreTranscript();
+      });
+    }
+
     const cursor = nextTranscriptCursorRef.current;
-    if (!activeSession || !cursor) return Promise.resolve(null);
+    if (!activeSession || !cursor) {
+      return Promise.resolve({ items: transcriptItemsRef.current, status: "exhausted" as const });
+    }
     const requestRevision = transcriptRequestAuthorityRef.current.begin();
     const currentItems = transcriptItemsRef.current;
     setLoadingMoreTranscript(true);
     const promise = (async () => {
       try {
         const page = await loadTranscript(activeSession, cursor);
-        if (!transcriptRequestAuthorityRef.current.isCurrent(requestRevision)) return null;
+        if (!transcriptRequestAuthorityRef.current.isCurrent(requestRevision)) {
+          return { items: currentItems, status: "cancelled" as const };
+        }
         if (page.restartRequired) {
           const restarted = await loadTranscript(activeSession);
-          if (!transcriptRequestAuthorityRef.current.isCurrent(requestRevision)) return null;
+          if (!transcriptRequestAuthorityRef.current.isCurrent(requestRevision)) {
+            return { items: currentItems, status: "cancelled" as const };
+          }
           transcriptLocatorRequestAuthorityRef.current.begin();
           transcriptLocatorCacheRef.current.delete(requestKey);
           setTranscriptLocatorState(null);
@@ -3780,7 +3941,10 @@ export function SessionsView({
           setItems(restarted.items);
           setNextTranscriptCursor(restarted.nextCursor);
           queueTranscriptLocator(activeSession, requestKey);
-          return restarted.items;
+          return {
+            items: restarted.items,
+            status: restarted.nextCursor ? "loaded" as const : "exhausted" as const,
+          };
         }
         const sourceChanged = Boolean(
           transcriptSourceVersionRef.current
@@ -3812,13 +3976,16 @@ export function SessionsView({
         setItems(merged.items);
         setNextTranscriptCursor(merged.nextCursor);
         if (sourceChanged) queueTranscriptLocator(activeSession, requestKey);
-        return merged.items;
+        return {
+          items: merged.items,
+          status: merged.nextCursor ? "loaded" as const : "exhausted" as const,
+        };
       } catch (error) {
         if (transcriptRequestAuthorityRef.current.isCurrent(requestRevision)) {
           logger.warn("sessions transcript page load failed", { error });
           showSessionError("Could not load session details. Try again.");
         }
-        return null;
+        return { items: currentItems, status: "failed" as const };
       } finally {
         if (transcriptRequestAuthorityRef.current.isCurrent(requestRevision)) {
           setLoadingMoreTranscript(false);
@@ -3844,8 +4011,8 @@ export function SessionsView({
     const loadAll = async () => {
       while (nextTranscriptCursorRef.current) {
         const cursorBefore = nextTranscriptCursorRef.current;
-        const loaded = await loadMoreTranscript();
-        if (!loaded) break;
+        const result = await loadMoreTranscript();
+        if (result.status === "failed" || result.status === "cancelled") break;
         if (nextTranscriptCursorRef.current === cursorBefore) break;
       }
     };
@@ -3947,7 +4114,6 @@ export function SessionsView({
                     { value: TRANSCRIPT_IMPORT_PROVIDER_PLACEHOLDER, label: "Choose provider" },
                     ...TRANSCRIPT_IMPORT_PROVIDERS,
                   ]}
-                  showOptionTooltip={false}
                 />
                 <IconButton
                   className={`sessionImportButton ${importButtonStateClass}`}
@@ -4055,7 +4221,7 @@ export function SessionsView({
                             <CheckboxIndicator checked={active} />
                             {isWebSource(option.title.trim())
                               ? <span className="sessionProjectFilterItemLabel">{option.label}</span>
-                              : <AppTooltip content={option.title} onlyWhenTruncated><span className="sessionProjectFilterItemLabel">{option.label}</span></AppTooltip>}
+                              : <span className="sessionProjectFilterItemLabel">{option.label}</span>}
                             <span className="sessionProjectFilterItemCount">{option.count}</span>
                           </DropdownMenu.CheckboxItem>
                         );
@@ -4118,15 +4284,13 @@ export function SessionsView({
               emptyState={<EmptyState icon={<SearchX size={22} strokeWidth={1.75} />} iconTone="muted" title="No matching sessions" />}
             />
             {showSessionListLocator ? (
-              <AppTooltip content="Locate session in list">
-                <IconButton
-                  className="sessionListLocator"
-                  aria-label="Locate session in list"
-                  onClick={locateActiveSession}
-                >
-                  <LocateFixed size={15} aria-hidden="true" />
-                </IconButton>
-              </AppTooltip>
+              <IconButton
+                className="sessionListLocator"
+                aria-label="Locate session in list"
+                onClick={locateActiveSession}
+              >
+                <LocateFixed size={15} aria-hidden="true" />
+              </IconButton>
             ) : null}
           </div>
           <div className="sessionPager">
@@ -4212,18 +4376,30 @@ export function SessionsView({
     <DialogShell
       open={Boolean(pendingResumeConflict)}
       onOpenChange={(open) => {
-        if (!open) cancelResumeConflict();
+        if (!open && !repairingResume) cancelResumeConflict();
       }}
       descriptionId="session-resume-conflict-description"
     >
       <Dialog.Title className="confirmDialogTitle">Resume active session?</Dialog.Title>
       <Dialog.Description id="session-resume-conflict-description" className="confirmDialogDescription">
-        This {pendingResumeConflict ? friendlyAgent(pendingResumeConflict.session.agent) : "agent"} session is still open in another process. Close it before resuming.
+        This {pendingResumeConflict ? friendlyAgent(pendingResumeConflict.session.agent) : "agent"} session is still open in another process. Close it first, then archive and unarchive it before resuming.
       </Dialog.Description>
       <div className="confirmDialogActions">
         <DialogActionButton
+          variant="primary"
+          onClick={() => { void repairAndResume(); }}
+          disabled={repairingResume}
+          aria-busy={repairingResume}
+          aria-label="Archive, unarchive, and resume"
+          autoFocus={!repairingResume}
+          style={{ minWidth: "220px" }}
+        >
+          {repairingResume ? <LoadingIcon size={15} /> : "Archive, unarchive, and resume"}
+        </DialogActionButton>
+        <DialogActionButton
           variant="secondary"
           onClick={cancelResumeConflict}
+          disabled={repairingResume}
         >
           Cancel
         </DialogActionButton>

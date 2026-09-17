@@ -64,12 +64,14 @@ function buildRealAnalytics(sessions) {
     const day = days.get(date) || {
       date,
       usage: { inputTokens: 0, cachedInputTokens: 0, cacheWriteInputTokens: 0, outputTokens: 0, reasoningOutputTokens: 0, totalTokens: 0 },
+      cost: { inputUsd: 0, cachedInputUsd: 0, cacheWriteInputUsd: 0, outputUsd: 0, totalUsd: 0 },
       responses: 0,
       sessions: 0,
       runs: { started: 0, completed: 0, unclosed: 0, totalMs: 0, maxMs: 0 },
       aborted: 0,
       compacted: 0,
       models: [],
+      projects: [],
       tools: [],
       skills: [],
       rateLimits: {},
@@ -95,13 +97,14 @@ function buildRealAnalytics(sessions) {
     if (model) {
       const modelEntry = day.models.find((entry) => entry.model === model);
       if (modelEntry) modelEntry.totalTokens += usageValue("totalTokens", "total_tokens");
-      else day.models.push({ model, totalTokens: usageValue("totalTokens", "total_tokens"), totalMs: 0, completedRuns: 0 });
+      else day.models.push({ model, totalTokens: usageValue("totalTokens", "total_tokens"), totalMs: 0, completedRuns: 0, cost: { inputUsd: 0, cachedInputUsd: 0, cacheWriteInputUsd: 0, outputUsd: 0, totalUsd: 0 } });
     }
     days.set(date, day);
   }
   const sortedDays = [...days.values()].sort((left, right) => left.date.localeCompare(right.date));
   const summary = sortedDays.reduce((total, day) => ({
     usage: Object.fromEntries(Object.keys(total.usage).map((key) => [key, total.usage[key] + day.usage[key]])),
+    cost: Object.fromEntries(Object.keys(total.cost).map((key) => [key, total.cost[key] + day.cost[key]])),
     responses: total.responses + day.responses,
     sessions: total.sessions + day.sessions,
     runs: {
@@ -117,6 +120,7 @@ function buildRealAnalytics(sessions) {
     compactedSessions: total.compactedSessions + (day.compacted ? 1 : 0),
   }), {
     usage: { inputTokens: 0, cachedInputTokens: 0, cacheWriteInputTokens: 0, outputTokens: 0, reasoningOutputTokens: 0, totalTokens: 0 },
+    cost: { inputUsd: 0, cachedInputUsd: 0, cacheWriteInputUsd: 0, outputUsd: 0, totalUsd: 0 },
     responses: 0,
     sessions: 0,
     runs: { started: 0, completed: 0, unclosed: 0, totalMs: 0, maxMs: 0 },

@@ -1,6 +1,5 @@
 import { useState, type ComponentPropsWithoutRef, type FocusEventHandler, type KeyboardEventHandler, type ReactNode } from "react";
 import { Check, ChevronDown } from "lucide-react";
-import { Tooltip } from "./Tooltip.tsx";
 import { DropdownMenu, Select } from "radix-ui";
 
 import { MenuContent } from "./MenuContent.tsx";
@@ -39,9 +38,7 @@ export type SelectControlProps = {
   align?: SelectContentProps["align"];
   indicatorPosition?: "left" | "right";
   showChevron?: boolean;
-  showOptionTooltip?: boolean;
   disabled?: boolean;
-  triggerTooltipContent?: ReactNode;
   menuAction?: SelectMenuAction;
   inputId?: string;
   inputAriaLabel?: string;
@@ -77,9 +74,7 @@ function StandardSelectControl({
   align,
   indicatorPosition = "right",
   showChevron = true,
-  showOptionTooltip = true,
   disabled = false,
-  triggerTooltipContent,
   menuAction,
   variant: _variant,
   inputId: _inputId,
@@ -107,17 +102,15 @@ function StandardSelectControl({
         onValueChange(nextValue);
       }}
     >
-      <Tooltip content={triggerTooltipContent}>
-        <SelectTrigger className={className} label={label} showChevron={showChevron} disabled={disabled}>
-          <Select.Value>
-            {renderValue
-              ? renderValue(selectedOption)
-              : renderOption && selectedOption
-                ? renderOption(selectedOption)
-                : <span className="selectValueText">{selectedLabel}</span>}
-          </Select.Value>
-        </SelectTrigger>
-      </Tooltip>
+      <SelectTrigger className={className} label={label} showChevron={showChevron} disabled={disabled}>
+        <Select.Value>
+          {renderValue
+            ? renderValue(selectedOption)
+            : renderOption && selectedOption
+              ? renderOption(selectedOption)
+              : <span className="selectValueText">{selectedLabel}</span>}
+        </Select.Value>
+      </SelectTrigger>
       <Select.Portal>
         <Select.Content
           className={["selectControlContent", contentClassName].filter(Boolean).join(" ")}
@@ -143,21 +136,11 @@ function StandardSelectControl({
                     <Check size={14} />
                   </Select.ItemIndicator>
                 </span>
-                {showOptionTooltip ? (
-                  <Tooltip content={option.label} onlyWhenTruncated>
-                    <Select.ItemText asChild>
-                      <span className="selectControlItemText selectItemText">
-                        {renderOption ? renderOption(option) : option.label}
-                      </span>
-                    </Select.ItemText>
-                  </Tooltip>
-                ) : (
-                  <Select.ItemText asChild>
-                    <span className="selectControlItemText selectItemText">
-                      {renderOption ? renderOption(option) : option.label}
-                    </span>
-                  </Select.ItemText>
-                )}
+                <Select.ItemText asChild>
+                  <span className="selectControlItemText selectItemText">
+                    {renderOption ? renderOption(option) : option.label}
+                  </span>
+                </Select.ItemText>
               </Select.Item>
             ))}
           </Select.Viewport>
@@ -197,9 +180,7 @@ function EditableSelectControl({
   align,
   indicatorPosition = "right",
   showChevron = true,
-  showOptionTooltip = true,
   disabled = false,
-  triggerTooltipContent,
   menuAction,
   inputId,
   inputAriaLabel,
@@ -225,12 +206,11 @@ function EditableSelectControl({
   };
 
   return (
-    <Tooltip content={triggerTooltipContent}>
-      <div
-        ref={triggerRef}
-        className={["selectControlEditable", className].filter(Boolean).join(" ")}
-        data-state={menuOpen ? "open" : "closed"}
-      >
+    <div
+      ref={triggerRef}
+      className={["selectControlEditable", className].filter(Boolean).join(" ")}
+      data-state={menuOpen ? "open" : "closed"}
+    >
         <input
           id={inputId}
           className="selectControlEditableInput"
@@ -291,9 +271,7 @@ function EditableSelectControl({
                       <span className="selectControlItemLeadingIcon selectItemLeadingIcon" aria-hidden="true">
                         {option.value === value ? <Check className="selectControlItemIndicator selectItemIndicator" size={14} /> : null}
                       </span>
-                      {showOptionTooltip ? (
-                        <Tooltip content={optionLabel} onlyWhenTruncated>{optionText}</Tooltip>
-                      ) : optionText}
+                      {optionText}
                     </DropdownMenu.Item>
                   );
                 })}
@@ -316,7 +294,6 @@ function EditableSelectControl({
             </MenuContent>
           </DropdownMenu.Portal>
         </DropdownMenu.Root>
-      </div>
-    </Tooltip>
+    </div>
   );
 }

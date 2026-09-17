@@ -16,6 +16,16 @@ function rejectText(text, needle, label) {
 }
 
 const storage = await source("crates/tendi-core/src/storage.rs");
+const schema = await source("crates/tendi-core/src/migrations/schema.rs");
+const repositories = (
+  await Promise.all([
+    source("crates/tendi-core/src/storage/repositories/mod.rs"),
+    source("crates/tendi-core/src/storage/repositories/analytics.rs"),
+    source("crates/tendi-core/src/storage/repositories/projections.rs"),
+    source("crates/tendi-core/src/storage/repositories/sessions.rs"),
+    source("crates/tendi-core/src/storage/repositories/skills.rs"),
+  ])
+).join("\n");
 const daemon = await source("crates/tendi-daemon/src/lib.rs");
 const coordinator = await source("crates/tendi-daemon/src/operation_coordinator.rs");
 const contracts = await source("crates/tendi-core/src/runtime_contract.rs");
@@ -47,25 +57,25 @@ const sessionSnapshotGateway = runtimeGateway.slice(
   runtimeGateway.indexOf("export async function invokeSessionScanStart"),
 );
 
-requireText(storage, "CREATE TABLE IF NOT EXISTS normalized_snapshots", "storage snapshots");
-requireText(storage, "PRIMARY KEY (scope_key, domain)", "storage snapshot scope");
-requireText(storage, "CREATE TABLE IF NOT EXISTS scoped_projection_contexts", "projection context scope");
-requireText(storage, "pub fn list_sessions_for_scope", "session scope read");
-requireText(storage, "pub fn skill_source_records_for_workspace", "skill source scope read");
-requireText(storage, "CREATE TABLE IF NOT EXISTS scoped_skill_sources", "skill source physical scope");
-requireText(storage, "CREATE TABLE IF NOT EXISTS scoped_skill_snapshots", "skill snapshot physical scope");
-requireText(storage, "pub fn upsert_skill_source_records_for_workspace", "skill source scope write");
-requireText(storage, "persist_skill_update_persistence_for_workspace_with_deleted", "atomic skill persistence");
-requireText(storage, "save_sessions_at_with_scope_in_tx", "atomic session persistence");
-requireText(storage, "finalize_projection_domain_in_tx", "atomic projection persistence");
-requireText(storage, "pub fn overview_analytics_for_scope", "analytics scope read");
-requireText(storage, "CREATE TABLE IF NOT EXISTS scoped_session_analytics", "analytics physical scope");
-requireText(storage, "PRIMARY KEY (scope_key, session_id, agent, session_path)", "analytics composite identity");
-requireText(storage, "pub fn session_scan_cache_for_scope", "session cache scope");
+requireText(schema, "CREATE TABLE IF NOT EXISTS normalized_snapshots", "storage snapshots");
+requireText(schema, "PRIMARY KEY (scope_key, domain)", "storage snapshot scope");
+requireText(schema, "CREATE TABLE IF NOT EXISTS scoped_projection_contexts", "projection context scope");
+requireText(repositories, "pub fn list_sessions_for_scope", "session scope read");
+requireText(repositories, "pub fn skill_source_records_for_workspace", "skill source scope read");
+requireText(schema, "CREATE TABLE IF NOT EXISTS scoped_skill_sources", "skill source physical scope");
+requireText(schema, "CREATE TABLE IF NOT EXISTS scoped_skill_snapshots", "skill snapshot physical scope");
+requireText(repositories, "pub fn upsert_skill_source_records_for_workspace", "skill source scope write");
+requireText(repositories, "persist_skill_update_persistence_for_workspace_with_deleted", "atomic skill persistence");
+requireText(repositories, "save_sessions_at_with_scope_in_tx", "atomic session persistence");
+requireText(repositories, "finalize_projection_domain_in_tx", "atomic projection persistence");
+requireText(repositories, "pub fn overview_analytics_for_scope", "analytics scope read");
+requireText(schema, "CREATE TABLE IF NOT EXISTS scoped_session_analytics", "analytics physical scope");
+requireText(schema, "PRIMARY KEY (scope_key, session_id, agent, session_path)", "analytics composite identity");
+requireText(repositories, "pub fn session_scan_cache_for_scope", "session cache scope");
 requireText(contracts, "pub struct SourceLocator", "source identity contract");
 requireText(contracts, "pub struct SessionKey", "session identity contract");
 requireText(coordinator, "struct OperationCoordinator", "operation writer owner");
-requireText(daemon, "self.state.operations.shutdown()", "operation shutdown");
+requireText(daemon, "self.state.requests.shutdown()", "operation shutdown");
 requireText(daemon, "last-event-id", "event replay input");
 requireText(daemon, "serde_json::to_string(&event)", "event envelope transport");
 requireText(frontendContracts, "function decideRevision", "frontend revision reducer contract");
@@ -107,7 +117,7 @@ rejectText(catalogController, "if (Array.isArray(result)) return applyDomainSnap
 rejectText(mcpView, "Array.isArray(result)", "MCP view must consume the object mutation contract");
 rejectText(hooksView, "Array.isArray(result)", "Hooks view must consume the object mutation contract");
 rejectText(rulesView, "Array.isArray(result)", "Rules view must consume the object mutation contract");
-requireText(storage, "pub fn read_cached_projection", "read projection snapshot boundary");
+requireText(repositories, "pub fn read_cached_projection", "read projection snapshot boundary");
 requireText(daemon, "fn schedule_projection_refresh", "projection refresh coordinator");
 requireText(daemon, "PROJECTION_CHANGED_EVENT", "projection refresh completion event");
 for (const command of ["agents_list", "skills_list", "rules_list", "hooks_list", "mcp_list"]) {

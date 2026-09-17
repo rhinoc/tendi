@@ -6,6 +6,7 @@ import { SelectControl } from "../../components/shared/SelectControl.tsx";
 import { StatefulButton } from "../../components/shared/StatefulButton.tsx";
 import { Toast } from "../../components/shared/Toast.tsx";
 import { AsyncStatus } from "../../lib/async-status.ts";
+import { logger } from "../../lib/logger.ts";
 
 export type SettingsApplicationOption = {
   value: string;
@@ -72,16 +73,34 @@ export function SettingsApplicationPicker({
     setInputValue(displayValueForOption(options, value));
   }, [options, value]);
 
+  useEffect(() => {
+    logger.info("settings application display rendered", {
+      id,
+      value,
+      inputValue,
+      localValue: localValueRef.current,
+      savedValue,
+      optionLabel: displayValueForOption(options, value),
+    });
+  }, [id, inputValue, options, savedValue, value]);
+
   const resetTestState = () => {
     testRequestRef.current += 1;
     setTestState(AsyncStatus.Idle);
   };
 
   const chooseOption = (nextValue: string) => {
+    const previousValue = localValueRef.current;
     localValueRef.current = nextValue;
     setInputValue(displayValueForOption(options, nextValue));
     onChange(nextValue);
     resetTestState();
+    logger.info("settings application option selected", {
+      id,
+      previousValue,
+      nextValue,
+      savedValue,
+    });
     void onSave(nextValue);
   };
 
@@ -127,7 +146,13 @@ export function SettingsApplicationPicker({
             resetTestState();
           }}
           onInputBlur={() => {
-            void onSave(value);
+            const pendingValue = localValueRef.current;
+            logger.info("settings application input blurred", {
+              id,
+              pendingValue,
+              savedValue,
+            });
+            void onSave(pendingValue);
           }}
           onInputKeyDown={(event) => {
             if (event.key === "Enter") event.currentTarget.blur();
@@ -139,7 +164,6 @@ export function SettingsApplicationPicker({
               resetTestState();
             }
           }}
-          showOptionTooltip={false}
         />
         <StatefulButton
           size="sm"

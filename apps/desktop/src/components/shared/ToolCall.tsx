@@ -1,9 +1,8 @@
 import { ArrowUpRight, Ban, Check, CircleX } from "lucide-react";
-import { useEffect, useState, type ReactNode } from "react";
+import { useState, type ReactNode } from "react";
 
 import { formatDuration } from "../../lib/strings.ts";
 import { EMPTY_DISPLAY_VALUE } from "../../lib/constants.ts";
-import { Tooltip as AppTooltip } from "./Tooltip.tsx";
 import { Badge } from "./Badge.tsx";
 import { Disclosure } from "./Disclosure.tsx";
 import { LoadingIcon } from "./LoadingIcon.tsx";
@@ -69,7 +68,7 @@ export function ToolCall({
   nested = false,
   highlighted = false,
   searchQuery = "",
-  defaultOpen = status === "running",
+  defaultOpen = false,
   onOpenLinkedSession,
 }: ToolCallProps) {
   const [open, setOpen] = useState(defaultOpen);
@@ -78,10 +77,6 @@ export function ToolCall({
   const summaryText = summary?.trim() || command || EMPTY_DISPLAY_VALUE;
   const duration = formatDuration(item.durationMs);
   const detailsId = `tool-call-details-${itemKey.replace(/[^a-zA-Z0-9_-]/g, "-")}`;
-
-  useEffect(() => {
-    if (status) setOpen(status === "running");
-  }, [status]);
 
   return (
     <Disclosure
@@ -112,9 +107,7 @@ export function ToolCall({
           ) : item.tag ? (
             <Badge tone="neutral" mono>{item.tag}</Badge>
           ) : null}
-          <AppTooltip content={summaryText} onlyWhenTruncated>
-            <code>{highlightToolCallText(summaryText, searchQuery)}</code>
-          </AppTooltip>
+          <code>{highlightToolCallText(summaryText, searchQuery)}</code>
           {status ? <span className="toolCallStatus">{statusLabel(status)}</span> : duration ? <Badge tone="neutral" className="toolCallDuration">{duration}</Badge> : null}
         </>
       )}

@@ -186,6 +186,7 @@ pub fn save_skill_file(
     cached_skill_dir: Option<&Path>,
 ) -> Result<SkillFileWriteResult> {
     let skill_dir = resolve_skill_dir(cwd, skill_name, cached_skill_dir)?;
+    let _resources = crate::coordination::acquire_file_resources(std::slice::from_ref(&skill_dir))?;
     let path = safe_join(&skill_dir, relative_path)?;
     let current_sha = sha256_file_streaming(&path)?;
     if current_sha != expected_sha256 {
@@ -193,10 +194,24 @@ pub fn save_skill_file(
     }
 
     atomic_write(&path, content)?;
+    let after_sha256 = sha256_text(content);
+    crate::logging::global().debug(
+        "skill file saved",
+        serde_json::json!({
+            "operation": "save_skill_file",
+            "skillName": skill_name,
+            "skillDir": &skill_dir,
+            "path": &path,
+            "relativePath": relative_path,
+            "beforeSha256": current_sha,
+            "expectedSha256": expected_sha256,
+            "afterSha256": &after_sha256,
+        }),
+    );
     Ok(SkillFileWriteResult {
         path,
         relative_path: relative_path.to_string(),
-        sha256: sha256_text(content),
+        sha256: after_sha256,
     })
 }
 
@@ -223,6 +238,7 @@ pub fn create_skill_file(
 ) -> Result<SkillFileWriteResult> {
     ensure_not_root_skill_manifest(relative_path)?;
     let skill_dir = resolve_skill_dir(cwd, skill_name, cached_skill_dir)?;
+    let _resources = crate::coordination::acquire_file_resources(std::slice::from_ref(&skill_dir))?;
     let path = safe_child_path(&skill_dir, relative_path)?;
     if path.exists() {
         bail!("path already exists: {}", path.display());
@@ -232,10 +248,22 @@ pub fn create_skill_file(
             .with_context(|| format!("failed to create {}", parent.display()))?;
     }
     atomic_write(&path, "")?;
+    let after_sha256 = sha256_text("");
+    crate::logging::global().debug(
+        "skill file created",
+        serde_json::json!({
+            "operation": "create_skill_file",
+            "skillName": skill_name,
+            "skillDir": &skill_dir,
+            "path": &path,
+            "relativePath": relative_path,
+            "afterSha256": &after_sha256,
+        }),
+    );
     Ok(SkillFileWriteResult {
         path,
         relative_path: relative_path.to_string(),
-        sha256: sha256_text(""),
+        sha256: after_sha256,
     })
 }
 
@@ -246,11 +274,22 @@ pub fn create_skill_folder(
     cached_skill_dir: Option<&Path>,
 ) -> Result<()> {
     let skill_dir = resolve_skill_dir(cwd, skill_name, cached_skill_dir)?;
+    let _resources = crate::coordination::acquire_file_resources(std::slice::from_ref(&skill_dir))?;
     let path = safe_child_path(&skill_dir, relative_path)?;
     if path.exists() {
         bail!("path already exists: {}", path.display());
     }
     fs::create_dir_all(&path).with_context(|| format!("failed to create {}", path.display()))?;
+    crate::logging::global().debug(
+        "skill folder created",
+        serde_json::json!({
+            "operation": "create_skill_folder",
+            "skillName": skill_name,
+            "skillDir": &skill_dir,
+            "path": &path,
+            "relativePath": relative_path,
+        }),
+    );
     Ok(())
 }
 
@@ -262,6 +301,7 @@ pub fn rename_skill_path(
     cached_skill_dir: Option<&Path>,
 ) -> Result<()> {
     let skill_dir = resolve_skill_dir(cwd, skill_name, cached_skill_dir)?;
+    let _resources = crate::coordination::acquire_file_resources(std::slice::from_ref(&skill_dir))?;
     let from = safe_join(&skill_dir, from_relative_path)?;
     ensure_strict_skill_child(&skill_dir, &from)?;
     ensure_not_root_skill_manifest(from_relative_path)?;
@@ -276,6 +316,18 @@ pub fn rename_skill_path(
     }
     fs::rename(&from, &to)
         .with_context(|| format!("failed to rename {} to {}", from.display(), to.display()))?;
+    crate::logging::global().debug(
+        "skill path renamed",
+        serde_json::json!({
+            "operation": "rename_skill_path",
+            "skillName": skill_name,
+            "skillDir": &skill_dir,
+            "from": &from,
+            "fromRelativePath": from_relative_path,
+            "to": &to,
+            "toRelativePath": to_relative_path,
+        }),
+    );
     Ok(())
 }
 
@@ -286,14 +338,34 @@ pub fn delete_skill_path(
     cached_skill_dir: Option<&Path>,
 ) -> Result<()> {
     let skill_dir = resolve_skill_dir(cwd, skill_name, cached_skill_dir)?;
+    let _resources = crate::coordination::acquire_file_resources(std::slice::from_ref(&skill_dir))?;
     let path = safe_join(&skill_dir, relative_path)?;
     ensure_strict_skill_child(&skill_dir, &path)?;
     ensure_not_root_skill_manifest(relative_path)?;
+    let logger = crate::logging::global();
+    let before_sha256 = if logger.debug_enabled() && path.is_file() {
+        Some(sha256_file_streaming(&path)?)
+    } else {
+        None
+    };
     if path.is_dir() {
         fs::remove_dir_all(&path)
             .with_context(|| format!("failed to delete {}", path.display()))?;
     } else {
         fs::remove_file(&path).with_context(|| format!("failed to delete {}", path.display()))?;
+    }
+    if logger.debug_enabled() {
+        logger.debug(
+            "skill path deleted",
+            serde_json::json!({
+                "operation": "delete_skill_path",
+                "skillName": skill_name,
+                "skillDir": &skill_dir,
+                "path": &path,
+                "relativePath": relative_path,
+                "beforeSha256": before_sha256,
+            }),
+        );
     }
     Ok(())
 }

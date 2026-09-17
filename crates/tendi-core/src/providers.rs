@@ -194,22 +194,6 @@ pub(crate) trait AgentProvider: Sync {
         None
     }
 
-    fn skill_frontmatter_satisfies(
-        &self,
-        meta: &serde_yaml::Mapping,
-        visibility: SkillVisibility,
-    ) -> bool {
-        crate::skills::skill_frontmatter_satisfies_with_provider_key(meta, visibility, None)
-    }
-
-    fn render_skill_frontmatter(
-        &self,
-        before: &str,
-        visibility: SkillVisibility,
-    ) -> Result<String> {
-        crate::skills::render_skill_frontmatter_with_provider_key(before, visibility, None)
-    }
-
     fn skill_frontmatter_visibility_key(&self) -> Option<&'static str> {
         None
     }
@@ -221,6 +205,16 @@ pub(crate) trait AgentProvider: Sync {
         _update_provider_config: bool,
     ) -> Result<Vec<FileChange>> {
         Ok(Vec::new())
+    }
+
+    /// All physical resources mutated when applying this provider's skill policy.
+    /// The installation directory covers its manifest and provider-owned children.
+    fn skill_mutation_resource_paths(
+        &self,
+        skill_dir: &Path,
+        _update_provider_config: bool,
+    ) -> Vec<PathBuf> {
+        vec![skill_dir.to_path_buf()]
     }
 
     fn is_managed_skill_file(&self, _relative_path: &str) -> bool {
@@ -364,6 +358,10 @@ pub(crate) trait AgentProvider: Sync {
         None
     }
 
+    fn session_resume_repair_commands(&self, _session: &SessionRecord) -> Vec<SessionCommand> {
+        Vec::new()
+    }
+
     fn assistant_ask_command(&self, _workspace: &Path, _prompt: &str) -> Option<SessionCommand> {
         None
     }
@@ -472,6 +470,12 @@ pub(crate) trait AgentProvider: Sync {
         true
     }
 
+    /// Provider-owned version of its line-independent searchable message parser.
+    /// None keeps unknown formats on the full rebuild path.
+    fn transcript_search_append_version(&self) -> Option<&'static str> {
+        None
+    }
+
     fn transcript_cacheable(&self) -> bool {
         true
     }
@@ -530,6 +534,14 @@ pub(crate) trait AgentProvider: Sync {
     }
 
     fn analytics_model_hint(&self, _session: &SessionRecord) -> Option<String> {
+        None
+    }
+
+    fn analytics_cost(
+        &self,
+        _model: &str,
+        _usage: crate::analytics::AnalyticsTokenUsage,
+    ) -> Option<crate::analytics::AnalyticsCost> {
         None
     }
 
@@ -702,6 +714,10 @@ pub(crate) trait AgentProvider: Sync {
         (None, None)
     }
 
+    fn hook_review_resource_paths(&self, source: &Path) -> Result<Vec<PathBuf>> {
+        Ok(vec![source.to_path_buf()])
+    }
+
     fn review_hook(&self, _hook: &HookRecord) -> Result<()> {
         bail!("this hook does not support review")
     }
@@ -849,6 +865,10 @@ pub fn active_session_writer(session: &SessionRecord) -> Result<Option<SessionWr
     agent_provider(session.agent).active_session_writer(session)
 }
 
+pub fn session_resume_repair_commands(session: &SessionRecord) -> Vec<SessionCommand> {
+    agent_provider(session.agent).session_resume_repair_commands(session)
+}
+
 pub fn accepts_session_app_url(url: &str) -> bool {
     agent_providers()
         .into_iter()
@@ -953,6 +973,7 @@ mod tests {
 
     use super::{
         AgentKind, SessionRecord, codex, plan_assistant_ask, plan_session_resume, project_dirs,
+        session_resume_repair_commands,
     };
 
     fn temp_dir(prefix: &str) -> PathBuf {
@@ -1222,5 +1243,41 @@ mod tests {
         drop(lock_file);
         assert!(plan_session_resume(&session).is_ok());
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn codex_resume_repair_archives_then_unarchives_the_session() {
+        let session = SessionRecord {
+            id: "session-id".to_string(),
+            agent: AgentKind::Codex,
+            title: None,
+            project: None,
+            repository: None,
+            repository_url: None,
+            logical_project_id: None,
+            logical_project_name: None,
+            path: PathBuf::from("/Users/test/.codex/sessions/session-id.jsonl"),
+            started_at: None,
+            updated_at: None,
+            message_count: None,
+            first_user_message: None,
+            last_user_message: None,
+            last_assistant_message: None,
+            turn_count: None,
+            model: None,
+            mode: None,
+            approval_mode: None,
+            is_run_everything: None,
+            parent_session_id: None,
+            token_usage: None,
+        };
+
+        let commands = session_resume_repair_commands(&session);
+
+        assert_eq!(commands.len(), 2);
+        assert_eq!(commands[0].executable, "codex");
+        assert_eq!(commands[0].args, ["archive", "session-id"]);
+        assert_eq!(commands[1].executable, "codex");
+        assert_eq!(commands[1].args, ["unarchive", "session-id"]);
     }
 }

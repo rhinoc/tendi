@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { CheckCircle2, Monitor, Moon, Sun, Trash2 } from "lucide-react";
 import { DropdownMenu, Popover } from "radix-ui";
-import { actionLabels, AsyncStatus, CliInstallState, compactDateTime, DesktopUpdateStatus, EMPTY_DISPLAY_VALUE, formatRelativeTime, formatUserPath, logExportLabels, MissingSessionProjectPolicy, normalizeSettings, remoteRepositoryLabel, TauriCommand, normalizeMissingSessionProjectPolicy, normalizeSessionResumeTarget, safeInvoke, SessionResumeTarget, type BundledSkillStatus, type CliInstallStatus, type DesktopUpdateState, type ProjectSummary, type RawSkillRecord, type SettingsPayload, type SettingsState, type SkillInstallResult } from "../../lib/index.ts";
+import { actionLabels, AsyncStatus, CliInstallState, compactDateTime, DesktopUpdateStatus, EMPTY_DISPLAY_VALUE, formatRelativeTime, formatUserPath, logExportLabels, MissingSessionProjectPolicy, remoteRepositoryLabel, TauriCommand, normalizeMissingSessionProjectPolicy, normalizeSessionResumeTarget, safeInvoke, SessionResumeTarget, type BundledSkillStatus, type CliInstallStatus, type DesktopUpdateState, type ProjectSummary, type RawSkillRecord, type SettingsState, type SkillInstallResult } from "../../lib/index.ts";
 import { Appearance, ColorTheme, FontFamily, type ResolvedAppearance, type ThemePreferences } from "../../lib/appearance.ts";
 import { appIconOptions, appIconPreviewDataUrl, type AppIcon } from "../../lib/app-icon.ts";
 import { Button } from "../../components/shared/Button.tsx";
@@ -15,7 +15,7 @@ import { PageHeader } from "../../components/shared/PageHeader.tsx";
 import { SegmentedControl, SegmentedControlItem } from "../../components/shared/SegmentedControl.tsx";
 import { SelectControl } from "../../components/shared/SelectControl.tsx";
 import { StatefulButton } from "../../components/shared/StatefulButton.tsx";
-import { Toast } from "../../components/shared/Toast.tsx";
+import { Toast, useToast } from "../../components/shared/Toast.tsx";
 import { Switch } from "../../components/shared/Switch.tsx";
 import { RowActionsMenu } from "../../components/shared/RowActionsMenu.tsx";
 import { SettingsApplicationPicker, type SettingsApplicationOption } from "./SettingsApplicationPicker.tsx";
@@ -36,6 +36,7 @@ import {
   testEditorApp,
   testTerminalApp,
 } from "../../lib/runtime-gateway.ts";
+import { logger } from "../../lib/logger.ts";
 import "./SettingsView.css";
 
 type TerminalApp = {
@@ -51,6 +52,7 @@ const terminalAppLabels: Record<string, string> = {
   ghostty: "Ghostty",
   warp: "Warp",
   orca: "Orca",
+  superset: "Superset",
 };
 
 const projectTableColumns: CompactTableColumn<ProjectSummary>[] = [
@@ -144,7 +146,6 @@ type SettingsViewProps = {
   onMissingSessionProjectPolicyChange: (policy: MissingSessionProjectPolicy) => void;
   appIcon: AppIcon;
   onAppIconChange: (appIcon: AppIcon) => void;
-  configProfiles: Record<string, string>;
   projects: ProjectSummary[];
   onProjectsScanned?: (projects: ProjectSummary[]) => void;
   appSettingsLoading: boolean;
@@ -155,6 +156,7 @@ type SettingsViewProps = {
   onCheckForUpdates: () => void;
   onInstallUpdate: () => void;
   onSkillsUpdated?: (skills: RawSkillRecord[], options?: { patch?: boolean; deleted?: string[] }) => void;
+  onBeginSkillMutation: () => () => void;
   installedAgentKeys: string[];
   targetOptions: Array<{
     id: string;
@@ -220,6 +222,23 @@ type ThemeMode = (typeof themeModes)[number];
 
 type SettingsInputKey = "terminal" | "editor" | "additionalSessionRoots" | "projectScanScopes";
 type SettingsInputRevisions = Record<SettingsInputKey, number>;
+type SettingsField = keyof SettingsState;
+type SettingsRevisions = Record<SettingsField, number>;
+type SettingsSaveTicket = Partial<SettingsRevisions>;
+
+const initialSettingsRevisions: SettingsRevisions = {
+  appearance: 0,
+  lightTheme: 0,
+  darkTheme: 0,
+  appIcon: 0,
+  fontFamily: 0,
+  terminal: 0,
+  editor: 0,
+  sessionResumeTarget: 0,
+  missingSessionProjectPolicy: 0,
+  developerMode: 0,
+  additionalSessionRoots: 0,
+};
 
 function ThemeSelect({ mode, value, onChange }: { mode: ThemeMode; value: ColorTheme; onChange: (value: ColorTheme) => void }) {
   return (
@@ -232,7 +251,6 @@ function ThemeSelect({ mode, value, onChange }: { mode: ThemeMode; value: ColorT
         value={value}
         onValueChange={(nextValue) => onChange(nextValue as ColorTheme)}
         options={[...themeOptions]}
-        showOptionTooltip={false}
         renderOption={(option) => {
           const colors = themePreviewColors[mode.value][option.value as ColorTheme];
           return (
@@ -260,7 +278,6 @@ function AppIconSelect({ value, onChange }: { value: AppIcon; onChange: (value: 
       value={value}
       onValueChange={(nextValue) => onChange(nextValue as AppIcon)}
       options={[...appIconOptions]}
-      showOptionTooltip={false}
       renderValue={(option) => option ? (
         <span className="settingsAppIconOption">
           <img className="settingsAppIconPreview" src={appIconPreviewDataUrl(option.value)} alt="" aria-hidden="true" />
@@ -292,7 +309,8 @@ function SettingsGroup({ title, children }: { title: string; children: ReactNode
   );
 }
 
-export function SettingsView({ appearance, themePreferences, fontFamily, terminal, editor, additionalSessionRoots, developerMode, sessionResumeTarget, missingSessionProjectPolicy, appIcon, configProfiles, projects, onAppearanceChange, onThemeChange, onFontFamilyChange, onTerminalChange, onEditorChange, onAdditionalSessionRootsChange, onDeveloperModeChange, onSessionResumeTargetChange, onMissingSessionProjectPolicyChange, onAppIconChange, onProjectsScanned, appSettingsLoading, appSettingsLoadError, onRetryAppSettings, update, lastUpdateCheckAt, onCheckForUpdates, onInstallUpdate, onSkillsUpdated, installedAgentKeys, targetOptions }: SettingsViewProps) {
+export function SettingsView({ appearance, themePreferences, fontFamily, terminal, editor, additionalSessionRoots, developerMode, sessionResumeTarget, missingSessionProjectPolicy, appIcon, projects, onAppearanceChange, onThemeChange, onFontFamilyChange, onTerminalChange, onEditorChange, onAdditionalSessionRootsChange, onDeveloperModeChange, onSessionResumeTargetChange, onMissingSessionProjectPolicyChange, onAppIconChange, onProjectsScanned, appSettingsLoading, appSettingsLoadError, onRetryAppSettings, update, lastUpdateCheckAt, onCheckForUpdates, onInstallUpdate, onSkillsUpdated, onBeginSkillMutation, installedAgentKeys, targetOptions }: SettingsViewProps) {
+  const showToast = useToast();
   const [relativeTimeNow, setRelativeTimeNow] = useState(() => Date.now());
   const [terminalInput, setTerminalInput] = useState(terminal);
   const [editorInput, setEditorInput] = useState(editor);
@@ -332,9 +350,12 @@ export function SettingsView({ appearance, themePreferences, fontFamily, termina
     return () => window.clearInterval(timer);
   }, []);
   const appearanceSaveRequestRef = useRef(0);
-  const themeSaveRequestRef = useRef(0);
+  const settingsLoadRequestRef = useRef(0);
   const appIconSaveRequestRef = useRef(0);
   const fontFamilySaveRequestRef = useRef(0);
+  const terminalSaveRequestRef = useRef(0);
+  const editorSaveRequestRef = useRef(0);
+  const settingsRevisionRef = useRef<SettingsRevisions>(initialSettingsRevisions);
   const inputRevisionRef = useRef<SettingsInputRevisions>({
     terminal: 0,
     editor: 0,
@@ -343,6 +364,14 @@ export function SettingsView({ appearance, themePreferences, fontFamily, termina
   });
   const onThemeChangeRef = useRef(onThemeChange);
   onThemeChangeRef.current = onThemeChange;
+  const invalidateSettingsLoad = useCallback(() => {
+    settingsLoadRequestRef.current += 1;
+    setSettingsLoading(false);
+  }, []);
+  const reportSaveFailure = (message: string = actionLabels.saveFailed) => {
+    showToast({ message, tone: "error" });
+    return message;
+  };
   const terminalOptions: SettingsApplicationOption[] = useMemo(() => {
     const items = terminalApps.length
       ? terminalApps
@@ -365,6 +394,7 @@ export function SettingsView({ appearance, themePreferences, fontFamily, termina
     { value: "coteditor", label: "CotEditor" },
   ];
   const loadSettings = useCallback(async () => {
+    const requestId = ++settingsLoadRequestRef.current;
     const inputRevisions = { ...inputRevisionRef.current };
     setSettingsLoading(true);
     setSettingsLoadError("");
@@ -374,6 +404,7 @@ export function SettingsView({ appearance, themePreferences, fontFamily, termina
       readBundledSkillStatus(),
       readProjectScanScopes(),
     ]);
+    if (requestId !== settingsLoadRequestRef.current) return;
     const errors = [
       apps ? "" : "Unable to read terminal applications",
       nextCliStatus ? "" : "Unable to read CLI status",
@@ -390,8 +421,10 @@ export function SettingsView({ appearance, themePreferences, fontFamily, termina
           .join("\n"));
       }
     }
-    setSettingsLoadError(errors.join("; "));
-    setSettingsLoading(false);
+    if (requestId === settingsLoadRequestRef.current) {
+      setSettingsLoadError(errors.join("; "));
+      setSettingsLoading(false);
+    }
   }, []);
 
   useEffect(() => {
@@ -399,6 +432,19 @@ export function SettingsView({ appearance, themePreferences, fontFamily, termina
   }, [loadSettings]);
 
   useEffect(() => {
+    logger.info("settings view mounted", { terminal, editor });
+    return () => logger.info("settings view unmounted", { terminal, editor });
+  }, []);
+
+  useEffect(() => {
+    logger.info("settings values synchronized", {
+      terminal,
+      terminalInput,
+      editor,
+      editorInput,
+      terminalInputRevision: inputRevisionRef.current.terminal,
+      editorInputRevision: inputRevisionRef.current.editor,
+    });
     if (inputRevisionRef.current.terminal === 0) setTerminalInput(terminal);
     if (inputRevisionRef.current.editor === 0) setEditorInput(editor);
     if (inputRevisionRef.current.additionalSessionRoots === 0) {
@@ -406,58 +452,66 @@ export function SettingsView({ appearance, themePreferences, fontFamily, termina
     }
   }, [additionalSessionRoots, editor, terminal]);
 
-  const applySavedSettings = (value: SettingsState, syncedInputs: Partial<SettingsInputRevisions> = {}) => {
+  const beginSettingsSave = (field: SettingsField): SettingsSaveTicket => {
+    invalidateSettingsLoad();
+    settingsRevisionRef.current = {
+      ...settingsRevisionRef.current,
+      [field]: settingsRevisionRef.current[field] + 1,
+    };
+    return { [field]: settingsRevisionRef.current[field] };
+  };
+  const isCurrentSettingsSave = (field: SettingsField, requestRevisions: SettingsSaveTicket) => (
+    requestRevisions[field] === settingsRevisionRef.current[field]
+  );
+  const applySavedSettings = (value: SettingsState, syncedInputs: Partial<SettingsInputRevisions>, requestRevisions: SettingsSaveTicket) => {
     const savedSettings = value;
-    if (syncedInputs.terminal === inputRevisionRef.current.terminal) setTerminalInput(savedSettings.terminal);
-    if (syncedInputs.editor === inputRevisionRef.current.editor) setEditorInput(savedSettings.editor);
+    const shouldApply = (field: SettingsField) => (
+      requestRevisions[field] === settingsRevisionRef.current[field]
+    );
+    logger.info("settings saved values applied", {
+      currentTerminal: terminal,
+      currentTerminalInput: terminalInput,
+      savedTerminal: savedSettings.terminal,
+      currentEditor: editor,
+      currentEditorInput: editorInput,
+      savedEditor: savedSettings.editor,
+      terminalInputRevision: inputRevisionRef.current.terminal,
+      editorInputRevision: inputRevisionRef.current.editor,
+      syncedInputs,
+    });
+    if (syncedInputs.terminal === inputRevisionRef.current.terminal && shouldApply("terminal")) setTerminalInput(savedSettings.terminal);
+    if (syncedInputs.editor === inputRevisionRef.current.editor && shouldApply("editor")) setEditorInput(savedSettings.editor);
     if (syncedInputs.additionalSessionRoots === inputRevisionRef.current.additionalSessionRoots) {
-      setAdditionalSessionRootsInput(savedSettings.additionalSessionRoots.join("\n"));
+      if (shouldApply("additionalSessionRoots")) setAdditionalSessionRootsInput(savedSettings.additionalSessionRoots.join("\n"));
     }
-    onTerminalChange(savedSettings.terminal);
-    onEditorChange(savedSettings.editor);
-    onAdditionalSessionRootsChange(savedSettings.additionalSessionRoots);
-    onAppearanceChange(savedSettings.appearance);
-    onThemeChangeRef.current(Appearance.Light, savedSettings.lightTheme);
-    onThemeChangeRef.current(Appearance.Dark, savedSettings.darkTheme);
-    onFontFamilyChange(savedSettings.fontFamily);
-    onDeveloperModeChange(savedSettings.developerMode);
-    onSessionResumeTargetChange(savedSettings.sessionResumeTarget);
-    onMissingSessionProjectPolicyChange(savedSettings.missingSessionProjectPolicy);
-    onAppIconChange(savedSettings.appIcon);
+    if (shouldApply("terminal")) onTerminalChange(savedSettings.terminal);
+    if (shouldApply("editor")) onEditorChange(savedSettings.editor);
+    if (shouldApply("additionalSessionRoots")) onAdditionalSessionRootsChange(savedSettings.additionalSessionRoots);
+    if (shouldApply("appearance")) onAppearanceChange(savedSettings.appearance);
+    if (shouldApply("lightTheme")) onThemeChangeRef.current(Appearance.Light, savedSettings.lightTheme);
+    if (shouldApply("darkTheme")) onThemeChangeRef.current(Appearance.Dark, savedSettings.darkTheme);
+    if (shouldApply("fontFamily")) onFontFamilyChange(savedSettings.fontFamily);
+    if (shouldApply("developerMode")) onDeveloperModeChange(savedSettings.developerMode);
+    if (shouldApply("sessionResumeTarget")) onSessionResumeTargetChange(savedSettings.sessionResumeTarget);
+    if (shouldApply("missingSessionProjectPolicy")) onMissingSessionProjectPolicyChange(savedSettings.missingSessionProjectPolicy);
+    if (shouldApply("appIcon")) onAppIconChange(savedSettings.appIcon);
     return savedSettings;
   };
-
-  const buildSettingsPayload = (overrides: Partial<SettingsState> = {}): SettingsPayload => ({
-    ...normalizeSettings({
-      appearance,
-      lightTheme: themePreferences.light,
-      darkTheme: themePreferences.dark,
-      appIcon,
-      fontFamily,
-      terminal,
-      editor,
-      sessionResumeTarget,
-      missingSessionProjectPolicy,
-      developerMode,
-      additionalSessionRoots,
-      ...overrides,
-    }),
-    configProfiles,
-  });
 
   const saveAppIcon = async (nextAppIcon: AppIcon) => {
     const previousAppIcon = appIcon;
     const requestId = appIconSaveRequestRef.current + 1;
     appIconSaveRequestRef.current = requestId;
+    const requestRevisions = beginSettingsSave("appIcon");
     setAppIconError("");
     onAppIconChange(nextAppIcon);
-    const nextSettings = await saveSettings(buildSettingsPayload({ appIcon: nextAppIcon }));
+    const nextSettings = await saveSettings({ appIcon: nextAppIcon });
     if (appIconSaveRequestRef.current !== requestId) return;
     if (nextSettings) {
-      applySavedSettings(nextSettings);
+      applySavedSettings(nextSettings, {}, requestRevisions);
     } else {
       onAppIconChange(previousAppIcon);
-      setAppIconError(actionLabels.saveFailed);
+      setAppIconError(reportSaveFailure());
     }
   };
 
@@ -465,32 +519,32 @@ export function SettingsView({ appearance, themePreferences, fontFamily, termina
     const previousAppearance = appearance;
     const requestId = appearanceSaveRequestRef.current + 1;
     appearanceSaveRequestRef.current = requestId;
+    const requestRevisions = beginSettingsSave("appearance");
     setAppearanceError("");
     onAppearanceChange(nextAppearance);
-    const nextSettings = await saveSettings(buildSettingsPayload({ appearance: nextAppearance }));
+    const nextSettings = await saveSettings({ appearance: nextAppearance });
     if (appearanceSaveRequestRef.current !== requestId) return;
     if (nextSettings) {
-      applySavedSettings(nextSettings);
+      applySavedSettings(nextSettings, {}, requestRevisions);
     } else {
       onAppearanceChange(previousAppearance);
-      setAppearanceError(actionLabels.saveFailed);
+      setAppearanceError(reportSaveFailure());
     }
   };
 
   const saveTheme = async (mode: ResolvedAppearance, nextTheme: ColorTheme) => {
     const key = mode === Appearance.Light ? "lightTheme" : "darkTheme";
     const previousTheme = themePreferences[mode];
-    const requestId = themeSaveRequestRef.current + 1;
-    themeSaveRequestRef.current = requestId;
+    const requestRevisions = beginSettingsSave(key);
     setThemeError("");
     onThemeChange(mode, nextTheme);
-    const nextSettings = await saveSettings(buildSettingsPayload({ [key]: nextTheme }));
-    if (themeSaveRequestRef.current !== requestId) return;
+    const nextSettings = await saveSettings({ [key]: nextTheme });
+    if (!isCurrentSettingsSave(key, requestRevisions)) return;
     if (nextSettings) {
-      applySavedSettings(nextSettings);
+      applySavedSettings(nextSettings, {}, requestRevisions);
     } else {
       onThemeChange(mode, previousTheme);
-      setThemeError(actionLabels.saveFailed);
+      setThemeError(reportSaveFailure());
     }
   };
 
@@ -498,29 +552,56 @@ export function SettingsView({ appearance, themePreferences, fontFamily, termina
     const previousFontFamily = fontFamily;
     const requestId = fontFamilySaveRequestRef.current + 1;
     fontFamilySaveRequestRef.current = requestId;
+    const requestRevisions = beginSettingsSave("fontFamily");
     setFontFamilyError("");
     onFontFamilyChange(nextFontFamily);
-    const nextSettings = await saveSettings(buildSettingsPayload({ fontFamily: nextFontFamily }));
+    const nextSettings = await saveSettings({ fontFamily: nextFontFamily });
     if (fontFamilySaveRequestRef.current !== requestId) return;
     if (nextSettings) {
-      applySavedSettings(nextSettings);
+      applySavedSettings(nextSettings, {}, requestRevisions);
     } else {
       onFontFamilyChange(previousFontFamily);
-      setFontFamilyError(actionLabels.saveFailed);
+      setFontFamilyError(reportSaveFailure());
     }
   };
 
-  const saveTerminal = async (terminal: string) => {
+  const saveTerminal = async (nextTerminal: string) => {
     const inputRevision = inputRevisionRef.current.terminal;
-    const normalized = terminal.trim() || "auto";
+    const normalized = nextTerminal.trim() || "auto";
     setTerminalInput(normalized);
     if (normalized === terminal) return;
-    const nextSettings = await saveSettings(buildSettingsPayload({ terminal: normalized }));
+    const previousTerminal = terminal;
+    const requestId = terminalSaveRequestRef.current + 1;
+    terminalSaveRequestRef.current = requestId;
+    const requestRevisions = beginSettingsSave("terminal");
+    onTerminalChange(normalized);
+    logger.info("settings terminal save started", {
+      requestedTerminal: nextTerminal,
+      normalizedTerminal: normalized,
+      currentTerminal: terminal,
+      inputRevision,
+      requestId,
+    });
+    const nextSettings = await saveSettings({ terminal: normalized });
+    if (terminalSaveRequestRef.current !== requestId) {
+      logger.warn("settings terminal save response ignored as stale", {
+        requestId,
+        latestRequestId: terminalSaveRequestRef.current,
+        returnedTerminal: nextSettings?.terminal ?? null,
+      });
+      return;
+    }
+    logger.info("settings terminal save completed", {
+      requestId,
+      returnedTerminal: nextSettings?.terminal ?? null,
+      succeeded: Boolean(nextSettings),
+    });
     if (nextSettings) {
-      applySavedSettings(nextSettings, { terminal: inputRevision });
+      applySavedSettings(nextSettings, { terminal: inputRevision }, requestRevisions);
       setTerminalError("");
     } else {
-      setTerminalError(actionLabels.saveFailed);
+      onTerminalChange(previousTerminal);
+      setTerminalError(reportSaveFailure());
     }
   };
 
@@ -528,14 +609,16 @@ export function SettingsView({ appearance, themePreferences, fontFamily, termina
     const normalized = normalizeSessionResumeTarget(target);
     if (normalized === sessionResumeTarget) return;
     const previous = sessionResumeTarget;
+    const requestRevisions = beginSettingsSave("sessionResumeTarget");
     onSessionResumeTargetChange(normalized);
-    const nextSettings = await saveSettings(buildSettingsPayload({ sessionResumeTarget: normalized }));
+    const nextSettings = await saveSettings({ sessionResumeTarget: normalized });
+    if (!isCurrentSettingsSave("sessionResumeTarget", requestRevisions)) return;
     if (nextSettings) {
-      applySavedSettings(nextSettings);
+      applySavedSettings(nextSettings, {}, requestRevisions);
       setSessionResumeError("");
     } else {
       onSessionResumeTargetChange(previous);
-      setSessionResumeError(actionLabels.saveFailed);
+      setSessionResumeError(reportSaveFailure());
     }
   };
 
@@ -543,42 +626,72 @@ export function SettingsView({ appearance, themePreferences, fontFamily, termina
     const normalized = normalizeMissingSessionProjectPolicy(policy);
     if (normalized === missingSessionProjectPolicy) return;
     const previous = missingSessionProjectPolicy;
+    const requestRevisions = beginSettingsSave("missingSessionProjectPolicy");
     onMissingSessionProjectPolicyChange(normalized);
-    const nextSettings = await saveSettings(buildSettingsPayload({ missingSessionProjectPolicy: normalized }));
+    const nextSettings = await saveSettings({ missingSessionProjectPolicy: normalized });
+    if (!isCurrentSettingsSave("missingSessionProjectPolicy", requestRevisions)) return;
     if (nextSettings) {
-      applySavedSettings(nextSettings);
+      applySavedSettings(nextSettings, {}, requestRevisions);
       setMissingSessionProjectError("");
     } else {
       onMissingSessionProjectPolicyChange(previous);
-      setMissingSessionProjectError(actionLabels.saveFailed);
+      setMissingSessionProjectError(reportSaveFailure());
     }
   };
 
-  const saveEditor = async (editor: string) => {
+  const saveEditor = async (nextEditor: string) => {
     const inputRevision = inputRevisionRef.current.editor;
-    const normalized = editor.trim() || "vscode";
+    const normalized = nextEditor.trim() || "vscode";
     setEditorInput(normalized);
     if (normalized === editor) return;
-    const nextSettings = await saveSettings(buildSettingsPayload({ editor: normalized }));
+    const previousEditor = editor;
+    const requestId = editorSaveRequestRef.current + 1;
+    editorSaveRequestRef.current = requestId;
+    const requestRevisions = beginSettingsSave("editor");
+    onEditorChange(normalized);
+    logger.info("settings editor save started", {
+      requestedEditor: nextEditor,
+      normalizedEditor: normalized,
+      currentEditor: editor,
+      inputRevision,
+      requestId,
+    });
+    const nextSettings = await saveSettings({ editor: normalized });
+    if (editorSaveRequestRef.current !== requestId) {
+      logger.warn("settings editor save response ignored as stale", {
+        requestId,
+        latestRequestId: editorSaveRequestRef.current,
+        returnedEditor: nextSettings?.editor ?? null,
+      });
+      return;
+    }
+    logger.info("settings editor save completed", {
+      requestId,
+      returnedEditor: nextSettings?.editor ?? null,
+      succeeded: Boolean(nextSettings),
+    });
     if (nextSettings) {
-      applySavedSettings(nextSettings, { editor: inputRevision });
+      applySavedSettings(nextSettings, { editor: inputRevision }, requestRevisions);
       setEditorError("");
     } else {
-      setEditorError(actionLabels.saveFailed);
+      onEditorChange(previousEditor);
+      setEditorError(reportSaveFailure());
     }
   };
 
   const saveDeveloperMode = async (nextDeveloperMode: boolean) => {
     const previousDeveloperMode = developerMode;
     if (nextDeveloperMode === previousDeveloperMode) return;
+    const requestRevisions = beginSettingsSave("developerMode");
     setDeveloperModeError("");
     onDeveloperModeChange(nextDeveloperMode);
-    const nextSettings = await saveSettings(buildSettingsPayload({ developerMode: nextDeveloperMode }));
+    const nextSettings = await saveSettings({ developerMode: nextDeveloperMode });
+    if (!isCurrentSettingsSave("developerMode", requestRevisions)) return;
     if (nextSettings) {
-      applySavedSettings(nextSettings);
+      applySavedSettings(nextSettings, {}, requestRevisions);
     } else {
       onDeveloperModeChange(previousDeveloperMode);
-      setDeveloperModeError(actionLabels.saveFailed);
+      setDeveloperModeError(reportSaveFailure());
     }
   };
 
@@ -590,12 +703,14 @@ export function SettingsView({ appearance, themePreferences, fontFamily, termina
       .filter(Boolean);
     setAdditionalSessionRootsInput(roots.join("\n"));
     if (roots.join("\n") === additionalSessionRoots.join("\n")) return;
-    const nextSettings = await saveSettings(buildSettingsPayload({ additionalSessionRoots: roots }));
+    const requestRevisions = beginSettingsSave("additionalSessionRoots");
+    const nextSettings = await saveSettings({ additionalSessionRoots: roots });
+    if (!isCurrentSettingsSave("additionalSessionRoots", requestRevisions)) return;
     if (nextSettings) {
-      applySavedSettings(nextSettings, { additionalSessionRoots: inputRevision });
+      applySavedSettings(nextSettings, { additionalSessionRoots: inputRevision }, requestRevisions);
       setSessionRootsError("");
     } else {
-      setSessionRootsError(`${actionLabels.saveFailed}: use absolute paths`);
+      setSessionRootsError(reportSaveFailure(`${actionLabels.saveFailed}: use absolute paths`));
     }
   };
 
@@ -605,12 +720,13 @@ export function SettingsView({ appearance, themePreferences, fontFamily, termina
       .map((path) => path.trim())
       .filter(Boolean);
     setProjectScanScopesInput(paths.join("\n"));
+    invalidateSettingsLoad();
     const result = await saveProjectScanScopesCommand(paths);
     if (result) {
       setProjectScanScopesError("");
       setProjectScanSummary(`${result.length} scan scope${result.length === 1 ? "" : "s"} saved`);
     } else {
-      setProjectScanScopesError(`${actionLabels.saveFailed}: use absolute paths`);
+      setProjectScanScopesError(reportSaveFailure(`${actionLabels.saveFailed}: use absolute paths`));
     }
   };
 
@@ -653,6 +769,7 @@ export function SettingsView({ appearance, themePreferences, fontFamily, termina
 
   const changeCliRegistration = async () => {
     if (cliBusy) return;
+    invalidateSettingsLoad();
     setCliBusy(CliAction.Install);
     setCliError("");
     try {
@@ -669,6 +786,7 @@ export function SettingsView({ appearance, themePreferences, fontFamily, termina
 
   const removeCli = async () => {
     if (cliBusy) return;
+    invalidateSettingsLoad();
     setCliBusy(CliAction.Remove);
     setCliError("");
     try {
@@ -702,6 +820,7 @@ export function SettingsView({ appearance, themePreferences, fontFamily, termina
     if (settingsLoadError) void loadSettings();
   };
   const installBundledSkill = (result: SkillInstallResult) => {
+    invalidateSettingsLoad();
     onSkillsUpdated?.(result.updated ?? result.skills ?? [], { patch: true });
     setBundledSkillError("");
     setBundledSkillInstallOpen(false);
@@ -709,6 +828,10 @@ export function SettingsView({ appearance, themePreferences, fontFamily, termina
       if (status) setBundledSkillStatus(status);
     });
   };
+  const beginBundledSkillMutation = useCallback(() => {
+    invalidateSettingsLoad();
+    return onBeginSkillMutation();
+  }, [invalidateSettingsLoad, onBeginSkillMutation]);
 
   return (
     <section className="content dataPage settingsPage">
@@ -730,6 +853,7 @@ export function SettingsView({ appearance, themePreferences, fontFamily, termina
         onClose={() => setBundledSkillInstallOpen(false)}
         onPreviewError={setBundledSkillError}
         onInstalled={installBundledSkill}
+        onBeginMutation={beginBundledSkillMutation}
         onRequestWrapper={() => undefined}
         installedAgentKeys={installedAgentKeys}
         targetOptions={targetOptions}
@@ -795,7 +919,6 @@ export function SettingsView({ appearance, themePreferences, fontFamily, termina
               value={fontFamily}
               onValueChange={(value) => { void saveFontFamily(value as FontFamily); }}
               options={[...fontOptions]}
-              showOptionTooltip={false}
               renderOption={(option) => <span style={{ fontFamily: `"${option.label}"` }}>{option.label}</span>}
             />
             {fontFamilyError ? <Toast tone="error" message={fontFamilyError} /> : null}
@@ -975,7 +1098,7 @@ export function SettingsView({ appearance, themePreferences, fontFamily, termina
           </SettingsGroup>
           <SettingsGroup title="Developer">
             <SettingsSection title="Sync" className="settingsBackupSection">
-              <BackupSettings onSkillsRestored={onSkillsUpdated} />
+              <BackupSettings onSkillsRestored={onSkillsUpdated} onBeginMutation={onBeginSkillMutation} />
             </SettingsSection>
           <SettingsSection title="Coding helpers">
             <div className="settingsAgentRows">

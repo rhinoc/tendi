@@ -4,8 +4,8 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use anyhow::Result;
 use anyhow::bail;
+use anyhow::{Context, Result};
 use chrono::{DateTime, SecondsFormat};
 use rusqlite::{Connection, OpenFlags, types::ValueRef};
 use serde_json::Value;
@@ -26,14 +26,6 @@ enum CursorPluginScope {
 }
 
 const CURSOR_SKILL_FRONTMATTER_KEY: &str = "disable-model-invocation";
-
-#[cfg(test)]
-pub(crate) fn plan_skill_frontmatter(
-    path: PathBuf,
-    visibility: SkillVisibility,
-) -> Result<FileChange> {
-    crate::skills::plan_skill_frontmatter_for_agent(path, AgentKind::Cursor, visibility)
-}
 
 fn infer_mcp_transport(spec: &Value) -> Option<String> {
     spec.get("transport")
@@ -1256,12 +1248,7 @@ pub(crate) fn append_transcript_metadata_from_store_for_test(
 }
 
 pub(super) fn may_contain_search_message(line: &str) -> bool {
-    let hint = crate::transcript::search_json_hint(line);
-    matches!(
-        crate::transcript::json_string_hint(hint, "\"role\"")
-            .or_else(|| crate::transcript::json_string_hint(hint, "\"type\"")),
-        Some("user" | "assistant")
-    )
+    line.contains('\\') || line.contains("\"user\"") || line.contains("\"assistant\"")
 }
 
 pub(crate) fn find_cursor_store_db(path: &Path) -> Option<std::path::PathBuf> {
@@ -1509,30 +1496,6 @@ impl super::AgentProvider for CursorProvider {
         })
     }
 
-    fn skill_frontmatter_satisfies(
-        &self,
-        meta: &serde_yaml::Mapping,
-        visibility: SkillVisibility,
-    ) -> bool {
-        crate::skills::skill_frontmatter_satisfies_with_provider_key(
-            meta,
-            visibility,
-            Some(CURSOR_SKILL_FRONTMATTER_KEY),
-        )
-    }
-
-    fn render_skill_frontmatter(
-        &self,
-        before: &str,
-        visibility: SkillVisibility,
-    ) -> Result<String> {
-        crate::skills::render_skill_frontmatter_with_provider_key(
-            before,
-            visibility,
-            Some(CURSOR_SKILL_FRONTMATTER_KEY),
-        )
-    }
-
     fn skill_frontmatter_visibility_key(&self) -> Option<&'static str> {
         Some(CURSOR_SKILL_FRONTMATTER_KEY)
     }
@@ -1776,6 +1739,12 @@ impl super::AgentProvider for CursorProvider {
 
     fn transcript_search_hint(&self, line: &str) -> bool {
         may_contain_search_message(line)
+    }
+
+    fn transcript_search_append_version(&self) -> Option<&'static str> {
+        // Search owns JSONL messages only; mutable store.db tool/model enrichment
+        // is deliberately not part of this projection.
+        Some("cursor-search-jsonl-v1")
     }
 
     fn transcript_cacheable(&self) -> bool {
@@ -2106,6 +2075,12 @@ impl super::AgentProvider for CursorProvider {
                 warnings,
             );
         }
+    }
+
+    fn hook_review_resource_paths(&self, source: &Path) -> Result<Vec<PathBuf>> {
+        let state = crate::hooks::tendi_hook_review_state_path()
+            .context("Tendi data directory is unavailable")?;
+        Ok(vec![source.to_path_buf(), state])
     }
 
     fn review_hook(&self, hook: &HookRecord) -> Result<()> {

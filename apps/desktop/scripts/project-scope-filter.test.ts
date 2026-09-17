@@ -63,12 +63,12 @@ const view: CatalogView = {
     { agents: ["codex"], kind: "always", scope: "project", order: 1, path: "/repo/project.md", sha256: "project" },
   ],
   hooks: [
-    { agent: "codex", event: "global", enabled: true, needs_review: false, path: "/global/hooks.json", trust_hash: "global" },
-    { agent: "codex", event: "project", enabled: true, needs_review: false, path: "/repo/hooks.json", trust_hash: "project" },
+    { id: "global-hook", agent: "codex", event: "global", enabled: true, needs_review: false, path: "/global/hooks.json", trust_hash: "global" },
+    { id: "project-hook", agent: "codex", event: "project", enabled: true, needs_review: false, path: "/repo/hooks.json", trust_hash: "project" },
   ],
   mcp: [
-    { agent: "codex", name: "global", scope: "global", transport: "stdio", enabled: true, status: "ready", path: "/global/mcp.json", trust_hash: "global" },
-    { agent: "codex", name: "project", scope: "demo", transport: "stdio", enabled: true, status: "ready", path: "/repo/mcp.json", trust_hash: "project" },
+    { id: "global-mcp", agent: "codex", name: "global", scope: "global", transport: "stdio", enabled: true, status: "ready", path: "/global/mcp.json", trust_hash: "global" },
+    { id: "project-mcp", agent: "codex", name: "project", scope: "demo", transport: "stdio", enabled: true, status: "ready", path: "/repo/mcp.json", trust_hash: "project" },
   ],
   sourceIndex: [],
 };

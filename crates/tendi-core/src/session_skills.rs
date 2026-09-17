@@ -95,46 +95,43 @@ pub(crate) struct SkillEvidenceCandidate {
     pub(crate) confidence: &'static str,
 }
 
+fn load_skills_for_index(store: &Store, cwd: &Path) -> Result<crate::SkillScan> {
+    for _ in 0..8 {
+        if let Some(scan) = store.list_skills_for_workspace(cwd)? {
+            return Ok(scan);
+        }
+        let state = store.read_projection_refresh_state::<crate::SkillScan>("skills", cwd)?;
+        let project_roots = store
+            .list_projects()?
+            .into_iter()
+            .map(|project| project.root_path)
+            .collect::<Vec<_>>();
+        let scan =
+            crate::skills::scan_skills_for_project_roots_with_store(cwd, store, &project_roots)?;
+        if store.save_skills_for_workspace_if_revision(cwd, &scan, state.revision)? {
+            return Ok(scan);
+        }
+    }
+    anyhow::bail!("skills projection changed during session indexing; refresh remains pending")
+}
+
 pub fn run_index_for_scope(
     cwd: &Path,
     scope_key: &ScopeKey,
     force: bool,
 ) -> Result<SessionSkillIndexReport> {
     let store = Store::open_default()?;
-    let (skill_scan, source_migrations, persist_skill_scan) =
-        if let Some(skill_scan) = store.list_skills_for_workspace(cwd)? {
-            (skill_scan, Vec::new(), false)
-        } else {
-            let project_roots = store
-                .list_projects()?
-                .into_iter()
-                .map(|project| project.root_path)
-                .collect::<Vec<_>>();
-            let scanned =
-                crate::skills::scan_skills_synced_for_project_roots_with_store_for_projection(
-                    cwd,
-                    &store,
-                    &project_roots,
-                )?;
-            (scanned.scan, scanned.source_migrations, true)
-        };
+    let _lease = crate::coordination::ResourceLease::try_acquire(
+        store.path(),
+        &format!("session-skills:{}", scope_key.as_str()),
+    )?
+    .context("session-skill index is already running for this scope")?;
+    let skill_scan = load_skills_for_index(&store, cwd)?;
     let session_scan = store.list_sessions_for_scope(scope_key)?;
-
-    store.with_database_write_lock_retry(|| {
-        if persist_skill_scan {
-            store.save_skills_for_workspace_with_source_migrations(
-                cwd,
-                &skill_scan,
-                &source_migrations,
-            )?;
-        }
-        store
-            .ensure_session_skill_index_version_for_scope(scope_key, SESSION_SKILL_INDEX_VERSION)?;
-        if force {
-            store.clear_session_skill_index_for_scope(scope_key)?;
-        }
-        Ok(())
-    })?;
+    store.ensure_session_skill_index_version_for_scope(scope_key, SESSION_SKILL_INDEX_VERSION)?;
+    if force {
+        store.clear_session_skill_index_for_scope(scope_key)?;
+    }
 
     let lookup = SkillLookup::new(&skill_scan);
     let mut parsed = 0;
@@ -146,15 +143,13 @@ pub fn run_index_for_scope(
             Ok(state) => state,
             Err(err) => {
                 failed += 1;
-                store.with_database_write_lock_retry(|| {
-                    store.mark_session_skill_index_failed_for_scope(
-                        scope_key,
-                        session,
-                        0,
-                        0,
-                        &format!("failed to inspect transcript: {err:#}"),
-                    )
-                })?;
+                store.mark_session_skill_index_failed_for_scope(
+                    scope_key,
+                    session,
+                    0,
+                    0,
+                    &format!("failed to inspect transcript: {err:#}"),
+                )?;
                 continue;
             }
         };
@@ -173,22 +168,18 @@ pub fn run_index_for_scope(
 
         match extract_session_skill_links(session, &lookup) {
             Ok(links) => {
-                store.with_database_write_lock_retry(|| {
-                    store.replace_session_skill_links_for_scope(scope_key, session, &state, &links)
-                })?;
+                store.replace_session_skill_links_for_scope(scope_key, session, &state, &links)?;
                 parsed += 1;
             }
             Err(err) => {
                 failed += 1;
-                store.with_database_write_lock_retry(|| {
-                    store.mark_session_skill_index_failed_for_scope(
-                        scope_key,
-                        session,
-                        state.file_mtime,
-                        state.file_size,
-                        &format!("{err:#}"),
-                    )
-                })?;
+                store.mark_session_skill_index_failed_for_scope(
+                    scope_key,
+                    session,
+                    state.file_mtime,
+                    state.file_size,
+                    &format!("{err:#}"),
+                )?;
             }
         }
     }
@@ -735,6 +726,37 @@ mod tests {
     use super::*;
 
     #[test]
+    fn skill_index_reads_a_published_projection_from_its_explicit_store() {
+        let root = temp_dir("published-projection");
+        let store = Store::open(root.join("test.sqlite3")).unwrap();
+        let scan = crate::SkillScan {
+            roots: vec![],
+            skills: vec![],
+            warnings: vec![],
+        };
+        assert!(
+            store
+                .save_skills_for_workspace_if_revision(&root, &scan, crate::Revision::ZERO)
+                .unwrap()
+        );
+        let captured = store
+            .read_projection_refresh_state::<crate::SkillScan>("skills", &root)
+            .unwrap()
+            .revision;
+        let loaded = load_skills_for_index(&store, &root).unwrap();
+        assert!(loaded.skills.is_empty());
+        assert_eq!(
+            store
+                .read_projection_refresh_state::<crate::SkillScan>("skills", &root)
+                .unwrap()
+                .revision,
+            captured
+        );
+        drop(store);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn extracts_codex_shell_skill_read() {
         let root = temp_dir("codex-shell");
         let skill_dir = root.join(".codex/skills/foo");
@@ -988,6 +1010,7 @@ mod tests {
                 dependents: Vec::new(),
                 dependency_ids: Vec::new(),
                 dependent_ids: Vec::new(),
+                is_wrapper: false,
                 visibility: SkillVisibility::Auto,
                 agents: vec![agent],
                 paths: vec![SkillPath {

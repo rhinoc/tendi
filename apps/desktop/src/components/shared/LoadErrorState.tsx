@@ -1,5 +1,4 @@
-import { Button } from "./Button.tsx";
-import { EmptyState } from "./EmptyState.tsx";
+import { Toast } from "./Toast.tsx";
 
 export type LoadErrorStateProps = {
   message: string;
@@ -9,10 +8,10 @@ export type LoadErrorStateProps = {
 
 export function LoadErrorState({ message, onRetry, retryLabel = "Retry" }: LoadErrorStateProps) {
   return (
-    <EmptyState
-      title={message}
-      role="alert"
-      action={onRetry ? <Button size="sm" variant="ghost" onClick={onRetry}>{retryLabel}</Button> : undefined}
+    <Toast
+      tone="error"
+      message={message}
+      action={onRetry ? { label: retryLabel, onClick: onRetry } : undefined}
     />
   );
 }

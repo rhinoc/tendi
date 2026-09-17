@@ -391,12 +391,28 @@ fn restore_artifact_target(artifact: &BackupArtifact) -> Result<PathBuf> {
         })
 }
 
+/// Keep-both can allocate a sibling name; reserve those containing directories
+/// together with the checkout before choosing names or reading merge targets.
+pub fn backup_restore_resource_paths(plan: &BackupRestorePlan) -> Vec<PathBuf> {
+    let mut paths = vec![plan.checkout.clone(), plan.target_root.clone()];
+    paths.extend(plan.operations.iter().map(|operation| {
+        operation
+            .target
+            .parent()
+            .unwrap_or(&operation.target)
+            .to_path_buf()
+    }));
+    paths
+}
+
 pub fn apply_backup_restore(
     plan: &BackupRestorePlan,
     store: &Store,
     workspace_root: &Path,
     resolutions: &[BackupRestoreResolution],
 ) -> Result<Vec<BackupRestoreOperation>> {
+    let _resources =
+        crate::coordination::acquire_file_resources(&backup_restore_resource_paths(plan))?;
     let result = apply_backup_restore_without_database(plan, resolutions)?;
     store.upsert_skill_source_records_for_workspace(workspace_root, &result.source_records)?;
     Ok(result.operations)
@@ -406,6 +422,8 @@ pub fn apply_backup_restore_without_database(
     plan: &BackupRestorePlan,
     resolutions: &[BackupRestoreResolution],
 ) -> Result<BackupRestoreApplyResult> {
+    let _resources =
+        crate::coordination::acquire_file_resources(&backup_restore_resource_paths(plan))?;
     let mut operations = plan.operations.clone();
     let mut source_records = Vec::new();
     let mut resolutions_by_id = BTreeMap::new();
@@ -611,6 +629,7 @@ pub fn adopt_skill_for_backup(
     skill_path: &Path,
     name: impl Into<String>,
 ) -> Result<SkillSourceRecord> {
+    let _resources = crate::coordination::acquire_file_resources(&[skill_path.to_path_buf()])?;
     let record = skill_backup_record_for_adoption(skill_path, name)?;
     store
         .upsert_skill_source_records_for_workspace(workspace_root, std::slice::from_ref(&record))?;
@@ -930,6 +949,16 @@ fn source_file_label(path: &Path) -> String {
         .to_string()
 }
 
+/// A linked worktree stores its index and shared Git metadata outside the checkout.
+/// Admission and the core mutation owner must reserve the same complete resource set.
+pub fn checkout_mutation_resource_paths(checkout: &Path) -> Result<Vec<PathBuf>> {
+    let mut paths = vec![checkout.to_path_buf()];
+    paths.extend(git::mutation_resource_paths(checkout)?);
+    paths.sort();
+    paths.dedup();
+    Ok(paths)
+}
+
 /// Materialize the current managed skills into the configured checkout and create one
 /// atomic Git commit, pushing it when the checkout has an origin remote. Credential
 /// resolution is intentionally delegated to the system Git client, so tokens never
@@ -940,6 +969,9 @@ pub fn backup_now(store: &Store, cwd: &Path) -> Result<BackupSyncReport> {
         .context("skill backup is not configured")?;
     let machine_name = current_machine_name()?;
     let local_manifest = build_backup_manifest(store, cwd, &config, &machine_name)?;
+    let _resources = crate::coordination::acquire_file_resources(
+        &checkout_mutation_resource_paths(&config.checkout_path)?,
+    )?;
     let has_remote = ensure_checkout(&config)?;
     let (existing_manifest, preserved_checkout) = if has_remote {
         synchronize_remote_checkout(&config)?
@@ -996,6 +1028,9 @@ pub fn backup_now(store: &Store, cwd: &Path) -> Result<BackupSyncReport> {
 /// Prepare a configured checkout so a new device can inspect and restore remote
 /// versions immediately after entering the repository.
 pub fn sync_checkout_for_restore(config: &BackupConfig) -> Result<Option<BackupManifest>> {
+    let _resources = crate::coordination::acquire_file_resources(
+        &checkout_mutation_resource_paths(&config.checkout_path)?,
+    )?;
     let has_remote = ensure_checkout(config)?;
     if !has_remote {
         return read_checkout_manifest(&config.checkout_path);
@@ -1350,6 +1385,7 @@ fn artifact_key(category: &str, id: &str) -> String {
 
 pub fn write_snapshot(manifest: &BackupManifest, destination: &Path) -> Result<()> {
     validate_manifest(manifest)?;
+    let _resources = crate::coordination::acquire_file_resources(&[destination.to_path_buf()])?;
     fs::create_dir_all(destination)
         .with_context(|| format!("failed to create backup snapshot {}", destination.display()))?;
     let skills_root = destination.join("skills");
@@ -2336,6 +2372,84 @@ mod tests {
     };
 
     #[test]
+    fn checkout_mutation_resources_cover_an_uninitialized_checkout() {
+        let root = temp_dir("tendi-backup-resources-new");
+        let checkout = root.join("checkout");
+        assert_eq!(
+            super::checkout_mutation_resource_paths(&checkout).unwrap(),
+            vec![checkout]
+        );
+        assert!(!root.exists());
+    }
+
+    #[test]
+    fn checkout_mutation_resources_conflict_across_linked_worktrees() {
+        use crate::coordination::{ResourceLease, canonical_resource_path};
+
+        let root = temp_dir("tendi-backup-resources-worktree");
+        let repository = root.join("repository");
+        let first = root.join("first");
+        let second = root.join("second");
+        fs::create_dir_all(&repository).unwrap();
+        run_git(&repository, &["init", "--initial-branch=main"]);
+        run_git(
+            &repository,
+            &[
+                "-c",
+                "user.name=Tendi test",
+                "-c",
+                "user.email=test@tendi.local",
+                "commit",
+                "--allow-empty",
+                "-m",
+                "initial",
+            ],
+        );
+        run_git(
+            &repository,
+            &["worktree", "add", "-b", "first", first.to_str().unwrap()],
+        );
+        run_git(
+            &repository,
+            &["worktree", "add", "-b", "second", second.to_str().unwrap()],
+        );
+        let first_paths = super::checkout_mutation_resource_paths(&first).unwrap();
+        let second_paths = super::checkout_mutation_resource_paths(&second).unwrap();
+        let common = canonical_resource_path(&repository.join(".git")).unwrap();
+        for paths in [&first_paths, &second_paths] {
+            assert!(
+                paths
+                    .iter()
+                    .any(|path| canonical_resource_path(path).unwrap() == common)
+            );
+        }
+        let namespace = root.join("locks");
+        let held = ResourceLease::acquire_paths(&namespace, &first_paths).unwrap();
+        let other_namespace = namespace.clone();
+        let blocked = std::thread::spawn(move || {
+            ResourceLease::try_acquire_paths(&other_namespace, &second_paths)
+                .unwrap()
+                .is_none()
+        })
+        .join()
+        .unwrap();
+        assert!(
+            blocked,
+            "separate worktrees must serialize mutations to common Git metadata"
+        );
+        drop(held);
+        assert!(
+            ResourceLease::try_acquire_paths(
+                &namespace,
+                &super::checkout_mutation_resource_paths(&second).unwrap()
+            )
+            .unwrap()
+            .is_some()
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn backup_statuses_skip_all_skill_work_without_a_configured_repository() {
         let root = temp_dir("tendi-skill-backup-status-no-config");
         let skill = root.join("global/review");
@@ -3286,6 +3400,7 @@ mod tests {
             dependents: Vec::new(),
             dependency_ids: Vec::new(),
             dependent_ids: Vec::new(),
+            is_wrapper: false,
             visibility: SkillVisibility::Auto,
             agents: vec![AgentKind::Shared],
             paths: vec![SkillPath {

@@ -197,7 +197,7 @@ export function selectAnalyticsDisplayValue(
   queryKey: AnalyticsQueryKey,
 ): OverviewAnalytics | null {
   const storedQueryKey = state.analytics.valueQueryKey;
-  if (!storedQueryKey || storedQueryKey.agent !== queryKey.agent || storedQueryKey.range !== queryKey.range) {
+  if (!storedQueryKey || storedQueryKey.agent !== queryKey.agent || storedQueryKey.range > queryKey.range) {
     return null;
   }
   return state.analytics.value;

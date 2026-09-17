@@ -9,7 +9,6 @@ import { useTabState } from "../lib/tab-state.ts";
 import { ContentTopDragStrip } from "../components/shared/ContentTopDragStrip.tsx";
 import { CopyPathMenuItem, OpenInEditorMenuItem, RevealInFinderMenuItem } from "../components/shared/DataTableMenus.tsx";
 import { DataTableSelectionActions, renderDataTableSelectionMenu, type DataTableSelectionActionDefinition } from "../components/shared/DataTableSelectionActions.tsx";
-import { Badge } from "../components/shared/Badge.tsx";
 import { CopyButton } from "../components/shared/CopyButton.tsx";
 import { Button } from "../components/shared/Button.tsx";
 import { CollapsibleAccordion, type CollapsibleAccordionItem } from "../components/shared/CollapsibleAccordion.tsx";
@@ -26,7 +25,7 @@ import { Switch } from "../components/shared/Switch.tsx";
 import { Toast } from "../components/shared/Toast.tsx";
 import { Tooltip } from "../components/shared/Tooltip.tsx";
 import { mcpColumns as defaultMcpColumns } from "../lib/tableColumns.tsx";
-import { actionLabels, EMPTY_DISPLAY_VALUE, formatUserPath, isMcpMutationDelta, MCP_FREEZE_COLUMN, mcpCopy, mcpDisplayName, mcpNeedsLogin, scopeNameForValue, TableSelectionActionId, TauriCommand, mcpRowKey, mcpSelectionActionIds, mcpSourcePath, safeInvoke, type McpRecord } from "../lib/index.ts";
+import { actionLabels, EMPTY_DISPLAY_VALUE, formatUserPath, isMcpMutationDelta, MCP_FREEZE_COLUMN, mcpCopy, mcpDisplayName, scopeNameForValue, TableSelectionActionId, TauriCommand, mcpRowKey, mcpSelectionActionIds, mcpSourcePath, safeInvoke, type McpRecord } from "../lib/index.ts";
 import type { JsonValue } from "../lib/generated/runtime-types.ts";
 import type { McpTool } from "../lib/mcp.ts";
 
@@ -149,7 +148,6 @@ function mcpToolContent(tool: McpTool): ReactNode {
 function mcpToolItems(row: McpRow): CollapsibleAccordionItem[] {
   return row.tools.map((tool) => {
     const title = tool.title?.trim() || tool.name;
-    const description = tool.description?.trim();
     return {
       id: tool.name,
       title: (
@@ -214,7 +212,6 @@ function McpDetail({
         <span className="mcpDetailTitle">
           <McpServerIcon icons={row.icons} size={22} />
           <span className="mcpDetailTitleText">{title}</span>
-          {mcpNeedsLogin(row.status) ? <Badge tone="warning">Need login</Badge> : null}
         </span>
       )}
       meta={(

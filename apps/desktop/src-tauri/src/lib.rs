@@ -3,7 +3,7 @@ mod cli_registration;
 mod terminals;
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     env,
     fs::{self, File, OpenOptions},
     io,
@@ -54,6 +54,53 @@ fn clear_assistant_cancellation(
 
 const UPDATE_AVAILABLE_EVENT: &str = "tendi://update-available";
 
+#[tauri::command]
+async fn tokenizer_count(
+    request: runtime_schema::TokenizerCountRequest,
+) -> Result<runtime_schema::TokenizerCountResponse, String> {
+    tauri::async_runtime::spawn_blocking(move || tokenizer_count_blocking(request))
+        .await
+        .map_err(|error| format!("tokenizer task failed: {error}"))?
+}
+
+fn tokenizer_count_blocking(
+    request: runtime_schema::TokenizerCountRequest,
+) -> Result<runtime_schema::TokenizerCountResponse, String> {
+    let tokenizer = tiktoken_rs::bpe_for_tokenizer(tiktoken_rs::tokenizer::Tokenizer::O200kBase)
+        .map_err(|error| format!("failed to initialize o200k_base tokenizer: {error}"))?;
+    let allowed_special = HashSet::new();
+    let counts = request
+        .texts
+        .iter()
+        .map(|text| {
+            tokenizer
+                .count(text, &allowed_special)
+                .map(|count| count as u64)
+                .map_err(|error| format!("failed to count tokens: {error}"))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(runtime_schema::TokenizerCountResponse { counts })
+}
+
+#[cfg(test)]
+mod tokenizer_tests {
+    use super::tokenizer_count_blocking;
+    use tendi_core::generated::runtime_contract::TokenizerCountRequest;
+
+    #[test]
+    fn tokenizer_count_uses_o200k_base() {
+        let response = tokenizer_count_blocking(TokenizerCountRequest {
+            texts: vec![
+                "hello world".to_string(),
+                "中文 tokenization".to_string(),
+                "```rust\nfn main() {}\n```".to_string(),
+            ],
+        })
+        .expect("tokenizer count should succeed");
+        assert_eq!(response.counts, vec![2, 3, 8]);
+    }
+}
+
 fn session_resume_failure_response(
     code: &str,
     provider: Option<&str>,
@@ -103,6 +150,80 @@ fn terminal_launch_failure_response(
         }
     };
     session_resume_failure_response(code, Some(terminal), retryable, action, error.detail)
+}
+
+fn session_resume_active_writer_response(
+    writer: tendi_core::SessionWriter,
+) -> runtime_schema::SessionResumeResponse {
+    runtime_schema::SessionResumeResponse {
+        status: "activeWriter".to_string(),
+        lock_path: Some(writer.lock_path.display().to_string()),
+        agent: None,
+        terminal: None,
+        command_line: None,
+        error: None,
+    }
+}
+
+fn wait_for_session_writer_to_close(
+    session: &tendi_core::SessionRecord,
+) -> Result<Option<tendi_core::SessionWriter>, String> {
+    const POLL_ATTEMPTS: usize = 50;
+    const POLL_INTERVAL: Duration = Duration::from_millis(100);
+
+    for attempt in 0..POLL_ATTEMPTS {
+        let writer =
+            tendi_core::active_session_writer(session).map_err(|error| format!("{error:#}"))?;
+        if writer.is_none() || attempt + 1 == POLL_ATTEMPTS {
+            return Ok(writer);
+        }
+        std::thread::sleep(POLL_INTERVAL);
+    }
+    Ok(None)
+}
+
+fn run_session_resume_repair(commands: &[tendi_core::SessionCommand]) -> Result<(), String> {
+    for command in commands {
+        let mut process = Command::new(&command.executable);
+        process.args(&command.args);
+        if let Some(cwd) = &command.cwd {
+            process.current_dir(cwd);
+        }
+        process.envs(
+            command
+                .env
+                .iter()
+                .map(|(key, value)| (key.as_str(), value.as_str())),
+        );
+        let output = process.output().map_err(|error| {
+            format!(
+                "failed to run {} {}: {error}",
+                command.executable,
+                command.args.join(" "),
+            )
+        })?;
+        if output.status.success() {
+            continue;
+        }
+        let detail = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let detail = if detail.is_empty() {
+            String::from_utf8_lossy(&output.stdout).trim().to_string()
+        } else {
+            detail
+        };
+        return Err(format!(
+            "{} {} exited with {}{}",
+            command.executable,
+            command.args.join(" "),
+            output.status,
+            if detail.is_empty() {
+                String::new()
+            } else {
+                format!(": {detail}")
+            },
+        ));
+    }
+    Ok(())
 }
 
 struct UpdateState {
@@ -530,6 +651,7 @@ async fn session_resume_in_terminal(
 ) -> Result<runtime_schema::SessionResumeResponse, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let session = request.session;
+        let reconcile = session.reconcile.unwrap_or(false);
         let agent = match parse_agent_result(&session.agent) {
             Ok(agent) => agent,
             Err(error) => {
@@ -560,7 +682,7 @@ async fn session_resume_in_terminal(
         let record = tendi_core::SessionRecord {
             id: session.id,
             agent,
-            title: session.title,
+            title: None,
             project,
             repository: None,
             repository_url: None,
@@ -581,7 +703,11 @@ async fn session_resume_in_terminal(
             parent_session_id: None,
             token_usage: None,
         };
-        let active_writer = match tendi_core::active_session_writer(&record) {
+        let active_writer = match if reconcile {
+            wait_for_session_writer_to_close(&record)
+        } else {
+            tendi_core::active_session_writer(&record).map_err(|error| format!("{error:#}"))
+        } {
             Ok(writer) => writer,
             Err(error) => {
                 return Ok(session_resume_failure_response(
@@ -594,14 +720,48 @@ async fn session_resume_in_terminal(
             }
         };
         if let Some(writer) = active_writer {
-            return Ok(runtime_schema::SessionResumeResponse {
-                status: "activeWriter".to_string(),
-                lock_path: Some(writer.lock_path.display().to_string()),
-                agent: None,
-                terminal: None,
-                command_line: None,
-                error: None,
-            });
+            return Ok(session_resume_active_writer_response(writer));
+        }
+        if reconcile {
+            let repair_commands = tendi_core::session_resume_repair_commands(&record);
+            if let Err(error) = run_session_resume_repair(&repair_commands) {
+                let active_writer = match tendi_core::active_session_writer(&record) {
+                    Ok(writer) => writer,
+                    Err(writer_error) => {
+                        return Ok(session_resume_failure_response(
+                            "internal",
+                            Some(agent.label()),
+                            true,
+                            "retry",
+                            format!("{error}; failed to recheck writer lock: {writer_error:#}"),
+                        ));
+                    }
+                };
+                if let Some(writer) = active_writer {
+                    return Ok(session_resume_active_writer_response(writer));
+                }
+                return Ok(session_resume_failure_response(
+                    "internal",
+                    Some(agent.label()),
+                    true,
+                    "retry",
+                    error,
+                ));
+            }
+            if let Some(writer) = match tendi_core::active_session_writer(&record) {
+                Ok(writer) => writer,
+                Err(error) => {
+                    return Ok(session_resume_failure_response(
+                        "internal",
+                        Some(agent.label()),
+                        true,
+                        "retry",
+                        format!("failed to recheck writer lock: {error:#}"),
+                    ));
+                }
+            } {
+                return Ok(session_resume_active_writer_response(writer));
+            }
         }
         let mut plan = match tendi_core::plan_session_resume(&record) {
             Ok(plan) => plan,
@@ -1051,6 +1211,16 @@ pub fn run() {
         .setup(|app| {
             app.set_activation_policy(ActivationPolicy::Regular);
             let cwd = active_cwd().map_err(std::io::Error::other)?;
+            let startup_store =
+                tendi_core::storage::Store::open_default().map_err(std::io::Error::other)?;
+            let project_roots = startup_store
+                .list_projects()
+                .map_err(std::io::Error::other)?
+                .into_iter()
+                .map(|project| project.root_path)
+                .collect::<Vec<_>>();
+            tendi_core::initialize_workspace(&startup_store, &cwd, &project_roots)
+                .map_err(std::io::Error::other)?;
             app.manage(DaemonState {
                 daemon: Arc::new(tendi_daemon::Daemon::new(cwd)),
                 subscriptions: Mutex::new(HashMap::new()),

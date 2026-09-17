@@ -807,15 +807,13 @@ p {
   white-space: nowrap;
 }
 
-.skillLocationTargetCount {
-  flex: 0 0 auto;
+.skillLocationHint {
   color: var(--muted);
   font-size: var(--text-xs);
 }
 
-.skillLocationHint {
-  color: var(--muted);
-  font-size: var(--text-xs);
+.skillWrapperScopeDialog {
+  width: min(460px, calc(100vw - 48px));
 }
 
 .skillLocationApplyTooltipTarget {
@@ -1566,10 +1564,6 @@ p {
   transition: color 120ms ease, background-color 120ms ease;
 }
 
-.skillTitleOpen + .skillSourceButton {
-  margin-left: -2px;
-}
-
 .skillSourceButton:hover,
 .skillSourceButton:focus-visible {
   color: var(--text);
@@ -1578,6 +1572,22 @@ p {
 
 .skillSourceButton:active {
   background: var(--active-fill);
+}
+
+.skillUpdateButton,
+.skillUpdateButton:hover,
+.skillUpdateButton:focus-visible {
+  color: var(--tone-warn);
+}
+
+.skillSourceButton.skillUpdateButton > svg {
+  width: 16px;
+  height: 16px;
+}
+
+.skillSourceButton.skillWrapperButton > svg {
+  width: 16px;
+  height: 16px;
 }
 
 .skillSourceButton .skillInfoSourceImage {
@@ -1691,6 +1701,7 @@ p {
 .copyableSessionId code {
   min-width: 0;
   flex: 0 1 auto;
+  font-family: inherit;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -1897,11 +1908,13 @@ p {
   gap: 7px;
 }
 
-.skillInfoMenuContent .infoSection > :not(span, .visibility) {
+.skillInfoMenuContent .infoValueLine,
+.skillInfoMenuContent .skillInfoValue {
+  min-width: 0;
   margin-inline-start: var(--control-padding-x);
 }
 
-.skillInfoMenuContent .skillInfoRelationsTable {
+.skillInfoMenuContent .skillInfoValue {
   width: calc(100% - var(--control-padding-x));
 }
 
@@ -2093,7 +2106,8 @@ p {
 
 .skillInfoSourceSection .infoValueLine code,
 .ruleInfoPath .infoValueLine code,
-.sessionInfoPath code {
+.sessionInfoPath code,
+.infoValueLine .copyableSessionId code {
   font-family: inherit;
 }
 
@@ -2156,7 +2170,7 @@ button.skillInfoSourceIcon:hover {
 .skillInfoPathRow {
   min-width: 0;
   display: grid;
-  grid-template-columns: 24px minmax(0, 1fr) 28px 28px;
+  grid-template-columns: 18px minmax(0, 1fr) 28px 28px;
   align-items: center;
   gap: 6px;
 }
@@ -2166,8 +2180,8 @@ button.skillInfoSourceIcon:hover {
 }
 
 .skillInfoInstallAgent {
-  width: 24px;
-  height: 24px;
+  width: 18px;
+  height: 18px;
   display: inline-grid;
   place-items: center;
 }

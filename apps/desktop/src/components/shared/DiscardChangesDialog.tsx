@@ -21,6 +21,7 @@ export function DiscardChangesDialog({ open, onOpenChange, onDiscard }: DiscardC
             <DialogActionButton variant="secondary" onClick={() => onOpenChange(false)}>Cancel</DialogActionButton>
             <DialogActionButton
               variant="danger"
+              autoFocus
               onClick={() => {
                 onOpenChange(false);
                 onDiscard();

@@ -206,12 +206,13 @@ function RuleInfoMenu({
               <InfoSection label="Referenced skills" valueLine={false}>
                 <div className="ruleInfoSkillRefs">
                   {referencedSkills.map((skill) => (
-                    <Tooltip key={skill.id} content={skill.description}><button
+                    <button
+                      key={skill.id}
                       disabled={!onOpenSkill || !skill.id}
                       onClick={() => skill.id && onOpenSkill?.(skill.id)}
                     >
                       {skill.name}
-                    </button></Tooltip>
+                    </button>
                   ))}
                 </div>
               </InfoSection>
@@ -233,6 +234,7 @@ export function RulesView({
   locateRuleId,
   onLocateRuleComplete,
   projects,
+  onBeginMutation,
 }: {
   rows: RuleRecord[];
   skills?: SkillDependencyRecord[];
@@ -242,6 +244,7 @@ export function RulesView({
   onRetry?: () => void;
   onOpenSkill?: (skillId: string) => void;
   onDeleteRules?: (paths: string[]) => Promise<CatalogMutationResponse>;
+  onBeginMutation: () => () => void;
   onRuleSaved?: (path: string, sha256: string) => void;
   locateRuleId?: string;
   onLocateRuleComplete?: (id: string) => void;
@@ -470,17 +473,22 @@ export function RulesView({
 
   const save = useCallback(async () => {
     if (!dirty || !draft.sha256 || !activeRule?.path) return;
-    const result = await saveRule({
-      path: activeRule.path,
-      expectedSha256: draft.sha256,
-      content,
-    });
-    if (typeof result?.sha256 === "string") {
-      const savedContent = typeof result.content === "string" ? result.content : content;
-      updateEditorDraft(`rules:${activeRule.path}`, { content: savedContent, originalContent: savedContent, sha256: result.sha256 });
-      if (activeRule?.path) onRuleSaved?.(activeRule.path, result.sha256);
+    const releaseMutation = onBeginMutation();
+    try {
+      const result = await saveRule({
+        path: activeRule.path,
+        expectedSha256: draft.sha256,
+        content,
+      });
+      if (typeof result?.sha256 === "string") {
+        const savedContent = typeof result.content === "string" ? result.content : content;
+        updateEditorDraft(`rules:${activeRule.path}`, { content: savedContent, originalContent: savedContent, sha256: result.sha256 });
+        if (activeRule?.path) onRuleSaved?.(activeRule.path, result.sha256);
+      }
+    } finally {
+      releaseMutation();
     }
-  }, [activeRule?.path, content, dirty, draft.sha256, onRuleSaved]);
+  }, [activeRule?.path, content, dirty, draft.sha256, onBeginMutation, onRuleSaved]);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {

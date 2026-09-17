@@ -10,6 +10,7 @@ import { AnalyticsGranularity, groupAnalyticsDays, stepAnalyticsGranularity, typ
 import { formatTokenCount } from "../lib/token-format.ts";
 import { fixedVirtualRange } from "../lib/virtualization.ts";
 import { trackpadZoomDirection, useTrackpadZoom } from "../lib/zoom-gesture.ts";
+import { logger } from "../lib/logger.ts";
 
 const MAX_RUNG_COUNT = 28;
 const MAX_CATEGORY_COUNT = 4;
@@ -20,8 +21,8 @@ const TREND_VIRTUALIZATION_LIMIT = 80;
 const TREND_INITIAL_WINDOW_COLUMNS = 64;
 const TREND_LABEL_TARGET_GAP = 84;
 const TREND_DEFAULT_VIEWPORT_WIDTH = 640;
+const TREND_PREFETCH_SCREEN_RATIO = 1.75;
 const TREND_PLOT_HEIGHT = 184;
-const TREND_TOOLTIP_EXIT_SETTLE_MS = 120;
 const CACHE_RATE_MAX = 100;
 const CACHE_RATE_LOG_SCALE = Math.log1p(CACHE_RATE_MAX);
 
@@ -29,16 +30,13 @@ export enum OverviewUsageMetric {
   Sessions = "sessions",
   Turns = "turns",
   Tokens = "tokens",
+  Projects = "projects",
+  Cost = "cost",
   Cache = "cache",
   Time = "time",
   Tools = "tools",
   Skills = "skills",
 }
-export enum OverviewOlderLoadReason {
-  Auto = "auto",
-  Scroll = "scroll",
-}
-
 type TrendSegment = {
   key: string;
   label: string;
@@ -158,6 +156,17 @@ function formatDuration(milliseconds: number): string {
   return `${hours}h${remainingMinutes ? ` ${remainingMinutes}m` : ""}`;
 }
 
+const USD_FORMATTER = new Intl.NumberFormat(undefined, {
+  style: "currency",
+  currency: "USD",
+  minimumFractionDigits: 2,
+  maximumFractionDigits: 2,
+});
+
+function formatUsd(value: number): string {
+  return USD_FORMATTER.format(Math.max(0, value));
+}
+
 function linearPlotPosition(value: number, max: number): number {
   if (max <= 0) return 0;
   return Math.max(0, Math.min(1, value / max));
@@ -240,10 +249,16 @@ function callTotal(calls: AnalyticsPeriod["tools"]): number {
   return calls.reduce((sum, call) => sum + call.calls, 0);
 }
 
+function projectTokenTotal(period: AnalyticsPeriod): number {
+  return period.projects.reduce((sum, project) => sum + project.usage.totalTokens, 0);
+}
+
 function metricValue(period: AnalyticsPeriod, metric: OverviewUsageMetric): number {
   if (metric === OverviewUsageMetric.Sessions) return period.sessions;
   if (metric === OverviewUsageMetric.Turns) return period.runs;
   if (metric === OverviewUsageMetric.Cache) return cacheRate(period) ?? 0;
+  if (metric === OverviewUsageMetric.Projects) return projectTokenTotal(period);
+  if (metric === OverviewUsageMetric.Cost) return period.cost.totalUsd;
   if (metric === OverviewUsageMetric.Time) return period.totalRunMs;
   if (metric === OverviewUsageMetric.Tools) return callTotal(period.tools);
   if (metric === OverviewUsageMetric.Skills) return callTotal(period.skills);
@@ -251,7 +266,8 @@ function metricValue(period: AnalyticsPeriod, metric: OverviewUsageMetric): numb
 }
 
 function formatMetricValue(value: number, metric: OverviewUsageMetric): string {
-  if (metric === OverviewUsageMetric.Tokens) return formatTokenCount(value);
+  if (metric === OverviewUsageMetric.Tokens || metric === OverviewUsageMetric.Projects) return formatTokenCount(value);
+  if (metric === OverviewUsageMetric.Cost) return formatUsd(value);
   if (metric === OverviewUsageMetric.Cache) return `${value.toFixed(1)}%`;
   if (metric === OverviewUsageMetric.Time) return formatDuration(value);
   return value.toLocaleString();
@@ -260,6 +276,8 @@ function formatMetricValue(value: number, metric: OverviewUsageMetric): string {
 function metricLabel(metric: OverviewUsageMetric, granularity?: AnalyticsGranularity): string {
   if (metric === OverviewUsageMetric.Sessions) return granularity && granularity !== AnalyticsGranularity.Day ? "peak daily sessions" : "active sessions";
   if (metric === OverviewUsageMetric.Cache) return "cache rate";
+  if (metric === OverviewUsageMetric.Projects) return "project tokens";
+  if (metric === OverviewUsageMetric.Cost) return "estimated cost";
   if (metric === OverviewUsageMetric.Time) return "total time";
   if (metric === OverviewUsageMetric.Tools) return "tool calls";
   if (metric === OverviewUsageMetric.Skills) return "skill uses";
@@ -299,11 +317,22 @@ function sessionSegments(period: AnalyticsPeriod): TrendSegment[] {
 }
 
 function breakdownItems(period: AnalyticsPeriod, metric: OverviewUsageMetric): BreakdownItem[] {
-  if (metric === OverviewUsageMetric.Tokens || metric === OverviewUsageMetric.Time) {
+  if (metric === OverviewUsageMetric.Tokens || metric === OverviewUsageMetric.Time || metric === OverviewUsageMetric.Cost) {
     return period.models.map((model) => ({
       key: model.model,
       label: model.model,
-      value: metric === OverviewUsageMetric.Time ? model.totalMs : model.totalTokens,
+      value: metric === OverviewUsageMetric.Time
+        ? model.totalMs
+        : metric === OverviewUsageMetric.Cost
+          ? model.cost.totalUsd
+          : model.totalTokens,
+    }));
+  }
+  if (metric === OverviewUsageMetric.Projects) {
+    return period.projects.map((project) => ({
+      key: project.id,
+      label: project.name,
+      value: project.usage.totalTokens,
     }));
   }
   if (metric === OverviewUsageMetric.Tools || metric === OverviewUsageMetric.Skills) {
@@ -381,7 +410,7 @@ export function buildTrendTooltipSegments(
   segments: TrendSegment[],
 ): Array<BreakdownItem & { className: string }> {
   if (metric === OverviewUsageMetric.Cache) return [];
-  if (metric === OverviewUsageMetric.Tokens || metric === OverviewUsageMetric.Time || metric === OverviewUsageMetric.Tools || metric === OverviewUsageMetric.Skills) {
+  if (metric === OverviewUsageMetric.Tokens || metric === OverviewUsageMetric.Time || metric === OverviewUsageMetric.Cost || metric === OverviewUsageMetric.Projects || metric === OverviewUsageMetric.Tools || metric === OverviewUsageMetric.Skills) {
     const items = breakdownItems(period, metric).filter((item) => item.value > 0);
     if (items.length || metric !== OverviewUsageMetric.Time) {
       return items
@@ -412,13 +441,13 @@ export function buildTrendPeriodModel(
   // Rung geometry is only needed for the virtualized window. Tooltip rows are
   // optional so callers can skip them for off-screen / non-hovered periods.
   const includeTooltip = options.includeTooltip === true;
-  const periodBreakdown = (metric === OverviewUsageMetric.Tokens || metric === OverviewUsageMetric.Time || metric === OverviewUsageMetric.Tools || metric === OverviewUsageMetric.Skills)
+  const periodBreakdown = (metric === OverviewUsageMetric.Tokens || metric === OverviewUsageMetric.Time || metric === OverviewUsageMetric.Cost || metric === OverviewUsageMetric.Projects || metric === OverviewUsageMetric.Tools || metric === OverviewUsageMetric.Skills)
     ? breakdownItems(period, metric)
     : [];
   const periodValues = new Map(periodBreakdown.map((item) => [item.key, item.value]));
   const knownValue = topCategories.reduce((sum, item) => sum + (periodValues.get(item.key) ?? 0), 0);
   const otherValue = Math.max(0, metricValue(period, metric) - knownValue);
-  const segments: TrendSegment[] = (metric === OverviewUsageMetric.Tokens || metric === OverviewUsageMetric.Time || metric === OverviewUsageMetric.Tools || metric === OverviewUsageMetric.Skills)
+  const segments: TrendSegment[] = (metric === OverviewUsageMetric.Tokens || metric === OverviewUsageMetric.Time || metric === OverviewUsageMetric.Cost || metric === OverviewUsageMetric.Projects || metric === OverviewUsageMetric.Tools || metric === OverviewUsageMetric.Skills)
     && (metric !== OverviewUsageMetric.Time || periodBreakdown.length > 0)
     ? [
         ...topCategories.map((item, categoryIndex) => ({
@@ -475,7 +504,7 @@ export const OverviewTrendChart = memo(function OverviewTrendChart({
   hasOlder: boolean;
   loadingOlder: boolean;
   metric: OverviewUsageMetric;
-  onLoadOlder: (reason: OverviewOlderLoadReason) => void;
+  onLoadOlder: (minimumRange?: number) => void;
   onGranularityChange?: (granularity: AnalyticsGranularity) => void;
 }) {
   const chartDays = useMemo(() => {
@@ -552,9 +581,9 @@ export const OverviewTrendChart = memo(function OverviewTrendChart({
   const [activeKey, setActiveKey] = useState(visible[visible.length - 1]?.key ?? "");
   const [hoveredKey, setHoveredKey] = useState<string | null>(null);
   const [openTooltipKey, setOpenTooltipKey] = useState<string | null>(null);
-  const tooltipCloseTimerRef = useRef<number | null>(null);
   const barsRef = useRef<HTMLDivElement>(null);
   const loadRequestedRef = useRef(false);
+  const automaticOlderLoadAttemptedRef = useRef(false);
   const scrollSnapshotRef = useRef<ScrollSnapshot | null>(null);
   const viewportRef = useRef<HTMLDivElement>(null);
   const {
@@ -576,12 +605,6 @@ export const OverviewTrendChart = memo(function OverviewTrendChart({
   const pendingFocusIndexRef = useRef<number | null>(null);
   const zoomScaleRef = useRef(1);
   const zoomFocusTimestampRef = useRef<number | null>(null);
-
-  useEffect(() => () => {
-    if (tooltipCloseTimerRef.current !== null) {
-      window.clearTimeout(tooltipCloseTimerRef.current);
-    }
-  }, []);
 
   const windowStart = Math.min(trendWindow.start, Math.max(0, visible.length));
   const windowEnd = Math.max(windowStart, Math.min(trendWindow.end, visible.length));
@@ -664,16 +687,29 @@ export const OverviewTrendChart = memo(function OverviewTrendChart({
     syncTrendWindow(viewport);
 
     if (!loadingOlder) loadRequestedRef.current = false;
+    const availableWidth = Math.max(1, viewport.clientWidth - TREND_EDGE_PADDING * 2);
+    const periodsPerScreen = availableWidth / TREND_COLUMN_WIDTH;
+    const targetPeriods = Math.ceil(periodsPerScreen * TREND_PREFETCH_SCREEN_RATIO);
     if (
-      hasOlder
+      !automaticOlderLoadAttemptedRef.current
+      && hasOlder
       && !loadingOlder
-      && !loadRequestedRef.current
-      && viewport.scrollWidth <= viewport.clientWidth + 1
+      && visible.length < targetPeriods
     ) {
+      const daysPerPeriod = analytics.daysRequested / Math.max(1, visible.length);
+      const targetRange = Math.ceil(targetPeriods * daysPerPeriod);
+      automaticOlderLoadAttemptedRef.current = true;
       loadRequestedRef.current = true;
-      onLoadOlder(OverviewOlderLoadReason.Auto);
+      logger.info("overview analytics viewport prefetch requested", {
+        granularity,
+        loadedPeriods: visible.length,
+        targetPeriods,
+        viewportWidth: viewport.clientWidth,
+        requestedRange: targetRange,
+      });
+      onLoadOlder(targetRange);
     }
-  }, [granularity, hasOlder, loadingOlder, metric, onLoadOlder, trendViewportSize.width, visible, windowed]);
+  }, [analytics.daysRequested, granularity, hasOlder, loadingOlder, metric, onLoadOlder, trendViewportSize.width, visible, windowed]);
 
   useEffect(() => {
     const pendingIndex = pendingFocusIndexRef.current;
@@ -698,8 +734,14 @@ export const OverviewTrendChart = memo(function OverviewTrendChart({
     zoomFocusTimestampRef.current = focusedPeriod
       ? periodStartTimestamp(focusedPeriod.key, granularity)
       : null;
+    if (direction === 1 && hasOlder && !loadingOlder && !loadRequestedRef.current) {
+      loadRequestedRef.current = true;
+      onLoadOlder();
+    }
     onGranularityChange(nextGranularity);
   });
+
+  const trendViewportWidth = trendViewportSize.width || TREND_DEFAULT_VIEWPORT_WIDTH;
 
   const handleViewportWheel = (event: WheelEvent<HTMLDivElement>) => {
     handleTrackpadZoom(event);
@@ -727,7 +769,7 @@ export const OverviewTrendChart = memo(function OverviewTrendChart({
     syncTrendWindow(viewport);
     if (viewport.scrollLeft > 48 || !hasOlder || loadingOlder || loadRequestedRef.current) return;
     loadRequestedRef.current = true;
-    onLoadOlder(OverviewOlderLoadReason.Scroll);
+    onLoadOlder();
   };
 
   if (!visible.length || !hasMetricActivity) {
@@ -752,12 +794,12 @@ export const OverviewTrendChart = memo(function OverviewTrendChart({
                   <h3 id="overview-trend-title">
                     {metric === OverviewUsageMetric.Time && !hasTimingSupport ? "No timing data" : `No ${metricLabel(metric, granularity)} activity`}
                   </h3>
-                  <p>
-                    {metric === OverviewUsageMetric.Time && !hasTimingSupport
-                      ? "This provider does not record assistant completion timestamps."
-                      : "No activity in the selected range."}
-                  </p>
-                </div>
+                    <p>
+                      {metric === OverviewUsageMetric.Time && !hasTimingSupport
+                        ? "This provider does not record assistant completion timestamps."
+                        : "No activity in the selected range."}
+                    </p>
+                  </div>
               </div>
               <div className="overviewTrendXAxis" style={{ "--trend-columns": 1 } as CSSProperties} aria-hidden="true">
                 <span />
@@ -778,7 +820,6 @@ export const OverviewTrendChart = memo(function OverviewTrendChart({
     );
   }
 
-  const trendViewportWidth = trendViewportSize.width || TREND_DEFAULT_VIEWPORT_WIDTH;
   const viewportColumns = Math.max(1, Math.floor(trendViewportWidth / TREND_COLUMN_WIDTH));
   const targetLabelCount = Math.max(4, Math.floor(trendViewportWidth / TREND_LABEL_TARGET_GAP));
   const labelStep = Math.max(1, Math.ceil(Math.min(visible.length, viewportColumns) / targetLabelCount));
@@ -823,7 +864,7 @@ export const OverviewTrendChart = memo(function OverviewTrendChart({
           ...(hasOtherCategories ? [{ key: "other", label: "Other", swatchClassName: "categoryOther" }] : []),
           { key: "averageTurnTime", label: "Avg turn time", swatchClassName: "averageTurnTime" },
         ]
-    : metric === OverviewUsageMetric.Tools || metric === OverviewUsageMetric.Skills
+    : metric === OverviewUsageMetric.Tools || metric === OverviewUsageMetric.Skills || metric === OverviewUsageMetric.Projects || metric === OverviewUsageMetric.Cost
     ? [
         ...topCategories.map((item, index) => ({ key: item.key, label: item.label, swatchClassName: `category${index}` })),
         ...(hasOtherCategories ? [{ key: "other", label: "Other", swatchClassName: "categoryOther" }] : []),
@@ -951,29 +992,23 @@ export const OverviewTrendChart = memo(function OverviewTrendChart({
                 const cacheValue = metric === OverviewUsageMetric.Cache ? cacheRate(period) : null;
                 const tokensPerResponseValue = metric === OverviewUsageMetric.Tokens ? tokensPerResponse(period) : null;
                 const averageTurnTimeValue = metric === OverviewUsageMetric.Time ? averageTurnMs(period) : null;
-                const tooltipSegments = (isActive || isHovered)
+                const tooltipSegments = (isActive || isHovered || openTooltipKey === period.key)
                   ? buildTrendTooltipSegments(period, metric, topCategories, segments)
                   : [];
                 return (
                   <Tooltip
                     key={period.key}
                     interactive
-                    open={openTooltipKey === period.key}
+                    delayDuration={200}
                     onOpenChange={(open) => {
-                      if (tooltipCloseTimerRef.current !== null) {
-                        window.clearTimeout(tooltipCloseTimerRef.current);
-                        tooltipCloseTimerRef.current = null;
-                      }
                       setOpenTooltipKey((current) => {
                         if (open) return period.key;
                         return current === period.key ? null : current;
                       });
-                      if (!open) {
-                        tooltipCloseTimerRef.current = window.setTimeout(() => {
-                          tooltipCloseTimerRef.current = null;
-                          setHoveredKey((current) => current === period.key ? null : current);
-                        }, TREND_TOOLTIP_EXIT_SETTLE_MS);
-                      }
+                      setHoveredKey((current) => {
+                        if (open) return period.key;
+                        return current === period.key ? null : current;
+                      });
                     }}
                     content={(
                       <ChartTooltipContent
@@ -1025,6 +1060,16 @@ export const OverviewTrendChart = memo(function OverviewTrendChart({
                             {period.timedCompletedRuns.toLocaleString()} timed turns
                             {` · Longest ${period.maxRunMs ? formatDuration(period.maxRunMs) : EMPTY_DISPLAY_VALUE}`}
                           </p>
+                        ) : metric === OverviewUsageMetric.Projects ? (
+                            <p className="chartTooltipMeta">
+                            {period.projects.length.toLocaleString()} projects
+                            {` · ${period.responses.toLocaleString()} responses`}
+                          </p>
+                        ) : metric === OverviewUsageMetric.Cost ? (
+                            <p className="chartTooltipMeta">
+                            Estimated from model pricing
+                            {` · ${period.responses.toLocaleString()} responses`}
+                          </p>
                         ) : metric === OverviewUsageMetric.Turns ? (
                             <p className="chartTooltipMeta">
                             Longest {period.maxRunMs ? `${Math.round(period.maxRunMs / 1000)}s` : EMPTY_DISPLAY_VALUE}
@@ -1043,13 +1088,7 @@ export const OverviewTrendChart = memo(function OverviewTrendChart({
                       className={`overviewTrendBarButton${isHovered ? " isHovered" : ""}${isPeak ? " isPeak" : ""}`}
                       onClick={() => handlePeriodClick(period)}
                       onFocus={() => setActiveKey(period.key)}
-                      onMouseEnter={() => {
-                        if (tooltipCloseTimerRef.current !== null) {
-                          window.clearTimeout(tooltipCloseTimerRef.current);
-                          tooltipCloseTimerRef.current = null;
-                        }
-                        setHoveredKey(period.key);
-                      }}
+                      onMouseEnter={() => setHoveredKey(period.key)}
                       onMouseLeave={() => {
                         if (openTooltipKey !== period.key) setHoveredKey(null);
                       }}

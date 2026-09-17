@@ -28,6 +28,7 @@ test("skill file data does not invent missing fields", () => {
 
 test("MCP rows with no transport stay invalid", () => {
   assert.equal(normalizeMcp({
+    id: "broken-mcp",
     agent: "codex",
     name: "broken",
     scope: "global",
@@ -41,6 +42,7 @@ test("MCP rows with no transport stay invalid", () => {
 
 test("MCP rows preserve server metadata and data URI icons", () => {
   const row = normalizeMcp({
+    id: "figma-mcp",
     agent: "cursor",
     name: "figma",
     scope: "project",

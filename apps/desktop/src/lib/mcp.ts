@@ -1,9 +1,9 @@
 import type { JsonValue } from "./generated/runtime-types.ts";
-import { titleValue } from "./strings.ts";
 
 export type McpProbeState = "unknown" | "ready" | "ready-empty" | "needs-auth" | "failed";
 
 export type McpRecord = {
+  id: string;
   agent: string;
   name: string;
   scope: string;
@@ -40,14 +40,6 @@ export type McpTool = {
   icons: McpIcon[];
 };
 
-export function mcpNeedsLogin(status: unknown): boolean {
-  return status === "need-login" || status === "needs-auth";
-}
-
-export function mcpStatusLabel(status: unknown): string {
-  return mcpNeedsLogin(status) ? "Need login" : titleValue(status);
-}
-
 export function mcpDisplayName(
   row: Pick<McpRecord, "name"> | null | undefined,
 ): string {
@@ -79,6 +71,7 @@ function isJsonValue(value: unknown): value is JsonValue {
 }
 
 export function normalizeMcp(row: Record<string, unknown>): McpRecord | undefined {
+  const id = requiredString(row.id);
   const agent = requiredString(row.agent);
   const name = requiredString(row.name);
   const scope = requiredString(row.scope);
@@ -86,7 +79,7 @@ export function normalizeMcp(row: Record<string, unknown>): McpRecord | undefine
   const status = requiredString(row.status);
   const path = requiredString(row.path);
   const trustHash = requiredString(row.trust_hash);
-  if (!agent || !name || !scope || !transport || !status || !path || !trustHash) return undefined;
+  if (!id || !agent || !name || !scope || !transport || !status || !path || !trustHash) return undefined;
   if (typeof row.enabled !== "boolean") return undefined;
   const icons = Array.isArray(row.icons)
     ? row.icons.flatMap((value): McpIcon[] => {
@@ -124,6 +117,7 @@ export function normalizeMcp(row: Record<string, unknown>): McpRecord | undefine
     })
     : [];
   return {
+    id,
     agent,
     name,
     scope,
@@ -163,5 +157,5 @@ export function mcpSourcePath(row: McpRecord | null | undefined): string {
 }
 
 export function mcpRowKey(row: McpRecord): string {
-  return JSON.stringify([row.agent, row.name, row.path, row.server_path ?? []]);
+  return row.id;
 }

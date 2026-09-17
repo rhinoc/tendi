@@ -1,6 +1,7 @@
 import { titleValue } from "./strings.ts";
 
 export type HookRecord = {
+  id: string;
   agent: string;
   event: string;
   matcher?: string | null;
@@ -28,13 +29,15 @@ function requiredString(value: unknown): string | undefined {
 }
 
 export function normalizeHook(hook: Record<string, unknown>): HookRecord | undefined {
+  const id = requiredString(hook.id);
   const agent = requiredString(hook.agent);
   const event = requiredString(hook.event);
   const path = requiredString(hook.path);
   const trustHash = requiredString(hook.trust_hash);
-  if (!agent || !event || !path || !trustHash) return undefined;
+  if (!id || !agent || !event || !path || !trustHash) return undefined;
   if (typeof hook.enabled !== "boolean" || typeof hook.needs_review !== "boolean") return undefined;
   return {
+    id,
     agent,
     event,
     matcher: typeof hook.matcher === "string" ? hook.matcher : undefined,
@@ -53,17 +56,7 @@ export function normalizeHook(hook: Record<string, unknown>): HookRecord | undef
 }
 
 export function hookDeleteIdentity(hook: HookRecord | null | undefined): string | undefined {
-  if (!hook?.agent || !hook.event || !hook.path) return undefined;
-  return [
-    hook.path,
-    hook.agent,
-    hook.event,
-    hook?.matcher,
-    hook?.hook_type,
-    hookHandlerText(hook),
-    hook?.filter,
-    hook?.status_message,
-  ].map((value) => `${value ?? ""}`).join("|");
+  return hook?.id || undefined;
 }
 
 export function hookKey(hook: HookRecord | null | undefined, duplicateIndex = 0): string | undefined {

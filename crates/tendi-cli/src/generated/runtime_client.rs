@@ -354,6 +354,19 @@ impl RuntimeClient {
         let result = Self::decode_response(CommandName::AssistantChatSessions, request_id, value)?;
         Ok(serde_json::from_value(result)?)
     }
+    pub fn tokenizer_count(
+        &mut self,
+        params: tendi_core::generated::runtime_contract::TokenizerCountRequest,
+    ) -> JsonRpcRequest {
+        self.request(CommandName::TokenizerCount, params)
+    }
+    pub fn decode_tokenizer_count_response(
+        request_id: &Value,
+        value: Value,
+    ) -> anyhow::Result<tendi_core::generated::runtime_contract::TokenizerCountResponse> {
+        let result = Self::decode_response(CommandName::TokenizerCount, request_id, value)?;
+        Ok(serde_json::from_value(result)?)
+    }
     pub fn session_projects_list(
         &mut self,
         params: tendi_core::generated::runtime_contract::SessionProjectsListRequest,

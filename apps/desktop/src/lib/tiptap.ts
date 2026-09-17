@@ -1,3 +1,4 @@
+import { Editor } from "@tiptap/core";
 import StarterKit from "@tiptap/starter-kit";
 import { Markdown } from "@tiptap/markdown";
 import { Table as TiptapTable, TableCell, TableHeader, TableRow } from "@tiptap/extension-table";
@@ -17,3 +18,17 @@ export const tiptapExtensions = [
   PromptXmlDecorations,
   Markdown,
 ];
+
+export function markdownToHtml(content: string) {
+  const editor = new Editor({
+    extensions: tiptapExtensions,
+    content,
+    contentType: "markdown",
+    editable: false,
+  });
+  try {
+    return editor.getHTML();
+  } finally {
+    editor.destroy();
+  }
+}

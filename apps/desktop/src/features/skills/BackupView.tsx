@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { FolderOpen, GitCommitHorizontal, Settings2 } from "lucide-react";
 import { Dialog } from "radix-ui";
 
@@ -126,7 +126,7 @@ function BackupCategoryAccordion({
   onToggleCategoryItem,
   selectedCategoryCount,
 }: {
-  catalog: BackupStatusResponse["catalog"] | null;
+  catalog: BackupStatusResponse["catalog"];
   contents: BackupContents;
   onToggleCategory: (category: BackupCategory, enabled: boolean) => void;
   onToggleCategoryItem: (category: BackupCategory, id: string, selected: boolean) => void;
@@ -134,7 +134,7 @@ function BackupCategoryAccordion({
 }) {
   const items: CollapsibleAccordionItem[] = backupCategoryDefinitions.map((category) => {
     const selection = contents[category.key];
-    const itemCount = catalog?.[category.key].length ?? 0;
+    const itemCount = catalog[category.key].length;
     const selectedCount = selectedCategoryCount(category.key);
     const mixed = selection.enabled && itemCount > 0 && selectedCount > 0 && selectedCount < itemCount;
     const checked = selection.enabled && !mixed;
@@ -144,11 +144,11 @@ function BackupCategoryAccordion({
       title: (
         <span className="backupCategoryAccordionTitle">
           <strong>{category.label}</strong>
-          <span>{!catalog ? "Unavailable" : selection.enabled ? (itemCount ? `${selectedCount}/${itemCount}` : "No items") : "Not included"}</span>
+          <span>{selection.enabled ? (itemCount ? `${selectedCount}/${itemCount}` : "No items") : "Not included"}</span>
         </span>
       ),
       leading: <SelectionCheckbox checked={checked} mixed={mixed} label={`Include ${category.label}`} onChange={(nextChecked) => onToggleCategory(category.key, nextChecked)} />,
-      content: !catalog ? <p className="settingsBackupEmpty">Sync contents are unavailable. Refresh and try again.</p> : catalog[category.key].length ? (
+      content: catalog[category.key].length ? (
         <div className="backupContentItems">
           {catalog[category.key].map((item) => {
             const selected = selection.enabled && !selection.excluded.includes(item.id);
@@ -183,9 +183,11 @@ function BackupCategoryAccordion({
 
 export function BackupSettings({
   onSkillsRestored,
+  onBeginMutation,
 }: {
   onSkillsRestored?: (skills: RawSkillRecord[], options?: { patch?: boolean }) => void;
-} = {}) {
+  onBeginMutation: () => () => void;
+}) {
   const [data, setData] = useState<BackupStatusResponse | null>(null);
   const [repository, setRepository] = useState("");
   const [contents, setContents] = useState<BackupContents>(defaultBackupContents);
@@ -203,6 +205,7 @@ export function BackupSettings({
   const [restoreResolutions, setRestoreResolutions] = useState<Record<string, RestoreResolution>>({});
   const [restoreBusy, setRestoreBusy] = useState(false);
   const [relativeTimeNow, setRelativeTimeNow] = useState(() => Date.now());
+  const loadRequestRef = useRef(0);
 
   useEffect(() => {
     const timer = window.setInterval(() => setRelativeTimeNow(Date.now()), 30_000);
@@ -214,12 +217,14 @@ export function BackupSettings({
   const backupConfig = data?.config;
 
   const load = useCallback(async () => {
+    const requestId = ++loadRequestRef.current;
     try {
       const [next, targetOptions] = await Promise.all([
         readSkillBackup(),
         readSkillTargets(),
       ]);
       if (!targetOptions) throw new Error("Unable to read skill targets");
+      if (requestId !== loadRequestRef.current) return;
       setData(next);
       setLoadError("");
       if (next.config) {
@@ -237,7 +242,7 @@ export function BackupSettings({
           .map((target) => ({ value: target.id, label: target.displayName })),
       ));
     } catch (loadError) {
-      setLoadError(errorMessage(loadError));
+      if (requestId === loadRequestRef.current) setLoadError(errorMessage(loadError));
     }
   }, []);
 
@@ -245,6 +250,7 @@ export function BackupSettings({
 
   const configure = async () => {
     if (!repository.trim()) return;
+    loadRequestRef.current += 1;
     setAction(BackupAction.Configure);
     setActionError("");
     try {
@@ -263,6 +269,7 @@ export function BackupSettings({
   };
 
   const backupNow = async () => {
+    loadRequestRef.current += 1;
     setAction(BackupAction.Backup);
     setActionError("");
     try {
@@ -276,6 +283,7 @@ export function BackupSettings({
   };
 
   const disconnect = async () => {
+    loadRequestRef.current += 1;
     setAction(BackupAction.Disconnect);
     setActionError("");
     try {
@@ -338,8 +346,10 @@ export function BackupSettings({
 
   const applyRestore = async () => {
     if (!restoreVersion) return;
+    loadRequestRef.current += 1;
     setRestoreBusy(true);
     setActionError("");
+    const releaseMutation = onBeginMutation();
     try {
       const result = await restoreSkillBackup({
         revision: restoreVersion.id,
@@ -351,11 +361,12 @@ export function BackupSettings({
       });
       setRestoreOpen(false);
       const nextSkills = result.updated ?? result.skills;
-      if (nextSkills) onSkillsRestored?.(nextSkills, { patch: true });
+      onSkillsRestored?.(nextSkills ?? [], { patch: true });
       await load();
     } catch (restoreError) {
       setActionError(errorMessage(restoreError));
     } finally {
+      releaseMutation();
       setRestoreBusy(false);
     }
   };
@@ -396,10 +407,10 @@ export function BackupSettings({
     return catalog[category].filter((item) => selection.enabled && !selection.excluded.includes(item.id)).length;
   };
   const syncContentsContent = data === null ? (
-    loadError ? <p className="settingsBackupEmpty">Sync contents are unavailable. Refresh and try again.</p> : <LoadingState className="backupDetailsSectionLoading" label="Loading sync contents" />
+    loadError ? null : <LoadingState className="backupDetailsSectionLoading" label="Loading sync contents" />
   ) : (
     <BackupCategoryAccordion
-      catalog={catalog}
+      catalog={data.catalog}
       contents={contents}
       onToggleCategory={toggleCategory}
       onToggleCategoryItem={toggleCategoryItem}

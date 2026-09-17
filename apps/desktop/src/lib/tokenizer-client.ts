@@ -1,10 +1,17 @@
+import { TokenizerKind, TokenizerWorkerResponseType } from "./tokenizer-types.ts";
 import type {
   TokenBreakdownSegment,
-  TokenizerKind,
-  TokenizerWorkerResponseType,
   TranscriptSkillLink,
   TranscriptTokenItem,
 } from "./tokenizer-types.ts";
+import {
+  markdownTokenParts,
+  markdownTokenSegments,
+  markdownTokenStatsFromCounts,
+  transcriptTokenSegmentsFromCounts,
+  transcriptTokenTexts,
+} from "./tokenizer-shared.ts";
+import { invokeCommand, isTauriRuntime, TauriCommand } from "./tauri.ts";
 
 export type TokenizerWorkerRequest =
   | {
@@ -38,10 +45,68 @@ export type TokenizerWorkerClient = {
   dispose: () => void;
 };
 
+async function countNativeTokens(texts: string[]): Promise<number[]> {
+  const result = await invokeCommand(TauriCommand.TokenizerCount, { texts });
+  if (result.counts.length !== texts.length) {
+    throw new Error(`Tokenizer returned ${result.counts.length} counts for ${texts.length} texts`);
+  }
+  return result.counts;
+}
+
+function createNativeTokenizerClient(
+  onResponse: (response: TokenizerWorkerResponse) => void,
+  onError: (error: Error) => void,
+): TokenizerWorkerClient {
+  let nextRequestId = 0;
+  let disposed = false;
+  const emitResponse = (response: TokenizerWorkerResponse) => {
+    if (!disposed) onResponse(response);
+  };
+
+  const run = async (request: TokenizerWorkerRequest, id: number) => {
+    if (request.kind === TokenizerKind.Markdown) {
+      const parts = markdownTokenParts(request.activePath, request.content, request.selectionText);
+      const counts = await countNativeTokens(parts.texts);
+      emitResponse({
+        id,
+        kind: request.kind,
+        type: TokenizerWorkerResponseType.Result,
+        segments: markdownTokenSegments(markdownTokenStatsFromCounts(parts, counts)),
+      });
+      return;
+    }
+
+    const texts = transcriptTokenTexts(request.items);
+    const counts = await countNativeTokens(texts);
+    const countByText = new Map(texts.map((text, index) => [text, counts[index] ?? 0]));
+    emitResponse({
+      id,
+      kind: request.kind,
+      type: TokenizerWorkerResponseType.Result,
+      segments: transcriptTokenSegmentsFromCounts(request.items, request.skillLinks, countByText),
+    });
+  };
+
+  return {
+    request(request) {
+      const id = ++nextRequestId;
+      void run(request, id).catch((error) => {
+        if (disposed) return;
+        onError(error instanceof Error ? error : new Error(String(error)));
+      });
+      return id;
+    },
+    dispose() {
+      disposed = true;
+    },
+  };
+}
+
 export function createTokenizerWorker(
   onResponse: (response: TokenizerWorkerResponse) => void,
   onError: (error: Error) => void,
 ): TokenizerWorkerClient {
+  if (isTauriRuntime()) return createNativeTokenizerClient(onResponse, onError);
   const worker = new Worker(new URL("./tokenizer.worker.ts", import.meta.url), { type: "module" });
   let nextRequestId = 0;
   let disposed = false;

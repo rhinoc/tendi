@@ -6,7 +6,7 @@ import { Dialog } from "radix-ui";
 
 import { Appearance, applyAppearance, applyFontFamily, getThemeTransitionOrigin, listenForSystemAppearanceChange, resolveAppearance, startThemeTransition, type ColorTheme, type ThemePreferences } from "./lib/appearance.ts";
 import { applyAppIcon, type AppIcon } from "./lib/app-icon.ts";
-import { ALL_AGENT_FILTER, AppPage, assertRuntimeEventPayload, AsyncStatus, COLLAPSED_SIDEBAR_SIZE, configDisplayName, DOMAIN_KEYS, DOMAIN_NAV_ITEMS, DesktopUpdateStatus, hookDisplayName, ProjectScopeFilter, promptDisplayName, RuntimeDomainKey, SessionResumeErrorAction, SessionResumeErrorCode, SessionResumeOutcomeStatus, SessionResumeTarget, SIDEBAR_SIZE, SkillChangeCommand, SkillVisibility, TauriCommand, UPDATE_AVAILABLE_EVENT, UpdateCheckStatus, agentIdentityKey, dialogCopy, formatSessionTitle, formatUserPath, friendlyAgent, hookItemsFromRows, hookSearchText, hookSourcePath, hookTrustHash, isConcreteAgent, isTauriRuntime, isVisibleAgent, logger, mcpDisplayName, mcpRowKey, navItems, normalizeSessionSkillLink, persistSidebarFilters, promptPreview, promptTitleFromBody, readCachedSidebarFilters, ruleSearchText, ruleTitle, selectProjectScopeView, sessionAppDeepLink, sessionExternalKey, sessionIdentity, sessionLaunchPayload, sessionResumeError, sessionSourceExternalKey, sessionResumeTargetForAgent, sessionTitleValue, skillChangeActionLabel, skillChangeDescription, skillChangeLoadingCopy, skillChangeTitle, skillDisplayName } from "./lib/index.ts";
+import { ALL_AGENT_FILTER, AppPage, assertRuntimeEventPayload, AsyncStatus, COLLAPSED_SIDEBAR_SIZE, configDisplayName, DaemonCommandError, DaemonErrorCode, DOMAIN_KEYS, DOMAIN_NAV_ITEMS, DesktopUpdateStatus, hookDisplayName, ProjectScopeFilter, promptDisplayName, RuntimeDomainKey, SessionResumeErrorAction, SessionResumeErrorCode, SessionResumeOutcomeStatus, SessionResumeTarget, SIDEBAR_SIZE, SkillChangeCommand, SkillVisibility, TauriCommand, UPDATE_AVAILABLE_EVENT, UpdateCheckStatus, agentIdentityKey, dialogCopy, formatSessionTitle, formatUserPath, friendlyAgent, hookItemsFromRows, hookSearchText, isConcreteAgent, isTauriRuntime, isVisibleAgent, logger, mcpDisplayName, mcpRowKey, navItems, normalizeSessionSkillLink, persistSidebarFilters, promptPreview, promptTitleFromBody, readCachedSidebarFilters, ruleSearchText, ruleTitle, selectProjectScopeView, sessionAppDeepLink, sessionExternalKey, sessionIdentity, sessionLaunchPayload, sessionResumeError, sessionSourceExternalKey, sessionResumeTargetForAgent, sessionTitleValue, skillChangeActionLabel, skillChangeDescription, skillChangeLoadingCopy, skillChangeTitle, skillDisplayName } from "./lib/index.ts";
 import type { BundledSkillStatus, DesktopUpdateState, DomainKey, HookRecord, McpRecord, NormalizedSkill, ProjectSummary, SessionRecord, SessionResumeOutcome, UpdateCheckResult } from "./lib/index.ts";
 import { sortSidebarSources, type OrderedSidebarSource } from "./lib/sidebar-sources.ts";
 import { mcpColumns } from "./lib/tableColumns.tsx";
@@ -41,6 +41,7 @@ import {
   applySkillChange,
   applySkillChangeIfAvailable,
   checkForUpdates as checkForUpdatesCommand,
+  deletePrompts as deletePromptsCommand,
   deleteHook as deleteHookCommand,
   deleteHooks as deleteHooksCommand,
   deleteRules as deleteRulesCommand,
@@ -74,13 +75,14 @@ import {
   resumeSessionInTerminal,
   SkillUpdateCheckState,
   reviewHook as reviewHookCommand,
-  savePrompt,
+  savePrompt as savePromptCommand,
   setHookEnabled as setHookEnabledCommand,
   setHooksEnabled as setHooksEnabledCommand,
   setMcpEnabled as setMcpEnabledCommand,
   setMcpEnabledMany as setMcpEnabledManyCommand,
 } from "./lib/runtime-gateway.ts";
-import { applySkillChangeAndCommit, commitHookCommandResult, commitMcpCommandResult, commitRuleCommandResult, commitSkillChangeResult, commitSkillRows, createSkillCatalogRuntime } from "./lib/runtime-workflows.ts";
+import { applySkillChangeAndCommit, commitHookCommandResult, commitMcpCommandResult, commitRuleCommandResult, commitSkillChangeResult, commitSkillRows, commitSkillVisibilityResult, createSkillCatalogRuntime, createSnapshotMutationRuntime } from "./lib/runtime-workflows.ts";
+import type { SnapshotMutationRuntime } from "./lib/runtime-workflows.ts";
 import type { SkillChangeArgs, SkillChangeResponse } from "./lib/runtime-gateway.ts";
 import { singleFlight, singleFlightKey } from "./lib/single-flight.ts";
 import { useSessionRuntimeController } from "./controllers/session-runtime-controller.ts";
@@ -118,6 +120,10 @@ type PaletteConfigRow = {
 const loadConfirmSkillChangesDialog = () => import("./features/skills/ConfirmSkillChangesDialog.tsx");
 const loadBundledSkillInstallDialog = () => import("./features/skills/BundledSkillInstallDialog.tsx");
 const DIALOG_CLOSE_ANIMATION_MS = 280;
+
+function isStaleSkillUpdatePreviewError(error: unknown): boolean {
+  return error instanceof DaemonCommandError && error.code === DaemonErrorCode.Conflict;
+}
 
 const ConfirmSkillChangesDialogContent = lazy(() => loadConfirmSkillChangesDialog().then(({ ConfirmSkillChangesDialogContent: component }) => ({ default: component })));
 const BundledSkillInstallDialog = lazy(() => loadBundledSkillInstallDialog().then(({ BundledSkillInstallDialog: component }) => ({ default: component })));
@@ -250,47 +256,19 @@ function sidebarSources(
 }
 
 function hookDeleteArgs(hook: HookRecord) {
-  return {
-    agent: hook.agent,
-    path: hookSourcePath(hook),
-    expectedTrustHash: hookTrustHash(hook),
-    event: hook.event,
-    matcher: hook.matcher ?? null,
-    hookType: hook.hook_type ?? null,
-    command: hook.command ?? null,
-    url: hook.url ?? null,
-    prompt: hook.prompt ?? null,
-    filter: hook.filter ?? null,
-    statusMessage: hook.status_message ?? null,
-  };
+  return { id: hook.id };
 }
 
 function hookSetEnabledArgs(hook: HookRecord, enabled: boolean) {
-  return {
-    ...hookDeleteArgs(hook),
-    enabled,
-  };
+  return { id: hook.id, enabled };
 }
 
 function mcpSetEnabledArgs(server: McpRecord, enabled: boolean) {
-  return {
-    agent: server.agent,
-    path: server.path,
-    expectedTrustHash: server.trust_hash,
-    name: server.name,
-    enabled,
-    serverPath: server.server_path ?? [],
-  };
+  return { id: server.id, enabled };
 }
 
 function mcpProbeArgs(server: McpRecord) {
-  return {
-    agent: server.agent,
-    path: server.path,
-    expectedTrustHash: server.trust_hash,
-    name: server.name,
-    serverPath: server.server_path ?? [],
-  };
+  return { id: server.id };
 }
 
 function isDomainKey(value: string): value is DomainKey {
@@ -395,28 +373,33 @@ export function App() {
   }, []);
   const appearanceChangeRevision = useRef(0);
   const domainLoadInFlight = useRef(new Map<DomainKey, Promise<void>>());
-  const promptsRefreshInFlight = useRef<Promise<RawDomainRow[]> | null>(null);
   const skillIndexRunInFlight = useRef<Promise<SkillIndexStatus> | null>(null);
   const skillIndexStatusRefreshInFlight = useRef<Promise<SkillIndexStatus | null> | null>(null);
   const sessionResumeTargetRequests = useRef(new Map<string, Promise<Exclude<SessionResumeTarget, SessionResumeTarget.Auto>>>());
   const updateOperationInFlight = useRef(false);
   const skillChangeDialogCloseTimer = useRef<number | null>(null);
-  const skillChangeResultCommitTimer = useRef<number | null>(null);
+  const skillChangePreviewKey = useRef<string | null>(null);
+  const skillChangeAppliedKey = useRef<string | null>(null);
   const bundledSkillDialogCloseTimer = useRef<number | null>(null);
   const settingsLoadRequest = useRef(0);
   const sidebarPanelRef = usePanelRef();
   const skillUpdateCheckRevision = useRef(0);
   const skillUpdateCheckInFlight = useRef<Promise<void> | null>(null);
   const skillUpdateCheckActive = useRef(false);
+  const projectListRequest = useRef(0);
+  const sessionProjectListRequest = useRef(0);
   const refreshSessionProjects = useCallback(async () => {
+    const requestId = ++sessionProjectListRequest.current;
     const result = await invokeSessionProjectList();
-    if (result) desktopStore.actions.setSessionProjects(result);
+    if (requestId === sessionProjectListRequest.current && result) desktopStore.actions.setSessionProjects(result);
   }, []);
   const refreshProjects = useCallback(async () => {
+    const requestId = ++projectListRequest.current;
     const [projectsResult, sessionProjectsResult] = await Promise.all([
       invokeProjectList(),
       invokeSessionProjectList(),
     ]);
+    if (requestId !== projectListRequest.current) return;
     if (projectsResult) desktopStore.actions.setProjects(projectsResult);
     if (sessionProjectsResult) desktopStore.actions.setSessionProjects(sessionProjectsResult);
   }, []);
@@ -773,30 +756,46 @@ export function App() {
   const loadSettings = useCallback(async () => {
     const requestId = ++settingsLoadRequest.current;
     const appearanceRevision = appearanceChangeRevision.current;
+    const settingsAtRequest = desktopStore.getSnapshot().settings.values;
     desktopStore.actions.setSettingsLoading(true);
     desktopStore.actions.setSettingsError("");
     try {
       const settings = await readSettings();
       if (requestId !== settingsLoadRequest.current) return;
-      if (appearanceRevision === appearanceChangeRevision.current) {
-        desktopStore.actions.patchSettings({ appearance: settings.appearance });
+      const currentSettings = desktopStore.getSnapshot().settings.values;
+      const patch: Partial<typeof settingsAtRequest> = {};
+      const unchanged = <K extends keyof typeof settingsAtRequest>(key: K) => (
+        currentSettings[key] === settingsAtRequest[key]
+      );
+      const unchangedThemes = (
+        currentSettings.themePreferences.light === settingsAtRequest.themePreferences.light
+        && currentSettings.themePreferences.dark === settingsAtRequest.themePreferences.dark
+      );
+      if (appearanceRevision === appearanceChangeRevision.current && unchanged("appearance")) {
+        patch.appearance = settings.appearance;
       }
-      const themePreferencesForState = {
-        light: settings.lightTheme as ColorTheme,
-        dark: settings.darkTheme as ColorTheme,
-      } satisfies ThemePreferences;
-      void applyAppIcon(settings.appIcon);
-      desktopStore.actions.patchSettings({
-        themePreferences: themePreferencesForState,
-        appIcon: settings.appIcon,
-        fontFamily: settings.fontFamily,
-        terminal: settings.terminal,
-        editor: settings.editor,
-        additionalSessionRoots: settings.additionalSessionRoots,
-        developerMode: settings.developerMode,
-        sessionResumeTarget: settings.sessionResumeTarget,
-        missingSessionProjectPolicy: settings.missingSessionProjectPolicy,
-        configProfiles: settings.configProfiles,
+      if (unchangedThemes) {
+        patch.themePreferences = {
+          light: settings.lightTheme as ColorTheme,
+          dark: settings.darkTheme as ColorTheme,
+        } satisfies ThemePreferences;
+      }
+      if (unchanged("appIcon")) {
+        patch.appIcon = settings.appIcon;
+        void applyAppIcon(settings.appIcon);
+      }
+      if (unchanged("fontFamily")) patch.fontFamily = settings.fontFamily;
+      if (unchanged("terminal")) patch.terminal = settings.terminal;
+      if (unchanged("editor")) patch.editor = settings.editor;
+      if (unchanged("additionalSessionRoots")) patch.additionalSessionRoots = settings.additionalSessionRoots;
+      if (unchanged("developerMode")) patch.developerMode = settings.developerMode;
+      if (unchanged("sessionResumeTarget")) patch.sessionResumeTarget = settings.sessionResumeTarget;
+      if (unchanged("missingSessionProjectPolicy")) patch.missingSessionProjectPolicy = settings.missingSessionProjectPolicy;
+      if (unchanged("configProfiles")) patch.configProfiles = settings.configProfiles;
+      desktopStore.actions.patchSettings(patch);
+      logger.info("settings values loaded", {
+        requestId,
+        preservedFields: Object.keys(settingsAtRequest).filter((key) => !unchanged(key as keyof typeof settingsAtRequest)),
       });
     } catch (error) {
       if (requestId === settingsLoadRequest.current) desktopStore.actions.setSettingsError(errorMessage(error));
@@ -819,13 +818,42 @@ export function App() {
   const {
     refreshList: refreshSkillList,
     refreshListAndUpdates: refreshSkillListAndUpdates,
+    beginMutation: beginSkillMutation,
   } = skillRuntime;
+  const catalogRuntimes = useMemo(() => {
+    const create = (domain: RuntimeDomainKey, load: () => Promise<RawDomainRow[]>) => [
+      domain,
+      createSnapshotMutationRuntime({
+        load,
+        commit: (rows) => {
+          desktopStore.actions.commitDomainSnapshot(domain, rows);
+          if (domain !== RuntimeDomainKey.Agents) {
+            desktopStore.actions.markDomainLoaded(domain);
+            desktopStore.actions.setDomainError(domain, "");
+          }
+        },
+        onError: (error) => {
+          if (domain !== RuntimeDomainKey.Agents) setDomainError(domain, errorMessage(error));
+          logger.error("catalog snapshot refresh failed", { domain, error });
+        },
+      }),
+    ] as const;
+    return new Map<RuntimeDomainKey, SnapshotMutationRuntime<RawDomainRow[]>>([
+      create(RuntimeDomainKey.Agents, invokeAgentsList),
+      create(RuntimeDomainKey.Prompts, () => invokeDomainList(RuntimeDomainKey.Prompts)),
+      create(RuntimeDomainKey.Rules, () => invokeDomainList(RuntimeDomainKey.Rules)),
+      create(RuntimeDomainKey.Hooks, () => invokeDomainList(RuntimeDomainKey.Hooks)),
+      create(RuntimeDomainKey.Mcp, () => invokeDomainList(RuntimeDomainKey.Mcp)),
+    ]);
+  }, [setDomainError]);
+  const beginCatalogMutation = useCallback((domain: RuntimeDomainKey) => (
+    catalogRuntimes.get(domain)?.beginMutation() ?? (() => undefined)
+  ), [catalogRuntimes]);
   const refreshSkillsForRuntime = useCallback(() => refreshSkillList(true), [refreshSkillList]);
 
   const refreshProjection = useCallback(async (domain: string) => {
     if (domain === RuntimeDomainKey.Agents) {
-      const agents = await invokeAgentsList();
-      desktopStore.actions.commitDomainSnapshot(RuntimeDomainKey.Agents, agents);
+      await catalogRuntimes.get(RuntimeDomainKey.Agents)?.refresh(true);
       return;
     }
     if (!isDomainKey(domain)) return;
@@ -834,11 +862,8 @@ export function App() {
       return;
     }
     if (domain === RuntimeDomainKey.Sessions) return;
-    const rows = await invokeDomainList(domain);
-    desktopStore.actions.commitDomainSnapshot(domain, rows);
-    desktopStore.actions.markDomainLoaded(domain);
-    desktopStore.actions.setDomainError(domain, "");
-  }, [refreshSkillList]);
+    await catalogRuntimes.get(domain)?.refresh(true);
+  }, [catalogRuntimes, refreshSkillList]);
 
   const setProjectionError = useCallback((domain: string, message: string) => {
     if (isDomainKey(domain)) desktopStore.actions.setDomainError(domain, message);
@@ -880,8 +905,12 @@ export function App() {
   });
 
   const applySkillRows = useCallback((skills: RawSkillRecord[], options?: { patch?: boolean; deleted?: string[] }) => {
-    commitSkillRows(desktopStore, skills, options);
-  }, []);
+    if (skills.length > 0 || options?.deleted?.length) {
+      commitSkillRows(desktopStore, skills, options);
+    } else {
+      void refreshSkillList(true);
+    }
+  }, [refreshSkillList]);
 
   const applyInstalledSkills = useCallback((result: SkillInstallResult) => {
     applySkillRows(result.updated ?? result.skills ?? [], { patch: true });
@@ -942,153 +971,177 @@ export function App() {
     setDomainLoading(RuntimeDomainKey.Prompts, true);
     setDomainError(RuntimeDomainKey.Prompts, "");
     try {
-      if (!promptsRefreshInFlight.current) {
-        promptsRefreshInFlight.current = (async () => {
-          const rows = await invokeDomainList(RuntimeDomainKey.Prompts);
-          desktopStore.actions.commitDomainSnapshot(RuntimeDomainKey.Prompts, rows);
-          return rows;
-        })().finally(() => {
-          promptsRefreshInFlight.current = null;
-        });
-      }
-      return await promptsRefreshInFlight.current;
-    } catch (error) {
-      logger.error("prompts refresh failed", { error });
-      setDomainError(RuntimeDomainKey.Prompts, errorMessage(error));
-      return null;
+      return await catalogRuntimes.get(RuntimeDomainKey.Prompts)?.refresh(false);
     } finally {
       setDomainLoading(RuntimeDomainKey.Prompts, false);
     }
-  }, []);
-
-  const applyPromptSaved = desktopStore.actions.applyPromptRecord;
+  }, [catalogRuntimes, setDomainError]);
 
   const savePromptFromSession = useCallback(async (body: string) => {
     if (!body.trim()) return false;
-    const prompt = await savePrompt({
-      id: null,
-      title: promptTitleFromBody(body),
-      tags: [],
-      body,
-    });
-    if (!prompt) return false;
-    desktopStore.actions.applyPromptRecord(prompt, body);
-    return true;
-  }, []);
+    const release = beginCatalogMutation(RuntimeDomainKey.Prompts);
+    try {
+      const prompt = await savePromptCommand({
+        id: null,
+        title: promptTitleFromBody(body),
+        tags: [],
+        body,
+      });
+      if (!prompt) return false;
+      desktopStore.actions.applyPromptRecord(prompt, body);
+      return true;
+    } finally {
+      release();
+    }
+  }, [beginCatalogMutation]);
 
-  const removePrompts = useCallback((ids: string[]) => {
-    desktopStore.actions.removePrompts(ids);
-  }, []);
+  const savePromptRecord = useCallback(async (draft: { id?: string; title: string; tags: string[]; body: string }) => {
+    const release = beginCatalogMutation(RuntimeDomainKey.Prompts);
+    try {
+      const result = await savePromptCommand({
+        id: draft.id ?? null,
+        title: draft.title,
+        tags: draft.tags,
+        body: draft.body,
+      });
+      if (result) desktopStore.actions.applyPromptRecord(result, draft.body);
+      return result;
+    } finally {
+      release();
+    }
+  }, [beginCatalogMutation]);
+
+  const deletePromptRecords = useCallback(async (ids: string[]) => {
+    const release = beginCatalogMutation(RuntimeDomainKey.Prompts);
+    try {
+      const result = await deletePromptsCommand(ids);
+      if (result) desktopStore.actions.removePrompts(ids);
+      return result;
+    } finally {
+      release();
+    }
+  }, [beginCatalogMutation]);
 
   const deleteRules = useCallback(async (paths: string[]) => {
+    const release = beginCatalogMutation(RuntimeDomainKey.Rules);
     try {
       const result = await deleteRulesCommand(paths);
       return commitRuleCommandResult(desktopStore, result);
     } catch (error) {
       logger.warn("tendi command failed", { command: TauriCommand.RuleFileDeleteMany, error });
       return { error: `${error}` };
+    } finally {
+      release();
     }
-  }, []);
+  }, [beginCatalogMutation]);
 
   const patchRuleSha256 = useCallback((path: string, sha256: string) => {
     desktopStore.actions.patchRuleSha256(path, sha256);
   }, []);
 
   const deleteHook = useCallback(async (hook: HookRecord) => {
+    const release = beginCatalogMutation(RuntimeDomainKey.Hooks);
     try {
       const result = await deleteHookCommand(hookDeleteArgs(hook));
       return commitHookCommandResult(desktopStore, result);
     } catch (error) {
       logger.warn("tendi command failed", { command: TauriCommand.HookDelete, error });
       return { error: `${error}` };
+    } finally {
+      release();
     }
-  }, []);
+  }, [beginCatalogMutation]);
 
   const deleteHooks = useCallback(async (hooks: HookRecord[]) => {
+    const release = beginCatalogMutation(RuntimeDomainKey.Hooks);
     try {
-      const result = await deleteHooksCommand(hooks.map(hookDeleteArgs));
+      const result = await deleteHooksCommand({ ids: hooks.map((hook) => hook.id) });
       return commitHookCommandResult(desktopStore, result);
     } catch (error) {
       logger.warn("tendi command failed", { command: TauriCommand.HookDeleteMany, error });
       return { error: `${error}` };
+    } finally {
+      release();
     }
-  }, []);
+  }, [beginCatalogMutation]);
 
   const setHookEnabled = useCallback(async (hook: HookRecord, enabled: boolean) => {
+    const release = beginCatalogMutation(RuntimeDomainKey.Hooks);
     try {
       const result = await setHookEnabledCommand(hookSetEnabledArgs(hook, enabled));
       return commitHookCommandResult(desktopStore, result);
     } catch (error) {
       logger.warn("tendi command failed", { command: TauriCommand.HookSetEnabled, error });
       return { error: `${error}` };
+    } finally {
+      release();
     }
-  }, []);
+  }, [beginCatalogMutation]);
 
   const setHooksEnabled = useCallback(async (hooks: HookRecord[], enabled: boolean) => {
+    const release = beginCatalogMutation(RuntimeDomainKey.Hooks);
     try {
-      const result = await setHooksEnabledCommand(hooks.map((hook) => hookSetEnabledArgs(hook, enabled)));
+      const result = await setHooksEnabledCommand({ requests: hooks.map((hook) => hookSetEnabledArgs(hook, enabled)) });
       return commitHookCommandResult(desktopStore, result);
     } catch (error) {
       logger.warn("tendi command failed", { command: TauriCommand.HookSetEnabledMany, error });
       return { error: `${error}` };
+    } finally {
+      release();
     }
-  }, []);
+  }, [beginCatalogMutation]);
 
   const setMcpEnabled = useCallback(async (server: McpRecord, enabled: boolean) => {
+    const release = beginCatalogMutation(RuntimeDomainKey.Mcp);
     try {
       const result = await setMcpEnabledCommand(mcpSetEnabledArgs(server, enabled));
       return commitMcpCommandResult(desktopStore, result);
     } catch (error) {
       logger.warn("tendi command failed", { command: TauriCommand.McpSetEnabled, error });
       return { error: `${error}` };
+    } finally {
+      release();
     }
-  }, []);
+  }, [beginCatalogMutation]);
 
   const setMcpEnabledMany = useCallback(async (servers: McpRecord[], enabled: boolean) => {
+    const release = beginCatalogMutation(RuntimeDomainKey.Mcp);
     try {
-      const result = await setMcpEnabledManyCommand(servers.map((server) => mcpSetEnabledArgs(server, enabled)));
+      const result = await setMcpEnabledManyCommand({ requests: servers.map((server) => mcpSetEnabledArgs(server, enabled)) });
       return commitMcpCommandResult(desktopStore, result);
     } catch (error) {
       logger.warn("tendi command failed", { command: TauriCommand.McpSetEnabledMany, error });
       return { error: `${error}` };
+    } finally {
+      release();
     }
-  }, []);
+  }, [beginCatalogMutation]);
 
   const probeMcp = useCallback(async (server: McpRecord) => {
+    const release = beginCatalogMutation(RuntimeDomainKey.Mcp);
     try {
       const result = await probeMcpCommand(mcpProbeArgs(server));
       return commitMcpCommandResult(desktopStore, result);
     } catch (error) {
       logger.warn("tendi command failed", { command: TauriCommand.McpProbe, error });
       return { error: `${error}` };
+    } finally {
+      release();
     }
-  }, []);
+  }, [beginCatalogMutation]);
 
   const reviewHook = useCallback(async (hook: HookRecord) => {
+    const release = beginCatalogMutation(RuntimeDomainKey.Hooks);
     try {
-      const result = await reviewHookCommand({
-        agent: hook.agent,
-        path: hookSourcePath(hook),
-        expectedTrustHash: hookTrustHash(hook),
-        event: hook.event,
-        matcher: hook.matcher ?? null,
-        hookType: hook.hook_type ?? null,
-        command: hook.command ?? null,
-        url: hook.url ?? null,
-        prompt: hook.prompt ?? null,
-        filter: hook.filter ?? null,
-        statusMessage: hook.status_message ?? null,
-      });
+      const result = await reviewHookCommand({ id: hook.id });
       return commitHookCommandResult(desktopStore, result);
     } catch (error) {
       logger.warn("tendi command failed", { command: TauriCommand.HookReview, error });
       return { error: `${error}` };
+    } finally {
+      release();
     }
-  }, []);
-
-  useEffect(() => {
-    void refreshSkillListAndUpdates();
-  }, [refreshSkillListAndUpdates]);
+  }, [beginCatalogMutation]);
 
   const refreshAnalyticsRevision = useCallback(async () => {
     setAnalyticsRevisionError("");
@@ -1164,18 +1217,9 @@ export function App() {
   }, [setSessionRefreshError]);
 
   useEffect(() => {
-    let cancelled = false;
     void whenEventsReady()
-      .then(() => invokeAgentsList())
-      .then((agents) => {
-        if (!cancelled && Array.isArray(agents)) {
-          desktopStore.actions.commitDomainSnapshot(RuntimeDomainKey.Agents, agents);
-        }
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [whenEventsReady]);
+      .then(() => catalogRuntimes.get(RuntimeDomainKey.Agents)?.refresh(false));
+  }, [catalogRuntimes, whenEventsReady]);
 
   useEffect(() => {
     let cancelled = false;
@@ -1229,17 +1273,22 @@ export function App() {
       if (cliStatus.state !== "installed" || !cliStatus.pathConfigured) {
         throw new Error(cliStatus.detail || "The Tendi CLI is not available on PATH.");
       }
-      const report = await installBundledSkillCommand();
-      setBundledSkillDialogOpen(false);
-      if (bundledSkillDialogCloseTimer.current !== null) window.clearTimeout(bundledSkillDialogCloseTimer.current);
-      bundledSkillDialogCloseTimer.current = window.setTimeout(() => {
-        bundledSkillDialogCloseTimer.current = null;
-        setBundledSkillPrompt(null);
-      }, DIALOG_CLOSE_ANIMATION_MS);
-      if (Array.isArray(report.updated)) {
-        applySkillRows(report.updated, { patch: true });
-      } else {
-        void refreshSkillList(true);
+      const releaseMutation = beginSkillMutation();
+      try {
+        const report = await installBundledSkillCommand();
+        setBundledSkillDialogOpen(false);
+        if (bundledSkillDialogCloseTimer.current !== null) window.clearTimeout(bundledSkillDialogCloseTimer.current);
+        bundledSkillDialogCloseTimer.current = window.setTimeout(() => {
+          bundledSkillDialogCloseTimer.current = null;
+          setBundledSkillPrompt(null);
+        }, DIALOG_CLOSE_ANIMATION_MS);
+        if (Array.isArray(report.updated)) {
+          applySkillRows(report.updated, { patch: true });
+        } else {
+          void refreshSkillList(true);
+        }
+      } finally {
+        releaseMutation();
       }
     } catch (error) {
       logger.error("bundled skill install failed", { error });
@@ -1266,12 +1315,11 @@ export function App() {
         setDomainError(domain, "");
         try {
           if (domain === RuntimeDomainKey.Skills) {
-            if (view === AppPage.Overview) {
-              await refreshSkillListAndUpdates();
-            } else {
-              await refreshSkillList();
-              void ensureSkillUpdates();
-            }
+            // Overview needs the local catalog for counts. The remote update
+            // check is independent and must not block every other catalog
+            // request during bootstrap.
+            await refreshSkillList();
+            void ensureSkillUpdates();
             return;
           }
           if (domain === RuntimeDomainKey.Sessions) {
@@ -1285,8 +1333,7 @@ export function App() {
             await refreshPrompts();
             return;
           }
-          const rows = await invokeDomainList(domain);
-          desktopStore.actions.commitDomainSnapshot(domain, rows);
+          await catalogRuntimes.get(domain)?.refresh(false);
         } catch (error) {
           logger.error("domain load failed", { domain, error });
           setDomainError(domain, errorMessage(error));
@@ -1333,7 +1380,7 @@ export function App() {
       window.cancelAnimationFrame(frame);
       window.clearTimeout(timer);
     };
-  }, [domainRetryRevision, ensureSkillUpdates, refreshPrompts, refreshSessionsFromScan, refreshSkillList, refreshSkillListAndUpdates, resyncSessionSnapshot, setDomainError, view, whenEventsReady]);
+  }, [catalogRuntimes, domainRetryRevision, ensureSkillUpdates, refreshPrompts, refreshSessionsFromScan, refreshSkillList, resyncSessionSnapshot, setDomainError, view, whenEventsReady]);
 
   useEffect(() => {
     if (typeof window === "undefined") return undefined;
@@ -1370,9 +1417,8 @@ export function App() {
   }, [navigate]);
   const backToSkills = useCallback(() => navigate(AppPage.Skills), [navigate]);
   const saveSkillEditorRows = useCallback((skills?: Parameters<NonNullable<ComponentProps<typeof SkillEditorView>["onSaved"]>>[0]) => {
-    if (!skills) return;
-    desktopStore.actions.patchSkills(skills);
-  }, []);
+    applySkillRows(skills ?? [], { patch: true });
+  }, [applySkillRows]);
   const refreshPromptsForView = useCallback(() => {
     void loadDomainForRetry(RuntimeDomainKey.Prompts);
   }, [loadDomainForRetry]);
@@ -1386,6 +1432,7 @@ export function App() {
     void loadDomainForRetry(RuntimeDomainKey.Mcp);
   }, [loadDomainForRetry]);
   const handleProjectsScanned = useCallback((nextProjects: ProjectSummary[]) => {
+    projectListRequest.current += 1;
     desktopStore.actions.setProjects(nextProjects);
     void refreshSessionProjects();
     retryRulesForView();
@@ -1454,6 +1501,7 @@ export function App() {
   const resumeSession = useCallback(async (
     session: SessionRecord,
     requestedTarget?: Exclude<SessionResumeTarget, SessionResumeTarget.Auto>,
+    options: { reconcile?: boolean } = {},
   ): Promise<SessionResumeOutcome> => {
     if (!isTauriRuntime()) {
       return {
@@ -1480,7 +1528,7 @@ export function App() {
       }
       if (requestedTarget && !appUrl) throw new Error(`${session.agent} sessions cannot be resumed in app`);
     }
-    const result = await resumeSessionInTerminal(sessionLaunchPayload(session));
+    const result = await resumeSessionInTerminal(sessionLaunchPayload(session, options));
     if (result.status === SessionResumeOutcomeStatus.ActiveWriter) return result;
     if (result.status === SessionResumeOutcomeStatus.Failed) return result;
     return { status: SessionResumeOutcomeStatus.Launched, target: SessionResumeTarget.Terminal, terminal: result.terminal };
@@ -1503,10 +1551,18 @@ export function App() {
       setSkillUpdateError(error);
       return;
     }
-    return singleFlight(singleFlightKey("skill-change-preview", { command, args }), async () => {
+    const previewKey = singleFlightKey("skill-change-preview", { command, args });
+    if (skillChangePreviewKey.current === previewKey) return;
+    skillChangePreviewKey.current = previewKey;
+    return singleFlight(previewKey, async () => {
+      const startedAt = performance.now();
       const displayNames = names
         ? names.map((id) => data.skills.find((skill) => skill.id === id)?.name ?? id)
         : [];
+      logger.info("skill change preview started", {
+        command,
+        skillCount: names?.length ?? 0,
+      });
       if (isUpdate || isDelete) {
         if (skillChangeDialogCloseTimer.current !== null) {
           window.clearTimeout(skillChangeDialogCloseTimer.current);
@@ -1526,16 +1582,35 @@ export function App() {
         const preview = isUpdate
           ? await previewSkillChange(command, args)
           : await previewSkillChangeIfAvailable(command, args);
-        if (!preview) return;
+        if (!preview) {
+          logger.warn("skill change preview unavailable", {
+            command,
+            durationMs: performance.now() - startedAt,
+          });
+          if (skillChangePreviewKey.current === previewKey) skillChangePreviewKey.current = null;
+          return;
+        }
+        logger.info("skill change preview completed", {
+          command,
+          durationMs: performance.now() - startedAt,
+          canApply: preview.canApply,
+          fileChangeCount: preview.plan?.file_changes.changes.length ?? 0,
+          gitUpdateCount: preview.plan?.git_updates.length ?? 0,
+          mergeIssueCount: preview.plan?.merge_issues.length ?? 0,
+        });
         if (isUpdate) {
           setPendingSkillChange((current) => current?.command === command ? { ...current, preview } : current);
         } else {
           setPendingSkillChange({ command, args, names: names!, displayNames, preview, onApplied });
         }
       } catch (error) {
-        logger.error("skill change preview failed", { command, error });
+        if (skillChangePreviewKey.current === previewKey) skillChangePreviewKey.current = null;
+        logger.error("skill change preview failed", {
+          command,
+          durationMs: performance.now() - startedAt,
+          error,
+        });
         const message = `${error}`;
-        setSkillUpdateError(message);
         if (isUpdate) setPendingSkillChange((current) => current?.command === command ? { ...current, previewError: message } : current);
         if (isDelete) setPendingSkillChange((current) => current?.command === command && current.args === args ? { ...current, previewError: message } : current);
       }
@@ -1557,6 +1632,8 @@ export function App() {
     skillChangeDialogCloseTimer.current = window.setTimeout(() => {
       skillChangeDialogCloseTimer.current = null;
       setPendingSkillChange(null);
+      skillChangePreviewKey.current = null;
+      skillChangeAppliedKey.current = null;
     }, DIALOG_CLOSE_ANIMATION_MS);
   }, [applyingSkillChange]);
 
@@ -1564,7 +1641,18 @@ export function App() {
     if (!pendingSkillChange || applyingSkillChange) return;
     const pending = pendingSkillChange;
     const { command, args, names, onApplied } = pending;
-    return singleFlight(singleFlightKey("skill-change-apply", { command, args, resolutions }), async () => {
+    const applyKey = singleFlightKey("skill-change-apply", { command, args, resolutions });
+    if (skillChangeAppliedKey.current === applyKey) return;
+    skillChangeAppliedKey.current = applyKey;
+    return singleFlight(applyKey, async () => {
+      const startedAt = performance.now();
+      logger.info("skill change apply started", {
+        command,
+        skillCount: names.length,
+        hasPreviewId: Boolean(pending.preview?.previewId),
+      });
+      const releaseSkillMutation = beginSkillMutation();
+      let mutationCommitted = false;
       setApplyingSkillChange(true);
       setPendingSkillChange((current) => current ? { ...current, applyError: undefined } : current);
       if (command === SkillChangeCommand.UpdateMany) setSkillUpdateError("");
@@ -1577,49 +1665,83 @@ export function App() {
           ...(command === SkillChangeCommand.UpdateMany ? { previewId, resolutions } : {}),
         });
         const nextSkills = result.updated ?? result.skills;
+        if (nextSkills) {
+          commitSkillChangeResult(desktopStore, result);
+          if (command === SkillChangeCommand.UpdateMany) desktopStore.actions.clearSkillUpdates(names);
+        } else if (command === SkillChangeCommand.DeleteMany) {
+          desktopStore.actions.patchSkills([], names);
+        } else if (command === SkillChangeCommand.UpdateMany) {
+          desktopStore.actions.clearSkillUpdates(names);
+        }
+        onApplied?.();
+        logger.info("skill change apply completed", {
+          command,
+          durationMs: performance.now() - startedAt,
+          applied: result.applied,
+          updatedCount: nextSkills?.length ?? 0,
+          refreshRequired: result.refreshRequired ?? false,
+        });
+        if (!nextSkills && (command !== SkillChangeCommand.DeleteMany || result?.refreshRequired)) {
+          void refreshSkillList(true);
+        }
+        mutationCommitted = true;
+        releaseSkillMutation();
         setSkillChangeDialogOpen(false);
         if (skillChangeDialogCloseTimer.current !== null) window.clearTimeout(skillChangeDialogCloseTimer.current);
         skillChangeDialogCloseTimer.current = window.setTimeout(() => {
           skillChangeDialogCloseTimer.current = null;
           setPendingSkillChange(null);
-        }, DIALOG_CLOSE_ANIMATION_MS);
-        if (skillChangeResultCommitTimer.current !== null) window.clearTimeout(skillChangeResultCommitTimer.current);
-        skillChangeResultCommitTimer.current = window.setTimeout(() => {
-          skillChangeResultCommitTimer.current = null;
-          if (nextSkills) {
-            commitSkillChangeResult(desktopStore, result);
-            if (command === SkillChangeCommand.UpdateMany) desktopStore.actions.clearSkillUpdates(names);
-          } else if (command === SkillChangeCommand.DeleteMany) {
-            desktopStore.actions.patchSkills([], names);
-          } else if (command === SkillChangeCommand.UpdateMany) {
-            desktopStore.actions.clearSkillUpdates(names);
-          }
-          onApplied?.();
-          if (!nextSkills && (command !== SkillChangeCommand.DeleteMany || result?.refreshRequired)) {
-            void refreshSkillList(true);
-          }
+          skillChangePreviewKey.current = null;
+          skillChangeAppliedKey.current = null;
         }, DIALOG_CLOSE_ANIMATION_MS);
       } catch (error) {
-        logger.error("skill change apply failed", { command, error });
+        if (skillChangeAppliedKey.current === applyKey) skillChangeAppliedKey.current = null;
+        if (command === SkillChangeCommand.UpdateMany && isStaleSkillUpdatePreviewError(error)) {
+          logger.warn("skill change preview stale; refreshing before apply", { command, error });
+          skillChangePreviewKey.current = null;
+          setPendingSkillChange((current) => current?.command === command
+            ? { ...current, preview: null, previewError: undefined, applyError: undefined }
+            : current);
+          await previewAndApply(command, args, { onApplied });
+          return;
+        }
+        logger.error("skill change apply failed", {
+          command,
+          durationMs: performance.now() - startedAt,
+          error,
+        });
         const message = `${error}`;
         setPendingSkillChange((current) => current?.command === command ? { ...current, applyError: message } : current);
-        if (command === SkillChangeCommand.UpdateMany) setSkillUpdateError(message);
       } finally {
+        if (!mutationCommitted) releaseSkillMutation();
         setApplyingSkillChange(false);
       }
     });
   };
 
   const applyVisibility = useCallback(async (names: string[], visibility: SkillVisibility) => {
-    desktopStore.actions.setSkillVisibility(names, visibility);
-    const result = await applySkillChangeIfAvailable(SkillChangeCommand.Set, { skillIds: names, visibility });
-    if (result) commitSkillChangeResult(desktopStore, result);
+    const releaseSkillMutation = beginSkillMutation();
+    let result: Awaited<ReturnType<typeof applySkillChangeIfAvailable>> = null;
+    try {
+      desktopStore.actions.setSkillVisibility(names, visibility);
+      result = await applySkillChangeIfAvailable(SkillChangeCommand.Set, { skillIds: names, visibility });
+      if (result) commitSkillVisibilityResult(desktopStore, result);
+    } finally {
+      releaseSkillMutation();
+    }
     if (!result) await refreshSkillList(true);
-  }, [refreshSkillList]);
+  }, [beginSkillMutation, refreshSkillList]);
 
   const applyWrapperSkill = useCallback(
-    (args: WrapperArgs) => applySkillChangeAndCommit(desktopStore, SkillChangeCommand.Wrap, args),
-    [],
+    async (args: WrapperArgs) => {
+      const release = beginSkillMutation();
+      try {
+        return await applySkillChangeAndCommit(desktopStore, SkillChangeCommand.Wrap, args);
+      } finally {
+        release();
+      }
+    },
+    [beginSkillMutation],
   );
   const applySkillUpdates = useCallback(
     (names: string[], onApplied?: () => void) => previewAndApply(SkillChangeCommand.UpdateMany, { skillIds: names }, { onApplied }),
@@ -1868,6 +1990,7 @@ export function App() {
               onOpenSession={openSessionFromLink}
               onOpenSkill={openSkillById}
               onSaved={saveSkillEditorRows}
+              onBeginMutation={beginSkillMutation}
             />
           ) : (
             <PlaceholderView title="Skill unavailable" />
@@ -1889,6 +2012,7 @@ export function App() {
               onApplyUpdates={applySkillUpdates}
               onDeleteSkills={deleteSkills}
               onAddInstalled={applyInstalledSkills}
+              onBeginMutation={beginSkillMutation}
               openSkill={openSkillFromList}
             />
           ) : contentView === AppPage.Sessions ? (
@@ -1924,13 +2048,13 @@ export function App() {
               loadError={domainErrors.prompts ?? ""}
               hasRows={data.prompts.length > 0}
               onRefreshPrompts={refreshPromptsForView}
-              onPromptSaved={applyPromptSaved}
-              onPromptsDeleted={removePrompts}
+              onSavePrompt={savePromptRecord}
+              onDeletePrompts={deletePromptRecords}
               locatePromptId={paletteLocateRequest?.view === AppPage.Prompts ? paletteLocateRequest.rowId : undefined}
               onLocatePromptComplete={clearPaletteLocate}
             />
           ) : contentView === AppPage.Rules ? (
-              <MemoRulesView rows={filteredData.rules} skills={data.skills} projects={projects} loadingRows={loadingDomains.has(RuntimeDomainKey.Rules)} loadError={domainErrors.rules ?? ""} hasRows={data.rules.length > 0} onRetry={retryRulesForView} onOpenSkill={openSkillById} onDeleteRules={deleteRules} onRuleSaved={patchRuleSha256} locateRuleId={paletteLocateRequest?.view === AppPage.Rules ? paletteLocateRequest.rowId : undefined} onLocateRuleComplete={clearPaletteLocate} />
+              <MemoRulesView rows={filteredData.rules} skills={data.skills} projects={projects} loadingRows={loadingDomains.has(RuntimeDomainKey.Rules)} loadError={domainErrors.rules ?? ""} hasRows={data.rules.length > 0} onRetry={retryRulesForView} onOpenSkill={openSkillById} onDeleteRules={deleteRules} onRuleSaved={patchRuleSha256} onBeginMutation={() => beginCatalogMutation(RuntimeDomainKey.Rules)} locateRuleId={paletteLocateRequest?.view === AppPage.Rules ? paletteLocateRequest.rowId : undefined} onLocateRuleComplete={clearPaletteLocate} />
             ) : contentView === AppPage.Hooks ? (
               <MemoHooksView rows={filteredData.hooks} projects={projects} loadingRows={loadingDomains.has(RuntimeDomainKey.Hooks)} loadError={domainErrors.hooks ?? ""} hasRows={data.hooks.length > 0} onRetry={retryHooksForView} onDeleteHook={deleteHook} onDeleteHooks={deleteHooks} onSetHookEnabled={setHookEnabled} onSetHooksEnabled={setHooksEnabled} onReviewHook={reviewHook} locateHookId={paletteLocateRequest?.view === AppPage.Hooks ? paletteLocateRequest.rowId : undefined} onLocateHookComplete={clearPaletteLocate} />
             ) : contentView === AppPage.Mcp ? (
@@ -1946,7 +2070,6 @@ export function App() {
               editor={editor}
               additionalSessionRoots={additionalSessionRoots}
               appIcon={appIcon}
-              configProfiles={configProfiles}
               developerMode={developerMode}
               sessionResumeTarget={sessionResumeTarget}
               missingSessionProjectPolicy={missingSessionProjectPolicy}
@@ -1969,6 +2092,7 @@ export function App() {
               onCheckForUpdates={checkForUpdatesManually}
               onInstallUpdate={installUpdateManually}
               onSkillsUpdated={applySkillRows}
+              onBeginSkillMutation={beginSkillMutation}
               installedAgentKeys={installedAgentKeys}
               targetOptions={visibleAgentTargets}
               onThemeChange={handleThemeChange}

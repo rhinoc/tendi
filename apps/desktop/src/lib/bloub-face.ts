@@ -43,6 +43,7 @@ export type BloubExpressionId =
   | "somnolent";
 
 export type BloubFaceMood = BloubExpressionId | "thinking";
+export type BloubFaceLookDirection = "left" | "up" | "right";
 
 type Vec3 = [number, number, number];
 
@@ -101,7 +102,11 @@ const EYE_SPLIT = 15.46;
 const EYE_W = 0.186;
 const EYE_H = 0.412;
 const REST_GAZE: HeadGaze = { yaw: 28.49, pitch: 28.62, roll: -13 };
-const INWARD_GAZE = { yaw: -26, pitch: 10 };
+const LOOK_GAZE: Record<BloubFaceLookDirection, { yaw: number; pitch: number }> = {
+  left: { yaw: -26, pitch: 10 },
+  up: { yaw: 0, pitch: 26 },
+  right: { yaw: 26, pitch: 10 },
+};
 const DOT_X = [-0.557, -0.013, 0.532] as const;
 const DOT_R = 0.165;
 const DOT_PEAK = 1.25;
@@ -319,12 +324,22 @@ const expressions: BotExpression[] = [
 
 const expressionById = new Map(expressions.map((expression) => [expression.id, expression]));
 
-function expressionFor(mood: BloubFaceMood, lookInward: boolean): BotExpression {
+type BloubFaceLookTarget = BloubFaceLookDirection | boolean | null | undefined;
+
+function resolveLookDirection(lookTarget: BloubFaceLookTarget): BloubFaceLookDirection | null {
+  if (lookTarget === true) return "left";
+  if (lookTarget === false || lookTarget == null) return null;
+  return lookTarget;
+}
+
+function expressionFor(mood: BloubFaceMood, lookTarget: BloubFaceLookTarget): BotExpression {
   const expression = expressionById.get(mood === "thinking" ? "neutre" : mood) ?? expressions[0]!;
-  if (!lookInward) return expression;
+  const lookDirection = resolveLookDirection(lookTarget);
+  if (!lookDirection) return expression;
+  const gaze = LOOK_GAZE[lookDirection];
   return {
     ...expression,
-    gaze: { ...INWARD_GAZE, roll: expression.gaze.roll },
+    gaze: { ...gaze, roll: expression.gaze.roll },
   };
 }
 
@@ -424,29 +439,31 @@ function sampleThinkingDots(now: number, opacity: number, reduceMotion: boolean)
 export class BloubFaceEngine {
   private mood: BloubFaceMood;
   private previousMood: BloubFaceMood;
-  private lookInward: boolean;
+  private lookDirection: BloubFaceLookDirection | null;
   private fromExpression: BotExpression;
   private targetExpression: BotExpression;
   private changedAt = 0;
 
-  constructor(initialMood: BloubFaceMood = "neutre", lookInward = false) {
-    const expression = expressionFor(initialMood, lookInward);
+  constructor(initialMood: BloubFaceMood = "neutre", lookTarget: BloubFaceLookTarget = false) {
+    const lookDirection = resolveLookDirection(lookTarget);
+    const expression = expressionFor(initialMood, lookDirection);
     this.mood = initialMood;
     this.previousMood = initialMood;
-    this.lookInward = lookInward;
+    this.lookDirection = lookDirection;
     this.fromExpression = expression;
     this.targetExpression = expression;
   }
 
-  setMood(mood: BloubFaceMood, now: number, lookInward = false): void {
-    if (mood === this.mood && lookInward === this.lookInward) return;
+  setMood(mood: BloubFaceMood, now: number, lookTarget: BloubFaceLookTarget = false): void {
+    const lookDirection = resolveLookDirection(lookTarget);
+    if (mood === this.mood && lookDirection === this.lookDirection) return;
     const currentExpression = this.expressionAt(now);
     this.previousMood = this.mood;
     this.mood = mood;
-    this.lookInward = lookInward;
+    this.lookDirection = lookDirection;
     this.fromExpression = currentExpression;
     if (mood !== "thinking") {
-      this.targetExpression = expressionFor(mood, lookInward);
+      this.targetExpression = expressionFor(mood, lookDirection);
     }
     this.changedAt = now;
   }

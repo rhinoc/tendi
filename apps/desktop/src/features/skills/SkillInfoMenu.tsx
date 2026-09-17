@@ -63,13 +63,14 @@ function SkillInfoRelations({
             <td>
               <div className="skillInfoRelationList">
                 {row.skills.map((relatedSkill) => (
-                  <Tooltip key={relatedSkill.id} content={relatedSkill.description}><button
+                  <button
+                    key={relatedSkill.id}
                     className="skillInfoRelationChip"
                     disabled={!onOpenSkill || !relatedSkill.id}
                     onClick={() => relatedSkill.id && onOpenSkill?.(relatedSkill.id)}
                   >
                     {relatedSkill.name}
-                  </button></Tooltip>
+                  </button>
                 ))}
               </div>
             </td>
@@ -105,71 +106,77 @@ export function SkillInfoMenu({ skill, skills, onOpenSkill }: SkillInfoMenuProps
       title={skillDisplayName(skill)}
       contentClassName="skillInfoMenuContent"
     >
-            <InfoSection label="Source" className="skillInfoSourceSection">
-                {sourceValue ? (
-                  <button
-                    className="skillInfoSourceIcon"
-                    aria-label={sourceActionLabels.ariaLabel}
-                    onClick={() => openSource(sourceValue, sourceDetails.kind, sourceDetails.relativePath)}
-                  >
-                    {sourceIcon.icon}
-                  </button>
-                ) : (
-                  <Tooltip content={sourceIcon.label}><span className="skillInfoSourceIcon" aria-label={`${sourceIcon.label} source`}>
-                    {sourceIcon.icon}
-                  </span></Tooltip>
-                )}
-                {sourceValue && (isWebSource(sourceValue.trim())
-                  ? <code>{displaySourceValue}</code>
-                  : <Tooltip content={displaySourceValue} onlyWhenTruncated><code>{displaySourceValue}</code></Tooltip>)}
-                {sourceValue && (
-                  <>
-                    <IconButton
-                      aria-label={sourceActionLabels.ariaLabel}
-                      onClick={() => openSource(sourceValue, sourceDetails.kind, sourceDetails.relativePath)}
-                    >
-                      {sourceUrl ? <ExternalLink size={13} /> : <FolderOpen size={13} />}
-                    </IconButton>
-                    <CopyButton iconOnly value={sourceValue} copyLabel={copyValueLabel("source")} copiedLabel={copiedValueLabel("source")} />
-                  </>
-                )}
-            </InfoSection>
-            <InfoSection label="Visibility" valueLine={false}>
-              <Visibility value={skill.visibility} skill={skill} readOnly />
-            </InfoSection>
-            <InfoSection label="Agents" valueLine={false}>
-              <div className="skillInfoAgents"><AgentChips agents={skill.agents} /></div>
-            </InfoSection>
-            {relationRows.length > 0 && (
-              <InfoSection label="Relationships" valueLine={false}>
-                <SkillInfoRelations rows={relationRows} onOpenSkill={onOpenSkill} />
-              </InfoSection>
-            )}
-            <InfoSection label="Install location" valueLine={false}>
-              <div className="skillInfoPathList">
-                {installLocations.map((target) => (
-                  <div className="skillInfoPathRow" key={target.id}>
-                    <span className="skillInfoInstallAgent">
-                      <AgentBadge agent={target.agent} small />
-                    </span>
-                    <Tooltip content={formatUserPath(target.path)} onlyWhenTruncated><code>{formatUserPath(target.path)}</code></Tooltip>
-                    <IconButton
-                      aria-label={revealPathLabel(target.label)}
-                      onClick={() => target.path && safeInvoke(TauriCommand.RevealInFinder, { path: target.path })}
-                    >
-                      <FolderOpen size={13} />
-                    </IconButton>
-                    <CopyButton
-                      iconOnly
-                      value={target.path}
-                      copyLabel={copyPathLabel(target.label)}
-                      copiedLabel={copiedPathLabel(target.label)}
-                      disabled={!target.path}
-                    />
-                  </div>
-                ))}
+      <InfoSection label="Source" className="skillInfoSourceSection">
+        {sourceValue ? (
+          <button
+            className="skillInfoSourceIcon"
+            aria-label={sourceActionLabels.ariaLabel}
+            onClick={() => openSource(sourceValue, sourceDetails.kind, sourceDetails.relativePath)}
+          >
+            {sourceIcon.icon}
+          </button>
+        ) : (
+          <Tooltip content={sourceIcon.label}><span className="skillInfoSourceIcon" aria-label={`${sourceIcon.label} source`}>
+            {sourceIcon.icon}
+          </span></Tooltip>
+        )}
+        {sourceValue && (isWebSource(sourceValue.trim())
+          ? <code>{displaySourceValue}</code>
+          : <Tooltip content={displaySourceValue} onlyWhenTruncated><code>{displaySourceValue}</code></Tooltip>)}
+        {sourceValue && (
+          <>
+            <IconButton
+              aria-label={sourceActionLabels.ariaLabel}
+              onClick={() => openSource(sourceValue, sourceDetails.kind, sourceDetails.relativePath)}
+            >
+              {sourceUrl ? <ExternalLink size={13} /> : <FolderOpen size={13} />}
+            </IconButton>
+            <CopyButton iconOnly value={sourceValue} copyLabel={copyValueLabel("source")} copiedLabel={copiedValueLabel("source")} />
+          </>
+        )}
+      </InfoSection>
+      <InfoSection label="Visibility" valueLine={false}>
+        <div className="skillInfoValue">
+          <Visibility value={skill.visibility} skill={skill} readOnly />
+        </div>
+      </InfoSection>
+      <InfoSection label="Agents" valueLine={false}>
+        <div className="skillInfoValue skillInfoAgents"><AgentChips agents={skill.agents} /></div>
+      </InfoSection>
+      {relationRows.length > 0 && (
+        <InfoSection label="Relationships" valueLine={false}>
+          <div className="skillInfoValue">
+            <SkillInfoRelations rows={relationRows} onOpenSkill={onOpenSkill} />
+          </div>
+        </InfoSection>
+      )}
+      <InfoSection label="Install location" valueLine={false}>
+        <div className="skillInfoValue">
+          <div className="skillInfoPathList">
+            {installLocations.map((target) => (
+              <div className="skillInfoPathRow" key={target.id}>
+                <span className="skillInfoInstallAgent">
+                  <AgentBadge agent={target.agent} small />
+                </span>
+                <Tooltip content={formatUserPath(target.path)} onlyWhenTruncated><code>{formatUserPath(target.path)}</code></Tooltip>
+                <IconButton
+                  aria-label={revealPathLabel(target.label)}
+                  onClick={() => target.path && safeInvoke(TauriCommand.RevealInFinder, { path: target.path })}
+                >
+                  <FolderOpen size={13} />
+                </IconButton>
+                <CopyButton
+                  iconOnly
+                  value={target.path}
+                  copyLabel={copyPathLabel(target.label)}
+                  copiedLabel={copiedPathLabel(target.label)}
+                  disabled={!target.path}
+                />
               </div>
-            </InfoSection>
+            ))}
+          </div>
+        </div>
+      </InfoSection>
     </InfoDropdownMenu>
   );
 }

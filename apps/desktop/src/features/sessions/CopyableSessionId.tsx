@@ -11,7 +11,7 @@ export type CopyableSessionIdProps = {
 export function CopyableSessionId({ sessionId, className = "" }: CopyableSessionIdProps) {
   const { copied, markCopied } = useCopyFeedback();
 
-  if (!sessionId) return <code>-</code>;
+  if (!sessionId) return <span>-</span>;
 
   const copySessionId = async (event: React.MouseEvent<HTMLButtonElement>) => {
     event.preventDefault();

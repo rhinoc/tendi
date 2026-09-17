@@ -14,7 +14,7 @@ import {
   type TokenBreakdownSegment,
 } from "../lib/tokenizer-types.ts";
 import { tokenToneClass, type TokenTone } from "../lib/token-style.ts";
-import { TauriCommand, safeInvoke } from "../lib/tauri";
+import { isTauriRuntime, TauriCommand, safeInvoke } from "../lib/tauri";
 import { logger } from "../lib/logger.ts";
 import "./TokenStatusBar.css";
 
@@ -232,14 +232,25 @@ export function TokenStatusBar({ activePath = "", content = "", selectionText = 
             timeoutRef.current = null;
           }
           if (response.type === TokenizerWorkerResponseType.Result) setEstimatedSegments(response.segments);
-          else useMainThreadFallback(response.message, response.id);
+          else if (isTauriRuntime()) {
+            setEstimatedSegments([]);
+            logger.error("native tokenizer failed", { activePath: latestInputRef.current.activePath, error: response.message });
+          } else useMainThreadFallback(response.message, response.id);
         },
         (error) => {
-          if (latestRequestRef.current > 0) useMainThreadFallback(error.message);
+          if (isTauriRuntime()) {
+            setEstimatedSegments([]);
+            logger.error("native tokenizer failed", { activePath: latestInputRef.current.activePath, error });
+          } else if (latestRequestRef.current > 0) useMainThreadFallback(error.message);
         },
       );
     } catch (error) {
-      useMainThreadFallback(error instanceof Error ? error.message : String(error), 0);
+      if (isTauriRuntime()) {
+        setEstimatedSegments([]);
+        logger.error("native tokenizer initialization failed", { activePath: latestInputRef.current.activePath, error });
+      } else {
+        useMainThreadFallback(error instanceof Error ? error.message : String(error), 0);
+      }
       return;
     }
     workerRef.current = worker;
@@ -266,7 +277,12 @@ export function TokenStatusBar({ activePath = "", content = "", selectionText = 
     timeoutRef.current = window.setTimeout(() => {
       if (latestRequestRef.current !== requestId) return;
       timeoutRef.current = null;
-      useMainThreadFallback("timeout", requestId);
+      if (isTauriRuntime()) {
+        setEstimatedSegments([]);
+        logger.error("native tokenizer timed out", { activePath: latestInputRef.current.activePath });
+      } else {
+        useMainThreadFallback("timeout", requestId);
+      }
     }, TOKENIZER_WORKER_TIMEOUT_MS);
   }, [activePath, content, providedSegments, selectionText]);
 

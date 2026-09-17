@@ -131,6 +131,7 @@ pub fn save_rule_file_at_path(
     expected_sha256: &str,
     content: &str,
 ) -> Result<RuleFileWriteResult> {
+    let _resources = crate::coordination::acquire_file_resources(&[path.to_path_buf()])?;
     {
         let before = fs::read_to_string(path)
             .with_context(|| format!("failed to read {}", path.display()))?;
@@ -147,6 +148,7 @@ pub fn save_rule_file_at_path(
 }
 
 pub fn delete_rule_files(paths: &[PathBuf]) -> Result<()> {
+    let _resources = crate::coordination::acquire_file_resources(paths)?;
     for path in paths {
         fs::remove_file(path).with_context(|| format!("failed to delete {}", path.display()))?;
     }

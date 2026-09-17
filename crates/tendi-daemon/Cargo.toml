@@ -17,3 +17,6 @@ notify = "8.2"
 serde.workspace = true
 serde_json.workspace = true
 tendi-core = { path = "../tendi-core" }
+
+[dev-dependencies]
+rusqlite.workspace = true

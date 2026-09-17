@@ -180,6 +180,32 @@ pub(crate) fn local_repository_snapshot(
     process_repository_snapshot_cache().metadata_snapshot(workspace, cancelled)
 }
 
+/// Git worktrees have distinct `.git` pointer files but share refs and objects.
+/// Query ownership fresh: a cached repository snapshot is not a lock identity.
+pub(crate) fn mutation_resource_paths(repository: &Path) -> anyhow::Result<Vec<PathBuf>> {
+    if !repository.join(".git").exists() && !repository.join("HEAD").is_file() {
+        // A clone destination has no Git metadata yet. Its owner is the exact
+        // destination directory, including the metadata that clone will create.
+        return Ok(vec![repository.to_path_buf()]);
+    }
+    let mut resources = vec![repository.join(".git")];
+    for (argument, operation) in [
+        ("--git-dir", "git-dir"),
+        ("--git-common-dir", "git-common-dir"),
+    ] {
+        let output = query_required(
+            repository,
+            &["rev-parse", argument],
+            never_cancelled(),
+            operation,
+        )?;
+        resources.push(resolve_git_path(repository, &output, operation)?);
+    }
+    resources.sort();
+    resources.dedup();
+    Ok(resources)
+}
+
 pub(crate) fn invalidate_local_repository_snapshot(
     workspace: &Path,
     repo_root: Option<&Path>,
@@ -727,6 +753,58 @@ mod tests {
         git_success(&root, &["commit", "--quiet", "-m", "initial"]);
         git_success(&root, &["remote", "add", "origin", remote_url]);
         root
+    }
+
+    #[test]
+    fn linked_worktrees_share_mutation_resources() {
+        let root = create_git_repo(
+            "tendi-git-shared-mutation",
+            "https://example.test/shared.git",
+            "shared",
+        );
+        let linked = root.join("linked");
+        git_success(
+            &root,
+            &[
+                "worktree",
+                "add",
+                "--quiet",
+                "--detach",
+                linked.to_str().unwrap(),
+            ],
+        );
+        let namespace = root.join("resource-locks");
+        let main_resources = super::mutation_resource_paths(&root).unwrap();
+        let linked_resources = super::mutation_resource_paths(&linked).unwrap();
+        let common = fs::canonicalize(root.join(".git")).unwrap();
+        assert!(
+            linked_resources
+                .iter()
+                .any(|path| { fs::canonicalize(path).ok().as_ref() == Some(&common) })
+        );
+        let lease =
+            crate::coordination::ResourceLease::acquire_paths(&namespace, &main_resources).unwrap();
+        let waiting_namespace = namespace.clone();
+        let waiting_resources = linked_resources.clone();
+        assert!(
+            thread::spawn(move || {
+                crate::coordination::ResourceLease::try_acquire_paths(
+                    &waiting_namespace,
+                    &waiting_resources,
+                )
+                .unwrap()
+                .is_none()
+            })
+            .join()
+            .unwrap()
+        );
+        drop(lease);
+        let lease =
+            crate::coordination::ResourceLease::try_acquire_paths(&namespace, &linked_resources)
+                .unwrap();
+        assert!(lease.is_some());
+        drop(lease);
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

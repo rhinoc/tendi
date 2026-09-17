@@ -4,17 +4,20 @@ import { RuntimeDomainKey, type DomainKey } from "./domain.ts";
 import { assertRuntimeEvent, assertRuntimeEventPayload } from "./generated/runtime-events.ts";
 import { RuntimeEventName } from "./generated/runtime-events.ts";
 import type {
-  AgentConfigFile,
   AgentKind,
+  AgentConfigFile,
   AssistantAskRequest,
   AssistantAskResponse,
   AssistantChatSession,
   AssistantStreamEvent,
   HookDeleteRequest,
+  HookDeleteManyRequest,
   HookReviewRequest,
+  HookSetEnabledManyRequest,
   HookSetEnabledRequest,
   HookSourceReadRequest,
   McpProbeRequest,
+  McpSetEnabledManyRequest,
   McpSetEnabledRequest,
   ResponseFor,
   SessionResumeRequest,
@@ -54,7 +57,8 @@ import { normalizeSkillFileEntries, type SkillFileEntry } from "./file-tree.ts";
 import { readRuleFile, type RuleFileResult } from "./rule-file.ts";
 import { SessionResumeErrorAction, SessionResumeErrorCode, SessionResumeOutcomeStatus, SessionResumeTarget, type SessionIdentityRecord, type SessionRecord, type SessionResumeError } from "./sessions.ts";
 import { sessionResumeError } from "./session-resume.ts";
-import { normalizeConfigProfiles, normalizeSettings, type SettingsPayload } from "./settings.ts";
+import { normalizeConfigProfiles, normalizeSettings, type SettingsPatch, type SettingsPayload } from "./settings.ts";
+import { createSettingsPatchWriter } from "./settings-write.ts";
 import type { ProjectSummary, SessionProjectSummary } from "./projects.ts";
 import type { AnalyticsRefreshProgress, OverviewAnalytics } from "./analytics.ts";
 import { normalizeRuntimeSkillVisibility } from "./runtime-contract.ts";
@@ -366,28 +370,6 @@ function runtimeSkillAddRequest(request: SkillAddRequest): GeneratedSkillsAddReq
   };
 }
 
-type HookRequestInput<T extends { agent: AgentKind }> = Omit<T, "agent"> & { agent: string };
-
-function runtimeHookRequest<T extends { agent: AgentKind }>(args: HookRequestInput<T>): T {
-  return { ...args, agent: runtimeAgentKind(args.agent) } as T;
-}
-
-type McpRequestInput = Omit<McpSetEnabledRequest, "agent"> & { agent: string };
-
-function runtimeMcpRequest(args: McpRequestInput): McpSetEnabledRequest {
-  return { ...args, agent: runtimeAgentKind(args.agent), serverPath: [...args.serverPath] };
-}
-
-type McpProbeRequestInput = Omit<McpProbeRequest, "agent"> & { agent: string };
-
-function runtimeMcpProbeRequest(args: McpProbeRequestInput): McpProbeRequest {
-  return { ...args, agent: runtimeAgentKind(args.agent), serverPath: [...args.serverPath] };
-}
-
-function isNonNegativeSafeInteger(value: unknown): value is number {
-  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
-}
-
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value && typeof value === "object" && !Array.isArray(value));
 }
@@ -593,6 +575,7 @@ export async function invokeAnalyticsOverview(args: {
   days: number;
   rankDays: number;
   refreshTranscripts: boolean;
+  endDate?: string | null;
 }): Promise<OverviewAnalytics | null> {
   try {
     const response = await invokeCommand(TauriCommand.AnalyticsOverview, args);
@@ -691,13 +674,17 @@ export async function readSettings(): Promise<SettingsPayload> {
   };
 }
 
-export async function saveSettings(settings: SettingsPayload): Promise<SettingsPayload | null> {
+const writeSettingsPatch = createSettingsPatchWriter(async (patch) => {
+  const response = await invokeCommand(TauriCommand.SettingsSave, patch);
+  return {
+    ...normalizeSettings(response as Partial<SettingsPayload>),
+    configProfiles: normalizeConfigProfiles(response.configProfiles),
+  };
+});
+
+export async function saveSettings(patch: SettingsPatch): Promise<SettingsPayload | null> {
   try {
-    const response = await invokeCommand(TauriCommand.SettingsSave, settings);
-    return {
-      ...normalizeSettings(response as Partial<SettingsPayload>),
-      configProfiles: normalizeConfigProfiles(response.configProfiles),
-    };
+    return await writeSettingsPatch(patch);
   } catch {
     return null;
   }
@@ -851,14 +838,14 @@ export async function setConfigProfile(agent: string, profile: string | null): P
   return { configProfiles: response.configProfiles };
 }
 
-export async function readSkillFiles(args: { skillId: string; skillPath?: string }): Promise<SkillFileEntry[]> {
+export async function readSkillFiles(args: { skillId: string; locationId?: string }): Promise<SkillFileEntry[]> {
   return normalizeSkillFileEntries(await invokeCommand(TauriCommand.SkillFiles, args));
 }
 
 export async function readSkillFile(args: {
   skillId: string;
   relativePath: string;
-  skillPath?: string;
+  locationId?: string;
 }): Promise<SkillFileReadResponse> {
   const response = await invokeCommand(TauriCommand.SkillFileRead, args);
   if (typeof response.content !== "string" || typeof response.sha256 !== "string") {
@@ -884,16 +871,16 @@ export async function saveSkillFile(args: {
   relativePath: string;
   expectedSha256: string;
   content: string;
-  skillPath?: string;
+  locationId?: string;
 }): Promise<SkillFileMutationResponse> {
   return parseSkillFileSave(await invokeCommand(TauriCommand.SkillFileSave, args));
 }
 
-export async function createSkillFile(args: { skillId: string; relativePath: string; skillPath?: string }): Promise<SkillFileMutationResponse> {
+export async function createSkillFile(args: { skillId: string; relativePath: string; locationId?: string }): Promise<SkillFileMutationResponse> {
   return parseSkillFileMutation(await invokeCommand(TauriCommand.SkillFileCreate, args));
 }
 
-export async function createSkillFolder(args: { skillId: string; relativePath: string; skillPath?: string }): Promise<SkillFileMutationResponse> {
+export async function createSkillFolder(args: { skillId: string; relativePath: string; locationId?: string }): Promise<SkillFileMutationResponse> {
   return parseSkillFileMutation(await invokeCommand(TauriCommand.SkillFolderCreate, args));
 }
 
@@ -901,12 +888,12 @@ export async function renameSkillPath(args: {
   skillId: string;
   fromRelativePath: string;
   toRelativePath: string;
-  skillPath?: string;
+  locationId?: string;
 }): Promise<SkillFileMutationResponse> {
   return parseSkillFileMutation(await invokeCommand(TauriCommand.SkillPathRename, args));
 }
 
-export async function deleteSkillPath(args: { skillId: string; relativePath: string; skillPath?: string }): Promise<SkillFileMutationResponse> {
+export async function deleteSkillPath(args: { skillId: string; relativePath: string; locationId?: string }): Promise<SkillFileMutationResponse> {
   return parseSkillFileMutation(await invokeCommand(TauriCommand.SkillPathDelete, args));
 }
 
@@ -1136,40 +1123,40 @@ export async function deletePrompts(ids: readonly string[]): Promise<boolean> {
   }
 }
 
-export async function readHookSource(args: HookRequestInput<HookSourceReadRequest>): Promise<HookSourceResponse> {
-  return invokeCommand(TauriCommand.HookSourceRead, runtimeHookRequest(args));
+export async function readHookSource(args: HookSourceReadRequest): Promise<HookSourceResponse> {
+  return invokeCommand(TauriCommand.HookSourceRead, args);
 }
 
-export async function deleteHook(args: HookRequestInput<HookDeleteRequest>): Promise<ResponseFor<"hook_delete">> {
-  return invokeCommand(TauriCommand.HookDelete, runtimeHookRequest(args));
+export async function deleteHook(args: HookDeleteRequest): Promise<ResponseFor<"hook_delete">> {
+  return invokeCommand(TauriCommand.HookDelete, args);
 }
 
-export async function deleteHooks(requests: readonly HookRequestInput<HookDeleteRequest>[]): Promise<ResponseFor<"hook_delete_many">> {
-  return invokeCommand(TauriCommand.HookDeleteMany, { requests: requests.map(runtimeHookRequest) });
+export async function deleteHooks(args: HookDeleteManyRequest): Promise<ResponseFor<"hook_delete_many">> {
+  return invokeCommand(TauriCommand.HookDeleteMany, args);
 }
 
-export async function setHookEnabled(args: HookRequestInput<HookSetEnabledRequest>): Promise<ResponseFor<"hook_set_enabled">> {
-  return invokeCommand(TauriCommand.HookSetEnabled, runtimeHookRequest(args));
+export async function setHookEnabled(args: HookSetEnabledRequest): Promise<ResponseFor<"hook_set_enabled">> {
+  return invokeCommand(TauriCommand.HookSetEnabled, args);
 }
 
-export async function setHooksEnabled(requests: readonly HookRequestInput<HookSetEnabledRequest>[]): Promise<ResponseFor<"hook_set_enabled_many">> {
-  return invokeCommand(TauriCommand.HookSetEnabledMany, { requests: requests.map(runtimeHookRequest) });
+export async function setHooksEnabled(args: HookSetEnabledManyRequest): Promise<ResponseFor<"hook_set_enabled_many">> {
+  return invokeCommand(TauriCommand.HookSetEnabledMany, args);
 }
 
-export async function reviewHook(args: HookRequestInput<HookReviewRequest>): Promise<ResponseFor<"hook_review">> {
-  return invokeCommand(TauriCommand.HookReview, runtimeHookRequest(args));
+export async function reviewHook(args: HookReviewRequest): Promise<ResponseFor<"hook_review">> {
+  return invokeCommand(TauriCommand.HookReview, args);
 }
 
-export async function setMcpEnabled(args: McpRequestInput): Promise<ResponseFor<"mcp_set_enabled">> {
-  return invokeCommand(TauriCommand.McpSetEnabled, runtimeMcpRequest(args));
+export async function setMcpEnabled(args: McpSetEnabledRequest): Promise<ResponseFor<"mcp_set_enabled">> {
+  return invokeCommand(TauriCommand.McpSetEnabled, args);
 }
 
-export async function probeMcp(args: McpProbeRequestInput): Promise<ResponseFor<"mcp_probe">> {
-  return invokeCommand(TauriCommand.McpProbe, runtimeMcpProbeRequest(args));
+export async function probeMcp(args: McpProbeRequest): Promise<ResponseFor<"mcp_probe">> {
+  return invokeCommand(TauriCommand.McpProbe, args);
 }
 
-export async function setMcpEnabledMany(requests: readonly McpRequestInput[]): Promise<ResponseFor<"mcp_set_enabled_many">> {
-  return invokeCommand(TauriCommand.McpSetEnabledMany, { requests: requests.map(runtimeMcpRequest) });
+export async function setMcpEnabledMany(args: McpSetEnabledManyRequest): Promise<ResponseFor<"mcp_set_enabled_many">> {
+  return invokeCommand(TauriCommand.McpSetEnabledMany, args);
 }
 
 export async function searchSkillMarketplace(query: string): Promise<MarketplaceSearchResponse> {
@@ -1242,25 +1229,40 @@ function normalizeSkillDeleteManyResponse(response: GeneratedSkillsDeleteManyRes
 }
 
 async function invokeSkillChange(command: SkillChangeCommand, args: SkillChangeArgs, dryRun: boolean): Promise<SkillChangeResponse> {
-  switch (command) {
-    case SkillChangeCommand.Set: {
-      const source = args as Omit<GeneratedSkillsSetRequest, "visibility"> & { visibility: SkillVisibility };
-      const request: GeneratedSkillsSetRequest = { ...source, visibility: runtimeVisibility(source.visibility), dryRun };
-      return normalizeSkillSetResponse(await invokeCommand(TauriCommand.SkillsSet, request));
+  const startedAt = performance.now();
+  logger.info("skill change command started", {
+    command,
+    dryRun,
+    skillCount: Array.isArray(args.skillIds) ? args.skillIds.length : 0,
+    hasPreviewId: "previewId" in args && Boolean(args.previewId),
+  });
+  try {
+    switch (command) {
+      case SkillChangeCommand.Set: {
+        const source = args as Omit<GeneratedSkillsSetRequest, "visibility"> & { visibility: SkillVisibility };
+        const request: GeneratedSkillsSetRequest = { ...source, visibility: runtimeVisibility(source.visibility), dryRun };
+        return normalizeSkillSetResponse(await invokeCommand(TauriCommand.SkillsSet, request));
+      }
+      case SkillChangeCommand.Wrap: {
+        const request: GeneratedSkillsWrapRequest = { ...(args as GeneratedSkillsWrapRequest), dryRun };
+        return normalizeSkillWrapResponse(await invokeCommand(TauriCommand.SkillsWrap, request));
+      }
+      case SkillChangeCommand.UpdateMany: {
+        const request: GeneratedSkillsUpdateManyRequest = { ...(args as GeneratedSkillsUpdateManyRequest), dryRun };
+        return normalizeSkillUpdateManyResponse(await invokeCommand(TauriCommand.SkillsUpdateMany, request));
+      }
+      case SkillChangeCommand.DeleteMany:
+        return normalizeSkillDeleteManyResponse(await invokeCommand(
+          TauriCommand.SkillsDeleteMany,
+          args as GeneratedSkillsDeleteManyRequest,
+        ));
     }
-    case SkillChangeCommand.Wrap: {
-      const request: GeneratedSkillsWrapRequest = { ...(args as GeneratedSkillsWrapRequest), dryRun };
-      return normalizeSkillWrapResponse(await invokeCommand(TauriCommand.SkillsWrap, request));
-    }
-    case SkillChangeCommand.UpdateMany: {
-      const request: GeneratedSkillsUpdateManyRequest = { ...(args as GeneratedSkillsUpdateManyRequest), dryRun };
-      return normalizeSkillUpdateManyResponse(await invokeCommand(TauriCommand.SkillsUpdateMany, request));
-    }
-    case SkillChangeCommand.DeleteMany:
-      return normalizeSkillDeleteManyResponse(await invokeCommand(
-        TauriCommand.SkillsDeleteMany,
-        args as GeneratedSkillsDeleteManyRequest,
-      ));
+  } finally {
+    logger.info("skill change command finished", {
+      command,
+      dryRun,
+      durationMs: performance.now() - startedAt,
+    });
   }
 }
 

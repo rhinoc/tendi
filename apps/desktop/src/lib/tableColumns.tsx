@@ -1,10 +1,9 @@
 import { ColumnDataType, type ColumnDef } from "../components/DataTable.types";
 import { AgentBadge } from "../components/shared/AgentBadge.tsx";
 import { AgentChips } from "../components/shared/AgentChips.tsx";
-import { Badge } from "../components/shared/Badge.tsx";
 import { McpServerIcon } from "../components/shared/McpServerIcon.tsx";
 import { Tooltip } from "../components/shared/Tooltip.tsx";
-import { basename, EMPTY_DISPLAY_VALUE, friendlyAgent, mcpDisplayName, mcpNeedsLogin, scopeNameForValue } from "./index.ts";
+import { basename, EMPTY_DISPLAY_VALUE, friendlyAgent, mcpDisplayName, scopeNameForValue } from "./index.ts";
 import type { McpRecord, RuleRecord } from "./index.ts";
 
 type AgentRow = { agent?: string | null };
@@ -74,7 +73,6 @@ export const mcpColumns: ColumnDef<McpRow>[] = [
             <span className="mcpNameCopy">
               <span className="dataCellTitleLine">
                 <span className="dataCellTitle">{title}</span>
-                {mcpNeedsLogin(row.status) ? <Badge tone="warning">Need login</Badge> : null}
               </span>
               <span className="dataCellSubLine">
                 <span className="dataCellSub">{row.server_description?.trim() || EMPTY_DISPLAY_VALUE}</span>
