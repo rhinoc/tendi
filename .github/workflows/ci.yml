@@ -46,6 +46,9 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
+      - name: Check Rust test boundaries
+        run: bash scripts/check-rust-test-boundaries.sh
+
       - name: Cache Rust build
         uses: actions/cache@v4
         with:
