@@ -93,7 +93,7 @@ export function readCachedAppIcon(): AppIcon {
   try {
     return normalizeAppIcon(window.localStorage.getItem(APP_ICON_CACHE_KEY));
   } catch {
-    return ColorTheme.SakuraPop;
+    return ColorTheme.Gruvbox;
   }
 }
 

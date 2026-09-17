@@ -960,9 +960,29 @@ fn reconcile_skill_visibility_for_workspace_with_report(
         if !path.join("SKILL.md").is_file() {
             continue;
         }
-        changes.extend(plan_skill_visibility_at_path(
-            &path, agent, visibility, true,
-        )?);
+        match plan_skill_visibility_at_path(&path, agent, visibility, true) {
+            Ok(planned) => changes.extend(planned),
+            Err(error) => {
+                // A malformed provider-owned policy must not make every
+                // installation in this scope retry forever. Preserve the
+                // user's bytes, expose the exact resource in the scan, and
+                // let the rest of the reconciliation commit and acknowledge
+                // its durable receipt.
+                let warning = format!(
+                    "{}: provider visibility sync skipped: {error:#}",
+                    path.display()
+                );
+                crate::logging::global().warn(
+                    "skill provider visibility sync skipped",
+                    serde_json::json!({
+                        "path": &path,
+                        "agent": agent.label(),
+                        "error": error.to_string(),
+                    }),
+                );
+                scan.warnings.push(warning);
+            }
+        }
     }
     let changeset = ChangeSet {
         changes: dedupe_changes(changes),
@@ -5779,10 +5799,26 @@ fn check_skill_updates_for_skills(
             "durationMs": stage_started.elapsed().as_secs_f64() * 1000.0,
         }),
     );
-    let reports = skills
-        .iter()
-        .map(|skill| check_skill_update(skill, &git_remote_heads, &git_changed_paths, cancelled))
-        .collect();
+    let mut reports = Vec::with_capacity(skills.len());
+    for batch in skills.chunks(MAX_CONCURRENT_GIT_FETCHES) {
+        if cancelled.load(Ordering::Acquire) {
+            break;
+        }
+        let batch_reports = std::thread::scope(|scope| {
+            batch
+                .iter()
+                .map(|skill| {
+                    scope.spawn(|| {
+                        check_skill_update(skill, &git_remote_heads, &git_changed_paths, cancelled)
+                    })
+                })
+                .collect::<Vec<_>>()
+                .into_iter()
+                .filter_map(|handle| handle.join().ok())
+                .collect::<Vec<_>>()
+        });
+        reports.extend(batch_reports);
+    }
     cleanup_git_remote_heads(git_remote_heads);
     crate::logging::global().info(
         "skill update check completed",
@@ -9209,6 +9245,47 @@ mod tests {
     }
 
     #[test]
+    fn global_skill_visibility_is_shared_across_workspace_scopes() {
+        let root = temp_dir("tendi-global-visibility-scope");
+        let child = root.join("apps/desktop");
+        let global_skill = root.join("../global-skills/demo");
+        fs::create_dir_all(&child).unwrap();
+        let store = crate::storage::Store::open(root.join("test.sqlite3")).unwrap();
+
+        store
+            .upsert_skill_visibilities_for_workspace(
+                &root,
+                &[(global_skill.clone(), SkillVisibility::Manual)],
+            )
+            .unwrap();
+        store
+            .upsert_skill_visibilities_for_workspace(
+                &child,
+                &[(global_skill.clone(), SkillVisibility::Auto)],
+            )
+            .unwrap();
+
+        assert_eq!(
+            store
+                .skill_visibilities_for_workspace(&root)
+                .unwrap()
+                .get(&global_skill.canonicalize().unwrap_or(global_skill.clone()))
+                .copied(),
+            Some(SkillVisibility::Auto)
+        );
+        assert_eq!(
+            store
+                .skill_visibilities_for_workspace(&child)
+                .unwrap()
+                .get(&global_skill.canonicalize().unwrap_or(global_skill.clone()))
+                .copied(),
+            Some(SkillVisibility::Auto)
+        );
+        drop(store);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn reconciliation_reloads_visibility_after_resource_admission() {
         let root = temp_dir("tendi-reconcile-resource-race");
         let skill_dir = root.join("demo");
@@ -9264,6 +9341,49 @@ mod tests {
             .unwrap();
         assert_eq!(scan.skills[0].visibility, SkillVisibility::Off);
         worker.join().unwrap();
+        drop(store);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn malformed_provider_policy_does_not_block_reconciliation() {
+        let root = temp_dir("tendi-reconcile-malformed-provider-policy");
+        let skill_dir = root.join("demo");
+        fs::create_dir_all(skill_dir.join("agents")).unwrap();
+        fs::write(skill_dir.join("SKILL.md"), "---\nname: demo\n---\n").unwrap();
+        let policy = skill_dir.join("agents/openai.yaml");
+        fs::write(&policy, "- provider-format-from-future\n").unwrap();
+        let store = crate::storage::Store::open(root.join("test.sqlite3")).unwrap();
+        store
+            .upsert_skill_visibilities_for_workspace(
+                &root,
+                &[(skill_dir.clone(), SkillVisibility::Manual)],
+            )
+            .unwrap();
+        let mut skill = test_skill("demo", "Demo", &skill_dir);
+        skill.agents = vec![AgentKind::Codex];
+        skill.paths[0].agent = AgentKind::Codex;
+        skill.paths[0].effective_visibility = SkillVisibility::Manual;
+        let scan = SkillScan {
+            roots: Vec::new(),
+            skills: vec![skill],
+            warnings: Vec::new(),
+        };
+
+        let reconciled =
+            super::reconcile_skill_visibility_for_workspace(&store, &root, scan, &[]).unwrap();
+
+        assert_eq!(
+            fs::read_to_string(policy).unwrap(),
+            "- provider-format-from-future\n"
+        );
+        assert_eq!(reconciled.skills.len(), 1);
+        assert!(
+            reconciled
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("provider visibility sync skipped"))
+        );
         drop(store);
         fs::remove_dir_all(root).unwrap();
     }

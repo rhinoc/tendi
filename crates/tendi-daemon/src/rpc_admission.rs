@@ -39,7 +39,6 @@ fn skill_projection_writer(method: &str) -> bool {
             | "skill_path_rename"
             | "skill_path_delete"
             | "skills_refresh"
-            | "skills_updates"
             | "skills_add"
             | "skills_update"
             | "skills_update_many"
@@ -912,6 +911,12 @@ fn projection_dependencies(method: &str) -> &'static [&'static str] {
 #[cfg(test)]
 mod admission_rpc_tests {
     use super::*;
+
+    #[test]
+    fn remote_skill_update_check_does_not_claim_projection_writer() {
+        assert!(!skill_projection_writer("skills_updates"));
+        assert!(skill_projection_writer("skills_update"));
+    }
 
     #[test]
     fn skill_reconciliation_projection_resources_are_scoped() {

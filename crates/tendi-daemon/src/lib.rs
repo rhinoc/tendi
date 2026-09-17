@@ -319,7 +319,10 @@ struct SkillUpdateCheckCache {
     projection_revision: tendi_core::Revision,
     reports: Vec<tendi_core::skills::SkillUpdateReport>,
     skill_fingerprints: BTreeMap<String, String>,
+    checked_at: Instant,
 }
+
+const SKILL_UPDATE_REPORT_CACHE_TTL: Duration = Duration::from_secs(15);
 
 #[derive(Debug)]
 struct SkillDistributionPreview {
@@ -4376,6 +4379,35 @@ impl Daemon {
         scan: tendi_core::skills::SkillScan,
         check_revision: tendi_core::Revision,
     ) -> &'static str {
+        let skill_ids = scan
+            .skills
+            .iter()
+            .map(|skill| skill.id.clone())
+            .collect::<Vec<_>>();
+        if let Ok(Some(updates)) =
+            self.cached_skill_update_reports_at_revision(&scan, &skill_ids, check_revision)
+        {
+            tendi_core::logging::global().info(
+                "skill update check completed from cache",
+                json!({
+                    "skillCount": scan.skills.len(),
+                    "cacheTtlMs": SKILL_UPDATE_REPORT_CACHE_TTL.as_secs_f64() * 1000.0,
+                }),
+            );
+            self.emit_event(
+                SKILL_UPDATE_EVENT,
+                runtime_event(
+                    SKILL_UPDATE_EVENT,
+                    json!({
+                        "status": "completed",
+                        "skills": scan.skills,
+                        "updates": updates,
+                        "error": Value::Null,
+                    }),
+                ),
+            );
+            return "started";
+        }
         let Some(job) = self.state.skill_update.start() else {
             return "already-running";
         };
@@ -5146,6 +5178,7 @@ impl Daemon {
                 projection_revision,
                 reports: reports.to_vec(),
                 skill_fingerprints,
+                checked_at: Instant::now(),
             });
         Ok(())
     }
@@ -5192,6 +5225,17 @@ impl Daemon {
             );
             return Ok(None);
         };
+        if cache.checked_at.elapsed() > SKILL_UPDATE_REPORT_CACHE_TTL {
+            tendi_core::logging::global().info(
+                "skill update report cache miss",
+                json!({
+                    "reason": "expired",
+                    "ageMs": cache.checked_at.elapsed().as_secs_f64() * 1000.0,
+                    "cacheTtlMs": SKILL_UPDATE_REPORT_CACHE_TTL.as_secs_f64() * 1000.0,
+                }),
+            );
+            return Ok(None);
+        }
         let revision_matches = cache.projection_revision == revision;
         let selected_ids_present = selected_ids
             .iter()
@@ -6083,7 +6127,12 @@ fn skill_watch_loop(daemon: Daemon, receiver: Receiver<notify::Result<Event>>) {
             break;
         }
         match receiver.recv_timeout(CONFIG_WATCH_DEBOUNCE) {
-            Ok(Ok(event)) => pending.extend(event.paths),
+            Ok(Ok(event)) => pending.extend(
+                event
+                    .paths
+                    .into_iter()
+                    .filter(|path| !is_skill_watcher_transient_path(path)),
+            ),
             Ok(Err(error)) => {
                 tendi_core::logging::global().error(
                     "skill watcher failed",
@@ -6112,6 +6161,15 @@ fn skill_watch_loop(daemon: Daemon, receiver: Receiver<notify::Result<Event>>) {
             runtime_event(SKILL_CHANGED_EVENT, json!({ "paths": paths })),
         );
     }
+}
+
+fn is_skill_watcher_transient_path(path: &Path) -> bool {
+    path.components().any(|component| {
+        component
+            .as_os_str()
+            .to_str()
+            .is_some_and(|name| name.contains(".tendi-tmp-"))
+    })
 }
 
 fn claim_scheduled_skill_backup(dirty: &AtomicBool, running: &AtomicBool) -> bool {
@@ -7827,6 +7885,19 @@ mod tests {
             "skills_delete_many",
             &json!({})
         ));
+    }
+
+    #[test]
+    fn skill_watcher_ignores_tendi_atomic_write_temporary_paths() {
+        assert!(is_skill_watcher_transient_path(Path::new(
+            "/tmp/demo/.SKILL.md.tendi-tmp-123-1"
+        )));
+        assert!(is_skill_watcher_transient_path(Path::new(
+            "/tmp/demo/agents/.openai.yaml.tendi-tmp-123-2"
+        )));
+        assert!(!is_skill_watcher_transient_path(Path::new(
+            "/tmp/demo/SKILL.md"
+        )));
     }
 
     #[test]

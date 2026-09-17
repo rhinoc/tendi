@@ -298,7 +298,7 @@ fn default_color_theme() -> String {
 }
 
 fn default_app_icon() -> String {
-    "sakura-pop".to_string()
+    "gruvbox".to_string()
 }
 
 fn default_editor() -> String {
@@ -2075,7 +2075,7 @@ mod tests {
         assert_eq!(store.app_settings().unwrap().font_family, "manrope");
         assert_eq!(store.app_settings().unwrap().light_theme, "vercel");
         assert_eq!(store.app_settings().unwrap().dark_theme, "vercel");
-        assert_eq!(store.app_settings().unwrap().app_icon, "sakura-pop");
+        assert_eq!(store.app_settings().unwrap().app_icon, "gruvbox");
         assert_eq!(store.app_settings().unwrap().session_resume_target, "auto");
         assert_eq!(
             store.app_settings().unwrap().missing_session_project_policy,

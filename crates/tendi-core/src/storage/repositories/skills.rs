@@ -17,6 +17,67 @@ fn canonical_skill_visibility_path(path: &Path) -> PathBuf {
 
 const INSTALLATION_SCOPE_KEY: &str = "installation:default";
 
+fn installation_scope_key() -> ScopeKey {
+    ScopeKey::new(INSTALLATION_SCOPE_KEY).expect("installation scope key is valid")
+}
+
+fn skill_visibility_scope(workspace_root: &Path, skill_path: &Path) -> Result<ScopeKey> {
+    let workspace_root = canonical_workspace_root(workspace_root);
+    let skill_path = canonical_skill_visibility_path(skill_path);
+    if skill_path.starts_with(&workspace_root) {
+        workspace_scope_key(&workspace_root)
+    } else {
+        Ok(installation_scope_key())
+    }
+}
+
+fn migrate_global_skill_visibility_scopes(tx: &Transaction<'_>) -> Result<()> {
+    let mut statement = tx.prepare(
+        "SELECT scope_key, skill_path, visibility
+         FROM scoped_skill_visibility
+         WHERE scope_key LIKE 'workspace:%'
+         ORDER BY scope_key, skill_path",
+    )?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    drop(statement);
+
+    for (scope_key, skill_path, visibility) in rows {
+        let Some(workspace) = scope_key.strip_prefix("workspace:") else {
+            continue;
+        };
+        let workspace = PathBuf::from(workspace);
+        let skill_path_buf = PathBuf::from(&skill_path);
+        let canonical_workspace = canonical_workspace_root(&workspace);
+        let canonical_skill_path = canonical_skill_visibility_path(&skill_path_buf);
+        if canonical_skill_path.starts_with(&canonical_workspace) {
+            continue;
+        }
+        tx.execute(
+            "INSERT OR IGNORE INTO scoped_skill_visibility (scope_key, skill_path, visibility)
+             VALUES (?1, ?2, ?3)",
+            params![
+                INSTALLATION_SCOPE_KEY,
+                canonical_skill_path.display().to_string(),
+                visibility
+            ],
+        )?;
+        tx.execute(
+            "DELETE FROM scoped_skill_visibility
+             WHERE scope_key = ?1 AND skill_path = ?2",
+            params![scope_key, skill_path],
+        )?;
+    }
+    Ok(())
+}
+
 impl Store {
     pub(crate) fn ensure_skill_visibility_table(&self) -> Result<()> {
         self.with_named_write_transaction("ensure_skill_visibility_table", |tx| {
@@ -32,6 +93,16 @@ impl Store {
                     ON scoped_skill_visibility(skill_path);
                 ",
             )?;
+            migrate_global_skill_visibility_scopes(tx)?;
+            // Skills projections are owned by workspace scopes. Older builds
+            // accidentally created an installation-scope dirty receipt while
+            // persisting global visibility; it has no worker that can consume
+            // it and must not keep the database looking perpetually dirty.
+            tx.execute(
+                "DELETE FROM projection_dirty_resources
+                 WHERE scope_key = ?1 AND domain = 'skills'",
+                params![INSTALLATION_SCOPE_KEY],
+            )?;
             Ok(())
         })
     }
@@ -40,22 +111,34 @@ impl Store {
         &self,
         workspace_root: &Path,
     ) -> Result<BTreeMap<PathBuf, SkillVisibility>> {
-        let scope_key = workspace_scope_key(&canonical_workspace_root(workspace_root))?;
+        let workspace_root = canonical_workspace_root(workspace_root);
+        let scope_key = workspace_scope_key(&workspace_root)?;
         let mut statement = self.conn.prepare(
-            "SELECT skill_path, visibility
+            "SELECT scope_key, skill_path, visibility
              FROM scoped_skill_visibility
-             WHERE scope_key = ?1
+             WHERE scope_key IN (?1, ?2)
              ORDER BY skill_path",
         )?;
-        let rows = statement.query_map(params![scope_key.as_str()], |row| {
-            let path = PathBuf::from(row.get::<_, String>(0)?);
-            let raw_visibility = row.get::<_, String>(1)?;
-            let visibility =
-                parse_skill_visibility(&raw_visibility).ok_or(rusqlite::Error::InvalidQuery)?;
-            Ok((path, visibility))
-        })?;
-        rows.collect::<std::result::Result<BTreeMap<_, _>, _>>()
-            .map_err(Into::into)
+        let rows =
+            statement.query_map(params![scope_key.as_str(), INSTALLATION_SCOPE_KEY], |row| {
+                let row_scope = row.get::<_, String>(0)?;
+                let path = PathBuf::from(row.get::<_, String>(1)?);
+                let raw_visibility = row.get::<_, String>(2)?;
+                let visibility =
+                    parse_skill_visibility(&raw_visibility).ok_or(rusqlite::Error::InvalidQuery)?;
+                Ok((row_scope, path, visibility))
+            })?;
+        let mut values = BTreeMap::new();
+        for row in rows {
+            let (row_scope, path, visibility) = row?;
+            let owner = skill_visibility_scope(&workspace_root, &path)?;
+            if row_scope != owner.as_str() {
+                continue;
+            }
+            let path = canonical_skill_visibility_path(&path);
+            values.insert(path, visibility);
+        }
+        Ok(values)
     }
 
     pub fn upsert_skill_visibilities_for_workspace(
@@ -90,19 +173,16 @@ impl Store {
         {
             anyhow::bail!("mixed visibility cannot be persisted");
         }
-        let scope_key = workspace_scope_key(&canonical_workspace_root(workspace_root))?;
         let values = values
             .iter()
             .map(|(path, visibility)| (canonical_skill_visibility_path(path), *visibility))
             .collect::<Vec<_>>();
-        let resources = values
-            .iter()
-            .map(|(path, _)| crate::coordination::canonical_resource_path(path))
-            .collect::<Result<Vec<_>>>()?;
+        let workspace_root = canonical_workspace_root(workspace_root);
         self.with_named_write_transaction("write_skill_visibilities_for_workspace", |tx| {
             let mut changed = 0;
             for (path, visibility) in &values {
-                changed += tx.execute(
+                let scope_key = skill_visibility_scope(&workspace_root, path)?;
+                let row_changed = tx.execute(
                     "INSERT INTO scoped_skill_visibility (scope_key, skill_path, visibility)
                      VALUES (?1, ?2, ?3)
                      ON CONFLICT(scope_key, skill_path) DO UPDATE SET
@@ -115,11 +195,23 @@ impl Store {
                         initialize_only
                     ],
                 )?;
-            }
-            if changed > 0 {
-                self.mark_projection_resources_in_tx(
-                    tx, &scope_key, "skills", &resources, false, true,
-                )?;
+                changed += row_changed;
+                if row_changed > 0 {
+                    let resource = crate::coordination::canonical_resource_path(path)?;
+                    let projection_scope = if scope_key.as_str() == INSTALLATION_SCOPE_KEY {
+                        workspace_scope_key(&workspace_root)?
+                    } else {
+                        scope_key.clone()
+                    };
+                    self.mark_projection_resources_in_tx(
+                        tx,
+                        &projection_scope,
+                        "skills",
+                        std::slice::from_ref(&resource),
+                        false,
+                        true,
+                    )?;
+                }
             }
             Ok(changed)
         })
@@ -133,28 +225,37 @@ impl Store {
         if skill_paths.is_empty() {
             return Ok(0);
         }
-        let scope_key = workspace_scope_key(&canonical_workspace_root(workspace_root))?;
+        let workspace_root = canonical_workspace_root(workspace_root);
         let skill_paths = skill_paths
             .iter()
             .map(|path| canonical_skill_visibility_path(path))
             .collect::<Vec<_>>();
-        let resources = skill_paths
-            .iter()
-            .map(|path| crate::coordination::canonical_resource_path(path))
-            .collect::<Result<Vec<_>>>()?;
         self.with_named_write_transaction("delete_skill_visibilities_for_workspace", |tx| {
             let mut deleted = 0;
             for path in &skill_paths {
-                deleted += tx.execute(
+                let scope_key = skill_visibility_scope(&workspace_root, path)?;
+                let row_deleted = tx.execute(
                     "DELETE FROM scoped_skill_visibility
                      WHERE scope_key = ?1 AND skill_path = ?2",
                     params![scope_key.as_str(), path.display().to_string()],
                 )?;
-            }
-            if deleted > 0 {
-                self.mark_projection_resources_in_tx(
-                    tx, &scope_key, "skills", &resources, false, true,
-                )?;
+                deleted += row_deleted;
+                if row_deleted > 0 {
+                    let resource = crate::coordination::canonical_resource_path(path)?;
+                    let projection_scope = if scope_key.as_str() == INSTALLATION_SCOPE_KEY {
+                        workspace_scope_key(&workspace_root)?
+                    } else {
+                        scope_key.clone()
+                    };
+                    self.mark_projection_resources_in_tx(
+                        tx,
+                        &projection_scope,
+                        "skills",
+                        std::slice::from_ref(&resource),
+                        false,
+                        true,
+                    )?;
+                }
             }
             Ok(deleted)
         })
@@ -168,30 +269,43 @@ impl Store {
         remove_source: bool,
     ) -> Result<bool> {
         let workspace_root = canonical_workspace_root(workspace_root);
-        let scope_key = workspace_scope_key(&workspace_root)?;
         let source = canonical_skill_visibility_path(source);
         let destination = canonical_skill_visibility_path(destination);
-        let resources = [&source, &destination]
-            .into_iter()
-            .map(|path| crate::coordination::canonical_resource_path(path))
-            .collect::<Result<Vec<_>>>()?;
+        let source_scope = skill_visibility_scope(&workspace_root, &source)?;
+        let destination_scope = skill_visibility_scope(&workspace_root, &destination)?;
         self.with_named_write_transaction("copy_skill_visibility_for_workspace", |tx| {
-            let Some(visibility) = tx.query_row("SELECT visibility FROM scoped_skill_visibility WHERE scope_key = ?1 AND skill_path = ?2", params![scope_key.as_str(), source.display().to_string()], |row| row.get::<_, String>(0)).optional()? else { return Ok(false); };
+            let Some(visibility) = tx.query_row("SELECT visibility FROM scoped_skill_visibility WHERE scope_key = ?1 AND skill_path = ?2", params![source_scope.as_str(), source.display().to_string()], |row| row.get::<_, String>(0)).optional()? else { return Ok(false); };
             tx.execute(
                 "INSERT INTO scoped_skill_visibility (scope_key, skill_path, visibility)
                  VALUES (?1, ?2, ?3)
                  ON CONFLICT(scope_key, skill_path) DO UPDATE SET
                     visibility = excluded.visibility",
-                params![scope_key.as_str(), destination.display().to_string(), visibility],
+                params![destination_scope.as_str(), destination.display().to_string(), visibility],
             )?;
             if remove_source && source != destination {
                 tx.execute(
                     "DELETE FROM scoped_skill_visibility
                      WHERE scope_key = ?1 AND skill_path = ?2",
-                    params![scope_key.as_str(), source.display().to_string()],
+                    params![source_scope.as_str(), source.display().to_string()],
                 )?;
             }
-            self.mark_projection_resources_in_tx(tx, &scope_key, "skills", &resources, false, true)?;
+            let resources = [&source, &destination]
+                .into_iter()
+                .map(|path| crate::coordination::canonical_resource_path(path))
+                .collect::<Result<Vec<_>>>()?;
+            let projection_scope = if destination_scope.as_str() == INSTALLATION_SCOPE_KEY {
+                workspace_scope_key(&workspace_root)?
+            } else {
+                destination_scope.clone()
+            };
+            self.mark_projection_resources_in_tx(
+                tx,
+                &projection_scope,
+                "skills",
+                &resources,
+                false,
+                true,
+            )?;
             Ok(true)
         })
     }
