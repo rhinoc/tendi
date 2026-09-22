@@ -26,7 +26,7 @@
     "test:assistant": "node --import tsx --test scripts/assistant.test.ts",
     "test:command-palette": "node --import tsx --test scripts/command-palette-performance.test.ts",
     "test:overview-tooltip": "node --test scripts/overview-tooltip.test.mjs",
-    "test:controllers": "node --import tsx --experimental-test-module-mocks --test scripts/runtime-contract.test.ts scripts/controllers.test.ts scripts/desktop-store.test.ts scripts/session-list-locator.test.ts scripts/rule-file.test.ts scripts/skill-actions.test.ts scripts/add-skill-dialog.test.ts",
+    "test:controllers": "node --import tsx --experimental-test-module-mocks --test scripts/runtime-contract.test.ts scripts/controllers.test.ts scripts/desktop-store.test.ts scripts/session-list-locator.test.ts scripts/rule-file.test.ts scripts/skill-actions.test.ts scripts/add-skill-dialog.test.ts scripts/session-runtime-controller.test.ts",
     "build": "vite build",
     "e2e:align": "node scripts/alignment-e2e.mjs",
     "e2e:frozen": "node scripts/alignment-e2e.mjs --frozen-only",

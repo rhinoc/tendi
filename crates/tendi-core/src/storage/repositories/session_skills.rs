@@ -1,5 +1,6 @@
 //! session_skills persistence through the database-owned transaction boundary.
 use super::super::*;
+use std::collections::BTreeMap;
 
 pub(in crate::storage) fn cleanup_stale_scoped_session_skill_rows(
     conn: &rusqlite::Transaction<'_>,
@@ -357,6 +358,34 @@ impl Store {
             )
             .optional()?;
         Ok(status.as_deref() == Some("indexed"))
+    }
+
+    pub fn session_skill_index_states_for_scope(
+        &self,
+        scope_key: &ScopeKey,
+    ) -> Result<BTreeMap<(String, String, String), (i64, i64)>> {
+        with_database_read_lock_retry(|| {
+            let mut statement = self.conn.prepare(
+                "SELECT session_id, agent, session_path, file_mtime, file_size
+                 FROM scoped_session_skill_index
+                 WHERE scope_key = ?1 AND status = 'indexed'",
+            )?;
+            let mut states = BTreeMap::new();
+            let rows = statement.query_map([scope_key.as_str()], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, i64>(4)?,
+                ))
+            })?;
+            for row in rows {
+                let (session_id, agent, session_path, file_mtime, file_size) = row?;
+                states.insert((session_id, agent, session_path), (file_mtime, file_size));
+            }
+            Ok(states)
+        })
     }
 
     pub fn replace_session_skill_links_for_scope(

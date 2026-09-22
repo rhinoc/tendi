@@ -12,6 +12,13 @@ pub struct ProjectionRefreshState<T> {
     pub reconcile_full: bool,
 }
 
+/// Upper bound for one scan persistence transaction. The scan itself remains
+/// outside the writer lease; only this many rows are allowed into one commit.
+const SCAN_WRITE_BATCH_SIZE: usize = 128;
+
+const SCAN_PROJECTION_DOMAINS: [&str; 6] =
+    ["agents", "skills", "rules", "hooks", "mcp", "sessions"];
+
 #[cfg(test)]
 #[path = "projections_tests.rs"]
 mod concurrency_tests;
@@ -70,6 +77,93 @@ pub(in crate::storage) fn advance_projection_head_in_tx(
         schema_version: 1,
         status: status.to_string(),
     })
+}
+
+fn projection_revision_in_tx(
+    tx: &Transaction<'_>,
+    scope_key: &ScopeKey,
+    domain: &str,
+) -> Result<Revision> {
+    let revision = tx
+        .query_row(
+            "SELECT revision FROM projection_heads
+             WHERE scope_key = ?1 AND domain = ?2",
+            params![scope_key.as_str(), domain],
+            |row| row.get::<_, u64>(0),
+        )
+        .optional()?
+        .unwrap_or(Revision::ZERO.value());
+    Ok(Revision::new(revision))
+}
+
+fn scan_revision_matches(
+    tx: &Transaction<'_>,
+    scope_key: &ScopeKey,
+    domain: &str,
+    expected: Revision,
+) -> Result<bool> {
+    Ok(projection_revision_in_tx(tx, scope_key, domain)? == expected)
+}
+
+fn insert_fs_manifest_entries_in_tx(
+    tx: &Transaction<'_>,
+    scope_key: &ScopeKey,
+    entries: &[FsManifestEntry],
+) -> Result<()> {
+    anyhow::ensure!(
+        entries.len() <= SCAN_WRITE_BATCH_SIZE,
+        "scan manifest batch exceeds the writer bound"
+    );
+    for entry in entries {
+        tx.execute(
+            "INSERT INTO fs_manifest (
+                scope_key, source_kind, path, root, agent, scope, mtime_ns, size, inode, device,
+                sha256, parser_version, last_seen_at, parse_status, resource_path
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
+             ON CONFLICT(scope_key, source_kind, path) DO UPDATE SET
+                root = excluded.root,
+                agent = excluded.agent,
+                scope = excluded.scope,
+                mtime_ns = excluded.mtime_ns,
+                size = excluded.size,
+                inode = excluded.inode,
+                device = excluded.device,
+                sha256 = excluded.sha256,
+                parser_version = excluded.parser_version,
+                last_seen_at = excluded.last_seen_at,
+                parse_status = excluded.parse_status,
+                resource_path = excluded.resource_path",
+            params![
+                scope_key.as_str(),
+                entry.source_kind,
+                entry.path.display().to_string(),
+                entry.root.display().to_string(),
+                entry.agent,
+                entry.scope,
+                entry.mtime_ns,
+                entry.size,
+                entry.inode,
+                entry.device,
+                entry.sha256,
+                entry.parser_version,
+                entry.last_seen_at,
+                entry.parse_status,
+                entry
+                    .resource_path
+                    .as_ref()
+                    .map(|path| path.to_string_lossy().into_owned()),
+            ],
+        )?;
+    }
+    Ok(())
+}
+
+fn scan_session_identity(session: &SessionRecord) -> (String, String, String) {
+    (
+        session.id.clone(),
+        session.agent.label().to_string(),
+        session.path.display().to_string(),
+    )
 }
 
 impl Store {
@@ -457,6 +551,71 @@ impl Store {
             .map(|_| ())
     }
 
+    fn replace_skill_source_projection_in_batches(
+        &self,
+        scope_key: &ScopeKey,
+        source_records: &[SkillSourceRecord],
+        revision: Revision,
+    ) -> Result<bool> {
+        let mut records_by_path = BTreeMap::new();
+        for record in source_records {
+            records_by_path
+                .entry(record.skill_path.clone())
+                .or_insert(record);
+        }
+        let records = records_by_path.into_values().cloned().collect::<Vec<_>>();
+        let current_paths = records
+            .iter()
+            .map(|record| record.skill_path.display().to_string())
+            .collect::<BTreeSet<_>>();
+
+        let Some(stale_paths) =
+            self.with_named_write_transaction("prepare_skill_source_projection", |tx| {
+                if !scan_revision_matches(tx, scope_key, "skills", revision)? {
+                    return Ok(None);
+                }
+                let stale_paths = self
+                    .skill_source_projection_paths_in_tx(tx, scope_key)?
+                    .into_iter()
+                    .filter(|path| !current_paths.contains(path))
+                    .collect::<Vec<_>>();
+                Ok(Some(stale_paths))
+            })?
+        else {
+            return Ok(false);
+        };
+
+        for paths in stale_paths.chunks(SCAN_WRITE_BATCH_SIZE) {
+            let committed =
+                self.with_named_write_transaction("delete_skill_source_projection_batch", |tx| {
+                    if !scan_revision_matches(tx, scope_key, "skills", revision)? {
+                        return Ok(false);
+                    }
+                    self.delete_skill_source_projection_paths_in_tx(tx, scope_key, paths)?;
+                    Ok(true)
+                })?;
+            if !committed {
+                return Ok(false);
+            }
+        }
+
+        for records in records.chunks(SCAN_WRITE_BATCH_SIZE) {
+            let committed =
+                self.with_named_write_transaction("write_skill_source_projection_batch", |tx| {
+                    if !scan_revision_matches(tx, scope_key, "skills", revision)? {
+                        return Ok(false);
+                    }
+                    self.upsert_skill_source_projection_batch_in_tx(tx, scope_key, records)?;
+                    Ok(true)
+                })?;
+            if !committed {
+                return Ok(false);
+            }
+        }
+
+        Ok(true)
+    }
+
     fn save_projection_domain_snapshot_if_revision<T: Serialize>(
         &self,
         workspace_root: &Path,
@@ -470,51 +629,16 @@ impl Store {
     ) -> Result<bool> {
         let scope_key = workspace_scope_key(workspace_root)?;
         let snapshot_json = snapshot.map(serde_json::to_string).transpose()?;
-        let committed = self.with_named_write_transaction("save_projection_domain_snapshot", |tx| {
-            if let Some(expected) = expected {
-                let current = tx.query_row("SELECT revision FROM projection_heads WHERE scope_key = ?1 AND domain = ?2", params![scope_key.as_str(), domain], |row| row.get::<_, u64>(0)).optional()?.unwrap_or(0);
-                if current != expected.value() { return Ok(false); }
-            }
-            if domain == "skills" && ready {
-                self.replace_skill_source_projection_in_tx(&tx, &scope_key, source_records)?;
-            } else {
-                self.insert_skill_source_records_if_missing_for_workspace_in_tx(
-                    &tx,
-                    &scope_key,
-                    source_records,
-                )?;
-            }
-            if let Some(snapshot_json) = snapshot_json.as_deref() {
-                self.write_normalized_snapshot_json_in_tx(tx, &scope_key, domain, snapshot_json)?;
-            }
-            if ready {
-                if let Some(captured) = expected {
-                    tx.execute("UPDATE projection_dirty_resources SET generation = 0 WHERE scope_key = ?1 AND domain = ?2 AND generation <= ?3", params![scope_key.as_str(), domain, captured.value()])?;
-                    tx.execute("DELETE FROM projection_dirty_resources WHERE scope_key = ?1 AND domain = ?2 AND generation = 0 AND reconcile_generation = 0", params![scope_key.as_str(), domain])?;
-                }
-            }
-        let previous_revision = tx
-            .query_row(
-                "SELECT revision FROM projection_heads WHERE scope_key = ?1 AND domain = ?2",
-                params![scope_key.as_str(), domain],
-                |row| row.get::<_, u64>(0),
-            )
-            .optional()?
-            .unwrap_or(0);
-        self.finalize_projection_domain_in_tx(&tx, domain, &scope_key, entries, ready, error)?;
-        if domain == "skills" {
-            crate::logging::global().info(
-                "skill projection revision advanced",
-                serde_json::json!({
-                    "scopeKey": scope_key.as_str(),
-                    "previousRevision": previous_revision,
-                    "revision": previous_revision.saturating_add(1),
-                    "status": if ready { "ready" } else { "failed" },
-                }),
-            );
-        }
-        Ok(true)
-        })?;
+        let committed = self.save_scan_projection_in_batches(
+            &scope_key,
+            domain,
+            snapshot_json.as_deref(),
+            entries,
+            ready,
+            error,
+            source_records,
+            expected,
+        )?;
         if committed && domain == "skills" && ready {
             crate::logging::global().debug(
                 "skill projection persistence committed",
@@ -1029,34 +1153,6 @@ impl Store {
         Ok(())
     }
 
-    pub(in crate::storage) fn sync_normalized_snapshot_revision_in_tx(
-        &self,
-        tx: &Transaction<'_>,
-        scope_key: &ScopeKey,
-        domain: &str,
-    ) -> Result<()> {
-        let Some(revision) = tx
-            .query_row(
-                "SELECT revision FROM projection_heads
-                 WHERE scope_key = ?1 AND domain = ?2",
-                params![scope_key.as_str(), domain],
-                |row| row.get::<_, i64>(0),
-            )
-            .optional()?
-        else {
-            return Ok(());
-        };
-        tx.execute(
-            &format!(
-                "UPDATE {NORMALIZED_SNAPSHOT_TABLE}
-                 SET revision = ?1, updated_at = ?2
-                 WHERE scope_key = ?3 AND domain = ?4"
-            ),
-            params![revision, unix_now() as i64, scope_key.as_str(), domain],
-        )?;
-        Ok(())
-    }
-
     pub(in crate::storage) fn read_normalized_snapshot<T: for<'de> Deserialize<'de>>(
         &self,
         scope_key: &ScopeKey,
@@ -1140,89 +1236,6 @@ impl Store {
         Ok(entries)
     }
 
-    pub(in crate::storage) fn finalize_projection_domain_in_tx(
-        &self,
-        tx: &Transaction<'_>,
-        domain: &str,
-        scope_key: &ScopeKey,
-        entries: &[FsManifestEntry],
-        ready: bool,
-        error: Option<String>,
-    ) -> Result<()> {
-        let kinds = manifest_source_kinds(domain)?;
-        let delete_sql = format!(
-            "DELETE FROM fs_manifest
-             WHERE scope_key = ?1 AND source_kind IN ({})",
-            std::iter::repeat_n("?", kinds.len())
-                .enumerate()
-                .map(|(index, _)| format!("?{}", index + 2))
-                .collect::<Vec<_>>()
-                .join(", ")
-        );
-        let mut delete_params = vec![SqlValue::Text(scope_key.as_str().to_string())];
-        delete_params.extend(kinds.iter().map(|kind| SqlValue::Text((*kind).to_string())));
-        tx.execute(&delete_sql, params_from_iter(delete_params.iter()))?;
-        for entry in entries {
-            tx.execute(
-                "INSERT INTO fs_manifest (
-                    scope_key, source_kind, path, root, agent, scope, mtime_ns, size, inode, device,
-                    sha256, parser_version, last_seen_at, parse_status, resource_path
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
-                 ON CONFLICT(scope_key, source_kind, path) DO UPDATE SET
-                    root = excluded.root,
-                    agent = excluded.agent,
-                    scope = excluded.scope,
-                    mtime_ns = excluded.mtime_ns,
-                    size = excluded.size,
-                    inode = excluded.inode,
-                    device = excluded.device,
-                    sha256 = excluded.sha256,
-                    parser_version = excluded.parser_version,
-                    last_seen_at = excluded.last_seen_at,
-                    parse_status = excluded.parse_status,
-                    resource_path = excluded.resource_path",
-                params![
-                    scope_key.as_str(),
-                    entry.source_kind,
-                    entry.path.display().to_string(),
-                    entry.root.display().to_string(),
-                    entry.agent,
-                    entry.scope,
-                    entry.mtime_ns,
-                    entry.size,
-                    entry.inode,
-                    entry.device,
-                    entry.sha256,
-                    entry.parser_version,
-                    entry.last_seen_at,
-                    entry.parse_status,
-                    entry
-                        .resource_path
-                        .as_ref()
-                        .map(|path| path.to_string_lossy().into_owned()),
-                ],
-            )?;
-        }
-        self.set_projection_context_in_tx(
-            tx,
-            &scope_key,
-            domain,
-            if ready { "ready" } else { "failed" },
-            error,
-        )?;
-        let source_version = SourceVersion::new(PROJECTION_PARSER_VERSION)
-            .map_err(|error| anyhow::anyhow!(error))?;
-        advance_projection_head_in_tx(
-            tx,
-            &scope_key,
-            domain,
-            Some(&source_version),
-            if ready { "ready" } else { "failed" },
-        )?;
-        self.sync_normalized_snapshot_revision_in_tx(tx, &scope_key, domain)?;
-        Ok(())
-    }
-
     pub(in crate::storage) fn set_projection_context(
         &self,
         domain: &str,
@@ -1262,132 +1275,432 @@ impl Store {
         self.save_scan_for_workspace_with_revisions(workspace_root, report, Some(expected))
     }
 
+    fn save_scan_projection_in_batches(
+        &self,
+        scope_key: &ScopeKey,
+        domain: &str,
+        snapshot_json: Option<&str>,
+        entries: &[FsManifestEntry],
+        ready: bool,
+        error: Option<String>,
+        source_records: &[SkillSourceRecord],
+        expected: Option<Revision>,
+    ) -> Result<bool> {
+        // Keep the old revision visible while the derived manifest is rebuilt.
+        // Readers already treat `refreshing` as unavailable, so a failed batch
+        // cannot expose a half-written projection as fresh data.
+        let Some(revision) =
+            self.with_named_write_transaction("save_scan_projection_begin", |tx| {
+                let current = projection_revision_in_tx(tx, scope_key, domain)?;
+                if expected.is_some_and(|expected| expected != current) {
+                    return Ok(None);
+                }
+                self.write_projection_context_in_tx(tx, scope_key, domain, "refreshing", None)?;
+                Ok(Some(current))
+            })?
+        else {
+            return Ok(false);
+        };
+
+        loop {
+            let deleted =
+                self.with_named_write_transaction("save_scan_projection_delete_batch", |tx| {
+                    if !scan_revision_matches(tx, scope_key, domain, revision)? {
+                        return Ok(None);
+                    }
+                    let kinds = manifest_source_kinds(domain)?;
+                    let placeholders = std::iter::repeat_n("?", kinds.len())
+                        .enumerate()
+                        .map(|(index, _)| format!("?{}", index + 2))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    let sql = format!(
+                        "DELETE FROM fs_manifest
+                         WHERE rowid IN (
+                            SELECT rowid FROM fs_manifest
+                            WHERE scope_key = ?1 AND source_kind IN ({placeholders})
+                            LIMIT ?{}
+                         )",
+                        kinds.len() + 2
+                    );
+                    let mut values = vec![SqlValue::Text(scope_key.as_str().to_string())];
+                    values.extend(kinds.iter().map(|kind| SqlValue::Text((*kind).to_string())));
+                    values.push(SqlValue::Integer(SCAN_WRITE_BATCH_SIZE as i64));
+                    Ok(Some(tx.execute(&sql, params_from_iter(values.iter()))?))
+                })?;
+            let Some(deleted) = deleted else {
+                return Ok(false);
+            };
+            if deleted == 0 {
+                break;
+            }
+        }
+
+        for entries in entries.chunks(SCAN_WRITE_BATCH_SIZE) {
+            let committed =
+                self.with_named_write_transaction("save_scan_projection_write_batch", |tx| {
+                    if !scan_revision_matches(tx, scope_key, domain, revision)? {
+                        return Ok(false);
+                    }
+                    insert_fs_manifest_entries_in_tx(tx, scope_key, entries)?;
+                    Ok(true)
+                })?;
+            if !committed {
+                return Ok(false);
+            }
+        }
+
+        if domain == "skills"
+            && ready
+            && !self.replace_skill_source_projection_in_batches(
+                scope_key,
+                source_records,
+                revision,
+            )?
+        {
+            return Ok(false);
+        }
+        if domain == "skills" && !ready {
+            for records in source_records.chunks(SCAN_WRITE_BATCH_SIZE) {
+                let committed = self.with_named_write_transaction(
+                    "write_partial_skill_source_projection_batch",
+                    |tx| {
+                        if !scan_revision_matches(tx, scope_key, domain, revision)? {
+                            return Ok(false);
+                        }
+                        self.insert_skill_source_records_if_missing_for_workspace_in_tx(
+                            tx, scope_key, records,
+                        )?;
+                        Ok(true)
+                    },
+                )?;
+                if !committed {
+                    return Ok(false);
+                }
+            }
+        }
+
+        self.with_named_write_transaction("save_scan_projection_finalize", |tx| {
+            if !scan_revision_matches(tx, scope_key, domain, revision)? {
+                return Ok(false);
+            }
+            if let Some(snapshot_json) = snapshot_json {
+                self.write_normalized_snapshot_json_in_tx(tx, scope_key, domain, snapshot_json)?;
+            }
+            if ready {
+                if let Some(captured) = expected {
+                    tx.execute(
+                        "UPDATE projection_dirty_resources
+                         SET generation = 0
+                         WHERE scope_key = ?1 AND domain = ?2 AND generation <= ?3",
+                        params![scope_key.as_str(), domain, captured.value()],
+                    )?;
+                    tx.execute(
+                        "DELETE FROM projection_dirty_resources
+                         WHERE scope_key = ?1 AND domain = ?2
+                           AND generation = 0 AND reconcile_generation = 0",
+                        params![scope_key.as_str(), domain],
+                    )?;
+                }
+            }
+            self.write_projection_context_in_tx(
+                tx,
+                scope_key,
+                domain,
+                if ready { "ready" } else { "failed" },
+                error,
+            )?;
+            advance_projection_head_in_tx(
+                tx,
+                scope_key,
+                domain,
+                Some(
+                    &SourceVersion::new(PROJECTION_PARSER_VERSION)
+                        .map_err(|error| anyhow::anyhow!(error))?,
+                ),
+                if ready { "ready" } else { "failed" },
+            )?;
+            Ok(true)
+        })
+    }
+
+    fn save_scan_session_batch(
+        &self,
+        scope_key: &ScopeKey,
+        batch: &SessionScan,
+        scanned_at: u64,
+        sources: &PreparedSessionSources,
+        revision: Revision,
+    ) -> Result<Option<Revision>> {
+        self.with_named_write_transaction("save_scan_session_batch", |tx| {
+            if !scan_revision_matches(tx, scope_key, "sessions", revision)? {
+                return Ok(None);
+            }
+            self.save_sessions_at_with_scope_in_tx(tx, batch, scanned_at, scope_key, sources)?;
+            Ok(Some(projection_revision_in_tx(tx, scope_key, "sessions")?))
+        })
+    }
+
+    fn remove_scan_session_batch(
+        &self,
+        scope_key: &ScopeKey,
+        sessions: &[SessionRecord],
+        revision: Revision,
+    ) -> Result<Option<Revision>> {
+        self.with_named_write_transaction("remove_scan_session_batch", |tx| {
+            if !scan_revision_matches(tx, scope_key, "sessions", revision)? {
+                return Ok(None);
+            }
+            for session in sessions {
+                let identity = params![
+                    scope_key.as_str(),
+                    session.id,
+                    session.agent.label(),
+                    session.path.display().to_string(),
+                ];
+                session_search_storage::mark_session_key_pending_in_tx(tx, scope_key, session)?;
+                tx.execute(
+                    "DELETE FROM scoped_session_skill_links
+                     WHERE scope_key = ?1 AND session_id = ?2 AND agent = ?3 AND session_path = ?4",
+                    identity,
+                )?;
+                tx.execute(
+                    "DELETE FROM scoped_session_skill_index
+                     WHERE scope_key = ?1 AND session_id = ?2 AND agent = ?3 AND session_path = ?4",
+                    params![
+                        scope_key.as_str(),
+                        session.id,
+                        session.agent.label(),
+                        session.path.display().to_string(),
+                    ],
+                )?;
+                tx.execute(
+                    "DELETE FROM scoped_session_scan_sources
+                     WHERE scope_key = ?1 AND session_id = ?2 AND agent = ?3 AND session_path = ?4",
+                    params![
+                        scope_key.as_str(),
+                        session.id,
+                        session.agent.label(),
+                        session.path.display().to_string(),
+                    ],
+                )?;
+                tx.execute(
+                    "DELETE FROM scoped_sessions
+                     WHERE scope_key = ?1 AND id = ?2 AND agent = ?3 AND path = ?4",
+                    params![
+                        scope_key.as_str(),
+                        session.id,
+                        session.agent.label(),
+                        session.path.display().to_string(),
+                    ],
+                )?;
+            }
+            Ok(Some(
+                advance_projection_head_in_tx(tx, scope_key, "sessions", None, "ready")?.revision,
+            ))
+        })
+    }
+
+    fn save_scan_sessions_in_batches(
+        &self,
+        scope_key: &ScopeKey,
+        scan: &SessionScan,
+        scanned_at: u64,
+        expected: Option<Revision>,
+    ) -> Result<bool> {
+        let existing = if scan.warnings.is_empty() {
+            Some(self.list_sessions_for_scope(scope_key)?.sessions)
+        } else {
+            None
+        };
+        let Some(mut revision) =
+            self.with_named_write_transaction("save_scan_sessions_begin", |tx| {
+                let current = projection_revision_in_tx(tx, scope_key, "sessions")?;
+                if expected.is_some_and(|expected| expected != current) {
+                    return Ok(None);
+                }
+                Ok(Some(current))
+            })?
+        else {
+            return Ok(false);
+        };
+
+        for chunk in scan.sessions.chunks(SCAN_WRITE_BATCH_SIZE) {
+            let batch = SessionScan {
+                sessions: chunk.to_vec(),
+                // An empty warning means "complete scan" to the existing
+                // session writer, which would delete every row outside this
+                // chunk. Mark each intermediate batch explicitly non-final;
+                // final membership cleanup is handled below in bounded steps.
+                warnings: if scan.warnings.is_empty() {
+                    vec!["scan persistence batch is not final".to_string()]
+                } else {
+                    scan.warnings.clone()
+                },
+            };
+            let sources = self.prepare_session_sources(scope_key, chunk)?;
+            let Some(next) =
+                self.save_scan_session_batch(scope_key, &batch, scanned_at, &sources, revision)?
+            else {
+                return Ok(false);
+            };
+            revision = next;
+        }
+
+        if let Some(existing) = existing {
+            let incoming = scan
+                .sessions
+                .iter()
+                .map(scan_session_identity)
+                .collect::<HashSet<_>>();
+            let removed = existing
+                .into_iter()
+                .filter(|session| !incoming.contains(&scan_session_identity(session)))
+                .collect::<Vec<_>>();
+            for chunk in removed.chunks(SCAN_WRITE_BATCH_SIZE) {
+                let Some(next) = self.remove_scan_session_batch(scope_key, chunk, revision)? else {
+                    return Ok(false);
+                };
+                revision = next;
+            }
+        }
+
+        self.with_named_write_transaction("save_scan_sessions_finalize", |tx| {
+            if !scan_revision_matches(tx, scope_key, "sessions", revision)? {
+                return Ok(false);
+            }
+            let key = format!("sessions_last_scan_at:{}", scope_key.as_str());
+            tx.execute(
+                "INSERT INTO meta (key, value) VALUES (?1, ?2)
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                params![key, scanned_at.to_string()],
+            )?;
+            advance_projection_head_in_tx(tx, scope_key, "sessions", None, "ready")?;
+            Ok(true)
+        })
+    }
+
     fn save_scan_for_workspace_with_revisions(
         &self,
         workspace_root: &Path,
         report: &ScanReport,
         expected: Option<&BTreeMap<String, Revision>>,
     ) -> Result<bool> {
-        const DOMAINS: [&str; 6] = ["agents", "skills", "rules", "hooks", "mcp", "sessions"];
         if let Some(expected) = expected {
             anyhow::ensure!(
-                DOMAINS.iter().all(|domain| expected.contains_key(*domain)),
+                SCAN_PROJECTION_DOMAINS
+                    .iter()
+                    .all(|domain| expected.contains_key(*domain)),
                 "aggregate projection publication requires all six captured revisions"
             );
         }
         let workspace_root = canonical_workspace_root(workspace_root);
         let scope_key = workspace_scope_key(&workspace_root)?;
-        let skill_source_records = skill_source_records_from_scan(&report.skills);
-        let sources = self.prepare_session_sources(&scope_key, &report.sessions.sessions)?;
-        let snapshots = [
-            (
-                "agents",
-                &report.agents.warnings,
-                serde_json::to_string(&report.agents)?,
-            ),
-            (
-                "skills",
-                &report.skills.warnings,
-                serde_json::to_string(&report.skills)?,
-            ),
-            (
-                "rules",
-                &report.rules.warnings,
-                serde_json::to_string(&report.rules)?,
-            ),
-            (
-                "hooks",
-                &report.hooks.warnings,
-                serde_json::to_string(&report.hooks)?,
-            ),
-            (
-                "mcp",
-                &report.mcp.warnings,
-                serde_json::to_string(&report.mcp)?,
-            ),
-        ];
-        let prepared_projections = [
-            (
-                "agents",
-                report.agents.warnings.is_empty(),
-                report.agents.warnings.join("; "),
-            ),
-            (
-                "skills",
-                report.skills.warnings.is_empty(),
-                report.skills.warnings.join("; "),
-            ),
-            (
-                "rules",
-                report.rules.warnings.is_empty(),
-                report.rules.warnings.join("; "),
-            ),
-            (
-                "hooks",
-                report.hooks.warnings.is_empty(),
-                report.hooks.warnings.join("; "),
-            ),
-            (
-                "mcp",
-                report.mcp.warnings.is_empty(),
-                report.mcp.warnings.join("; "),
-            ),
-        ]
-        .into_iter()
-        .map(|(domain, ready, error)| {
-            let entries = match domain {
-                "agents" => manifest_entries_for_agents(&report.agents, &workspace_root),
-                "skills" => manifest_entries_for_skills(&report.skills, &workspace_root),
-                "rules" => manifest_entries_for_rules(&report.rules, &workspace_root),
-                "hooks" => manifest_entries_for_hooks(&report.hooks, &workspace_root),
-                "mcp" => manifest_entries_for_mcp(&report.mcp, &workspace_root),
-                _ => unreachable!("projection domain is validated by the match above"),
-            };
-            (domain, ready, error, entries)
-        })
-        .collect::<Vec<_>>();
-        self.with_named_write_transaction("save_scan_for_workspace", |tx| {
-            if let Some(expected) = expected {
-                for domain in DOMAINS {
-                    let current = tx.query_row("SELECT revision FROM projection_heads WHERE scope_key = ?1 AND domain = ?2", params![scope_key.as_str(), domain], |row| row.get::<_, u64>(0)).optional()?.unwrap_or(0);
-                    if current != expected[domain].value() { return Ok(false); }
-                }
-            }
-            if report.skills.warnings.is_empty() {
-                self.replace_skill_source_projection_in_tx(&tx, &scope_key, &skill_source_records)?;
-            }
-            for (domain, warnings, json) in &snapshots {
-                if warnings.is_empty() {
-                    self.write_normalized_snapshot_json_in_tx(tx, &scope_key, domain, json)?;
-                }
-            }
-            if report.sessions.warnings.is_empty() {
-                self.save_sessions_at_with_scope_in_tx(
-                    &tx,
-                    &report.sessions,
-                    unix_now(),
-                    &scope_key,
-                    &sources,
-                )?;
-            }
-            for (domain, ready, error, entries) in prepared_projections {
-                if ready {
-                    if let Some(expected) = expected {
-                        tx.execute("UPDATE projection_dirty_resources SET generation = 0 WHERE scope_key = ?1 AND domain = ?2 AND generation <= ?3", params![scope_key.as_str(), domain, expected[domain].value()])?;
-                        tx.execute("DELETE FROM projection_dirty_resources WHERE scope_key = ?1 AND domain = ?2 AND generation = 0 AND reconcile_generation = 0", params![scope_key.as_str(), domain])?;
+        if let Some(expected) = expected {
+            let preflight = self.with_named_write_transaction("save_scan_preflight", |tx| {
+                for domain in SCAN_PROJECTION_DOMAINS {
+                    if !scan_revision_matches(tx, &scope_key, domain, expected[domain])? {
+                        return Ok(false);
                     }
                 }
-                self.finalize_projection_domain_in_tx(
-                    &tx,
-                    domain,
-                    &scope_key,
-                    &entries,
-                    ready,
-                    (!ready).then_some(error),
-                )?;
+                Ok(true)
+            })?;
+            if !preflight {
+                return Ok(false);
             }
-            Ok(true)
-        })
+        }
+
+        let agents_ready = report.agents.warnings.is_empty();
+        if !self.save_scan_projection_in_batches(
+            &scope_key,
+            "agents",
+            agents_ready
+                .then(|| serde_json::to_string(&report.agents))
+                .transpose()?
+                .as_deref(),
+            &manifest_entries_for_agents(&report.agents, &workspace_root),
+            agents_ready,
+            (!agents_ready).then(|| report.agents.warnings.join("; ")),
+            &[],
+            expected.map(|expected| expected["agents"]),
+        )? {
+            return Ok(false);
+        }
+
+        let skills_ready = report.skills.warnings.is_empty();
+        if !self.save_scan_projection_in_batches(
+            &scope_key,
+            "skills",
+            skills_ready
+                .then(|| serde_json::to_string(&report.skills))
+                .transpose()?
+                .as_deref(),
+            &manifest_entries_for_skills(&report.skills, &workspace_root),
+            skills_ready,
+            (!skills_ready).then(|| report.skills.warnings.join("; ")),
+            &skill_source_records_from_scan(&report.skills),
+            expected.map(|expected| expected["skills"]),
+        )? {
+            return Ok(false);
+        }
+
+        let rules_ready = report.rules.warnings.is_empty();
+        if !self.save_scan_projection_in_batches(
+            &scope_key,
+            "rules",
+            rules_ready
+                .then(|| serde_json::to_string(&report.rules))
+                .transpose()?
+                .as_deref(),
+            &manifest_entries_for_rules(&report.rules, &workspace_root),
+            rules_ready,
+            (!rules_ready).then(|| report.rules.warnings.join("; ")),
+            &[],
+            expected.map(|expected| expected["rules"]),
+        )? {
+            return Ok(false);
+        }
+
+        let hooks_ready = report.hooks.warnings.is_empty();
+        if !self.save_scan_projection_in_batches(
+            &scope_key,
+            "hooks",
+            hooks_ready
+                .then(|| serde_json::to_string(&report.hooks))
+                .transpose()?
+                .as_deref(),
+            &manifest_entries_for_hooks(&report.hooks, &workspace_root),
+            hooks_ready,
+            (!hooks_ready).then(|| report.hooks.warnings.join("; ")),
+            &[],
+            expected.map(|expected| expected["hooks"]),
+        )? {
+            return Ok(false);
+        }
+
+        let mcp_ready = report.mcp.warnings.is_empty();
+        if !self.save_scan_projection_in_batches(
+            &scope_key,
+            "mcp",
+            mcp_ready
+                .then(|| serde_json::to_string(&report.mcp))
+                .transpose()?
+                .as_deref(),
+            &manifest_entries_for_mcp(&report.mcp, &workspace_root),
+            mcp_ready,
+            (!mcp_ready).then(|| report.mcp.warnings.join("; ")),
+            &[],
+            expected.map(|expected| expected["mcp"]),
+        )? {
+            return Ok(false);
+        }
+
+        self.save_scan_sessions_in_batches(
+            &scope_key,
+            &report.sessions,
+            unix_now(),
+            expected.map(|expected| expected["sessions"]),
+        )
     }
 
     pub fn upsert_fs_manifest(&self, entry: &FsManifestEntry) -> Result<()> {

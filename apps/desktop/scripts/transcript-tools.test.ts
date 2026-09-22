@@ -3,6 +3,8 @@ import test from "node:test";
 import {
   collectCursorItemWithTimestamp,
   extractToolCommand,
+  groupTranscriptItems,
+  TranscriptGroupType,
 } from "../src/lib/transcript.ts";
 import type { TranscriptItem } from "../src/lib/transcript.ts";
 
@@ -64,4 +66,37 @@ test("serializes generic tool arguments for other transcript formats", () => {
     JSON.parse(extractToolCommand({ name: "web_search", action: { type: "search", query: "Cursor transcript" } })),
     { type: "search", query: "Cursor transcript" },
   );
+});
+
+test("groups Codex exec calls with adjacent reasoning", () => {
+  const reasoningBefore: TranscriptItem = { type: "reasoning", body: "inspect the repository" };
+  const firstCommand: TranscriptItem = { type: "tool", body: "pwd", tag: "exec", command: "pwd" };
+  const reasoningAfter: TranscriptItem = { type: "reasoning", body: "read the relevant file" };
+  const secondCommand: TranscriptItem = { type: "tool", body: "sed", tag: "exec", command: "sed -n '1,20p' file" };
+  const assistant: TranscriptItem = { type: "assistant", body: "Done" };
+
+  const grouped = groupTranscriptItems([reasoningBefore, firstCommand, reasoningAfter, secondCommand, assistant]);
+
+  assert.equal(grouped.length, 2);
+  assert.equal(grouped[0].type, TranscriptGroupType.ToolGroup);
+  assert.deepEqual((grouped[0] as { tools: TranscriptItem[] }).tools, [
+    reasoningBefore,
+    firstCommand,
+    reasoningAfter,
+    secondCommand,
+  ]);
+  assert.equal(grouped[1], assistant);
+});
+
+test("keeps standalone reasoning and non-exec tools unchanged", () => {
+  const reasoning: TranscriptItem = { type: "reasoning", body: "no command follows" };
+  const read: TranscriptItem = { type: "tool", body: "read", tag: "Read" };
+  const write: TranscriptItem = { type: "tool", body: "write", tag: "Write" };
+
+  const grouped = groupTranscriptItems([reasoning, read, write]);
+
+  assert.equal(grouped.length, 2);
+  assert.equal(grouped[0], reasoning);
+  assert.equal(grouped[1].type, TranscriptGroupType.ToolGroup);
+  assert.deepEqual((grouped[1] as { tools: TranscriptItem[] }).tools, [read, write]);
 });

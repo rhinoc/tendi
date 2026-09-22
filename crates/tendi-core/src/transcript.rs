@@ -345,6 +345,30 @@ fn transcript_boundary_hash(path: &Path, offset: u64) -> Result<u64> {
     }))
 }
 
+fn transcript_source_identity_append_compatible(
+    path: &Path,
+    previous: &TranscriptSourceIdentity,
+    current: &TranscriptSourceIdentity,
+) -> Result<bool> {
+    if previous.device != current.device
+        || previous.inode != current.inode
+        || previous.prefix_len > current.prefix_len
+    {
+        return Ok(false);
+    }
+    if previous.prefix_len == current.prefix_len {
+        return Ok(previous.prefix_hash == current.prefix_hash);
+    }
+
+    let mut file = fs::File::open(path)?;
+    let mut prefix = vec![0u8; previous.prefix_len];
+    file.read_exact(&mut prefix)?;
+    let prefix_hash = prefix.iter().fold(0xcbf29ce484222325u64, |hash, byte| {
+        (hash ^ u64::from(*byte)).wrapping_mul(0x100000001b3)
+    });
+    Ok(prefix_hash == previous.prefix_hash)
+}
+
 #[cfg(unix)]
 fn transcript_file_identity(metadata: &fs::Metadata) -> (u64, u64) {
     use std::os::unix::fs::MetadataExt;
@@ -503,11 +527,19 @@ fn parse_transcript_page_with_snapshot(
                 || cursor.source_size != snapshot.size
                 || transcript_boundary_hash(path, cursor.offset)? != cursor.boundary_hash
         } else {
-            cursor.source != source.identity
-                || cursor.offset > source.size
-                || cursor.source_size != source.size
-                || cursor.source_modified_ns != source.modified_ns
-                || transcript_boundary_hash(path, cursor.offset)? != cursor.boundary_hash
+            // Live agent transcripts grow by appending complete JSONL records. Keep the
+            // cursor valid when the consumed prefix is unchanged so pagination can follow
+            // the live tail without rescanning from the beginning.
+            let append_compatible = transcript_source_identity_append_compatible(
+                path,
+                &cursor.source,
+                &source.identity,
+            )? && cursor.offset <= source.size
+                && source.size >= cursor.source_size
+                && (source.size > cursor.source_size
+                    || source.modified_ns == cursor.source_modified_ns)
+                && transcript_boundary_hash(path, cursor.offset)? == cursor.boundary_hash;
+            !append_compatible
         }
     } else {
         search_snapshot.is_some_and(|snapshot| {
@@ -1520,7 +1552,7 @@ fn collect_shared_format_item_with_timestamp(
                     }
                     .to_string(),
                 ),
-                timestamp.as_deref().map(compact_time),
+                timestamp,
             );
         }
         return;
@@ -1529,7 +1561,7 @@ fn collect_shared_format_item_with_timestamp(
         return;
     }
 
-    let time = timestamp.as_deref().map(compact_time);
+    let time = timestamp.clone();
     let content = value
         .pointer("/message/content")
         .or_else(|| value.get("content"))
@@ -2157,13 +2189,24 @@ fn truncate_text(value: &str, limit: usize) -> String {
     text
 }
 
-pub(crate) fn compact_time(value: &str) -> String {
+pub fn compact_time(value: &str) -> String {
     value
         .split('T')
         .nth(1)
         .and_then(|time| time.get(0..5))
         .unwrap_or(value)
         .to_string()
+}
+
+pub fn compact_local_time(value: &str) -> String {
+    chrono::DateTime::parse_from_rfc3339(value)
+        .map(|timestamp| {
+            timestamp
+                .with_timezone(&chrono::Local)
+                .format("%H:%M")
+                .to_string()
+        })
+        .unwrap_or_else(|_| compact_time(value))
 }
 
 #[cfg(test)]

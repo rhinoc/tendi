@@ -45,6 +45,7 @@ type UpdateFile = {
   beforeExists: boolean;
   incomingExists: boolean;
   status: string;
+  reason?: string | null;
 };
 
 type UpdateFileSource = {
@@ -57,6 +58,7 @@ type UpdateFileSource = {
   before_exists?: boolean;
   incoming_exists?: boolean;
   status?: string;
+  reason?: string | null;
 };
 
 function normalizeUpdateFile(file: UpdateFileSource, allowPathResolutionKey: boolean): UpdateFile | null {
@@ -76,6 +78,7 @@ function normalizeUpdateFile(file: UpdateFileSource, allowPathResolutionKey: boo
     beforeExists: file.before_exists ?? file.before != null,
     incomingExists: file.incoming_exists ?? file.incoming != null,
     status: file.status ?? "",
+    reason: file.reason ?? null,
   };
 }
 
@@ -119,6 +122,12 @@ function fileResolutionDescription(file: UpdateFile) {
   if (!file.beforeExists && file.incomingExists) {
     return "Deleted locally, modified remotely";
   }
+  if (file.status === "unavailable") {
+    return "Choose which version to keep";
+  }
+  if (file.status === "binary") {
+    return "Binary file cannot be previewed";
+  }
   return null;
 }
 
@@ -146,6 +155,55 @@ function isUnresolvedFile(file: UpdateFile, resolutions: Record<string, string>)
     || (file.status !== "binary" && hasUnresolvedConflictMarkers(content));
 }
 
+function unavailableReason(file: UpdateFile) {
+  return file.reason?.trim() || "Tendi cannot calculate a three-way merge for this file.";
+}
+
+function skillUpdateDisplayPath(path: string) {
+  return path.startsWith("skills/") ? path.slice("skills/".length) : path;
+}
+
+function UnavailableFileState({ file }: { file: UpdateFile }) {
+  const [side, setSide] = useState<"local" | "update">(file.beforeExists ? "local" : "update");
+  useEffect(() => setSide(file.beforeExists ? "local" : "update"), [file.beforeExists, file.resolutionKey]);
+  const showingLocal = side === "local" && file.beforeExists;
+  const content = showingLocal ? file.before : file.incoming;
+
+  return (
+    <div className="skillUpdateUnavailableState" role="status">
+      <div className="skillUpdateUnavailableHeader">
+        <div className="skillUpdateUnavailableMessage">
+          <strong>Automatic merge unavailable</strong>
+          <p>{unavailableReason(file)}</p>
+        </div>
+        <div className="skillUpdateUnavailableSources" role="group" aria-label="Preview source">
+          <button
+            type="button"
+            className={showingLocal ? "selected" : ""}
+            aria-pressed={showingLocal}
+            disabled={!file.beforeExists}
+            onClick={() => setSide("local")}
+          >
+            Local
+          </button>
+          <button
+            type="button"
+            className={!showingLocal ? "selected" : ""}
+            aria-pressed={!showingLocal}
+            disabled={!file.incomingExists}
+            onClick={() => setSide("update")}
+          >
+            Update
+          </button>
+        </div>
+      </div>
+      <pre className="skillUpdateUnavailableContent" data-selectable-text>
+        {content || "No content available."}
+      </pre>
+    </div>
+  );
+}
+
 function SkillUpdateDiffPreview({
   files,
   resolutions,
@@ -167,22 +225,30 @@ function SkillUpdateDiffPreview({
     setSelectedPath((current) => files.some((file) => file.path === current) ? current : (files[0]?.path ?? ""));
   }, [files]);
   const selected = useMemo(() => files.find((file) => file.path === selectedPath) ?? files[0], [files, selectedPath]);
-  const selectedContent = selected && selected.status !== "binary"
+  const selectedContent = selected && selected.status !== "binary" && selected.status !== "unavailable"
     ? resolvedUpdateContent(selected, resolutions)
     : selected && resolutions[selected.resolutionKey] === KEEP_LOCAL_RESOLUTION
       ? selected.before
       : selected && resolutions[selected.resolutionKey] === USE_UPDATE_RESOLUTION
         ? selected.incoming
         : "";
-  const selectedIsMergeStatus = selected ? isMergeResolutionStatus(selected.status) : false;
+  const selectedIsConflict = selected?.status === "conflict";
   const selectedIsFileLevelResolution = selected ? isFileLevelResolution(selected) : false;
   const selectedFileResolutionDescription = selected ? fileResolutionDescription(selected) : null;
+  const displayPathByPath = useMemo(
+    () => new Map(files.map((file) => [file.path, skillUpdateDisplayPath(file.path)])),
+    [files],
+  );
+  const pathByDisplayPath = useMemo(
+    () => new Map([...displayPathByPath].map(([path, displayPath]) => [displayPath, path])),
+    [displayPathByPath],
+  );
   const rows = useMemo(
     () => buildFileTreeRows(
-      files.map((file) => ({ name: file.path, kind: "file" })),
+      files.map((file) => ({ name: displayPathByPath.get(file.path) ?? file.path, kind: "file" })),
       collapsedFolders,
     ),
-    [collapsedFolders, files],
+    [collapsedFolders, displayPathByPath, files],
   );
   const filesByPath = useMemo(
     () => new Map(files.map((file) => [file.path, file])),
@@ -213,7 +279,7 @@ function SkillUpdateDiffPreview({
       {unresolvedFiles.length > 0 ? (
         <div className="skillUpdateDiffToolbar" role="toolbar" aria-label="Bulk conflict resolution">
           <span className="skillUpdateDiffToolbarLabel">
-            {unresolvedFiles.length}/{resolutionCount} conflicts to resolve
+            {unresolvedFiles.length}/{resolutionCount} {unresolvedFiles.some((file) => file.status !== "conflict") ? "merge issues" : "conflicts"} to resolve
           </span>
           <div className="skillUpdateDiffToolbarActions">
             <DialogActionButton variant="secondary" onClick={() => onResolveAll(KEEP_LOCAL_RESOLUTION)}>
@@ -235,16 +301,16 @@ function SkillUpdateDiffPreview({
         >
           <FileTree
             items={items}
-            selectedId={selected.path}
+            selectedId={skillUpdateDisplayPath(selected.path)}
             onItemActivate={(item) => {
               if (item.kind === "folder") toggleFolder(item.id);
-              else setSelectedPath(item.id);
+              else setSelectedPath(pathByDisplayPath.get(item.id) ?? item.id);
             }}
             onItemToggle={(item) => {
               if (item.kind === "folder") toggleFolder(item.id);
             }}
             renderTrailing={(item) => {
-              const updateFile = filesByPath.get(item.id);
+              const updateFile = filesByPath.get(pathByDisplayPath.get(item.id) ?? item.id);
               if (!updateFile || !hasFileDiff(updateFile)) return null;
               const needsResolution = isMergeResolutionStatus(updateFile.status);
               return (
@@ -261,20 +327,28 @@ function SkillUpdateDiffPreview({
         <ResizeSeparator className="skillUpdateDiffResizeHandle" />
         <Panel className="skillUpdateDiffEditor" minSize="45%">
           <div className="skillUpdateDiffEditorBody">
-            <CodeMirrorFileEditor
-              content={selectedContent}
-              language={isYamlPath(selected.path) ? CodeMirrorLanguage.Yaml : isJsonPath(selected.path) ? CodeMirrorLanguage.Json : undefined}
-              originalContent={selected.base}
-              showDiff={!selectedIsMergeStatus}
-              showConflictMarkers={selectedIsMergeStatus && selected.status !== "binary"}
-              readOnly={!selectedIsMergeStatus || selected.status === "binary"}
-              onChange={selectedIsMergeStatus && selected.status !== "binary"
-                ? (content) => onResolve(selected, content)
-                : undefined}
-              onConflictResolve={selectedIsMergeStatus && selected.status !== "binary"
-                ? (content) => onResolve(selected, content)
-                : undefined}
-            />
+            {selected.status === "unavailable" ? (
+              <UnavailableFileState file={selected} />
+            ) : selected.status === "binary" ? (
+              <div className="skillUpdateBinaryState" role="status">
+                Binary file cannot be previewed. Choose which file to keep below.
+              </div>
+            ) : (
+              <CodeMirrorFileEditor
+                content={selectedContent}
+                language={isYamlPath(selected.path) ? CodeMirrorLanguage.Yaml : isJsonPath(selected.path) ? CodeMirrorLanguage.Json : undefined}
+                originalContent={selected.base}
+                showDiff={!selectedIsConflict}
+                showConflictMarkers={selectedIsConflict}
+                readOnly={!selectedIsConflict}
+                onChange={selectedIsConflict
+                  ? (content) => onResolve(selected, content)
+                  : undefined}
+                onConflictResolve={selectedIsConflict
+                  ? (content) => onResolve(selected, content)
+                  : undefined}
+              />
+            )}
             {selectedIsFileLevelResolution ? (
               <div className="skillMergeResolutionBar" role="group" aria-label="Resolve file conflict">
                 {selectedFileResolutionDescription ? <span>{selectedFileResolutionDescription}</span> : null}

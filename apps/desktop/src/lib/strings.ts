@@ -1,4 +1,4 @@
-import { timestampMs } from "./time.ts";
+import { displayDateTimeParts, timestampMs } from "./time.ts";
 
 export function basename(value: unknown): string {
   return `${value ?? ""}`.split("/").filter(Boolean).pop() ?? "";
@@ -20,45 +20,18 @@ export function formatUserPath(value: unknown): string {
   return homePrefix ? `~${path.slice(homePrefix[0].length)}` : path;
 }
 
-function parseDateTimeParts(value: unknown) {
-  const text = `${value ?? ""}`.trim();
-  if (!text) return null;
-
-  const partsFromDate = (date: Date) => {
-    if (Number.isNaN(date.getTime())) return null;
-    return {
-      year: date.getFullYear(),
-      month: date.getMonth() + 1,
-      day: date.getDate(),
-      hour: String(date.getHours()).padStart(2, "0"),
-      minute: String(date.getMinutes()).padStart(2, "0"),
-    };
-  };
-
-  if (/^\d+$/.test(text)) return partsFromDate(new Date(Number(text) * 1000));
-
-  const match = text.match(/^(\d{4})-(\d{2})-(\d{2})(?:[T ](\d{2}):(\d{2})(?::(\d{2})(?:\.\d+)?)?(Z|[+-]\d{2}:?\d{2})?)?/);
-  if (!match) return null;
-  const [, year, month, day, hour = "00", minute = "00", second = "00", zone] = match;
-
-  if (zone) {
-    const normalized = text.replace(/([+-]\d{2})(\d{2})$/, "$1:$2");
-    return partsFromDate(new Date(normalized));
-  }
-
-  return partsFromDate(new Date(Number(year), Number(month) - 1, Number(day), Number(hour), Number(minute), Number(second)));
-}
-
 export function compactDateTime(value: unknown, options: { year?: boolean } = {}): string {
-  const parts = parseDateTimeParts(value);
+  const parts = displayDateTimeParts(value);
   if (parts) {
     const { year, month, day, hour, minute } = parts;
+    const hourLabel = String(hour).padStart(2, "0");
+    const minuteLabel = String(minute).padStart(2, "0");
     if (options.year) {
       const monthLabel = String(month).padStart(2, "0");
       const dayLabel = String(day).padStart(2, "0");
-      return `${year}-${monthLabel}-${dayLabel} ${hour}:${minute}`;
+      return `${year}-${monthLabel}-${dayLabel} ${hourLabel}:${minuteLabel}`;
     }
-    return `${month}/${day} ${hour}:${minute}`;
+    return `${month}/${day} ${hourLabel}:${minuteLabel}`;
   }
 
   const text = `${value ?? ""}`.trim();
@@ -90,7 +63,7 @@ export function formatRelativeTime(value: unknown, now = Date.now()): string {
 }
 
 export function dayGroupKey(value: unknown): string {
-  const parts = parseDateTimeParts(value);
+  const parts = displayDateTimeParts(value);
   if (!parts) return "";
   const { year, month, day } = parts;
   return `${year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;

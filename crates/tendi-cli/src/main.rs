@@ -1515,6 +1515,10 @@ fn main() -> Result<()> {
                 if dry_run {
                     return Ok(());
                 }
+                if !plan.can_apply() {
+                    println!("No applicable updates.");
+                    return Ok(());
+                }
                 if !yes && !confirm("Apply these updates? [y/N] ")? {
                     println!("aborted");
                     return Ok(());
@@ -2259,7 +2263,11 @@ fn print_transcript(items: &[tendi_core::TranscriptItem]) -> Result<()> {
             stdout,
             "{:<9} {:<8} {:<16} {}",
             item.kind,
-            item.time.as_deref().unwrap_or("-"),
+            item.time
+                .as_deref()
+                .map(tendi_core::transcript::compact_local_time)
+                .as_deref()
+                .unwrap_or("-"),
             item.tag.as_deref().unwrap_or("-"),
             item.body.replace('\n', " ")
         )?;

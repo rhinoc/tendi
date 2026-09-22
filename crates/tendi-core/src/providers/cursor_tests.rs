@@ -45,7 +45,7 @@ fn parses_embedded_cursor_timestamp_for_transcript_items() {
 
     assert_eq!(items.len(), 1);
     assert_eq!(items[0].body, "Why did sending fail?");
-    assert_eq!(items[0].time.as_deref(), Some("23:01"));
+    assert_eq!(items[0].time.as_deref(), Some("2026-08-27T23:01:00+08:00"));
 }
 
 #[test]

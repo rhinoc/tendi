@@ -310,6 +310,78 @@ fn git_worktree_matching_remote_revision_is_not_an_update() {
 }
 
 #[test]
+fn materialized_update_uses_matching_intermediate_source_revision() {
+    let root = temp_dir("tendi-materialized-intermediate-base-test");
+    let repo = root.join("repo");
+    let source_skill = repo.join("skills/demo");
+    let installed_skill = root.join("installed/demo");
+    fs::create_dir_all(&source_skill).unwrap();
+    fs::create_dir_all(source_skill.join("agents")).unwrap();
+    fs::write(source_skill.join("SKILL.md"), "---\nname: demo\n---\nold\n").unwrap();
+    fs::write(source_skill.join("guide.md"), "old guide\n").unwrap();
+    fs::write(
+        source_skill.join("agents/openai.yaml"),
+        "policy:\n  allow_implicit_invocation: true\n",
+    )
+    .unwrap();
+    run_test_git(&repo, &["init", "--quiet"]);
+    run_test_git(&repo, &["config", "user.email", "tendi@example.test"]);
+    run_test_git(&repo, &["config", "user.name", "Tendi Test"]);
+    run_test_git(&repo, &["add", "."]);
+    run_test_git(&repo, &["commit", "--quiet", "-m", "old"]);
+    let old_revision = run_test_git(&repo, &["rev-parse", "HEAD"]);
+
+    fs::write(
+        source_skill.join("SKILL.md"),
+        "---\nname: demo\n---\nintermediate\n",
+    )
+    .unwrap();
+    fs::write(source_skill.join("guide.md"), "intermediate guide\n").unwrap();
+    run_test_git(&repo, &["commit", "--quiet", "-am", "intermediate"]);
+    let intermediate_revision = run_test_git(&repo, &["rev-parse", "HEAD"]);
+
+    fs::write(
+        source_skill.join("SKILL.md"),
+        "---\nname: demo\n---\nlatest\n",
+    )
+    .unwrap();
+    fs::write(source_skill.join("guide.md"), "latest guide\n").unwrap();
+    run_test_git(&repo, &["commit", "--quiet", "-am", "latest"]);
+    let latest_revision = run_test_git(&repo, &["rev-parse", "HEAD"]);
+
+    fs::create_dir_all(&installed_skill).unwrap();
+    fs::write(
+        installed_skill.join("SKILL.md"),
+        "---\nname: demo\ndisable-model-invocation: true\n---\nintermediate\n",
+    )
+    .unwrap();
+    fs::write(installed_skill.join("guide.md"), "intermediate guide\n").unwrap();
+    fs::create_dir_all(installed_skill.join("agents")).unwrap();
+    fs::write(
+        installed_skill.join("agents/openai.yaml"),
+        "policy:\n  allow_implicit_invocation: false\n",
+    )
+    .unwrap();
+    fs::write(installed_skill.join("local.md"), "local extra\n").unwrap();
+
+    let mut path = test_skill_path(
+        installed_skill.to_str().unwrap(),
+        AgentKind::Shared,
+        SkillVisibility::Auto,
+        None,
+    );
+    path.source_version = Some(old_revision);
+    path.source_relative_path = Some("skills/demo/SKILL.md".to_string());
+
+    assert_eq!(
+        super::materialized_source_revision_for_update(&repo, &path, &latest_revision),
+        Some(intermediate_revision)
+    );
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
 fn materialized_remote_change_check_ignores_unrelated_repository_commits() {
     let root = temp_dir("tendi-materialized-remote-change-test");
     let repo = root.join("repo");
@@ -374,6 +446,21 @@ fn three_way_merge_reports_same_region_conflicts() {
 }
 
 #[test]
+fn three_way_merge_reports_multiple_conflict_regions_as_conflict() {
+    let merged = super::merge_text(
+        Some("a: old\nb: old\nc: old\nd: old\n"),
+        Some("a: local\nb: old\nc: local\nd: old\n"),
+        Some("a: remote\nb: old\nc: remote\nd: old\n"),
+    );
+
+    assert_eq!(merged.status, "conflict");
+    assert!(merged.reason.is_none());
+    let content = merged.content.unwrap();
+    assert_eq!(content.matches("<<<<<<< local").count(), 2);
+    assert_eq!(content.matches(">>>>>>> remote").count(), 2);
+}
+
+#[test]
 fn update_application_refuses_a_stale_local_file() {
     let root = temp_dir("tendi-update-stale-file-test");
     fs::create_dir_all(&root).unwrap();
@@ -393,6 +480,7 @@ fn update_application_refuses_a_stale_local_file() {
         incoming_exists: true,
         after_exists: true,
         status: "remote".to_string(),
+        reason: None,
     };
 
     let error = apply_update_files(&root, &[file]).unwrap_err();
@@ -798,6 +886,7 @@ fn git_update_files_roll_back_previous_files_when_a_later_change_is_stale() {
             incoming_exists: true,
             after_exists: true,
             status: "remote".to_string(),
+            reason: None,
         },
         GitUpdateFile {
             path: "second.md".to_string(),
@@ -813,6 +902,7 @@ fn git_update_files_roll_back_previous_files_when_a_later_change_is_stale() {
             incoming_exists: true,
             after_exists: true,
             status: "remote".to_string(),
+            reason: None,
         },
     ];
 
@@ -847,6 +937,7 @@ fn binary_resolution_writes_selected_bytes() {
         incoming_exists: true,
         after_exists: false,
         status: "binary".to_string(),
+        reason: None,
     };
     super::resolve_update_file(
         &mut file,
@@ -881,6 +972,7 @@ fn file_resolution_can_accept_update_deletion() {
         incoming_exists: false,
         after_exists: false,
         status: "unavailable".to_string(),
+        reason: Some("reason".to_string()),
     };
     super::resolve_update_file(
         &mut file,
@@ -912,6 +1004,7 @@ fn merge_issue_resolution_uses_selected_side_content() {
             path: PathBuf::from("demo/SKILL.md"),
             resolution_key: "demo:SKILL.md".to_string(),
             status: "unavailable".to_string(),
+            reason: Some("reason".to_string()),
             before: "local\n".to_string(),
             base: String::new(),
             incoming: incoming.clone(),
@@ -2293,6 +2386,60 @@ fn remote_update_check_does_not_touch_fetch_head() {
 }
 
 #[test]
+fn remote_update_check_delegates_repository_resources_to_report_workers() {
+    let root = temp_dir("tendi-update-check-resource-delegation");
+    let remote = root.join("remote");
+    let skill_dir = root.join("installed/skills/demo");
+    fs::create_dir_all(remote.join("skills/demo")).unwrap();
+    fs::create_dir_all(&skill_dir).unwrap();
+    fs::write(
+        remote.join("skills/demo/SKILL.md"),
+        "---\nname: demo\ndescription: one\n---\n\none\n",
+    )
+    .unwrap();
+    fs::write(
+        skill_dir.join("SKILL.md"),
+        "---\nname: demo\ndescription: one\n---\n\none\n",
+    )
+    .unwrap();
+    run_test_git(&remote, &["init", "--quiet"]);
+    run_test_git(&remote, &["config", "user.email", "tendi@example.test"]);
+    run_test_git(&remote, &["config", "user.name", "Tendi Test"]);
+    run_test_git(&remote, &["add", "."]);
+    run_test_git(&remote, &["commit", "--quiet", "-m", "one"]);
+    let current_version = run_test_git(&remote, &["rev-parse", "HEAD"]);
+
+    let source = remote.display().to_string();
+    let checkout = super::git_checkout_for_source(&source, None, super::git::never_cancelled())
+        .expect("create persistent source checkout");
+
+    fs::write(
+        remote.join("skills/demo/SKILL.md"),
+        "---\nname: demo\ndescription: two\n---\n\ntwo\n",
+    )
+    .unwrap();
+    run_test_git(&remote, &["add", "."]);
+    run_test_git(&remote, &["commit", "--quiet", "-m", "two"]);
+
+    let mut resources = super::git::mutation_resource_paths(&checkout).unwrap();
+    resources.push(checkout.clone());
+    let _outer_resources = crate::coordination::acquire_file_resources(&resources).unwrap();
+
+    let mut skill = test_skill("demo", "Demo", &skill_dir);
+    let path = &mut skill.paths[0];
+    path.source_kind = "git".to_string();
+    path.source = Some(source);
+    path.source_version = Some(current_version);
+    path.source_relative_path = Some("skills/demo".to_string());
+    path.update_status = "checkable".to_string();
+
+    let updates = super::check_skill_updates_for_skills(&[&skill], super::git::never_cancelled());
+
+    assert_eq!(updates[0].status, "update-available");
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn up_to_date_remote_check_does_not_fetch_remote_objects() {
     let root = temp_dir("tendi-update-check-ls-remote");
     let remote = root.join("remote");
@@ -2925,6 +3072,57 @@ fn merge_skill_manifest_prefers_local_visibility_for_remote_visibility_change() 
     let file = files.first().expect("merged skill file");
     assert_eq!(file.status, "remote");
     assert_eq!(file.after, expected);
+}
+
+#[test]
+fn semantically_equal_skill_manifest_formatting_is_not_a_conflict() {
+    let base = "---\nname: demo\ndescription: Old\n---\n\n# same\n";
+    let local = "---\nname: demo\ndescription: New\nmetadata:\n  bins:\n  - demo\ndisable-model-invocation: true\n---\n\n# same\n";
+    let incoming =
+        "---\nname: demo\ndescription: \"New\"\nmetadata:\n  bins: [demo]\n---\n\n# same\n";
+
+    let files = merge_file_maps(
+        Some(BTreeMap::from([(
+            "SKILL.md".to_string(),
+            base.as_bytes().to_vec(),
+        )])),
+        BTreeMap::from([("SKILL.md".to_string(), local.as_bytes().to_vec())]),
+        BTreeMap::from([("SKILL.md".to_string(), incoming.as_bytes().to_vec())]),
+        "",
+        "/tmp/demo",
+        SkillVisibility::Manual,
+        AgentKind::Shared,
+    );
+
+    let file = files.first().expect("remote skill manifest update");
+    assert_eq!(file.status, "remote");
+    assert!(!file.after.contains("<<<<<<< local"));
+    assert!(file.after.contains("disable-model-invocation: true"));
+}
+
+#[test]
+fn unavailable_skill_file_does_not_claim_a_merged_content() {
+    let files = merge_file_maps(
+        None,
+        BTreeMap::from([("SKILL.md".to_string(), b"local\n".to_vec())]),
+        BTreeMap::from([("SKILL.md".to_string(), b"incoming\n".to_vec())]),
+        "",
+        "/tmp/demo",
+        SkillVisibility::Auto,
+        AgentKind::Shared,
+    );
+
+    let file = files.first().expect("unavailable skill file");
+    assert_eq!(file.status, "unavailable");
+    assert!(file.after.is_empty());
+    assert!(file.after_bytes.is_none());
+    assert!(!file.after_exists);
+    assert!(
+        file.reason
+            .as_deref()
+            .unwrap()
+            .contains("previous source version")
+    );
 }
 
 #[test]
@@ -3609,7 +3807,7 @@ fn project_skills_cli_lock_imports_once_into_source_database() {
     assert_eq!(path.source_version.as_deref(), Some("content-hash"));
     assert_eq!(path.update_status, "tracked");
 
-    let records = store.skill_source_records().unwrap();
+    let records = store.skill_source_records_for_workspace(&root).unwrap();
     let imported = records
         .iter()
         .filter(|record| record.skill_name == "demo")

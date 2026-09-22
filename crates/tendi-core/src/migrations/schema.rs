@@ -1,7 +1,15 @@
-use anyhow::Result;
+use anyhow::{Context, Result, bail};
 
-use crate::storage::STORAGE_SCHEMA_VERSION;
-use rusqlite::Connection;
+use crate::storage::{ANALYTICS_JSON_ENCODING, STORAGE_SCHEMA_VERSION, compress_analytics_json};
+use rusqlite::{Connection, OptionalExtension, params, types::Value};
+
+pub(super) const SESSION_LIST_MIGRATION_KEY: &str = "storage.scoped_session_list.v2";
+pub(super) const ANALYTICS_MIGRATION_KEY: &str = "storage.analytics_json.v2";
+pub(super) const SESSION_SEARCH_FTS_MIGRATION_KEY: &str = "storage.session_search_fts.v2";
+
+const SESSION_LIST_MIGRATION_BATCH_SIZE: i64 = 128;
+const ANALYTICS_MIGRATION_BATCH_SIZE: i64 = 32;
+const SESSION_SEARCH_FTS_MIGRATION_BATCH_SIZE: i64 = 256;
 
 pub(super) fn bootstrap(conn: &Connection) -> Result<()> {
     conn.execute_batch(
@@ -9,6 +17,13 @@ pub(super) fn bootstrap(conn: &Connection) -> Result<()> {
         CREATE TABLE IF NOT EXISTS meta (
             key TEXT PRIMARY KEY,
             value TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS storage_migrations (
+            key TEXT PRIMARY KEY,
+            state TEXT NOT NULL CHECK (state IN ('pending', 'running', 'completed', 'failed')),
+            cursor INTEGER NOT NULL DEFAULT 0,
+            updated_at INTEGER NOT NULL DEFAULT 0,
+            last_error TEXT
         );
         CREATE TABLE IF NOT EXISTS scoped_skill_sources (
             scope_key TEXT NOT NULL,
@@ -123,6 +138,16 @@ pub(super) fn bootstrap(conn: &Connection) -> Result<()> {
             first_user_message TEXT,
             last_user_message TEXT,
             last_assistant_message TEXT,
+            repository TEXT,
+            repository_url TEXT,
+            logical_project_id TEXT,
+            logical_project_name TEXT,
+            started_at_ms INTEGER,
+            updated_at_ms INTEGER,
+            turn_count INTEGER,
+            parent_session_id TEXT,
+            input_tokens INTEGER,
+            cached_input_tokens INTEGER,
             data_json TEXT NOT NULL,
             PRIMARY KEY (scope_key, id, agent, path)
         );
@@ -217,7 +242,7 @@ pub(super) fn bootstrap(conn: &Connection) -> Result<()> {
             file_mtime INTEGER NOT NULL,
             file_size INTEGER NOT NULL,
             indexed_at TEXT NOT NULL,
-            analytics_json TEXT NOT NULL,
+            analytics_json BLOB NOT NULL,
             parser_state_json TEXT NOT NULL,
             event_min_date TEXT,
             event_max_date TEXT,
@@ -260,6 +285,14 @@ pub(super) fn bootstrap(conn: &Connection) -> Result<()> {
             requested_at TEXT NOT NULL,
             last_error TEXT
         );
+        CREATE TABLE IF NOT EXISTS scoped_session_search_maintenance (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            pending_mutations INTEGER NOT NULL DEFAULT 0,
+            last_optimized_at INTEGER NOT NULL DEFAULT 0
+        );
+        INSERT OR IGNORE INTO scoped_session_search_maintenance(
+            id, pending_mutations, last_optimized_at
+        ) VALUES (1, 0, 0);
         CREATE TABLE IF NOT EXISTS scoped_session_search_work (
             scope_key TEXT NOT NULL,
             session_id TEXT NOT NULL,
@@ -335,23 +368,101 @@ pub(super) fn bootstrap(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+pub(super) fn rebuild_scoped_session_skill_links(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        "PRAGMA writable_schema = ON;
+         DELETE FROM sqlite_master
+          WHERE name IN (
+              'scoped_session_skill_links',
+              'sqlite_autoindex_scoped_session_skill_links_1',
+              'idx_scoped_session_skill_links_session',
+              'idx_scoped_session_skill_links_skill'
+          );
+         PRAGMA writable_schema = OFF;
+         VACUUM;
+         CREATE TABLE scoped_session_skill_links (
+             scope_key TEXT NOT NULL,
+             session_id TEXT NOT NULL,
+             agent TEXT NOT NULL,
+             session_path TEXT NOT NULL,
+             skill_name TEXT NOT NULL,
+             skill_path TEXT NOT NULL,
+             skill_agent TEXT,
+             skill_scope TEXT,
+             evidence_kind TEXT NOT NULL,
+             evidence_text TEXT NOT NULL,
+             evidence_time TEXT,
+             confidence TEXT NOT NULL,
+             PRIMARY KEY (scope_key, session_id, agent, session_path, skill_path)
+         );
+         CREATE INDEX idx_scoped_session_skill_links_session
+             ON scoped_session_skill_links(scope_key, session_id, agent);
+         CREATE INDEX idx_scoped_session_skill_links_skill
+             ON scoped_session_skill_links(scope_key, skill_name);",
+    )?;
+    conn.execute("DELETE FROM scoped_session_skill_index", [])?;
+    Ok(())
+}
+
 pub(super) fn needs_current_shape(conn: &Connection) -> Result<bool> {
-    Ok(!column_exists(
-        conn,
-        "scoped_session_search_index",
-        "search_checkpoint",
-    )?)
+    Ok(!table_exists(conn, "storage_migrations")?
+        || !column_exists(conn, "scoped_session_search_index", "search_checkpoint")?
+        || !column_exists(conn, "scoped_sessions", "cached_input_tokens")?
+        || !column_exists(conn, "scoped_sessions", "started_at_ms")?
+        || !column_exists(conn, "scoped_sessions", "updated_at_ms")?)
+}
+
+pub(super) fn has_user_schema(conn: &Connection) -> Result<bool> {
+    conn.query_row(
+        "SELECT EXISTS(
+             SELECT 1 FROM sqlite_master
+             WHERE type IN ('table', 'index', 'trigger', 'view')
+               AND name NOT LIKE 'sqlite_%'
+         )",
+        [],
+        |row| row.get(0),
+    )
+    .map_err(Into::into)
 }
 
 /// Upgrade the unversioned schema shipped in v0.1.x directly to the current
 /// shape. Unreleased scoped-schema revisions are not migration boundaries.
 /// New scoped projections start empty and are populated by normal source scans.
-pub(super) fn run(conn: &Connection) -> Result<()> {
+pub(super) fn run(conn: &Connection, existing_schema: bool) -> Result<()> {
+    let previous_version: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+    let analytics_migration_needed = analytics_json_needs_migration(conn)?;
+    let fts_migration_needed = session_search_fts_needs_migration(conn)?;
     ensure_prompt_tags_column(conn)?;
     ensure_session_search_index_version_column(conn)?;
     ensure_scoped_session_search_checkpoint_column(conn)?;
+    let list_columns_added = ensure_scoped_session_list_columns(conn)?;
     ensure_storage_indexes(conn)?;
-    ensure_session_search_fts(conn)?;
+    ensure_session_search_fts_shape(conn)?;
+    initialize_migration_state(
+        conn,
+        SESSION_LIST_MIGRATION_KEY,
+        existing_schema && (previous_version < STORAGE_SCHEMA_VERSION || list_columns_added),
+    )?;
+    initialize_migration_state(conn, ANALYTICS_MIGRATION_KEY, analytics_migration_needed)?;
+    initialize_migration_state(conn, SESSION_SEARCH_FTS_MIGRATION_KEY, fts_migration_needed)?;
+    if !analytics_migration_needed {
+        conn.execute(
+            "INSERT INTO meta(key, value) VALUES ('storage.analytics_json_encoding', ?1)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            [ANALYTICS_JSON_ENCODING],
+        )?;
+    }
+    if existing_schema
+        && (previous_version < STORAGE_SCHEMA_VERSION
+            || analytics_migration_needed
+            || fts_migration_needed)
+    {
+        conn.execute(
+            "INSERT INTO meta(key, value) VALUES ('storage.compaction.pending', '1')
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            [],
+        )?;
+    }
     conn.execute_batch(&format!(
         "PRAGMA user_version = {};",
         STORAGE_SCHEMA_VERSION
@@ -370,9 +481,45 @@ fn ensure_storage_indexes(conn: &Connection) -> Result<()> {
             ON assistant_chat_sessions(updated_at DESC, id ASC);
         CREATE INDEX IF NOT EXISTS idx_assistant_chat_messages_session
             ON assistant_chat_messages(session_id, id ASC);
+        CREATE INDEX IF NOT EXISTS idx_scoped_sessions_scope_updated_id
+            ON scoped_sessions(scope_key, updated_at DESC, id ASC);
+        CREATE INDEX IF NOT EXISTS idx_scoped_sessions_scope_agent_updated_id
+            ON scoped_sessions(scope_key, agent, updated_at DESC, id ASC);
+        CREATE INDEX IF NOT EXISTS idx_scoped_sessions_scope_started_id
+            ON scoped_sessions(scope_key, started_at DESC, id ASC);
+        CREATE INDEX IF NOT EXISTS idx_scoped_sessions_scope_message_id
+            ON scoped_sessions(scope_key, message_count DESC, id ASC);
+        CREATE INDEX IF NOT EXISTS idx_scoped_sessions_scope_turn_id
+            ON scoped_sessions(scope_key, turn_count DESC, id ASC);
+        DROP INDEX IF EXISTS idx_scoped_session_search_records_session;
         ",
     )?;
     Ok(())
+}
+
+fn ensure_scoped_session_list_columns(conn: &Connection) -> Result<bool> {
+    let mut added = false;
+    for (name, definition) in [
+        ("repository", "TEXT"),
+        ("repository_url", "TEXT"),
+        ("logical_project_id", "TEXT"),
+        ("logical_project_name", "TEXT"),
+        ("started_at_ms", "INTEGER"),
+        ("updated_at_ms", "INTEGER"),
+        ("turn_count", "INTEGER"),
+        ("parent_session_id", "TEXT"),
+        ("input_tokens", "INTEGER"),
+        ("cached_input_tokens", "INTEGER"),
+    ] {
+        if !column_exists(conn, "scoped_sessions", name)? {
+            conn.execute(
+                &format!("ALTER TABLE scoped_sessions ADD COLUMN {name} {definition}"),
+                [],
+            )?;
+            added = true;
+        }
+    }
+    Ok(added)
 }
 
 fn column_exists(conn: &Connection, table: &str, column: &str) -> Result<bool> {
@@ -432,61 +579,483 @@ fn ensure_prompt_tags_column(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-fn ensure_session_search_fts(conn: &Connection) -> Result<()> {
-    conn.execute_batch(
-        "
-        CREATE VIRTUAL TABLE IF NOT EXISTS scoped_session_search_fts USING fts5(
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct MigrationBatch {
+    pub processed: usize,
+    pub complete: bool,
+}
+
+fn table_exists(conn: &Connection, table: &str) -> Result<bool> {
+    conn.query_row(
+        "SELECT EXISTS(
+             SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1
+         )",
+        [table],
+        |row| row.get(0),
+    )
+    .map_err(Into::into)
+}
+
+fn analytics_json_needs_migration(conn: &Connection) -> Result<bool> {
+    let declared_type: Option<String> = conn
+        .query_row(
+            "SELECT type FROM pragma_table_info('scoped_session_analytics')
+             WHERE name = 'analytics_json'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let Some(declared_type) = declared_type else {
+        return Ok(false);
+    };
+    let encoded = conn
+        .query_row(
+            "SELECT value FROM meta WHERE key = 'storage.analytics_json_encoding'",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?;
+    Ok(encoded.as_deref() != Some(ANALYTICS_JSON_ENCODING)
+        && !declared_type.eq_ignore_ascii_case("BLOB"))
+}
+
+fn session_search_fts_needs_migration(conn: &Connection) -> Result<bool> {
+    let definition: Option<String> = conn
+        .query_row(
+            "SELECT sql FROM sqlite_master
+             WHERE type = 'table' AND name = 'scoped_session_search_fts'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?;
+    Ok(definition.is_some_and(|sql| !is_compact_fts_definition(&sql)))
+}
+
+fn is_compact_fts_definition(sql: &str) -> bool {
+    sql.contains("content = ''")
+        && sql.contains("contentless_delete = 1")
+        && sql.contains("detail = column")
+}
+
+fn ensure_session_search_fts_shape(conn: &Connection) -> Result<()> {
+    let exists: bool = table_exists(conn, "scoped_session_search_fts")?;
+    if !exists {
+        create_session_search_fts(conn, "scoped_session_search_fts")?;
+        recreate_session_search_triggers(conn)?;
+    } else if !session_search_fts_needs_migration(conn)? {
+        recreate_session_search_triggers(conn)?;
+    }
+    Ok(())
+}
+
+fn create_session_search_fts(conn: &Connection, table: &str) -> Result<()> {
+    conn.execute_batch(&format!(
+        "CREATE VIRTUAL TABLE {table} USING fts5(
             metadata_text,
             title,
             project,
             user_text,
             assistant_text,
-            content = 'scoped_session_search_records',
-            content_rowid = 'id',
+            content = '',
+            contentless_delete = 1,
+            detail = column,
             tokenize = 'trigram case_sensitive 0'
-        );
-        CREATE TRIGGER IF NOT EXISTS scoped_session_search_records_ai
-        AFTER INSERT ON scoped_session_search_records BEGIN
-            INSERT INTO scoped_session_search_fts(
-                rowid, metadata_text, title, project,
-                user_text, assistant_text
-            )
-            VALUES (
-                new.id, new.metadata_text, new.title, new.project,
-                new.user_text, new.assistant_text
-            );
-        END;
-        CREATE TRIGGER IF NOT EXISTS scoped_session_search_records_ad
-        AFTER DELETE ON scoped_session_search_records BEGIN
-            INSERT INTO scoped_session_search_fts(
-                scoped_session_search_fts, rowid, metadata_text, title, project,
-                user_text, assistant_text
-            )
-            VALUES (
-                'delete', old.id, old.metadata_text, old.title, old.project,
-                old.user_text, old.assistant_text
-            );
-        END;
-        CREATE TRIGGER IF NOT EXISTS scoped_session_search_records_au
-        AFTER UPDATE ON scoped_session_search_records BEGIN
-            INSERT INTO scoped_session_search_fts(
-                scoped_session_search_fts, rowid, metadata_text, title, project,
-                user_text, assistant_text
-            )
-            VALUES (
-                'delete', old.id, old.metadata_text, old.title, old.project,
-                old.user_text, old.assistant_text
-            );
-            INSERT INTO scoped_session_search_fts(
-                rowid, metadata_text, title, project,
-                user_text, assistant_text
-            )
-            VALUES (
-                new.id, new.metadata_text, new.title, new.project,
-                new.user_text, new.assistant_text
-            );
-        END;
-        ",
+        )"
+    ))?;
+    Ok(())
+}
+
+fn initialize_migration_state(conn: &Connection, key: &str, pending: bool) -> Result<()> {
+    let state = if pending { "pending" } else { "completed" };
+    conn.execute(
+        "INSERT OR IGNORE INTO storage_migrations(key, state, cursor, updated_at, last_error)
+         VALUES (?1, ?2, 0, CAST(strftime('%s', 'now') AS INTEGER), NULL)",
+        params![key, state],
+    )?;
+    Ok(())
+}
+
+fn migration_state(tx: &rusqlite::Transaction<'_>, key: &str) -> Result<Option<(String, i64)>> {
+    tx.query_row(
+        "SELECT state, cursor FROM storage_migrations WHERE key = ?1",
+        [key],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )
+    .optional()
+    .map_err(Into::into)
+}
+
+fn update_migration_state(
+    tx: &rusqlite::Transaction<'_>,
+    key: &str,
+    state: &str,
+    cursor: i64,
+) -> Result<()> {
+    tx.execute(
+        "UPDATE storage_migrations
+         SET state = ?1, cursor = ?2, updated_at = CAST(strftime('%s', 'now') AS INTEGER),
+             last_error = NULL
+         WHERE key = ?3",
+        params![state, cursor, key],
+    )?;
+    Ok(())
+}
+
+pub(super) fn migrate_session_list_batch(tx: &rusqlite::Transaction<'_>) -> Result<MigrationBatch> {
+    let Some((state, cursor)) = migration_state(tx, SESSION_LIST_MIGRATION_KEY)? else {
+        return Ok(MigrationBatch {
+            processed: 0,
+            complete: true,
+        });
+    };
+    if state == "completed" {
+        return Ok(MigrationBatch {
+            processed: 0,
+            complete: true,
+        });
+    }
+    let rows = {
+        let mut statement = tx.prepare(
+            "SELECT rowid, data_json FROM scoped_sessions
+             WHERE rowid > ?1 ORDER BY rowid LIMIT ?2",
+        )?;
+        statement
+            .query_map(params![cursor, SESSION_LIST_MIGRATION_BATCH_SIZE], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    if rows.is_empty() {
+        update_migration_state(tx, SESSION_LIST_MIGRATION_KEY, "completed", cursor)?;
+        return Ok(MigrationBatch {
+            processed: 0,
+            complete: true,
+        });
+    }
+
+    let mut next_cursor = cursor;
+    for (rowid, data_json) in &rows {
+        let value = serde_json::from_str::<serde_json::Value>(data_json).ok();
+        let repository = json_string_field(value.as_ref(), "repository");
+        let repository_url = json_string_field(value.as_ref(), "repository_url");
+        let logical_project_id = json_string_field(value.as_ref(), "logical_project_id");
+        let logical_project_name = json_string_field(value.as_ref(), "logical_project_name");
+        let started_at = json_string_field(value.as_ref(), "started_at");
+        let updated_at = json_string_field(value.as_ref(), "updated_at");
+        let started_at_ms = started_at
+            .as_deref()
+            .and_then(crate::time::parse_timestamp)
+            .map(|value| value.timestamp_millis());
+        let updated_at_ms = updated_at
+            .as_deref()
+            .and_then(crate::time::parse_timestamp)
+            .map(|value| value.timestamp_millis());
+        let turn_count = json_i64_field(value.as_ref(), "turn_count");
+        let parent_session_id = json_string_field(value.as_ref(), "parent_session_id");
+        let input_tokens = json_i64_nested_field(value.as_ref(), &["token_usage", "input_tokens"]);
+        let cached_input_tokens =
+            json_i64_nested_field(value.as_ref(), &["token_usage", "cached_input_tokens"]);
+        tx.execute(
+            "UPDATE scoped_sessions SET
+                repository = ?1, repository_url = ?2,
+                logical_project_id = ?3, logical_project_name = ?4,
+                started_at_ms = ?5, updated_at_ms = ?6, turn_count = ?7,
+                parent_session_id = ?8, input_tokens = ?9, cached_input_tokens = ?10
+             WHERE rowid = ?11",
+            params![
+                repository,
+                repository_url,
+                logical_project_id,
+                logical_project_name,
+                started_at_ms,
+                updated_at_ms,
+                turn_count,
+                parent_session_id,
+                input_tokens,
+                cached_input_tokens,
+                rowid,
+            ],
+        )?;
+        next_cursor = *rowid;
+    }
+    update_migration_state(tx, SESSION_LIST_MIGRATION_KEY, "pending", next_cursor)?;
+    Ok(MigrationBatch {
+        processed: rows.len(),
+        complete: false,
+    })
+}
+
+fn json_string_field(value: Option<&serde_json::Value>, key: &str) -> Option<String> {
+    value
+        .and_then(|value| value.get(key))
+        .and_then(serde_json::Value::as_str)
+        .map(ToOwned::to_owned)
+}
+
+fn json_i64_field(value: Option<&serde_json::Value>, key: &str) -> Option<i64> {
+    value
+        .and_then(|value| value.get(key))
+        .and_then(serde_json::Value::as_i64)
+}
+
+fn json_i64_nested_field(value: Option<&serde_json::Value>, keys: &[&str]) -> Option<i64> {
+    keys.iter()
+        .fold(value, |value, key| value.and_then(|value| value.get(*key)))
+        .and_then(serde_json::Value::as_i64)
+}
+
+pub(super) fn migrate_analytics_json_batch(
+    tx: &rusqlite::Transaction<'_>,
+) -> Result<MigrationBatch> {
+    let Some((state, cursor)) = migration_state(tx, ANALYTICS_MIGRATION_KEY)? else {
+        return Ok(MigrationBatch {
+            processed: 0,
+            complete: true,
+        });
+    };
+    if state == "completed" {
+        return Ok(MigrationBatch {
+            processed: 0,
+            complete: true,
+        });
+    }
+    let rows = {
+        let mut statement = tx.prepare(
+            "SELECT rowid, analytics_json FROM scoped_session_analytics
+             WHERE rowid > ?1 ORDER BY rowid LIMIT ?2",
+        )?;
+        statement
+            .query_map(params![cursor, ANALYTICS_MIGRATION_BATCH_SIZE], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, Value>(1)?))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    if rows.is_empty() {
+        tx.execute(
+            "INSERT INTO meta(key, value) VALUES ('storage.analytics_json_encoding', ?1)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            [ANALYTICS_JSON_ENCODING],
+        )?;
+        update_migration_state(tx, ANALYTICS_MIGRATION_KEY, "completed", cursor)?;
+        return Ok(MigrationBatch {
+            processed: 0,
+            complete: true,
+        });
+    }
+
+    let processed = rows.len();
+    let mut next_cursor = cursor;
+    for (rowid, value) in rows {
+        let encoded = match value {
+            Value::Text(value) => compress_analytics_json(&value)
+                .with_context(|| format!("compress analytics cache row {rowid}"))?,
+            Value::Blob(value) if value.starts_with(ANALYTICS_JSON_ENCODING.as_bytes()) => value,
+            Value::Blob(value) => {
+                let value = String::from_utf8(value)
+                    .with_context(|| format!("analytics cache row {rowid} is not UTF-8"))?;
+                compress_analytics_json(&value)
+                    .with_context(|| format!("compress analytics cache row {rowid}"))?
+            }
+            other => bail!("analytics cache row {rowid} has unsupported SQLite value {other:?}"),
+        };
+        tx.execute(
+            "UPDATE scoped_session_analytics SET analytics_json = ?1 WHERE rowid = ?2",
+            params![encoded, rowid],
+        )?;
+        next_cursor = rowid;
+    }
+    update_migration_state(tx, ANALYTICS_MIGRATION_KEY, "pending", next_cursor)?;
+    Ok(MigrationBatch {
+        processed,
+        complete: false,
+    })
+}
+
+pub(super) fn migrate_session_search_fts_batch(
+    tx: &rusqlite::Transaction<'_>,
+) -> Result<MigrationBatch> {
+    let Some((state, cursor)) = migration_state(tx, SESSION_SEARCH_FTS_MIGRATION_KEY)? else {
+        return Ok(MigrationBatch {
+            processed: 0,
+            complete: true,
+        });
+    };
+    if state == "completed" {
+        return Ok(MigrationBatch {
+            processed: 0,
+            complete: true,
+        });
+    }
+
+    const REPLACEMENT: &str = "scoped_session_search_fts_migration_v2";
+    if !table_exists(tx, REPLACEMENT)? {
+        create_session_search_fts(tx, REPLACEMENT)?;
+    }
+    install_dual_session_search_triggers(tx, is_compact_fts_table(tx)?)?;
+
+    let rows = {
+        let mut statement = tx.prepare(
+            "SELECT id, metadata_text, title, project, user_text, assistant_text
+             FROM scoped_session_search_records
+             WHERE id > ?1 ORDER BY id LIMIT ?2",
+        )?;
+        statement
+            .query_map(
+                params![cursor, SESSION_SEARCH_FTS_MIGRATION_BATCH_SIZE],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, String>(4)?,
+                        row.get::<_, String>(5)?,
+                    ))
+                },
+            )?
+            .collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    let mut next_cursor = cursor;
+    for (id, metadata_text, title, project, user_text, assistant_text) in &rows {
+        tx.execute(
+            &format!(
+                "INSERT OR REPLACE INTO {REPLACEMENT}(
+                    rowid, metadata_text, title, project, user_text, assistant_text
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)"
+            ),
+            params![id, metadata_text, title, project, user_text, assistant_text],
+        )?;
+        next_cursor = *id;
+    }
+
+    if rows.len() < SESSION_SEARCH_FTS_MIGRATION_BATCH_SIZE as usize {
+        drop_session_search_triggers(tx)?;
+        tx.execute_batch(
+            "DROP TABLE scoped_session_search_fts;
+             ALTER TABLE scoped_session_search_fts_migration_v2
+                 RENAME TO scoped_session_search_fts;",
+        )?;
+        recreate_session_search_triggers(tx)?;
+        update_migration_state(
+            tx,
+            SESSION_SEARCH_FTS_MIGRATION_KEY,
+            "completed",
+            next_cursor,
+        )?;
+        return Ok(MigrationBatch {
+            processed: rows.len(),
+            complete: true,
+        });
+    }
+    update_migration_state(tx, SESSION_SEARCH_FTS_MIGRATION_KEY, "pending", next_cursor)?;
+    Ok(MigrationBatch {
+        processed: rows.len(),
+        complete: false,
+    })
+}
+
+fn is_compact_fts_table(conn: &Connection) -> Result<bool> {
+    let definition: String = conn.query_row(
+        "SELECT sql FROM sqlite_master
+         WHERE type = 'table' AND name = 'scoped_session_search_fts'",
+        [],
+        |row| row.get(0),
+    )?;
+    Ok(is_compact_fts_definition(&definition))
+}
+
+fn drop_session_search_triggers(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        "DROP TRIGGER IF EXISTS scoped_session_search_records_ai;
+         DROP TRIGGER IF EXISTS scoped_session_search_records_ad;
+         DROP TRIGGER IF EXISTS scoped_session_search_records_au;",
+    )?;
+    Ok(())
+}
+
+fn install_dual_session_search_triggers(conn: &Connection, old_is_compact: bool) -> Result<()> {
+    const REPLACEMENT: &str = "scoped_session_search_fts_migration_v2";
+    let old_delete = if old_is_compact {
+        "DELETE FROM scoped_session_search_fts WHERE rowid = old.id;"
+    } else {
+        "INSERT INTO scoped_session_search_fts(
+             scoped_session_search_fts, rowid, metadata_text, title, project,
+             user_text, assistant_text
+         ) VALUES (
+             'delete', old.id, old.metadata_text, old.title, old.project,
+             old.user_text, old.assistant_text
+         );"
+    };
+    drop_session_search_triggers(conn)?;
+    conn.execute_batch(&format!(
+        "CREATE TRIGGER scoped_session_search_records_ai
+         AFTER INSERT ON scoped_session_search_records BEGIN
+             INSERT INTO scoped_session_search_fts(
+                 rowid, metadata_text, title, project, user_text, assistant_text
+             ) VALUES (
+                 new.id, new.metadata_text, new.title, new.project,
+                 new.user_text, new.assistant_text
+             );
+             INSERT INTO {REPLACEMENT}(
+                 rowid, metadata_text, title, project, user_text, assistant_text
+             ) VALUES (
+                 new.id, new.metadata_text, new.title, new.project,
+                 new.user_text, new.assistant_text
+             );
+         END;
+         CREATE TRIGGER scoped_session_search_records_ad
+         AFTER DELETE ON scoped_session_search_records BEGIN
+             {old_delete}
+             DELETE FROM {REPLACEMENT} WHERE rowid = old.id;
+         END;
+         CREATE TRIGGER scoped_session_search_records_au
+         AFTER UPDATE ON scoped_session_search_records BEGIN
+             {old_delete}
+             INSERT INTO scoped_session_search_fts(
+                 rowid, metadata_text, title, project, user_text, assistant_text
+             ) VALUES (
+                 new.id, new.metadata_text, new.title, new.project,
+                 new.user_text, new.assistant_text
+             );
+             DELETE FROM {REPLACEMENT} WHERE rowid = old.id;
+             INSERT INTO {REPLACEMENT}(
+                 rowid, metadata_text, title, project, user_text, assistant_text
+             ) VALUES (
+                 new.id, new.metadata_text, new.title, new.project,
+                 new.user_text, new.assistant_text
+             );
+         END;"
+    ))?;
+    Ok(())
+}
+
+fn recreate_session_search_triggers(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        "DROP TRIGGER IF EXISTS scoped_session_search_records_ai;
+         DROP TRIGGER IF EXISTS scoped_session_search_records_ad;
+         DROP TRIGGER IF EXISTS scoped_session_search_records_au;
+         CREATE TRIGGER scoped_session_search_records_ai
+         AFTER INSERT ON scoped_session_search_records BEGIN
+             INSERT INTO scoped_session_search_fts(
+                 rowid, metadata_text, title, project, user_text, assistant_text
+             ) VALUES (
+                 new.id, new.metadata_text, new.title, new.project,
+                 new.user_text, new.assistant_text
+             );
+         END;
+         CREATE TRIGGER scoped_session_search_records_ad
+         AFTER DELETE ON scoped_session_search_records BEGIN
+             DELETE FROM scoped_session_search_fts WHERE rowid = old.id;
+         END;
+         CREATE TRIGGER scoped_session_search_records_au
+         AFTER UPDATE ON scoped_session_search_records BEGIN
+             INSERT OR REPLACE INTO scoped_session_search_fts(
+                 rowid, metadata_text, title, project, user_text, assistant_text
+             ) VALUES (
+                 new.id, new.metadata_text, new.title, new.project,
+                 new.user_text, new.assistant_text
+             );
+         END;",
     )?;
     Ok(())
 }

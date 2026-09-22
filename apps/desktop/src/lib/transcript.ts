@@ -1,4 +1,4 @@
-import { timestampMs } from "./time.ts";
+import { formatLocalTime, timestampMs } from "./time.ts";
 
 export type TranscriptItem = {
   type: string;
@@ -135,7 +135,7 @@ export function normalizeTranscript(items: Array<Record<string, unknown>>): Tran
       type,
       body,
       tag: typeof item.tag === "string" && item.tag.trim() ? item.tag : undefined,
-      time: typeof item.time === "string" && item.time.trim() ? item.time : undefined,
+      time: typeof item.time === "string" && item.time.trim() ? compactTime(item.time) : undefined,
       command: typeof item.command === "string" ? item.command : undefined,
       result: typeof item.result === "string" ? item.result : undefined,
       durationMs,
@@ -276,6 +276,10 @@ export function transcriptItemType(item: TranscriptItem): string {
   return item.type;
 }
 
+export function isTranscriptExecItem(item: TranscriptItem): boolean {
+  return transcriptItemType(item) === "tool" && item.tag?.trim().toLowerCase() === "exec";
+}
+
 export function transcriptContextPreview(body: string, tag?: string): string {
   if (tag?.trim().toLowerCase() === "skill") {
     const name = body.match(/<name>\s*([^<]+?)\s*<\/name>/i)?.[1]?.trim();
@@ -296,6 +300,27 @@ export function groupTranscriptItems(items: TranscriptItem[]): TranscriptGroup[]
   const grouped: TranscriptGroup[] = [];
   for (let index = 0; index < items.length; index += 1) {
     const item = items[index];
+    if (transcriptItemType(item) === "reasoning" || transcriptItemType(item) === "thinking" || isTranscriptExecItem(item)) {
+      const commandItems = [item];
+      let commandCount = isTranscriptExecItem(item) ? 1 : 0;
+      while (
+        index + commandItems.length < items.length
+        && (
+          transcriptItemType(items[index + commandItems.length]) === "reasoning"
+          || transcriptItemType(items[index + commandItems.length]) === "thinking"
+          || isTranscriptExecItem(items[index + commandItems.length])
+        )
+      ) {
+        const nextItem = items[index + commandItems.length];
+        commandItems.push(nextItem);
+        if (isTranscriptExecItem(nextItem)) commandCount += 1;
+      }
+      if (commandCount > 0 && commandItems.length > 1) {
+        index += commandItems.length - 1;
+        grouped.push({ type: TranscriptGroupType.ToolGroup, tools: commandItems });
+        continue;
+      }
+    }
     if (transcriptItemType(item) !== "tool") {
       grouped.push(item);
       continue;
@@ -602,7 +627,7 @@ export function extractTitle(value: JsonObject) {
 }
 
 export function compactTime(value: string) {
-  return value.split("T")[1]?.slice(0, 5) || value;
+  return formatLocalTime(value) || value;
 }
 
 export { timestampMs } from "./time.ts";

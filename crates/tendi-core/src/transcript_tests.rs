@@ -275,7 +275,7 @@ fn transcript_cursor_preserves_utf8_line_boundaries() {
 }
 
 #[test]
-fn transcript_cursor_requests_restart_when_the_file_appends() {
+fn transcript_cursor_continues_when_the_file_appends() {
     let path = temp_path("tendi-transcript-page-append-test.jsonl");
     fs::write(
         &path,
@@ -305,8 +305,15 @@ fn transcript_cursor_requests_restart_when_the_file_appends() {
     )
     .unwrap();
 
-    assert!(stale.restart_required);
-    assert!(stale.items.is_empty());
+    assert!(!stale.restart_required);
+    assert_eq!(
+        stale
+            .items
+            .iter()
+            .map(|item| item.body.as_str())
+            .collect::<Vec<_>>(),
+        ["two", "three"],
+    );
     fs::remove_file(path).unwrap();
 }
 
@@ -923,7 +930,7 @@ fn renders_paired_codex_compaction_events_once() {
     assert_eq!(items.len(), 1);
     assert_eq!(items[0].kind, "compaction");
     assert_eq!(items[0].body, "Context compacted");
-    assert_eq!(items[0].time.as_deref(), Some("06:19"));
+    assert_eq!(items[0].time.as_deref(), Some("2026-07-24T06:19:25.075Z"));
 }
 
 #[test]
@@ -1177,7 +1184,7 @@ fn extracts_claude_tool_use_as_tool_item() {
     assert_eq!(items[1].kind, "tool");
     assert_eq!(items[1].body, "cat src/main.rs");
     assert_eq!(items[1].tag.as_deref(), Some("Bash"));
-    assert_eq!(items[1].time.as_deref(), Some("10:11"));
+    assert_eq!(items[1].time.as_deref(), Some("2026-06-19T10:11:12.000Z"));
     assert_eq!(items[1].command.as_deref(), Some("cat src/main.rs"));
 }
 
@@ -1435,7 +1442,7 @@ fn extracts_codex_internal_context_as_context_item() {
     assert!(items[1].body.contains("plugin metadata"));
     assert_eq!(items[2].kind, "user");
     assert_eq!(items[2].body, "What happened in this session?");
-    assert_eq!(items[2].time.as_deref(), Some("10:12"));
+    assert_eq!(items[2].time.as_deref(), Some("2026-06-19T10:12:12.000Z"));
 }
 
 #[test]

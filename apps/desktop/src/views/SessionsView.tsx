@@ -26,6 +26,7 @@ import { InfoDropdownMenu } from "../components/shared/InfoDropdownMenu.tsx";
 import { InfoSection } from "../components/shared/InfoSection.tsx";
 import { IconButton } from "../components/shared/IconButton.tsx";
 import { LoadErrorState } from "../components/shared/LoadErrorState.tsx";
+import { LoadingDots } from "../components/shared/LoadingDots.tsx";
 import { LoadingIcon } from "../components/shared/LoadingIcon.tsx";
 import { LoadingInline } from "../components/shared/LoadingInline.tsx";
 import { LoadingState } from "../components/shared/LoadingState.tsx";
@@ -48,7 +49,7 @@ import { cacheRateTone } from "../lib/token-style.ts";
 import { TokenUsageSource } from "../lib/tokenizer-types.ts";
 import { planSessionListLocation, SessionListLocationPlan, shouldShowSessionListLocator } from "../lib/session-list-locator.ts";
 import { measureTranscriptTextHeight, type TranscriptTextLayout } from "../lib/pretext-layout.ts";
-import { fixedVirtualRange, virtualRangeFor } from "../lib/virtualization.ts";
+import { fixedVirtualRange, variableVirtualRangeFor } from "../lib/virtualization.ts";
 import {
   SESSION_FREEZE_COLUMN,
   AsyncStatus,
@@ -77,6 +78,7 @@ import {
   sessionCacheRate,
   sessionTitleValue,
   sessionIdentity,
+  sessionLogicalIdentity,
   sessionSourceExternalKey,
   sessionKind,
   sessionAppDeepLink,
@@ -99,6 +101,7 @@ import {
   transcriptContextPreview,
   transcriptEvidenceSearchText,
   transcriptItemType,
+  isTranscriptExecItem,
   transcriptItemsSize,
 } from "../lib/index.ts";
 import type {
@@ -365,6 +368,8 @@ enum KeyboardNavigationScope {
   Detail = "detail",
 }
 
+type TranscriptNavigationIntent = "idle" | "search" | "locator" | "skill" | "top" | "bottom";
+
 type KeyboardNavigationScopeRef = {
   current: KeyboardNavigationScope;
 };
@@ -403,7 +408,8 @@ function transcriptTextLayoutFor(root: HTMLDivElement | null, viewportWidth: num
   const lineHeight = parseCssPixels(styles.getPropertyValue("--leading-body"), 20);
   const horizontalPadding = parseCssPixels(styles.getPropertyValue("--transcript-inline-padding"), 16);
   const font = `${styles.fontWeight || "400"} ${fontSize}px ${styles.fontFamily}`;
-  const maxBubbleWidth = Math.min(viewportWidth * 0.8, 600);
+  const transcriptContentWidth = Math.max(1, viewportWidth - horizontalPadding * 2);
+  const maxBubbleWidth = Math.min(transcriptContentWidth * 0.8, 600);
   return {
     contentWidth: Math.max(1, maxBubbleWidth - horizontalPadding * 2 - 2),
     font,
@@ -459,22 +465,18 @@ function isKeyboardNavigationIgnoredTarget(target: EventTarget | null) {
 function transcriptRangeForViewport(
   itemCount: number,
   offsets: number[],
-  measured: readonly number[] | undefined,
   scrollTop: number,
   viewportHeight: number,
   virtualized: boolean,
 ) {
   if (!virtualized || itemCount === 0) return { start: 0, end: itemCount };
-  return virtualRangeFor({
-    datasetEpoch: `transcript:${itemCount}:${offsets.at(-1) ?? 0}`,
-    stableKey: "transcript-index",
-    count: itemCount,
-    estimate: TRANSCRIPT_DEFAULT_ITEM_HEIGHT + TRANSCRIPT_ITEM_VERTICAL_INSET,
-    measured,
-    scrollOffset: scrollTop,
-    viewportSize: viewportHeight,
-    overscan: TRANSCRIPT_VIRTUAL_OVERSCAN,
-  });
+  return variableVirtualRangeFor(
+    offsets,
+    scrollTop,
+    viewportHeight,
+    TRANSCRIPT_DEFAULT_ITEM_HEIGHT + TRANSCRIPT_ITEM_VERTICAL_INSET,
+    TRANSCRIPT_VIRTUAL_OVERSCAN,
+  );
 }
 
 function useTranscriptVirtualizer(
@@ -487,11 +489,7 @@ function useTranscriptVirtualizer(
   const scrollRestorationKey = `sessions.transcript:${resetKey}`;
   const {
     size: viewportSize,
-    scrollOffset,
-    scrollOffsetRef,
     readViewportSize,
-    syncScrollPosition,
-    scheduleScrollSync,
   } = useVirtualViewport<HTMLDivElement>(
     { width: 0, height: 720 },
     {
@@ -509,8 +507,11 @@ function useTranscriptVirtualizer(
   const resizeObserverRef = useRef<ResizeObserver | null>(null);
   const stickToBottomRef = useRef(false);
   const stickToBottomFrameRef = useRef<number | null>(null);
+  const scrollSyncFrameRef = useRef<number | null>(null);
   const restoredScrollKeyRef = useRef<string | undefined>(undefined);
   const scrollRestorationKeyRef = useRef(scrollRestorationKey);
+  const [scrollOffset, setScrollOffset] = useState(0);
+  const scrollOffsetRef = useRef(0);
 
   const rememberScrollPosition = useCallback((root: HTMLDivElement) => {
     setTabScrollPosition(scrollRestorationKey, {
@@ -537,11 +538,40 @@ function useTranscriptVirtualizer(
   }, [estimatedHeights, items.length, measurementVersion]);
   const offsetsRef = useRef(offsets);
   offsetsRef.current = offsets;
-  const measured = useMemo(
-    () => offsets.slice(0, -1).map((end, index) => end - offsets[index]),
-    [offsets],
-  );
   const viewportHeight = readViewportSize();
+
+  const range = useMemo(() => {
+    return transcriptRangeForViewport(items.length, offsets, scrollOffset, viewportHeight, virtualized);
+  }, [items.length, offsets, scrollOffset, viewportHeight, virtualized]);
+  const renderedRangeRef = useRef(range);
+  renderedRangeRef.current = range;
+
+  const syncScrollPosition = useCallback(() => {
+    const root = rootRef.current;
+    const next = root ? Math.max(0, Number.isFinite(root.scrollTop) ? root.scrollTop : 0) : 0;
+    scrollOffsetRef.current = next;
+    const nextRange = transcriptRangeForViewport(
+      items.length,
+      offsetsRef.current,
+      next,
+      readViewportSize(),
+      virtualized,
+    );
+    const currentRange = renderedRangeRef.current;
+    if (currentRange.start !== nextRange.start || currentRange.end !== nextRange.end) {
+      renderedRangeRef.current = nextRange;
+      setScrollOffset(next);
+    }
+    return next;
+  }, [items.length, readViewportSize, rootRef, virtualized]);
+
+  const scheduleScrollSync = useCallback(() => {
+    if (!virtualized || scrollSyncFrameRef.current !== null) return;
+    scrollSyncFrameRef.current = window.requestAnimationFrame(() => {
+      scrollSyncFrameRef.current = null;
+      syncScrollPosition();
+    });
+  }, [syncScrollPosition, virtualized]);
 
   const scrollToCurrentBottom = useCallback(() => {
     if (!stickToBottomRef.current) return;
@@ -638,6 +668,9 @@ function useTranscriptVirtualizer(
     if (stickToBottomFrameRef.current !== null) {
       window.cancelAnimationFrame(stickToBottomFrameRef.current);
     }
+    if (scrollSyncFrameRef.current !== null) {
+      window.cancelAnimationFrame(scrollSyncFrameRef.current);
+    }
     const root = rootRef.current;
     if (root) setTabScrollPosition(scrollRestorationKeyRef.current, {
       top: root.scrollTop,
@@ -696,10 +729,6 @@ function useTranscriptVirtualizer(
     }
   }, []);
 
-  const range = useMemo(() => {
-    return transcriptRangeForViewport(items.length, offsets, measured, scrollOffset, viewportHeight, virtualized);
-  }, [items.length, measured, offsets, scrollOffset, viewportHeight, virtualized]);
-
   const scrollToIndex = useCallback((index: number, behavior: ScrollBehavior = "auto") => {
     const root = rootRef.current;
     if (!root || items.length === 0) return;
@@ -753,6 +782,10 @@ function transcriptItemKey(prefix: string | undefined, index: string | number) {
   return prefix ? `${prefix}-${index}` : `${index}`;
 }
 
+function transcriptGroupChildKey(groupIndex: string | number, childIndex: number, item: TranscriptItemRecord) {
+  return transcriptItemKey(transcriptItemType(item), `${groupIndex}-${childIndex}`);
+}
+
 function transcriptRefreshIdentity(item: TranscriptItemRecord) {
   return JSON.stringify([
     transcriptItemType(item),
@@ -780,12 +813,18 @@ function transcriptRefreshIdentity(item: TranscriptItemRecord) {
 
 function preserveTranscriptTail(currentItems: TranscriptItemRecord[], refreshedItems: TranscriptItemRecord[]) {
   if (currentItems.length <= refreshedItems.length) return refreshedItems;
-  const sharesPrefix = refreshedItems.every((item, index) => (
-    transcriptRefreshIdentity(currentItems[index]) === transcriptRefreshIdentity(item)
-  ));
+  const sharesPrefix = transcriptItemsSharePrefix(currentItems, refreshedItems);
   return sharesPrefix
     ? [...refreshedItems, ...currentItems.slice(refreshedItems.length)]
     : refreshedItems;
+}
+
+function transcriptItemsSharePrefix(currentItems: TranscriptItemRecord[], refreshedItems: TranscriptItemRecord[]) {
+  const prefixLength = Math.min(currentItems.length, refreshedItems.length);
+  for (let index = 0; index < prefixLength; index += 1) {
+    if (transcriptRefreshIdentity(currentItems[index]) !== transcriptRefreshIdentity(refreshedItems[index])) return false;
+  }
+  return true;
 }
 
 const transcriptObjectIdentity = new WeakMap<object, string>();
@@ -829,7 +868,7 @@ function transcriptReactKey(item: TranscriptItemRecord, type = transcriptItemTyp
 }
 
 function transcriptGroupReactKey(tools: TranscriptItemRecord[]) {
-  return `tool-group:${tools[0] ? transcriptReactKey(tools[0], "tool") : "empty"}`;
+  return `tool-group:${tools[0] ? transcriptReactKey(tools[0], transcriptItemType(tools[0])) : "empty"}`;
 }
 
 
@@ -861,7 +900,7 @@ function findSkillEvidenceTarget(transcriptItems: TranscriptItemRecord[], link: 
       for (let toolIndex = 0; toolIndex < tools.length; toolIndex += 1) {
         if (evidenceMatchesItem(tools[toolIndex], evidenceText, evidenceTime)) {
           return {
-            key: transcriptItemKey("tool", `${index}-${toolIndex}`),
+            key: transcriptGroupChildKey(index, toolIndex, tools[toolIndex]),
             groupKey: transcriptItemKey("tool-group", index),
             index,
           };
@@ -887,13 +926,11 @@ function findTranscriptSearchTargets(
   const matches: TranscriptSearchTarget[] = [];
   transcriptItems.forEach((item, index) => {
     const type = transcriptItemType(item);
-    if (!scopes[transcriptSearchScope(type)]) return;
-
     if (type === TranscriptGroupType.ToolGroup) {
       (item.tools ?? []).forEach((tool, toolIndex) => {
-        if (transcriptItemText(tool).includes(needle)) {
+        if (scopes[transcriptSearchScope(transcriptItemType(tool))] && transcriptItemText(tool).includes(needle)) {
           matches.push({
-            key: transcriptItemKey("tool", `${index}-${toolIndex}`),
+            key: transcriptGroupChildKey(index, toolIndex, tool),
             groupKey: transcriptItemKey("tool-group", index),
             index,
           });
@@ -901,6 +938,7 @@ function findTranscriptSearchTargets(
       });
       return;
     }
+    if (!scopes[transcriptSearchScope(type)]) return;
     if (transcriptItemText(item).includes(needle)) {
       matches.push({ key: transcriptItemKey(type, index), index });
     }
@@ -908,23 +946,73 @@ function findTranscriptSearchTargets(
   return matches;
 }
 
+type TranscriptSearchIndexEntry = {
+  groupIndex: number;
+  itemIndex: number;
+  childIndex?: number;
+  toolIndex?: number;
+};
+
+function transcriptSearchIndexForBackendGroups(transcriptItems: TranscriptItemRecord[]) {
+  const entries: TranscriptSearchIndexEntry[] = [];
+  let groupIndex = 0;
+  for (let itemIndex = 0; itemIndex < transcriptItems.length; itemIndex += 1) {
+    const item = transcriptItems[itemIndex];
+    if (transcriptItemType(item) !== TranscriptGroupType.ToolGroup) {
+      entries.push({
+        groupIndex,
+        itemIndex,
+        ...(transcriptItemType(item) === "tool" ? { toolIndex: 0 } : {}),
+      });
+      groupIndex += 1;
+      continue;
+    }
+
+    let toolGroupIndex: number | undefined;
+    let toolIndex = 0;
+    for (let childIndex = 0; childIndex < (item.tools ?? []).length; childIndex += 1) {
+      const child = item.tools![childIndex];
+      if (transcriptItemType(child) === "tool") {
+        if (toolGroupIndex === undefined) {
+          toolGroupIndex = groupIndex;
+          groupIndex += 1;
+          toolIndex = 0;
+        } else {
+          toolIndex += 1;
+        }
+        entries.push({ groupIndex: toolGroupIndex, itemIndex, childIndex, toolIndex });
+      } else {
+        toolGroupIndex = undefined;
+        entries.push({ groupIndex, itemIndex, childIndex });
+        groupIndex += 1;
+      }
+    }
+  }
+  return { entries, groupCount: groupIndex };
+}
+
 function transcriptSearchTargetForHit(
   transcriptItems: TranscriptItemRecord[],
   hit: TranscriptSearchHit,
 ): TranscriptSearchTarget | null {
-  const item = transcriptItems[hit.groupIndex];
+  const indexEntry = transcriptSearchIndexForBackendGroups(transcriptItems).entries.find((entry) => (
+    entry.groupIndex === hit.groupIndex && entry.toolIndex === hit.toolIndex
+  ));
+  if (!indexEntry) return null;
+  const item = transcriptItems[indexEntry.itemIndex];
   if (!item) return null;
-  const type = transcriptItemType(item);
-  if (type === TranscriptGroupType.ToolGroup && hit.toolIndex !== undefined && item.tools?.[hit.toolIndex]) {
+  if (indexEntry.childIndex !== undefined && item.tools?.[indexEntry.childIndex]) {
+    const child = item.tools[indexEntry.childIndex];
     return {
-      key: transcriptItemKey("tool", `${hit.groupIndex}-${hit.toolIndex}`),
-      groupKey: transcriptItemKey("tool-group", hit.groupIndex),
-      index: hit.groupIndex,
+      key: transcriptGroupChildKey(indexEntry.itemIndex, indexEntry.childIndex, child),
+      groupKey: transcriptItemKey("tool-group", indexEntry.itemIndex),
+      index: indexEntry.itemIndex,
     };
   }
+  const type = transcriptItemType(item);
   return {
-    key: transcriptItemKey(type, hit.groupIndex),
-    index: hit.groupIndex,
+    key: transcriptItemKey(type, indexEntry.itemIndex),
+    index: indexEntry.itemIndex,
   };
 }
 
@@ -933,7 +1021,11 @@ function transcriptItemSearchQuery(
   query: string,
   scopes: TranscriptSearchScopeState,
 ): string {
-  if (!query || !scopes[transcriptSearchScope(transcriptItemType(item))]) return "";
+  if (!query) return "";
+  if (transcriptItemType(item) === TranscriptGroupType.ToolGroup) {
+    return (item.tools ?? []).some((child) => scopes[transcriptSearchScope(transcriptItemType(child))]) ? query : "";
+  }
+  if (!scopes[transcriptSearchScope(transcriptItemType(item))]) return "";
   return query;
 }
 
@@ -1086,13 +1178,21 @@ export function TranscriptPanel({
   const [jumpingSkillPath, setJumpingSkillPath] = useState("");
   const [pendingTranscriptBottom, setPendingTranscriptBottom] = useState(false);
   const [transcriptScrollEdges, setTranscriptScrollEdges] = useState({ atTop: true, atBottom: true });
-  const [pendingUserMessageTarget, setPendingUserMessageTarget] = useState<{ key: string; index: number; sessionKey: string } | null>(null);
+  const [pendingUserMessageTarget, setPendingUserMessageTarget] = useState<{
+    key: string;
+    index: number;
+    sessionKey: string;
+    navigationRevision: number;
+  } | null>(null);
   const [transcriptFocusRequest, setTranscriptFocusRequest] = useState<{
     target: TranscriptSearchTarget;
     preferSearchMatch: boolean;
     behavior: ScrollBehavior;
+    navigationRevision: number;
   } | null>(null);
   const highlightTimerRef = useRef(0);
+  const transcriptNavigationRevisionRef = useRef(0);
+  const transcriptNavigationIntentRef = useRef<TranscriptNavigationIntent>("idle");
   const transcriptNavigationKeyRef = useRef("");
   const transcriptNavigationPromiseRef = useRef(Promise.resolve());
   const transcriptNavigationSessionKeyRef = useRef("");
@@ -1102,6 +1202,11 @@ export function TranscriptPanel({
   const transcriptItemsRef = useRef(transcriptItems);
   transcriptItemsRef.current = transcriptItems;
   const normalizedSessionSearchQuery = `${sessionSearchQuery ?? ""}`.trim().toLowerCase();
+  const beginTranscriptNavigation = useCallback((intent: TranscriptNavigationIntent) => {
+    transcriptNavigationRevisionRef.current += 1;
+    transcriptNavigationIntentRef.current = intent;
+    return transcriptNavigationRevisionRef.current;
+  }, []);
   const captureTranscriptSearchScroll = useCallback(() => {
     const root = transcriptRef.current;
     if (!root) return;
@@ -1129,6 +1234,7 @@ export function TranscriptPanel({
     };
   }, [captureTranscriptSearchScroll, normalizedSessionSearchQuery, searchOpen, transcriptNavigationSessionKey]);
   useEffect(() => {
+    beginTranscriptNavigation(normalizedSessionSearchQuery ? "search" : "idle");
     window.clearTimeout(highlightTimerRef.current);
     setHighlightedKey("");
     setSearchQuery(normalizedSessionSearchQuery);
@@ -1139,7 +1245,7 @@ export function TranscriptPanel({
     setSearchResult(null);
     setSearchError(false);
     setTranscriptFocusRequest(null);
-  }, [normalizedSessionSearchQuery, transcriptNavigationSessionKey]);
+  }, [beginTranscriptNavigation, normalizedSessionSearchQuery, transcriptNavigationSessionKey]);
   const normalizedInputSearchQuery = searchQuery.trim().toLowerCase();
   const normalizedSearchQuery = debouncedSearchQuery;
   const selectedSearchScopeCount = TRANSCRIPT_SEARCH_SCOPES.filter((scope) => searchScopes[scope.id]).length;
@@ -1157,6 +1263,7 @@ export function TranscriptPanel({
   );
   const searchResultCount = remoteSearchActive ? (searchResult?.hits.length ?? 0) : searchTargets.length;
   const clearMessageSearch = useCallback(() => {
+    beginTranscriptNavigation("idle");
     captureTranscriptSearchScroll();
     window.clearTimeout(highlightTimerRef.current);
     setHighlightedKey("");
@@ -1165,26 +1272,29 @@ export function TranscriptPanel({
     setDebouncedSearchQuery("");
     setSearchScopes(DEFAULT_TRANSCRIPT_SEARCH_SCOPES);
     setSearchOpen(false);
-  }, [captureTranscriptSearchScroll]);
+  }, [beginTranscriptNavigation, captureTranscriptSearchScroll]);
   const setSearchScope = useCallback((scope: TranscriptSearchScope, checked: boolean) => {
+    beginTranscriptNavigation("search");
     setSearchScopes((current) => {
       if (!checked && TRANSCRIPT_SEARCH_SCOPES.every((item) => item.id === scope || !current[item.id])) {
         return current;
       }
       return { ...current, [scope]: checked };
     });
-  }, []);
+  }, [beginTranscriptNavigation]);
   useEffect(() => () => window.clearTimeout(highlightTimerRef.current), []);
   useEffect(() => {
     if (!normalizedInputSearchQuery) {
+      beginTranscriptNavigation("idle");
       setDebouncedSearchQuery("");
       return;
     }
+    beginTranscriptNavigation("search");
     const timer = window.setTimeout(() => {
       setDebouncedSearchQuery(normalizedInputSearchQuery);
     }, SESSION_SEARCH_DEBOUNCE_MS);
     return () => window.clearTimeout(timer);
-  }, [normalizedInputSearchQuery]);
+  }, [beginTranscriptNavigation, normalizedInputSearchQuery]);
   useEffect(() => {
     if (!remoteSearchActive) return;
     if (!normalizedSearchQuery) {
@@ -1311,17 +1421,27 @@ export function TranscriptPanel({
     transcriptSearchScrollSnapshotRef.current = null;
     updateTranscriptScrollEdges();
   }, [searchOpen, updateTranscriptScrollEdges]);
-  const focusTranscriptTarget = useCallback((target: TranscriptSearchTarget, preferSearchMatch = false, behavior: ScrollBehavior = "smooth") => {
+  const focusTranscriptTarget = useCallback((
+    target: TranscriptSearchTarget,
+    preferSearchMatch = false,
+    behavior: ScrollBehavior = "smooth",
+    navigationRevision = beginTranscriptNavigation("locator"),
+  ) => {
+    if (navigationRevision !== transcriptNavigationRevisionRef.current) return;
     window.clearTimeout(highlightTimerRef.current);
     setHighlightedKey(target.key);
     const targetIndex = target.index ?? transcriptIndexFromKey(target.key);
     if (targetIndex !== null) scrollTranscriptToIndex(targetIndex);
-    setTranscriptFocusRequest({ target, preferSearchMatch, behavior });
-  }, [scrollTranscriptToIndex]);
+    setTranscriptFocusRequest({ target, preferSearchMatch, behavior, navigationRevision });
+  }, [beginTranscriptNavigation, scrollTranscriptToIndex]);
   useLayoutEffect(() => {
     const request = transcriptFocusRequest;
     const root = transcriptRef.current;
     if (!request || !root) return;
+    if (request.navigationRevision !== transcriptNavigationRevisionRef.current) {
+      setTranscriptFocusRequest(null);
+      return;
+    }
     if (request.target.groupKey) {
       const group = root.querySelector(`[data-transcript-key="${cssEscape(request.target.groupKey)}"]`) as HTMLDetailsElement | null;
       if (!group) return;
@@ -1347,7 +1467,7 @@ export function TranscriptPanel({
   const ensureSearchHitLoaded = useCallback(async (hit: TranscriptSearchHit) => {
     let loadedItems = transcriptItemsRef.current;
     let previousRawLength = items.length;
-    while (groupTranscriptItems(loadedItems).length <= hit.groupIndex) {
+    while (transcriptSearchIndexForBackendGroups(loadedItems).groupCount <= hit.groupIndex) {
       const next = await onLoadMore();
       loadedItems = groupTranscriptItems(next.items) as TranscriptItemRecord[];
       transcriptItemsRef.current = loadedItems;
@@ -1381,8 +1501,11 @@ export function TranscriptPanel({
     };
   }, [items.length, onLoadMore]);
   const scrollTranscriptToTop = useCallback(() => {
+    beginTranscriptNavigation("top");
+    setTranscriptFocusRequest(null);
+    setPendingTranscriptBottom(false);
     scrollTranscriptToIndex(0, "smooth");
-  }, [scrollTranscriptToIndex]);
+  }, [beginTranscriptNavigation, scrollTranscriptToIndex]);
   useLayoutEffect(() => {
     if (!pendingTranscriptBottom) return;
     scrollTranscriptToBottom();
@@ -1390,16 +1513,25 @@ export function TranscriptPanel({
     setPendingTranscriptBottom(false);
   }, [pendingTranscriptBottom, scrollTranscriptToBottom, transcriptItems, transcriptRenderRangeKey, updateTranscriptScrollEdges]);
   const jumpToBottom = useCallback(async () => {
+    const navigationRevision = beginTranscriptNavigation("bottom");
+    setTranscriptFocusRequest(null);
+    setPendingTranscriptBottom(false);
+    scrollTranscriptToBottom();
     setJumpingToBottom(true);
     try {
       if (hasMore) await onLoadAll();
     } finally {
       setJumpingToBottom(false);
-      setPendingTranscriptBottom(true);
+      if (navigationRevision === transcriptNavigationRevisionRef.current) {
+        setPendingTranscriptBottom(true);
+      }
     }
-  }, [hasMore, onLoadAll]);
+  }, [beginTranscriptNavigation, hasMore, onLoadAll, scrollTranscriptToBottom]);
   const jumpToSkillEvidence = useCallback(async (link: SessionSkillLinkRecord) => {
     if (jumpingSkillPath) return;
+    const navigationRevision = beginTranscriptNavigation("skill");
+    setTranscriptFocusRequest(null);
+    setPendingTranscriptBottom(false);
     setJumpingSkillPath(link.skill_path);
     try {
       let loadedItems = transcriptItemsRef.current;
@@ -1407,6 +1539,7 @@ export function TranscriptPanel({
       let previousRawLength = items.length;
       while (!target) {
         const next = await onLoadMore();
+        if (navigationRevision !== transcriptNavigationRevisionRef.current) return;
         loadedItems = groupTranscriptItems(next.items) as TranscriptItemRecord[];
         transcriptItemsRef.current = loadedItems;
         target = findSkillEvidenceTarget(loadedItems, link);
@@ -1415,24 +1548,28 @@ export function TranscriptPanel({
         previousRawLength = next.items.length;
       }
       if (target) {
-        focusTranscriptTarget(target);
-      } else {
+        focusTranscriptTarget(target, false, "smooth", navigationRevision);
+      } else if (navigationRevision === transcriptNavigationRevisionRef.current) {
         onReportError?.(`Could not find ${linkSkillName(link)} usage in this transcript.`);
       }
     } finally {
       setJumpingSkillPath("");
     }
-  }, [focusTranscriptTarget, items.length, jumpingSkillPath, onLoadMore, onReportError]);
+  }, [beginTranscriptNavigation, focusTranscriptTarget, items.length, jumpingSkillPath, onLoadMore, onReportError]);
   const selectLocatorItem = useCallback((key: string, behavior?: ScrollBehavior) => {
     const index = transcriptIndexFromKey(key);
     if (index === null) return;
+    const navigationRevision = beginTranscriptNavigation("locator");
+    setTranscriptFocusRequest(null);
+    setPendingTranscriptBottom(false);
     keyboardNavigationScopeRef.current = KeyboardNavigationScope.Detail;
     transcriptNavigationKeyRef.current = key;
     void ensureTranscriptIndexLoaded(index).then((result) => {
-      if (result.loaded) focusTranscriptTarget({ key, index }, false, behavior);
+      if (navigationRevision !== transcriptNavigationRevisionRef.current) return;
+      if (result.loaded) focusTranscriptTarget({ key, index }, false, behavior, navigationRevision);
       else if (result.status === "exhausted") onReportError?.("Could not locate this message in the transcript.");
     });
-  }, [ensureTranscriptIndexLoaded, focusTranscriptTarget, keyboardNavigationScopeRef, onReportError]);
+  }, [beginTranscriptNavigation, ensureTranscriptIndexLoaded, focusTranscriptTarget, keyboardNavigationScopeRef, onReportError]);
   const visibleUserMessageIndex = useCallback(() => {
     const root = transcriptRef.current;
     if (!root) return -1;
@@ -1467,35 +1604,44 @@ export function TranscriptPanel({
     if (targetIndex < 0 || targetIndex >= locatorItems.length) return;
     const target = locatorItems[targetIndex];
     const navigationSessionKey = transcriptNavigationSessionKeyRef.current;
+    const navigationRevision = beginTranscriptNavigation("locator");
+    setTranscriptFocusRequest(null);
+    setPendingTranscriptBottom(false);
     transcriptNavigationKeyRef.current = target.key;
     if (groupTranscriptItems(transcriptItemsRef.current).length > target.index) {
-      focusTranscriptTarget({ key: target.key, index: target.index });
+      focusTranscriptTarget({ key: target.key, index: target.index }, false, "smooth", navigationRevision);
       return;
     }
-    setPendingUserMessageTarget({ key: target.key, index: target.index, sessionKey: navigationSessionKey });
+    setPendingUserMessageTarget({ key: target.key, index: target.index, sessionKey: navigationSessionKey, navigationRevision });
     const loadTarget = async () => {
       const result = await ensureTranscriptIndexLoaded(target.index);
+      if (navigationRevision !== transcriptNavigationRevisionRef.current) return;
       if (!result.loaded) {
         setPendingUserMessageTarget((current) => (
-          current?.key === target.key && current.sessionKey === navigationSessionKey ? null : current
+          current?.key === target.key
+            && current.sessionKey === navigationSessionKey
+            && current.navigationRevision === navigationRevision
+            ? null
+            : current
         ));
       }
     };
     transcriptNavigationPromiseRef.current = transcriptNavigationPromiseRef.current.then(loadTarget, loadTarget);
-  }, [ensureTranscriptIndexLoaded, focusTranscriptTarget, keyboardNavigationScopeRef, locatorItems, visibleUserMessageIndex]);
+  }, [beginTranscriptNavigation, ensureTranscriptIndexLoaded, focusTranscriptTarget, keyboardNavigationScopeRef, locatorItems, visibleUserMessageIndex]);
   useEffect(() => {
     const pending = pendingUserMessageTarget;
     if (!pending) return;
     if (
       keyboardNavigationScopeRef.current !== KeyboardNavigationScope.Detail
       || pending.sessionKey !== transcriptNavigationSessionKey
+      || pending.navigationRevision !== transcriptNavigationRevisionRef.current
     ) {
       setPendingUserMessageTarget(null);
       return;
     }
     if (groupTranscriptItems(transcriptItems).length <= pending.index) return;
     setPendingUserMessageTarget(null);
-    focusTranscriptTarget({ key: pending.key, index: pending.index });
+    focusTranscriptTarget({ key: pending.key, index: pending.index }, false, "smooth", pending.navigationRevision);
   }, [focusTranscriptTarget, keyboardNavigationScopeRef, pendingUserMessageTarget, transcriptItems, transcriptNavigationSessionKey]);
   useEffect(() => {
     if (!locatorItems.some((item) => item.key === transcriptNavigationKeyRef.current)) {
@@ -1503,11 +1649,12 @@ export function TranscriptPanel({
     }
   }, [locatorItems]);
   useEffect(() => {
+    beginTranscriptNavigation(normalizedSessionSearchQuery ? "search" : "idle");
     transcriptNavigationKeyRef.current = "";
     transcriptNavigationPromiseRef.current = Promise.resolve();
     setPendingUserMessageTarget(null);
     setTranscriptFocusRequest(null);
-  }, [transcriptNavigationSessionKey]);
+  }, [beginTranscriptNavigation, normalizedSessionSearchQuery, transcriptNavigationSessionKey]);
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
       if (
@@ -1531,28 +1678,37 @@ export function TranscriptPanel({
   }, [normalizedSearchQuery, searchScopes, transcriptNavigationSessionKey]);
   useEffect(() => {
     if (!searchReady || searchLoading || searchError || searchResultCount === 0) return;
+    if (transcriptNavigationIntentRef.current !== "idle" && transcriptNavigationIntentRef.current !== "search") return;
+    const navigationRevision = beginTranscriptNavigation("search");
     if (remoteSearchActive) {
       const hit = searchResult?.hits[searchIndex];
       if (!hit) return;
       let cancelled = false;
       void ensureSearchHitLoaded(hit).then(() => {
-        if (cancelled) return;
+        if (
+          cancelled
+          || navigationRevision !== transcriptNavigationRevisionRef.current
+          || transcriptNavigationIntentRef.current !== "search"
+        ) return;
         const grouped = groupTranscriptItems(transcriptItemsRef.current) as TranscriptItemRecord[];
         const target = transcriptSearchTargetForHit(grouped, hit);
-        if (target) focusTranscriptTarget(target, true);
+        if (target) focusTranscriptTarget(target, true, "smooth", navigationRevision);
       });
       return () => {
         cancelled = true;
       };
     }
     const target = searchTargets[searchIndex];
-    if (target) focusTranscriptTarget(target, true);
-  }, [ensureSearchHitLoaded, focusTranscriptTarget, remoteSearchActive, searchError, searchIndex, searchReady, searchResult, searchResultCount, searchLoading, searchTargets, transcriptItems]);
+    if (target) focusTranscriptTarget(target, true, "smooth", navigationRevision);
+  }, [beginTranscriptNavigation, ensureSearchHitLoaded, focusTranscriptTarget, remoteSearchActive, searchError, searchIndex, searchReady, searchResult, searchResultCount, searchLoading, searchTargets, transcriptItems]);
   const transcriptReactKeyCounts = new Map<string, number>();
   const moveSearchResult = useCallback((offset: number) => {
     if (searchResultCount === 0) return;
+    beginTranscriptNavigation("search");
+    setTranscriptFocusRequest(null);
+    setPendingTranscriptBottom(false);
     setSearchIndex((current) => (current + offset + searchResultCount) % searchResultCount);
-  }, [searchResultCount]);
+  }, [beginTranscriptNavigation, searchResultCount]);
   const openLinkedSession = useCallback((sessionId: string) => {
     const linkedSession = childSessions.find((child) => child.id === sessionId);
     if (linkedSession) onOpenSession(linkedSession);
@@ -1588,7 +1744,7 @@ export function TranscriptPanel({
           </div>
         </div>
         <div className="threadMeta">
-          <span>{session.updatedDetailLabel || EMPTY_DISPLAY_VALUE}</span>
+          <span>{compactDateTime(session.updatedAt, { year: true }) || EMPTY_DISPLAY_VALUE}</span>
           <span className="threadMessageCount">{session.messages === undefined ? EMPTY_DISPLAY_VALUE : `${session.messages} messages`}</span>
         </div>
         {searchOpen ? (
@@ -1702,6 +1858,7 @@ export function TranscriptPanel({
                       addTopSpacing={isChatTranscriptType(type) && !isChatTranscriptType(previousType)}
                       highlightedKey={highlightedKey}
                       searchQuery={transcriptItemSearchQuery(item, normalizedSearchQuery, searchScopes)}
+                      searchScopes={searchScopes}
                       onOpenLinkedSession={openLinkedSession}
                       onSavePrompt={onSavePrompt}
                     />
@@ -1711,7 +1868,7 @@ export function TranscriptPanel({
               {transcriptBottomSpacerHeight > 0 ? <div className="transcriptVirtualSpacer" style={{ height: transcriptBottomSpacerHeight }} aria-hidden="true" /> : null}
               {hasMore ? (
                 <>
-                  {loadingMore ? <div className="sessionTranscriptLoadMore" aria-live="polite"><LoadingInline label="Loading more messages" /></div> : null}
+                  {loadingMore ? <div className="sessionTranscriptLoadMore" role="status" aria-label="Loading more messages"><LoadingDots size={15} /></div> : null}
                   <div ref={loadMoreRef} className="sessionTranscriptLoadMoreSentinel" aria-hidden="true" />
                 </>
               ) : null}
@@ -2344,7 +2501,7 @@ export function SessionInfoMenu({ session }: { session: SessionRecord }) {
                   <span className="sessionTimelineDot" aria-hidden="true" />
                   <div className="sessionTimelineText">
                     <strong>Updated</strong>
-                    <code>{session.updatedDetailLabel || EMPTY_DISPLAY_VALUE}</code>
+                    <code>{compactDateTime(session.updatedAt, { year: true }) || EMPTY_DISPLAY_VALUE}</code>
                   </div>
                 </div>
               </div>
@@ -2377,6 +2534,7 @@ type TranscriptItemProps = {
   addTopSpacing: boolean;
   highlightedKey: string;
   searchQuery: string;
+  searchScopes: TranscriptSearchScopeState;
   onOpenLinkedSession?: (sessionId: string) => void;
   onSavePrompt?: (body: string) => Promise<boolean>;
 };
@@ -2386,7 +2544,9 @@ function transcriptItemIsHighlighted(item: TranscriptItemRecord, itemKey: string
   if (type !== TranscriptGroupType.ToolGroup) return highlightedKey === itemKey;
   const groupIndex = itemKey.slice("tool-group-".length);
   return highlightedKey === itemKey
-    || highlightedKey.startsWith(`tool-${groupIndex}-`);
+    || (item.tools ?? []).some((child, childIndex) => (
+      highlightedKey === transcriptGroupChildKey(groupIndex, childIndex, child)
+    ));
 }
 
 function transcriptHighlightState(props: TranscriptItemProps) {
@@ -2449,12 +2609,13 @@ export const TranscriptItem = memo(function TranscriptItem({
   addTopSpacing,
   highlightedKey,
   searchQuery,
+  searchScopes,
   onOpenLinkedSession,
   onSavePrompt,
 }: TranscriptItemProps) {
   const type = transcriptItemType(item);
   const highlighted = highlightedKey === itemKey;
-  if (type === TranscriptGroupType.ToolGroup) return <ToolCallGroup tools={item.tools ?? []} itemKey={itemKey} highlightedKey={highlightedKey} searchQuery={searchQuery} onOpenLinkedSession={onOpenLinkedSession} />;
+  if (type === TranscriptGroupType.ToolGroup) return <ToolCallGroup tools={item.tools ?? []} itemKey={itemKey} highlightedKey={highlightedKey} searchQuery={searchQuery} searchScopes={searchScopes} onOpenLinkedSession={onOpenLinkedSession} />;
   if (type === "tool") {
     return <ToolCall item={item} itemKey={itemKey} highlighted={highlighted} searchQuery={searchQuery} onOpenLinkedSession={onOpenLinkedSession} />;
   }
@@ -2500,6 +2661,7 @@ export const TranscriptItem = memo(function TranscriptItem({
   && previous.itemKey === next.itemKey
   && previous.addTopSpacing === next.addTopSpacing
   && previous.searchQuery === next.searchQuery
+  && previous.searchScopes === next.searchScopes
   && previous.onOpenLinkedSession === next.onOpenLinkedSession
   && previous.onSavePrompt === next.onSavePrompt
   && (
@@ -2639,21 +2801,25 @@ export function ToolCallGroup({
   itemKey,
   highlightedKey,
   searchQuery,
+  searchScopes,
   onOpenLinkedSession,
 }: {
   tools: TranscriptItemRecord[];
   itemKey: string;
   highlightedKey: string;
   searchQuery: string;
+  searchScopes: TranscriptSearchScopeState;
   onOpenLinkedSession?: (sessionId: string) => void;
 }) {
   const [open, setOpen] = useState(false);
+  const commandCount = tools.filter(isTranscriptExecItem).length || tools.length;
   const totalDuration = tools.reduce((total, item) => {
     const value = Number(item.durationMs);
     return Number.isFinite(value) ? total + value : total;
   }, 0);
   const duration = totalDuration > 0 ? formatDuration(totalDuration) : "";
-  const toolReactKeyCounts = new Map<string, number>();
+  const childReactKeyCounts = new Map<string, number>();
+  const groupIndex = itemKey.slice("tool-group-".length);
   return (
     <Disclosure
       className="toolCallGroup"
@@ -2666,29 +2832,41 @@ export function ToolCallGroup({
       contentPadding="inset"
       summary={(
         <>
-          <span>Ran {tools.length} {tools.length === 1 ? "command" : "commands"}</span>
+          <span>Ran {commandCount} {commandCount === 1 ? "command" : "commands"}</span>
           {duration ? <Badge tone="neutral" className="toolCallDuration">{duration}</Badge> : null}
         </>
       )}
     >
       <>
         {tools.map((tool, index) => {
-          const groupIndex = itemKey.split("-").pop();
-          const toolKey = transcriptItemKey("tool", `${groupIndex}-${index}`);
-          const reactKeyBase = transcriptReactKey(tool, "tool");
-          const reactKeyOccurrence = toolReactKeyCounts.get(reactKeyBase) ?? 0;
-          toolReactKeyCounts.set(reactKeyBase, reactKeyOccurrence + 1);
+          const toolKey = transcriptGroupChildKey(groupIndex, index, tool);
+          const type = transcriptItemType(tool);
+          const reactKeyBase = transcriptReactKey(tool, type);
+          const reactKeyOccurrence = childReactKeyCounts.get(reactKeyBase) ?? 0;
+          childReactKeyCounts.set(reactKeyBase, reactKeyOccurrence + 1);
+          const childSearchQuery = transcriptItemSearchQuery(tool, searchQuery, searchScopes);
+          if (type === "thinking" || type === "reasoning") {
+            return (
+              <ThinkingBlock
+                item={tool}
+                itemKey={toolKey}
+                highlighted={highlightedKey === toolKey}
+                searchQuery={childSearchQuery}
+                key={reactKeyOccurrence === 0 ? reactKeyBase : `${reactKeyBase}:${reactKeyOccurrence}`}
+              />
+            );
+          }
           return (
             <ToolCall
               item={tool}
               itemKey={toolKey}
               highlighted={highlightedKey === toolKey}
-              searchQuery={searchQuery}
+              searchQuery={childSearchQuery}
               onOpenLinkedSession={onOpenLinkedSession}
               key={reactKeyOccurrence === 0 ? reactKeyBase : `${reactKeyBase}:${reactKeyOccurrence}`}
-            nested
-          />
-        );
+              nested
+            />
+          );
         })}
       </>
     </Disclosure>
@@ -2945,6 +3123,10 @@ export function SessionsView({
     for (const session of [...importedSessions, ...sessionItems]) byId.set(sessionTableRowId(session), session);
     return [...byId.values()];
   }, [importedSessions, sessionItems]);
+  const sessionMembershipKey = useMemo(
+    () => sessionItems.map((session) => sessionLogicalIdentity(session)).join("\u0001"),
+    [sessionItems],
+  );
   const activeSort = remoteSearchActive ? searchSort ?? SESSION_SEARCH_SORT : sort;
   const pageContextKey = sessionPageContextKey(
     activeSort,
@@ -3041,7 +3223,7 @@ export function SessionsView({
     return () => {
       cancelled = true;
     };
-  }, [groupBy, listSessions, pageContextKey, pageSize, pendingListLocate, remoteListRequest, sessionItems, showChildSessions, showSessionError, sort, useLocalSessionList]);
+  }, [groupBy, listSessions, pageContextKey, pageSize, pendingListLocate, remoteListRequest, sessionMembershipKey, showChildSessions, showSessionError, sort, useLocalSessionList]);
   const projectOptions = localListView?.projectOptions ?? remoteList?.projectOptions ?? EMPTY_SESSION_PROJECT_OPTIONS;
   const visibleProjectOptions = localListView?.visibleProjectOptions ?? projectOptions
     .filter((option) => selectedProjectKeys.includes(option.key) || !projectFilterQuery || projectSearchRank(option.label, projectFilterQuery) !== null)
@@ -3829,7 +4011,8 @@ export function SessionsView({
           && refreshedPage.sourceVersion
           && refreshedPage.sourceVersion !== transcriptSourceVersionRef.current,
       );
-      if (sourceChanged) {
+      const sourcePrefixRewritten = sourceChanged && !transcriptItemsSharePrefix(transcriptItemsRef.current, refreshedPage.items);
+      if (sourcePrefixRewritten) {
         transcriptLocatorRequestAuthorityRef.current.begin();
         transcriptLocatorCacheRef.current.delete(activeSessionTranscriptKey);
         setTranscriptLocatorState(null);
@@ -3887,10 +4070,6 @@ export function SessionsView({
       transcriptRequestAuthorityRef.current.invalidate(requestRevision);
     };
   }, [activeImportedTranscript, activeSessionLogicalKey, activeSessionTranscriptKey, activeSessionTranscriptRefreshKey, loadTranscript, queueTranscriptLocator, showSessionError]);
-  useEffect(() => {
-    if (!activeSession || activeImportedTranscript) return;
-    queueTranscriptLocator(activeSession, activeSessionTranscriptKey);
-  }, [activeImportedTranscript, activeSession, activeSessionTranscriptKey, queueTranscriptLocator]);
   const loadMoreTranscript = useCallback((): Promise<TranscriptLoadMoreResult> => {
     const requestKey = activeSessionTranscriptKey;
     const existing = loadMoreTranscriptInFlightRef.current;

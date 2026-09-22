@@ -5,7 +5,6 @@ import {
   invokeSessionScanStart,
   invokeSessionSnapshot,
   SessionScanPhase,
-  SkillUpdateEventStatus,
   subscribeRuntimeEvents,
 } from "../lib/runtime-gateway.ts";
 import type { RuntimeEvent } from "../lib/runtime-gateway.ts";
@@ -16,6 +15,7 @@ import { RuntimeDomainKey } from "../lib/domain.ts";
 import { sessionIdentityRecordKey, sessionLogicalIdentityRecordKey } from "../lib/sessions.ts";
 import type { SessionIdentityRecord } from "../lib/sessions.ts";
 import type { RawDomainRow } from "./controller-types.ts";
+import { applySkillUpdateEvent } from "./skill-update-controller.ts";
 import { desktopStore } from "../store/desktop-store.ts";
 
 const SESSION_EVENT_FLUSH_MS = 200;
@@ -35,6 +35,7 @@ export type SessionRuntimeControllerOptions = {
   setAnalyticsRevisionError: (message: string) => void;
   setSkillUpdateError: (message: string) => void;
   setCheckingSkillUpdates: (checking: boolean) => void;
+  setSkillUpdateCheckActive: (active: boolean) => void;
 };
 
 export type SessionRuntimeController = {
@@ -58,6 +59,7 @@ export function useSessionRuntimeController(
     setAnalyticsRevisionError,
     setSkillUpdateError,
     setCheckingSkillUpdates,
+    setSkillUpdateCheckActive,
   } = options;
   const sessionsRefreshInFlight = useRef<Promise<number | null> | null>(null);
   const sessionEventReady = useRef<Promise<void>>(Promise.resolve());
@@ -263,24 +265,22 @@ export function useSessionRuntimeController(
         }
         handleSessionScanEvent(event);
       } else if (event.event === RuntimeEventName.AnalyticsRevision) {
-        if (sessionScopeKey.current && event.payload.scopeKey !== sessionScopeKey.current) return;
+        // Runtime history can replay events before the current session
+        // snapshot establishes its scope. Do not let another workspace's
+        // analytics revision poison the current Overview cache.
+        if (!sessionScopeKey.current || event.payload.scopeKey !== sessionScopeKey.current) return;
         setAnalyticsRevision(event.payload.revision);
         setAnalyticsRevisionReady(true);
         setAnalyticsRevisionError("");
       } else if (event.event === RuntimeEventName.AnalyticsProgress) {
         desktopStore.actions.setAnalyticsProgress(event.payload);
       } else if (event.event === RuntimeEventName.SkillsUpdates) {
-        const payload = event.payload;
-        if (payload.status === SkillUpdateEventStatus.Completed) {
-          // An update check only produces reports; it does not mutate the
-          // skill projection. Do not replace or refresh the list here: doing
-          // so makes a background check reorder the visible table later.
-          desktopStore.actions.setSkillUpdateReports(payload.updates);
-          setSkillUpdateError("");
-        } else {
-          setSkillUpdateError(payload.error || "Update check failed");
-        }
-        setCheckingSkillUpdates(false);
+        applySkillUpdateEvent(event.payload, {
+          setSkillUpdateReports: (updates) => desktopStore.actions.setSkillUpdateReports(updates),
+          setSkillUpdateError,
+          setCheckingSkillUpdates,
+          setSkillUpdateCheckActive,
+        });
       } else if (event.event === RuntimeEventName.SkillsChanged) {
         if (!isCurrentScopeEvent) return;
         void refreshSkills().catch((error) => {

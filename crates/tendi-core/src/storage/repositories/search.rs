@@ -132,22 +132,35 @@ impl Store {
     ) -> Result<Vec<SessionSearchHit>> {
         let query = session_search_query(terms);
         self.session_search_matches(&query)?;
-        let sql_params = vec![SqlValue::Text(scope_key.as_str().to_string())];
+        let mut sql_params = vec![SqlValue::Text(scope_key.as_str().to_string())];
+        let exact_match = terms
+            .iter()
+            .map(|_| {
+                "LOWER(
+                    COALESCE(search.title, '') || ' ' ||
+                    COALESCE(search.project, '') || ' ' ||
+                    COALESCE(search.metadata_text, '') || ' ' ||
+                    COALESCE(search.user_text, '') || ' ' ||
+                    COALESCE(search.assistant_text, '')
+                ) LIKE ? ESCAPE '\\'"
+            })
+            .collect::<Vec<_>>()
+            .join(" AND ");
+        sql_params.extend(
+            terms
+                .iter()
+                .map(|term| SqlValue::Text(format!("%{}%", escape_like(term)))),
+        );
         let candidate_join = self.session_search_candidate_join(candidates)?;
         let mut stmt = self.conn.prepare(&format!(
-            "WITH ranked AS (
+            "WITH matched AS (
                 SELECT
                     search.scope_key,
                     search.session_id,
                     search.agent,
                     search.session_path,
                     search.id AS record_id,
-                    matches.bm25_score,
-                    ROW_NUMBER() OVER (
-                        PARTITION BY search.scope_key, search.session_id,
-                                     search.agent, search.session_path
-                        ORDER BY matches.bm25_score DESC, search.id ASC
-                    ) AS row_number
+                    matches.bm25_score
                 FROM temp.{SESSION_SEARCH_MATCH_TABLE} AS matches
                 JOIN scoped_session_search_records AS search ON search.id = matches.record_id
                 JOIN scoped_session_search_index AS published
@@ -155,11 +168,7 @@ impl Store {
                  AND published.agent = search.agent AND published.session_path = search.session_path
                  AND published.search_index_version = {SESSION_SEARCH_INDEX_VERSION}
                 {candidate_join}
-                WHERE search.scope_key = ?1
-            ), matched AS (
-                SELECT scope_key, session_id, agent, session_path, record_id, bm25_score
-                FROM ranked
-                WHERE row_number = 1
+                WHERE search.scope_key = ?1 AND {exact_match}
             )
             SELECT
                 sessions.data_json,
@@ -193,21 +202,30 @@ impl Store {
         })?;
         let candidate_order = candidates.map(Self::session_search_candidate_order);
         let mut hits: Vec<SessionSearchHit> = Vec::new();
-        let mut seen = HashSet::new();
+        let mut hit_indexes: HashMap<(String, String, PathBuf), usize> = HashMap::new();
         for row in rows {
-            let (data_json, document, search_score) = row?;
+            let (data_json, document, _bm25_score) = row?;
             let session = Self::normalize_cached_session(
                 serde_json::from_str::<SessionRecord>(&data_json)
                     .context("invalid cached scoped session search row")?,
             );
-            if !seen.insert(Self::session_search_hit_key(&session)) {
+            if !contains_search_terms(&document, terms) {
                 continue;
             }
-            hits.push(SessionSearchHit {
+            let hit = SessionSearchHit {
                 session,
-                search_score,
+                search_score: contains_search_score(&document, terms),
                 search_snippet: contains_search_snippet(&document, terms),
-            });
+            };
+            let key = Self::session_search_hit_key(&hit.session);
+            if let Some(index) = hit_indexes.get(&key).copied() {
+                if hit.search_score > hits[index].search_score {
+                    hits[index] = hit;
+                }
+            } else {
+                hit_indexes.insert(key, hits.len());
+                hits.push(hit);
+            }
         }
         if let Some(candidate_order) = candidate_order {
             hits.sort_by_key(|hit| {

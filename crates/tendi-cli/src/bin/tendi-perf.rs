@@ -28,6 +28,7 @@ const PROMPT_COUNT: usize = 500;
 const SESSION_SEARCH_SESSIONS: usize = 512;
 const SESSION_SEARCH_CANDIDATES: usize = 100;
 const SESSION_SOAK_COUNT: usize = 10_000;
+const SESSION_PAGE_COUNT: usize = 16_710;
 
 fn main() -> Result<()> {
     let scenario = env::args().nth(1).context("usage: tendi-perf <scenario>")?;
@@ -39,6 +40,7 @@ fn main() -> Result<()> {
         "secondary-session-page" => secondary_session_page(),
         "secondary-session-search" => secondary_session_search(),
         "secondary-session-list-10k" => secondary_session_list_10k(),
+        "secondary-session-list-16k" => secondary_session_list_16k(),
         "secondary-session-10k-soak" => secondary_session_10k_soak(),
         "secondary-linked-sessions" => secondary_linked_sessions(),
         "secondary-skill-files" => secondary_skill_files(),
@@ -191,6 +193,13 @@ fn secondary_session_search() -> Result<Value> {
         },
         1,
     )?;
+    let (_, search_errors, _) = store.refresh_pending_session_search_for_scope(&scope_key)?;
+    if !search_errors.is_empty() {
+        bail!(
+            "session search fixture indexing failed: {}",
+            search_errors.join("; ")
+        );
+    }
     let candidates = sessions
         .iter()
         .take(SESSION_SEARCH_CANDIDATES)
@@ -238,6 +247,13 @@ fn secondary_session_10k_soak() -> Result<Value> {
         },
         1,
     )?;
+    let (_, search_errors, _) = store.refresh_pending_session_search_for_scope(&scope_key)?;
+    if !search_errors.is_empty() {
+        bail!(
+            "10k session search fixture indexing failed: {}",
+            search_errors.join("; ")
+        );
+    }
 
     let candidates = sessions
         .iter()
@@ -269,11 +285,19 @@ fn secondary_session_10k_soak() -> Result<Value> {
 }
 
 fn secondary_session_list_10k() -> Result<Value> {
-    let scratch = Scratch::new("session-list-10k")?;
-    let store = Store::open(scratch.path().join("session-list-10k.sqlite3"))?;
+    secondary_session_list("session-list-10k", SESSION_SOAK_COUNT)
+}
+
+fn secondary_session_list_16k() -> Result<Value> {
+    secondary_session_list("session-list-16k", SESSION_PAGE_COUNT)
+}
+
+fn secondary_session_list(label: &str, session_count: usize) -> Result<Value> {
+    let scratch = Scratch::new(label)?;
+    let store = Store::open(scratch.path().join(format!("{label}.sqlite3")))?;
     let scope_key = ScopeKey::new(scratch.path().display().to_string())
         .map_err(|error| anyhow::anyhow!(error))?;
-    let sessions = (0..SESSION_SOAK_COUNT)
+    let sessions = (0..session_count)
         .map(|index| {
             session(
                 index,
@@ -309,14 +333,14 @@ fn secondary_session_list_10k() -> Result<Value> {
                 locate: None,
             },
         )?;
-        if page.rows.len() != 50 || page.total != SESSION_SOAK_COUNT {
+        if page.rows.len() != 50 || page.total != session_count {
             bail!(
-                "unexpected 10k session page: {} of {}",
+                "unexpected session page: {} of {}",
                 page.rows.len(),
-                page.total
+                page.total,
             );
         }
-        Ok((page, SESSION_SOAK_COUNT))
+        Ok((page, session_count))
     })
 }
 

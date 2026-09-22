@@ -3,7 +3,7 @@
   "openrpc": "1.3.2",
   "protocolVersion": 2,
   "schemaVersion": 1,
-  "contractFingerprint": "81be9570295a07ebb0f7ed62df9572e9a4bd990b3abd425658e3528062164c0d",
+  "contractFingerprint": "6aa6289f5b12906366104f71917aa24c703bffd1a5ab8c06b3f01745412451ca",
   "methods": [
     {
       "name": "scan",

@@ -79,6 +79,31 @@ pub(super) struct WriterQueue {
 pub(super) struct WriterTurn<'a>(&'a WriterQueue);
 
 impl WriterQueue {
+    /// Acquire the writer only when there is no owner or queued request.
+    /// Background maintenance uses this admission path so it never waits in
+    /// front of an interactive request merely to discover that the database is
+    /// busy.
+    pub(super) fn try_acquire(&self, priority: WritePriority) -> Result<Option<WriterTurn<'_>>> {
+        let thread = std::thread::current().id();
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| anyhow::anyhow!("database writer queue poisoned"))?;
+        if state.owner == Some(thread) {
+            return Err(AdmissionError::Reentrant.into());
+        }
+        if state.owner.is_some() || !state.waiting.is_empty() {
+            return Ok(None);
+        }
+        state.owner = Some(thread);
+        state.interactive_streak = if priority == WritePriority::Interactive {
+            0
+        } else {
+            state.interactive_streak
+        };
+        Ok(Some(WriterTurn(self)))
+    }
+
     #[cfg(test)]
     pub(super) fn acquire(&self, timeout: Duration) -> Result<WriterTurn<'_>> {
         self.acquire_for(timeout, WritePriority::Interactive)

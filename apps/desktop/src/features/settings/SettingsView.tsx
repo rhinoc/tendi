@@ -81,7 +81,7 @@ const projectTableColumns: CompactTableColumn<ProjectSummary>[] = [
     width: "minmax(140px, 0.7fr)",
     cellClassName: "compactTableCell--muted",
     value: (project) => compactDateTime(project.lastScannedAt, { year: true }) || undefined,
-    title: (project) => project.lastScannedAt || undefined,
+    title: (project) => compactDateTime(project.lastScannedAt, { year: true }) || undefined,
     empty: EMPTY_DISPLAY_VALUE,
   },
 ];

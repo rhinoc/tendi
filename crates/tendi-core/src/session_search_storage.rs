@@ -9,14 +9,22 @@ const SEARCH_WRITE_BATCH_ROWS: usize = 128;
 // A cooperative SQL work budget, not a hard deadline: one statement and COMMIT
 // finish atomically. Large FTS rows can exceed it and remain visible in metrics.
 const SEARCH_WRITE_BATCH_TARGET: Duration = Duration::from_millis(10);
+const SESSION_SEARCH_PROJECTION_DOMAIN: &str = "session-search";
 
 /// The exact metadata and revision boundary committed by one index publication.
 /// Callers must not widen this span across unrelated metadata transactions.
 #[derive(Debug, Clone)]
 pub struct SessionSearchPublication {
     pub session: SessionRecord,
+    /// Revisions from the dedicated `session-search` projection stream.
     pub base_revision: Revision,
     pub revision: Revision,
+}
+
+impl SessionSearchPublication {
+    /// This receipt is internal to the search index lifecycle. It is not a
+    /// sessions scan event and must not be published through that contract.
+    pub const DOMAIN: &'static str = SESSION_SEARCH_PROJECTION_DOMAIN;
 }
 
 #[derive(Debug)]
@@ -227,6 +235,54 @@ impl Store {
             bail!("session search rebuild failed: {}", errors.join("; "));
         }
         Ok(changed.len())
+    }
+
+    pub fn optimize_session_search_fts_if_due(&self) -> Result<bool> {
+        let Some(_maintenance_lease) = crate::coordination::ResourceLease::try_acquire(
+            self.path(),
+            "session-search-fts-optimize",
+        )?
+        else {
+            // FTS5 optimize is one SQLite command and its transaction cannot be
+            // safely split here. Serialize it across Store instances so two
+            // processes never hold the canonical writer for the same optimize.
+            return Ok(false);
+        };
+        let now = unix_now();
+        let due = self.conn.query_row(
+            "SELECT pending_mutations, last_optimized_at
+             FROM scoped_session_search_maintenance WHERE id = 1",
+            [],
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, u64>(1)?)),
+        )?;
+        let interval_due = now.saturating_sub(due.1) >= SESSION_SEARCH_FTS_OPTIMIZE_INTERVAL;
+        if due.0 < SESSION_SEARCH_FTS_OPTIMIZE_MUTATIONS
+            && (!interval_due || due.0 < SESSION_SEARCH_FTS_OPTIMIZE_MIN_MUTATIONS)
+        {
+            return Ok(false);
+        }
+        let pending_work: bool = self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM scoped_session_search_work)",
+            [],
+            |row| row.get(0),
+        )?;
+        if pending_work {
+            return Ok(false);
+        }
+        self.with_background_write_transaction("session_search.fts_optimize", |tx| {
+            tx.execute(
+                "INSERT INTO scoped_session_search_fts(scoped_session_search_fts)
+                 VALUES ('optimize')",
+                [],
+            )?;
+            tx.execute(
+                "UPDATE scoped_session_search_maintenance
+                 SET pending_mutations = 0, last_optimized_at = ?1 WHERE id = 1",
+                [now],
+            )?;
+            Ok(())
+        })?;
+        Ok(true)
     }
 
     fn refresh_session_search(
@@ -463,6 +519,7 @@ impl Store {
                     processed += 1;
                     if started.elapsed() >= SEARCH_WRITE_BATCH_TARGET { break; }
                 }
+                record_session_search_mutations_in_tx(tx, processed)?;
                 Ok(processed)
             })?;
             start += processed;
@@ -484,6 +541,7 @@ impl Store {
                     processed += 1;
                     if started.elapsed() >= SEARCH_WRITE_BATCH_TARGET { break; }
                 }
+                record_session_search_mutations_in_tx(tx, processed)?;
                 Ok(processed)
             })?;
             removed_start += processed;
@@ -515,7 +573,18 @@ impl Store {
                         checkpoint_json
                     ],
                 )?;
-                let head = advance_projection_head_in_tx(tx, scope, "sessions", None, "ready")?;
+                // Search publication has its own revision stream. Seed it from
+                // the canonical sessions head once so old workspaces preserve
+                // monotonic ordering without allowing search work to advance
+                // the sessions projection.
+                Self::align_session_search_revision_in_tx(tx, scope)?;
+                let head = advance_projection_head_in_tx(
+                    tx,
+                    scope,
+                    SESSION_SEARCH_PROJECTION_DOMAIN,
+                    None,
+                    "ready",
+                )?;
                 Ok(SessionSearchPublication {
                     session: session.clone(),
                     base_revision: Revision::new(head.revision.value() - 1),
@@ -523,6 +592,47 @@ impl Store {
                 })
             })?;
         Ok((Some(publication), source_advanced))
+    }
+
+    fn align_session_search_revision_in_tx(tx: &Transaction<'_>, scope: &ScopeKey) -> Result<()> {
+        let sessions_revision = tx
+            .query_row(
+                "SELECT revision FROM projection_heads
+                 WHERE scope_key = ?1 AND domain = 'sessions'",
+                [scope.as_str()],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()?;
+        let Some(sessions_revision) = sessions_revision else {
+            return Ok(());
+        };
+        let search_revision = tx
+            .query_row(
+                "SELECT revision FROM projection_heads
+                 WHERE scope_key = ?1 AND domain = ?2",
+                params![scope.as_str(), SESSION_SEARCH_PROJECTION_DOMAIN],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()?;
+        if search_revision.is_some_and(|revision| revision >= sessions_revision) {
+            return Ok(());
+        }
+        let updated_at = i64::try_from(unix_now()).context("invalid projection timestamp")?;
+        tx.execute(
+            "INSERT INTO projection_heads
+                (scope_key, domain, revision, source_version, schema_version, status, updated_at)
+             VALUES (?1, ?2, ?3, NULL, 1, 'ready', ?4)
+             ON CONFLICT(scope_key, domain) DO UPDATE SET
+                revision = MAX(projection_heads.revision, excluded.revision),
+                updated_at = excluded.updated_at",
+            params![
+                scope.as_str(),
+                SESSION_SEARCH_PROJECTION_DOMAIN,
+                sessions_revision,
+                updated_at,
+            ],
+        )?;
+        Ok(())
     }
 
     fn prune_session_search_key(
@@ -561,6 +671,7 @@ impl Store {
             check_search_cancellation(should_stop)?;
             self.with_background_write_transaction("session_search.prune_batch", |tx| {
                 let started = std::time::Instant::now();
+                let mut processed = 0;
                 for id in &ids {
                     tx.execute(
                         "DELETE FROM scoped_session_search_records WHERE id = ?1
@@ -571,10 +682,12 @@ impl Store {
                               AND s.path = scoped_session_search_records.session_path)",
                         [id],
                     )?;
+                    processed += 1;
                     if started.elapsed() >= SEARCH_WRITE_BATCH_TARGET {
                         break;
                     }
                 }
+                record_session_search_mutations_in_tx(tx, processed)?;
                 Ok(())
             })?;
         }
@@ -597,6 +710,18 @@ impl Store {
 
 fn session_search_lock_key(scope: &ScopeKey) -> String {
     format!("session-search-{}", &sha256_text(scope.as_str())[..24])
+}
+
+fn record_session_search_mutations_in_tx(tx: &Transaction<'_>, mutations: usize) -> Result<()> {
+    if mutations == 0 {
+        return Ok(());
+    }
+    tx.execute(
+        "UPDATE scoped_session_search_maintenance
+         SET pending_mutations = pending_mutations + ?1 WHERE id = 1",
+        [mutations as i64],
+    )?;
+    Ok(())
 }
 
 /// Called in the same transaction that changes canonical metadata or membership.

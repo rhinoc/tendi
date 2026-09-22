@@ -124,6 +124,111 @@
   min-height: 0;
 }
 
+.skillUpdateBinaryState {
+  flex: 1 1 auto;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  color: var(--muted);
+  font-size: var(--text-ui);
+  text-align: center;
+}
+
+.skillUpdateUnavailableState {
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background: var(--panel-bg);
+}
+
+.skillUpdateUnavailableHeader {
+  display: flex;
+  align-items: flex-start;
+  gap: 16px;
+  flex: 0 0 auto;
+  flex-wrap: wrap;
+  padding: 18px 20px 14px;
+  border-bottom: 1px solid var(--line);
+  background: var(--surface-2);
+}
+
+.skillUpdateUnavailableMessage {
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.skillUpdateUnavailableMessage strong {
+  color: var(--text);
+  font-size: var(--text-ui);
+}
+
+.skillUpdateUnavailableMessage p {
+  margin: 5px 0 0;
+  color: var(--muted);
+  font-size: var(--text-sm);
+  line-height: var(--leading-body);
+}
+
+.skillUpdateUnavailableSources {
+  display: inline-flex;
+  flex: 0 0 auto;
+  gap: 2px;
+  padding: 2px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--inset-fill);
+}
+
+.skillUpdateUnavailableSources button {
+  min-width: 68px;
+  padding: 5px 9px;
+  border: 0;
+  border-radius: calc(var(--radius-sm) - 2px);
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: var(--text-sm);
+  font-weight: 600;
+}
+
+.skillUpdateUnavailableSources button:hover:not(:disabled) {
+  color: var(--text);
+  background: var(--hover-fill);
+}
+
+.skillUpdateUnavailableSources button.selected {
+  background: var(--panel-bg);
+  box-shadow: var(--shadow-border);
+  color: var(--text);
+}
+
+.skillUpdateUnavailableSources button:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+.skillUpdateUnavailableSources button:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 1px;
+}
+
+.skillUpdateUnavailableContent {
+  flex: 1 1 auto;
+  min-height: 0;
+  margin: 0;
+  padding: 16px 20px 24px;
+  overflow: auto;
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  line-height: var(--leading-body);
+  tab-size: 2;
+  white-space: pre;
+}
+
 .skillMergeResolutionBar {
   display: flex;
   align-items: center;

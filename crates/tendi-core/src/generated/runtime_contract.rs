@@ -5,7 +5,7 @@ pub use serde_json::Value;
 pub const PROTOCOL_VERSION: u64 = 2;
 pub const SCHEMA_VERSION: u64 = 1;
 pub const RUNTIME_CONTRACT_FINGERPRINT: &str =
-    "81be9570295a07ebb0f7ed62df9572e9a4bd990b3abd425658e3528062164c0d";
+    "6aa6289f5b12906366104f71917aa24c703bffd1a5ab8c06b3f01745412451ca";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -467,6 +467,8 @@ pub struct SkillMergeIssue {
     pub path: String,
     pub resolution_key: String,
     pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
     pub before: String,
     pub base: String,
     pub incoming: String,
@@ -484,6 +486,8 @@ pub struct GitUpdateFile {
     pub incoming_exists: bool,
     pub after_exists: bool,
     pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct GitSkillVisibility {

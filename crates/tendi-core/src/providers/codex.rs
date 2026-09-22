@@ -2955,7 +2955,7 @@ fn collect_codex_item(value: &Value, items: &mut Vec<TranscriptItem>) {
     let time = value
         .get("timestamp")
         .and_then(Value::as_str)
-        .map(compact_time);
+        .map(str::to_string);
     let timestamp_ms = value
         .get("timestamp")
         .and_then(Value::as_str)
@@ -3087,10 +3087,18 @@ fn push_codex_compaction(items: &mut Vec<TranscriptItem>, value: &Value) {
     let time = value
         .get("timestamp")
         .and_then(Value::as_str)
-        .map(compact_time);
+        .map(str::to_string);
+    let compacted_time = time.as_deref().map(compact_time);
     if items
         .last()
-        .is_some_and(|item| item.kind == "compaction" && item.time == time)
+        .and_then(|item| {
+            item.time
+                .as_deref()
+                .map(|previous| (item, compact_time(previous)))
+        })
+        .is_some_and(|(item, previous)| {
+            item.kind == "compaction" && Some(previous) == compacted_time
+        })
     {
         return;
     }
@@ -3131,7 +3139,7 @@ fn push_codex_model_config(items: &mut Vec<TranscriptItem>, value: &Value) {
     let time = value
         .get("timestamp")
         .and_then(Value::as_str)
-        .map(compact_time);
+        .map(str::to_string);
     push_model_config(items, model, effort, time);
 }
 

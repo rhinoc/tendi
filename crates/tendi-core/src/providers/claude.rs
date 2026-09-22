@@ -5,9 +5,9 @@ use serde_json::Value;
 use walkdir::WalkDir;
 
 use crate::transcript::{
-    TranscriptItem, attach_tool_result, collect_message_content, compact_time,
-    extract_content_text, extract_duration_ms, extract_thinking_text, extract_tool_command,
-    push_item, push_tool_item, summarize_tool_call,
+    TranscriptItem, attach_tool_result, collect_message_content, extract_content_text,
+    extract_duration_ms, extract_thinking_text, extract_tool_command, push_item, push_tool_item,
+    summarize_tool_call,
 };
 use crate::{analytics::AnalyticsCapabilities, skills::SkillVisibility, time::timestamp_ms};
 
@@ -750,7 +750,7 @@ fn collect_claude_item(value: &Value, items: &mut Vec<TranscriptItem>) {
     let time = value
         .get("timestamp")
         .and_then(Value::as_str)
-        .map(compact_time);
+        .map(str::to_string);
     let timestamp_ms = value
         .get("timestamp")
         .and_then(Value::as_str)

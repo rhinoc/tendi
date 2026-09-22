@@ -134,6 +134,11 @@ pub fn run_index_for_scope(
     }
 
     let lookup = SkillLookup::new(&skill_scan);
+    let indexed_states = if force {
+        BTreeMap::new()
+    } else {
+        store.session_skill_index_states_for_scope(scope_key)?
+    };
     let mut parsed = 0;
     let mut skipped = 0;
     let mut failed = 0;
@@ -154,13 +159,14 @@ pub fn run_index_for_scope(
             }
         };
 
-        if !force
-            && store.session_skill_index_is_current_for_scope(
-                scope_key,
-                session,
-                state.file_mtime,
-                state.file_size,
-            )?
+        let index_key = (
+            session.id.clone(),
+            session.agent.label().to_string(),
+            session.path.display().to_string(),
+        );
+        if indexed_states
+            .get(&index_key)
+            .is_some_and(|indexed| *indexed == (state.file_mtime, state.file_size))
         {
             skipped += 1;
             continue;

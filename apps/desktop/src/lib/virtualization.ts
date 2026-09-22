@@ -11,6 +11,57 @@ export type VirtualizationContract = {
 
 export type VirtualRange = { start: number; end: number };
 
+function lowerBound(values: readonly number[], target: number, start: number, end: number) {
+  let low = Math.max(0, start);
+  let high = Math.min(values.length, end);
+  while (low < high) {
+    const middle = low + Math.floor((high - low) / 2);
+    if ((values[middle] ?? 0) < target) low = middle + 1;
+    else high = middle;
+  }
+  return low;
+}
+
+function upperBound(values: readonly number[], target: number, start: number, end: number) {
+  let low = Math.max(0, start);
+  let high = Math.min(values.length, end);
+  while (low < high) {
+    const middle = low + Math.floor((high - low) / 2);
+    if ((values[middle] ?? 0) <= target) low = middle + 1;
+    else high = middle;
+  }
+  return low;
+}
+
+/**
+ * Finds a virtual window from monotonically increasing item-end offsets.
+ * Unlike a measured-item scan, this stays logarithmic as the data set grows.
+ */
+export function variableVirtualRangeFor(
+  offsets: readonly number[],
+  scrollOffset: number,
+  viewportSize: number,
+  estimate: number,
+  overscan: number,
+): VirtualRange {
+  const count = Math.max(0, offsets.length - 1);
+  if (count === 0) return { start: 0, end: 0 };
+
+  const itemSize = Math.max(1, estimate);
+  const viewport = Math.max(0, viewportSize);
+  const buffer = Math.max(0, Math.floor(overscan)) * itemSize;
+  const totalSize = Math.max(0, offsets[count] ?? 0);
+  const boundedOffset = Math.min(
+    Math.max(0, Number.isFinite(scrollOffset) ? scrollOffset : 0),
+    Math.max(0, totalSize - viewport),
+  );
+  const bufferedStart = Math.max(0, boundedOffset - buffer);
+  const bufferedEnd = Math.min(totalSize, boundedOffset + viewport + buffer);
+  const start = Math.min(count, Math.max(0, upperBound(offsets, bufferedStart, 1, count + 1) - 1));
+  const end = Math.min(count, Math.max(start, lowerBound(offsets, bufferedEnd, start + 1, count + 1)));
+  return { start, end };
+}
+
 export function virtualRangeFor(contract: VirtualizationContract): VirtualRange {
   const count = Math.max(0, Math.floor(contract.count));
   const itemSize = Math.max(1, contract.estimate);

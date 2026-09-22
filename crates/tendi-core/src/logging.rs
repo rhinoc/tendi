@@ -140,6 +140,9 @@ pub fn init(component: &str) -> Result<Logger> {
 }
 
 pub fn global() -> Logger {
+    #[cfg(test)]
+    crate::test_support::ensure_isolated_environment();
+
     GLOBAL_LOGGER
         .get_or_init(|| Logger::new("tendi").unwrap_or_else(|_| Logger::disabled("tendi")))
         .clone()

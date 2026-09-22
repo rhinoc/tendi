@@ -4,12 +4,12 @@ use super::{
     transaction,
 };
 use anyhow::{Context, Result};
-use rusqlite::{Connection, Transaction};
+use rusqlite::{Connection, DatabaseName, Transaction};
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
     sync::{Arc, LazyLock, Mutex, Weak},
-    time::Duration,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 type DatabaseSlot = Arc<Mutex<Weak<DatabaseWriter>>>;
@@ -23,7 +23,7 @@ pub(super) struct DatabaseWriter {
 }
 
 impl DatabaseWriter {
-    fn open_connection(path: &Path) -> Result<Connection> {
+    fn open_connection_unleased(path: &Path) -> Result<Connection> {
         let connection = Connection::open(path)
             .with_context(|| format!("failed to open database writer {}", path.display()))?;
         connection.busy_timeout(Duration::from_secs(30))?;
@@ -31,19 +31,143 @@ impl DatabaseWriter {
         Ok(connection)
     }
 
+    fn probe_connection(connection: &Connection, require_application_schema: bool) -> Result<()> {
+        let quick_check: String = connection
+            .query_row("PRAGMA quick_check(1)", [], |row| row.get(0))
+            .context("database health probe quick_check failed")?;
+        anyhow::ensure!(
+            quick_check.eq_ignore_ascii_case("ok"),
+            "database health probe quick_check returned {quick_check}"
+        );
+
+        let _: i64 = connection
+            .query_row("PRAGMA schema_version", [], |row| row.get(0))
+            .context("database health probe could not read schema_version")?;
+        let _: i64 = connection
+            .query_row("SELECT count(*) FROM sqlite_master", [], |row| row.get(0))
+            .context("database health probe could not read sqlite_master")?;
+        if require_application_schema {
+            let meta_exists: bool = connection.query_row(
+                "SELECT EXISTS(
+                    SELECT 1 FROM sqlite_master
+                    WHERE type = 'table' AND name = 'meta'
+                )",
+                [],
+                |row| row.get(0),
+            )?;
+            anyhow::ensure!(
+                meta_exists,
+                "database health probe found no application schema"
+            );
+        }
+        Ok(())
+    }
+
+    fn open_and_probe(path: &Path, require_application_schema: bool) -> Result<Connection> {
+        let started = std::time::Instant::now();
+        let _database_lease = acquire_database_lease(path, started)?;
+        let connection = Self::open_connection_unleased(path)?;
+        Self::probe_or_repair_connection(&connection, path, require_application_schema)?;
+        Ok(connection)
+    }
+
+    fn open_with_lease(path: &Path) -> Result<Connection> {
+        let started = std::time::Instant::now();
+        let _database_lease = acquire_database_lease(path, started)?;
+        Self::open_connection_unleased(path)
+    }
+
+    fn probe_or_repair_connection(
+        connection: &Connection,
+        path: &Path,
+        require_application_schema: bool,
+    ) -> Result<()> {
+        match Self::probe_connection(connection, require_application_schema) {
+            Ok(()) => Ok(()),
+            Err(error) if Self::repairs_session_skill_links(connection, path, &error)? => {
+                Self::probe_connection(connection, require_application_schema)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    fn repairs_session_skill_links(
+        connection: &Connection,
+        path: &Path,
+        error: &anyhow::Error,
+    ) -> Result<bool> {
+        let message = format!("{error:#}");
+        if !message.contains("database health probe quick_check returned") {
+            return Ok(false);
+        }
+        let mut statement = connection.prepare(
+            "SELECT rootpage FROM sqlite_master
+             WHERE name IN (
+                 'scoped_session_skill_links',
+                 'sqlite_autoindex_scoped_session_skill_links_1',
+                 'idx_scoped_session_skill_links_session',
+                 'idx_scoped_session_skill_links_skill'
+             )",
+        )?;
+        let root_pages = statement
+            .query_map([], |row| row.get::<_, i64>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let corrupted = root_pages
+            .iter()
+            .any(|root_page| message.contains(&format!("Tree {root_page} page {root_page}")));
+        if !corrupted {
+            return Ok(false);
+        }
+
+        let backup_path = Self::backup_corrupt_database(connection, path)?;
+        crate::migrations::rebuild_corrupt_session_skill_links(connection).with_context(|| {
+            format!(
+                "rebuild corrupt session skill links; backup={}",
+                backup_path.display()
+            )
+        })?;
+        crate::logging::global().warn(
+            "rebuilt corrupt session skill links",
+            serde_json::json!({
+                "database": path,
+                "backup": backup_path,
+            }),
+        );
+        Ok(true)
+    }
+
+    fn backup_corrupt_database(connection: &Connection, path: &Path) -> Result<PathBuf> {
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let file_name = path
+            .file_name()
+            .context("database path has no file name")?
+            .to_string_lossy();
+        let backup_path =
+            path.with_file_name(format!("{file_name}.corrupt-backup-{timestamp}.sqlite3"));
+        connection
+            .backup(DatabaseName::Main, &backup_path, None)
+            .with_context(|| format!("backup corrupt database to {}", backup_path.display()))?;
+        Ok(backup_path)
+    }
+
+    fn registry_slot(path: &Path) -> Result<DatabaseSlot> {
+        let mut databases = DATABASES
+            .lock()
+            .map_err(|_| anyhow::anyhow!("database registry poisoned"))?;
+        databases.retain(|_, slot| {
+            Arc::strong_count(slot) > 1
+                || slot
+                    .try_lock()
+                    .map_or(true, |database| database.strong_count() > 0)
+        });
+        Ok(databases.entry(path.to_path_buf()).or_default().clone())
+    }
+
     pub(super) fn open(path: &Path) -> Result<Arc<Self>> {
-        let slot = {
-            let mut databases = DATABASES
-                .lock()
-                .map_err(|_| anyhow::anyhow!("database registry poisoned"))?;
-            databases.retain(|_, slot| {
-                Arc::strong_count(slot) > 1
-                    || slot
-                        .try_lock()
-                        .map_or(true, |database| database.strong_count() > 0)
-            });
-            databases.entry(path.to_path_buf()).or_default().clone()
-        };
+        let slot = Self::registry_slot(path)?;
         // Only opens for this database wait for its initialization. Opening an
         // unrelated database never waits behind another database's SQLite lock.
         let mut current = slot
@@ -52,7 +176,7 @@ impl DatabaseWriter {
         if let Some(database) = current.upgrade() {
             return Ok(database);
         }
-        let connection = Self::open_connection(path)?;
+        let connection = Self::open_with_lease(path)?;
         let database = Arc::new(Self {
             path: path.to_path_buf(),
             queue: WriterQueue::default(),
@@ -60,6 +184,29 @@ impl DatabaseWriter {
         });
         *current = Arc::downgrade(&database);
         Ok(database)
+    }
+
+    pub(super) fn recover_path(path: &Path) -> Result<()> {
+        anyhow::ensure!(
+            path.exists(),
+            "database recovery refused missing database {}",
+            path.display()
+        );
+        let slot = Self::registry_slot(path)?;
+        let database = slot
+            .lock()
+            .map_err(|_| anyhow::anyhow!("database initialization poisoned"))?
+            .upgrade();
+        if let Some(database) = database {
+            return database.recover();
+        }
+
+        // There is no live writer in this process to replace. Opening and
+        // probing under the same cross-process lease still proves that a
+        // subsequent Store::open may safely create its writer; it never
+        // creates or substitutes an empty database.
+        let _connection = Self::open_and_probe(path, true)?;
+        Ok(())
     }
 
     pub(super) fn recover(&self) -> Result<()> {
@@ -73,7 +220,14 @@ impl DatabaseWriter {
                     self.path.display()
                 ))
             })?;
-        let connection = Self::open_connection(&self.path)?;
+        let _database_lease = acquire_database_lease(&self.path, queued)?;
+        let connection = Self::open_connection_unleased(&self.path)?;
+        // DatabaseWriter is also used by low-level storage tests and by the
+        // schema bootstrap path before the application tables exist. The
+        // recovery entry point validates the application schema when it has
+        // no live writer; replacing an existing writer only needs the SQLite
+        // health probe here.
+        Self::probe_or_repair_connection(&connection, &self.path, false)?;
         let queue_wait = queued.elapsed();
         let mut current = self
             .connection
@@ -90,6 +244,72 @@ impl DatabaseWriter {
         Ok(())
     }
 
+    pub(super) fn vacuum(&self) -> Result<()> {
+        let queued = std::time::Instant::now();
+        let _turn = self
+            .queue
+            .acquire_for(Duration::from_secs(30), WritePriority::Background)?;
+        let _database_lease = acquire_database_lease(&self.path, queued)?;
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| anyhow::anyhow!("database writer connection poisoned"))?;
+        connection.busy_timeout(Duration::from_secs(30))?;
+        let started = std::time::Instant::now();
+        connection.execute_batch("VACUUM")?;
+        crate::logging::global().info(
+            "database vacuum completed",
+            serde_json::json!({
+                "database": self.path,
+                "durationMs": started.elapsed().as_secs_f64() * 1000.0,
+            }),
+        );
+        Ok(())
+    }
+
+    /// Run compaction only when this process is currently idle and the
+    /// cross-process writer lease is immediately available. A caller that gets
+    /// `false` must leave its durable maintenance marker in place and retry
+    /// from a later maintenance opportunity.
+    pub(super) fn vacuum_if_idle(&self) -> Result<bool> {
+        let Some(_turn) = self.queue.try_acquire(WritePriority::Background)? else {
+            return Ok(false);
+        };
+        let Some(_database_lease) =
+            crate::coordination::ResourceLease::try_acquire(&self.path, "database-writer")?
+        else {
+            return Ok(false);
+        };
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| anyhow::anyhow!("database writer connection poisoned"))?;
+        connection.busy_timeout(Duration::from_millis(1))?;
+        let started = std::time::Instant::now();
+        match connection.execute_batch("VACUUM") {
+            Ok(()) => {
+                crate::logging::global().info(
+                    "database idle vacuum completed",
+                    serde_json::json!({
+                        "database": self.path,
+                        "durationMs": started.elapsed().as_secs_f64() * 1000.0,
+                    }),
+                );
+                Ok(true)
+            }
+            Err(error)
+                if matches!(error, rusqlite::Error::SqliteFailure(ref code, _)
+                if matches!(
+                    code.code,
+                    rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked
+                )) =>
+            {
+                Ok(false)
+            }
+            Err(error) => Err(error.into()),
+        }
+    }
+
     pub(super) fn write<T>(
         &self,
         operation: &str,
@@ -104,6 +324,41 @@ impl DatabaseWriter {
         write: impl FnOnce(&Transaction<'_>) -> Result<T>,
     ) -> Result<T> {
         self.write_with_priority(operation, WritePriority::Background, write)
+    }
+
+    pub(super) fn write_background_until<T>(
+        &self,
+        operation: &str,
+        deadline: std::time::Instant,
+        write: impl FnOnce(&Transaction<'_>) -> Result<T>,
+    ) -> Result<Option<T>> {
+        let queued = std::time::Instant::now();
+        let Some(_turn) = self.queue.try_acquire(WritePriority::Background)? else {
+            return Ok(None);
+        };
+        let Some(_database_lease) =
+            crate::coordination::ResourceLease::try_acquire(&self.path, "database-writer")?
+        else {
+            return Ok(None);
+        };
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            return Ok(None);
+        }
+        let mut connection = self
+            .connection
+            .lock()
+            .map_err(|_| anyhow::anyhow!("database writer connection poisoned"))?;
+        let result = transaction::write(
+            &mut connection,
+            &self.path,
+            operation,
+            WritePriority::Background,
+            queued.elapsed(),
+            remaining,
+            write,
+        )?;
+        Ok(Some(result))
     }
 
     fn write_with_priority<T>(

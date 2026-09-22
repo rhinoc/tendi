@@ -28,9 +28,10 @@ use chrono::Local;
 use rusqlite::{Connection, params};
 
 use super::{
-    AppSettings, PromptWrite, SESSION_SEARCH_CANDIDATE_TABLE, SessionListQuery, SessionListRow,
-    Store, compare_session_list_rows, highlight_contains_match, is_database_io_error,
-    is_database_io_error_message, normalize_repository_url,
+    ANALYTICS_JSON_ENCODING, AppSettings, PromptWrite, SESSION_SEARCH_CANDIDATE_TABLE,
+    SessionListQuery, SessionListRow, Store, compare_session_list_rows, decompress_analytics_json,
+    highlight_contains_match, is_database_io_error, is_database_io_error_message,
+    normalize_repository_url,
 };
 
 #[test]
@@ -413,6 +414,8 @@ fn session_list_page_filters_sorts_pages_searches_and_locates_in_storage() {
     }
     sessions[3].project = Some(PathBuf::from("/tmp/another-project"));
     sessions[3].path = PathBuf::from("/tmp/another-project/other.jsonl");
+    sessions[3].first_user_message = Some("retained list preview".to_string());
+    sessions[3].model = Some("retained-model".to_string());
     sessions[4].parent_session_id = Some("newest".to_string());
     store
         .save_sessions_at_for_scope(
@@ -500,6 +503,14 @@ fn session_list_page_filters_sorts_pages_searches_and_locates_in_storage() {
         .unwrap();
     assert_eq!(filtered.total, 1);
     assert_eq!(filtered.rows[0].session.id, "other");
+    assert_eq!(
+        filtered.rows[0].session.first_user_message.as_deref(),
+        Some("retained list preview")
+    );
+    assert_eq!(
+        filtered.rows[0].session.model.as_deref(),
+        Some("retained-model")
+    );
 
     let grouped = store
         .list_session_page_for_scope(
@@ -516,6 +527,134 @@ fn session_list_page_filters_sorts_pages_searches_and_locates_in_storage() {
     assert_eq!(grouped.page, 1);
     assert_eq!(grouped.group_count, Some(1));
     assert_eq!(grouped.rows[0].session.id, "other");
+
+    drop(store);
+    fs::remove_dir_all(temp).unwrap();
+}
+
+#[test]
+fn session_list_uses_derived_numeric_projection_for_sql_page_ordering() {
+    let temp = temp_dir("tendi-storage-session-list-projection");
+    fs::create_dir_all(&temp).unwrap();
+    let store = Store::open(temp.join("tendi.sqlite3")).unwrap();
+    let scope = ScopeKey::new("workspace:session-list-projection").unwrap();
+    let mut sessions = vec![
+        session("low", "Low"),
+        session("high", "High"),
+        session("middle", "Middle"),
+    ];
+    sessions[0].updated_at = Some("2026-06-23T10:00:00+02:00".to_string());
+    sessions[1].updated_at = Some("2026-06-23T10:00:00Z".to_string());
+    sessions[2].updated_at = Some("2026-06-23T10:00:00-02:00".to_string());
+    sessions[0].turn_count = Some(1);
+    sessions[1].turn_count = Some(20);
+    sessions[2].turn_count = Some(10);
+    sessions[0].token_usage = Some(crate::sessions::SessionTokenUsage {
+        input_tokens: 100,
+        cached_input_tokens: 10,
+        output_tokens: 0,
+        reasoning_output_tokens: 0,
+        total_tokens: 0,
+    });
+    sessions[1].token_usage = Some(crate::sessions::SessionTokenUsage {
+        input_tokens: 100,
+        cached_input_tokens: 80,
+        output_tokens: 0,
+        reasoning_output_tokens: 0,
+        total_tokens: 0,
+    });
+    store
+        .save_sessions_at_for_scope(
+            &scope,
+            &SessionScan {
+                sessions: sessions.clone(),
+                warnings: Vec::new(),
+            },
+            1,
+        )
+        .unwrap();
+
+    let turns_page = store
+        .list_session_page_for_scope(
+            &scope,
+            SessionListQuery {
+                query: String::new(),
+                agent: None,
+                sort_key: "turns".to_string(),
+                sort_direction: "desc".to_string(),
+                group_by: None,
+                page: 0,
+                page_size: 1,
+                show_child_sessions: false,
+                selected_project_keys: Vec::new(),
+                locate: None,
+            },
+        )
+        .unwrap();
+    assert_eq!(turns_page.total, 3);
+    assert_eq!(turns_page.rows[0].session.id, "high");
+
+    let updated_page = store
+        .list_session_page_for_scope(
+            &scope,
+            SessionListQuery {
+                query: String::new(),
+                agent: None,
+                sort_key: "updatedAt".to_string(),
+                sort_direction: "desc".to_string(),
+                group_by: None,
+                page: 0,
+                page_size: 3,
+                show_child_sessions: false,
+                selected_project_keys: Vec::new(),
+                locate: None,
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        updated_page
+            .rows
+            .iter()
+            .map(|row| row.session.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["middle", "high", "low"]
+    );
+
+    let cache_page = store
+        .list_session_page_for_scope(
+            &scope,
+            SessionListQuery {
+                query: String::new(),
+                agent: None,
+                sort_key: "cacheRate".to_string(),
+                sort_direction: "desc".to_string(),
+                group_by: None,
+                page: 0,
+                page_size: 1,
+                show_child_sessions: false,
+                selected_project_keys: Vec::new(),
+                locate: None,
+            },
+        )
+        .unwrap();
+    assert_eq!(cache_page.rows[0].session.id, "high");
+
+    let projection = Connection::open(store.path())
+        .unwrap()
+        .query_row(
+            "SELECT turn_count, input_tokens, cached_input_tokens
+             FROM scoped_sessions WHERE scope_key = ?1 AND id = 'high'",
+            [scope.as_str()],
+            |row| {
+                Ok((
+                    row.get::<_, Option<i64>>(0)?,
+                    row.get::<_, Option<i64>>(1)?,
+                    row.get::<_, Option<i64>>(2)?,
+                ))
+            },
+        )
+        .unwrap();
+    assert_eq!(projection, (Some(20), Some(100), Some(80)));
 
     drop(store);
     fs::remove_dir_all(temp).unwrap();
@@ -553,6 +692,203 @@ fn session_search_ranks_hits_with_fts_bm25() {
     assert_eq!(hits[0].session.id, "repeated-hit");
     assert!(hits[0].search_score > hits[1].search_score);
     assert!(hits[1].search_score > 0.0);
+
+    drop(store);
+    fs::remove_dir_all(temp).unwrap();
+}
+
+#[test]
+fn session_search_preserves_long_substrings_and_rejects_split_trigrams() {
+    let temp = temp_dir("tendi-storage-session-search-trigram-filter");
+    fs::create_dir_all(&temp).unwrap();
+    let store = Store::open(temp.join("tendi.sqlite3")).unwrap();
+    let scope = ScopeKey::new("workspace:session-search-trigram-filter").unwrap();
+    store
+        .save_sessions_at_for_scope(
+            &scope,
+            &SessionScan {
+                sessions: vec![
+                    session("exact", "abcdef"),
+                    session("split", "abc xxx bcd xxx cde xxx def"),
+                ],
+                warnings: Vec::new(),
+            },
+            1,
+        )
+        .unwrap();
+    store
+        .ensure_scoped_session_search_for_scope(&scope)
+        .unwrap();
+
+    let hits = store
+        .search_sessions_for_scope(&scope, "abcdef", None)
+        .unwrap();
+    assert_eq!(
+        hits.iter()
+            .map(|hit| hit.session.id.as_str())
+            .collect::<Vec<_>>(),
+        ["exact"]
+    );
+
+    drop(store);
+    fs::remove_dir_all(temp).unwrap();
+}
+
+#[test]
+fn session_search_fts_optimize_resets_due_mutation_counter() {
+    let temp = temp_dir("tendi-storage-session-search-optimize");
+    fs::create_dir_all(&temp).unwrap();
+    let store = Store::open(temp.join("tendi.sqlite3")).unwrap();
+    store
+        .with_named_write_transaction("test.session_search_maintenance_due", |tx| {
+            tx.execute(
+                "UPDATE scoped_session_search_maintenance
+                 SET pending_mutations = 2000, last_optimized_at = 0 WHERE id = 1",
+                [],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+
+    assert!(store.optimize_session_search_fts_if_due().unwrap());
+    let state: (i64, i64) = store
+        .conn
+        .query_row(
+            "SELECT pending_mutations, last_optimized_at
+             FROM scoped_session_search_maintenance WHERE id = 1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(state.0, 0);
+    assert!(state.1 > 0);
+
+    drop(store);
+    fs::remove_dir_all(temp).unwrap();
+}
+
+#[test]
+fn schema_v1_storage_migrates_fts_and_analytics_cache() {
+    let temp = temp_dir("tendi-storage-v1-compaction-migration");
+    fs::create_dir_all(&temp).unwrap();
+    let db = temp.join("tendi.sqlite3");
+    let analytics_json = r#"{"sessionId":"legacy","agent":"codex","responses":[]}"#;
+    {
+        let conn = Connection::open(&db).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+             CREATE TABLE scoped_session_analytics (
+                 scope_key TEXT NOT NULL, session_id TEXT NOT NULL, agent TEXT NOT NULL,
+                 session_path TEXT NOT NULL, file_mtime INTEGER NOT NULL, file_size INTEGER NOT NULL,
+                 indexed_at TEXT NOT NULL, analytics_json TEXT NOT NULL, parser_state_json TEXT NOT NULL,
+                 event_min_date TEXT, event_max_date TEXT, has_activity INTEGER NOT NULL DEFAULT 0,
+                 capability_token_usage INTEGER NOT NULL DEFAULT 0,
+                 capability_reasoning_tokens INTEGER NOT NULL DEFAULT 0,
+                 capability_explicit_runs INTEGER NOT NULL DEFAULT 0,
+                 capability_rate_limit_history INTEGER NOT NULL DEFAULT 0,
+                 overview_indexed INTEGER NOT NULL DEFAULT 1, overview_index_error TEXT,
+                 PRIMARY KEY (scope_key, session_id, agent, session_path)
+             );
+             CREATE TABLE scoped_session_search_records (
+                 scope_key TEXT NOT NULL, id INTEGER PRIMARY KEY AUTOINCREMENT,
+                 session_id TEXT NOT NULL, agent TEXT NOT NULL, session_path TEXT NOT NULL,
+                 record_order INTEGER NOT NULL, metadata_text TEXT NOT NULL DEFAULT '',
+                 title TEXT NOT NULL DEFAULT '', project TEXT NOT NULL DEFAULT '',
+                 user_text TEXT NOT NULL, assistant_text TEXT NOT NULL,
+                 UNIQUE (scope_key, session_id, agent, session_path, record_order)
+             );
+             CREATE VIRTUAL TABLE scoped_session_search_fts USING fts5(
+                 metadata_text, title, project, user_text, assistant_text,
+                 content = 'scoped_session_search_records', content_rowid = 'id',
+                 tokenize = 'trigram case_sensitive 0'
+             );
+             PRAGMA user_version = 1;",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO scoped_session_search_records(
+                scope_key, session_id, agent, session_path, record_order,
+                title, user_text, assistant_text
+             ) VALUES ('legacy', 'session', 'codex', '/tmp/session.jsonl', 0,
+                       'Legacy title', 'needle', '')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO scoped_session_search_fts(
+                rowid, metadata_text, title, project, user_text, assistant_text
+             ) SELECT id, metadata_text, title, project, user_text, assistant_text
+               FROM scoped_session_search_records",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO scoped_session_analytics(
+                scope_key, session_id, agent, session_path, file_mtime, file_size,
+                indexed_at, analytics_json, parser_state_json
+             ) VALUES ('legacy', 'session', 'codex', '/tmp/session.jsonl', 0, 0,
+                       '', ?1, '{}')",
+            [analytics_json],
+        )
+        .unwrap();
+    }
+
+    let store = Store::open(&db).unwrap();
+    store.run_pending_storage_migrations().unwrap();
+    let definition: String = store
+        .conn
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE name = 'scoped_session_search_fts'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(definition.contains("contentless_delete = 1"));
+    assert!(definition.contains("detail = column"));
+    let rowid: i64 = store
+        .conn
+        .query_row(
+            "SELECT rowid FROM scoped_session_search_fts
+             WHERE scoped_session_search_fts MATCH 'nee AND eed AND edl AND dle'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(rowid, 1);
+    let compressed: Vec<u8> = store
+        .conn
+        .query_row(
+            "SELECT analytics_json FROM scoped_session_analytics",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(compressed.starts_with(ANALYTICS_JSON_ENCODING.as_bytes()));
+    assert_eq!(
+        decompress_analytics_json(&compressed).unwrap(),
+        analytics_json
+    );
+    assert!(
+        store
+            .conn
+            .query_row(
+                "SELECT value = '1' FROM meta WHERE key = 'storage.compaction.pending'",
+                [],
+                |row| row.get::<_, bool>(0),
+            )
+            .unwrap()
+    );
+    assert!(store.run_pending_storage_maintenance().unwrap());
+    assert!(
+        store
+            .conn
+            .query_row(
+                "SELECT NOT EXISTS(SELECT 1 FROM meta WHERE key = 'storage.compaction.pending')",
+                [],
+                |row| row.get::<_, bool>(0),
+            )
+            .unwrap()
+    );
 
     drop(store);
     fs::remove_dir_all(temp).unwrap();

@@ -75,6 +75,9 @@ impl ProviderContext {
         cwd: &Path,
         additional_project_dirs: &[PathBuf],
     ) -> Self {
+        #[cfg(test)]
+        crate::test_support::ensure_isolated_environment();
+
         let mut project_dirs = project_dirs(cwd);
         for directory in additional_project_dirs {
             let directory = directory
@@ -770,6 +773,96 @@ static UNKNOWN: unknown::UnknownProvider = unknown::UnknownProvider;
 
 pub(crate) fn all_providers() -> Vec<&'static dyn AgentProvider> {
     vec![&SHARED, &CODEX, &CURSOR, &CLAUDE, &UNKNOWN]
+}
+
+/// Providers whose frontmatter policy is materialized into a skill's
+/// `SKILL.md`. Shared skill directories are consumed by both Claude and
+/// Cursor, regardless of which provider discovered the directory.
+pub(crate) fn skill_frontmatter_visibility_providers(
+    agent: AgentKind,
+) -> Vec<&'static dyn AgentProvider> {
+    let kinds = match agent {
+        AgentKind::Unknown => vec![AgentKind::Claude, AgentKind::Cursor],
+        _ => vec![agent, AgentKind::Claude, AgentKind::Cursor],
+    };
+    let mut providers = Vec::new();
+    for kind in kinds {
+        let provider = agent_provider(kind);
+        if providers
+            .iter()
+            .all(|current: &&'static dyn AgentProvider| current.kind() != provider.kind())
+        {
+            providers.push(provider);
+        }
+    }
+    providers
+}
+
+/// Providers whose files are an installation overlay rather than source
+/// content. These files are regenerated from Tendi/provider policy after a
+/// source update and must not make a source revision look locally modified.
+pub(crate) fn skill_overlay_providers(agent: AgentKind) -> Vec<&'static dyn AgentProvider> {
+    let kinds = match agent {
+        AgentKind::Codex => vec![AgentKind::Codex],
+        AgentKind::Cursor | AgentKind::Claude => vec![agent, AgentKind::Codex],
+        AgentKind::Shared => vec![AgentKind::Shared, AgentKind::Codex],
+        AgentKind::Unknown => vec![
+            AgentKind::Shared,
+            AgentKind::Codex,
+            AgentKind::Cursor,
+            AgentKind::Claude,
+        ],
+    };
+    let mut providers = Vec::new();
+    for kind in kinds {
+        let provider = agent_provider(kind);
+        if providers
+            .iter()
+            .all(|current: &&'static dyn AgentProvider| current.kind() != provider.kind())
+        {
+            providers.push(provider);
+        }
+    }
+    providers
+}
+
+pub(crate) fn skill_frontmatter_visibility_keys(agent: AgentKind) -> Vec<&'static str> {
+    let mut keys = Vec::new();
+    for provider in skill_frontmatter_visibility_providers(agent) {
+        if let Some(key) = provider.skill_frontmatter_visibility_key()
+            && !keys.contains(&key)
+        {
+            keys.push(key);
+        }
+    }
+    keys
+}
+
+pub(crate) fn is_managed_skill_file(agent: AgentKind, relative_path: &str) -> bool {
+    skill_overlay_providers(agent)
+        .into_iter()
+        .any(|provider| provider.is_managed_skill_file(relative_path))
+}
+
+pub(crate) fn normalize_skill_file_for_merge(
+    agent: AgentKind,
+    relative_path: &str,
+    local: Option<&str>,
+    base: Option<&str>,
+    incoming: Option<&str>,
+    visibility: SkillVisibility,
+) -> Option<(Option<String>, Option<String>, Option<String>)> {
+    skill_overlay_providers(agent)
+        .into_iter()
+        .find_map(|provider| {
+            provider.normalize_skill_file_for_merge(
+                relative_path,
+                local,
+                base,
+                incoming,
+                visibility,
+            )
+        })
 }
 
 pub(crate) fn agent_provider(agent: AgentKind) -> &'static dyn AgentProvider {

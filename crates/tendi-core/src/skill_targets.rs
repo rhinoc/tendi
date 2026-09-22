@@ -628,6 +628,9 @@ pub fn skill_target_root(
     target: &SkillTarget,
     scope: SkillInstallScope,
 ) -> Result<PathBuf> {
+    #[cfg(test)]
+    crate::test_support::ensure_isolated_environment();
+
     let config = target_config(target)?;
     if let Some(agent) = config.provider {
         let provider = crate::providers::agent_provider(agent);

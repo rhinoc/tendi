@@ -253,6 +253,7 @@ export {
   transcriptContextPreview,
   transcriptEvidenceSearchText,
   transcriptItemType,
+  isTranscriptExecItem,
   TranscriptGroupType,
   groupTranscriptItems,
 } from "./transcript.ts";

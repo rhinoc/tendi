@@ -1,10 +1,194 @@
 use super::*;
 use std::{
-    fs,
+    fs, thread,
     time::{SystemTime, UNIX_EPOCH},
 };
 
 static TEST_LOCK: Mutex<()> = Mutex::new(());
+
+#[test]
+fn sqlite_database_error_classification_separates_locks_from_recovery_errors() {
+    let cases = [
+        (
+            rusqlite::ffi::SQLITE_BUSY,
+            tendi_core::storage::DatabaseErrorKind::Busy,
+            false,
+        ),
+        (
+            rusqlite::ffi::SQLITE_LOCKED,
+            tendi_core::storage::DatabaseErrorKind::Locked,
+            false,
+        ),
+        (
+            rusqlite::ffi::SQLITE_IOERR_SHORT_READ,
+            tendi_core::storage::DatabaseErrorKind::Io,
+            true,
+        ),
+        (
+            rusqlite::ffi::SQLITE_CORRUPT,
+            tendi_core::storage::DatabaseErrorKind::Corrupt,
+            true,
+        ),
+        (
+            rusqlite::ffi::SQLITE_NOTADB,
+            tendi_core::storage::DatabaseErrorKind::NotADatabase,
+            true,
+        ),
+        (
+            rusqlite::ffi::SQLITE_CANTOPEN,
+            tendi_core::storage::DatabaseErrorKind::CannotOpen,
+            true,
+        ),
+        (
+            rusqlite::ffi::SQLITE_FULL,
+            tendi_core::storage::DatabaseErrorKind::DiskFull,
+            false,
+        ),
+        (
+            rusqlite::ffi::SQLITE_READONLY,
+            tendi_core::storage::DatabaseErrorKind::ReadOnly,
+            false,
+        ),
+    ];
+
+    for (code, expected_kind, requires_recovery) in cases {
+        let error = anyhow::Error::new(rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(code),
+            None,
+        ));
+        assert_eq!(
+            tendi_core::storage::database_error_kind(&error),
+            Some(expected_kind)
+        );
+        assert_eq!(
+            tendi_core::storage::is_database_recovery_error(&error),
+            requires_recovery
+        );
+    }
+
+    assert_eq!(
+        tendi_core::storage::database_error_kind_from_message("database is locked"),
+        Some(tendi_core::storage::DatabaseErrorKind::Locked)
+    );
+    assert!(!tendi_core::storage::is_database_recovery_error_message(
+        "database is locked"
+    ));
+    assert!(tendi_core::storage::is_database_recovery_error_message(
+        "database disk image is malformed"
+    ));
+    let lock_error = core_error("database is locked");
+    assert_eq!(
+        lock_error
+            .data
+            .as_ref()
+            .and_then(|data| data["recovery"].as_bool()),
+        Some(false)
+    );
+}
+
+#[test]
+fn failed_storage_recovery_enters_terminal_degraded_state() {
+    let root = temp_workspace();
+    let database_path = root.with_extension("sqlite3");
+    fs::write(&database_path, b"not a sqlite database").unwrap();
+    let mut daemon = Daemon::with_database(root.clone(), database_path.clone(), false);
+    daemon.test_database_path = Some(database_path.clone());
+
+    let first = match daemon.open_store() {
+        Ok(_) => panic!("invalid database must fail recovery"),
+        Err(error) => error,
+    };
+    assert!(!first.to_string().starts_with("database is degraded:"));
+    assert!(daemon.is_storage_degraded());
+
+    let second = match daemon.open_store() {
+        Ok(_) => panic!("degraded database must reject subsequent opens"),
+        Err(error) => error,
+    };
+    assert!(second.to_string().starts_with("database is degraded:"));
+    daemon.shutdown();
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn session_search_worker_stops_after_terminal_storage_degradation() {
+    let root = temp_workspace();
+    let database_path = root.with_extension("sqlite3");
+    fs::write(&database_path, b"not a sqlite database").unwrap();
+    let mut daemon = Daemon::with_database(root.clone(), database_path.clone(), false);
+    daemon.test_database_path = Some(database_path);
+    assert!(daemon.open_store().is_err());
+
+    let worker_daemon = daemon.clone();
+    let worker = thread::spawn(move || session_search_loop(worker_daemon));
+    let mut exited = worker.is_finished();
+    for _ in 0..20 {
+        if exited {
+            break;
+        }
+        thread::sleep(Duration::from_millis(5));
+        exited = worker.is_finished();
+    }
+    daemon.shutdown();
+    let join_result = worker.join();
+
+    assert!(
+        exited,
+        "degraded search worker must stop instead of retrying"
+    );
+    assert!(join_result.is_ok());
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn recovery_waits_for_shared_cross_process_database_lease() {
+    let root = temp_workspace();
+    let daemon = test_daemon_without_background(root.clone());
+    let store = daemon.open_store().unwrap();
+    let lease = tendi_core::coordination::ResourceLease::acquire(
+        &daemon.state.database_path,
+        "database-writer",
+    )
+    .unwrap();
+    let recovery_daemon = daemon.clone();
+    let recovery = thread::spawn(move || recovery_daemon.recover_storage("lease test"));
+
+    thread::sleep(Duration::from_millis(100));
+    assert!(
+        !recovery.is_finished(),
+        "recovery must wait for the database lease"
+    );
+    drop(lease);
+    assert!(
+        recovery.join().unwrap(),
+        "recovery should finish after lease release"
+    );
+
+    drop(store);
+    daemon.shutdown();
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn event_emit_uses_unavailable_revision_without_opening_database() {
+    let root = temp_workspace();
+    let daemon = test_daemon_without_background(root.clone());
+    let database_path = daemon.state.database_path.clone();
+    assert!(!database_path.exists());
+    let subscription = daemon.subscribe_events();
+    daemon.emit_event(
+        PROJECTION_CHANGED_EVENT,
+        runtime_event(
+            PROJECTION_CHANGED_EVENT,
+            json!({ "domain": "rules", "error": Value::Null }),
+        ),
+    );
+    let event = subscription.recv_timeout(Duration::from_secs(1)).unwrap();
+    assert_eq!(event.revision, None);
+    assert!(!database_path.exists());
+    daemon.shutdown();
+    let _ = fs::remove_dir_all(root);
+}
 
 struct ShortWriter {
     bytes: Vec<u8>,
@@ -1814,5 +1998,63 @@ fn json_rpc_boundary_uses_generated_envelope_and_numeric_errors() {
     assert!(response["id"].is_null());
     assert_eq!(response["error"]["code"], -32600);
     daemon.shutdown();
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn sessions_snapshot_preserves_full_session_records() {
+    let root = temp_workspace();
+    let daemon = test_daemon_without_background(root.clone());
+    let store = test_store(&daemon);
+    let scope = daemon_scope_key(&daemon).unwrap();
+    store
+        .save_sessions_at_for_scope(
+            &scope,
+            &tendi_core::sessions::SessionScan {
+                sessions: vec![tendi_core::SessionRecord {
+                    id: "snapshot-session".to_string(),
+                    agent: tendi_core::AgentKind::Codex,
+                    title: Some("Snapshot title".to_string()),
+                    project: Some(root.clone()),
+                    repository: None,
+                    repository_url: None,
+                    logical_project_id: None,
+                    logical_project_name: None,
+                    path: root.join("snapshot.jsonl"),
+                    started_at: Some("2026-06-23T10:00:00Z".to_string()),
+                    updated_at: Some("2026-06-23T10:01:00Z".to_string()),
+                    message_count: Some(2),
+                    first_user_message: Some("first message".to_string()),
+                    last_user_message: Some("last message".to_string()),
+                    last_assistant_message: Some("answer".to_string()),
+                    turn_count: Some(1),
+                    model: Some("gpt-snapshot".to_string()),
+                    mode: Some("default".to_string()),
+                    approval_mode: None,
+                    is_run_everything: None,
+                    parent_session_id: None,
+                    token_usage: None,
+                }],
+                warnings: Vec::new(),
+            },
+            1,
+        )
+        .unwrap();
+
+    let snapshot = daemon.sessions_snapshot().unwrap();
+    assert_eq!(snapshot.payload.len(), 1);
+    assert_eq!(snapshot.payload[0].id, "snapshot-session");
+    assert_eq!(snapshot.payload[0].model.as_deref(), Some("gpt-snapshot"));
+    assert_eq!(
+        snapshot.payload[0].first_user_message.as_deref(),
+        Some("first message")
+    );
+    assert_eq!(
+        snapshot.payload[0].path,
+        root.join("snapshot.jsonl").display().to_string()
+    );
+
+    daemon.shutdown();
+    let _ = fs::remove_file(root.with_extension("sqlite3"));
     let _ = fs::remove_dir_all(root);
 }

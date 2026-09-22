@@ -1094,22 +1094,47 @@ impl Store {
         Ok(inserted)
     }
 
-    /// Persist the source rows produced by a complete skill projection. This
-    /// is normal projection synchronization, not a compatibility transition:
-    /// the successful scan is authoritative for the workspace's current paths.
-    pub(in crate::storage) fn replace_skill_source_projection_in_tx(
+    pub(in crate::storage) fn skill_source_projection_paths_in_tx(
+        &self,
+        tx: &Transaction<'_>,
+        scope_key: &ScopeKey,
+    ) -> Result<Vec<String>> {
+        let mut statement =
+            tx.prepare("SELECT skill_path FROM scoped_skill_sources WHERE scope_key = ?1")?;
+        let paths = statement
+            .query_map(params![scope_key.as_str()], |row| row.get(0))?
+            .collect::<rusqlite::Result<Vec<String>>>()?;
+        Ok(paths)
+    }
+
+    pub(in crate::storage) fn delete_skill_source_projection_paths_in_tx(
+        &self,
+        tx: &Transaction<'_>,
+        scope_key: &ScopeKey,
+        paths: &[String],
+    ) -> Result<()> {
+        for path in paths {
+            tx.execute(
+                "DELETE FROM scoped_skill_sources
+                 WHERE scope_key = ?1 AND skill_path = ?2",
+                params![scope_key.as_str(), path],
+            )?;
+            tx.execute(
+                "DELETE FROM scoped_skill_snapshots
+                 WHERE scope_key = ?1 AND skill_path = ?2",
+                params![scope_key.as_str(), path],
+            )?;
+        }
+        Ok(())
+    }
+
+    pub(in crate::storage) fn upsert_skill_source_projection_batch_in_tx(
         &self,
         tx: &Transaction<'_>,
         scope_key: &ScopeKey,
         records: &[SkillSourceRecord],
     ) -> Result<()> {
-        let mut records_by_path = BTreeMap::new();
         for record in records {
-            records_by_path
-                .entry(record.skill_path.clone())
-                .or_insert(record);
-        }
-        for record in records_by_path.values() {
             log_skill_source_record_write("scoped_skill_sources", Some(scope_key.as_str()), record);
             tx.execute(
                 "INSERT INTO scoped_skill_sources (
@@ -1139,32 +1164,6 @@ impl Store {
                     record.origin,
                     serde_json::to_string(record)?,
                 ],
-            )?;
-        }
-
-        let current_paths = records_by_path
-            .keys()
-            .map(|path| path.display().to_string())
-            .collect::<BTreeSet<_>>();
-        let existing_paths = {
-            let mut statement =
-                tx.prepare("SELECT skill_path FROM scoped_skill_sources WHERE scope_key = ?1")?;
-            let rows = statement.query_map(params![scope_key.as_str()], |row| row.get(0))?;
-            rows.collect::<std::result::Result<Vec<String>, _>>()?
-        };
-        for skill_path in existing_paths {
-            if current_paths.contains(&skill_path) {
-                continue;
-            }
-            tx.execute(
-                "DELETE FROM scoped_skill_sources
-                 WHERE scope_key = ?1 AND skill_path = ?2",
-                params![scope_key.as_str(), skill_path],
-            )?;
-            tx.execute(
-                "DELETE FROM scoped_skill_snapshots
-                 WHERE scope_key = ?1 AND skill_path = ?2",
-                params![scope_key.as_str(), skill_path],
             )?;
         }
         Ok(())

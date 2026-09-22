@@ -5,7 +5,7 @@
   flex: 1;
   min-height: 0;
   min-width: 0;
-  --transcript-inline-padding: 16px;
+  --transcript-inline-padding: 8px;
   --transcript-surface-radius: var(--radius-lg);
   --transcript-nested-radius: max(0px, calc(var(--transcript-surface-radius) - 8px));
   --transcript-control-height: var(--control-height-row);
@@ -257,8 +257,10 @@
 
 .sessionTranscriptLoadMore {
   display: flex;
+  align-items: center;
   justify-content: center;
-  padding: 16px 0 4px;
+  padding: 10px 0 14px;
+  color: var(--faint);
 }
 
 .sessionTranscriptLoadMoreSentinel {
@@ -684,6 +686,7 @@
 
 .chatLine {
   min-width: 0;
+  width: 100%;
   max-width: 100%;
   display: flex;
   margin: 0;
@@ -956,6 +959,10 @@
 
 .thinkingBlock {
   background: var(--chat-tool-bg);
+}
+
+.transcriptPanel .thinkingBlock.disclosure[data-summary-size="comfortable"] > .disclosureSummaryRow > .thinkingSummary {
+  padding-inline: var(--transcript-inline-padding);
 }
 
 .contextBlock {

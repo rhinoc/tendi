@@ -1,8 +1,10 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, HashSet},
     fs,
     path::{Path, PathBuf},
-    time::Duration,
+    sync::{LazyLock, Mutex},
+    thread,
+    time::{Duration, Instant},
 };
 
 use anyhow::{Context, Result, bail};
@@ -22,6 +24,10 @@ mod skill_sources;
 const CODEX_GLOBAL_SKILL_CONFIG_MIGRATION_KEY: &str = "codex_global_skill_config_migrated_v1";
 const GIT_SOURCE_VERSION_LONG_SHA_MIGRATION_KEY: &str = "git_source_version_long_sha_migrated_v1";
 const MAX_SQUASHED_DEVELOPMENT_SCHEMA_VERSION: i64 = 3;
+const STORAGE_MAINTENANCE_TIME_SLICE: Duration = Duration::from_millis(100);
+
+static STORAGE_MAINTENANCE_SCHEDULED: LazyLock<Mutex<HashSet<PathBuf>>> =
+    LazyLock::new(|| Mutex::new(HashSet::new()));
 
 impl Store {
     pub fn open_default() -> Result<Self> {
@@ -57,6 +63,7 @@ impl Store {
             .with_context(|| format!("failed to open sqlite reader {}", path.display()))?;
         conn.busy_timeout(Duration::from_secs(30))?;
         let store = Self { conn, path, writer };
+        let existing_schema = schema::has_user_schema(&store.conn)?;
         let schema_version = store
             .conn
             .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))?;
@@ -71,16 +78,271 @@ impl Store {
                         "unsupported database schema version {current}; this build only supports schema versions 0 through {MAX_SQUASHED_DEVELOPMENT_SCHEMA_VERSION}"
                     );
                     schema::bootstrap(tx)?;
-                    schema::run(tx)?;
+                    schema::run(tx, existing_schema)?;
                 }
                 Ok(())
             })?;
         }
         Ok(store)
     }
+
+    /// Advance every resumable storage migration. Each batch is committed independently so a
+    /// process interruption leaves the last durable row cursor available for the next open.
+    pub fn run_pending_storage_migrations(&self) -> Result<()> {
+        while !self.run_pending_storage_migrations_until(None)? {
+            // An explicit migration request is allowed to wait for the
+            // cross-process migration owner. The background scheduler uses the
+            // bounded, non-waiting path below instead.
+            thread::sleep(Duration::from_millis(10));
+        }
+        Ok(())
+    }
+
+    fn run_pending_storage_migrations_until(&self, deadline: Option<Instant>) -> Result<bool> {
+        let Some(_migration_lease) =
+            crate::coordination::ResourceLease::try_acquire(&self.path, "storage-migrations")?
+        else {
+            return Ok(false);
+        };
+        if !run_migration_until_complete(
+            self,
+            schema::SESSION_LIST_MIGRATION_KEY,
+            "migration.scoped_session_list",
+            schema::migrate_session_list_batch,
+            deadline,
+        )? {
+            return Ok(false);
+        }
+        if !run_migration_until_complete(
+            self,
+            schema::ANALYTICS_MIGRATION_KEY,
+            "migration.analytics_json",
+            schema::migrate_analytics_json_batch,
+            deadline,
+        )? {
+            return Ok(false);
+        }
+        if !run_migration_until_complete(
+            self,
+            schema::SESSION_SEARCH_FTS_MIGRATION_KEY,
+            "migration.session_search_fts",
+            schema::migrate_session_search_fts_batch,
+            deadline,
+        )? {
+            return Ok(false);
+        }
+        Ok(true)
+    }
+
+    /// Explicitly consume the durable compaction marker. This is never called from `Store::open`.
+    pub fn run_pending_storage_maintenance(&self) -> Result<bool> {
+        loop {
+            if let Some(result) = self.try_run_pending_storage_maintenance()? {
+                return Ok(result);
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    fn try_run_pending_storage_maintenance(&self) -> Result<Option<bool>> {
+        // Keep the migration lease while consuming the compaction marker. Without
+        // this, another process can start a new migration in the gap between
+        // `run_pending_storage_migrations` and VACUUM.
+        let Some(_migration_lease) =
+            crate::coordination::ResourceLease::try_acquire(&self.path, "storage-migrations")?
+        else {
+            return Ok(None);
+        };
+        let pending = self
+            .conn
+            .query_row(
+                "SELECT value = '1' FROM meta WHERE key = 'storage.compaction.pending'",
+                [],
+                |row| row.get::<_, bool>(0),
+            )
+            .optional()?
+            .unwrap_or(false);
+        if !pending {
+            return Ok(Some(false));
+        }
+        let Some(_compaction_lease) =
+            crate::coordination::ResourceLease::try_acquire(&self.path, "storage-compaction")?
+        else {
+            return Ok(None);
+        };
+        self.writer
+            .vacuum()
+            .context("compact database after storage migration")?;
+        self.with_named_write_transaction("schema.clear_compaction_marker", |tx| {
+            tx.execute(
+                "DELETE FROM meta WHERE key = 'storage.compaction.pending'",
+                [],
+            )?;
+            Ok(())
+        })?;
+        Ok(Some(true))
+    }
+
+    fn run_pending_storage_maintenance_if_idle(&self) -> Result<bool> {
+        let Some(_migration_lease) =
+            crate::coordination::ResourceLease::try_acquire(&self.path, "storage-migrations")?
+        else {
+            return Ok(false);
+        };
+        let pending = self
+            .conn
+            .query_row(
+                "SELECT value = '1' FROM meta WHERE key = 'storage.compaction.pending'",
+                [],
+                |row| row.get::<_, bool>(0),
+            )
+            .optional()?
+            .unwrap_or(false);
+        if !pending {
+            return Ok(true);
+        }
+        let Some(_compaction_lease) =
+            crate::coordination::ResourceLease::try_acquire(&self.path, "storage-compaction")?
+        else {
+            return Ok(false);
+        };
+        if !self.writer.vacuum_if_idle()? {
+            return Ok(false);
+        }
+        self.with_named_write_transaction("schema.clear_compaction_marker", |tx| {
+            tx.execute(
+                "DELETE FROM meta WHERE key = 'storage.compaction.pending'",
+                [],
+            )?;
+            Ok(())
+        })?;
+        Ok(true)
+    }
+
+    fn schedule_pending_storage_work(&self) {
+        let pending_migrations = self
+            .conn
+            .query_row(
+                "SELECT EXISTS(
+                    SELECT 1 FROM storage_migrations
+                    WHERE state IN ('pending', 'failed')
+                )",
+                [],
+                |row| row.get::<_, bool>(0),
+            )
+            .unwrap_or(false);
+        let pending_compaction = self
+            .conn
+            .query_row(
+                "SELECT value = '1' FROM meta WHERE key = 'storage.compaction.pending'",
+                [],
+                |row| row.get::<_, bool>(0),
+            )
+            .optional()
+            .ok()
+            .flatten()
+            .unwrap_or(false);
+        if !pending_migrations && !pending_compaction {
+            return;
+        }
+        let should_spawn = STORAGE_MAINTENANCE_SCHEDULED
+            .lock()
+            .map(|mut scheduled| scheduled.insert(self.path.clone()))
+            .unwrap_or(false);
+        if !should_spawn {
+            return;
+        }
+
+        let path = self.path.clone();
+        if let Err(error) = thread::Builder::new()
+            .name("tendi-storage-maintenance".to_string())
+            .spawn(move || {
+                let result = Store::open(&path).and_then(|store| {
+                    loop {
+                        let complete = store.run_pending_storage_migrations_until(Some(
+                            Instant::now() + STORAGE_MAINTENANCE_TIME_SLICE,
+                        ))?;
+                        if complete && store.run_pending_storage_maintenance_if_idle()? {
+                            break;
+                        }
+                        // A busy writer or a time-sliced migration keeps its
+                        // durable marker. Retry without holding any lease so
+                        // foreground work gets the next admission opportunity.
+                        thread::sleep(Duration::from_millis(100));
+                    }
+                    Ok(())
+                });
+                if let Err(error) = result {
+                    crate::logging::global().warn(
+                        "background storage compaction deferred",
+                        serde_json::json!({
+                            "database": path,
+                            "error": format!("{error:#}"),
+                        }),
+                    );
+                }
+                if let Ok(mut scheduled) = STORAGE_MAINTENANCE_SCHEDULED.lock() {
+                    scheduled.remove(&path);
+                }
+            })
+        {
+            if let Ok(mut scheduled) = STORAGE_MAINTENANCE_SCHEDULED.lock() {
+                scheduled.remove(&self.path);
+            }
+            crate::logging::global().warn(
+                "background storage compaction could not start",
+                serde_json::json!({
+                    "database": self.path,
+                    "error": error.to_string(),
+                }),
+            );
+        }
+    }
+}
+
+fn run_migration_until_complete(
+    store: &Store,
+    key: &str,
+    operation: &str,
+    migrate: fn(&rusqlite::Transaction<'_>) -> Result<schema::MigrationBatch>,
+    deadline: Option<Instant>,
+) -> Result<bool> {
+    loop {
+        if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+            return Ok(false);
+        }
+        match store.with_background_write_transaction_until(
+            operation,
+            deadline.unwrap_or_else(|| Instant::now() + Duration::from_secs(30)),
+            migrate,
+        ) {
+            Ok(Some(batch)) if batch.complete => return Ok(true),
+            Ok(Some(_)) => continue,
+            Ok(None) => return Ok(false),
+            Err(error) => {
+                let message = format!("{error:#}");
+                let _ = store.with_background_write_transaction("migration.record_failure", |tx| {
+                    tx.execute(
+                        "UPDATE storage_migrations
+                             SET state = 'failed', last_error = ?1,
+                                 updated_at = CAST(strftime('%s', 'now') AS INTEGER)
+                             WHERE key = ?2",
+                        params![message, key],
+                    )?;
+                    Ok(())
+                });
+                return Err(error).with_context(|| format!("storage migration {key} failed"));
+            }
+        }
+    }
+}
+
+pub(crate) fn rebuild_corrupt_session_skill_links(conn: &Connection) -> Result<()> {
+    schema::rebuild_scoped_session_skill_links(conn)
 }
 
 pub(crate) fn run_workspace(store: &Store, cwd: &Path, project_roots: &[PathBuf]) -> Result<()> {
+    store.schedule_pending_storage_work();
     store.ensure_skill_visibility_table()?;
     migrate_codex_global_skill_config(store)?;
     invalidate_old_projection_contexts(store)?;

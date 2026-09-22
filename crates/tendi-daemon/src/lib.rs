@@ -13,6 +13,9 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
+#[cfg(test)]
+use std::sync::OnceLock;
+
 use notify::{Event, RecommendedWatcher, RecursiveMode, Watcher};
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -48,6 +51,49 @@ const DATABASE_RECOVERY_WAIT: Duration = Duration::from_secs(2);
 const DATABASE_RECOVERY_SUCCESS_COOLDOWN: Duration = Duration::from_secs(2);
 const SKILL_RECONCILIATION_RETRY_INITIAL: Duration = Duration::from_secs(2);
 const SKILL_RECONCILIATION_RETRY_MAX: Duration = Duration::from_secs(30);
+const SESSION_SEARCH_MAINTENANCE_INTERVAL: Duration = Duration::from_secs(5 * 60);
+
+#[cfg(test)]
+fn ensure_test_environment() {
+    static TEST_HOME: OnceLock<PathBuf> = OnceLock::new();
+
+    TEST_HOME.get_or_init(|| {
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time before epoch")
+            .as_nanos();
+        let raw_home = std::env::temp_dir().join(format!(
+            "tendi-daemon-test-home-{}-{suffix}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&raw_home).expect("create isolated daemon test home");
+        let home = fs::canonicalize(&raw_home).expect("canonicalize isolated daemon test home");
+        let state = home.join(".state");
+        let config = home.join(".config");
+        let cache = home.join(".cache");
+        let log_dir = home.join("logs");
+
+        for directory in [&state, &config, &cache, &log_dir] {
+            fs::create_dir_all(directory).expect("create isolated daemon test directory");
+        }
+
+        unsafe {
+            std::env::set_var("HOME", &home);
+            std::env::set_var("XDG_STATE_HOME", &state);
+            std::env::set_var("XDG_CONFIG_HOME", &config);
+            std::env::set_var("XDG_CACHE_HOME", &cache);
+            std::env::remove_var("CODEX_HOME");
+            std::env::remove_var("AUTOHAND_HOME");
+            std::env::remove_var("GROK_HOME");
+            std::env::remove_var("HERMES_HOME");
+            std::env::remove_var("VIBE_HOME");
+            std::env::set_var("TENDI_LOG_DIR", &log_dir);
+            std::env::remove_var("TENDI_LOG_PATH");
+        }
+
+        home
+    });
+}
 
 #[derive(Debug, Clone, Serialize)]
 pub struct DaemonError {
@@ -334,21 +380,21 @@ struct SkillDistributionPreview {
 
 #[derive(Debug)]
 struct StorageRecoveryState {
+    degraded: bool,
     in_progress: bool,
-    retry_at: Option<Instant>,
-    retry_delay: Duration,
     last_completed_at: Option<Instant>,
     last_succeeded: bool,
+    last_error: Option<String>,
 }
 
 impl Default for StorageRecoveryState {
     fn default() -> Self {
         Self {
+            degraded: false,
             in_progress: false,
-            retry_at: None,
-            retry_delay: DATABASE_RECOVERY_RETRY_INITIAL,
             last_completed_at: None,
             last_succeeded: false,
+            last_error: None,
         }
     }
 }
@@ -468,6 +514,9 @@ impl Daemon {
     /// Embedders own whether watchers and recovery start; storage identity is
     /// injected independently and is used by every request and background job.
     pub fn with_database(cwd: PathBuf, database_path: PathBuf, start_background: bool) -> Self {
+        #[cfg(test)]
+        ensure_test_environment();
+
         let (watch_tx, watch_rx) = mpsc::channel();
         let (config_watch_tx, config_watch_rx) = mpsc::channel();
         let (skill_watch_tx, skill_watch_rx) = mpsc::channel();
@@ -584,10 +633,13 @@ impl Daemon {
     }
 
     fn open_store(&self) -> anyhow::Result<tendi_core::storage::Store> {
+        if let Some(reason) = self.storage_degraded_reason() {
+            return Err(anyhow::anyhow!("database is degraded: {reason}"));
+        }
         let result = tendi_core::storage::Store::open(&self.state.database_path);
         match result {
             Ok(store) => Ok(store),
-            Err(error) if tendi_core::storage::is_database_io_error(&error) => {
+            Err(error) if tendi_core::storage::is_database_recovery_error(&error) => {
                 if self.recover_storage(&error) {
                     tendi_core::storage::Store::open(&self.state.database_path)
                 } else {
@@ -596,6 +648,26 @@ impl Daemon {
             }
             Err(error) => Err(error),
         }
+    }
+
+    fn storage_degraded_reason(&self) -> Option<String> {
+        self.state
+            .storage_recovery
+            .state
+            .lock()
+            .ok()
+            .and_then(|state| {
+                state.degraded.then(|| {
+                    state
+                        .last_error
+                        .clone()
+                        .unwrap_or_else(|| "database recovery failed".to_string())
+                })
+            })
+    }
+
+    fn is_storage_degraded(&self) -> bool {
+        self.storage_degraded_reason().is_some()
     }
 
     fn recover_storage(&self, reason: impl std::fmt::Display) -> bool {
@@ -609,6 +681,9 @@ impl Daemon {
             );
             return false;
         };
+        if state.degraded {
+            return false;
+        }
         if state.in_progress {
             let deadline = now + DATABASE_RECOVERY_WAIT;
             while state.in_progress {
@@ -633,9 +708,6 @@ impl Daemon {
         {
             return true;
         }
-        if state.retry_at.is_some_and(|retry_at| retry_at > now) {
-            return false;
-        }
         state.in_progress = true;
         drop(state);
 
@@ -651,11 +723,11 @@ impl Daemon {
         state.in_progress = false;
         state.last_completed_at = Some(Instant::now());
         state.last_succeeded = result.is_ok();
+        state.degraded = result.is_err();
+        state.last_error = result.as_ref().err().map(ToString::to_string);
         recovery.changed.notify_all();
         match result {
             Ok(()) => {
-                state.retry_at = None;
-                state.retry_delay = DATABASE_RECOVERY_RETRY_INITIAL;
                 tendi_core::logging::global().info(
                     "database connection recovery completed",
                     json!({
@@ -666,16 +738,12 @@ impl Daemon {
                 true
             }
             Err(error) => {
-                let retry_delay = state.retry_delay;
-                state.retry_at = Some(Instant::now() + retry_delay);
-                state.retry_delay =
-                    std::cmp::min(retry_delay.saturating_mul(2), DATABASE_RECOVERY_RETRY_MAX);
                 tendi_core::logging::global().error(
                     "database connection recovery failed",
                     json!({
                         "database": self.state.database_path,
                         "durationMs": started.elapsed().as_secs_f64() * 1000.0,
-                        "retryAfterMs": retry_delay.as_secs_f64() * 1000.0,
+                        "state": "degraded",
                         "error": error.to_string(),
                     }),
                 );
@@ -685,13 +753,13 @@ impl Daemon {
     }
 
     fn recover_storage_error(&self, error: &DaemonError) -> bool {
-        let is_storage_error = error
+        let recoverable = error
             .data
             .as_ref()
-            .and_then(|data| data.get("category"))
-            .and_then(Value::as_str)
-            == Some("storage");
-        if is_storage_error {
+            .and_then(|data| data.get("recovery"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        if recoverable {
             return self.recover_storage(&error.message);
         }
         false
@@ -718,35 +786,22 @@ impl Daemon {
             return;
         }
         let payload = payload.into_json();
-        {
-            let scope_key = daemon_scope_key(self).ok();
-            let domain = event_projection_domain(event, &payload);
-            let revision = domain
-                .as_deref()
-                .and_then(|domain| {
-                    let store = self.open_store().ok()?;
-                    match store.projection_head(scope_key.as_ref()?, domain) {
-                        Ok(head) => head.map(|head| head.revision.value()),
-                        Err(error) => {
-                            if tendi_core::storage::is_database_io_error(&error) {
-                                self.recover_storage(&error);
-                            }
-                            None
-                        }
-                    }
-                })
-                .unwrap_or_default();
-            self.state.events.publish_with_metadata(
-                event,
-                payload,
-                scope_key.map(|scope| scope.as_str().to_string()),
-                domain,
-                None,
-                None,
-                Some(revision),
-                None,
-            );
-        }
+        let scope_key = daemon_scope_key(self).ok();
+        let domain = event_projection_domain(event, &payload);
+        let revision = payload
+            .get("revision")
+            .and_then(Value::as_u64)
+            .or_else(|| payload.get("projectionRevision").and_then(Value::as_u64));
+        self.state.events.publish_with_metadata(
+            event,
+            payload,
+            scope_key.map(|scope| scope.as_str().to_string()),
+            domain,
+            None,
+            None,
+            revision,
+            None,
+        );
     }
 
     fn emit_revisioned_event(
@@ -1597,20 +1652,18 @@ impl Daemon {
             .session_snapshot_for_scope(&scope_key)
             .map_err(core_error)?;
         let revision = revision.value();
-        let rows = scan.sessions;
-        let value = json!({
-            "scopeKey": scope_key,
-            "domain": "sessions",
-            "revision": revision,
-            "schemaVersion": 1,
-            "snapshotId": format!("sessions:{}:{}", scope_key, revision),
-            "payload": rows,
-        });
-        serde_json::from_value(value).map_err(|error| {
-            DaemonError::new(
-                "CONTRACT_VIOLATION",
-                format!("sessions snapshot encode failed: {error}"),
-            )
+        let payload = scan
+            .sessions
+            .into_iter()
+            .map(session_record_runtime_value)
+            .collect::<Vec<_>>();
+        Ok(runtime_schema::SessionSnapshot {
+            scope_key: scope_key.as_str().to_string(),
+            domain: "sessions".to_string(),
+            revision,
+            schema_version: 1,
+            snapshot_id: format!("sessions:{}:{}", scope_key, revision),
+            payload,
         })
     }
 
@@ -5984,12 +6037,13 @@ fn run_session_scan(
         &cache,
     )
     .map_err(core_error)?;
+    let changed_sessions = cache.changed_sessions(&report.sessions);
     let base_revision = store
         .projection_head(&scope_key, "sessions")
         .map_err(core_error)?
         .map(|head| head.revision)
         .unwrap_or(tendi_core::Revision::ZERO);
-    for sessions in report.sessions.chunks(SESSION_SCAN_PERSIST_BATCH_SIZE) {
+    for sessions in changed_sessions.chunks(SESSION_SCAN_PERSIST_BATCH_SIZE) {
         store
             .apply_session_delta_and_resolve_projects_for_scope(&scope_key, sessions)
             .map_err(core_error)?;
@@ -6002,7 +6056,7 @@ fn run_session_scan(
         .map_err(core_error)?
         .map(|head| head.revision)
         .unwrap_or(base_revision);
-    let analytics_sessions = report.sessions.clone();
+    let analytics_sessions = changed_sessions;
     daemon.emit_revisioned_event(
         SESSION_SCAN_EVENT,
         &scope_key,
@@ -6065,7 +6119,7 @@ fn existing_watch_directory(path: &Path) -> Option<PathBuf> {
 fn config_watch_loop(daemon: Daemon, receiver: Receiver<notify::Result<Event>>) {
     let mut pending = BTreeSet::new();
     loop {
-        if daemon.is_shutting_down() {
+        if daemon.is_shutting_down() || daemon.is_storage_degraded() {
             break;
         }
         match receiver.recv_timeout(CONFIG_WATCH_DEBOUNCE) {
@@ -6123,7 +6177,7 @@ fn config_watch_loop(daemon: Daemon, receiver: Receiver<notify::Result<Event>>) 
 fn skill_watch_loop(daemon: Daemon, receiver: Receiver<notify::Result<Event>>) {
     let mut pending = BTreeSet::new();
     loop {
-        if daemon.is_shutting_down() {
+        if daemon.is_shutting_down() || daemon.is_storage_degraded() {
             break;
         }
         match receiver.recv_timeout(CONFIG_WATCH_DEBOUNCE) {
@@ -6184,7 +6238,7 @@ fn claim_scheduled_skill_backup(dirty: &AtomicBool, running: &AtomicBool) -> boo
 }
 
 fn backup_sync_loop(daemon: Daemon) {
-    while !daemon.is_shutting_down() {
+    while !daemon.is_shutting_down() && !daemon.is_storage_degraded() {
         let started = Instant::now();
         while started.elapsed() < BACKUP_SYNC_INTERVAL && !daemon.is_shutting_down() {
             thread::sleep(Duration::from_millis(100));
@@ -6198,7 +6252,7 @@ fn backup_sync_loop(daemon: Daemon) {
 
 fn projection_recovery_loop(daemon: Daemon) {
     let mut retry_delay = DATABASE_RECOVERY_RETRY_INITIAL;
-    while !daemon.is_shutting_down() {
+    while !daemon.is_shutting_down() && !daemon.is_storage_degraded() {
         match daemon
             .open_store()
             .and_then(|store| store.pending_projection_scopes("skills"))
@@ -6212,7 +6266,7 @@ fn projection_recovery_loop(daemon: Daemon) {
                 }
             }
             Err(error) => {
-                if tendi_core::storage::is_database_io_error(&error) {
+                if tendi_core::storage::is_database_recovery_error(&error) {
                     daemon.recover_storage(&error);
                 } else {
                     tendi_core::logging::global().warn(
@@ -6235,7 +6289,7 @@ fn session_watch_loop(daemon: Daemon, receiver: Receiver<notify::Result<Event>>)
     let mut pending_live_previews = BTreeSet::new();
     let mut live_preview_since = None;
     loop {
-        if daemon.is_shutting_down() {
+        if daemon.is_shutting_down() || daemon.is_storage_degraded() {
             break;
         }
         if let Some(paths) = take_due_session_watch_retries(&runtime) {
@@ -6781,12 +6835,12 @@ fn unwatch_session_path(state: &mut SessionWatcherState, path: &Path) {
     }
 }
 
-fn refresh_session_analytics_serialized(
+fn refresh_session_analytics_serialized_with_revision(
     daemon: &Daemon,
     phase: &'static str,
     scope_key: &tendi_core::ScopeKey,
     sessions: &[tendi_core::SessionRecord],
-) -> Result<tendi_core::analytics::AnalyticsRefreshReport, DaemonError> {
+) -> Result<(tendi_core::analytics::AnalyticsRefreshReport, u64), DaemonError> {
     let initial = tendi_core::analytics::AnalyticsRefreshProgress {
         total: sessions.len(),
         ..Default::default()
@@ -6823,7 +6877,7 @@ fn refresh_session_analytics_serialized(
         .analytics_operations
         .execute(operation_id, move || {
             let store = daemon_for_job.open_store()?;
-            store.refresh_session_analytics_for_scope_with_progress(
+            let report = store.refresh_session_analytics_for_scope_with_progress(
                 &scope_key,
                 &sessions,
                 |progress| {
@@ -6844,7 +6898,9 @@ fn refresh_session_analytics_serialized(
                         ),
                     );
                 },
-            )
+            )?;
+            let revision = store.analytics_revision()?;
+            Ok((report, revision))
         }) {
         Ok(result) => result.map_err(core_error),
         Err(error) => Err(internal_error(format!(
@@ -6852,7 +6908,7 @@ fn refresh_session_analytics_serialized(
         ))),
     };
     match result {
-        Ok(report) => {
+        Ok((report, revision)) => {
             let final_progress = last_progress
                 .lock()
                 .map(|progress| *progress)
@@ -6870,7 +6926,7 @@ fn refresh_session_analytics_serialized(
                     }),
                 ),
             );
-            Ok(report)
+            Ok((report, revision))
         }
         Err(error) => {
             daemon.recover_storage_error(&error);
@@ -6897,16 +6953,29 @@ fn refresh_session_analytics_serialized(
     }
 }
 
+#[cfg(test)]
+fn refresh_session_analytics_serialized(
+    daemon: &Daemon,
+    phase: &'static str,
+    scope_key: &tendi_core::ScopeKey,
+    sessions: &[tendi_core::SessionRecord],
+) -> Result<tendi_core::analytics::AnalyticsRefreshReport, DaemonError> {
+    refresh_session_analytics_serialized_with_revision(daemon, phase, scope_key, sessions)
+        .map(|(report, _revision)| report)
+}
+
 /// Derived search work has its own lifecycle: a metadata commit never waits
 /// for transcript parsing. Persisted dirty scopes survive queue saturation,
 /// process restarts and failures; this worker also repairs them on startup.
 fn session_search_loop(daemon: Daemon) {
     let mut retry_delay = DATABASE_RECOVERY_RETRY_INITIAL;
-    while !daemon.is_shutting_down() {
+    let mut next_maintenance_at = Instant::now();
+    while !daemon.is_shutting_down() && !daemon.is_storage_degraded() {
         let result = (|| -> anyhow::Result<()> {
             let store = daemon.open_store()?;
             let active_scope =
                 daemon_scope_key(&daemon).map_err(|error| anyhow::anyhow!(error.message))?;
+            let mut pending_search = false;
             // Other workspaces belong to their own daemon/CLI lifecycle. An
             // unsolicited event must not establish another workspace's UI scope.
             for scope_key in store
@@ -6917,13 +6986,13 @@ fn session_search_loop(daemon: Daemon) {
                 if daemon.is_shutting_down() {
                     break;
                 }
-                let (publications, warnings, _pending) = match store
+                let (publications, warnings, pending) = match store
                     .refresh_pending_session_search_for_scope_until(&scope_key, || {
                         daemon.is_shutting_down()
                     }) {
                     Ok(report) => report,
                     Err(error) => {
-                        if tendi_core::storage::is_database_io_error(&error) {
+                        if tendi_core::storage::is_database_recovery_error(&error) {
                             daemon.recover_storage(&error);
                             return Err(error);
                         }
@@ -6934,6 +7003,7 @@ fn session_search_loop(daemon: Daemon) {
                         continue;
                     }
                 };
+                pending_search |= pending;
                 for warning in warnings {
                     tendi_core::logging::global().warn(
                         "session search refresh deferred",
@@ -6941,20 +7011,40 @@ fn session_search_loop(daemon: Daemon) {
                     );
                 }
                 for publication in publications {
-                    let operation_id = tendi_core::OperationId::new(format!(
-                        "session-search-{}",
-                        publication.revision.value()
-                    ))
-                    .map_err(|error| anyhow::anyhow!(error))?;
-                    daemon.emit_revisioned_event(
-                        SESSION_SCAN_EVENT, &scope_key, "sessions", &operation_id,
-                        publication.base_revision, publication.revision, None,
-                        runtime_event(SESSION_SCAN_EVENT, json!({
-                            "generation": daemon.state.session_runtime.generation.load(Ordering::Acquire),
-                            "phase": "watch", "scanned": 1, "upserts": [publication.session],
-                            "deleted": [], "complete": true, "error": Value::Null,
-                        })),
+                    record_session_search_publication(
+                        &scope_key,
+                        publication.session.id.as_str(),
+                        publication.base_revision,
+                        publication.revision,
                     );
+                }
+            }
+            // The search worker remains responsive to durable pending work,
+            // while FTS maintenance is admitted only at a low-frequency
+            // boundary after that work has had priority.
+            if !pending_search && Instant::now() >= next_maintenance_at {
+                next_maintenance_at = Instant::now() + SESSION_SEARCH_MAINTENANCE_INTERVAL;
+                match store.optimize_session_search_fts_if_due() {
+                    Ok(true) => tendi_core::logging::global().info(
+                        "session search FTS optimized",
+                        json!({"scopeKey": active_scope}),
+                    ),
+                    Ok(false) => {}
+                    Err(error)
+                        if matches!(
+                            tendi_core::storage::database_error_kind(&error),
+                            Some(
+                                tendi_core::storage::DatabaseErrorKind::Busy
+                                    | tendi_core::storage::DatabaseErrorKind::Locked
+                            )
+                        ) =>
+                    {
+                        tendi_core::logging::global().debug(
+                            "session search FTS maintenance deferred",
+                            json!({"scopeKey": active_scope, "error": format!("{error:#}")}),
+                        );
+                    }
+                    Err(error) => return Err(error),
                 }
             }
             Ok(())
@@ -6962,7 +7052,7 @@ fn session_search_loop(daemon: Daemon) {
         match result {
             Ok(()) => retry_delay = DATABASE_RECOVERY_RETRY_INITIAL,
             Err(error) => {
-                if tendi_core::storage::is_database_io_error(&error) {
+                if tendi_core::storage::is_database_recovery_error(&error) {
                     daemon.recover_storage(&error);
                 } else {
                     tendi_core::logging::global().warn(
@@ -6979,9 +7069,67 @@ fn session_search_loop(daemon: Daemon) {
     }
 }
 
+/// A search index commit has no legal runtime event of its own today. Keep its
+/// publication receipt observable in diagnostics with an explicit domain, but
+/// do not route it through `sessions://scan`, whose payload means canonical
+/// session metadata changed.
+fn record_session_search_publication(
+    scope_key: &tendi_core::ScopeKey,
+    session_id: &str,
+    base_revision: tendi_core::Revision,
+    revision: tendi_core::Revision,
+) {
+    tendi_core::logging::global().debug(
+        "session search index publication committed",
+        json!({
+            "domain": tendi_core::storage::SessionSearchPublication::DOMAIN,
+            "scopeKey": scope_key,
+            "sessionId": session_id,
+            "baseRevision": base_revision,
+            "revision": revision,
+        }),
+    );
+}
+
+#[cfg(test)]
+mod session_search_lifecycle_tests {
+    use super::*;
+
+    #[test]
+    fn completed_search_publication_does_not_emit_sessions_scan() {
+        let root = std::env::temp_dir().join(format!(
+            "tendi-search-publication-event-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("system time before epoch")
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).expect("create search publication test workspace");
+        let daemon = Daemon::with_database(root.clone(), root.join("state.sqlite3"), false);
+        let subscription = daemon.subscribe_events();
+        let scope = tendi_core::ScopeKey::new("workspace:search-publication-test")
+            .expect("valid test scope");
+
+        record_session_search_publication(
+            &scope,
+            "session-1",
+            tendi_core::Revision::new(4),
+            tendi_core::Revision::new(5),
+        );
+
+        assert!(matches!(
+            subscription.recv_timeout(Duration::from_millis(20)),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+        ));
+        daemon.shutdown();
+        fs::remove_dir_all(root).expect("remove search publication test workspace");
+    }
+}
+
 fn sleep_worker_retry(daemon: &Daemon, delay: Duration) {
     let deadline = Instant::now() + delay;
-    while !daemon.is_shutting_down() {
+    while !daemon.is_shutting_down() && !daemon.is_storage_degraded() {
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
             return;
@@ -6992,7 +7140,7 @@ fn sleep_worker_retry(daemon: &Daemon, delay: Duration) {
 
 fn session_analytics_loop(daemon: Daemon, receiver: Receiver<AnalyticsRefreshJob>) {
     loop {
-        if daemon.is_shutting_down() {
+        if daemon.is_shutting_down() || daemon.is_storage_degraded() {
             break;
         }
         let received = match receiver.recv_timeout(Duration::from_millis(100)) {
@@ -7025,25 +7173,24 @@ fn session_analytics_loop(daemon: Daemon, receiver: Receiver<AnalyticsRefreshJob
                 by_scope.entry(scope_key).or_default().push(session);
             }
             for (scope_key, sessions) in by_scope {
-                if refresh_session_analytics_serialized(&daemon, phase, &scope_key, &sessions)
-                    .is_ok()
-                {
-                    // Readers are deliberately short-lived. A Store kept by
-                    // this worker can retain a WAL file descriptor that was
-                    // replaced by another process while the worker was idle.
-                    if let Ok(store) = daemon.open_store()
-                        && let Ok(Some(head)) = store.projection_head(&scope_key, "analytics")
-                    {
-                        daemon.emit_event(
+                match refresh_session_analytics_serialized_with_revision(
+                    &daemon, phase, &scope_key, &sessions,
+                ) {
+                    Ok((_report, revision)) => daemon.emit_event(
+                        ANALYTICS_REVISION_EVENT,
+                        runtime_event(
                             ANALYTICS_REVISION_EVENT,
-                            runtime_event(
-                                ANALYTICS_REVISION_EVENT,
-                                json!({
-                                    "scopeKey": scope_key,
-                                    "revision": head.revision.value()
-                                }),
-                            ),
-                        );
+                            json!({
+                                "scopeKey": scope_key,
+                                "revision": revision
+                            }),
+                        ),
+                    ),
+                    Err(error) => {
+                        daemon.recover_storage_error(&error);
+                        if daemon.is_storage_degraded() {
+                            break;
+                        }
                     }
                 }
             }
@@ -7286,6 +7433,55 @@ fn agent_kind_from_request(value: runtime_schema::AgentKind) -> tendi_core::Agen
         runtime_schema::AgentKind::Claude => tendi_core::AgentKind::Claude,
         runtime_schema::AgentKind::Shared => tendi_core::AgentKind::Shared,
         runtime_schema::AgentKind::Unknown => tendi_core::AgentKind::Unknown,
+    }
+}
+
+fn runtime_agent_kind(value: tendi_core::AgentKind) -> runtime_schema::AgentKind {
+    match value {
+        tendi_core::AgentKind::Codex => runtime_schema::AgentKind::Codex,
+        tendi_core::AgentKind::Cursor => runtime_schema::AgentKind::Cursor,
+        tendi_core::AgentKind::Claude => runtime_schema::AgentKind::Claude,
+        tendi_core::AgentKind::Shared => runtime_schema::AgentKind::Shared,
+        tendi_core::AgentKind::Unknown => runtime_schema::AgentKind::Unknown,
+    }
+}
+
+fn session_record_runtime_value(
+    session: tendi_core::SessionRecord,
+) -> runtime_schema::SessionRecord {
+    runtime_schema::SessionRecord {
+        id: session.id,
+        agent: runtime_agent_kind(session.agent),
+        title: session.title,
+        project: session.project.map(|path| path.display().to_string()),
+        repository: session.repository.map(|path| path.display().to_string()),
+        repository_url: session.repository_url,
+        logical_project_id: session.logical_project_id,
+        logical_project_name: session.logical_project_name,
+        path: session.path.display().to_string(),
+        started_at: session.started_at,
+        updated_at: session.updated_at,
+        message_count: session.message_count.map(|value| value as u64),
+        first_user_message: session.first_user_message,
+        last_user_message: session.last_user_message,
+        last_assistant_message: session.last_assistant_message,
+        turn_count: session.turn_count.map(|value| value as u64),
+        model: session.model,
+        mode: session.mode,
+        approval_mode: session.approval_mode,
+        is_run_everything: session.is_run_everything,
+        parent_session_id: session.parent_session_id,
+        search_score: None,
+        search_snippet: None,
+        token_usage: session
+            .token_usage
+            .map(|usage| runtime_schema::SessionTokenUsage {
+                input_tokens: usage.input_tokens,
+                cached_input_tokens: usage.cached_input_tokens,
+                output_tokens: usage.output_tokens,
+                reasoning_output_tokens: usage.reasoning_output_tokens,
+                total_tokens: usage.total_tokens,
+            }),
     }
 }
 
@@ -7535,7 +7731,8 @@ fn internal_error(message: impl std::fmt::Display) -> DaemonError {
 
 fn core_error(error: impl std::fmt::Display) -> DaemonError {
     let message = error.to_string();
-    let is_storage_error = tendi_core::storage::is_database_io_error_message(&message);
+    let database_kind = tendi_core::storage::database_error_kind_from_message(&message);
+    let is_degraded = message.starts_with("database is degraded:");
     let code = if message.contains("refusing to overwrite changed")
         || message.contains("preview expired")
         || message.contains("selection changed")
@@ -7552,8 +7749,26 @@ fn core_error(error: impl std::fmt::Display) -> DaemonError {
     } else {
         "CORE_ERROR"
     };
-    if is_storage_error {
-        DaemonError::with_data(code, message, json!({ "category": "storage" }))
+    if let Some(kind) = database_kind {
+        DaemonError::with_data(
+            code,
+            message,
+            json!({
+                "category": "storage",
+                "kind": kind.as_str(),
+                "recovery": kind.requires_connection_recovery(),
+            }),
+        )
+    } else if is_degraded {
+        DaemonError::with_data(
+            code,
+            message,
+            json!({
+                "category": "storage",
+                "state": "degraded",
+                "recovery": false,
+            }),
+        )
     } else {
         DaemonError::new(code, message)
     }

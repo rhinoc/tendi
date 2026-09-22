@@ -145,7 +145,7 @@ impl Store {
                                 Ok((
                                     row.get::<_, i64>(0)?,
                                     row.get::<_, i64>(1)?,
-                                    row.get::<_, String>(2)?,
+                                    row.get::<_, Vec<u8>>(2)?,
                                     row.get::<_, String>(3)?,
                                 ))
                             },
@@ -153,8 +153,10 @@ impl Store {
                         .optional()?;
                     let cached = cached_row.and_then(
                         |(file_mtime, file_size, analytics_json, parser_state_json)| match (
-                            serde_json::from_str(&analytics_json),
-                            serde_json::from_str(&parser_state_json),
+                            decompress_analytics_json(&analytics_json).and_then(|json| {
+                                serde_json::from_str(&json).map_err(anyhow::Error::from)
+                            }),
+                            serde_json::from_str(&parser_state_json).map_err(anyhow::Error::from),
                         ) {
                             (Ok(analytics), Ok(state)) => Some(SessionAnalyticsRecord {
                                 analytics,
@@ -268,7 +270,7 @@ impl Store {
             overview: analytics::AnalyticsOverviewIndex,
             overview_record: SessionAnalyticsOverviewRecord,
             session_path: String,
-            analytics_json: String,
+            analytics_json: Vec<u8>,
             parser_state_json: String,
             overview_json: String,
         }
@@ -282,7 +284,9 @@ impl Store {
                     record,
                     overview: record.analytics.overview_index(&record.state),
                     session_path: record.analytics.session_path.display().to_string(),
-                    analytics_json: serde_json::to_string(&record.analytics)?,
+                    analytics_json: compress_analytics_json(&serde_json::to_string(
+                        &record.analytics,
+                    )?)?,
                     parser_state_json: serde_json::to_string(&record.state)?,
                     overview_json: serde_json::to_string(&overview_record)?,
                     overview_record,
@@ -527,10 +531,17 @@ impl Store {
                    AND event_max_date >= ?3",
             )?;
             let rows = stmt.query_map(params![scope_key.as_str(), agent_value, cutoff], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, String>(1)?))
             })?;
             for row in rows {
                 let (analytics_json, parser_state_json) = row?;
+                let analytics_json = match decompress_analytics_json(&analytics_json) {
+                    Ok(value) => value,
+                    Err(error) => {
+                        warnings.push(format!("invalid scoped analytics cache row: {error}"));
+                        continue;
+                    }
+                };
                 match (
                     serde_json::from_str::<crate::analytics::SessionAnalytics>(&analytics_json),
                     serde_json::from_str::<crate::analytics::AnalyticsParserState>(

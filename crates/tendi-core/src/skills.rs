@@ -614,6 +614,8 @@ pub struct SkillMergeIssue {
     pub path: PathBuf,
     pub resolution_key: String,
     pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
     pub before: String,
     pub base: String,
     pub incoming: String,
@@ -721,6 +723,8 @@ pub struct GitUpdateFile {
     pub incoming_exists: bool,
     pub after_exists: bool,
     pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -3327,6 +3331,9 @@ fn persistent_source_root(source: &str) -> Result<PathBuf> {
 }
 
 fn tendi_state_root() -> Result<PathBuf> {
+    #[cfg(test)]
+    crate::test_support::ensure_isolated_environment();
+
     dirs::home_dir()
         .map(|home| home.join(".tendi"))
         .context("could not resolve Tendi state directory")
@@ -4563,6 +4570,9 @@ fn plan_wrapper_sync_for_ids(
 }
 
 fn discover_roots_for_projects(cwd: &Path, project_roots: &[PathBuf]) -> Vec<SkillRoot> {
+    #[cfg(test)]
+    crate::test_support::ensure_isolated_environment();
+
     let mut roots = Vec::new();
     let ctx = crate::providers::ProviderContext::with_additional_project_dirs(cwd, project_roots);
     for provider in crate::providers::all_providers() {
@@ -5805,11 +5815,28 @@ fn check_skill_updates_for_skills(
             break;
         }
         let batch_reports = std::thread::scope(|scope| {
+            let remote_heads = &git_remote_heads;
+            let changed_paths = &git_changed_paths;
             batch
                 .iter()
                 .map(|skill| {
-                    scope.spawn(|| {
-                        check_skill_update(skill, &git_remote_heads, &git_changed_paths, cancelled)
+                    let inherited = skill_update_resource_reservation(skill, cancelled);
+                    scope.spawn(move || {
+                        let inherited = match inherited {
+                            Ok(reservation) => reservation,
+                            Err(error) => {
+                                crate::logging::global().warn(
+                                    "skill update resource delegation failed",
+                                    serde_json::json!({
+                                        "skill": skill.name,
+                                        "error": error.to_string(),
+                                    }),
+                                );
+                                None
+                            }
+                        };
+                        let _inherited = inherited.map(|reservation| reservation.enter());
+                        check_skill_update(skill, remote_heads, changed_paths, cancelled)
                     })
                 })
                 .collect::<Vec<_>>()
@@ -5828,6 +5855,24 @@ fn check_skill_updates_for_skills(
         }),
     );
     reports
+}
+
+fn skill_update_resource_reservation(
+    skill: &SkillRecord,
+    cancelled: &AtomicBool,
+) -> Result<Option<crate::coordination::ResourceReservation>> {
+    let Some(path) = select_update_path(skill) else {
+        return Ok(None);
+    };
+    if !is_git_source_kind(&path.source_kind) || git_repository_boundary(&path.path).is_some() {
+        return Ok(None);
+    }
+    let Some(repo) = git_checkout_for_skill_path(path, cancelled) else {
+        return Ok(None);
+    };
+    let mut paths = git::mutation_resource_paths(&repo)?;
+    paths.push(repo);
+    crate::coordination::fork_current_file_resources(&paths)
 }
 
 #[derive(Clone)]
@@ -6128,6 +6173,7 @@ fn check_git_update(
 struct MergeOutcome {
     status: String,
     content: Option<String>,
+    reason: Option<String>,
 }
 
 fn merge_text(base: Option<&str>, local: Option<&str>, incoming: Option<&str>) -> MergeOutcome {
@@ -6135,18 +6181,21 @@ fn merge_text(base: Option<&str>, local: Option<&str>, incoming: Option<&str>) -
         return MergeOutcome {
             status: "unchanged".to_string(),
             content: local.map(str::to_string),
+            reason: None,
         };
     }
     if local == base {
         return MergeOutcome {
             status: "remote".to_string(),
             content: incoming.map(str::to_string),
+            reason: None,
         };
     }
     if incoming == base {
         return MergeOutcome {
             status: "local".to_string(),
             content: local.map(str::to_string),
+            reason: None,
         };
     }
 
@@ -6157,12 +6206,14 @@ fn merge_text(base: Option<&str>, local: Option<&str>, incoming: Option<&str>) -
                 "<<<<<<< local\n=======\n{}>>>>>>> remote\n",
                 incoming.unwrap_or_default()
             )),
+            reason: None,
         };
     };
     let Some(incoming) = incoming else {
         return MergeOutcome {
             status: "conflict".to_string(),
             content: Some(format!("<<<<<<< local\n{}=======\n>>>>>>> remote\n", local)),
+            reason: None,
         };
     };
     let Some(base) = base else {
@@ -6172,38 +6223,84 @@ fn merge_text(base: Option<&str>, local: Option<&str>, incoming: Option<&str>) -
                 "<<<<<<< local\n{}=======\n{}>>>>>>> remote\n",
                 local, incoming
             )),
+            reason: None,
         };
     };
     match git_merge_file_text(base, local, incoming) {
-        Some((content, conflict)) => MergeOutcome {
+        Ok((content, conflict)) => MergeOutcome {
             status: if conflict {
                 "conflict".to_string()
             } else {
                 "merged".to_string()
             },
             content: Some(content),
+            reason: None,
         },
-        None => MergeOutcome {
+        Err(reason) => MergeOutcome {
             status: "unavailable".to_string(),
             content: None,
+            reason: Some(reason),
         },
     }
 }
 
-fn git_merge_file_text(base: &str, local: &str, incoming: &str) -> Option<(String, bool)> {
+fn merge_skill_manifest_text(
+    base: Option<&str>,
+    local: Option<&str>,
+    incoming: Option<&str>,
+) -> MergeOutcome {
+    if local != incoming && skill_manifest_semantically_equal(local, incoming) {
+        return MergeOutcome {
+            status: "remote".to_string(),
+            content: incoming.map(str::to_string),
+            reason: None,
+        };
+    }
+    merge_text(base, local, incoming)
+}
+
+fn skill_manifest_semantically_equal(left: Option<&str>, right: Option<&str>) -> bool {
+    match (left, right) {
+        (None, None) => true,
+        (Some(left), Some(right)) => {
+            let Ok(left) = MarkdownDoc::parse_lenient(left) else {
+                return false;
+            };
+            let Ok(right) = MarkdownDoc::parse_lenient(right) else {
+                return false;
+            };
+            left.meta == right.meta
+                && normalize_line_endings(&left.body) == normalize_line_endings(&right.body)
+        }
+        _ => false,
+    }
+}
+
+fn normalize_line_endings(text: &str) -> String {
+    text.replace("\r\n", "\n")
+}
+
+fn git_merge_file_text(base: &str, local: &str, incoming: &str) -> Result<(String, bool), String> {
     let root = std::env::temp_dir().join(format!(
         "tendi-merge-{}-{}",
         std::process::id(),
         GIT_UPDATE_CHECK_SEQUENCE.fetch_add(1, Ordering::Relaxed)
     ));
-    fs::create_dir_all(&root).ok()?;
+    if let Err(error) = fs::create_dir_all(&root) {
+        return Err(format!(
+            "Could not prepare the automatic merge workspace: {error}"
+        ));
+    }
     let local_path = root.join("local");
     let base_path = root.join("base");
     let incoming_path = root.join("incoming");
-    let result = (|| {
-        fs::write(&local_path, local).ok()?;
-        fs::write(&base_path, base).ok()?;
-        fs::write(&incoming_path, incoming).ok()?;
+    let result = (|| -> Result<(String, bool), String> {
+        fs::write(&local_path, local)
+            .map_err(|error| format!("Could not write the local merge input: {error}"))?;
+        fs::write(&base_path, base)
+            .map_err(|error| format!("Could not write the base merge input: {error}"))?;
+        fs::write(&incoming_path, incoming)
+            .map_err(|error| format!("Could not write the update merge input: {error}"))?;
         let output = git::run_git(
             &root,
             [
@@ -6223,12 +6320,26 @@ fn git_merge_file_text(base: &str, local: &str, incoming: &str) -> Option<(Strin
             git::LOCAL_COMMAND_TIMEOUT,
             git::never_cancelled(),
         )
-        .ok()?;
-        let conflict = output.status.code() == Some(1);
+        .map_err(|error| format!("Automatic merge tool failed: {error}"))?;
+        // `git merge-file` returns the number of conflicts (1..=127), not a
+        // boolean exit code. A file with multiple conflict regions must still
+        // expose its diff3 output as an ordinary conflict; only other exit
+        // statuses indicate that the merge tool itself was unavailable.
+        let conflict = output
+            .status
+            .code()
+            .is_some_and(|code| (1..=127).contains(&code));
         if !output.status.success() && !conflict {
-            return None;
+            let detail = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            return Err(if detail.is_empty() {
+                format!("Automatic merge tool exited with status {}", output.status)
+            } else {
+                format!("Automatic merge tool failed: {detail}")
+            });
         }
-        Some((String::from_utf8(output.stdout).ok()?, conflict))
+        String::from_utf8(output.stdout)
+            .map(|content| (content, conflict))
+            .map_err(|_| "Automatic merge tool returned non-text output.".to_string())
     })();
     let _ = fs::remove_dir_all(&root);
     result
@@ -6298,13 +6409,8 @@ fn provider_visibility_override(
     incoming: Option<&str>,
     agent: AgentKind,
 ) -> Option<(&'static str, bool)> {
-    if !matches!(agent, AgentKind::Shared | AgentKind::Unknown) {
-        return None;
-    }
-
-    crate::providers::all_providers()
+    crate::providers::skill_frontmatter_visibility_keys(agent)
         .into_iter()
-        .filter_map(|provider| provider.skill_frontmatter_visibility_key())
         .find_map(|provider_key| {
             let has_provider_visibility =
                 [local, base, incoming].into_iter().flatten().any(|text| {
@@ -6345,17 +6451,14 @@ fn normalize_skill_manifests_for_merge(
 }
 
 fn normalize_provider_skill_file_for_merge(
+    agent: AgentKind,
     path: &str,
     local: Option<&str>,
     base: Option<&str>,
     incoming: Option<&str>,
     visibility: SkillVisibility,
 ) -> (Option<String>, Option<String>, Option<String>) {
-    crate::providers::all_providers()
-        .into_iter()
-        .find_map(|provider| {
-            provider.normalize_skill_file_for_merge(path, local, base, incoming, visibility)
-        })
+    crate::providers::normalize_skill_file_for_merge(agent, path, local, base, incoming, visibility)
         .unwrap_or_else(|| {
             (
                 local.map(str::to_string),
@@ -6619,7 +6722,14 @@ fn merge_materialized_git_path_files(
     workspace_root: Option<&Path>,
 ) -> Result<Vec<GitUpdateFile>> {
     let relative = normalized_skill_repo_path(path);
-    let base = git_update_base(repo, path, relative, store, workspace_root)?;
+    let base = if let Some(revision) =
+        materialized_source_revision_for_update(repo, path, remote_revision)
+    {
+        git_files_at_source_version(repo, &revision, relative, true)
+            .context("matching materialized skill source revision has no files")?
+    } else {
+        git_update_base(repo, path, relative, store, workspace_root)?
+    };
     let local = local_skill_files(&path.path, repo, relative);
     let incoming = git_files_at_revision(repo, remote_revision, relative).unwrap_or_default();
     Ok(merge_file_maps(
@@ -6631,6 +6741,66 @@ fn merge_materialized_git_path_files(
         visibility,
         path.agent,
     ))
+}
+
+/// A materialized skill may have been refreshed by an older installer without
+/// advancing Tendi's recorded source revision. If its source-owned files still
+/// match a commit between the recorded revision and the incoming revision, use
+/// that commit as the merge base. Extra local files remain local and are still
+/// preserved by the normal merge.
+fn materialized_source_revision_for_update(
+    repo: &Path,
+    path: &SkillPath,
+    remote_revision: &str,
+) -> Option<String> {
+    let current_revision = path.source_version.as_deref()?;
+    if current_revision == remote_revision {
+        return Some(current_revision.to_string());
+    }
+    let relative = normalized_skill_repo_path(path);
+    let range = format!("{current_revision}..{remote_revision}");
+    let revisions = git::run_git(
+        repo,
+        [
+            "rev-list",
+            "--ancestry-path",
+            range.as_str(),
+            "--",
+            relative,
+        ],
+        git::LOCAL_COMMAND_TIMEOUT,
+        git::never_cancelled(),
+    )
+    .ok()
+    .filter(|output| output.status.success())
+    .map(|output| String::from_utf8_lossy(&output.stdout).into_owned())?;
+
+    revisions.lines().find_map(|revision| {
+        materialized_skill_matches_revision(repo, path, revision).then(|| revision.to_string())
+    })
+}
+
+fn materialized_skill_matches_revision(repo: &Path, path: &SkillPath, revision: &str) -> bool {
+    let relative = normalized_skill_repo_path(path);
+    let Some(source_files) = git_files_at_source_version(repo, revision, relative, true) else {
+        return false;
+    };
+    if source_files.is_empty() {
+        return false;
+    }
+    let local_files = local_skill_files(&path.path, repo, relative);
+    let source_changes = merge_file_maps(
+        Some(source_files.clone()),
+        local_files,
+        source_files.clone(),
+        relative,
+        "",
+        path.effective_visibility,
+        path.agent,
+    );
+    source_changes
+        .iter()
+        .all(|file| !source_files.contains_key(&file.path) || file.status != "local")
 }
 
 fn merge_file_maps(
@@ -6656,10 +6826,7 @@ fn merge_file_maps(
                 .strip_prefix(prefix)
                 .unwrap_or(&path)
                 .trim_start_matches('/');
-            if crate::providers::all_providers()
-                .into_iter()
-                .any(|provider| provider.is_managed_skill_file(path_in_skill))
-            {
+            if crate::providers::is_managed_skill_file(agent, path_in_skill) {
                 return None;
             }
             let before_bytes = local.get(&path);
@@ -6670,12 +6837,14 @@ fn merge_file_maps(
             let incoming_text = incoming_bytes.map(|bytes| String::from_utf8(bytes.clone()).ok());
             let resolution_key = format!("{key_prefix}:{path}");
             if !base_available {
+                let before = before.flatten();
+                let incoming = incoming_text.flatten();
                 return Some(GitUpdateFile {
                     path,
                     resolution_key,
-                    before: before.flatten().unwrap_or_default(),
+                    before: before.unwrap_or_default(),
                     base: String::new(),
-                    incoming: incoming_text.flatten().unwrap_or_default(),
+                    incoming: incoming.unwrap_or_default(),
                     after: String::new(),
                     before_bytes: before_bytes.cloned(),
                     incoming_bytes: incoming_bytes.cloned(),
@@ -6684,6 +6853,10 @@ fn merge_file_maps(
                     incoming_exists: incoming_bytes.is_some(),
                     after_exists: false,
                     status: "unavailable".to_string(),
+                    reason: Some(
+                        "The previous source version is unavailable, so Tendi cannot calculate a three-way merge."
+                            .to_string(),
+                    ),
                 });
             }
             if before.as_ref().is_some_and(Option::is_none)
@@ -6704,6 +6877,7 @@ fn merge_file_maps(
                     incoming_exists: incoming_bytes.is_some(),
                     after_exists: false,
                     status: "binary".to_string(),
+                    reason: None,
                 });
             }
             let before = before.flatten();
@@ -6720,6 +6894,7 @@ fn merge_file_maps(
                 );
             } else {
                 (local, base, incoming) = normalize_provider_skill_file_for_merge(
+                    agent,
                     path_in_skill,
                     local.as_deref(),
                     base.as_deref(),
@@ -6727,7 +6902,11 @@ fn merge_file_maps(
                     visibility,
                 );
             }
-            let merged = merge_text(base.as_deref(), local.as_deref(), incoming.as_deref());
+            let merged = if path_in_skill == "SKILL.md" {
+                merge_skill_manifest_text(base.as_deref(), local.as_deref(), incoming.as_deref())
+            } else {
+                merge_text(base.as_deref(), local.as_deref(), incoming.as_deref())
+            };
             if merged.status == "unchanged" {
                 return None;
             }
@@ -6739,17 +6918,20 @@ fn merge_file_maps(
                 before: before.unwrap_or_default(),
                 base: base.unwrap_or_default(),
                 incoming: incoming.unwrap_or_default(),
-                after: merged_content.clone().unwrap_or_default(),
+                after: if merged_status == "unavailable" {
+                    String::new()
+                } else {
+                    merged_content.clone().unwrap_or_default()
+                },
                 before_bytes: before_bytes.cloned(),
                 incoming_bytes: incoming_bytes.cloned(),
                 after_bytes: None,
                 before_exists: before_bytes.is_some(),
                 incoming_exists: incoming_bytes.is_some(),
-                after_exists: !matches!(
-                    merged_status.as_str(),
-                    "conflict" | "unavailable" | "binary"
-                ) && merged_content.is_some(),
+                after_exists: !matches!(merged_status.as_str(), "conflict" | "unavailable" | "binary")
+                    && merged_content.is_some(),
                 status: merged_status,
+                reason: merged.reason,
             })
         })
         .collect()
@@ -6882,7 +7064,11 @@ fn plan_registry_update(
             path: skill_file,
             resolution_key,
             status: "unavailable".to_string(),
-            before,
+            reason: Some(
+                "The previous snapshot for this skill is unavailable, so Tendi cannot calculate a three-way merge."
+                    .to_string(),
+            ),
+            before: before.clone(),
             base: String::new(),
             incoming,
             after: String::new(),
@@ -6897,7 +7083,7 @@ fn plan_registry_update(
     ) else {
         return Ok(None);
     };
-    let merged = merge_text(Some(&base), Some(&local), Some(&incoming));
+    let merged = merge_skill_manifest_text(Some(&base), Some(&local), Some(&incoming));
     let merged_status = merged.status.clone();
     let merged_content = merged.content.unwrap_or_default();
     if merged_status == "conflict" {
@@ -6906,6 +7092,7 @@ fn plan_registry_update(
             path: skill_file,
             resolution_key,
             status: merged_status,
+            reason: merged.reason,
             before,
             base,
             incoming,
@@ -7864,6 +8051,7 @@ fn git_materialized_path_files(
                 incoming_exists: after_exists,
                 after_exists,
                 status: "remote".to_string(),
+                reason: None,
             })
         })
         .collect()
@@ -8089,14 +8277,10 @@ fn render_skill_frontmatter_for_agents(
 }
 
 fn skill_visibility_frontmatter_agents(agent: AgentKind) -> Vec<AgentKind> {
-    let mut agents = vec![agent];
-    if matches!(
-        agent,
-        AgentKind::Codex | AgentKind::Cursor | AgentKind::Claude | AgentKind::Shared
-    ) {
-        agents.extend([AgentKind::Claude, AgentKind::Cursor]);
-    }
-    agents
+    crate::providers::skill_frontmatter_visibility_providers(agent)
+        .into_iter()
+        .map(|provider| provider.kind())
+        .collect()
 }
 
 fn plan_skill_visibility_at_path(

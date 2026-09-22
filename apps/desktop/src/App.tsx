@@ -902,6 +902,7 @@ export function App() {
     setAnalyticsRevisionError,
     setSkillUpdateError,
     setCheckingSkillUpdates,
+    setSkillUpdateCheckActive: (active) => { skillUpdateCheckActive.current = active; },
   });
 
   const applySkillRows = useCallback((skills: RawSkillRecord[], options?: { patch?: boolean; deleted?: string[] }) => {

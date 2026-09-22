@@ -634,6 +634,9 @@ pub(crate) fn workload(method: &str) -> Option<Workload> {
 }
 
 pub(crate) fn workload_for_request(method: &str, params: &Value) -> Option<Workload> {
+    if method == "session_skill_index_run" {
+        return Some(Workload::Compute);
+    }
     if method == "skills_updates" && params.get("check").and_then(Value::as_bool) == Some(true) {
         // This RPC only starts the already-scheduled background check. The
         // control-plane response must not wait for an interactive worker.

@@ -59,7 +59,8 @@ export type OverviewViewProps = {
   onOpenSession: (session: SessionRecord) => void;
 };
 
-const ANALYTICS_DEFAULT_RANGE_DAYS = 30;
+// Match the initial viewport prefetch window so startup uses one full query.
+const ANALYTICS_DEFAULT_RANGE_DAYS = 61;
 const MAX_ANALYTICS_DAYS = 365;
 const ANALYTICS_REVISION_SETTLE_MS = 400;
 const ANALYTICS_LOAD_STEPS = [ANALYTICS_DEFAULT_RANGE_DAYS, 90, 182, MAX_ANALYTICS_DAYS] as const;
@@ -336,7 +337,10 @@ export const OverviewView = memo(function OverviewView({
       if (request !== analyticsRequestRef.current) return;
       if (result) {
         const merged = mergeAnalyticsDays(analyticsRef.current, result, analyticsRange);
-        desktopStore.actions.setAnalyticsValue(merged, { ...queryKey, revision: resultRevision });
+        // The request revision identifies the snapshot the UI asked for. The
+        // response revision can lag while the analytics worker is publishing;
+        // using it as the cache key makes every settled refresh look stale.
+        desktopStore.actions.setAnalyticsValue(merged, queryKey);
         analyticsRef.current = merged;
       }
       else {
@@ -355,7 +359,7 @@ export const OverviewView = memo(function OverviewView({
       const latestRevision = Math.max(analyticsLatestRevisionRef.current, pendingRevision ?? analyticsRevision);
       const shouldRefreshLatestRevision = request === analyticsRequestRef.current
         && !refreshTranscripts
-        && latestRevision > resultRevision;
+        && latestRevision > analyticsRevision;
       logger.info("overview analytics query completed", {
         requestedRevision: analyticsRevision,
         resultRevision,

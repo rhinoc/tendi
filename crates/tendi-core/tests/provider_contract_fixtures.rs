@@ -68,7 +68,7 @@ fn provider_fixtures_keep_parser_ownership_and_tool_identity() {
             assert_eq!(item.result.as_deref(), Some("fixture"));
         }
         if agent == AgentKind::Cursor {
-            assert_eq!(item.time.as_deref(), Some("18:11"));
+            assert_eq!(item.time.as_deref(), Some("2026-08-28T18:11:00+08:00"));
         }
         let _ = fs::remove_dir_all(path.parent().unwrap());
     }

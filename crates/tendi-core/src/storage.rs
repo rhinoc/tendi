@@ -1,6 +1,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     fs,
+    io::{Read, Write},
     path::{Path, PathBuf},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -8,6 +9,7 @@ use std::{
 pub use crate::generated::runtime_contract::AppSettingsPatch;
 use anyhow::{Context, Result, bail};
 use chrono::Local;
+use flate2::{Compression, read::ZlibDecoder, write::ZlibEncoder};
 use rusqlite::{
     Connection, OptionalExtension, Transaction, params, params_from_iter,
     types::{Type, Value as SqlValue},
@@ -72,9 +74,13 @@ struct ProjectState {
 const SESSION_ANALYTICS_BATCH_SIZE: usize = 64;
 // The current schema is squashed; all development revisions before this
 // release were never published as compatibility boundaries.
-pub(crate) const STORAGE_SCHEMA_VERSION: i64 = 1;
+pub(crate) const STORAGE_SCHEMA_VERSION: i64 = 2;
 const SESSION_SEARCH_INDEX_VERSION: i64 = 2;
 pub(crate) const PROJECTION_PARSER_VERSION: &str = "scan-v8";
+pub(crate) const ANALYTICS_JSON_ENCODING: &str = "zlib-v1";
+pub(crate) const SESSION_SEARCH_FTS_OPTIMIZE_MUTATIONS: i64 = 50_000;
+pub(crate) const SESSION_SEARCH_FTS_OPTIMIZE_MIN_MUTATIONS: i64 = 2_000;
+pub(crate) const SESSION_SEARCH_FTS_OPTIMIZE_INTERVAL: u64 = 7 * 24 * 60 * 60;
 const DATABASE_READ_LOCK_ATTEMPTS: usize = 100;
 const DATABASE_READ_LOCK_RETRY: Duration = Duration::from_millis(50);
 const SCOPED_SESSION_TABLE: &str = "scoped_sessions";
@@ -106,19 +112,118 @@ fn log_skill_source_record_write(table: &str, scope_key: Option<&str>, record: &
     );
 }
 
-pub(crate) fn is_database_lock_error(error: &anyhow::Error) -> bool {
-    error.chain().any(|cause| {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DatabaseErrorKind {
+    Busy,
+    Locked,
+    Io,
+    Corrupt,
+    NotADatabase,
+    CannotOpen,
+    DiskFull,
+    ReadOnly,
+}
+
+impl DatabaseErrorKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Busy => "busy",
+            Self::Locked => "locked",
+            Self::Io => "io",
+            Self::Corrupt => "corrupt",
+            Self::NotADatabase => "not-a-database",
+            Self::CannotOpen => "cannot-open",
+            Self::DiskFull => "disk-full",
+            Self::ReadOnly => "read-only",
+        }
+    }
+
+    pub fn requires_connection_recovery(self) -> bool {
+        matches!(
+            self,
+            Self::Io | Self::Corrupt | Self::NotADatabase | Self::CannotOpen
+        )
+    }
+}
+
+fn sqlite_database_error_kind(error: &rusqlite::Error) -> Option<DatabaseErrorKind> {
+    let rusqlite::Error::SqliteFailure(code, _) = error else {
+        return None;
+    };
+    Some(match code.code {
+        rusqlite::ErrorCode::DatabaseBusy => DatabaseErrorKind::Busy,
+        rusqlite::ErrorCode::DatabaseLocked => DatabaseErrorKind::Locked,
+        rusqlite::ErrorCode::SystemIoFailure => DatabaseErrorKind::Io,
+        rusqlite::ErrorCode::DatabaseCorrupt => DatabaseErrorKind::Corrupt,
+        rusqlite::ErrorCode::NotADatabase => DatabaseErrorKind::NotADatabase,
+        rusqlite::ErrorCode::CannotOpen => DatabaseErrorKind::CannotOpen,
+        rusqlite::ErrorCode::DiskFull => DatabaseErrorKind::DiskFull,
+        rusqlite::ErrorCode::ReadOnly => DatabaseErrorKind::ReadOnly,
+        _ => return None,
+    })
+}
+
+pub fn database_error_kind(error: &anyhow::Error) -> Option<DatabaseErrorKind> {
+    error.chain().find_map(|cause| {
         cause
             .downcast_ref::<rusqlite::Error>()
-            .is_some_and(|error| {
-                matches!(
-                    error,
-                    rusqlite::Error::SqliteFailure(code, _)
-                        if code.code == rusqlite::ErrorCode::DatabaseBusy
-                            || code.code == rusqlite::ErrorCode::DatabaseLocked
-                )
-            })
+            .and_then(sqlite_database_error_kind)
     })
+}
+
+/// Classify errors that crossed a daemon boundary as text. Lock errors are
+/// deliberately checked first: they are admission/back-pressure, never a
+/// reason to replace a healthy connection.
+pub fn database_error_kind_from_message(message: &str) -> Option<DatabaseErrorKind> {
+    let message = message.to_ascii_lowercase();
+    if message.contains("database is locked")
+        || message.contains("database table is locked")
+        || message.contains("database schema is locked")
+        || message.contains("database is busy")
+    {
+        return Some(DatabaseErrorKind::Locked);
+    }
+    if message.contains("disk i/o error")
+        || message.contains("disk io error")
+        || message.contains("i/o error")
+        || message.contains("ioerr")
+        || message.contains("error code 522")
+    {
+        return Some(DatabaseErrorKind::Io);
+    }
+    if message.contains("database disk image is malformed")
+        || message.contains("database is malformed")
+        || message.contains("database corrupt")
+    {
+        return Some(DatabaseErrorKind::Corrupt);
+    }
+    if message.contains("file is not a database")
+        || message.contains("not a database")
+        || message.contains("notadb")
+    {
+        return Some(DatabaseErrorKind::NotADatabase);
+    }
+    if message.contains("unable to open database file")
+        || message.contains("cannot open database")
+        || message.contains("cantopen")
+    {
+        return Some(DatabaseErrorKind::CannotOpen);
+    }
+    if message.contains("database or disk is full") || message.contains("disk is full") {
+        return Some(DatabaseErrorKind::DiskFull);
+    }
+    if message.contains("readonly database")
+        || message.contains("read-only database")
+        || message.contains("attempt to write a readonly database")
+    {
+        return Some(DatabaseErrorKind::ReadOnly);
+    }
+    None
+}
+
+pub(crate) fn is_database_lock_error(error: &anyhow::Error) -> bool {
+    database_error_kind(error)
+        .is_some_and(|kind| matches!(kind, DatabaseErrorKind::Busy | DatabaseErrorKind::Locked))
 }
 
 /// SQLite reports WAL/file-descriptor failures as `SQLITE_IOERR` (including
@@ -126,30 +231,29 @@ pub(crate) fn is_database_lock_error(error: &anyhow::Error) -> bool {
 /// recoverable at the connection boundary; replaying the business operation
 /// is not safe.
 pub fn is_database_io_error(error: &anyhow::Error) -> bool {
-    error.chain().any(|cause| {
-        cause
-            .downcast_ref::<rusqlite::Error>()
-            .is_some_and(|error| {
-                matches!(
-                    error,
-                    rusqlite::Error::SqliteFailure(code, _)
-                        if code.code == rusqlite::ErrorCode::SystemIoFailure
-                )
-            })
-    })
+    database_error_kind(error) == Some(DatabaseErrorKind::Io)
 }
 
 /// Some daemon boundaries currently carry only a serialized error message.
 /// Keep the fallback matcher narrow and tied to SQLite's IOERR diagnostics.
 pub fn is_database_io_error_message(message: &str) -> bool {
-    message.contains("disk I/O error") || message.contains("Error code 522")
+    database_error_kind_from_message(message) == Some(DatabaseErrorKind::Io)
+}
+
+pub fn is_database_recovery_error(error: &anyhow::Error) -> bool {
+    database_error_kind(error).is_some_and(DatabaseErrorKind::requires_connection_recovery)
+}
+
+pub fn is_database_recovery_error_message(message: &str) -> bool {
+    database_error_kind_from_message(message)
+        .is_some_and(DatabaseErrorKind::requires_connection_recovery)
 }
 
 pub fn recover_database(path: impl AsRef<Path>) -> Result<()> {
     let path = path.as_ref();
     let path = fs::canonicalize(path)
         .with_context(|| format!("failed to resolve sqlite database {}", path.display()))?;
-    database::DatabaseWriter::open(&path)?.recover()
+    database::DatabaseWriter::recover_path(&path)
 }
 
 fn with_database_read_lock_retry<T, F>(mut read: F) -> Result<T>
@@ -765,6 +869,28 @@ struct SessionSearchDocument {
     assistant_text: String,
 }
 
+pub(crate) fn compress_analytics_json(value: &str) -> Result<Vec<u8>> {
+    let mut encoded = ANALYTICS_JSON_ENCODING.as_bytes().to_vec();
+    let mut encoder = ZlibEncoder::new(Vec::new(), Compression::new(3));
+    encoder.write_all(value.as_bytes())?;
+    encoded.extend(encoder.finish()?);
+    Ok(encoded)
+}
+
+pub(crate) fn decompress_analytics_json(value: &[u8]) -> Result<String> {
+    let (encoding, compressed) = value
+        .split_at_checked(ANALYTICS_JSON_ENCODING.len())
+        .context("analytics cache payload is truncated")?;
+    anyhow::ensure!(
+        encoding == ANALYTICS_JSON_ENCODING.as_bytes(),
+        "unsupported analytics cache encoding"
+    );
+    let mut decoder = ZlibDecoder::new(compressed);
+    let mut decoded = String::new();
+    decoder.read_to_string(&mut decoded)?;
+    Ok(decoded)
+}
+
 impl Store {
     pub fn path(&self) -> &Path {
         &self.path
@@ -786,6 +912,16 @@ impl Store {
         write: impl FnOnce(&Transaction<'_>) -> Result<T>,
     ) -> Result<T> {
         self.writer.write_background(operation, write)
+    }
+
+    fn with_background_write_transaction_until<T>(
+        &self,
+        operation: &str,
+        deadline: std::time::Instant,
+        write: impl FnOnce(&Transaction<'_>) -> Result<T>,
+    ) -> Result<Option<T>> {
+        self.writer
+            .write_background_until(operation, deadline, write)
     }
 }
 
@@ -913,6 +1049,9 @@ fn normalize_additional_session_roots(values: Vec<String>) -> Result<Vec<String>
 }
 
 pub fn default_db_path() -> Result<PathBuf> {
+    #[cfg(test)]
+    crate::test_support::ensure_isolated_environment();
+
     let base = dirs::data_dir()
         .or_else(|| dirs::home_dir().map(|home| home.join("Library/Application Support")))
         .context("could not resolve application support directory")?;
@@ -1328,7 +1467,18 @@ fn session_search_terms(query: &str) -> Vec<String> {
 fn session_search_query(terms: &[String]) -> String {
     terms
         .iter()
-        .map(|term| format!("\"{}\"", term.replace('"', "\"\"")))
+        .flat_map(|term| {
+            let chars = term.chars().collect::<Vec<_>>();
+            let mut trigrams = Vec::new();
+            for window in chars.windows(3) {
+                let trigram = window.iter().collect::<String>();
+                if !trigrams.contains(&trigram) {
+                    trigrams.push(trigram);
+                }
+            }
+            trigrams
+        })
+        .map(|trigram| format!("\"{}\"", trigram.replace('"', "\"\"")))
         .collect::<Vec<_>>()
         .join(" AND ")
 }
@@ -1379,10 +1529,27 @@ fn contains_search_score(document: &SessionSearchDocument, terms: &[String]) -> 
                 (document.assistant_text.as_str(), 3.0),
             ]
             .into_iter()
-            .find_map(|(value, weight)| value.to_lowercase().contains(term).then_some(weight))
+            .find_map(|(value, weight)| {
+                let matches = value.to_lowercase().match_indices(term).count();
+                (matches > 0).then_some(weight * matches as f64)
+            })
             .unwrap_or(0.0)
         })
         .sum()
+}
+
+fn contains_search_terms(document: &SessionSearchDocument, terms: &[String]) -> bool {
+    terms.iter().all(|term| {
+        [
+            document.metadata_text.as_str(),
+            document.title.as_str(),
+            document.project.as_str(),
+            document.user_text.as_str(),
+            document.assistant_text.as_str(),
+        ]
+        .into_iter()
+        .any(|value| value.to_lowercase().contains(term))
+    })
 }
 
 fn contains_search_snippet(document: &SessionSearchDocument, terms: &[String]) -> String {

@@ -306,6 +306,7 @@ export type SkillMergeIssue = {
   path: string;
   resolution_key: string;
   status: string;
+  reason?: string | null;
   before: string;
   base: string;
   incoming: string;
@@ -322,6 +323,7 @@ export type GitUpdateFile = {
   incoming_exists: boolean;
   after_exists: boolean;
   status: string;
+  reason?: string | null;
 };
 export type GitSkillVisibility = {
   skill_dir: string;
@@ -2028,5 +2030,5 @@ export function isDesktopCommand(command: string): command is CommandName {
 }
 export const PROTOCOL_VERSION = 2;
 export const SCHEMA_VERSION = 1;
-export const RUNTIME_CONTRACT_FINGERPRINT = "81be9570295a07ebb0f7ed62df9572e9a4bd990b3abd425658e3528062164c0d";
+export const RUNTIME_CONTRACT_FINGERPRINT = "6aa6289f5b12906366104f71917aa24c703bffd1a5ab8c06b3f01745412451ca";
 export const RUNTIME_ERROR_CODES = {"INVALID_REQUEST":-32600,"METHOD_NOT_FOUND":-32601,"INVALID_PARAMS":-32602,"INVALID_ARGUMENT":-32602,"INTERNAL":-32603,"CORE_ERROR":-32603,"CONFLICT":-32002,"UNAUTHORIZED":-32003,"UNSUPPORTED_TRANSPORT":-32004,"CONTRACT_VIOLATION":-32005,"DAEMON_ERROR":-32001} as const;

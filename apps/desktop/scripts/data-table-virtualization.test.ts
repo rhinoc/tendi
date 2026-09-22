@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 
-import { fixedVirtualRange, virtualRangeFor } from "../src/lib/virtualization.ts";
+import { fixedVirtualRange, variableVirtualRangeFor, virtualRangeFor } from "../src/lib/virtualization.ts";
 
 const dataTable = await readFile(new URL("../src/components/DataTable.tsx", import.meta.url), "utf8");
 const dataTableCss = await readFile(new URL("../src/components/DataTable.css", import.meta.url), "utf8");
@@ -54,6 +54,27 @@ test("keeps every consumer inside the shared virtualization contract", () => {
   });
 
   assert.ok(0 <= range.start && range.start <= range.end && range.end <= 10_000);
+});
+
+test("uses prefix offsets for variable-height ranges without changing the window", () => {
+  const measured = [32, 160, 72, 220, 48, 144, 96, 64];
+  const offsets = [0];
+  for (const height of measured) offsets.push(offsets.at(-1)! + height);
+  for (const scrollOffset of [0, 40, 220, 480, 700, 1_000]) {
+    assert.deepEqual(
+      variableVirtualRangeFor(offsets, scrollOffset, 240, 96, 2),
+      virtualRangeFor({
+        datasetEpoch: "variable",
+        stableKey: "variable",
+        count: measured.length,
+        estimate: 96,
+        measured,
+        scrollOffset,
+        viewportSize: 240,
+        overscan: 2,
+      }),
+    );
+  }
 });
 
 test("retries a row locator after a virtual seek changes the mounted window", () => {

@@ -2,7 +2,7 @@ import { Tooltip } from "../../components/shared/Tooltip.tsx";
 import { AlertCircle, ArrowLeft, ArrowRight, Check } from "lucide-react";
 
 import { ColumnCellVariant, ColumnDataType, type ColumnDef } from "../../components/DataTable.types";
-import { AsyncStatus, EMPTY_DISPLAY_VALUE, friendlyAgent, sessionCacheRate, sessionTitleValue, SessionKind, sessionKind, sessionProject, sessionProjectGroupKey, sessionProjectGroupLabel, sessionResumeLabel, sessionResumeTargetForAgent, sessionResumeTargetForMenu, SessionResumeTarget, SessionSortKey, sortValue, summarizeSessionPreviewRecord, type SessionRecord, type SessionResumeState } from "../../lib/index.ts";
+import { AsyncStatus, compactDateTime, EMPTY_DISPLAY_VALUE, friendlyAgent, sessionCacheRate, sessionTitleValue, SessionKind, sessionKind, sessionProject, sessionProjectGroupKey, sessionProjectGroupLabel, sessionResumeLabel, sessionResumeTargetForAgent, sessionResumeTargetForMenu, SessionResumeTarget, SessionSortKey, sortValue, summarizeSessionPreviewRecord, type SessionRecord, type SessionResumeState } from "../../lib/index.ts";
 import { cacheRateTone } from "../../lib/token-style.ts";
 import { AgentBadge } from "../../components/shared/AgentBadge.tsx";
 import { Badge } from "../../components/shared/Badge.tsx";
@@ -23,9 +23,7 @@ export type SessionTableRow = {
   repositoryUrl?: string;
   logicalProjectId?: string;
   logicalProjectName?: string;
-  startedLabel?: string;
   startedAt?: string;
-  updatedLabel?: string;
   updatedAt?: string;
   time?: string;
   path?: string;
@@ -164,8 +162,8 @@ export function createSessionTableColumns<T extends SessionTableRow = SessionTab
       sortable: true,
       sortValue: (session) => sortValue(session as SessionRecord, SessionSortKey.StartedAt),
       width: widths.startedAt ?? "104px",
-      value: (session) => session.startedLabel,
-      title: (session) => session.startedAt,
+      value: (session) => compactDateTime(session.startedAt),
+      title: (session) => compactDateTime(session.startedAt, { year: true }) || undefined,
     },
     {
       key: SessionSortKey.UpdatedAt,
@@ -174,8 +172,8 @@ export function createSessionTableColumns<T extends SessionTableRow = SessionTab
       sortable: true,
       sortValue: (session) => sortValue(session as SessionRecord, SessionSortKey.UpdatedAt),
       width: widths.updatedAt ?? "104px",
-      value: (session) => session.updatedLabel,
-      title: (session) => session.updatedAt,
+      value: (session) => compactDateTime(session.updatedAt),
+      title: (session) => compactDateTime(session.updatedAt, { year: true }) || undefined,
     },
     {
       key: SessionSortKey.Messages,

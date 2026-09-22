@@ -1391,6 +1391,12 @@ const SCHEMAS: Record<string, Record<string, unknown>> = {
       "status": {
         "type": "string"
       },
+      "reason": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
       "before": {
         "type": "string"
       },
@@ -1448,6 +1454,12 @@ const SCHEMAS: Record<string, Record<string, unknown>> = {
       },
       "status": {
         "type": "string"
+      },
+      "reason": {
+        "type": [
+          "string",
+          "null"
+        ]
       }
     },
     "required": [

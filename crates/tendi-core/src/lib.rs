@@ -29,6 +29,9 @@ pub mod storage;
 mod time;
 pub mod transcript;
 
+#[cfg(test)]
+pub(crate) mod test_support;
+
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
@@ -73,6 +76,9 @@ pub fn initialize_workspace(
     cwd: impl AsRef<Path>,
     project_roots: &[PathBuf],
 ) -> Result<()> {
+    #[cfg(test)]
+    test_support::ensure_isolated_environment();
+
     let cwd = cwd.as_ref();
     migrations::run_workspace(store, cwd, project_roots)?;
     store.invalidate_projection("skills", cwd)?;

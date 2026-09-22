@@ -1,5 +1,5 @@
 import { agentIdentityKey, friendlyAgent } from "../lib/agents.ts";
-import { compactDateTime, dayGroupKey } from "../lib/strings.ts";
+import { dayGroupKey } from "../lib/strings.ts";
 import { formatTranscriptPreview } from "../lib/session-preview.ts";
 import { transcriptItemType, type JsonlTranscriptParseResult } from "../lib/transcript.ts";
 import {
@@ -204,9 +204,6 @@ export function createImportedSessionRecord(input: {
     startedAt,
     updatedAt,
     time: updatedAt,
-    startedLabel: compactDateTime(startedAt),
-    updatedLabel: compactDateTime(updatedAt),
-    updatedDetailLabel: compactDateTime(updatedAt, { year: true }),
     messages: parsed.items.length,
     firstUserMessage: userMessages[0],
     lastUserMessage: userMessages.at(-1),

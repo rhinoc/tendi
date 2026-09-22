@@ -1,4 +1,4 @@
-import { basename, compactDateTime } from "./strings.ts";
+import { basename } from "./strings.ts";
 import { compareTimestamps, timestampMs } from "./time.ts";
 import { agentIdentityKey, normalizedAgentKey } from "./agents.ts";
 import { agentDefinition } from "./agent/index.ts";
@@ -20,9 +20,6 @@ export type SessionRecord = {
   startedAt?: string;
   updatedAt?: string;
   time?: string;
-  startedLabel?: string;
-  updatedLabel?: string;
-  updatedDetailLabel?: string;
   messages?: number;
   firstUserMessage?: string;
   lastUserMessage?: string;
@@ -230,9 +227,6 @@ export function normalizeSession(session: Record<string, unknown>): SessionRecor
     startedAt,
     updatedAt,
     time: updatedAt,
-    startedLabel: compactDateTime(startedAt),
-    updatedLabel: compactDateTime(updatedAt),
-    updatedDetailLabel: compactDateTime(updatedAt, { year: true }),
     messages: optionalCount(session.message_count),
     firstUserMessage: textValue(session.first_user_message) || undefined,
     lastUserMessage: textValue(session.last_user_message) || undefined,

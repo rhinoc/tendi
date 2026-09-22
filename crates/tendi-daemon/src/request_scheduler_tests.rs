@@ -46,6 +46,18 @@ fn remote_skill_update_check_bypasses_local_compute_queue() {
         Some(Workload::Compute)
     );
 }
+
+#[test]
+fn session_skill_index_runs_as_background_compute() {
+    assert_eq!(
+        workload_for_request(
+            "session_skill_index_run",
+            &serde_json::json!({ "force": false }),
+        ),
+        Some(Workload::Compute)
+    );
+}
+
 fn cancel() -> Arc<AtomicBool> {
     Arc::new(AtomicBool::new(false))
 }
