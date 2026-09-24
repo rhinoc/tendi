@@ -155,7 +155,10 @@
       "id": "fixture"
     },
     "hook_source_read": {
-      "id": "fixture"
+      "agent": "codex",
+      "path": "fixture",
+      "expectedTrustHash": "fixture",
+      "event": "fixture"
     },
     "mcp_list": {},
     "mcp_probe": {
@@ -287,10 +290,12 @@
       "query": "fixture"
     },
     "skill_files": {
-      "skillId": "fixture"
+      "skillName": "fixture",
+      "skillPath": "fixture"
     },
     "skill_file_read": {
-      "skillId": "fixture",
+      "skillName": "fixture",
+      "skillPath": "fixture",
       "relativePath": "fixture"
     },
     "skill_file_save": {

@@ -1,5 +1,5 @@
 import { Tooltip } from "../components/shared/Tooltip.tsx";
-import { lazy, Suspense, useCallback, useDeferredValue, useEffect, useMemo, useRef, useState, type ComponentType, type ReactNode } from "react";
+import { lazy, Suspense, useCallback, useDeferredValue, useEffect, useMemo, useState, type ComponentType, type ReactNode } from "react";
 import { ContextMenu, DropdownMenu } from "radix-ui";
 import { Code2, Copy, FolderOpen, Info, ScrollText, SearchX, Trash2 } from "lucide-react";
 import { Group as PanelGroup, Panel } from "react-resizable-panels";
@@ -8,7 +8,7 @@ import { DataTable } from "../components/DataTable.tsx";
 import { ColumnDataType, type ColumnDef, type SortState } from "../components/DataTable.types";
 import { SortDirection } from "../lib/sort.ts";
 import { useTabState } from "../lib/tab-state.ts";
-import { updateEditorDraft, useEditorDraft } from "../lib/editor-draft-state.ts";
+import { releaseCleanEditorDraft, updateEditorDraft, useEditorDraft } from "../lib/editor-draft-state.ts";
 import { DiffLineKind } from "../lib/diff.ts";
 import { AgentChips } from "../components/shared/AgentChips.tsx";
 import { CopyButton } from "../components/shared/CopyButton.tsx";
@@ -31,9 +31,11 @@ import { SearchField } from "../components/shared/SearchField.tsx";
 import { Toast } from "../components/shared/Toast.tsx";
 import type { SkillDependencyRecord } from "../features/skills/SkillDependencyGraph.tsx";
 import { ruleColumns as sharedRuleColumns } from "../lib/tableColumns.tsx";
-import { actionLabels, copiedPathLabel, copyPathLabel, EMPTY_DISPLAY_VALUE, revealPathLabel, RULE_FREEZE_COLUMN, RuleScope, scopeColumnFromValue, selectionDeleteErrorLabel, selectionDeleteLabel, TableSelectionActionId, TauriCommand, diffPreview, formatUserPath, friendlyAgent, ruleAgents, ruleKey, ruleSelectionActionIds, ruleSortValue, ruleTitle, safeInvoke, scopeNameForValue, suppressNextClick, type ProjectSummary, type RuleRecord } from "../lib/index.ts";
-import { selectRuleListView } from "../controllers/rule-controller.ts";
-import { readRule, saveRule, SkillScope, type CatalogMutationResponse } from "../lib/runtime-gateway.ts";
+import { actionLabels, copiedPathLabel, copyPathLabel, EMPTY_DISPLAY_VALUE, revealPathLabel, RULE_FREEZE_COLUMN, scopeColumnFromValue, selectionDeleteLabel, TableSelectionActionId, TauriCommand, diffPreview, formatUserPath, friendlyAgent, ruleAgents, ruleKey, ruleSelectionActionIds, ruleSortValue, ruleTitle, safeInvoke, scopeNameForValue, suppressNextClick, type ProjectSummary, type RuleRecord } from "../lib/index.ts";
+import { ruleSkillReferences, selectRuleListView } from "../controllers/rule-controller.ts";
+import type { CatalogMutationResponse } from "../lib/runtime-gateway.ts";
+import { useRuleEditor } from "../features/rules/useRuleEditor.ts";
+import { useRuleOperations } from "../features/rules/useRuleOperations.ts";
 
 const MarkdownFilePane = lazy(() => import("../components/shared/MarkdownFilePane.tsx").then(({ MarkdownFilePane: component }) => ({ default: component })));
 
@@ -55,22 +57,17 @@ function ruleSourcePath(rule: RuleRecord): string {
   return rule.path;
 }
 
-function operationError(value: CatalogMutationResponse | undefined): string | null {
-  if (!value || typeof value !== "object") return null;
-  const error = "error" in value ? value.error : undefined;
-  return typeof error === "string" ? error : null;
-}
-
 function ruleSelectionActions(
   selectedRows: RuleTableRow[],
   Menu: RuleMenuComponents,
   requestDeleteRules: (rows: RuleTableRow[]) => void,
+  filterDeletableRules: (rows: readonly RuleTableRow[]) => RuleTableRow[],
   deleting: boolean,
 ): DataTableSelectionActionDefinition[] {
   const row = selectedRows.length === 1 ? selectedRows[0] : undefined;
   if (selectedRows.length === 0 || ruleSelectionActionIds(selectedRows.length).length === 0) return [];
   const path = row ? ruleSourcePath(row.rule) : "";
-  const deletable = selectedRows.filter((item) => Boolean(item.rule.path));
+  const deletable = filterDeletableRules(selectedRows);
   const deleteLabel = selectionDeleteLabel("rule", selectedRows.length);
   const actions: Record<string, DataTableSelectionActionDefinition> = {
     [TableSelectionActionId.OpenEditor]: {
@@ -103,51 +100,15 @@ function ruleSelectionActions(
   return ruleSelectionActionIds(selectedRows.length).map((id) => actions[id]);
 }
 
-function RuleActionsCell({ rule, requestDeleteRules, deleting }: { rule: RuleRecord; requestDeleteRules: (rows: RuleTableRow[]) => void; deleting: boolean }) {
+function RuleActionsCell({ rule, requestDeleteRules, filterDeletableRules, deleting }: { rule: RuleRecord; requestDeleteRules: (rows: RuleTableRow[]) => void; filterDeletableRules: (rows: readonly RuleTableRow[]) => RuleTableRow[]; deleting: boolean }) {
   return (
     <RowActionsMenu
       ariaLabel={`Rule actions for ${ruleTitle(rule)}`}
       onOpenChange={(open) => { if (!open) suppressNextClick(); }}
     >
-      {renderDataTableSelectionMenu(ruleSelectionActions([{ key: ruleKey(rule), id: ruleKey(rule), rule }], DropdownMenu, requestDeleteRules, deleting))}
+      {renderDataTableSelectionMenu(ruleSelectionActions([{ key: ruleKey(rule), id: ruleKey(rule), rule }], DropdownMenu, requestDeleteRules, filterDeletableRules, deleting))}
     </RowActionsMenu>
   );
-}
-
-function normalizeSkillName(value: string) {
-  return value.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
-}
-
-function preferReferencedSkill(matches: SkillDependencyRecord[], rule: RuleRecord) {
-  if (matches.length === 1) return matches[0];
-  if (rule.scope === RuleScope.Project) {
-    const projectMatches = matches.filter((skill) =>
-      (skill.paths ?? []).some((path) => path.scope === SkillScope.Project),
-    );
-    if (projectMatches.length === 1) return projectMatches[0];
-  }
-  const globalMatches = matches.filter((skill) => (skill.paths ?? []).every((path) => path.scope !== SkillScope.Project));
-  return globalMatches.length === 1 ? globalMatches[0] : undefined;
-}
-
-function ruleSkillRefs(content: string, skills: SkillDependencyRecord[], rule: RuleRecord | null) {
-  if (!rule) return [];
-  const byName = new Map<string, SkillDependencyRecord[]>();
-  for (const skill of skills) {
-    const key = normalizeSkillName(skill.name);
-    const group = byName.get(key) ?? [];
-    group.push(skill);
-    byName.set(key, group);
-  }
-  const refs = new Map<string, SkillDependencyRecord>();
-  for (const match of content.matchAll(/(?:^|[^\w])[$/]([a-zA-Z0-9][a-zA-Z0-9_-]*)/g)) {
-    const candidates = byName.get(normalizeSkillName(match[1]));
-    if (!candidates?.length) continue;
-    const preferred = preferReferencedSkill(candidates, rule);
-    if (!preferred?.id) continue;
-    refs.set(preferred.id, preferred);
-  }
-  return [...refs.values()].sort((left, right) => left.name.localeCompare(right.name));
 }
 
 function RuleInfoMenu({
@@ -257,18 +218,21 @@ export function RulesView({
   const [activeKey, setActiveKey] = useTabState("rules.activeKey", ruleItems[0]?.key ?? "");
   const [selected, setSelected] = useState<string[]>([]);
   const [sort, setSort] = useTabState<SortState>("rules.sort", { key: "order", direction: SortDirection.Asc });
-  const [loading, setLoading] = useState(false);
   const [detailCollapsed, setDetailCollapsed] = useTabState("rules.detailCollapsed", false);
   const [showDiscardDialog, setShowDiscardDialog] = useState(false);
   const [pendingKey, setPendingKey] = useState("");
   const [pendingDeleteRows, setPendingDeleteRows] = useState<RuleTableRow[]>([]);
   const [pendingDeleteConfirmRows, setPendingDeleteConfirmRows] = useState<RuleTableRow[]>([]);
-  const [deleting, setDeleting] = useState(false);
-  const [deleteError, setDeleteError] = useState("");
   const [ruleLocatorRequest, setRuleLocatorRequest] = useState("");
-  const loadedRulePathRef = useRef("");
-  const [ruleLoadError, setRuleLoadError] = useState("");
-  const [ruleLoadAttempt, setRuleLoadAttempt] = useState(0);
+  const clearSelection = useCallback(() => setSelected([]), []);
+  const clearPendingDelete = useCallback(() => setPendingDeleteConfirmRows([]), []);
+  const {
+    deleting,
+    deleteError,
+    clearDeleteError,
+    filterDeletableRules,
+    confirmDeleteRules: deleteRules,
+  } = useRuleOperations({ onDeleteRules, clearPendingDelete, clearSelection });
   const normalizedQuery = query.trim().toLowerCase();
   useEffect(() => {
     if (!locateRuleId) return;
@@ -283,22 +247,22 @@ export function RulesView({
   const activeRule = activeItem?.rule ?? null;
   const ruleDraftKey = `rules:${activeRule?.path ?? "__none__"}`;
   const draft = useEditorDraft(ruleDraftKey);
+  useEffect(() => () => releaseCleanEditorDraft(ruleDraftKey), [ruleDraftKey]);
+  const { hasLoadedRule, loading, loadFailed, retryLoad, save } = useRuleEditor({
+    rule: activeRule,
+    resourceKey: ruleDraftKey,
+    draft,
+    onBeginMutation,
+    onRuleSaved,
+  });
   const content = draft.content;
-  const hasLoadedRule = Boolean(
-    activeRule
-      && (loadedRulePathRef.current === activeRule.path
-        || draft.content !== draft.originalContent && Boolean(draft.sha256)),
-  );
+  const ruleLoadError = loadFailed ? "Could not load rule. Try again." : "";
   const deferredContent = useDeferredValue(content);
   const referencedSkills = useMemo(
-    () => ruleSkillRefs(content, skills, activeRule),
+    () => ruleSkillReferences(content, skills, activeRule),
     [activeRule, content, skills],
   );
   const dirty = content !== draft.originalContent;
-  const dirtyRef = useRef(dirty);
-  dirtyRef.current = dirty;
-  const draftRef = useRef(draft);
-  draftRef.current = draft;
   const diffLines = useMemo(
     () => loading || !dirty ? [] : diffPreview(draft.originalContent, deferredContent),
     [deferredContent, dirty, draft.originalContent, loading],
@@ -314,7 +278,7 @@ export function RulesView({
     [diffLines],
   );
   const requestDeleteRules = useCallback((items: RuleTableRow[]) => {
-    const deletable = items.filter((item) => Boolean(item.rule.path));
+    const deletable = filterDeletableRules(items);
     if (deletable.length === 0) return;
     if (dirty && deletable.some((item) => item.rule.path === activeRule?.path)) {
       setPendingKey("");
@@ -324,31 +288,11 @@ export function RulesView({
       return;
     }
     setPendingDeleteConfirmRows(deletable);
-  }, [activeRule?.path, dirty]);
+  }, [activeRule?.path, dirty, filterDeletableRules]);
   const confirmDeleteRules = useCallback(async () => {
     const targets = pendingDeleteConfirmRows;
-    if (targets.length === 0 || deleting) return;
-    setDeleting(true);
-    setDeleteError("");
-    try {
-      const result = await onDeleteRules?.(targets.map((item) => item.rule.path));
-      const error = operationError(result);
-      if (error) {
-        setDeleteError(error);
-        return;
-      }
-      if (!result) {
-        setDeleteError(selectionDeleteErrorLabel("rule", targets.length));
-        return;
-      }
-      setPendingDeleteConfirmRows([]);
-      setSelected([]);
-    } catch (error) {
-      setDeleteError(`${error}`);
-    } finally {
-      setDeleting(false);
-    }
-  }, [deleting, onDeleteRules, pendingDeleteConfirmRows]);
+    if (targets.length > 0) await deleteRules(targets);
+  }, [deleteRules, pendingDeleteConfirmRows]);
   const columns = useMemo((): ColumnDef<RuleTableRow>[] => [
     {
       key: "source",
@@ -403,17 +347,17 @@ export function RulesView({
       key: "actions",
       header: "",
       width: "40px",
-      render: (row) => <RuleActionsCell rule={row.rule} requestDeleteRules={requestDeleteRules} deleting={deleting} />,
+      render: (row) => <RuleActionsCell rule={row.rule} requestDeleteRules={requestDeleteRules} filterDeletableRules={filterDeletableRules} deleting={deleting} />,
     },
-  ], [deleting, projectList, requestDeleteRules]);
+  ], [deleting, filterDeletableRules, projectList, requestDeleteRules]);
   const rowContextMenu = useCallback((row: RuleTableRow, { selectedRows, selected: isSelected }: { selectedRows: RuleTableRow[]; selected: boolean }) => {
     const actionRows = isSelected ? selectedRows : [row];
-    const actions = ruleSelectionActions(actionRows, ContextMenu, requestDeleteRules, deleting);
+    const actions = ruleSelectionActions(actionRows, ContextMenu, requestDeleteRules, filterDeletableRules, deleting);
     return actions.length > 0 ? renderDataTableSelectionMenu(actions) : null;
-  }, [deleting, requestDeleteRules]);
+  }, [deleting, filterDeletableRules, requestDeleteRules]);
   const bottomBar = useCallback((selectedRows: RuleTableRow[]) => (
-    <DataTableSelectionActions actions={ruleSelectionActions(selectedRows, DropdownMenu, requestDeleteRules, deleting)} ariaLabel="More selected rule actions" />
-  ), [deleting, requestDeleteRules]);
+    <DataTableSelectionActions actions={ruleSelectionActions(selectedRows, DropdownMenu, requestDeleteRules, filterDeletableRules, deleting)} ariaLabel="More selected rule actions" />
+  ), [deleting, filterDeletableRules, requestDeleteRules]);
 
   useEffect(() => {
     if (!activeKey && ruleItems[0]) setActiveKey(ruleItems[0].key);
@@ -425,70 +369,6 @@ export function RulesView({
   useEffect(() => {
     setSelected((current) => current.filter((key) => ruleItems.some((item) => item.key === key)));
   }, [ruleItems]);
-
-  useEffect(() => {
-    let cancelled = false;
-    const rulePath = activeRule?.path ?? "";
-    if (!rulePath) {
-      loadedRulePathRef.current = "";
-      setRuleLoadError("");
-      setLoading(false);
-      return () => { cancelled = true; };
-    }
-    const resourceKey = `rules:${rulePath}`;
-    if (dirtyRef.current && draftRef.current.sha256) {
-      loadedRulePathRef.current = rulePath;
-      setRuleLoadError("");
-      setLoading(false);
-      return () => { cancelled = true; };
-    }
-    const sameRule = loadedRulePathRef.current === rulePath;
-    if (!sameRule) {
-      loadedRulePathRef.current = "";
-      updateEditorDraft(resourceKey, { content: "", originalContent: "", sha256: "" });
-    }
-    setLoading(true);
-    setRuleLoadError("");
-    async function loadRule() {
-      try {
-        const result = await readRule(rulePath);
-        if (cancelled) return;
-        loadedRulePathRef.current = rulePath;
-        updateEditorDraft(resourceKey, { content: result.content, originalContent: result.content, sha256: result.sha256 });
-        setRuleLoadError("");
-      } catch {
-        if (cancelled) return;
-        if (!sameRule) {
-          loadedRulePathRef.current = "";
-          updateEditorDraft(resourceKey, { content: "", originalContent: "", sha256: "" });
-        }
-        setRuleLoadError("Could not load rule. Try again.");
-      } finally {
-        if (!cancelled) setLoading(false);
-      }
-    }
-    loadRule();
-    return () => { cancelled = true; };
-  }, [activeRule?.path, activeRule?.sha256, ruleLoadAttempt]);
-
-  const save = useCallback(async () => {
-    if (!dirty || !draft.sha256 || !activeRule?.path) return;
-    const releaseMutation = onBeginMutation();
-    try {
-      const result = await saveRule({
-        path: activeRule.path,
-        expectedSha256: draft.sha256,
-        content,
-      });
-      if (typeof result?.sha256 === "string") {
-        const savedContent = typeof result.content === "string" ? result.content : content;
-        updateEditorDraft(`rules:${activeRule.path}`, { content: savedContent, originalContent: savedContent, sha256: result.sha256 });
-        if (activeRule?.path) onRuleSaved?.(activeRule.path, result.sha256);
-      }
-    } finally {
-      releaseMutation();
-    }
-  }, [activeRule?.path, content, dirty, draft.sha256, onBeginMutation, onRuleSaved]);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -555,7 +435,7 @@ export function RulesView({
             <SearchField pageSearch placeholder="Search rules" value={query} onChange={(event) => setQuery(event.target.value)} onClear={() => setQuery("")} />
           </PageHeader>
           {loadError && hasRows ? <LoadErrorState message={loadError} onRetry={onRetry} /> : null}
-          {deleteError ? <Toast tone="error" message={deleteError} onDismiss={() => setDeleteError("")} /> : null}
+          {deleteError ? <Toast tone="error" message={deleteError} onDismiss={clearDeleteError} /> : null}
           <div className="sessionListBody">
             <DataTable
               rows={tableRows}
@@ -619,7 +499,7 @@ export function RulesView({
           >
             {!hasLoadedRule && ruleLoadError ? (
               <div className="ruleEditorLoading">
-                <LoadErrorState message={ruleLoadError} onRetry={() => setRuleLoadAttempt((attempt) => attempt + 1)} />
+                <LoadErrorState message={ruleLoadError} onRetry={retryLoad} />
               </div>
             ) : !hasLoadedRule ? (
               <EditorStatePlaceholder className="ruleEditorLoading" label="Loading rule" />
@@ -643,7 +523,7 @@ export function RulesView({
                   </div>
                 ) : ruleLoadError ? (
                   <div className="ruleEditorStatusOverlay">
-                    <LoadErrorState message={ruleLoadError} onRetry={() => setRuleLoadAttempt((attempt) => attempt + 1)} />
+                    <LoadErrorState message={ruleLoadError} onRetry={retryLoad} />
                   </div>
                 ) : null}
               </div>

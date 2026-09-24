@@ -1,7 +1,7 @@
 import { ALL_AGENT_FILTER, friendlyAgent, normalizedAgentKey, sameAgent } from "../lib/agents.ts";
 import { hookDeleteIdentity, hookSourcePath, isHookMutationDelta, normalizeHook, type HookRecord } from "../lib/hooks.ts";
 import { isMcpMutationDelta, mcpRowKey, mcpSourcePath, normalizeMcp, type McpRecord } from "../lib/mcp.ts";
-import { normalizePrompt, type PromptRecord } from "../lib/prompt-model.ts";
+import { mergePromptBody, normalizePrompt, type PromptRecord } from "../lib/prompt-model.ts";
 import { normalizeRule, ruleAgents, type RuleRecord } from "../lib/rules.ts";
 import { normalizeSession, sessionLogicalIdentity, type SessionRecord } from "../lib/sessions.ts";
 import { normalizeSkill, type NormalizedSkill } from "../lib/skills.ts";
@@ -105,15 +105,12 @@ export function applyPromptRecord(
 ): RuntimeData {
   const id = typeof record.id === "string" ? record.id.trim() : "";
   if (!id) return current;
-  const withBody = typeof record.body === "string" || bodyFallback === undefined
-    ? record
-    : { ...record, body: bodyFallback };
-  const normalized = normalizePrompt(withBody);
+  const normalized = normalizePrompt(record);
   if (!normalized) return current;
   const existing = current.prompts.find((prompt) => prompt.id === id);
   const nextRecord = {
     ...normalized,
-    body: normalized.body || existing?.body || bodyFallback || "",
+    body: mergePromptBody(normalized.body, existing?.body, bodyFallback),
   };
   const prompts = [nextRecord, ...current.prompts.filter((prompt) => prompt.id !== id)];
   if (prompts.length === current.prompts.length && prompts.every((prompt, index) => prompt === current.prompts[index])) return current;

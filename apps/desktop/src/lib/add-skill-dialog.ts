@@ -97,6 +97,12 @@ export function isSkillSourceActionReady(source: string, isDirectSource: boolean
   return Boolean(source.trim()) && (!isDirectSource || Boolean(target.trim()));
 }
 
+export function isDirectSkillSource(value: string) {
+  const source = value.trim();
+  return /^(?:https?:\/\/|ssh:\/\/|git@|github:|gitlab:|huggingface:|\/|\/?\.\.?\/)/i.test(source)
+    || /^[^/\s]+\/[^/\s]+(?:#\S+)?$/.test(source);
+}
+
 export function resolveSkillInstallTarget<T extends { id: string }>(target: string, options: T[]) {
   return options.some((option) => option.id === target) ? target : options[0]?.id ?? "";
 }

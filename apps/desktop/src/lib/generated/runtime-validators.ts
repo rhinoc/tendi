@@ -2375,13 +2375,69 @@ const SCHEMAS: Record<string, Record<string, unknown>> = {
   "HookSourceReadRequest": {
     "type": "object",
     "properties": {
-      "id": {
+      "agent": {
+        "$ref": "#/components/schemas/AgentKind"
+      },
+      "path": {
         "type": "string",
         "minLength": 1
+      },
+      "expectedTrustHash": {
+        "type": "string",
+        "minLength": 1
+      },
+      "event": {
+        "type": "string",
+        "minLength": 1
+      },
+      "matcher": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "hookType": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "command": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "url": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "prompt": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "filter": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "statusMessage": {
+        "type": [
+          "string",
+          "null"
+        ]
       }
     },
     "required": [
-      "id"
+      "agent",
+      "path",
+      "expectedTrustHash",
+      "event"
     ],
     "additionalProperties": false
   },
@@ -2990,42 +3046,40 @@ const SCHEMAS: Record<string, Record<string, unknown>> = {
   "SkillFilesRequest": {
     "type": "object",
     "properties": {
-      "skillId": {
+      "skillName": {
         "type": "string",
         "minLength": 1
       },
-      "locationId": {
-        "type": [
-          "string",
-          "null"
-        ]
+      "skillPath": {
+        "type": "string",
+        "minLength": 1
       }
     },
     "required": [
-      "skillId"
+      "skillName",
+      "skillPath"
     ],
     "additionalProperties": false
   },
   "SkillFileReadRequest": {
     "type": "object",
     "properties": {
-      "skillId": {
+      "skillName": {
+        "type": "string",
+        "minLength": 1
+      },
+      "skillPath": {
         "type": "string",
         "minLength": 1
       },
       "relativePath": {
         "type": "string",
         "minLength": 1
-      },
-      "locationId": {
-        "type": [
-          "string",
-          "null"
-        ]
       }
     },
     "required": [
-      "skillId",
+      "skillName",
+      "skillPath",
       "relativePath"
     ],
     "additionalProperties": false

@@ -53,11 +53,12 @@ import type { SkillDependencyRecord } from "./SkillDependencyGraph.tsx";
 import { SkillInfoMenu } from "./SkillInfoMenu.tsx";
 import { LinkedSessionsDrawerFallback } from "../sessions/LinkedSessionsDrawerFallback.tsx";
 import {
-  discardDirtyDrafts,
+  discardCleanDrafts,
   getSkillEditorState,
   hydrateSkillDraft,
-  trimCleanDrafts,
+  setSkillEditorActivePath,
   updateSkillEditorField,
+  updateSkillEditorState,
   useSkillEditorState,
   type SkillDraft,
   type SkillEditorStateValue,
@@ -69,6 +70,7 @@ const DIALOG_CLOSE_ANIMATION_MS = 220;
 
 export type SkillEditorViewProps = {
   skill: NormalizedSkill;
+  skillFilesChanged?: { id: number; paths: readonly string[] } | null;
   skills: SkillDependencyRecord[];
   back: () => void;
   onReadSkillIndexStatus?: () => Promise<SkillIndexStatus | null>;
@@ -79,11 +81,13 @@ export type SkillEditorViewProps = {
   onBeginMutation: () => () => void;
 };
 
-export function SkillEditorView({ skill, skills, back, onReadSkillIndexStatus, skillIndexStatus, onOpenSession, onOpenSkill, onSaved, onBeginMutation }: SkillEditorViewProps) {
+export function SkillEditorView({ skill, skillFilesChanged, skills, back, onReadSkillIndexStatus, skillIndexStatus, onOpenSession, onOpenSkill, onSaved, onBeginMutation }: SkillEditorViewProps) {
   const currentSkill = skill;
   const skillLocation = currentSkill.paths.find((path) => path.path);
   const locationId = skillLocation?.location_id;
+  const skillPath = skillLocation?.path;
   const skillContentHash = skillLocation?.sha256;
+  const fileSourceKey = `${currentSkill.id}\u0000${skillPath ?? ""}\u0000${skillContentHash ?? ""}`;
   const readOnly = isReadOnlySkillSource(currentSkill);
   const editorState = useSkillEditorState(currentSkill.id);
   const { activePath, selectedPath, drafts, createdPaths, fileTreeCollapsed, collapsedFolders } = editorState;
@@ -99,19 +103,23 @@ export function SkillEditorView({ skill, skills, back, onReadSkillIndexStatus, s
   const [renamingPath, setRenamingPath] = useState("");
   const [renameValue, setRenameValue] = useState("");
   const [loadingFiles, setLoadingFiles] = useState(true);
+  const [loadedFileSourceKey, setLoadedFileSourceKey] = useState("");
   const [fileError, setFileError] = useState("");
   const [loadingContent, setLoadingContent] = useState(false);
   const [contentError, setContentError] = useState("");
   const [saveState, setSaveState] = useState<SaveStatus>(SaveStatus.Idle);
   const [saveError, setSaveError] = useState("");
-  const setActivePath = useCallback((value: SkillEditorStateValue<string>) => {
-    updateSkillEditorField(currentSkill.id, "activePath", value);
+  const setActivePath = useCallback((path: string) => {
+    setSkillEditorActivePath(currentSkill.id, path);
   }, [currentSkill.id]);
   const setSelectedPath = useCallback((value: SkillEditorStateValue<string>) => {
     updateSkillEditorField(currentSkill.id, "selectedPath", value);
   }, [currentSkill.id]);
   const setDrafts = useCallback((value: SkillEditorStateValue<Record<string, SkillDraft>>) => {
     updateSkillEditorField(currentSkill.id, "drafts", value);
+  }, [currentSkill.id]);
+  useEffect(() => () => {
+    updateSkillEditorField(currentSkill.id, "drafts", (current) => discardCleanDrafts(current));
   }, [currentSkill.id]);
   const setCreatedPaths = useCallback((value: SkillEditorStateValue<Set<string>>) => {
     updateSkillEditorField(currentSkill.id, "createdPaths", value);
@@ -123,13 +131,16 @@ export function SkillEditorView({ skill, skills, back, onReadSkillIndexStatus, s
     updateSkillEditorField(currentSkill.id, "collapsedFolders", value);
   }, [currentSkill.id]);
   const linkedSessionsRequestRef = useRef(0);
+  const processedSkillFileChangeRef = useRef<{ id: number; paths: readonly string[] } | null>(null);
   const discardDialogCloseTimer = useRef<number | null>(null);
   const linkedSessionsSkillRef = useRef(currentSkill.id);
   const fileTreePanelRef = usePanelRef();
   const activeDraft = drafts[activePath] ?? { content: "", originalContent: "", sha256: "" };
   const content = activeDraft.content;
   const deferredContent = useDeferredValue(content);
-  const contentReady = Boolean(drafts[activePath]);
+  const contentReady = Boolean(drafts[activePath]) && (
+    activeDraft.content !== activeDraft.originalContent || loadedFileSourceKey === fileSourceKey
+  );
   const original = { content: activeDraft.originalContent, sha256: activeDraft.sha256 };
   const dirty = !readOnly && content !== original.content;
   const hasUnsavedDrafts = useMemo(
@@ -145,14 +156,20 @@ export function SkillEditorView({ skill, skills, back, onReadSkillIndexStatus, s
       setRenamingPath("");
       setShowDiscardDialog(false);
       setLoadingContent(true);
+      if (!skillPath) {
+        setFileError("Skill location is unavailable.");
+        setLoadingFiles(false);
+        setLoadingContent(false);
+        return;
+      }
       const fileListRead = readSkillFiles({
-        skillId: currentSkill.id,
-        locationId,
+        skillName: currentSkill.name,
+        skillPath,
       });
       const initialContentRead = readSkillFile({
-        skillId: currentSkill.id,
+        skillName: currentSkill.name,
+        skillPath,
         relativePath: "SKILL.md",
-        locationId,
       });
       const [fileListResult, initialContentResult] = await Promise.allSettled([fileListRead, initialContentRead]);
       if (fileListResult.status === "rejected") {
@@ -174,9 +191,12 @@ export function SkillEditorView({ skill, skills, back, onReadSkillIndexStatus, s
         ? restoredState.selectedPath
         : restoredActivePath;
       setFiles(next);
-      updateSkillEditorField(currentSkill.id, "activePath", restoredActivePath);
-      updateSkillEditorField(currentSkill.id, "selectedPath", restoredSelectedPath);
-      updateSkillEditorField(currentSkill.id, "drafts", (current) => trimCleanDrafts(current, restoredActivePath));
+      updateSkillEditorState(currentSkill.id, (current) => ({
+        ...current,
+        activePath: restoredActivePath,
+        selectedPath: restoredSelectedPath,
+        drafts: discardCleanDrafts(current.drafts),
+      }));
       if (firstFile &&
         initialContentResult.status === "fulfilled"
         && typeof initialContentResult.value.content === "string"
@@ -193,13 +213,14 @@ export function SkillEditorView({ skill, skills, back, onReadSkillIndexStatus, s
         ));
       }
       setLoadingFiles(false);
+      setLoadedFileSourceKey(fileSourceKey);
       setLoadingContent(false);
     }
     void loadFiles();
     return () => {
       cancelled = true;
     };
-  }, [currentSkill.id, skillContentHash, locationId]);
+  }, [currentSkill.id, currentSkill.name, fileSourceKey, skillContentHash, skillPath]);
 
   useEffect(() => {
     setSaveState(SaveStatus.Idle);
@@ -213,10 +234,15 @@ export function SkillEditorView({ skill, skills, back, onReadSkillIndexStatus, s
     async function loadContent() {
       setLoadingContent(true);
       setContentError("");
+      if (!skillPath) {
+        setContentError("Skill location is unavailable.");
+        setLoadingContent(false);
+        return;
+      }
       const fileRead = readSkillFile({
-        skillId: currentSkill.id,
+        skillName: currentSkill.name,
+        skillPath,
         relativePath: activePath,
-        locationId,
       });
       let result: SkillFileReadResponse;
       try {
@@ -247,7 +273,7 @@ export function SkillEditorView({ skill, skills, back, onReadSkillIndexStatus, s
       cancelled = true;
       setLoadingContent(false);
     };
-  }, [activePath, currentSkill.id, drafts, loadingFiles, locationId]);
+  }, [activePath, currentSkill.id, currentSkill.name, drafts, loadingFiles, skillPath]);
 
   const save = useCallback(async () => {
     if (readOnly || !dirty || !original.sha256 || saveState === SaveStatus.Saving) return;
@@ -286,6 +312,47 @@ export function SkillEditorView({ skill, skills, back, onReadSkillIndexStatus, s
       ?? null,
     [activePath, files, selectedPath],
   );
+  useEffect(() => {
+    if (!skillFilesChanged || processedSkillFileChangeRef.current === skillFilesChanged) return;
+    processedSkillFileChangeRef.current = skillFilesChanged;
+    if (loadingFiles || !activePath || !selectedEntry?.path || !skillFilesChanged.paths.includes(selectedEntry.path)) return;
+    const currentDraft = drafts[activePath];
+    if (currentDraft && currentDraft.content !== currentDraft.originalContent) return;
+    let cancelled = false;
+    async function reloadChangedFile() {
+      setLoadingContent(true);
+      setContentError("");
+      if (!skillPath) {
+        setContentError("Skill location is unavailable.");
+        setLoadingContent(false);
+        return;
+      }
+      try {
+        const result = await readSkillFile({
+          skillName: currentSkill.name,
+          skillPath,
+          relativePath: activePath,
+        });
+        if (cancelled) return;
+        updateSkillEditorField(currentSkill.id, "drafts", (current) => hydrateSkillDraft(
+          current,
+          activePath,
+          result.content,
+          result.sha256,
+          activePath,
+        ));
+      } catch (error) {
+        if (!cancelled) setContentError(error instanceof Error ? error.message : `${error}`);
+      } finally {
+        if (!cancelled) setLoadingContent(false);
+      }
+    }
+    void reloadChangedFile();
+    return () => {
+      cancelled = true;
+      setLoadingContent(false);
+    };
+  }, [activePath, currentSkill.id, currentSkill.name, drafts, loadingFiles, selectedEntry?.path, skillFilesChanged, skillPath]);
   const diffLines = useMemo(
     () => !contentReady || !dirty ? [] : diffPreview(original.content, deferredContent),
     [contentReady, deferredContent, dirty, original.content],
@@ -314,10 +381,14 @@ export function SkillEditorView({ skill, skills, back, onReadSkillIndexStatus, s
   };
   const reloadFiles = async (preferredPath = selectedPath) => {
     let result: SkillFileEntry[];
+    if (!skillPath) {
+      setFileError("Skill location is unavailable.");
+      return [];
+    }
     try {
       result = await readSkillFiles({
-        skillId: currentSkill.id,
-        locationId,
+        skillName: currentSkill.name,
+        skillPath,
       });
       setFileError("");
     } catch (error) {
@@ -528,7 +599,7 @@ export function SkillEditorView({ skill, skills, back, onReadSkillIndexStatus, s
     back();
   };
   const discardChanges = () => {
-    updateSkillEditorField(currentSkill.id, "drafts", (current) => discardDirtyDrafts(current));
+    updateSkillEditorField(currentSkill.id, "drafts", {});
     back();
   };
 

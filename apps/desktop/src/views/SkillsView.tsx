@@ -53,42 +53,40 @@ import { Toast } from "../components/shared/Toast.tsx";
 import { RelationshipGraphKind, SkillRelationshipMap } from "../features/skills/SkillRelationshipMap.tsx";
 import { SkillLocationDialog } from "../features/skills/SkillLocationDialog.tsx";
 import { SkillWrapperScopeDialog } from "../features/skills/SkillWrapperScopeDialog.tsx";
+import { useWrapperMutation } from "../features/skills/use-wrapper-mutation.ts";
 import { Visibility } from "../features/skills/Visibility.tsx";
 import { DataTable } from "../components/DataTable.tsx";
 import { ColumnDataType, type ColumnDef, type SortState } from "../components/DataTable.types";
 import { SortDirection } from "../lib/sort.ts";
 import { useTabState } from "../lib/tab-state.ts";
-import { actionLabels, isVisibleAgent, SKILL_FREEZE_COLUMN, scopeColumnFromValue, primarySkillPath, primarySkillScope, selectionDeleteLabel, SkillUpdateAvailability, TauriCommand, SkillOperationStatus, SkillVisibility, agentIdentityKey, allSkillVisibilities, compactDateTime, copyText, editableSkillVisibilities, isReadOnlySkillSource, isSkillRowSelectable, isSkillSelectable, isSkillVisibilityEditable, safeInvoke, skillDisplayName, skillSourceAction, skillSourceDetails, skillTargets, sourceRemoteDetails, suppressNextClick, type NormalizedSkill, type ProjectSummary, type RawSkillRecord, type SkillAddPlan, type SkillInstallResult, type WrapperArgs } from "../lib/index.ts";
-import { captureSkillSourcePage, isSkillSourceActionReady, normalizeSkillAddPlan, resolveSkillInstallTarget, restoreSkillSourcePage, shouldShowSkillQuickSelect, skillSourceErrorMessage, type SkillSourcePageSnapshot } from "../lib/add-skill-dialog.ts";
+import { actionLabels, isVisibleAgent, SKILL_FREEZE_COLUMN, scopeColumnFromValue, primarySkillPath, primarySkillScope, selectionDeleteLabel, SkillUpdateAvailability, TauriCommand, SkillOperationStatus, SkillVisibility, agentIdentityKey, allSkillVisibilities, compactDateTime, copyText, editableSkillVisibilities, isSkillRowSelectable, isSkillVisibilityEditable, safeInvoke, skillDisplayName, skillSourceAction, skillSourceDetails, skillTargets, sourceRemoteDetails, suppressNextClick, type NormalizedSkill, type ProjectSummary, type RawSkillRecord, type SkillAddPlan, type SkillInstallResult, type WrapperArgs } from "../lib/index.ts";
+import { resolveSkillInstallTarget, shouldShowSkillQuickSelect } from "../lib/add-skill-dialog.ts";
 import { SkillActionId, skillActionIds } from "../lib/skill-actions.ts";
 import {
   buildSkillInstallViewModel,
-  isExistingSkillOperationStatus,
+  canInstallSkillSelection,
+  canToggleSkillInstallRoot,
+  installedSkillName,
+  isSkillInstallDependencyLocked,
   isSelectableOperationStatus,
+  selectMovableSkills,
+  selectSkillInstallTargetOptions,
   SkillInstallFilter,
+  skillSelectionTargets,
   selectSkillListView,
+  suggestedWrapperDescription,
+  suggestedWrapperName,
+  skillInstallRootsForPreset,
 } from "../controllers/skill-controller.ts";
 import {
-  installSkillAdd,
-  previewSkillAdd,
-  readSkillPreview,
-  searchSkillMarketplace,
   SkillDistributionMode,
-  SkillScope,
-  type MarketplaceSource,
   type SkillChangeResponse,
-  type SkillPreviewReadResponse,
 } from "../lib/runtime-gateway.ts";
+import { SkillAddBusyAction, useAddSkillFlow } from "../features/skills/use-add-skill-flow.ts";
 
 enum SkillsViewMode {
   List = "list",
   Network = "network",
-}
-
-enum SkillAddBusyAction {
-  Idle = "",
-  Preview = "preview",
-  Install = "install",
 }
 
 type SkillWrapperSelection = {
@@ -111,55 +109,6 @@ function skillOriginLabel(skill: NormalizedSkill): string {
   const remote = sourceRemoteDetails(source.value, source.kind);
   return remote?.host.includes("github.") && remote.path ? remote.path : skill.section;
 }
-const recommendedSkillSources: MarketplaceSource[] = [
-  {
-    id: "mattpocock-skills",
-    name: "Matt Pocock Skills",
-    source: "mattpocock/skills",
-    url: "https://github.com/mattpocock/skills",
-    trustLabel: "Community",
-    kind: "Collection",
-  },
-  {
-    id: "claude-code-plugin-dev",
-    name: "Claude Code Plugin Dev",
-    source: "anthropics/claude-code/plugins/plugin-dev",
-    url: "https://github.com/anthropics/claude-code/tree/main/plugins/plugin-dev",
-    trustLabel: "Anthropic official",
-    kind: "Collection",
-  },
-  {
-    id: "emil-skills",
-    name: "Emil's Design Skills",
-    source: "emilkowalski/skills",
-    url: "https://github.com/emilkowalski/skills",
-    trustLabel: "Community",
-    kind: "Collection",
-  },
-  {
-    id: "vercel-agent-skills",
-    name: "Vercel Agent Skills",
-    source: "vercel-labs/agent-skills",
-    url: "https://github.com/vercel-labs/agent-skills",
-    trustLabel: "Vercel official",
-    kind: "Collection",
-  },
-];
-
-function installedSkillName(result: SkillInstallResult): string | null {
-  const rows = result.updated ?? result.skills ?? [];
-  const installedNames = new Set(rows.flatMap((skill) => typeof skill.name === "string" ? [skill.name] : []));
-  return result.report.plan.selected
-    .map((skill) => skill.name)
-    .find((name) => installedNames.has(name)) ?? null;
-}
-
-function commandErrorMessage(error: unknown, fallback: string) {
-  if (typeof error === "string" && error.trim()) return error;
-  if (error instanceof Error && error.message.trim()) return error.message;
-  return fallback;
-}
-
 type SkillMenuComponents = {
   Item: ComponentType<{
     className?: string;
@@ -297,9 +246,8 @@ function skillActionDefinitions({ Menu, selectedSkills, applyUpdates, deleteSkil
   const singleSkill = selectedSkills.length === 1 ? selectedSkills[0] : undefined;
   const primaryPath = singleSkill ? primarySkillPath(singleSkill) : null;
   const targets: SkillTarget[] = singleSkill ? skillTargets(singleSkill) : [];
-  const updateNames = selectedSkills.filter((skill) => skill.updateAvailability === SkillUpdateAvailability.UpdateAvailable).map((skill) => skill.id);
-  const deletableNames = selectedSkills.filter(isSkillSelectable).map((skill) => skill.id);
-  const movableSkills = selectedSkills.filter((skill) => !isReadOnlySkillSource(skill) && skillTargets(skill).length > 0);
+  const { updateNames, deletableNames } = skillSelectionTargets(selectedSkills);
+  const movableSkills = selectMovableSkills(selectedSkills);
   const updateLabel = "Update";
   const locationLabel = selectedSkills.length === 1 ? "Manage locations" : "Locations";
   const deleteLabel = selectionDeleteLabel("skill", selectedSkills.length);
@@ -544,28 +492,6 @@ function SkillSelectionActions({
   return <DataTableSelectionActions actions={actions} ariaLabel="More selected skill actions" />;
 }
 
-export function suggestedWrapperName(selectedSkills: SkillWrapperSelection[]) {
-  const names = selectedSkills.map((skill) => skill.name).filter(Boolean);
-  if (names.length === 0) return "wrapper";
-  const prefixes = names
-    .map((name) => name.split(/[-_]/)[0])
-    .filter((prefix) => prefix.length > 1);
-  return prefixes.length > 0 && prefixes.every((prefix) => prefix === prefixes[0]) ? prefixes[0] : "wrapper";
-}
-
-function childSkillSummary(selectedSkills: SkillWrapperSelection[]) {
-  const names = selectedSkills.map((skill) => skill.name).filter(Boolean);
-  if (names.length === 0) return "the selected child skills";
-  const visibleNames = names.slice(0, 4);
-  const suffix = names.length > visibleNames.length ? `, and ${names.length - visibleNames.length} more` : "";
-  return `${visibleNames.join(", ")}${suffix}`;
-}
-
-export function suggestedWrapperDescription(name: string, selectedSkills: SkillWrapperSelection[] = []) {
-  const domain = name.trim().replace(/[-_]+/g, " ");
-  return domain ? `Use when the request is about ${domain} and matches one of these child skills: ${childSkillSummary(selectedSkills)}.` : "";
-}
-
 export type WrapperDialogProps = {
   open: boolean;
   selectedSkills: SkillWrapperSelection[];
@@ -578,8 +504,7 @@ export function WrapperDialog({ open, selectedSkills, onOpenChange, onApplyWrapp
   const [description, setDescription] = useState("");
   const [descriptionEdited, setDescriptionEdited] = useState(false);
   const [manualChildren, setManualChildren] = useState(true);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState("");
+  const { apply: applyWrapper, busy, clearError, error } = useWrapperMutation({ onApplyWrapper });
   const selectedNames = useMemo(() => selectedSkills.map((skill) => skill.name), [selectedSkills]);
   const selectedSkillIds = useMemo(() => selectedSkills.map((skill) => skill.id), [selectedSkills]);
   const selectedSkillIdentity = useMemo(
@@ -595,13 +520,12 @@ export function WrapperDialog({ open, selectedSkills, onOpenChange, onApplyWrapp
     setDescription(suggestedWrapperDescription(nextName, selectedSkills));
     setDescriptionEdited(false);
     setManualChildren(true);
-    setError("");
-    setBusy(false);
-  }, [open, selectedSkillIdentity]);
+    clearError();
+  }, [clearError, open, selectedSkillIdentity]);
 
   useEffect(() => {
-    setError("");
-  }, [description, manualChildren, name, selectedNames]);
+    clearError();
+  }, [clearError, description, manualChildren, name, selectedNames]);
 
   const updateName = (value: string) => {
     setName(value);
@@ -623,17 +547,8 @@ export function WrapperDialog({ open, selectedSkills, onOpenChange, onApplyWrapp
 
   const apply = async () => {
     if (!canCreate || busy) return;
-    setBusy(true);
-    setError("");
-    try {
-      await onApplyWrapper(args);
-    } catch (error) {
-      setBusy(false);
-      setError(commandErrorMessage(error, "Could not create the wrapper skill."));
-      return;
-    }
-    setBusy(false);
-    onOpenChange(false);
+    const outcome = await applyWrapper(args);
+    if (outcome.status === "succeeded") onOpenChange(false);
   };
 
   return (
@@ -689,12 +604,6 @@ function skillOperationStatusLabel(status: SkillOperationStatus | undefined) {
   return "";
 }
 
-function isDirectSkillSource(value: string) {
-  const source = value.trim();
-  return /^(?:https?:\/\/|ssh:\/\/|git@|github:|gitlab:|huggingface:|\/|\/?\.\.?\/)/i.test(source)
-    || /^[^/\s]+\/[^/\s]+(?:#\S+)?$/.test(source);
-}
-
 const TiptapMarkdownPreview = lazy(() => import("../components/shared/TiptapMarkdownPreview.tsx").then(({ TiptapMarkdownPreview: component }) => ({ default: component })));
 
 export type AddSkillDialogProps = {
@@ -726,20 +635,9 @@ export type SkillTargetOption = {
 export function AddSkillDialog({ open, onOpenChange, trigger, onClose, onPreviewError, onInstalled, onBeginMutation, onRequestWrapper, installedAgentKeys, targetOptions, initialSource = "", sourceLocked = false, title = "Add skills" }: AddSkillDialogProps) {
   const lockedSource = sourceLocked && Boolean(initialSource.trim());
   const [source, setSource] = useState(initialSource);
-  const [sourcePageBeforePreview, setSourcePageBeforePreview] = useState<SkillSourcePageSnapshot<MarketplaceSource> | null>(null);
-  const [marketplaceQuery, setMarketplaceQuery] = useState("");
-  const [marketplaceResults, setMarketplaceResults] = useState<MarketplaceSource[]>([]);
-  const [marketplaceBusy, setMarketplaceBusy] = useState(false);
-  const [marketplaceError, setMarketplaceError] = useState("");
-  const [marketplaceNotice, setMarketplaceNotice] = useState("");
-  const [skillPreview, setSkillPreview] = useState<SkillPreviewReadResponse | null>(null);
-  const [skillPreviewBusy, setSkillPreviewBusy] = useState("");
-  const [skillPreviewError, setSkillPreviewError] = useState("");
   const [target, setTarget] = useState("");
   const [copy, setCopy] = useState(false);
   const [visibility, setVisibility] = useState<SkillVisibility>(SkillVisibility.Auto);
-  const [plan, setPlan] = useState<SkillAddPlan | null>(null);
-  const [previewId, setPreviewId] = useState("");
   const [selectedRoots, setSelectedRoots] = useState<string[]>([]);
   const [createWrapper, setCreateWrapper] = useState(false);
   const [replaceExisting, setReplaceExisting] = useState(false);
@@ -747,32 +645,10 @@ export function AddSkillDialog({ open, onOpenChange, trigger, onClose, onPreview
   const [reviewingSkills, setReviewingSkills] = useState(false);
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [skillSearch, setSkillSearch] = useState("");
-  const [busyAction, setBusyAction] = useState<SkillAddBusyAction>(SkillAddBusyAction.Idle);
-  const [error, setError] = useState("");
   const skillItemRefs = useRef(new Map<string, HTMLDivElement>());
   const skillListRef = useRef<HTMLDivElement>(null);
-  const initialPreviewRequestRef = useRef("");
-  const busy = busyAction !== SkillAddBusyAction.Idle;
-  const dialogBusy = busy || marketplaceBusy || Boolean(skillPreviewBusy);
-  const installing = busyAction === SkillAddBusyAction.Install;
   const visibleInstallTargets = useMemo(
-    () => {
-      const installed = new Set(installedAgentKeys);
-      return targetOptions
-        .map((option, index) => ({
-          option,
-          index,
-          installed: installed.has(agentIdentityKey(option.id)),
-        }))
-        .filter(({ option }) => option.supportsGlobal && option.id !== "universal" && isVisibleAgent(option.id))
-        .sort((left, right) => {
-          if (left.option.id === "shared") return -1;
-          if (right.option.id === "shared") return 1;
-          if (left.installed !== right.installed) return left.installed ? -1 : 1;
-          return left.index - right.index;
-        })
-        .map(({ option }) => option);
-    },
+    () => selectSkillInstallTargetOptions(targetOptions, installedAgentKeys, agentIdentityKey, isVisibleAgent),
     [targetOptions, installedAgentKeys],
   );
   const resolvedTarget = resolveSkillInstallTarget(target, visibleInstallTargets);
@@ -781,6 +657,68 @@ export function AddSkillDialog({ open, onOpenChange, trigger, onClose, onPreview
       setTarget(visibleInstallTargets[0]?.id ?? "");
     }
   }, [target, visibleInstallTargets]);
+  const handlePlanReady = useCallback((nextPlan: SkillAddPlan) => {
+    setCreateWrapper(false);
+    setReplaceExisting(false);
+    setReviewingSkills(false);
+    setSkillFilter(SkillInstallFilter.All);
+    setSkillSearch("");
+    setSelectedRoots(nextPlan.selected.map((skill) => skill.name));
+  }, []);
+  const handlePageRestored = useCallback(() => {
+    setSelectedRoots([]);
+    setSkillFilter(SkillInstallFilter.All);
+    setSkillSearch("");
+    setReplaceExisting(false);
+    setCreateWrapper(false);
+    setReviewingSkills(false);
+    setAdvancedOpen(false);
+  }, []);
+  const handleSourceChanged = useCallback(() => {
+    setSelectedRoots([]);
+    setCopy(false);
+    setReviewingSkills(false);
+    setAdvancedOpen(false);
+  }, []);
+  const flow = useAddSkillFlow({
+    open,
+    initialSource,
+    lockedSource,
+    source,
+    onSourceChange: setSource,
+    target: resolveSkillInstallTarget(target, visibleInstallTargets),
+    copy,
+    visibility,
+    replaceExisting,
+    onPlanReady: handlePlanReady,
+    onPageRestored: handlePageRestored,
+    onSourceChanged: handleSourceChanged,
+    onPreviewError,
+    onInstalled,
+    onBeginMutation,
+    onRequestWrapper,
+    onClose,
+  });
+  const {
+    marketplaceBusy,
+    marketplaceError,
+    marketplaceNotice,
+    skillPreview,
+    skillPreviewBusy,
+    skillPreviewError,
+    plan,
+    busyAction,
+    error,
+    busy,
+    installing,
+    dialogBusy,
+    sourceActionReady,
+    sourceActionText,
+    sourceActionLabel,
+    sourceCandidates,
+    sourceCandidatesLabel,
+    canGoBack,
+  } = flow;
   const available = plan?.available ?? [];
   const showSkillSearch = available.length > 10;
   const installView = useMemo(
@@ -816,160 +754,23 @@ export function AddSkillDialog({ open, onOpenChange, trigger, onClose, onPreview
   const allSelected = selectableSkills.length > 0 && selectableSkills.every((skill) => selectedSet.has(skill.name));
   const mixedSelected = selected.length > 0 && !allSelected;
   const firstSearchMatch = searchMatches[0] ?? "";
-  const canInstall = Boolean(resolvedTarget && source.trim() && plan && selected.length > 0 && (!selectedHasExisting || replaceExisting) && !busy);
-  const canGoBack = Boolean(plan) || sourcePageBeforePreview !== null;
+  const canInstall = canInstallSkillSelection({
+    resolvedTarget,
+    source,
+    hasPlan: Boolean(plan),
+    selected,
+    selectedHasExisting,
+    replaceExisting,
+    busy,
+  });
   const advanceLabel = busy ? "Preparing installation" : "Install selected skills";
   const advanceText = busy ? "Installing" : `Install ${selected.length}`;
-  const sourceCandidates = source.trim() ? marketplaceResults : recommendedSkillSources;
-  const sourceCandidatesLabel = source.trim() ? "Matches" : "Recommended";
-
-  const handleSourceChange = (value: string) => {
-    if (marketplaceBusy || lockedSource) return;
-    setSource(value);
-    setSourcePageBeforePreview(null);
-    setMarketplaceQuery(value);
-    setMarketplaceResults([]);
-    setMarketplaceError("");
-    setMarketplaceNotice("");
-    setPlan(null);
-    setPreviewId("");
-    setSelectedRoots([]);
-    setSkillPreview(null);
-    setSkillPreviewError("");
-    setCopy(false);
-    setReviewingSkills(false);
-    setAdvancedOpen(false);
-    setError("");
-  };
-
-  const searchMarketplace = async (rawQuery = source) => {
-    const query = rawQuery.trim();
-    if (query.length < 2 || marketplaceBusy) return;
-    setMarketplaceQuery(query);
-    setMarketplaceBusy(true);
-    setMarketplaceError("");
-    setMarketplaceNotice("");
-    setPlan(null);
-    setPreviewId("");
-    setSkillPreview(null);
-    setSkillPreviewError("");
-    try {
-      const response = await searchSkillMarketplace(query);
-      setMarketplaceResults(response.items);
-      setMarketplaceNotice(response.warnings.length
-        ? "Some marketplaces are unavailable."
-        : response.items.length ? "" : "No matching skills.");
-    } catch (searchError) {
-      setMarketplaceResults([]);
-      setMarketplaceError(String(searchError));
-    } finally {
-      setMarketplaceBusy(false);
-    }
-  };
-
-  const previewSource = async (nextSource = source) => {
-    const normalizedSource = nextSource.trim();
-    if (!normalizedSource || !resolvedTarget || busyAction || marketplaceBusy) return;
-    const previousPage = captureSkillSourcePage(source, marketplaceResults);
-    setSourcePageBeforePreview(previousPage);
-    setSource(normalizedSource);
-    setMarketplaceError("");
-    setMarketplaceNotice("");
-    setSkillPreview(null);
-    setSkillPreviewError("");
-    setBusyAction(SkillAddBusyAction.Preview);
-    setError("");
-    try {
-      const response = await previewSkillAdd({
-        source: normalizedSource,
-        target: resolvedTarget,
-        scope: SkillScope.Global,
-        skills: [],
-        copy,
-        overwrite: false,
-        visibility,
-        dryRun: true,
-      });
-      if (!response?.plan || !response.previewId) {
-        throw new Error("Skill preview returned no data. Restart the development service and try again.");
-      }
-      const nextPlan = normalizeSkillAddPlan(response.plan);
-      if (!nextPlan) throw new Error("Skill preview returned an invalid plan. Restart the development service and try again.");
-      setPlan(nextPlan);
-      setPreviewId(response.previewId);
-      setCreateWrapper(false);
-      setReplaceExisting(false);
-      setReviewingSkills(false);
-      setSkillFilter(SkillInstallFilter.All);
-      setSkillSearch("");
-      setSelectedRoots(nextPlan.selected.map((skill) => skill.name));
-    } catch (previewError) {
-      const message = skillSourceErrorMessage(previewError);
-      if (lockedSource) {
-        setSource(initialSource);
-        setError(message);
-      } else {
-        restoreSourcePage(previousPage);
-      }
-      onPreviewError(message);
-    } finally {
-      setBusyAction(SkillAddBusyAction.Idle);
-    }
-  };
-
-  const resolveSourceInput = () => {
-    const value = source.trim();
-    const directSource = isDirectSkillSource(value);
-    if (!isSkillSourceActionReady(value, directSource, resolvedTarget) || busy || marketplaceBusy) return;
-    if (directSource) {
-      void previewSource(value);
-    } else {
-      void searchMarketplace(value);
-    }
-  };
-
-  const selectMarketplaceSource = (skill: MarketplaceSource) => {
-    void previewSource(skill.source);
-  };
-
-  const previewSkill = async (name: string) => {
-    if (!previewId || skillPreviewBusy) return;
-    setSkillPreviewBusy(name);
-    setSkillPreviewError("");
-    try {
-      const preview = await readSkillPreview(previewId, name);
-      setSkillPreview(preview);
-    } catch (previewError) {
-      setSkillPreview(null);
-      setSkillPreviewError(`${previewError}`);
-    } finally {
-      setSkillPreviewBusy("");
-    }
-  };
-
-  const clearTransientErrors = useCallback(() => {
-    setError("");
-    setMarketplaceError("");
-    setMarketplaceNotice("");
-    setSkillPreviewError("");
-  }, []);
 
   const resetDialogState = useCallback(() => {
-    setSource(initialSource);
-    setSourcePageBeforePreview(null);
-    setMarketplaceQuery("");
-    setMarketplaceResults([]);
-    setMarketplaceBusy(false);
-    setMarketplaceError("");
-    setMarketplaceNotice("");
-    setSkillPreview(null);
-    setSkillPreviewBusy("");
-    setSkillPreviewError("");
+    flow.reset();
     setTarget("");
     setCopy(false);
     setVisibility(SkillVisibility.Auto);
-    setPlan(null);
-    setPreviewId("");
     setSelectedRoots([]);
     setCreateWrapper(false);
     setReplaceExisting(false);
@@ -977,123 +778,29 @@ export function AddSkillDialog({ open, onOpenChange, trigger, onClose, onPreview
     setReviewingSkills(false);
     setAdvancedOpen(false);
     setSkillSearch("");
-    setBusyAction(SkillAddBusyAction.Idle);
-    setError("");
     skillItemRefs.current.clear();
-    initialPreviewRequestRef.current = "";
-  }, [initialSource]);
+  }, [flow.reset]);
 
   const closeDialog = () => {
     if (dialogBusy) return;
     onClose();
   };
 
-  const restoreSourcePage = (previousPage: SkillSourcePageSnapshot<MarketplaceSource>) => {
-    const restoredPage = restoreSkillSourcePage(previousPage);
-    setPlan(null);
-    setPreviewId("");
-    setSelectedRoots([]);
-    setSkillPreview(null);
-    setSkillPreviewError("");
-    setSource(restoredPage.source);
-    setMarketplaceQuery(restoredPage.marketplaceQuery);
-    setMarketplaceResults(restoredPage.marketplaceResults);
-    setSourcePageBeforePreview(null);
-    clearTransientErrors();
-    setSkillFilter(SkillInstallFilter.All);
-    setSkillSearch("");
-    setReplaceExisting(false);
-    setCreateWrapper(false);
-    setReviewingSkills(false);
-    setAdvancedOpen(false);
-  };
-
-  useEffect(() => {
-    if (!open || !lockedSource || !initialSource.trim() || plan || busyAction || marketplaceBusy) return;
-    if (initialPreviewRequestRef.current === initialSource) return;
-    initialPreviewRequestRef.current = initialSource;
-    void previewSource(initialSource);
-  }, [initialSource, lockedSource, marketplaceBusy, open, plan, resolvedTarget]);
-
   const goBack = () => {
     if (dialogBusy) return;
     if (!canGoBack) return;
     if (reviewingSkills) {
       setReviewingSkills(false);
-      setSkillPreview(null);
+      flow.clearSkillPreview();
       return;
     }
-    restoreSourcePage(sourcePageBeforePreview ?? captureSkillSourcePage(marketplaceQuery || source, marketplaceResults));
+    flow.restorePreviousPage();
   };
-
-  const install = async () => {
-    if (!canInstall || busy) return;
-    setError("");
-    try {
-      setBusyAction(SkillAddBusyAction.Preview);
-      const previewResponse = await previewSkillAdd({
-        source: source.trim(),
-        target: resolvedTarget,
-        scope: SkillScope.Global,
-        skills: selected,
-        copy,
-        overwrite: replaceExisting,
-        visibility,
-        dryRun: true,
-      });
-      if (!previewResponse?.plan || !previewResponse.previewId) {
-        throw new Error("Skill preview returned no data. Restart the development service and try again.");
-      }
-      const finalPlan = normalizeSkillAddPlan(previewResponse.plan);
-      if (!finalPlan) {
-        throw new Error("Skill preview returned an invalid plan. Restart the development service and try again.");
-      }
-      setPlan(finalPlan);
-      setPreviewId(previewResponse.previewId);
-      const finalOperationByName = new Map(finalPlan.operations.map((operation) => [operation.name, operation]));
-      const finalSelectedHasExisting = selected.some((name) => isExistingSkillOperationStatus(finalOperationByName.get(name)?.status));
-      if (finalSelectedHasExisting && !replaceExisting) {
-        throw new Error("Some selected skills already exist at this destination. Choose Replace existing skills and try again.");
-      }
-      setBusyAction(SkillAddBusyAction.Install);
-      const releaseMutation = onBeginMutation();
-      try {
-        const result = await installSkillAdd({
-          source: source.trim(),
-          target: resolvedTarget,
-          scope: SkillScope.Global,
-          skills: selected,
-          copy,
-          overwrite: replaceExisting,
-          visibility,
-          previewId: previewResponse.previewId,
-          dryRun: false,
-        });
-        onInstalled(result);
-        if (createWrapper && selectedRoots.length > 1) {
-          const selectedRootSet = new Set(selectedRoots);
-          onRequestWrapper(available
-            .filter((skill) => selectedRootSet.has(skill.name))
-            .map((skill) => ({
-              id: skill.name,
-              name: skill.name,
-              description: skill.description,
-            })));
-        }
-      } finally {
-        releaseMutation();
-      }
-      closeDialog();
-    } catch (installError) {
-      setError(`${installError}`);
-    } finally {
-      setBusyAction(SkillAddBusyAction.Idle);
-    }
-  };
-
   const advance = () => {
     if (busy) return;
-    if (plan) install();
+    if (plan && canInstall) {
+      void flow.install({ selected, selectedRoots, available, createWrapper });
+    }
   };
 
   useLayoutEffect(() => {
@@ -1126,10 +833,7 @@ export function AddSkillDialog({ open, onOpenChange, trigger, onClose, onPreview
   }, [dialogBusy, open, resetDialogState]);
 
   const toggleSkill = (name: string) => {
-    const status = operationByName.get(name)?.status;
-    if (!isSelectableOperationStatus(status)) return;
-    const requiredBy = dependencyReasonsByName.get(name) ?? [];
-    if (selectedSet.has(name) && !selectedRootSet.has(name) && requiredBy.length > 0) return;
+    if (!canToggleSkillInstallRoot(name, selectedSet, selectedRootSet, operationByName, dependencyReasonsByName)) return;
     setSelectedRoots((current) => current.includes(name) ? current.filter((item) => item !== name) : [...current, name]);
   };
 
@@ -1138,13 +842,14 @@ export function AddSkillDialog({ open, onOpenChange, trigger, onClose, onPreview
   };
 
   const selectSkillPreset = (preset: SkillInstallFilter) => {
-    const skills = preset === SkillInstallFilter.All ? selectableSkills : preset === SkillInstallFilter.New ? newSkills : existingSkills;
     setSkillFilter(preset);
-    setSelectedRoots(
-      skills
-        .filter((skill) => selectableNameSet.has(skill.name))
-        .map((skill) => skill.name),
-    );
+    setSelectedRoots(skillInstallRootsForPreset(
+      preset,
+      selectableSkills,
+      newSkills,
+      existingSkills,
+      selectableNameSet,
+    ));
   };
 
   return (
@@ -1181,17 +886,17 @@ export function AddSkillDialog({ open, onOpenChange, trigger, onClose, onPreview
               className="skillSourceForm"
               onSubmit={(event) => {
                 event.preventDefault();
-                resolveSourceInput();
+                flow.resolveSourceInput();
               }}
             >
               <SearchField
                 value={source}
-                onChange={(event) => handleSourceChange(event.target.value)}
-                onClear={() => handleSourceChange("")}
+                onChange={(event) => flow.handleSourceChange(event.target.value)}
+                onClear={() => flow.handleSourceChange("")}
                 onKeyDown={(event) => {
                   if (event.key !== "Enter") return;
                   event.preventDefault();
-                  resolveSourceInput();
+                  flow.resolveSourceInput();
                 }}
                 placeholder="Search skills or paste a source"
                 aria-label="Search skills or paste a source"
@@ -1208,8 +913,8 @@ export function AddSkillDialog({ open, onOpenChange, trigger, onClose, onPreview
             <EmptyState
               className="sourceSearchEmpty"
               compact
-              title={isDirectSkillSource(source) ? "Scan a repository" : "Search for a skill"}
-              description={isDirectSkillSource(source) ? "Click Scan to inspect available skills." : "Click Search to find matching skills."}
+              title={flow.sourceEmptyTitle}
+              description={flow.sourceEmptyDescription}
             />
           )}
           {sourceCandidates.length > 0 && !plan && !marketplaceBusy && (
@@ -1223,7 +928,7 @@ export function AddSkillDialog({ open, onOpenChange, trigger, onClose, onPreview
                     type="button"
                     className="sourceCandidate"
                     key={skill.id + "-" + skill.source}
-                    onClick={() => selectMarketplaceSource(skill)}
+                    onClick={() => flow.selectMarketplaceSource(skill)}
                   >
                     <span className="sourceCandidateCopy">
                       <strong className="dataCellTitle">
@@ -1372,7 +1077,7 @@ export function AddSkillDialog({ open, onOpenChange, trigger, onClose, onPreview
               const operation = operationByName.get(skill.name);
               const blocked = !isSelectableOperationStatus(operation?.status);
               const requiredBy = dependencyReasonsByName.get(skill.name) ?? [];
-              const lockedDependency = requiredBy.length > 0 && !selectedRootSet.has(skill.name);
+              const lockedDependency = isSkillInstallDependencyLocked(skill.name, selectedRootSet, dependencyReasonsByName);
               const statusLabel = skillOperationStatusLabel(operation?.status);
               const searchMatch = normalizedSkillSearch && searchMatchSet.has(skill.name);
               const firstMatch = skill.name === firstSearchMatch;
@@ -1413,7 +1118,7 @@ export function AddSkillDialog({ open, onOpenChange, trigger, onClose, onPreview
                   disabled={Boolean(skillPreviewBusy)}
                   onClick={(event) => {
                     event.stopPropagation();
-                    void previewSkill(skill.name);
+                    void flow.previewSkill(skill.name);
                   }}
                 >
                   {skillPreviewBusy === skill.name
@@ -1440,7 +1145,7 @@ export function AddSkillDialog({ open, onOpenChange, trigger, onClose, onPreview
               <IconButton
                 className="skillPreviewCloseButton"
                 aria-label="Close skill preview"
-                onClick={() => setSkillPreview(null)}
+                onClick={flow.clearSkillPreview}
               >
                 <X size={14} />
               </IconButton>
@@ -1555,18 +1260,18 @@ export function AddSkillDialog({ open, onOpenChange, trigger, onClose, onPreview
             variant="primary"
             disabled={!initialSource.trim()}
             aria-label="Retry skill preview"
-            onClick={() => { void previewSource(initialSource); }}
+            onClick={() => { void flow.previewSource(initialSource); }}
           >
             Retry
           </DialogActionButton>
         ) : !busy && !marketplaceBusy ? (
           <DialogActionButton
             variant="primary"
-            disabled={!isSkillSourceActionReady(source, isDirectSkillSource(source), resolvedTarget)}
-            aria-label={isDirectSkillSource(source) ? "Scan repository" : "Search marketplaces"}
-            onClick={resolveSourceInput}
+            disabled={!sourceActionReady}
+            aria-label={sourceActionLabel}
+            onClick={flow.resolveSourceInput}
           >
-            {isDirectSkillSource(source) ? "Scan" : "Search"}
+            {sourceActionText}
           </DialogActionButton>
         ) : null}
       </DialogActionBar>
@@ -1698,8 +1403,8 @@ export function SkillsView({
     onDeleteSkills(names, clearSelection);
   }, [clearSelection, onDeleteSkills]);
   const deleteSelectedSkills = useCallback((skills: NormalizedSkill[]) => {
-    const names = skills.filter(isSkillSelectable).map((skill) => skill.id);
-    if (names.length > 0) deleteSkillsAndClear(names);
+    const { deletableNames } = skillSelectionTargets(skills);
+    if (deletableNames.length > 0) deleteSkillsAndClear(deletableNames);
   }, [deleteSkillsAndClear]);
   const clearLocationDialogCloseTimer = useCallback(() => {
     if (locationDialogCloseTimer.current === null) return;
@@ -1731,7 +1436,7 @@ export function SkillsView({
     setLocationDialogOpen(true);
   }, [clearLocationDialogCloseTimer]);
   const openManageLocationsBatch = useCallback((skills: NormalizedSkill[]) => {
-    const movableSkills = skills.filter((skill) => !isReadOnlySkillSource(skill) && skillTargets(skill).length > 0);
+    const movableSkills = selectMovableSkills(skills);
     if (movableSkills.length === 0) return;
     clearLocationDialogCloseTimer();
     setLocationSkillIds(movableSkills.map((skill) => skill.id));

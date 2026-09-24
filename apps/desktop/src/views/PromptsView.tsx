@@ -37,17 +37,10 @@ import { useTabState } from "../lib/tab-state.ts";
 import { DataTable } from "../components/DataTable.tsx";
 import { ColumnDataType, type ColumnDef } from "../components/DataTable.types";
 import type { DataTableMenuComponents } from "../components/shared/DataTableMenus.tsx";
-import { actionLabels, copiedValueLabel, copyValueLabel, promptActionLabels, promptDisplayName, selectionCopiedLabel, selectionCopyLabel, selectionDeleteLabel, TableSelectionActionId, compactDateTime, normalizePromptTags, promptPreview, promptSelectionActionIds, promptTagsLabel, suppressNextClick, type PromptRecord } from "../lib/index.ts";
-import type { RawDomainRow } from "../controllers/controller-types.ts";
+import { actionLabels, copiedValueLabel, copyValueLabel, filterPrompts, joinPromptBodies, promptActionLabels, promptDisplayName, selectionCopiedLabel, selectionCopyLabel, selectionDeleteLabel, TableSelectionActionId, compactDateTime, normalizePromptTags, promptPreview, promptSelectionActionIds, promptTagsLabel, suppressNextClick, type PromptDraft, type PromptRecord } from "../lib/index.ts";
+import { usePromptOperations } from "../features/prompts/usePromptOperations.ts";
 
 const PromptBodyEditor = lazy(() => import("../features/prompts/PromptBodyEditor.tsx").then(({ PromptBodyEditor: component }) => ({ default: component })));
-
-export type PromptDraft = {
-  id?: string;
-  title: string;
-  tags: string[];
-  body: string;
-};
 
 type TagInputProps = {
   label: string;
@@ -210,7 +203,7 @@ type PromptsViewProps = {
   loadError?: string;
   hasRows?: boolean;
   onRefreshPrompts: () => void | Promise<void>;
-  onSavePrompt: (draft: PromptDraft) => Promise<RawDomainRow | null>;
+  onSavePrompt: (draft: PromptDraft) => Promise<boolean>;
   onDeletePrompts: (ids: string[]) => Promise<boolean>;
   locatePromptId?: string;
   onLocatePromptComplete?: (id: string) => void;
@@ -221,17 +214,19 @@ export function PromptsView({ prompts, loadingPrompts = false, loadError = "", h
   const [query, setQuery] = useTabState("prompts.query", "");
   const [editingPrompt, setEditingPrompt] = useState<PromptRecord | null>(null);
   const [dialogOpen, setDialogOpen] = useState(false);
-  const [saving, setSaving] = useState(false);
-  const [dialogError, setDialogError] = useState("");
-  const [deletingPromptIds, setDeletingPromptIds] = useState<string[]>([]);
   const [pendingDeleteIds, setPendingDeleteIds] = useState<string[]>([]);
   const [promptLocatorRequest, setPromptLocatorRequest] = useState("");
+  const {
+    saving,
+    saveError: dialogError,
+    savePrompt: savePromptOperation,
+    clearSaveError,
+    deletingPromptIds,
+    filterDeletablePromptIds,
+    deletePrompts,
+  } = usePromptOperations({ onSavePrompt, onDeletePrompts });
   const normalizedQuery = query.trim().toLowerCase();
-  const visiblePrompts = useMemo(() => {
-    if (!normalizedQuery) return prompts;
-    return prompts.filter((prompt) => [prompt.title, promptTagsLabel(prompt), prompt.body]
-      .some((value) => value.toLowerCase().includes(normalizedQuery)));
-  }, [normalizedQuery, prompts]);
+  const visiblePrompts = useMemo(() => filterPrompts(prompts, query), [prompts, query]);
   useEffect(() => {
     if (!locatePromptId) return;
     setQuery("");
@@ -246,62 +241,43 @@ export function PromptsView({ prompts, loadingPrompts = false, loadError = "", h
   }, [prompts]);
 
   const openNewPrompt = () => {
-    setDialogError("");
+    clearSaveError();
     setEditingPrompt(null);
     setDialogOpen(true);
   };
   const openEditPrompt = useCallback((prompt: PromptRecord) => {
-    setDialogError("");
+    clearSaveError();
     setEditingPrompt(prompt);
     setDialogOpen(true);
-  }, []);
-  const savePrompt = async (draft: PromptDraft) => {
-    if (saving) return;
-    setSaving(true);
-    setDialogError("");
-    const result = await onSavePrompt({ ...draft, tags: normalizePromptTags(draft.tags) });
-    setSaving(false);
-    if (!result) {
-      setDialogError(promptActionLabels.saveFailed);
-      return;
-    }
-    setDialogOpen(false);
-  };
+  }, [clearSaveError]);
+  const savePrompt = useCallback(async (draft: PromptDraft) => {
+    if (await savePromptOperation(draft)) setDialogOpen(false);
+  }, [savePromptOperation]);
   const copyPrompts = useCallback(async (items: PromptRecord[]) => {
-    const text = items.map((prompt) => prompt.body).filter(Boolean).join("\n\n");
+    const text = joinPromptBodies(items);
     if (!text) return false;
     await copyTextToClipboard(text);
     return true;
   }, []);
   const deleteSelected = useCallback(async (ids: string[]) => {
-    if (ids.length === 0) return;
-    const pendingIds = ids.filter((id) => !deletingPromptIds.includes(id));
-    if (pendingIds.length === 0) return;
-    setDeletingPromptIds((current) => Array.from(new Set([...current, ...pendingIds])));
-    try {
-      const result = await onDeletePrompts(pendingIds);
-      if (!result) return;
-      setSelected((current) => current.filter((id) => !pendingIds.includes(id)));
-    } finally {
-      setDeletingPromptIds((current) => current.filter((id) => !pendingIds.includes(id)));
-    }
-  }, [deletingPromptIds, onDeletePrompts]);
+    const deletedIds = await deletePrompts(ids);
+    if (deletedIds) setSelected((current) => current.filter((id) => !deletedIds.includes(id)));
+  }, [deletePrompts]);
   const requestDeletePrompts = useCallback((items: PromptRecord[]) => {
-    const ids = items
-      .map((prompt) => prompt.id)
-      .filter((id) => !deletingPromptIds.includes(id));
+    const ids = filterDeletablePromptIds(items.map((prompt) => prompt.id));
     if (ids.length > 0) setPendingDeleteIds(ids);
-  }, [deletingPromptIds]);
+  }, [filterDeletablePromptIds]);
   const confirmDeletePrompts = useCallback(async () => {
-    const ids = pendingDeleteIds;
-    if (ids.length === 0) return;
+    const ids = filterDeletablePromptIds(pendingDeleteIds);
     setPendingDeleteIds([]);
+    if (ids.length === 0) return;
     await deleteSelected(ids);
-  }, [deleteSelected, pendingDeleteIds]);
+  }, [deleteSelected, filterDeletablePromptIds, pendingDeleteIds]);
   const selectionActions = useCallback((selectedRows: PromptRecord[], Menu: DataTableMenuComponents): DataTableSelectionActionDefinition[] => {
     const prompt = selectedRows.length === 1 ? selectedRows[0] : undefined;
     if (selectedRows.length === 0) return [];
-    const isDeleting = selectedRows.some((item) => deletingPromptIds.includes(item.id));
+    const selectedIds = selectedRows.map((item) => item.id);
+    const isDeleting = filterDeletablePromptIds(selectedIds).length !== selectedIds.length;
     const deleteLabel = selectionDeleteLabel("prompt", selectedRows.length);
     const copyLabel = selectionCopyLabel("prompt", selectedRows.length);
     const copiedLabel = selectionCopiedLabel("prompt", selectedRows.length);
@@ -327,7 +303,7 @@ export function PromptsView({ prompts, loadingPrompts = false, loadError = "", h
       },
     };
     return promptSelectionActionIds(selectedRows.length).map((id) => actions[id]);
-  }, [copyPrompts, deletingPromptIds, openEditPrompt, requestDeletePrompts]);
+  }, [copyPrompts, filterDeletablePromptIds, openEditPrompt, requestDeletePrompts]);
   const columns = useMemo((): ColumnDef<PromptRecord>[] => [
     {
       key: "title",

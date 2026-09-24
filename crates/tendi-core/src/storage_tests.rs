@@ -42,6 +42,9 @@ fn sqlite_ioerr_classification_includes_extended_codes() {
     ));
     assert!(is_database_io_error(&error));
     assert!(is_database_io_error_message(&error.to_string()));
+    assert!(is_database_io_error_message(
+        "database health probe quick_check returned *** in database main ***\nTree 33 page 33: unable to get the page. error code=522"
+    ));
     assert!(!is_database_io_error_message("database is locked"));
 }
 
@@ -198,7 +201,7 @@ fn finalizing_a_batched_session_scan_prunes_stale_rows() {
     let stale_search_rows_before: i64 = store
         .conn
         .query_row(
-            "SELECT COUNT(*) FROM scoped_session_search_records
+            "SELECT COUNT(*) FROM scoped_session_search_entries
                  WHERE scope_key = ?1 AND session_id = 'remove'",
             [scope.as_str()],
             |row| row.get(0),
@@ -234,7 +237,7 @@ fn finalizing_a_batched_session_scan_prunes_stale_rows() {
     let stale_search_rows_after: i64 = store
         .conn
         .query_row(
-            "SELECT COUNT(*) FROM scoped_session_search_records
+            "SELECT COUNT(*) FROM scoped_session_search_entries
                  WHERE scope_key = ?1 AND session_id = 'remove'",
             [scope.as_str()],
             |row| row.get(0),
@@ -326,7 +329,7 @@ fn scoped_session_search_rebuild_repairs_existing_projection_rows() {
     Connection::open(store.path())
         .unwrap()
         .execute(
-            "DELETE FROM scoped_session_search_records WHERE scope_key = ?1",
+            "DELETE FROM scoped_session_search_entries WHERE scope_key = ?1",
             params![scope.as_str()],
         )
         .unwrap();
@@ -768,7 +771,7 @@ fn session_search_fts_optimize_resets_due_mutation_counter() {
 }
 
 #[test]
-fn schema_v1_storage_migrates_fts_and_analytics_cache() {
+fn schema_v1_storage_discards_search_cache_and_migrates_analytics() {
     let temp = temp_dir("tendi-storage-v1-compaction-migration");
     fs::create_dir_all(&temp).unwrap();
     let db = temp.join("tendi.sqlite3");
@@ -835,26 +838,30 @@ fn schema_v1_storage_migrates_fts_and_analytics_cache() {
 
     let store = Store::open(&db).unwrap();
     store.run_pending_storage_migrations().unwrap();
-    let definition: String = store
+    let legacy_search_tables: bool = store
         .conn
         .query_row(
-            "SELECT sql FROM sqlite_master WHERE name = 'scoped_session_search_fts'",
+            "SELECT EXISTS(
+                 SELECT 1 FROM sqlite_master
+                 WHERE type = 'table' AND name IN (
+                     'scoped_session_search_records', 'scoped_session_search_fts'
+                 )
+             )",
             [],
             |row| row.get(0),
         )
         .unwrap();
-    assert!(definition.contains("contentless_delete = 1"));
-    assert!(definition.contains("detail = column"));
-    let rowid: i64 = store
+    assert!(!legacy_search_tables);
+    let search_rows: i64 = store
         .conn
         .query_row(
-            "SELECT rowid FROM scoped_session_search_fts
-             WHERE scoped_session_search_fts MATCH 'nee AND eed AND edl AND dle'",
+            "SELECT (SELECT COUNT(*) FROM scoped_session_search_entries)
+                 + (SELECT COUNT(*) FROM session_search_content_records)",
             [],
             |row| row.get(0),
         )
         .unwrap();
-    assert_eq!(rowid, 1);
+    assert_eq!(search_rows, 0);
     let compressed: Vec<u8> = store
         .conn
         .query_row(

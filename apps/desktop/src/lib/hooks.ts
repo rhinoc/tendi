@@ -1,8 +1,9 @@
 import { titleValue } from "./strings.ts";
+import type { AgentKind } from "./generated/runtime-types.ts";
 
 export type HookRecord = {
   id: string;
-  agent: string;
+  agent: AgentKind;
   event: string;
   matcher?: string | null;
   enabled: boolean;
@@ -18,6 +19,8 @@ export type HookRecord = {
   status_message?: string | null;
 };
 
+export type HookItem = { key: string; hook: HookRecord };
+
 export function hookDisplayName(hook: Pick<HookRecord, "event"> | null | undefined): string {
   return hook?.event || "Hook";
 }
@@ -30,7 +33,7 @@ function requiredString(value: unknown): string | undefined {
 
 export function normalizeHook(hook: Record<string, unknown>): HookRecord | undefined {
   const id = requiredString(hook.id);
-  const agent = requiredString(hook.agent);
+  const agent = requiredString(hook.agent) as AgentKind | undefined;
   const event = requiredString(hook.event);
   const path = requiredString(hook.path);
   const trustHash = requiredString(hook.trust_hash);
@@ -59,13 +62,31 @@ export function hookDeleteIdentity(hook: HookRecord | null | undefined): string 
   return hook?.id || undefined;
 }
 
+export function hookEnableDisabledReason(hook: HookRecord | null | undefined): string {
+  if (!hook) return "Missing hook source path";
+  if (!hookSourcePath(hook)) return "Missing hook source path";
+  return hook.read_only_reason ?? "";
+}
+
+export function hookReviewDisabledReason(hook: HookRecord | null | undefined): string {
+  return hook?.needs_review ? "" : "Hook does not need review";
+}
+
+export function hookSelectionTargets(items: HookItem[]) {
+  return {
+    deletable: items.filter((item) => !hookDeleteDisabledReason(item.hook)),
+    enable: items.filter((item) => !hookEnableDisabledReason(item.hook) && !item.hook.enabled),
+    disable: items.filter((item) => !hookEnableDisabledReason(item.hook) && Boolean(item.hook.enabled)),
+  };
+}
+
 export function hookKey(hook: HookRecord | null | undefined, duplicateIndex = 0): string | undefined {
   const base = hookDeleteIdentity(hook);
   if (!base) return undefined;
   return duplicateIndex === 0 ? base : `${base}#${duplicateIndex}`;
 }
 
-export function hookItemsFromRows(rows: HookRecord[]): Array<{ key: string; hook: HookRecord }> {
+export function hookItemsFromRows(rows: HookRecord[]): HookItem[] {
   const counts = new Map<string, number>();
   return rows.flatMap((hook) => {
     const base = hookDeleteIdentity(hook);
@@ -101,6 +122,12 @@ export function hookSearchText(hook: HookRecord | null | undefined): string {
     hook?.path,
     hookTrustHash(hook),
   ].map((value) => `${value ?? ""}`.toLowerCase()).join(" ");
+}
+
+export function filterHooks(items: HookItem[], query: string): HookItem[] {
+  const normalizedQuery = query.trim().toLowerCase();
+  if (!normalizedQuery) return items;
+  return items.filter((item) => hookSearchText(item.hook).includes(normalizedQuery));
 }
 
 export function hookSourcePath(hook: HookRecord | null | undefined): string {

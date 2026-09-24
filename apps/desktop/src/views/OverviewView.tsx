@@ -1,9 +1,7 @@
 import {
   memo,
-  useCallback,
   useEffect,
   useMemo,
-  useRef,
   useState,
 } from "react";
 import { ArrowLeft, ArrowRight, ArrowUpRight, RefreshCw } from "lucide-react";
@@ -30,15 +28,12 @@ import { formatRelativeTime } from "../lib/strings.ts";
 import { dialogCopy } from "../lib/dialog-copy.ts";
 import {
   type AnalyticsGranularity,
-  type OverviewAnalytics,
   selectAnalyticsGranularity,
 } from "../lib/analytics.ts";
-import { invokeAnalyticsOverview } from "../lib/runtime-gateway.ts";
-import { logger } from "../lib/logger.ts";
+import { useOverviewAnalytics } from "../features/overview/use-overview-analytics.ts";
 import { OpenInEditorMenuItem } from "../components/shared/DataTableMenus.tsx";
 import { OverviewTrendChart, OverviewUsageMetric } from "./OverviewTrendChart.tsx";
-import { desktopStore, selectAnalyticsDisplayValue, selectAnalyticsValue, useDesktopStore } from "../store/desktop-store.ts";
-import { ALL_AGENT_FILTER, DOMAIN_NAV_ITEMS, EMPTY_DISPLAY_VALUE, RuntimeDomainKey } from "../lib/index.ts";
+import { DOMAIN_NAV_ITEMS, EMPTY_DISPLAY_VALUE, RuntimeDomainKey } from "../lib/index.ts";
 import type { DomainKey } from "../lib/index.ts";
 import { SessionListStatus } from "../store/desktop-store.ts";
 import "./OverviewView.css";
@@ -59,12 +54,6 @@ export type OverviewViewProps = {
   onOpenSession: (session: SessionRecord) => void;
 };
 
-// Match the initial viewport prefetch window so startup uses one full query.
-const ANALYTICS_DEFAULT_RANGE_DAYS = 61;
-const MAX_ANALYTICS_DAYS = 365;
-const ANALYTICS_REVISION_SETTLE_MS = 400;
-const ANALYTICS_LOAD_STEPS = [ANALYTICS_DEFAULT_RANGE_DAYS, 90, 182, MAX_ANALYTICS_DAYS] as const;
-let retainedAnalyticsRange = ANALYTICS_DEFAULT_RANGE_DAYS;
 let retainedUsageMetric: OverviewUsageMetric = OverviewUsageMetric.Tokens;
 const USAGE_METRICS = [
   OverviewUsageMetric.Sessions,
@@ -89,57 +78,6 @@ const USAGE_METRIC_LABELS: Record<OverviewUsageMetric, string> = {
   [OverviewUsageMetric.Skills]: "Skills",
 };
 const OVERVIEW_INVENTORY = DOMAIN_NAV_ITEMS.map(({ domain, label }) => ({ id: domain, label }));
-const overviewAnalyticsQueries = new Map<string, Promise<OverviewAnalytics | null>>();
-
-function inclusiveDaysSince(date: string): number {
-  const [year, month, day] = date.split("-").map(Number);
-  if (!year || !month || !day) return ANALYTICS_LOAD_STEPS[0];
-  const now = new Date();
-  const todayUtc = Date.UTC(now.getFullYear(), now.getMonth(), now.getDate());
-  const firstUtc = Date.UTC(year, month - 1, day);
-  return Math.max(1, Math.floor((todayUtc - firstUtc) / 86_400_000) + 1);
-}
-
-function previousCalendarDate(date: string): string {
-  const value = new Date(`${date}T00:00:00Z`);
-  value.setUTCDate(value.getUTCDate() - 1);
-  return value.toISOString().slice(0, 10);
-}
-
-function overviewAnalyticsCacheKey(agent: string, days: number, analyticsRevision: number) {
-  return `${agent}:${days}:${analyticsRevision}`;
-}
-
-function mergeAnalyticsDays(
-  existing: OverviewAnalytics | null,
-  incoming: OverviewAnalytics,
-  requestedRange: number,
-): OverviewAnalytics {
-  if (!existing || existing.days.length === 0) {
-    return incoming;
-  }
-  const daysByDate = new Map(existing.days.map((day) => [day.date, day]));
-  for (const day of incoming.days) daysByDate.set(day.date, day);
-  const capabilitiesByAgent = new Map(existing.capabilities.map((capability) => [capability.agent, { ...capability }]));
-  for (const capability of incoming.capabilities) {
-    const current = capabilitiesByAgent.get(capability.agent);
-    if (!current) capabilitiesByAgent.set(capability.agent, { ...capability });
-    else {
-      current.tokenUsage ||= capability.tokenUsage;
-      current.reasoningTokens ||= capability.reasoningTokens;
-      current.explicitRuns ||= capability.explicitRuns;
-      current.duration ||= capability.duration;
-      current.rateLimitHistory ||= capability.rateLimitHistory;
-    }
-  }
-  return {
-    ...incoming,
-    daysRequested: Math.max(requestedRange, incoming.daysRequested, existing.daysRequested),
-    days: [...daysByDate.values()].sort((left, right) => left.date.localeCompare(right.date)),
-    capabilities: [...capabilitiesByAgent.values()],
-    warnings: [...new Set([...existing.warnings, ...incoming.warnings])],
-  };
-}
 
 function AnalyticsLoadingState({
   progress,
@@ -187,229 +125,30 @@ export const OverviewView = memo(function OverviewView({
   onOpenSession,
 }: OverviewViewProps) {
   const usage = useMemo(() => summarizeSessionUsage(sessions), [sessions]);
-  const [analyticsRange, setAnalyticsRange] = useState<number>(retainedAnalyticsRange);
-  const analyticsRevision = useDesktopStore((state) => state.analytics.revision);
-  const analyticsRevisionReady = useDesktopStore((state) => state.analytics.ready);
-  const analyticsRevisionError = useDesktopStore((state) => state.analytics.error);
-  const analyticsRangeKey = useMemo(() => ({
-    agent: agentFilter,
-    range: analyticsRange,
-    revision: analyticsRevision,
-  }), [agentFilter, analyticsRange, analyticsRevision]);
-  const analytics = useDesktopStore((state) => selectAnalyticsDisplayValue(state, analyticsRangeKey));
-  const [analyticsLoading, setAnalyticsLoading] = useState(!analytics);
-  const analyticsProgress = useDesktopStore((state) => state.analytics.progress);
-  const [analyticsError, setAnalyticsError] = useState("");
+  const {
+    analytics,
+    analyticsError,
+    analyticsLoading,
+    analyticsProgress,
+    analyticsRevisionError,
+    analyticsRange,
+    loadingOlder: loadingOlderAnalytics,
+    hasOlder: hasOlderAnalytics,
+    loadOlderAnalytics,
+    loadAnalytics,
+  } = useOverviewAnalytics({
+    agentFilter,
+  });
   const automaticGranularity = selectAnalyticsGranularity(analytics?.days.length ?? analyticsRange);
   const [granularityOverride, setGranularityOverride] = useState<AnalyticsGranularity | null>(null);
   const granularity = granularityOverride ?? automaticGranularity;
   const [usageMetric, setUsageMetric] = useState<OverviewUsageMetric>(retainedUsageMetric);
-  const analyticsRequestRef = useRef(0);
-  const analyticsRef = useRef<OverviewAnalytics | null>(analytics);
-  const analyticsLatestRevisionRef = useRef(analyticsRevision);
-  const analyticsLoadRef = useRef<((refreshTranscripts?: boolean, showLoading?: boolean) => Promise<void>) | null>(null);
-  const analyticsQueryInFlightRef = useRef(false);
-  const analyticsQueryRevisionRef = useRef<number | null>(null);
-  const analyticsRevisionRefreshPendingRef = useRef<number | null>(null);
-  const analyticsCoalescedRevisionCountRef = useRef(0);
-  const analyticsRevisionTimerRef = useRef<number | null>(null);
-  analyticsRef.current = analytics;
-  analyticsLatestRevisionRef.current = analyticsRevision;
-  const loadingOlderAnalytics = Boolean(analytics && analytics.daysRequested < analyticsRange);
-  const firstAvailableDate = analytics?.coverage.first;
-  const firstLoadedDate = analytics?.days[0]?.date;
-  const analyticsTargetRange = firstAvailableDate
-    ? Math.min(MAX_ANALYTICS_DAYS, inclusiveDaysSince(firstAvailableDate))
-    : ANALYTICS_LOAD_STEPS[0];
-  const hasOlderAnalytics = Boolean(
-    analyticsRange < analyticsTargetRange
-    && firstAvailableDate
-    && firstLoadedDate
-    && firstAvailableDate < firstLoadedDate
-  );
-  const loadOlderAnalytics = useCallback((minimumRange?: number) => {
-    if (analyticsRange >= analyticsTargetRange) return;
-    setAnalyticsRange((current) => {
-      if (current >= analyticsTargetRange) return current;
-      const step = ANALYTICS_LOAD_STEPS.find((days) => days > current);
-      const next = minimumRange === undefined
-        ? Math.min(step ?? analyticsTargetRange, analyticsTargetRange)
-        : Math.min(analyticsTargetRange, Math.max(current + 1, Math.ceil(minimumRange)));
-      retainedAnalyticsRange = next;
-      return next;
-    });
-  }, [analyticsRange, analyticsTargetRange]);
-  const scheduleAnalyticsRevisionRefresh = useCallback(() => {
-    if (analyticsRevisionTimerRef.current !== null) {
-      window.clearTimeout(analyticsRevisionTimerRef.current);
-    }
-    analyticsRevisionTimerRef.current = window.setTimeout(() => {
-      analyticsRevisionTimerRef.current = null;
-      void analyticsLoadRef.current?.(false, false);
-    }, ANALYTICS_REVISION_SETTLE_MS);
-  }, []);
-  const loadAnalytics = useCallback(async (refreshTranscripts = false, showLoading = refreshTranscripts) => {
-    if (analyticsQueryInFlightRef.current) {
-      const queryRevision = analyticsQueryRevisionRef.current;
-      if (!refreshTranscripts && queryRevision !== null && analyticsRevision > queryRevision) {
-        analyticsRevisionRefreshPendingRef.current = Math.max(
-          analyticsRevisionRefreshPendingRef.current ?? analyticsRevision,
-          analyticsRevision,
-        );
-        analyticsCoalescedRevisionCountRef.current += 1;
-        logger.info("overview analytics refresh coalesced", {
-          requestedRevision: analyticsRevision,
-          inFlightRevision: queryRevision,
-          refreshTranscripts,
-        });
-      }
-      return;
-    }
-    if (refreshTranscripts && analyticsRevisionTimerRef.current !== null) {
-      window.clearTimeout(analyticsRevisionTimerRef.current);
-      analyticsRevisionTimerRef.current = null;
-    }
-    const request = ++analyticsRequestRef.current;
-    const cacheKey = overviewAnalyticsCacheKey(agentFilter, analyticsRange, analyticsRevision);
-    const queryKey = { agent: agentFilter, range: analyticsRange, revision: analyticsRevision };
-    const cached = selectAnalyticsValue(desktopStore.getSnapshot(), queryKey);
-    if (!refreshTranscripts && cached) {
-      analyticsRef.current = cached;
-      setAnalyticsLoading(false);
-      return;
-    }
-    if (refreshTranscripts) {
-      overviewAnalyticsQueries.clear();
-    }
-    if (showLoading) {
-      setAnalyticsLoading(true);
-      desktopStore.actions.setAnalyticsProgress(null);
-    }
-    setAnalyticsError("");
-    const loadedDays = analyticsRef.current?.daysRequested ?? 0;
-    const isOlderRangeQuery = !refreshTranscripts && analyticsRange > loadedDays && loadedDays > 0;
-    const queryDays = isOlderRangeQuery
-      ? analyticsRange - loadedDays
-      : analyticsRange;
-    const existingFirstDate = isOlderRangeQuery
-      ? analyticsRef.current?.days[0]?.date
-      : undefined;
-    const queryEndDate = existingFirstDate ? previousCalendarDate(existingFirstDate) : undefined;
-    const args = {
-      agent: agentFilter === ALL_AGENT_FILTER ? null : agentFilter,
-      days: queryDays,
-      rankDays: Math.min(30, queryDays),
-      refreshTranscripts,
-      ...(queryEndDate ? { endDate: queryEndDate } : {}),
-    };
-    const queryCacheKey = `${cacheKey}:${queryDays}:${queryEndDate ?? "today"}`;
-    let query = refreshTranscripts ? undefined : overviewAnalyticsQueries.get(queryCacheKey);
-    if (!query) {
-      query = invokeAnalyticsOverview(args);
-      if (!refreshTranscripts) {
-        const pendingQuery = query;
-        overviewAnalyticsQueries.set(queryCacheKey, pendingQuery);
-        void pendingQuery.then(() => {
-          if (overviewAnalyticsQueries.get(queryCacheKey) === pendingQuery) {
-            overviewAnalyticsQueries.delete(queryCacheKey);
-          }
-        });
-      }
-    }
-    const startedAt = performance.now();
-    const coalescedRevisionCount = analyticsCoalescedRevisionCountRef.current;
-    analyticsCoalescedRevisionCountRef.current = 0;
-    analyticsQueryInFlightRef.current = true;
-    analyticsQueryRevisionRef.current = analyticsRevision;
-    logger.info("overview analytics query started", {
-      requestedRevision: analyticsRevision,
-      agent: agentFilter,
-      days: queryDays,
-      requestedRange: analyticsRange,
-      endDate: queryEndDate,
-      refreshTranscripts,
-      coalescedRevisionCount,
-    });
-    let resultRevision = analyticsRevision;
-    try {
-      const result = await query;
-      resultRevision = result?.revision ?? analyticsRevision;
-      if (request !== analyticsRequestRef.current) return;
-      if (result) {
-        const merged = mergeAnalyticsDays(analyticsRef.current, result, analyticsRange);
-        // The request revision identifies the snapshot the UI asked for. The
-        // response revision can lag while the analytics worker is publishing;
-        // using it as the cache key makes every settled refresh look stale.
-        desktopStore.actions.setAnalyticsValue(merged, queryKey);
-        analyticsRef.current = merged;
-      }
-      else {
-        setAnalyticsError((current) => current || "Analytics could not be loaded");
-        const loadedDays = analyticsRef.current?.daysRequested;
-        if (loadedDays && analyticsRange > loadedDays) {
-          retainedAnalyticsRange = loadedDays;
-          setAnalyticsRange(loadedDays);
-        }
-      }
-      setAnalyticsLoading(false);
-    } finally {
-      analyticsQueryInFlightRef.current = false;
-      analyticsQueryRevisionRef.current = null;
-      const pendingRevision = analyticsRevisionRefreshPendingRef.current;
-      const latestRevision = Math.max(analyticsLatestRevisionRef.current, pendingRevision ?? analyticsRevision);
-      const shouldRefreshLatestRevision = request === analyticsRequestRef.current
-        && !refreshTranscripts
-        && latestRevision > analyticsRevision;
-      logger.info("overview analytics query completed", {
-        requestedRevision: analyticsRevision,
-        resultRevision,
-        latestRevision,
-        durationMs: Math.round(performance.now() - startedAt),
-        coalescedRevisionCount,
-        refreshLatestRevision: shouldRefreshLatestRevision,
-      });
-      analyticsRevisionRefreshPendingRef.current = null;
-      if (shouldRefreshLatestRevision) scheduleAnalyticsRevisionRefresh();
-    }
-  }, [agentFilter, analyticsRange, analyticsRevision, scheduleAnalyticsRevisionRefresh]);
-  analyticsLoadRef.current = loadAnalytics;
   const showAnalyticsLoading = !analyticsRevisionError && analyticsLoading && !analytics;
   const analyticsRefreshing = analyticsLoading
     || analyticsProgress?.running === true;
   useEffect(() => {
     setGranularityOverride(null);
   }, [automaticGranularity]);
-
-  useEffect(() => {
-    if (!analyticsRevisionReady) return;
-    if (analyticsQueryInFlightRef.current) {
-      const queryRevision = analyticsQueryRevisionRef.current;
-      if (queryRevision !== null && analyticsRevision > queryRevision) {
-        analyticsRevisionRefreshPendingRef.current = Math.max(
-          analyticsRevisionRefreshPendingRef.current ?? analyticsRevision,
-          analyticsRevision,
-        );
-        analyticsCoalescedRevisionCountRef.current += 1;
-        logger.info("overview analytics revision coalesced while query is in flight", {
-          revision: analyticsRevision,
-          inFlightRevision: queryRevision,
-          coalescedRevisionCount: analyticsCoalescedRevisionCountRef.current,
-        });
-      }
-      return;
-    }
-    if (analyticsRef.current === null) {
-      void loadAnalytics(false, true);
-      return;
-    }
-    scheduleAnalyticsRevisionRefresh();
-  }, [analyticsRevision, analyticsRevisionReady, loadAnalytics, scheduleAnalyticsRevisionRefresh]);
-
-  useEffect(() => () => {
-    if (analyticsRevisionTimerRef.current !== null) {
-      window.clearTimeout(analyticsRevisionTimerRef.current);
-    }
-  }, []);
 
   const updateSkillCount = skillUpdateCount;
 

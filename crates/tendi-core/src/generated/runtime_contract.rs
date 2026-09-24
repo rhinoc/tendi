@@ -5,7 +5,7 @@ pub use serde_json::Value;
 pub const PROTOCOL_VERSION: u64 = 2;
 pub const SCHEMA_VERSION: u64 = 1;
 pub const RUNTIME_CONTRACT_FINGERPRINT: &str =
-    "6aa6289f5b12906366104f71917aa24c703bffd1a5ab8c06b3f01745412451ca";
+    "4d97bc00c50396f62aa7ca72b51ddf189916d3e7b4fa2accd2aa11e7834acf01";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -751,7 +751,27 @@ pub struct HookReviewRequest {
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct HookSourceReadRequest {
-    pub id: String,
+    pub agent: AgentKind,
+    pub path: String,
+    #[serde(rename = "expectedTrustHash")]
+    pub expected_trust_hash: String,
+    pub event: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub matcher: Option<String>,
+    #[serde(rename = "hookType")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hook_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prompt: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub filter: Option<String>,
+    #[serde(rename = "statusMessage")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status_message: Option<String>,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct McpSetEnabledRequest {
@@ -990,21 +1010,19 @@ pub struct SkillsMarketplaceSearchRequest {
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SkillFilesRequest {
-    #[serde(rename = "skillId")]
-    pub skill_id: String,
-    #[serde(rename = "locationId")]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub location_id: Option<String>,
+    #[serde(rename = "skillName")]
+    pub skill_name: String,
+    #[serde(rename = "skillPath")]
+    pub skill_path: String,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SkillFileReadRequest {
-    #[serde(rename = "skillId")]
-    pub skill_id: String,
+    #[serde(rename = "skillName")]
+    pub skill_name: String,
+    #[serde(rename = "skillPath")]
+    pub skill_path: String,
     #[serde(rename = "relativePath")]
     pub relative_path: String,
-    #[serde(rename = "locationId")]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub location_id: Option<String>,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SkillFileSaveRequest {

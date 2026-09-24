@@ -25,9 +25,11 @@ import { Switch } from "../components/shared/Switch.tsx";
 import { Toast } from "../components/shared/Toast.tsx";
 import { Tooltip } from "../components/shared/Tooltip.tsx";
 import { mcpColumns as defaultMcpColumns } from "../lib/tableColumns.tsx";
-import { actionLabels, EMPTY_DISPLAY_VALUE, formatUserPath, isMcpMutationDelta, MCP_FREEZE_COLUMN, mcpCopy, mcpDisplayName, scopeNameForValue, TableSelectionActionId, TauriCommand, mcpRowKey, mcpSelectionActionIds, mcpSourcePath, safeInvoke, type McpRecord } from "../lib/index.ts";
+import { actionLabels, EMPTY_DISPLAY_VALUE, formatUserPath, MCP_FREEZE_COLUMN, mcpCopy, mcpDisplayName, mcpEnableBlockReason, mcpSelectionActionIds, mcpSourcePath, mcpToggleTargets, mcpToolCount as getMcpToolCount, mcpToolParameters, safeInvoke, scopeNameForValue, supportsMcpProbe, TableSelectionActionId, TauriCommand, mcpRowKey, type McpRecord } from "../lib/index.ts";
 import type { JsonValue } from "../lib/generated/runtime-types.ts";
 import type { McpTool } from "../lib/mcp.ts";
+import type { McpMutationResponse } from "../lib/runtime-gateway.ts";
+import { useMcpOperations } from "../features/mcp/useMcpOperations.ts";
 
 import "./McpView.css";
 
@@ -52,57 +54,6 @@ function McpDetailRow({
       </div>
     </div>
   );
-}
-
-function jsonObject(value: JsonValue | undefined): Record<string, JsonValue> | undefined {
-  return value && typeof value === "object" && !Array.isArray(value)
-    ? value as Record<string, JsonValue>
-    : undefined;
-}
-
-function mcpSchemaType(value: JsonValue): string {
-  const schema = jsonObject(value);
-  const type = schema?.type;
-  if (typeof type === "string") return type;
-  if (Array.isArray(type)) {
-    const types = type.filter((item): item is string => typeof item === "string");
-    if (types.length > 0) return types.join(" | ");
-  }
-  if (typeof schema?.$ref === "string") return schema.$ref.split("/").pop() || schema.$ref;
-  if (Array.isArray(schema?.enum)) return "enum";
-  if (jsonObject(schema?.properties)) return "object";
-  return "any";
-}
-
-type McpToolParameter = {
-  name: string;
-  type: string;
-  required: boolean;
-  description?: string;
-  defaultValue?: JsonValue;
-  enumValues?: JsonValue[];
-};
-
-function mcpToolParameters(tool: McpTool): McpToolParameter[] {
-  const schema = jsonObject(tool.input_schema);
-  const properties = jsonObject(schema?.properties);
-  if (!properties) return [];
-  const required = new Set(
-    Array.isArray(schema?.required)
-      ? schema.required.filter((item): item is string => typeof item === "string")
-      : [],
-  );
-  return Object.entries(properties).map(([name, value]) => {
-    const property = jsonObject(value);
-    return {
-      name,
-      type: mcpSchemaType(value),
-      required: required.has(name),
-      description: typeof property?.description === "string" ? property.description : undefined,
-      defaultValue: property && "default" in property ? property.default : undefined,
-      enumValues: property && Array.isArray(property.enum) ? property.enum : undefined,
-    };
-  });
 }
 
 function mcpJsonText(value: JsonValue): string {
@@ -162,8 +113,8 @@ function mcpToolItems(row: McpRow): CollapsibleAccordionItem[] {
 }
 
 function mcpToolCount(row: McpRow): string {
-  if (row.probe_state !== "ready" && row.probe_state !== "ready-empty") return EMPTY_DISPLAY_VALUE;
-  return String(row.tools.length);
+  const count = getMcpToolCount(row);
+  return count === undefined ? EMPTY_DISPLAY_VALUE : String(count);
 }
 
 function mcpToolPlaceholder(row: McpRow): string {
@@ -204,7 +155,7 @@ function McpDetail({
   const title = mcpDisplayName(row);
   const path = formatUserPath(row.path);
   const description = row.server_description?.trim() || EMPTY_DISPLAY_VALUE;
-  const probeSupported = ["stdio", "http", "sse", "cursor-plugin"].includes(row.transport);
+  const probeSupported = supportsMcpProbe(row.transport);
 
   return (
     <DetailPanel
@@ -285,27 +236,6 @@ type McpMenuComponents = {
   Separator: ComponentType<{ className?: string }>;
 };
 
-function mcpEnabled(row: McpRow): boolean {
-  return row.enabled;
-}
-
-function mcpEnableDisabledReason(row: McpRow | null | undefined): string {
-  if (!row) return "Missing MCP server";
-  if (row.read_only_reason) return row.read_only_reason;
-  const path = mcpSourcePath(row);
-  if (!path) return "Missing MCP source path";
-  if (!row.trust_hash) return "MCP source hash is unavailable; reload the list";
-  return "";
-}
-
-function mcpOperationError(result: unknown): string | undefined {
-  if (result && typeof result === "object" && "error" in result) {
-    const error = (result as { error?: unknown }).error;
-    return typeof error === "string" ? error : undefined;
-  }
-  return undefined;
-}
-
 function McpEnabledSwitch({
   row,
   updating,
@@ -315,14 +245,14 @@ function McpEnabledSwitch({
   updating?: boolean;
   onToggle: (enabled: boolean) => void;
 }) {
-  const disabledReason = mcpEnableDisabledReason(row);
+  const disabledReason = mcpEnableBlockReason(row);
   const disabled = Boolean(disabledReason) || Boolean(updating);
   return (
     <Tooltip content={disabledReason || undefined}>
       <Switch
         className={`mcpEnabledSwitch ${updating ? "updating" : ""}`}
-        checked={mcpEnabled(row)}
-        label={mcpEnabled(row) ? "Disable MCP server" : "Enable MCP server"}
+        checked={row.enabled}
+        label={row.enabled ? "Disable MCP server" : "Enable MCP server"}
         disabled={disabled}
         aria-busy={updating || undefined}
         onCheckedChange={onToggle}
@@ -348,8 +278,8 @@ function mcpSelectionActions(
   setSelectedMcpEnabled: (rows: McpRow[], enabled: boolean) => Promise<void>,
   updating: boolean,
 ): DataTableSelectionActionDefinition[] {
-  const enableTargets = selectedRows.filter((row) => !mcpEnableDisabledReason(row) && !mcpEnabled(row));
-  const disableTargets = selectedRows.filter((row) => !mcpEnableDisabledReason(row) && mcpEnabled(row));
+  const enableTargets = mcpToggleTargets(selectedRows, true);
+  const disableTargets = mcpToggleTargets(selectedRows, false);
   const updateSelected = async (enabled: boolean) => {
     const targets = enabled ? enableTargets : disableTargets;
     await setSelectedMcpEnabled(targets, enabled);
@@ -397,9 +327,9 @@ type DataListViewProps = {
   loadError?: string;
   hasRows?: boolean;
   onRetry?: () => void;
-  onSetMcpEnabled?: (row: McpRow, enabled: boolean) => Promise<unknown>;
-  onSetMcpEnabledMany?: (rows: McpRow[], enabled: boolean) => Promise<unknown>;
-  onProbeMcp?: (row: McpRow) => Promise<unknown>;
+  onSetMcpEnabled?: (row: McpRow, enabled: boolean) => Promise<McpMutationResponse>;
+  onSetMcpEnabledMany?: (rows: McpRow[], enabled: boolean) => Promise<McpMutationResponse>;
+  onProbeMcp?: (row: McpRow) => Promise<McpMutationResponse>;
   locateMcpId?: string;
   onLocateMcpComplete?: (id: string) => void;
 };
@@ -407,9 +337,6 @@ type DataListViewProps = {
 export function DataListView({ title, rows, columns = defaultMcpColumns, loading = false, loadError = "", hasRows = false, onRetry, onSetMcpEnabled, onSetMcpEnabledMany, onProbeMcp, locateMcpId, onLocateMcpComplete }: DataListViewProps) {
   const [activeKey, setActiveKey] = useTabState("mcp.activeKey", rows[0] ? mcpRowKey(rows[0]) : "");
   const [selected, setSelected] = useState<string[]>([]);
-  const [updatingKeys, setUpdatingKeys] = useState<Set<string>>(() => new Set());
-  const [probingKey, setProbingKey] = useState("");
-  const [operationError, setOperationError] = useState("");
   const [mcpLocatorRequest, setMcpLocatorRequest] = useState("");
   const [detailCollapsed, setDetailCollapsed] = useTabState("mcp.detailCollapsed", false);
   const getRowId = useCallback(
@@ -421,7 +348,26 @@ export function DataListView({ title, rows, columns = defaultMcpColumns, loading
     () => rows.find((row) => mcpRowKey(row) === activeKey) ?? null,
     [activeKey, rows],
   );
-  const operationBusy = updatingKeys.size > 0 || Boolean(probingKey);
+  const removeSelection = useCallback((id: string) => {
+    setSelected((current) => current.filter((selectedId) => selectedId !== id));
+  }, []);
+  const clearSelection = useCallback(() => setSelected([]), []);
+  const {
+    updatingKeys,
+    probingKey,
+    operationBusy,
+    error: operationError,
+    clearError: clearOperationError,
+    setMcpEnabled,
+    setSelectedMcpEnabled,
+    probeMcp,
+  } = useMcpOperations({
+    onSetMcpEnabled,
+    onSetMcpEnabledMany,
+    onProbeMcp,
+    removeSelection,
+    clearSelection,
+  });
   useEffect(() => {
     if (!locateMcpId) return;
     setMcpLocatorRequest(locateMcpId);
@@ -435,71 +381,6 @@ export function DataListView({ title, rows, columns = defaultMcpColumns, loading
     setMcpLocatorRequest((current) => current === id ? "" : current);
     onLocateMcpComplete?.(id);
   }, [onLocateMcpComplete]);
-  const setMcpEnabled = useCallback(async (row: McpRow, enabled: boolean) => {
-    if (operationBusy || mcpEnableDisabledReason(row)) return;
-    const key = mcpRowKey(row);
-    setUpdatingKeys(new Set([key]));
-    setOperationError("");
-    try {
-      const result = await onSetMcpEnabled?.(row, enabled);
-      const error = mcpOperationError(result);
-      if (error) setOperationError(error);
-      else if (!isMcpMutationDelta(result)) setOperationError("Could not update MCP server.");
-      else setSelected((current) => current.filter((selectedId) => selectedId !== key));
-    } catch (error) {
-      setOperationError(`${error}`);
-    } finally {
-      setUpdatingKeys(new Set());
-    }
-  }, [onSetMcpEnabled, operationBusy]);
-  const setSelectedMcpEnabled = useCallback(async (targets: McpRow[], enabled: boolean) => {
-    if (operationBusy || targets.length === 0) return;
-    setUpdatingKeys(new Set(targets.map((row) => mcpRowKey(row))));
-    setOperationError("");
-    try {
-      if (targets.length > 1 && onSetMcpEnabledMany) {
-        const result = await onSetMcpEnabledMany(targets, enabled);
-        const error = mcpOperationError(result);
-        if (error) setOperationError(error);
-        else if (!isMcpMutationDelta(result)) setOperationError("Could not update MCP servers.");
-        else setSelected([]);
-        return;
-      }
-      for (const row of targets) {
-        const result = await onSetMcpEnabled?.(row, enabled);
-        const error = mcpOperationError(result);
-        if (error) {
-          setOperationError(error);
-          return;
-        }
-        if (!isMcpMutationDelta(result)) {
-          setOperationError("Could not update MCP servers.");
-          return;
-        }
-      }
-      setSelected([]);
-    } catch (error) {
-      setOperationError(`${error}`);
-    } finally {
-      setUpdatingKeys(new Set());
-    }
-  }, [onSetMcpEnabled, onSetMcpEnabledMany, operationBusy]);
-  const probeMcp = useCallback(async (row: McpRow) => {
-    if (operationBusy || !onProbeMcp || !["stdio", "http", "sse", "cursor-plugin"].includes(row.transport)) return;
-    const key = mcpRowKey(row);
-    setProbingKey(key);
-    setOperationError("");
-    try {
-      const result = await onProbeMcp(row);
-      const error = mcpOperationError(result);
-      if (error) setOperationError(error);
-      else if (!isMcpMutationDelta(result)) setOperationError("Could not check MCP connection.");
-    } catch (error) {
-      setOperationError(`${error}`);
-    } finally {
-      setProbingKey("");
-    }
-  }, [onProbeMcp, operationBusy]);
   const tableColumns = useMemo((): ColumnDef<McpRow>[] => {
     const nextColumns = columns.filter((column) => column.key !== "scope" && column.key !== "status");
     nextColumns.push({
@@ -508,8 +389,8 @@ export function DataListView({ title, rows, columns = defaultMcpColumns, loading
       label: "Enabled",
       type: ColumnDataType.Enum,
       width: "92px",
-      groupBy: (row) => (mcpEnabled(row) ? "On" : "Off"),
-      sortValue: (row) => (mcpEnabled(row) ? 1 : 0),
+      groupBy: (row) => (row.enabled ? "On" : "Off"),
+      sortValue: (row) => (row.enabled ? 1 : 0),
       render: (row) => (
         <McpEnabledSwitch
           row={row}
@@ -571,7 +452,7 @@ export function DataListView({ title, rows, columns = defaultMcpColumns, loading
         <Panel className="sessionListPanel mcpListPanel" defaultSize="54%" minSize="360px">
           <div className="sessionListPane mcpListPane">
             <PageHeader title={title} compact>{null}</PageHeader>
-            {operationError ? <Toast tone="error" message={operationError} onDismiss={() => setOperationError("")} /> : null}
+            {operationError ? <Toast tone="error" message={operationError} onDismiss={clearOperationError} /> : null}
             {loadError && hasRows ? <LoadErrorState message={loadError} onRetry={onRetry} /> : null}
             <div className="sessionListBody">
               <DataTable

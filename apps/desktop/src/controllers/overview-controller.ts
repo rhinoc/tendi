@@ -5,14 +5,8 @@ import { SkillUpdateAvailability } from "../lib/skill-status.ts";
 
 export type OverviewCounts = Record<DomainKey, number>;
 
-const overviewCountsCache = new WeakMap<RuntimeData, OverviewCounts>();
-
 export function selectOverviewCounts(data: RuntimeData): OverviewCounts {
-  const cached = overviewCountsCache.get(data);
-  if (cached) return cached;
-  const counts = Object.fromEntries(DOMAIN_KEYS.map((domain) => [domain, data[domain].length])) as OverviewCounts;
-  overviewCountsCache.set(data, counts);
-  return counts;
+  return Object.fromEntries(DOMAIN_KEYS.map((domain) => [domain, data[domain].length])) as OverviewCounts;
 }
 
 export function selectOverviewHookReviewCount(data: RuntimeData): number {

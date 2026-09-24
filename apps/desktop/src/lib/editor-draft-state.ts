@@ -1,19 +1,20 @@
 import { useSyncExternalStore } from "react";
+import {
+  discardEditorDraftChanges,
+  emptyEditorDraft,
+  isEditorDraftDirty,
+  type EditorDraft,
+} from "./editor-draft-logic.ts";
 
-export type EditorDraft = {
-  content: string;
-  originalContent: string;
-  sha256: string;
-};
+export type { EditorDraft } from "./editor-draft-logic.ts";
 
-const emptyDraft = (): EditorDraft => ({ content: "", originalContent: "", sha256: "" });
 const draftsByResource = new Map<string, EditorDraft>();
 const listenersByResource = new Map<string, Set<() => void>>();
 
 export function getEditorDraft(resourceKey: string): EditorDraft {
   const existing = draftsByResource.get(resourceKey);
   if (existing) return existing;
-  const initial = emptyDraft();
+  const initial = emptyEditorDraft();
   draftsByResource.set(resourceKey, initial);
   return initial;
 }
@@ -41,14 +42,18 @@ export function updateEditorDraft(
 }
 
 export function clearEditorDraft(resourceKey: string) {
-  return updateEditorDraft(resourceKey, emptyDraft());
+  return updateEditorDraft(resourceKey, emptyEditorDraft());
 }
 
 export function discardEditorDraft(resourceKey: string) {
-  return updateEditorDraft(resourceKey, (current) => ({
-    ...current,
-    content: current.originalContent,
-  }));
+  return updateEditorDraft(resourceKey, discardEditorDraftChanges);
+}
+
+export function releaseCleanEditorDraft(resourceKey: string) {
+  const current = draftsByResource.get(resourceKey);
+  if (!current || isEditorDraftDirty(current)) return;
+  draftsByResource.delete(resourceKey);
+  listenersByResource.get(resourceKey)?.forEach((listener) => listener());
 }
 
 export function useEditorDraft(resourceKey: string) {

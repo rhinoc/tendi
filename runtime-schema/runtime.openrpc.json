@@ -738,8 +738,20 @@
       },
       "HookSourceReadRequest": {
         "type": "object",
-        "properties": { "id": { "type": "string", "minLength": 1 } },
-        "required": ["id"],
+        "properties": {
+          "agent": { "$ref": "#/components/schemas/AgentKind" },
+          "path": { "type": "string", "minLength": 1 },
+          "expectedTrustHash": { "type": "string", "minLength": 1 },
+          "event": { "type": "string", "minLength": 1 },
+          "matcher": { "type": ["string", "null"] },
+          "hookType": { "type": ["string", "null"] },
+          "command": { "type": ["string", "null"] },
+          "url": { "type": ["string", "null"] },
+          "prompt": { "type": ["string", "null"] },
+          "filter": { "type": ["string", "null"] },
+          "statusMessage": { "type": ["string", "null"] }
+        },
+        "required": ["agent", "path", "expectedTrustHash", "event"],
         "additionalProperties": false
       },
       "McpSetEnabledRequest": {
@@ -960,14 +972,14 @@
       },
       "SkillFilesRequest": {
         "type": "object",
-        "properties": { "skillId": { "type": "string", "minLength": 1 }, "locationId": { "type": ["string", "null"] } },
-        "required": ["skillId"],
+        "properties": { "skillName": { "type": "string", "minLength": 1 }, "skillPath": { "type": "string", "minLength": 1 } },
+        "required": ["skillName", "skillPath"],
         "additionalProperties": false
       },
       "SkillFileReadRequest": {
         "type": "object",
-        "properties": { "skillId": { "type": "string", "minLength": 1 }, "relativePath": { "type": "string", "minLength": 1 }, "locationId": { "type": ["string", "null"] } },
-        "required": ["skillId", "relativePath"],
+        "properties": { "skillName": { "type": "string", "minLength": 1 }, "skillPath": { "type": "string", "minLength": 1 }, "relativePath": { "type": "string", "minLength": 1 } },
+        "required": ["skillName", "skillPath", "relativePath"],
         "additionalProperties": false
       },
       "SkillFileSaveRequest": {

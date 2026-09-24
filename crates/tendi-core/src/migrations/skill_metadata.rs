@@ -33,7 +33,7 @@ pub(super) fn migrate_scan(store: &Store, cwd: &Path, scan: &SkillScan) -> Resul
     }
 
     let persisted = store.skill_visibilities_for_workspace(&workspace_root)?;
-    let mut values = Vec::<(PathBuf, SkillVisibility)>::new();
+    let mut explicit_values = Vec::<(PathBuf, SkillVisibility)>::new();
     let mut legacy_files = Vec::new();
     let mut changes = Vec::new();
     for skill in &scan.skills {
@@ -49,14 +49,11 @@ pub(super) fn migrate_scan(store: &Store, cwd: &Path, scan: &SkillScan) -> Resul
                 .as_deref()
                 .and_then(crate::skills::parse_frontmatter)
                 .and_then(|frontmatter| parse_legacy_frontmatter_visibility(&frontmatter));
-            let visibility = persisted
-                .get(&key)
-                .copied()
-                .or(sidecar)
-                .or(legacy_frontmatter)
-                .unwrap_or(path.effective_visibility);
+            let legacy_visibility = sidecar.or(legacy_frontmatter);
             if !persisted.contains_key(&key) {
-                values.push((key, visibility));
+                if let Some(visibility) = legacy_visibility {
+                    explicit_values.push((key, visibility));
+                }
             }
             if sidecar.is_some() {
                 legacy_files.push(path.path.join(LEGACY_RELATIVE_PATH));
@@ -75,11 +72,13 @@ pub(super) fn migrate_scan(store: &Store, cwd: &Path, scan: &SkillScan) -> Resul
         }
     }
 
-    values.sort_by(|left, right| left.0.cmp(&right.0));
-    values.dedup_by(|left, right| left.0 == right.0);
-    if !values.is_empty() {
-        store.upsert_skill_visibilities_for_workspace(&workspace_root, &values)?;
-    }
+    explicit_values.sort_by(|left, right| left.0.cmp(&right.0));
+    explicit_values.dedup_by(|left, right| left.0 == right.0);
+    let visibility_choices_migrated = if explicit_values.is_empty() {
+        false
+    } else {
+        store.upsert_skill_visibilities_for_workspace(&workspace_root, &explicit_values)? > 0
+    };
     let had_changes = !changes.is_empty();
     if had_changes {
         crate::skills::apply_changes(&ChangeSet {
@@ -91,7 +90,7 @@ pub(super) fn migrate_scan(store: &Store, cwd: &Path, scan: &SkillScan) -> Resul
         remove_legacy_file(&path)?;
     }
 
-    let changed = !values.is_empty() || had_legacy_files || had_changes;
+    let changed = visibility_choices_migrated || had_legacy_files || had_changes;
     if scan.warnings.is_empty() {
         super::mark_migration_completed(store, &migration_key)?;
     }

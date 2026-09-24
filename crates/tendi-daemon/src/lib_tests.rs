@@ -87,6 +87,20 @@ fn sqlite_database_error_classification_separates_locks_from_recovery_errors() {
 }
 
 #[test]
+fn transient_storage_recovery_failures_remain_retryable() {
+    assert!(storage_recovery_failure_is_transient("disk I/O error"));
+    assert!(storage_recovery_failure_is_transient(
+        "database health probe quick_check returned *** in database main ***\nTree 33 page 33: unable to get the page. error code=522"
+    ));
+    assert!(!storage_recovery_failure_is_transient(
+        "database disk image is malformed"
+    ));
+    assert!(!storage_recovery_failure_is_transient(
+        "file is not a database"
+    ));
+}
+
+#[test]
 fn failed_storage_recovery_enters_terminal_degraded_state() {
     let root = temp_workspace();
     let database_path = root.with_extension("sqlite3");
@@ -239,6 +253,102 @@ fn test_daemon_without_background(cwd: PathBuf) -> Daemon {
     let mut daemon = Daemon::with_database(cwd, database_path.clone(), false);
     daemon.test_database_path = Some(database_path);
     daemon
+}
+
+#[test]
+fn rule_file_watcher_matches_existing_and_new_files_in_watched_directories() {
+    let root = temp_workspace();
+    let directory = root.join("rule-files");
+    fs::create_dir_all(&directory).unwrap();
+    let existing = directory.join("existing.md");
+    fs::write(&existing, "rule").unwrap();
+    let daemon = test_daemon_without_background(root.clone());
+    {
+        let mut watcher = daemon.state.rule_runtime.watcher.lock().unwrap();
+        watcher.watched_dirs.insert(directory.clone());
+        watcher.watched_files.insert(existing.clone());
+    }
+
+    assert_eq!(
+        daemon.rule_paths_for_watch_event(&existing),
+        vec![existing.clone()]
+    );
+    let added = directory.join("added.md");
+    assert_eq!(daemon.rule_paths_for_watch_event(&added), vec![added]);
+    assert!(
+        daemon
+            .rule_paths_for_watch_event(&root.join("unrelated.md"))
+            .is_empty()
+    );
+
+    daemon.shutdown();
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn external_rule_edit_refreshes_the_rules_projection() {
+    let root = temp_workspace();
+    let directory = root.join(".cursor/rules");
+    fs::create_dir_all(&directory).unwrap();
+    let path = directory.join("external.mdc");
+    fs::write(&path, "before\n").unwrap();
+    let daemon = test_daemon(root.clone());
+    let original_sha = daemon
+        .rules_projection()
+        .unwrap()
+        .rules
+        .into_iter()
+        .find(|rule| rule.path == path)
+        .expect("test rule is discovered")
+        .sha256;
+    daemon.rules_list().unwrap();
+    {
+        let watcher = daemon.state.rule_runtime.watcher.lock().unwrap();
+        assert!(
+            watcher
+                .watched_files
+                .contains(&path.canonicalize().unwrap())
+        );
+        assert!(
+            watcher
+                .watched_dirs
+                .contains(&directory.canonicalize().unwrap())
+        );
+    }
+    let events = daemon.subscribe_events();
+    thread::sleep(Duration::from_millis(300));
+
+    fs::write(&path, "after\n").unwrap();
+
+    let mut refreshed = false;
+    let mut projection_errors = Vec::new();
+    for _ in 0..50 {
+        let Ok(event) = events.recv_timeout(Duration::from_millis(100)) else {
+            continue;
+        };
+        if event.event == PROJECTION_CHANGED_EVENT && event.payload["domain"] == "rules" {
+            if event.payload["error"].is_null() {
+                refreshed = true;
+                break;
+            }
+            projection_errors.push(event.payload["error"].clone());
+        }
+    }
+    assert!(
+        refreshed,
+        "external rule edit should refresh its projection; errors: {projection_errors:?}"
+    );
+    let updated_sha = daemon
+        .rules_list()
+        .unwrap()
+        .into_iter()
+        .find(|rule| rule.path == path)
+        .expect("updated rule remains discoverable")
+        .sha256;
+    assert_ne!(updated_sha, original_sha);
+
+    daemon.shutdown();
+    let _ = fs::remove_dir_all(root);
 }
 
 fn test_store(daemon: &Daemon) -> tendi_core::storage::Store {

@@ -190,12 +190,15 @@ export type {
 export {
   normalizePrompt,
   normalizePromptTags,
+  filterPrompts,
+  joinPromptBodies,
+  mergePromptBody,
   promptDisplayName,
   promptTagsLabel,
   promptPreview,
   promptTitleFromBody,
 } from "./prompt-model.ts";
-export type { PromptRecord } from "./prompt-model.ts";
+export type { PromptDraft, PromptRecord } from "./prompt-model.ts";
 
 export { configDisplayName } from "./config.ts";
 
@@ -232,15 +235,29 @@ export {
   hookTypeLabel,
   hookTrustHash,
   hookSearchText,
+  filterHooks,
   hookSourcePath,
   hookDeleteDisabledReason,
   hookDisplayName,
+  hookSelectionTargets,
   isHookMutationDelta,
 } from "./hooks.ts";
 export type { HookRecord, HookMutationDelta } from "./hooks.ts";
 
-export { mcpDisplayName, mcpRowKey, mcpSourcePath, normalizeMcp, isMcpMutationDelta } from "./mcp.ts";
-export type { McpRecord, McpMutationDelta } from "./mcp.ts";
+export {
+  isMcpMutationDelta,
+  mcpDisplayName,
+  mcpEnableBlockReason,
+  mcpOperationError,
+  mcpRowKey,
+  mcpSourcePath,
+  mcpToggleTargets,
+  mcpToolCount,
+  mcpToolParameters,
+  normalizeMcp,
+  supportsMcpProbe,
+} from "./mcp.ts";
+export type { McpRecord, McpMutationDelta, McpToolParameter } from "./mcp.ts";
 
 export {
   createLatestRequestAuthority,

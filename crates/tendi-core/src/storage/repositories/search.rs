@@ -45,27 +45,6 @@ impl Store {
         ))
     }
 
-    pub(in crate::storage) fn session_search_matches(&self, query: &str) -> Result<()> {
-        self.conn.execute_batch(&format!(
-            "DROP TABLE IF EXISTS temp.{SESSION_SEARCH_MATCH_TABLE};
-             CREATE TEMP TABLE {SESSION_SEARCH_MATCH_TABLE} (
-                record_id INTEGER PRIMARY KEY,
-                bm25_score REAL NOT NULL
-            )"
-        ))?;
-        self.conn.execute(
-            &format!(
-                "INSERT INTO temp.{SESSION_SEARCH_MATCH_TABLE}(record_id, bm25_score)
-                 SELECT rowid,
-                        -bm25(scoped_session_search_fts, 0.5, 10.0, 5.0, 6.0, 3.0)
-                 FROM scoped_session_search_fts
-                 WHERE scoped_session_search_fts MATCH ?1"
-            ),
-            [query],
-        )?;
-        Ok(())
-    }
-
     pub(in crate::storage) fn session_search_candidate_order(
         candidates: &[SessionIdentity],
     ) -> HashMap<(String, String, PathBuf), usize> {
@@ -95,8 +74,7 @@ impl Store {
         )
     }
 
-    /// Search the workspace-owned session projection through its own scoped
-    /// FTS index. The legacy global FTS tables are never consulted here.
+    /// Search shared transcript content and this scope's metadata index.
     pub fn search_sessions_for_scope(
         &self,
         scope_key: &ScopeKey,
@@ -119,12 +97,46 @@ impl Store {
             return Ok(Vec::new());
         }
         if terms.iter().any(|term| term.chars().count() < 3) {
-            return self.search_scoped_sessions_by_contains(scope_key, &terms, candidates);
+            self.search_scoped_sessions_by_contains(scope_key, &terms, candidates)
+        } else {
+            self.search_scoped_sessions_by_shared_fts(scope_key, &terms, candidates)
         }
-        self.search_scoped_sessions_by_fts(scope_key, &terms, candidates)
     }
 
-    pub(in crate::storage) fn search_scoped_sessions_by_fts(
+    fn session_search_matches(&self, query: &str) -> Result<()> {
+        self.conn.execute_batch(&format!(
+            "DROP TABLE IF EXISTS temp.{SESSION_SEARCH_MATCH_TABLE};
+             CREATE TEMP TABLE {SESSION_SEARCH_MATCH_TABLE} (
+                record_id INTEGER PRIMARY KEY,
+                bm25_score REAL NOT NULL
+            )"
+        ))?;
+        self.conn.execute(
+            &format!(
+                "INSERT OR IGNORE INTO temp.{SESSION_SEARCH_MATCH_TABLE}(record_id, bm25_score)
+                 SELECT entries.id, 0.0
+                 FROM session_search_content_fts
+                 JOIN session_search_content_records AS content
+                   ON content.id = session_search_content_fts.rowid
+                 JOIN scoped_session_search_entries AS entries
+                   ON entries.content_id = content.id
+                 WHERE session_search_content_fts MATCH ?1"
+            ),
+            [query],
+        )?;
+        self.conn.execute(
+            &format!(
+                "INSERT OR IGNORE INTO temp.{SESSION_SEARCH_MATCH_TABLE}(record_id, bm25_score)
+                 SELECT rowid, 0.0
+                 FROM scoped_session_search_metadata_fts
+                 WHERE scoped_session_search_metadata_fts MATCH ?1"
+            ),
+            [query],
+        )?;
+        Ok(())
+    }
+
+    pub(in crate::storage) fn search_scoped_sessions_by_shared_fts(
         &self,
         scope_key: &ScopeKey,
         terms: &[String],
@@ -137,11 +149,11 @@ impl Store {
             .iter()
             .map(|_| {
                 "LOWER(
+                    COALESCE(search.metadata_text, '') || ' ' ||
                     COALESCE(search.title, '') || ' ' ||
                     COALESCE(search.project, '') || ' ' ||
-                    COALESCE(search.metadata_text, '') || ' ' ||
-                    COALESCE(search.user_text, '') || ' ' ||
-                    COALESCE(search.assistant_text, '')
+                    COALESCE(content.user_text, '') || ' ' ||
+                    COALESCE(content.assistant_text, '')
                 ) LIKE ? ESCAPE '\\'"
             })
             .collect::<Vec<_>>()
@@ -162,7 +174,8 @@ impl Store {
                     search.id AS record_id,
                     matches.bm25_score
                 FROM temp.{SESSION_SEARCH_MATCH_TABLE} AS matches
-                JOIN scoped_session_search_records AS search ON search.id = matches.record_id
+                JOIN scoped_session_search_entries AS search ON search.id = matches.record_id
+                JOIN session_search_content_records AS content ON content.id = search.content_id
                 JOIN scoped_session_search_index AS published
                   ON published.scope_key = search.scope_key AND published.session_id = search.session_id
                  AND published.agent = search.agent AND published.session_path = search.session_path
@@ -175,12 +188,12 @@ impl Store {
                 search.metadata_text,
                 search.title,
                 search.project,
-                search.user_text,
-                search.assistant_text,
-                matched.bm25_score
+                content.user_text,
+                content.assistant_text
              FROM matched
-             JOIN scoped_session_search_records AS search
+             JOIN scoped_session_search_entries AS search
                ON search.id = matched.record_id
+             JOIN session_search_content_records AS content ON content.id = search.content_id
              JOIN scoped_sessions AS sessions
                ON sessions.scope_key = matched.scope_key
               AND sessions.id = matched.session_id
@@ -197,14 +210,13 @@ impl Store {
                     user_text: row.get(4)?,
                     assistant_text: row.get(5)?,
                 },
-                row.get::<_, f64>(6)?,
             ))
         })?;
         let candidate_order = candidates.map(Self::session_search_candidate_order);
         let mut hits: Vec<SessionSearchHit> = Vec::new();
         let mut hit_indexes: HashMap<(String, String, PathBuf), usize> = HashMap::new();
         for row in rows {
-            let (data_json, document, _bm25_score) = row?;
+            let (data_json, document) = row?;
             let session = Self::normalize_cached_session(
                 serde_json::from_str::<SessionRecord>(&data_json)
                     .context("invalid cached scoped session search row")?,
@@ -253,8 +265,8 @@ impl Store {
                     COALESCE(search.title, '') || ' ' ||
                     COALESCE(search.project, '') || ' ' ||
                     COALESCE(search.metadata_text, '') || ' ' ||
-                    COALESCE(search.user_text, '') || ' ' ||
-                    COALESCE(search.assistant_text, '')
+                    COALESCE(content.user_text, '') || ' ' ||
+                    COALESCE(content.assistant_text, '')
                 ) LIKE ? ESCAPE '\\'"
             })
             .collect::<Vec<_>>()
@@ -274,10 +286,14 @@ impl Store {
                     search.agent,
                     search.session_path,
                     MIN(search.id) AS record_id
-                FROM scoped_session_search_records AS search
+                FROM scoped_session_search_entries AS search
+                JOIN session_search_content_records AS content
+                  ON content.id = search.content_id
                 JOIN scoped_session_search_index AS published
-                  ON published.scope_key = search.scope_key AND published.session_id = search.session_id
-                 AND published.agent = search.agent AND published.session_path = search.session_path
+                  ON published.scope_key = search.scope_key
+                 AND published.session_id = search.session_id
+                 AND published.agent = search.agent
+                 AND published.session_path = search.session_path
                  AND published.search_index_version = {SESSION_SEARCH_INDEX_VERSION}
                 {candidate_join}
                 WHERE search.scope_key = ?1 AND {where_clause}
@@ -288,17 +304,18 @@ impl Store {
                 search.metadata_text,
                 search.title,
                 search.project,
-                search.user_text,
-                search.assistant_text
-             FROM matched
-             JOIN scoped_session_search_records AS search
-               ON search.id = matched.record_id
-             JOIN scoped_sessions AS sessions
-               ON sessions.scope_key = search.scope_key
-              AND sessions.id = search.session_id
-              AND sessions.agent = search.agent
-              AND sessions.path = search.session_path
-             "
+                content.user_text,
+                content.assistant_text
+            FROM matched
+            JOIN scoped_session_search_entries AS search
+              ON search.id = matched.record_id
+            JOIN session_search_content_records AS content
+              ON content.id = search.content_id
+            JOIN scoped_sessions AS sessions
+              ON sessions.scope_key = matched.scope_key
+             AND sessions.id = matched.session_id
+             AND sessions.agent = matched.agent
+             AND sessions.path = matched.session_path"
         );
         let mut stmt = self.conn.prepare(&sql)?;
         let rows = stmt.query_map(params_from_iter(sql_params.iter()), |row| {

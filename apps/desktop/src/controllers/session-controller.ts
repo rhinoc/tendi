@@ -1,6 +1,7 @@
 import { agentIdentityKey, friendlyAgent } from "../lib/agents.ts";
 import { dayGroupKey } from "../lib/strings.ts";
-import { formatTranscriptPreview } from "../lib/session-preview.ts";
+import { formatSessionTitle, formatTranscriptPreview } from "../lib/session-preview.ts";
+import { sessionExternalKey, sessionSourceExternalKey } from "../lib/session-selection.ts";
 import { transcriptItemType, type JsonlTranscriptParseResult } from "../lib/transcript.ts";
 import {
   compareSessions,
@@ -300,6 +301,89 @@ export function selectSessionRelationships(
   return { childSessions, tree };
 }
 
+export type SessionGraphNode = {
+  name: string;
+  label: string;
+  kind: "session-parent" | "session-child" | "skill-used";
+};
+
+export type SessionGraphEdge = { from: string; to: string };
+
+export type SessionRelationsGraph = {
+  focusName: string;
+  nodes: SessionGraphNode[];
+  edges: SessionGraphEdge[];
+  relatedSessions: Map<string, SessionRecord>;
+};
+
+export function selectSessionRelationsGraph(
+  session: SessionRecord,
+  sessionTree: readonly SessionRecord[],
+): SessionRelationsGraph {
+  const focusName = `session:${sessionExternalKey(session)}`;
+  const relatedSessions = new Map<string, SessionRecord>();
+  const treeByKey = new Map(sessionTree.map((treeSession) => [sessionExternalKey(treeSession), treeSession]));
+  const nodes: SessionGraphNode[] = sessionTree.map((treeSession) => {
+    const name = `session:${sessionExternalKey(treeSession)}`;
+    if (name !== focusName) relatedSessions.set(name, treeSession);
+    return {
+      name,
+      label: formatSessionTitle(treeSession.title),
+      kind: sessionKind(treeSession) === SessionKind.Child ? "session-child" : "session-parent",
+    };
+  });
+  const edges: SessionGraphEdge[] = [];
+  for (const treeSession of sessionTree) {
+    if (!treeSession.parentSessionId) continue;
+    const parentKey = sessionExternalKey({ agent: treeSession.agent, id: treeSession.parentSessionId });
+    const parent = treeByKey.get(parentKey);
+    if (parent) {
+      edges.push({
+        from: `session:${sessionExternalKey(parent)}`,
+        to: `session:${sessionExternalKey(treeSession)}`,
+      });
+    }
+  }
+  return { focusName, nodes, edges, relatedSessions };
+}
+
+export type SessionSkillsConvergenceGraph = {
+  focusName: string;
+  nodes: SessionGraphNode[];
+  edges: SessionGraphEdge[];
+};
+
+export function selectSessionSkillsConvergenceGraph(
+  session: SessionRecord,
+  links: readonly SessionSkillLinkRecord[],
+): SessionSkillsConvergenceGraph {
+  const focusName = `session:${sessionSourceExternalKey({
+    agent: session.agent,
+    id: session.id,
+    path: session.path,
+  })}`;
+  const skillsByPath = new Map<string, string>();
+  for (const link of links) {
+    if (link.skill_name && link.skill_path && !skillsByPath.has(link.skill_path)) {
+      skillsByPath.set(link.skill_path, `skill:${link.skill_path}`);
+    }
+  }
+  const nodes: SessionGraphNode[] = [
+    {
+      name: focusName,
+      label: formatSessionTitle(session.title),
+      kind: sessionKind(session) === SessionKind.Child ? "session-child" : "session-parent",
+    },
+    ...[...skillsByPath.entries()].map(([skillPath, name]) => ({
+      name,
+      label: links.find((link) => link.skill_path === skillPath)?.skill_name ?? skillPath,
+      kind: "skill-used" as const,
+    })),
+  ];
+  const edges = [...skillsByPath.values()].map((name) => ({ from: focusName, to: name }));
+  return { focusName, nodes, edges };
+}
+
 export type ProjectSearchRank = { distance: number; start: number; length: number };
 
 export function projectSearchRank(label: string, query: string): ProjectSearchRank | null {
@@ -333,6 +417,21 @@ export function projectSearchRank(label: string, query: string): ProjectSearchRa
     }
   }
   return best;
+}
+
+export function selectVisibleSessionProjectOptions(
+  options: readonly SessionProjectOption[],
+  selectedProjectKeys: readonly string[],
+  query: string,
+): SessionProjectOption[] {
+  return options
+    .filter((option) => selectedProjectKeys.includes(option.key) || !query || projectSearchRank(option.label, query) !== null)
+    .sort((left, right) => {
+      const leftSelected = selectedProjectKeys.includes(left.key);
+      const rightSelected = selectedProjectKeys.includes(right.key);
+      if (leftSelected !== rightSelected) return leftSelected ? -1 : 1;
+      return right.count - left.count || left.label.localeCompare(right.label) || left.title.localeCompare(right.title);
+    });
 }
 
 function sessionGroupKeyForPaging(session: SessionRecord, groupBy: string): string {

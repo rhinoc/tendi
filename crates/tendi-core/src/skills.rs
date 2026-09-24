@@ -848,42 +848,15 @@ fn apply_persisted_skill_visibilities(
     cwd: &Path,
     mut scan: SkillScan,
 ) -> Result<SkillScan> {
-    let mut persisted = store.skill_visibilities_for_workspace(cwd)?;
-    let mut observed = BTreeMap::<PathBuf, SkillVisibility>::new();
-    for skill in &scan.skills {
-        for path in &skill.paths {
-            let key = canonical_skill_dir(&path.path);
-            observed
-                .entry(key)
-                .and_modify(|current| {
-                    *current = preferred_skill_visibility(*current, path.effective_visibility)
-                })
-                .or_insert(path.effective_visibility);
-        }
-    }
-
-    let missing = observed
-        .iter()
-        .filter(|(path, _)| !persisted.contains_key(*path))
-        .map(|(path, visibility)| (path.clone(), *visibility))
-        .collect::<Vec<_>>();
-    if !missing.is_empty() {
-        store.initialize_skill_visibilities_for_workspace(cwd, &missing)?;
-        // A command can win the race after the initial read. Publish its value,
-        // never the scanner's stale default; publication revision is checked by
-        // the projection owner after this preparation completes.
-        persisted = store.skill_visibilities_for_workspace(cwd)?;
-    }
+    let persisted = store.skill_visibilities_for_workspace(cwd)?;
     for skill in &mut scan.skills {
         for path in &mut skill.paths {
             let key = canonical_skill_dir(&path.path);
-            let visibility = persisted
-                .get(&key)
-                .copied()
-                .or_else(|| observed.get(&key).copied())
-                .unwrap_or(SkillVisibility::Auto);
-            path.tendi_visibility = Some(visibility);
-            path.effective_visibility = visibility;
+            let locked = persisted.get(&key).copied();
+            path.tendi_visibility = locked;
+            if let Some(visibility) = locked {
+                path.effective_visibility = visibility;
+            }
         }
         skill.visibility = skill_visibility_from_paths(&skill.paths);
     }
@@ -943,15 +916,17 @@ fn reconcile_skill_visibility_for_workspace_with_report(
         .flat_map(|(path, (agent, _, _))| skill_visibility_resource_paths(path, *agent, true))
         .collect::<Vec<_>>();
     let _resources = crate::coordination::acquire_file_resources(&resources)?;
-    // The database value is authoritative, including commands that changed no
-    // file bytes. Reload after admission rather than applying a stale scan plan.
+    // Explicit Tendi choices are authoritative, including commands that
+    // changed no file bytes. Reload them after admission rather than applying
+    // a stale visibility plan.
     let persisted = store.skill_visibilities_for_workspace(cwd)?;
     let mut scan = scan;
     for skill in &mut scan.skills {
         for path in &mut skill.paths {
-            if let Some(visibility) = persisted.get(&canonical_skill_dir(&path.path)) {
-                path.tendi_visibility = Some(*visibility);
-                path.effective_visibility = *visibility;
+            let visibility = persisted.get(&canonical_skill_dir(&path.path)).copied();
+            path.tendi_visibility = visibility;
+            if let Some(visibility) = visibility {
+                path.effective_visibility = visibility;
             }
         }
         skill.visibility = skill_visibility_from_paths(&skill.paths);
@@ -2897,6 +2872,9 @@ pub fn skill_source_records_for_add(report: &SkillAddApplyReport) -> Vec<SkillSo
 pub fn capture_skill_snapshots(records: &[SkillSourceRecord]) -> Result<Vec<SkillSnapshot>> {
     let mut snapshots = Vec::new();
     for record in records {
+        if is_git_source_kind(&record.source_kind) {
+            continue;
+        }
         let Some(source_version) = record.source_version.as_deref() else {
             continue;
         };

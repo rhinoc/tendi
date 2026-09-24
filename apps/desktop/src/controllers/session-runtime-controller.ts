@@ -26,6 +26,7 @@ type SessionScanEvent = Extract<RuntimeEvent, { event: typeof RuntimeEventName.S
 export type SessionRuntimeControllerOptions = {
   refreshSessionProjects: () => Promise<void>;
   refreshSkills: () => Promise<unknown>;
+  onSkillFilesChanged?: (eventId: number, paths: readonly string[]) => void;
   refreshProjection: (domain: string) => Promise<void>;
   setProjectionError: (domain: string, message: string) => void;
   runSkillIndex: () => Promise<unknown> | void;
@@ -50,6 +51,7 @@ export function useSessionRuntimeController(
   const {
     refreshSessionProjects,
     refreshSkills,
+    onSkillFilesChanged,
     refreshProjection,
     setProjectionError,
     runSkillIndex,
@@ -283,6 +285,7 @@ export function useSessionRuntimeController(
         });
       } else if (event.event === RuntimeEventName.SkillsChanged) {
         if (!isCurrentScopeEvent) return;
+        onSkillFilesChanged?.(event.id, event.payload.paths);
         void refreshSkills().catch((error) => {
           logger.warn("skills watcher refresh failed", { error });
         });
@@ -324,7 +327,7 @@ export function useSessionRuntimeController(
       for (const waiters of sessionScanWaiters.current.values()) waiters.forEach((resolve) => resolve());
       sessionScanWaiters.current.clear();
     };
-  }, [finishSessionScanWaiters, handleSessionScanEvent, refreshProjectionFromEvent, refreshSkills, resyncSessionSnapshot, setAnalyticsRevision, setAnalyticsRevisionError, setAnalyticsRevisionReady, setCheckingSkillUpdates, setProjectionError, setSkillUpdateError]);
+  }, [finishSessionScanWaiters, handleSessionScanEvent, onSkillFilesChanged, refreshProjectionFromEvent, refreshSkills, resyncSessionSnapshot, setAnalyticsRevision, setAnalyticsRevisionError, setAnalyticsRevisionReady, setCheckingSkillUpdates, setProjectionError, setSkillUpdateError]);
 
   const refreshSessionsFromScan = useCallback(() => {
     setSessionRefreshError("");

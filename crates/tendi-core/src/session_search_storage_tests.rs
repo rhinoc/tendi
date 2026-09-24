@@ -157,7 +157,7 @@ fn durable_provisional_tail_is_replaced_not_duplicated() {
     let count: i64 = store
         .conn
         .query_row(
-            "SELECT count(*) FROM scoped_session_search_records",
+            "SELECT count(*) FROM scoped_session_search_entries",
             [],
             |row| row.get(0),
         )
@@ -627,7 +627,7 @@ fn deletion_is_committed_before_independent_index_cleanup() {
     let remaining: i64 = store
         .conn
         .query_row(
-            "SELECT count(*) FROM scoped_session_search_records",
+            "SELECT count(*) FROM scoped_session_search_entries",
             [],
             |row| row.get(0),
         )
@@ -638,7 +638,7 @@ fn deletion_is_committed_before_independent_index_cleanup() {
 }
 
 #[test]
-fn append_retains_existing_fts_rows_even_when_session_metadata_is_unchanged() {
+fn append_retains_existing_search_entries_when_session_metadata_is_unchanged() {
     let (root, store, scope, session) = fixture("append");
     fs::write(&session.path, message("originalneedle")).unwrap();
     store
@@ -650,7 +650,7 @@ fn append_retains_existing_fts_rows_even_when_session_metadata_is_unchanged() {
     let original: i64 = store
         .conn
         .query_row(
-            "SELECT id FROM scoped_session_search_records WHERE record_order = 1",
+            "SELECT id FROM scoped_session_search_entries WHERE record_order = 1",
             [],
             |r| r.get(0),
         )
@@ -674,7 +674,7 @@ fn append_retains_existing_fts_rows_even_when_session_metadata_is_unchanged() {
     let retained: i64 = store
         .conn
         .query_row(
-            "SELECT id FROM scoped_session_search_records WHERE record_order = 1",
+            "SELECT id FROM scoped_session_search_entries WHERE record_order = 1",
             [],
             |r| r.get(0),
         )
@@ -734,7 +734,7 @@ fn rewrite_and_truncation_remove_obsolete_search_results() {
     let count: i64 = store
         .conn
         .query_row(
-            "SELECT count(*) FROM scoped_session_search_records",
+            "SELECT count(*) FROM scoped_session_search_entries",
             [],
             |r| r.get(0),
         )

@@ -7,6 +7,13 @@ export type PromptRecord = {
   updatedAt: string;
 };
 
+export type PromptDraft = {
+  id?: string;
+  title: string;
+  tags: string[];
+  body: string;
+};
+
 export function promptDisplayName(prompt: Pick<PromptRecord, "title"> | null | undefined): string {
   return prompt?.title || "Prompt";
 }
@@ -46,6 +53,21 @@ export function normalizePrompt(prompt: Record<string, unknown>): PromptRecord |
 
 export function promptTagsLabel(prompt: Pick<PromptRecord, "tags">): string {
   return prompt.tags.join(", ");
+}
+
+export function filterPrompts(prompts: PromptRecord[], query: string): PromptRecord[] {
+  const normalizedQuery = query.trim().toLowerCase();
+  if (!normalizedQuery) return prompts;
+  return prompts.filter((prompt) => [prompt.title, promptTagsLabel(prompt), prompt.body]
+    .some((value) => value.toLowerCase().includes(normalizedQuery)));
+}
+
+export function mergePromptBody(body: string, existingBody?: string, fallbackBody?: string): string {
+  return body || existingBody || fallbackBody || "";
+}
+
+export function joinPromptBodies(prompts: Pick<PromptRecord, "body">[]): string {
+  return prompts.map((prompt) => prompt.body).filter(Boolean).join("\n\n");
 }
 
 export function promptPreview(prompt: Pick<PromptRecord, "body">): string {

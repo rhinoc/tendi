@@ -177,9 +177,10 @@ export function transcriptTokenTexts(items: TranscriptTokenItem[]): string[] {
   return [...texts];
 }
 
-function cachedTokenCount(value: unknown, cache: Map<string, number>, count: TokenCounter): number {
+function tokenCount(value: unknown, cache: Map<string, number> | null, count: TokenCounter): number {
   const text = textValue(value);
   if (!text) return 0;
+  if (!cache) return count(text);
   let tokens = cache.get(text);
   if (tokens == null) {
     tokens = count(text);
@@ -188,9 +189,13 @@ function cachedTokenCount(value: unknown, cache: Map<string, number>, count: Tok
   return tokens;
 }
 
-function estimateTranscriptTokensWithCounter(items: TranscriptTokenItem[], count: TokenCounter): TranscriptTokenStats {
+function estimateTranscriptTokensWithCounter(
+  items: TranscriptTokenItem[],
+  count: TokenCounter,
+  cacheRepeatedTexts = true,
+): TranscriptTokenStats {
   const stats: TranscriptTokenStats = { input: 0, output: 0, total: 0 };
-  const cache = new Map<string, number>();
+  const cache = cacheRepeatedTexts ? new Map<string, number>() : null;
   const inputDetails = new Map<string, number>();
   const outputDetails = new Map<string, number>();
   let visibleContextTokens = 0;
@@ -212,13 +217,13 @@ function estimateTranscriptTokensWithCounter(items: TranscriptTokenItem[], count
       const tools = item.tools ?? [];
       chargeVisibleContext();
       for (const tool of tools) {
-        const outputTokens = cachedTokenCount(tool.command, cache, count);
+        const outputTokens = tokenCount(tool.command, cache, count);
         stats.output += outputTokens;
         visibleContextTokens += outputTokens;
         addDetail(outputDetails, `Tool call: ${toolLabel(tool)}`, outputTokens);
       }
       for (const tool of tools) {
-        const inputTokens = cachedTokenCount(tool.result, cache, count);
+        const inputTokens = tokenCount(tool.result, cache, count);
         visibleContextTokens += inputTokens;
         if (inputTokens > 0) requestPending = true;
       }
@@ -228,7 +233,7 @@ function estimateTranscriptTokensWithCounter(items: TranscriptTokenItem[], count
       chargeVisibleContext();
       while (index < items.length && (items[index].type ?? "") === "tool") {
         const tool = items[index];
-        const outputTokens = cachedTokenCount(tool.command, cache, count);
+        const outputTokens = tokenCount(tool.command, cache, count);
         stats.output += outputTokens;
         visibleContextTokens += outputTokens;
         addDetail(outputDetails, `Tool call: ${toolLabel(tool)}`, outputTokens);
@@ -238,7 +243,7 @@ function estimateTranscriptTokensWithCounter(items: TranscriptTokenItem[], count
       for (let toolIndex = groupEnd - 1; toolIndex >= 0; toolIndex -= 1) {
         const tool = items[toolIndex];
         if ((tool.type ?? "") !== "tool") break;
-        const inputTokens = cachedTokenCount(tool.result, cache, count);
+        const inputTokens = tokenCount(tool.result, cache, count);
         visibleContextTokens += inputTokens;
         if (inputTokens > 0) requestPending = true;
       }
@@ -246,7 +251,7 @@ function estimateTranscriptTokensWithCounter(items: TranscriptTokenItem[], count
       continue;
     }
 
-    const tokens = cachedTokenCount(transcriptItemText(item), cache, count);
+    const tokens = tokenCount(transcriptItemText(item), cache, count);
     if (isOutputType(type)) {
       chargeVisibleContext();
       stats.output += tokens;
@@ -275,7 +280,7 @@ export function estimateTranscriptTokensFromCounts(
   items: TranscriptTokenItem[],
   counts: ReadonlyMap<string, number>,
 ): TranscriptTokenStats {
-  return estimateTranscriptTokensWithCounter(items, (value) => counts.get(textValue(value)) ?? 0);
+  return estimateTranscriptTokensWithCounter(items, (value) => counts.get(textValue(value)) ?? 0, false);
 }
 
 function skillNotes(skillLinks: TranscriptSkillLink[] = []): string[] {

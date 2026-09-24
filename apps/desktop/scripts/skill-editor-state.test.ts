@@ -1,9 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
-  discardDirtyDrafts,
+  discardCleanDrafts,
   getSkillEditorState,
   hydrateSkillDraft,
+  retainActiveAndDirtyDrafts,
+  setSkillEditorActivePath,
   updateSkillEditorField,
 } from "../src/features/skills/skill-editor-state.ts";
 
@@ -73,8 +75,33 @@ test("loading content preserves dirty drafts and refreshes clean drafts", () => 
     originalContent: "fresh from disk",
     sha256: "fresh-sha",
   });
-  assert.deepEqual(discardDirtyDrafts({
+  assert.deepEqual(discardCleanDrafts({
     dirty: dirtyDraft,
     clean: cleanDraft,
-  }), { clean: cleanDraft });
+  }), { dirty: dirtyDraft });
+});
+
+test("clean drafts are kept only for the active file while dirty files survive switching", () => {
+  const activePath = "agents/openai.yaml";
+  const activeDraft = { content: "active", originalContent: "active", sha256: "active-sha" };
+  const inactiveDraft = { content: "stale", originalContent: "stale", sha256: "stale-sha" };
+  const dirtyDraft = { content: "edited", originalContent: "original", sha256: "dirty-sha" };
+  const drafts = {
+    [activePath]: activeDraft,
+    "other.md": inactiveDraft,
+    "unsaved.md": dirtyDraft,
+  };
+
+  assert.deepEqual(retainActiveAndDirtyDrafts(drafts, activePath), {
+    [activePath]: activeDraft,
+    "unsaved.md": dirtyDraft,
+  });
+
+  const skillId = `skill-editor-active-path-${Date.now()}`;
+  updateSkillEditorField(skillId, "drafts", drafts);
+  setSkillEditorActivePath(skillId, "other.md");
+  assert.deepEqual(getSkillEditorState(skillId).drafts, {
+    "other.md": inactiveDraft,
+    "unsaved.md": dirtyDraft,
+  });
 });

@@ -1,10 +1,12 @@
 import { useSyncExternalStore } from "react";
+import {
+  discardCleanDrafts,
+  hydrateEditorDraft,
+  retainActiveAndDirtyDrafts,
+  type EditorDraft,
+} from "../../lib/editor-draft-logic.ts";
 
-export type SkillDraft = {
-  content: string;
-  originalContent: string;
-  sha256: string;
-};
+export type SkillDraft = EditorDraft;
 
 export type SkillEditorState = {
   activePath: string;
@@ -17,7 +19,6 @@ export type SkillEditorState = {
 
 export type SkillEditorStateValue<T> = T | ((current: T) => T);
 
-const MAX_CLEAN_DRAFT_CHARS = 32 * 1024 * 1024;
 const stateBySkillId = new Map<string, SkillEditorState>();
 const listenersBySkillId = new Map<string, Set<() => void>>();
 
@@ -75,23 +76,14 @@ export function updateSkillEditorField<K extends keyof SkillEditorState>(
   }));
 }
 
-export function trimCleanDrafts(drafts: Record<string, SkillDraft>, activePath: string) {
-  let cleanChars = 0;
-  const evictable: Array<[string, SkillDraft]> = [];
-  for (const [path, draft] of Object.entries(drafts)) {
-    if (path === activePath || draft.content !== draft.originalContent) continue;
-    cleanChars += draft.content.length;
-    evictable.push([path, draft]);
-  }
-  if (cleanChars <= MAX_CLEAN_DRAFT_CHARS) return drafts;
+export { discardCleanDrafts, retainActiveAndDirtyDrafts };
 
-  const next = { ...drafts };
-  for (const [path, draft] of evictable) {
-    if (cleanChars <= MAX_CLEAN_DRAFT_CHARS) break;
-    delete next[path];
-    cleanChars -= draft.content.length;
-  }
-  return next;
+export function setSkillEditorActivePath(skillId: string, activePath: string) {
+  return updateSkillEditorState(skillId, (current) => ({
+    ...current,
+    activePath,
+    drafts: retainActiveAndDirtyDrafts(current.drafts, activePath),
+  }));
 }
 
 export function hydrateSkillDraft(
@@ -101,17 +93,8 @@ export function hydrateSkillDraft(
   sha256: string,
   activePath: string,
 ) {
-  const existing = drafts[path];
-  const nextDraft = existing && existing.content !== existing.originalContent
-    ? existing
-    : { content, originalContent: content, sha256 };
-  return trimCleanDrafts({ ...drafts, [path]: nextDraft }, activePath);
-}
-
-export function discardDirtyDrafts(drafts: Record<string, SkillDraft>) {
-  return Object.fromEntries(
-    Object.entries(drafts).filter(([, draft]) => draft.content === draft.originalContent),
-  );
+  const nextDraft = hydrateEditorDraft(drafts[path], content, sha256);
+  return retainActiveAndDirtyDrafts({ ...drafts, [path]: nextDraft }, activePath);
 }
 
 export function useSkillEditorState(skillId: string) {

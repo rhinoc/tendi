@@ -8,6 +8,34 @@ import { DataTable } from "../components/DataTable.tsx";
 import type { ColumnDef, SortState } from "../components/DataTable.types";
 import { SortDirection } from "../lib/sort.ts";
 import { getTabScrollPosition, setTabScrollPosition, useTabState } from "../lib/tab-state.ts";
+import { useTranscriptNavigation } from "../lib/hooks/use-transcript-navigation.ts";
+import {
+  buildSessionLocatorItems,
+  buildSessionLocatorItemsFromMetadata,
+  DEFAULT_TRANSCRIPT_SEARCH_SCOPES,
+  findTranscriptSearchTargets,
+  transcriptGroupChildKey,
+  transcriptItemKey,
+  transcriptItemSearchQuery,
+  TRANSCRIPT_SEARCH_SCOPES,
+  type SessionLocatorItem,
+  type TranscriptItemRecord,
+  type TranscriptLoadMoreResult,
+  type TranscriptSearchScopeState,
+} from "../features/sessions/session-transcript-logic.ts";
+import {
+  useSessionTranscript,
+  type SessionTranscriptTargetLoadOptions,
+  type SessionTranscriptTargetLoadResult,
+} from "../features/sessions/useSessionTranscript.ts";
+import { useSessionTranscriptSearch } from "../features/sessions/useSessionTranscriptSearch.ts";
+import { useSessionTranscriptNavigation } from "../features/sessions/useSessionTranscriptNavigation.ts";
+import { sessionSourceIdentity, useInferredSessionResumeTargets } from "../features/sessions/useInferredSessionResumeTargets.ts";
+import { useSessionListWorkspace } from "../features/sessions/useSessionListWorkspace.ts";
+import { useSessionRemoteListWorkspace } from "../features/sessions/useSessionRemoteListWorkspace.ts";
+import { useSessionResumeOperations } from "../features/sessions/useSessionResumeOperations.ts";
+import { useSessionSkillLinks } from "../features/sessions/useSessionSkillLinks.ts";
+import { ImportFeedbackState, useSessionImport } from "../features/sessions/useSessionImport.ts";
 import { agentDefinitions } from "../lib/agent/index.ts";
 import type { TokenMetricProps } from "../components/TokenStatusBar.tsx";
 import { AgentBadge } from "../components/shared/AgentBadge.tsx";
@@ -40,7 +68,7 @@ import { Toast } from "../components/shared/Toast.tsx";
 import { ToolCall } from "../components/shared/ToolCall.tsx";
 import { useVirtualViewport } from "../components/shared/useVirtualViewport.ts";
 import { findTextRanges } from "../components/shared/text-ranges.ts";
-import { RelationshipGraphKind, SkillRelationshipMap } from "../features/skills/SkillRelationshipMap.tsx";
+import { SkillRelationshipMap } from "../features/skills/SkillRelationshipMap.tsx";
 import { createSessionTableColumns } from "../features/sessions/createSessionTableColumns.tsx";
 import { SessionTitleText, TranscriptLinkText } from "../components/shared/TranscriptLinkText.tsx";
 import { PretextText } from "../components/shared/PretextText.tsx";
@@ -60,7 +88,6 @@ import {
   copyPathLabel,
   copyValueLabel,
   compactDateTime,
-  createLatestRequestAuthority,
   formatDuration,
   formatSessionTitle,
   formatTranscriptPreview,
@@ -69,7 +96,6 @@ import {
   groupTranscriptItems,
   isWebSource,
   logger,
-  mergeTranscriptItems,
   promptActionLabels,
   revealPathLabel,
   sessionExternalKey,
@@ -77,13 +103,10 @@ import {
   safeInvoke,
   sessionCacheRate,
   sessionTitleValue,
-  sessionIdentity,
   sessionLogicalIdentity,
   sessionSourceExternalKey,
   sessionKind,
   sessionAppDeepLink,
-  sessionResumeError,
-  sessionResumeErrorMessage,
   sessionResumeLabel,
   sessionResumeTargetForAgent,
   sessionResumeTargetForMenu,
@@ -91,9 +114,6 @@ import {
   sessionWorkspace,
   sessionWorkspacePath,
   SESSION_SEARCH_SORT,
-  SessionResumeErrorAction,
-  SessionResumeErrorCode,
-  SessionResumeOutcomeStatus,
   SessionResumeTarget,
   SessionKind,
   SessionSortKey,
@@ -102,33 +122,29 @@ import {
   transcriptEvidenceSearchText,
   transcriptItemType,
   isTranscriptExecItem,
-  transcriptItemsSize,
 } from "../lib/index.ts";
 import type {
-  JsonlTranscriptParseResult,
   TranscriptLocatorItem,
   TranscriptLocatorPage,
   TranscriptPage,
-  TranscriptSearchHit,
   TranscriptSearchResult,
   TranscriptSearchScopes,
   MissingSessionProjectPolicy,
   ProjectSummary,
   SessionProjectSummary,
   SessionResumeOutcome,
-  SessionResumeState,
   SessionRecord,
   SessionSkillLinkRecord,
 } from "../lib/index.ts";
 import type { SkillIndexStatus } from "../store/desktop-store.ts";
 import {
   IMPORTED_SESSION_AGENT,
-  createImportedSessionRecord,
-  projectSearchRank,
+  selectSessionRelationsGraph,
+  selectSessionSkillsConvergenceGraph,
+  selectVisibleSessionProjectOptions,
   sessionPageContextKey,
   sessionPageForRow,
   selectSessionRelationships,
-  selectSessionListView,
   mergeSessionListRows,
   sessionTableRowId,
   type GroupedSessionPage,
@@ -138,33 +154,9 @@ import {
 
 const SessionTokenStatusBar = lazy(() => import("../components/SessionTokenStatusBar.tsx").then(({ SessionTokenStatusBar: component }) => ({ default: component })));
 
-type TranscriptItemRecord = {
-  type: string;
-  body: string;
-  tag?: string;
-  time?: string;
-  command?: string;
-  result?: string;
-  durationMs?: string | number;
-  linkedSessionId?: string;
-  model?: string;
-  effort?: string;
-  mode?: string;
-  tools?: TranscriptItemRecord[];
-  callId?: string;
-  startedAtMs?: number;
-};
-
-type TranscriptLoadMoreResult = {
-  items: TranscriptItemRecord[];
-  status: "loaded" | "exhausted" | "failed" | "cancelled";
-};
-
 const SESSION_SEARCH_DEBOUNCE_MS = 300;
 const SESSION_LOCATOR_MIN_ITEMS = 4;
 const SESSION_REFRESH_ERROR = "Could not refresh sessions. Try again.";
-const TRANSCRIPT_CACHE_ITEM_LIMIT = 1_200;
-const TRANSCRIPT_CACHE_CHARACTER_LIMIT = 8 * 1024 * 1024;
 const TRANSCRIPT_IMPORT_PROVIDER_PLACEHOLDER = "__choose_transcript_provider__";
 const TRANSCRIPT_IMPORT_PROVIDERS = agentDefinitions
   .filter((definition) => definition.transcriptParser)
@@ -172,142 +164,6 @@ const TRANSCRIPT_IMPORT_PROVIDERS = agentDefinitions
 const EMPTY_SESSION_ROWS: SessionRecord[] = [];
 const EMPTY_SESSION_PROJECT_OPTIONS: SessionListPageResult["projectOptions"] = [];
 const EMPTY_GROUPED_SESSION_PAGES: GroupedSessionPage[] = [];
-
-enum ImportFeedbackState {
-  Idle = "idle",
-  Loading = "loading",
-  Success = "success",
-  Warning = "warning",
-  Error = "error",
-}
-type ResumeFeedbackState = AsyncStatus.Loading | AsyncStatus.Success | AsyncStatus.Error;
-type PendingResumeConflict = {
-  session: SessionRecord;
-  target?: Exclude<SessionResumeTarget, SessionResumeTarget.Auto>;
-};
-
-type TranscriptImportWorkerResponse =
-  | { ok: true; result: JsonlTranscriptParseResult }
-  | { ok: false; error: string };
-
-function parseImportedTranscript(
-  file: File,
-  providerId: string,
-  workerRef: { current: { worker: Worker; cancel: () => void } | null },
-): Promise<JsonlTranscriptParseResult> {
-  const worker = new Worker(
-    new URL("../workers/transcript-import.worker.ts", import.meta.url),
-    { type: "module" },
-  );
-  return new Promise((resolve, reject) => {
-    let settled = false;
-    const cleanup = () => {
-      if (workerRef.current?.worker === worker) workerRef.current = null;
-      worker.terminate();
-    };
-    const cancel = () => {
-      if (settled) return;
-      settled = true;
-      cleanup();
-      reject(new Error("Transcript import cancelled"));
-    };
-    worker.onmessage = (event: MessageEvent<TranscriptImportWorkerResponse>) => {
-      if (settled) return;
-      settled = true;
-      cleanup();
-      if (event.data.ok) resolve(event.data.result);
-      else reject(new Error(event.data.error));
-    };
-    worker.onerror = (event) => {
-      if (settled) return;
-      settled = true;
-      cleanup();
-      reject(new Error(event.message || "Transcript import worker failed"));
-    };
-    workerRef.current = { worker, cancel };
-    try {
-      worker.postMessage({ file, providerId });
-    } catch (error) {
-      logger.error("sessions transcript import worker failed", { error });
-      settled = true;
-      cleanup();
-      reject(error);
-    }
-  });
-}
-
-function trimTranscriptCache(cache: Map<string, TranscriptPage>) {
-  let itemCount = 0;
-  let characterCount = 0;
-  for (const page of cache.values()) {
-    itemCount += page.items.length;
-    characterCount += transcriptItemsSize(page.items);
-  }
-  while (
-    cache.size > 1
-    && (itemCount > TRANSCRIPT_CACHE_ITEM_LIMIT || characterCount > TRANSCRIPT_CACHE_CHARACTER_LIMIT)
-  ) {
-    const oldestKey = cache.keys().next().value;
-    if (oldestKey === undefined) break;
-    const oldest = cache.get(oldestKey);
-    cache.delete(oldestKey);
-    if (oldest) {
-      itemCount -= oldest.items.length;
-      characterCount -= transcriptItemsSize(oldest.items);
-    }
-  }
-  if (cache.size === 1 && (itemCount > TRANSCRIPT_CACHE_ITEM_LIMIT || characterCount > TRANSCRIPT_CACHE_CHARACTER_LIMIT)) {
-    const key = cache.keys().next().value;
-    if (key !== undefined) cache.delete(key);
-  }
-}
-
-enum TranscriptSearchScope {
-  User = "user",
-  Assistant = "assistant",
-  System = "system",
-  Tool = "tool",
-}
-
-type TranscriptSearchScopeState = Record<TranscriptSearchScope, boolean>;
-
-const TRANSCRIPT_SEARCH_SCOPES: Array<{
-  id: TranscriptSearchScope;
-  label: string;
-  ariaLabel: string;
-}> = [
-  { id: TranscriptSearchScope.User, label: "User", ariaLabel: "Search user messages" },
-  { id: TranscriptSearchScope.Assistant, label: "Assistant", ariaLabel: "Search assistant messages" },
-  { id: TranscriptSearchScope.System, label: "System", ariaLabel: "Search system messages" },
-  { id: TranscriptSearchScope.Tool, label: "Tools", ariaLabel: "Search tool calls" },
-];
-
-const DEFAULT_TRANSCRIPT_SEARCH_SCOPES: TranscriptSearchScopeState = {
-  [TranscriptSearchScope.User]: true,
-  [TranscriptSearchScope.Assistant]: true,
-  [TranscriptSearchScope.System]: false,
-  [TranscriptSearchScope.Tool]: false,
-};
-
-function transcriptSearchScope(type: string | undefined): TranscriptSearchScope {
-  switch (type) {
-    case "user":
-    case "notification":
-      return TranscriptSearchScope.User;
-    case "context":
-    case "compaction":
-    case "model_config":
-      return TranscriptSearchScope.System;
-    case "tool":
-    case TranscriptGroupType.ToolGroup:
-      return TranscriptSearchScope.Tool;
-    case "assistant":
-    case "thinking":
-    case "reasoning":
-    default:
-      return TranscriptSearchScope.Assistant;
-  }
-}
 
 function sessionCacheMetrics(session: SessionRecord): TokenMetricProps[] {
   const usage = session.tokenUsage;
@@ -355,30 +211,13 @@ function reportedTokenSegments(session: SessionRecord) {
   ];
 }
 
-type SkillEvidenceTarget = {
-  key: string;
-  groupKey?: string;
-  index: number;
-};
-
-type TranscriptSearchTarget = SkillEvidenceTarget;
-
 enum KeyboardNavigationScope {
   List = "list",
   Detail = "detail",
 }
 
-type TranscriptNavigationIntent = "idle" | "search" | "locator" | "skill" | "top" | "bottom";
-
 type KeyboardNavigationScopeRef = {
   current: KeyboardNavigationScope;
-};
-
-type SessionLocatorItem = {
-  key: string;
-  index: number;
-  label: string;
-  response: string;
 };
 
 const TRANSCRIPT_VIRTUAL_THRESHOLD = 120;
@@ -773,60 +612,6 @@ function linkEvidenceText(link: SessionSkillLinkRecord) {
 }
 
 
-function linkEvidenceTime(link: SessionSkillLinkRecord) {
-  return `${link.evidence_time ?? ""}`.trim();
-}
-
-
-function transcriptItemKey(prefix: string | undefined, index: string | number) {
-  return prefix ? `${prefix}-${index}` : `${index}`;
-}
-
-function transcriptGroupChildKey(groupIndex: string | number, childIndex: number, item: TranscriptItemRecord) {
-  return transcriptItemKey(transcriptItemType(item), `${groupIndex}-${childIndex}`);
-}
-
-function transcriptRefreshIdentity(item: TranscriptItemRecord) {
-  return JSON.stringify([
-    transcriptItemType(item),
-    item.body,
-    item.tag,
-    item.time,
-    item.command,
-    item.linkedSessionId,
-    item.model,
-    item.effort,
-    item.callId,
-    item.tools?.map((tool) => [
-      transcriptItemType(tool),
-      tool.body,
-      tool.tag,
-      tool.time,
-      tool.command,
-      tool.linkedSessionId,
-      tool.model,
-      tool.effort,
-      tool.callId,
-    ]),
-  ]);
-}
-
-function preserveTranscriptTail(currentItems: TranscriptItemRecord[], refreshedItems: TranscriptItemRecord[]) {
-  if (currentItems.length <= refreshedItems.length) return refreshedItems;
-  const sharesPrefix = transcriptItemsSharePrefix(currentItems, refreshedItems);
-  return sharesPrefix
-    ? [...refreshedItems, ...currentItems.slice(refreshedItems.length)]
-    : refreshedItems;
-}
-
-function transcriptItemsSharePrefix(currentItems: TranscriptItemRecord[], refreshedItems: TranscriptItemRecord[]) {
-  const prefixLength = Math.min(currentItems.length, refreshedItems.length);
-  for (let index = 0; index < prefixLength; index += 1) {
-    if (transcriptRefreshIdentity(currentItems[index]) !== transcriptRefreshIdentity(refreshedItems[index])) return false;
-  }
-  return true;
-}
-
 const transcriptObjectIdentity = new WeakMap<object, string>();
 let nextTranscriptObjectIdentity = 0;
 
@@ -872,200 +657,6 @@ function transcriptGroupReactKey(tools: TranscriptItemRecord[]) {
 }
 
 
-function transcriptItemText(item: TranscriptItemRecord) {
-  return [item.body, item.command, item.result, item.tag, item.time]
-    .map((value) => `${value ?? ""}`)
-    .join("\n")
-    .toLowerCase();
-}
-
-
-function evidenceMatchesItem(item: TranscriptItemRecord, evidenceText: string, evidenceTime: string) {
-  const itemTime = `${item.time ?? ""}`.trim();
-  if (evidenceTime && itemTime === evidenceTime) return true;
-  const needle = evidenceText.toLowerCase();
-  const command = `${item.command ?? ""}`.trim().toLowerCase();
-  if (!needle) return false;
-  return transcriptItemText(item).includes(needle) || (command && needle.includes(command));
-}
-
-
-function findSkillEvidenceTarget(transcriptItems: TranscriptItemRecord[], link: SessionSkillLinkRecord): SkillEvidenceTarget | null {
-  const evidenceText = linkEvidenceText(link);
-  const evidenceTime = linkEvidenceTime(link);
-  for (let index = 0; index < transcriptItems.length; index += 1) {
-    const item = transcriptItems[index];
-    if (transcriptItemType(item) === TranscriptGroupType.ToolGroup) {
-      const tools = item.tools ?? [];
-      for (let toolIndex = 0; toolIndex < tools.length; toolIndex += 1) {
-        if (evidenceMatchesItem(tools[toolIndex], evidenceText, evidenceTime)) {
-          return {
-            key: transcriptGroupChildKey(index, toolIndex, tools[toolIndex]),
-            groupKey: transcriptItemKey("tool-group", index),
-            index,
-          };
-        }
-      }
-      continue;
-    }
-    if (evidenceMatchesItem(item, evidenceText, evidenceTime)) {
-      return { key: transcriptItemKey(transcriptItemType(item), index), index };
-    }
-  }
-  return null;
-}
-
-function findTranscriptSearchTargets(
-  transcriptItems: TranscriptItemRecord[],
-  query: string,
-  scopes: TranscriptSearchScopeState,
-): TranscriptSearchTarget[] {
-  const needle = query.trim().toLowerCase();
-  if (!needle) return [];
-
-  const matches: TranscriptSearchTarget[] = [];
-  transcriptItems.forEach((item, index) => {
-    const type = transcriptItemType(item);
-    if (type === TranscriptGroupType.ToolGroup) {
-      (item.tools ?? []).forEach((tool, toolIndex) => {
-        if (scopes[transcriptSearchScope(transcriptItemType(tool))] && transcriptItemText(tool).includes(needle)) {
-          matches.push({
-            key: transcriptGroupChildKey(index, toolIndex, tool),
-            groupKey: transcriptItemKey("tool-group", index),
-            index,
-          });
-        }
-      });
-      return;
-    }
-    if (!scopes[transcriptSearchScope(type)]) return;
-    if (transcriptItemText(item).includes(needle)) {
-      matches.push({ key: transcriptItemKey(type, index), index });
-    }
-  });
-  return matches;
-}
-
-type TranscriptSearchIndexEntry = {
-  groupIndex: number;
-  itemIndex: number;
-  childIndex?: number;
-  toolIndex?: number;
-};
-
-function transcriptSearchIndexForBackendGroups(transcriptItems: TranscriptItemRecord[]) {
-  const entries: TranscriptSearchIndexEntry[] = [];
-  let groupIndex = 0;
-  for (let itemIndex = 0; itemIndex < transcriptItems.length; itemIndex += 1) {
-    const item = transcriptItems[itemIndex];
-    if (transcriptItemType(item) !== TranscriptGroupType.ToolGroup) {
-      entries.push({
-        groupIndex,
-        itemIndex,
-        ...(transcriptItemType(item) === "tool" ? { toolIndex: 0 } : {}),
-      });
-      groupIndex += 1;
-      continue;
-    }
-
-    let toolGroupIndex: number | undefined;
-    let toolIndex = 0;
-    for (let childIndex = 0; childIndex < (item.tools ?? []).length; childIndex += 1) {
-      const child = item.tools![childIndex];
-      if (transcriptItemType(child) === "tool") {
-        if (toolGroupIndex === undefined) {
-          toolGroupIndex = groupIndex;
-          groupIndex += 1;
-          toolIndex = 0;
-        } else {
-          toolIndex += 1;
-        }
-        entries.push({ groupIndex: toolGroupIndex, itemIndex, childIndex, toolIndex });
-      } else {
-        toolGroupIndex = undefined;
-        entries.push({ groupIndex, itemIndex, childIndex });
-        groupIndex += 1;
-      }
-    }
-  }
-  return { entries, groupCount: groupIndex };
-}
-
-function transcriptSearchTargetForHit(
-  transcriptItems: TranscriptItemRecord[],
-  hit: TranscriptSearchHit,
-): TranscriptSearchTarget | null {
-  const indexEntry = transcriptSearchIndexForBackendGroups(transcriptItems).entries.find((entry) => (
-    entry.groupIndex === hit.groupIndex && entry.toolIndex === hit.toolIndex
-  ));
-  if (!indexEntry) return null;
-  const item = transcriptItems[indexEntry.itemIndex];
-  if (!item) return null;
-  if (indexEntry.childIndex !== undefined && item.tools?.[indexEntry.childIndex]) {
-    const child = item.tools[indexEntry.childIndex];
-    return {
-      key: transcriptGroupChildKey(indexEntry.itemIndex, indexEntry.childIndex, child),
-      groupKey: transcriptItemKey("tool-group", indexEntry.itemIndex),
-      index: indexEntry.itemIndex,
-    };
-  }
-  const type = transcriptItemType(item);
-  return {
-    key: transcriptItemKey(type, indexEntry.itemIndex),
-    index: indexEntry.itemIndex,
-  };
-}
-
-function transcriptItemSearchQuery(
-  item: TranscriptItemRecord,
-  query: string,
-  scopes: TranscriptSearchScopeState,
-): string {
-  if (!query) return "";
-  if (transcriptItemType(item) === TranscriptGroupType.ToolGroup) {
-    return (item.tools ?? []).some((child) => scopes[transcriptSearchScope(transcriptItemType(child))]) ? query : "";
-  }
-  if (!scopes[transcriptSearchScope(transcriptItemType(item))]) return "";
-  return query;
-}
-
-function buildSessionLocatorItems(transcriptItems: TranscriptItemRecord[]): SessionLocatorItem[] {
-  const locatorItems: SessionLocatorItem[] = [];
-  let pendingResponse: SessionLocatorItem | null = null;
-  for (let index = 0; index < transcriptItems.length; index += 1) {
-    const item = transcriptItems[index];
-    const type = transcriptItemType(item);
-    if (type === "user") {
-      pendingResponse = {
-        key: transcriptItemKey("user", index),
-        index,
-        label: item.body.trim(),
-        response: "",
-      };
-      locatorItems.push(pendingResponse);
-    } else if (type === "assistant" && pendingResponse) {
-      pendingResponse.response = item.body.trim();
-      pendingResponse = null;
-    }
-  }
-  return locatorItems;
-}
-
-function buildSessionLocatorItemsFromMetadata(
-  locatorMetadata: TranscriptLocatorItem[],
-  indexOffset: number,
-): SessionLocatorItem[] {
-  return locatorMetadata.map((item) => {
-    const index = item.index + indexOffset;
-    return {
-      key: transcriptItemKey("user", index),
-      index,
-      label: item.label,
-      response: item.response,
-    };
-  });
-}
-
 function highlightTranscriptText(value: string | undefined, query: string): ReactNode {
   const text = `${value ?? ""}`;
   const ranges = findTextRanges(text, query);
@@ -1106,6 +697,7 @@ export function TranscriptPanel({
   onOpenSkill,
   onLoadSkills,
   onLoadMore,
+  loadUntilTarget,
   onLoadAll,
   onReportError,
   searchTranscript,
@@ -1131,6 +723,7 @@ export function TranscriptPanel({
   onOpenSkill?: (skillPath: string) => void;
   onLoadSkills?: () => void;
   onLoadMore: () => Promise<TranscriptLoadMoreResult>;
+  loadUntilTarget: (options: SessionTranscriptTargetLoadOptions) => Promise<SessionTranscriptTargetLoadResult>;
   onLoadAll: () => Promise<void>;
   onReportError?: (message: string) => void;
   searchTranscript?: (session: SessionRecord, query: string, scopes: TranscriptSearchScopes) => Promise<TranscriptSearchResult | null>;
@@ -1164,49 +757,46 @@ export function TranscriptPanel({
     scrollRestorationReady,
   );
   const searchInputRef = useRef<HTMLInputElement | null>(null);
-  const [highlightedKey, setHighlightedKey] = useState("");
   const [searchQuery, setSearchQuery] = useState("");
   const [debouncedSearchQuery, setDebouncedSearchQuery] = useState("");
   const [searchScopes, setSearchScopes] = useState<TranscriptSearchScopeState>(DEFAULT_TRANSCRIPT_SEARCH_SCOPES);
   const [searchOpen, setSearchOpen] = useState(false);
-  const [searchIndex, setSearchIndex] = useState(0);
-  const [searchLoading, setSearchLoading] = useState(false);
-  const [searchReadyQuery, setSearchReadyQuery] = useState("");
-  const [searchResult, setSearchResult] = useState<TranscriptSearchResult | null>(null);
-  const [searchError, setSearchError] = useState(false);
-  const [jumpingToBottom, setJumpingToBottom] = useState(false);
-  const [jumpingSkillPath, setJumpingSkillPath] = useState("");
-  const [pendingTranscriptBottom, setPendingTranscriptBottom] = useState(false);
   const [transcriptScrollEdges, setTranscriptScrollEdges] = useState({ atTop: true, atBottom: true });
-  const [pendingUserMessageTarget, setPendingUserMessageTarget] = useState<{
-    key: string;
-    index: number;
-    sessionKey: string;
-    navigationRevision: number;
-  } | null>(null);
-  const [transcriptFocusRequest, setTranscriptFocusRequest] = useState<{
-    target: TranscriptSearchTarget;
-    preferSearchMatch: boolean;
-    behavior: ScrollBehavior;
-    navigationRevision: number;
-  } | null>(null);
-  const highlightTimerRef = useRef(0);
-  const transcriptNavigationRevisionRef = useRef(0);
-  const transcriptNavigationIntentRef = useRef<TranscriptNavigationIntent>("idle");
-  const transcriptNavigationKeyRef = useRef("");
-  const transcriptNavigationPromiseRef = useRef(Promise.resolve());
-  const transcriptNavigationSessionKeyRef = useRef("");
+  const reportedSearchErrorRevisionRef = useRef(0);
   const transcriptSearchScrollSnapshotRef = useRef<{ top: number; distanceFromBottom: number } | null>(null);
   const transcriptNavigationSessionKey = `${session.agent}:${session.id}:${session.path}`;
-  transcriptNavigationSessionKeyRef.current = transcriptNavigationSessionKey;
-  const transcriptItemsRef = useRef(transcriptItems);
-  transcriptItemsRef.current = transcriptItems;
   const normalizedSessionSearchQuery = `${sessionSearchQuery ?? ""}`.trim().toLowerCase();
-  const beginTranscriptNavigation = useCallback((intent: TranscriptNavigationIntent) => {
-    transcriptNavigationRevisionRef.current += 1;
-    transcriptNavigationIntentRef.current = intent;
-    return transcriptNavigationRevisionRef.current;
+  const updateTranscriptScrollEdges = useCallback(() => {
+    const root = transcriptRef.current;
+    if (!root) return;
+    const maxScrollTop = Math.max(0, root.scrollHeight - root.clientHeight);
+    const next = {
+      atTop: root.scrollTop <= 2,
+      atBottom: root.scrollTop >= maxScrollTop - 2,
+    };
+    setTranscriptScrollEdges((current) => (
+      current.atTop === next.atTop && current.atBottom === next.atBottom ? current : next
+    ));
   }, []);
+  const {
+    beginNavigation: beginTranscriptNavigation,
+    isCurrentNavigation,
+    currentNavigationIntent,
+    focusTarget: focusTranscriptTarget,
+    highlightedKey,
+    clearHighlight,
+    jumpingToBottom,
+    scrollToTop: scrollTranscriptToTop,
+    jumpToBottom: runJumpToBottom,
+  } = useTranscriptNavigation({
+    rootRef: transcriptRef,
+    items: transcriptItems,
+    renderRangeKey: transcriptRenderRangeKey,
+    scrollToIndex: scrollTranscriptToIndex,
+    scrollToBottom: scrollTranscriptToBottom,
+    indexFromKey: transcriptIndexFromKey,
+    updateScrollEdges: updateTranscriptScrollEdges,
+  });
   const captureTranscriptSearchScroll = useCallback(() => {
     const root = transcriptRef.current;
     if (!root) return;
@@ -1235,341 +825,48 @@ export function TranscriptPanel({
   }, [captureTranscriptSearchScroll, normalizedSessionSearchQuery, searchOpen, transcriptNavigationSessionKey]);
   useEffect(() => {
     beginTranscriptNavigation(normalizedSessionSearchQuery ? "search" : "idle");
-    window.clearTimeout(highlightTimerRef.current);
-    setHighlightedKey("");
+    clearHighlight();
     setSearchQuery(normalizedSessionSearchQuery);
     setDebouncedSearchQuery(normalizedSessionSearchQuery);
     setSearchOpen(Boolean(normalizedSessionSearchQuery));
-    setSearchLoading(false);
-    setSearchReadyQuery("");
-    setSearchResult(null);
-    setSearchError(false);
-    setTranscriptFocusRequest(null);
-  }, [beginTranscriptNavigation, normalizedSessionSearchQuery, transcriptNavigationSessionKey]);
+  }, [beginTranscriptNavigation, clearHighlight, normalizedSessionSearchQuery, transcriptNavigationSessionKey]);
   const normalizedInputSearchQuery = searchQuery.trim().toLowerCase();
   const normalizedSearchQuery = debouncedSearchQuery;
   const selectedSearchScopeCount = TRANSCRIPT_SEARCH_SCOPES.filter((scope) => searchScopes[scope.id]).length;
-  const searchReady = !normalizedSearchQuery || searchReadyQuery === normalizedSearchQuery;
-  const remoteSearchActive = Boolean(
-    searchTranscript
-      && session.agent !== IMPORTED_SESSION_AGENT
-      && session.path,
-  );
+  const {
+    loading: searchLoading,
+    ready: searchReady,
+    result: searchResult,
+    error: searchError,
+    errorRevision: searchErrorRevision,
+    remoteSearch: remoteSearchActive,
+  } = useSessionTranscriptSearch({
+    session,
+    sessionKey: transcriptNavigationSessionKey,
+    query: normalizedSearchQuery,
+    scopes: searchScopes,
+    hasMore,
+    transcriptLoading: loading,
+    searchTranscript,
+    loadAll: onLoadAll,
+  });
+  useEffect(() => {
+    if (searchErrorRevision === reportedSearchErrorRevisionRef.current) return;
+    reportedSearchErrorRevisionRef.current = searchErrorRevision;
+    onReportError?.("Could not search messages in this session. Try again.");
+  }, [onReportError, searchErrorRevision]);
   const searchTargets = useMemo(
     () => searchReady && !remoteSearchActive
       ? findTranscriptSearchTargets(transcriptItems, normalizedSearchQuery, searchScopes)
       : [],
     [normalizedSearchQuery, remoteSearchActive, searchReady, searchScopes, transcriptItems],
   );
-  const searchResultCount = remoteSearchActive ? (searchResult?.hits.length ?? 0) : searchTargets.length;
-  const clearMessageSearch = useCallback(() => {
-    beginTranscriptNavigation("idle");
-    captureTranscriptSearchScroll();
-    window.clearTimeout(highlightTimerRef.current);
-    setHighlightedKey("");
-    setTranscriptFocusRequest(null);
-    setSearchQuery("");
-    setDebouncedSearchQuery("");
-    setSearchScopes(DEFAULT_TRANSCRIPT_SEARCH_SCOPES);
-    setSearchOpen(false);
-  }, [beginTranscriptNavigation, captureTranscriptSearchScroll]);
-  const setSearchScope = useCallback((scope: TranscriptSearchScope, checked: boolean) => {
-    beginTranscriptNavigation("search");
-    setSearchScopes((current) => {
-      if (!checked && TRANSCRIPT_SEARCH_SCOPES.every((item) => item.id === scope || !current[item.id])) {
-        return current;
-      }
-      return { ...current, [scope]: checked };
-    });
-  }, [beginTranscriptNavigation]);
-  useEffect(() => () => window.clearTimeout(highlightTimerRef.current), []);
-  useEffect(() => {
-    if (!normalizedInputSearchQuery) {
-      beginTranscriptNavigation("idle");
-      setDebouncedSearchQuery("");
-      return;
-    }
-    beginTranscriptNavigation("search");
-    const timer = window.setTimeout(() => {
-      setDebouncedSearchQuery(normalizedInputSearchQuery);
-    }, SESSION_SEARCH_DEBOUNCE_MS);
-    return () => window.clearTimeout(timer);
-  }, [beginTranscriptNavigation, normalizedInputSearchQuery]);
-  useEffect(() => {
-    if (!remoteSearchActive) return;
-    if (!normalizedSearchQuery) {
-      setSearchLoading(false);
-      setSearchReadyQuery("");
-      setSearchResult(null);
-      setSearchError(false);
-      return;
-    }
-    let cancelled = false;
-    setSearchLoading(true);
-    setSearchReadyQuery("");
-    setSearchResult(null);
-    setSearchError(false);
-    void searchTranscript?.(session, normalizedSearchQuery, searchScopes).then(
-      (result) => {
-        if (cancelled) return;
-        setSearchLoading(false);
-        setSearchReadyQuery(normalizedSearchQuery);
-        if (result) setSearchResult(result);
-        else {
-          setSearchError(true);
-          onReportError?.("Could not search messages in this session. Try again.");
-        }
-      },
-      () => {
-        if (cancelled) return;
-        setSearchLoading(false);
-        setSearchReadyQuery(normalizedSearchQuery);
-        setSearchError(true);
-        onReportError?.("Could not search messages in this session. Try again.");
-      },
-    );
-    return () => {
-      cancelled = true;
-    };
-  }, [normalizedSearchQuery, onReportError, remoteSearchActive, searchScopes, searchTranscript, transcriptNavigationSessionKey]);
-  useEffect(() => {
-    if (remoteSearchActive) return;
-    if (!normalizedSearchQuery) {
-      setSearchLoading(false);
-      setSearchReadyQuery("");
-      setSearchResult(null);
-      setSearchError(false);
-      return;
-    }
-    let cancelled = false;
-    setSearchLoading(true);
-    setSearchReadyQuery("");
-    void onLoadAll().then(
-      () => {
-        if (cancelled) return;
-        setSearchLoading(false);
-        setSearchReadyQuery(normalizedSearchQuery);
-      },
-      () => {
-        if (cancelled) return;
-        setSearchLoading(false);
-        setSearchReadyQuery(normalizedSearchQuery);
-      },
-    );
-    return () => {
-      cancelled = true;
-    };
-  }, [hasMore, loading, normalizedSearchQuery, onLoadAll, remoteSearchActive]);
-  useEffect(() => {
-    const handleKeyDown = (event: KeyboardEvent) => {
-      if (!(event.metaKey || event.ctrlKey) || event.key.toLowerCase() !== "f") return;
-      event.preventDefault();
-      event.stopPropagation();
-      setSearchOpen(true);
-      window.requestAnimationFrame(() => {
-        searchInputRef.current?.focus();
-        searchInputRef.current?.select();
-      });
-    };
-    window.addEventListener("keydown", handleKeyDown);
-    return () => window.removeEventListener("keydown", handleKeyDown);
-  }, []);
-  useEffect(() => {
-    if (!hasMore || loadingMore || searchLoading || jumpingToBottom) return;
-    const root = transcriptRef.current;
-    const sentinel = loadMoreRef.current;
-    if (!root || !sentinel) return;
-    const observer = new IntersectionObserver((entries) => {
-      if (entries.some((entry) => entry.isIntersecting)) void onLoadMore();
-    }, { root, rootMargin: "0px 0px 320px 0px" });
-    observer.observe(sentinel);
-    return () => observer.disconnect();
-  }, [hasMore, jumpingToBottom, loadingMore, onLoadMore, searchLoading]);
-  const updateTranscriptScrollEdges = useCallback(() => {
-    const root = transcriptRef.current;
-    if (!root) return;
-    const maxScrollTop = Math.max(0, root.scrollHeight - root.clientHeight);
-    const next = {
-      atTop: root.scrollTop <= 2,
-      atBottom: root.scrollTop >= maxScrollTop - 2,
-    };
-    setTranscriptScrollEdges((current) => (
-      current.atTop === next.atTop && current.atBottom === next.atBottom ? current : next
-    ));
-  }, []);
-  useEffect(() => {
-    const root = transcriptRef.current;
-    if (!root) return;
-    updateTranscriptScrollEdges();
-    root.addEventListener("scroll", updateTranscriptScrollEdges, { passive: true });
-    return () => root.removeEventListener("scroll", updateTranscriptScrollEdges);
-  }, [updateTranscriptScrollEdges]);
-  useEffect(() => {
-    const frame = window.requestAnimationFrame(updateTranscriptScrollEdges);
-    return () => window.cancelAnimationFrame(frame);
-  }, [hasMore, loading, loadingMore, transcriptItems, transcriptRenderRangeKey, updateTranscriptScrollEdges]);
-  useLayoutEffect(() => {
-    const snapshot = transcriptSearchScrollSnapshotRef.current;
-    if (!snapshot || searchOpen) return;
-    const root = transcriptRef.current;
-    if (!root) return;
-    const maxScrollTop = Math.max(0, root.scrollHeight - root.clientHeight);
-    const nextScrollTop = snapshot.distanceFromBottom <= 2
-      ? maxScrollTop
-      : Math.min(snapshot.top, maxScrollTop);
-    root.scrollTo({ top: nextScrollTop, behavior: "auto" });
-    transcriptSearchScrollSnapshotRef.current = null;
-    updateTranscriptScrollEdges();
-  }, [searchOpen, updateTranscriptScrollEdges]);
-  const focusTranscriptTarget = useCallback((
-    target: TranscriptSearchTarget,
-    preferSearchMatch = false,
-    behavior: ScrollBehavior = "smooth",
-    navigationRevision = beginTranscriptNavigation("locator"),
-  ) => {
-    if (navigationRevision !== transcriptNavigationRevisionRef.current) return;
-    window.clearTimeout(highlightTimerRef.current);
-    setHighlightedKey(target.key);
-    const targetIndex = target.index ?? transcriptIndexFromKey(target.key);
-    if (targetIndex !== null) scrollTranscriptToIndex(targetIndex);
-    setTranscriptFocusRequest({ target, preferSearchMatch, behavior, navigationRevision });
-  }, [beginTranscriptNavigation, scrollTranscriptToIndex]);
-  useLayoutEffect(() => {
-    const request = transcriptFocusRequest;
-    const root = transcriptRef.current;
-    if (!request || !root) return;
-    if (request.navigationRevision !== transcriptNavigationRevisionRef.current) {
-      setTranscriptFocusRequest(null);
-      return;
-    }
-    if (request.target.groupKey) {
-      const group = root.querySelector(`[data-transcript-key="${cssEscape(request.target.groupKey)}"]`) as HTMLDetailsElement | null;
-      if (!group) return;
-      if (!group.open) group.open = true;
-    }
-    const node = root.querySelector(`[data-transcript-key="${cssEscape(request.target.key)}"]`);
-    if (!node) return;
-    const details = node.closest("details");
-    if (details && !details.open) details.open = true;
-    const destination = request.preferSearchMatch
-      ? node.querySelector(".transcriptSearchMark") ?? node
-      : node;
-    setTranscriptFocusRequest(null);
-    const destinationBounds = destination.getBoundingClientRect();
-    const rootBounds = root.getBoundingClientRect();
-    const centeredTop = root.scrollTop
-      + destinationBounds.top
-      - rootBounds.top
-      - (root.clientHeight - destinationBounds.height) / 2;
-    root.scrollTo({ top: Math.max(0, centeredTop), behavior: request.behavior });
-    highlightTimerRef.current = window.setTimeout(() => setHighlightedKey(""), 1800);
-  }, [transcriptFocusRequest, transcriptItems, transcriptRenderRangeKey]);
-  const ensureSearchHitLoaded = useCallback(async (hit: TranscriptSearchHit) => {
-    let loadedItems = transcriptItemsRef.current;
-    let previousRawLength = items.length;
-    while (transcriptSearchIndexForBackendGroups(loadedItems).groupCount <= hit.groupIndex) {
-      const next = await onLoadMore();
-      loadedItems = groupTranscriptItems(next.items) as TranscriptItemRecord[];
-      transcriptItemsRef.current = loadedItems;
-      if (next.status !== "loaded") break;
-      if (next.items.length <= previousRawLength) break;
-      previousRawLength = next.items.length;
-    }
-  }, [items.length, onLoadMore]);
-  const ensureTranscriptIndexLoaded = useCallback(async (targetIndex: number) => {
-    if (!Number.isSafeInteger(targetIndex) || targetIndex < 0) {
-      return { loaded: false, status: "exhausted" as const };
-    }
-    let loadedItems = transcriptItemsRef.current;
-    let previousRawLength = items.length;
-    let status: TranscriptLoadMoreResult["status"] = "loaded";
-    while (groupTranscriptItems(loadedItems).length <= targetIndex) {
-      const next = await onLoadMore();
-      status = next.status;
-      loadedItems = groupTranscriptItems(next.items) as TranscriptItemRecord[];
-      transcriptItemsRef.current = loadedItems;
-      if (next.status !== "loaded") break;
-      if (next.items.length <= previousRawLength) {
-        status = "exhausted";
-        break;
-      }
-      previousRawLength = next.items.length;
-    }
-    return {
-      loaded: groupTranscriptItems(loadedItems).length > targetIndex,
-      status,
-    };
-  }, [items.length, onLoadMore]);
-  const scrollTranscriptToTop = useCallback(() => {
-    beginTranscriptNavigation("top");
-    setTranscriptFocusRequest(null);
-    setPendingTranscriptBottom(false);
-    scrollTranscriptToIndex(0, "smooth");
-  }, [beginTranscriptNavigation, scrollTranscriptToIndex]);
-  useLayoutEffect(() => {
-    if (!pendingTranscriptBottom) return;
-    scrollTranscriptToBottom();
-    updateTranscriptScrollEdges();
-    setPendingTranscriptBottom(false);
-  }, [pendingTranscriptBottom, scrollTranscriptToBottom, transcriptItems, transcriptRenderRangeKey, updateTranscriptScrollEdges]);
-  const jumpToBottom = useCallback(async () => {
-    const navigationRevision = beginTranscriptNavigation("bottom");
-    setTranscriptFocusRequest(null);
-    setPendingTranscriptBottom(false);
-    scrollTranscriptToBottom();
-    setJumpingToBottom(true);
-    try {
-      if (hasMore) await onLoadAll();
-    } finally {
-      setJumpingToBottom(false);
-      if (navigationRevision === transcriptNavigationRevisionRef.current) {
-        setPendingTranscriptBottom(true);
-      }
-    }
-  }, [beginTranscriptNavigation, hasMore, onLoadAll, scrollTranscriptToBottom]);
-  const jumpToSkillEvidence = useCallback(async (link: SessionSkillLinkRecord) => {
-    if (jumpingSkillPath) return;
-    const navigationRevision = beginTranscriptNavigation("skill");
-    setTranscriptFocusRequest(null);
-    setPendingTranscriptBottom(false);
-    setJumpingSkillPath(link.skill_path);
-    try {
-      let loadedItems = transcriptItemsRef.current;
-      let target = findSkillEvidenceTarget(loadedItems, link);
-      let previousRawLength = items.length;
-      while (!target) {
-        const next = await onLoadMore();
-        if (navigationRevision !== transcriptNavigationRevisionRef.current) return;
-        loadedItems = groupTranscriptItems(next.items) as TranscriptItemRecord[];
-        transcriptItemsRef.current = loadedItems;
-        target = findSkillEvidenceTarget(loadedItems, link);
-        if (next.status !== "loaded") break;
-        if (next.items.length <= previousRawLength) break;
-        previousRawLength = next.items.length;
-      }
-      if (target) {
-        focusTranscriptTarget(target, false, "smooth", navigationRevision);
-      } else if (navigationRevision === transcriptNavigationRevisionRef.current) {
-        onReportError?.(`Could not find ${linkSkillName(link)} usage in this transcript.`);
-      }
-    } finally {
-      setJumpingSkillPath("");
-    }
-  }, [beginTranscriptNavigation, focusTranscriptTarget, items.length, jumpingSkillPath, onLoadMore, onReportError]);
-  const selectLocatorItem = useCallback((key: string, behavior?: ScrollBehavior) => {
-    const index = transcriptIndexFromKey(key);
-    if (index === null) return;
-    const navigationRevision = beginTranscriptNavigation("locator");
-    setTranscriptFocusRequest(null);
-    setPendingTranscriptBottom(false);
+  const markDetailKeyboardScope = useCallback(() => {
     keyboardNavigationScopeRef.current = KeyboardNavigationScope.Detail;
-    transcriptNavigationKeyRef.current = key;
-    void ensureTranscriptIndexLoaded(index).then((result) => {
-      if (navigationRevision !== transcriptNavigationRevisionRef.current) return;
-      if (result.loaded) focusTranscriptTarget({ key, index }, false, behavior, navigationRevision);
-      else if (result.status === "exhausted") onReportError?.("Could not locate this message in the transcript.");
-    });
-  }, [beginTranscriptNavigation, ensureTranscriptIndexLoaded, focusTranscriptTarget, keyboardNavigationScopeRef, onReportError]);
+  }, [keyboardNavigationScopeRef]);
+  const isDetailKeyboardScope = useCallback(() => (
+    keyboardNavigationScopeRef.current === KeyboardNavigationScope.Detail
+  ), [keyboardNavigationScopeRef]);
   const visibleUserMessageIndex = useCallback(() => {
     const root = transcriptRef.current;
     if (!root) return -1;
@@ -1595,66 +892,129 @@ export function TranscriptPanel({
     });
     return firstVisible >= 0 ? firstVisible : firstAfterViewport >= 0 ? firstAfterViewport : lastBeforeViewport;
   }, [locatorItems]);
-  const moveUserMessage = useCallback((offset: number) => {
-    if (locatorItems.length === 0) return;
-    const currentKey = transcriptNavigationKeyRef.current;
-    const currentIndex = locatorItems.findIndex((item) => item.key === currentKey);
-    const baseIndex = currentIndex >= 0 ? currentIndex : visibleUserMessageIndex();
-    const targetIndex = baseIndex < 0 ? (offset > 0 ? 0 : locatorItems.length - 1) : baseIndex + offset;
-    if (targetIndex < 0 || targetIndex >= locatorItems.length) return;
-    const target = locatorItems[targetIndex];
-    const navigationSessionKey = transcriptNavigationSessionKeyRef.current;
-    const navigationRevision = beginTranscriptNavigation("locator");
-    setTranscriptFocusRequest(null);
-    setPendingTranscriptBottom(false);
-    transcriptNavigationKeyRef.current = target.key;
-    if (groupTranscriptItems(transcriptItemsRef.current).length > target.index) {
-      focusTranscriptTarget({ key: target.key, index: target.index }, false, "smooth", navigationRevision);
-      return;
-    }
-    setPendingUserMessageTarget({ key: target.key, index: target.index, sessionKey: navigationSessionKey, navigationRevision });
-    const loadTarget = async () => {
-      const result = await ensureTranscriptIndexLoaded(target.index);
-      if (navigationRevision !== transcriptNavigationRevisionRef.current) return;
-      if (!result.loaded) {
-        setPendingUserMessageTarget((current) => (
-          current?.key === target.key
-            && current.sessionKey === navigationSessionKey
-            && current.navigationRevision === navigationRevision
-            ? null
-            : current
-        ));
+  const {
+    searchIndex,
+    searchResultCount,
+    jumpingSkillPath,
+    jumpToSkillEvidence,
+    selectLocatorItem,
+    moveUserMessage,
+    moveSearchResult,
+  } = useSessionTranscriptNavigation({
+    sessionKey: transcriptNavigationSessionKey,
+    navigationSearchQuery: normalizedSessionSearchQuery,
+    transcript: {
+      items: transcriptItems,
+      locatorItems,
+      loadUntilTarget,
+    },
+    search: {
+      query: normalizedSearchQuery,
+      scopes: searchScopes,
+      targets: searchTargets,
+      ready: searchReady,
+      loading: searchLoading,
+      error: Boolean(searchError),
+      result: searchResult,
+      remote: remoteSearchActive,
+    },
+    navigation: {
+      beginNavigation: beginTranscriptNavigation,
+      isCurrentNavigation,
+      currentNavigationIntent,
+      focusTarget: focusTranscriptTarget,
+      indexFromKey: transcriptIndexFromKey,
+    },
+    keyboard: {
+      markDetailKeyboardScope,
+      isDetailKeyboardScope,
+      visibleUserMessageIndex,
+    },
+    onReportError,
+  });
+  const clearMessageSearch = useCallback(() => {
+    beginTranscriptNavigation("idle");
+    captureTranscriptSearchScroll();
+    clearHighlight();
+    setSearchQuery("");
+    setDebouncedSearchQuery("");
+    setSearchScopes(DEFAULT_TRANSCRIPT_SEARCH_SCOPES);
+    setSearchOpen(false);
+  }, [beginTranscriptNavigation, captureTranscriptSearchScroll, clearHighlight]);
+  const setSearchScope = useCallback((scope: keyof TranscriptSearchScopeState, checked: boolean) => {
+    beginTranscriptNavigation("search");
+    setSearchScopes((current) => {
+      if (!checked && TRANSCRIPT_SEARCH_SCOPES.every((item) => item.id === scope || !current[item.id])) {
+        return current;
       }
-    };
-    transcriptNavigationPromiseRef.current = transcriptNavigationPromiseRef.current.then(loadTarget, loadTarget);
-  }, [beginTranscriptNavigation, ensureTranscriptIndexLoaded, focusTranscriptTarget, keyboardNavigationScopeRef, locatorItems, visibleUserMessageIndex]);
+      return { ...current, [scope]: checked };
+    });
+  }, [beginTranscriptNavigation]);
   useEffect(() => {
-    const pending = pendingUserMessageTarget;
-    if (!pending) return;
-    if (
-      keyboardNavigationScopeRef.current !== KeyboardNavigationScope.Detail
-      || pending.sessionKey !== transcriptNavigationSessionKey
-      || pending.navigationRevision !== transcriptNavigationRevisionRef.current
-    ) {
-      setPendingUserMessageTarget(null);
+    if (!normalizedInputSearchQuery) {
+      beginTranscriptNavigation("idle");
+      setDebouncedSearchQuery("");
       return;
     }
-    if (groupTranscriptItems(transcriptItems).length <= pending.index) return;
-    setPendingUserMessageTarget(null);
-    focusTranscriptTarget({ key: pending.key, index: pending.index }, false, "smooth", pending.navigationRevision);
-  }, [focusTranscriptTarget, keyboardNavigationScopeRef, pendingUserMessageTarget, transcriptItems, transcriptNavigationSessionKey]);
+    beginTranscriptNavigation("search");
+    const timer = window.setTimeout(() => {
+      setDebouncedSearchQuery(normalizedInputSearchQuery);
+    }, SESSION_SEARCH_DEBOUNCE_MS);
+    return () => window.clearTimeout(timer);
+  }, [beginTranscriptNavigation, normalizedInputSearchQuery]);
   useEffect(() => {
-    if (!locatorItems.some((item) => item.key === transcriptNavigationKeyRef.current)) {
-      transcriptNavigationKeyRef.current = "";
-    }
-  }, [locatorItems]);
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (!(event.metaKey || event.ctrlKey) || event.key.toLowerCase() !== "f") return;
+      event.preventDefault();
+      event.stopPropagation();
+      setSearchOpen(true);
+      window.requestAnimationFrame(() => {
+        searchInputRef.current?.focus();
+        searchInputRef.current?.select();
+      });
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, []);
   useEffect(() => {
-    beginTranscriptNavigation(normalizedSessionSearchQuery ? "search" : "idle");
-    transcriptNavigationKeyRef.current = "";
-    transcriptNavigationPromiseRef.current = Promise.resolve();
-    setPendingUserMessageTarget(null);
-    setTranscriptFocusRequest(null);
-  }, [beginTranscriptNavigation, normalizedSessionSearchQuery, transcriptNavigationSessionKey]);
+    if (!hasMore || loadingMore || searchLoading || jumpingToBottom) return;
+    const root = transcriptRef.current;
+    const sentinel = loadMoreRef.current;
+    if (!root || !sentinel) return;
+    const observer = new IntersectionObserver((entries) => {
+      if (entries.some((entry) => entry.isIntersecting)) void onLoadMore();
+    }, { root, rootMargin: "0px 0px 320px 0px" });
+    observer.observe(sentinel);
+    return () => observer.disconnect();
+  }, [hasMore, jumpingToBottom, loadingMore, onLoadMore, searchLoading]);
+  useEffect(() => {
+    const root = transcriptRef.current;
+    if (!root) return;
+    updateTranscriptScrollEdges();
+    root.addEventListener("scroll", updateTranscriptScrollEdges, { passive: true });
+    return () => root.removeEventListener("scroll", updateTranscriptScrollEdges);
+  }, [updateTranscriptScrollEdges]);
+  useEffect(() => {
+    const frame = window.requestAnimationFrame(updateTranscriptScrollEdges);
+    return () => window.cancelAnimationFrame(frame);
+  }, [hasMore, loading, loadingMore, transcriptItems, transcriptRenderRangeKey, updateTranscriptScrollEdges]);
+  useLayoutEffect(() => {
+    const snapshot = transcriptSearchScrollSnapshotRef.current;
+    if (!snapshot || searchOpen) return;
+    const root = transcriptRef.current;
+    if (!root) return;
+    const maxScrollTop = Math.max(0, root.scrollHeight - root.clientHeight);
+    const nextScrollTop = snapshot.distanceFromBottom <= 2
+      ? maxScrollTop
+      : Math.min(snapshot.top, maxScrollTop);
+    root.scrollTo({ top: nextScrollTop, behavior: "auto" });
+    transcriptSearchScrollSnapshotRef.current = null;
+    updateTranscriptScrollEdges();
+  }, [searchOpen, updateTranscriptScrollEdges]);
+  const jumpToBottom = useCallback(
+    () => runJumpToBottom(hasMore, onLoadAll),
+    [hasMore, onLoadAll, runJumpToBottom],
+  );
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
       if (
@@ -1673,42 +1033,7 @@ export function TranscriptPanel({
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [keyboardNavigationScopeRef, moveUserMessage]);
-  useEffect(() => {
-    setSearchIndex(0);
-  }, [normalizedSearchQuery, searchScopes, transcriptNavigationSessionKey]);
-  useEffect(() => {
-    if (!searchReady || searchLoading || searchError || searchResultCount === 0) return;
-    if (transcriptNavigationIntentRef.current !== "idle" && transcriptNavigationIntentRef.current !== "search") return;
-    const navigationRevision = beginTranscriptNavigation("search");
-    if (remoteSearchActive) {
-      const hit = searchResult?.hits[searchIndex];
-      if (!hit) return;
-      let cancelled = false;
-      void ensureSearchHitLoaded(hit).then(() => {
-        if (
-          cancelled
-          || navigationRevision !== transcriptNavigationRevisionRef.current
-          || transcriptNavigationIntentRef.current !== "search"
-        ) return;
-        const grouped = groupTranscriptItems(transcriptItemsRef.current) as TranscriptItemRecord[];
-        const target = transcriptSearchTargetForHit(grouped, hit);
-        if (target) focusTranscriptTarget(target, true, "smooth", navigationRevision);
-      });
-      return () => {
-        cancelled = true;
-      };
-    }
-    const target = searchTargets[searchIndex];
-    if (target) focusTranscriptTarget(target, true, "smooth", navigationRevision);
-  }, [beginTranscriptNavigation, ensureSearchHitLoaded, focusTranscriptTarget, remoteSearchActive, searchError, searchIndex, searchReady, searchResult, searchResultCount, searchLoading, searchTargets, transcriptItems]);
   const transcriptReactKeyCounts = new Map<string, number>();
-  const moveSearchResult = useCallback((offset: number) => {
-    if (searchResultCount === 0) return;
-    beginTranscriptNavigation("search");
-    setTranscriptFocusRequest(null);
-    setPendingTranscriptBottom(false);
-    setSearchIndex((current) => (current + offset + searchResultCount) % searchResultCount);
-  }, [beginTranscriptNavigation, searchResultCount]);
   const openLinkedSession = useCallback((sessionId: string) => {
     const linkedSession = childSessions.find((child) => child.id === sessionId);
     if (linkedSession) onOpenSession(linkedSession);
@@ -2299,39 +1624,16 @@ function SessionRelationsConvergence({
   sessionTree: SessionRecord[];
   onOpenSession: (session: SessionRecord) => void;
 }) {
-  const currentName = `session:${sessionExternalKey(session)}`;
-  const relatedSessions = new Map<string, SessionRecord>();
-  const treeByKey = new Map(sessionTree.map((treeSession) => [sessionExternalKey(treeSession), treeSession]));
-  const nodes = sessionTree.map((treeSession) => {
-    const name = `session:${sessionExternalKey(treeSession)}`;
-    if (name !== currentName) relatedSessions.set(name, treeSession);
-    return {
-      name,
-      label: formatSessionTitle(treeSession.title),
-      kind: sessionKind(treeSession) === SessionKind.Child ? RelationshipGraphKind.SessionChild : RelationshipGraphKind.SessionParent,
-    };
-  });
-  const edges: Array<{ from: string; to: string }> = [];
-  for (const treeSession of sessionTree) {
-    if (!treeSession.parentSessionId) continue;
-    const parentKey = sessionExternalKey({ agent: treeSession.agent, id: treeSession.parentSessionId });
-    const parent = treeByKey.get(parentKey);
-    if (parent) {
-      edges.push({
-        from: `session:${sessionExternalKey(parent)}`,
-        to: `session:${sessionExternalKey(treeSession)}`,
-      });
-    }
-  }
+  const graph = selectSessionRelationsGraph(session, sessionTree);
 
   return (
     <SkillRelationshipMap
-      nodes={nodes}
-      edges={edges}
-      focusName={currentName}
+      nodes={graph.nodes}
+      edges={graph.edges}
+      focusName={graph.focusName}
       compact
       onOpenSkill={(name) => {
-        const relatedSession = relatedSessions.get(name);
+        const relatedSession = graph.relatedSessions.get(name);
         if (relatedSession) onOpenSession(relatedSession);
       }}
     />
@@ -2348,22 +1650,12 @@ function SessionSkillsConvergence({
   links: SessionSkillLinkRecord[];
   onOpenSkill?: (skillPath: string) => void;
 }) {
-  const currentName = `session:${sessionKey(session)}`;
-  const skillsByPath = new Map<string, string>();
-  for (const link of links) {
-    const name = linkSkillName(link);
-    if (name && link.skill_path && !skillsByPath.has(link.skill_path)) skillsByPath.set(link.skill_path, `skill:${link.skill_path}`);
-  }
-  const nodes = [
-    { name: currentName, label: formatSessionTitle(session.title), kind: sessionKind(session) === SessionKind.Child ? RelationshipGraphKind.SessionChild : RelationshipGraphKind.SessionParent },
-    ...[...skillsByPath.entries()].map(([skillPath, name]) => ({ name, label: links.find((link) => link.skill_path === skillPath)?.skill_name ?? skillPath, kind: RelationshipGraphKind.SkillUsed })),
-  ];
-  const edges = [...skillsByPath.values()].map((name) => ({ from: currentName, to: name }));
+  const graph = selectSessionSkillsConvergenceGraph(session, links);
   return (
     <SkillRelationshipMap
-      nodes={nodes}
-      edges={edges}
-      focusName={currentName}
+      nodes={graph.nodes}
+      edges={graph.edges}
+      focusName={graph.focusName}
       compact
       onOpenSkill={(name) => {
         if (name.startsWith("skill:")) onOpenSkill?.(name.slice("skill:".length));
@@ -2884,10 +2176,6 @@ function sessionKey(session: SessionRecord | null | undefined) {
   });
 }
 
-function sessionSourceIdentity(session: SessionRecord) {
-  return sessionIdentity(session);
-}
-
 export function SessionsView({
   sessions: sessionItems,
   developerMode,
@@ -2946,10 +2234,6 @@ export function SessionsView({
     "sessions.activeRowId",
     initialSession ? sessionTableRowId(initialSession) : "",
   );
-  const [importedSessions, setImportedSessions] = useState<SessionRecord[]>([]);
-  const [importedTranscripts, setImportedTranscripts] = useState<Record<string, TranscriptItemRecord[]>>({});
-  const [importFeedback, setImportFeedback] = useState<ImportFeedbackState>(ImportFeedbackState.Idle);
-  const [importError, setImportError] = useState("");
   const [transcriptImportProvider, setTranscriptImportProvider] = useState("");
   const [query, setQuery] = useTabState("sessions.query", "");
   const [sort, setSort] = useTabState<SortState>("sessions.sort", { key: SessionSortKey.UpdatedAt, direction: SortDirection.Desc });
@@ -2958,33 +2242,8 @@ export function SessionsView({
   const [pageSize, setPageSize] = useTabState("sessions.pageSize", 50);
   const [groupBy, setGroupBy] = useTabState<string | null>("sessions.groupBy", null);
   const [showChildSessions, setShowChildSessions] = useTabState("sessions.showChildSessions", false);
-  const [items, setItems] = useState<TranscriptItemRecord[]>([]);
-  const [transcriptLocatorState, setTranscriptLocatorState] = useState<{
-    key: string;
-    items: TranscriptLocatorItem[];
-  } | null>(null);
-  const [nextTranscriptCursor, setNextTranscriptCursor] = useState<string | undefined>();
-  const [loadingMoreTranscript, setLoadingMoreTranscript] = useState(false);
-  const [skillLinks, setSkillLinks] = useState<SessionSkillLinkRecord[]>([]);
-  const [skillLinksKey, setSkillLinksKey] = useState("");
-  const [skillLinksAttemptKey, setSkillLinksAttemptKey] = useState("");
-  const [loadingSkillLinks, setLoadingSkillLinks] = useState(false);
-  const [skillLinksError, setSkillLinksError] = useState("");
-  const [loading, setLoading] = useState(false);
-  const [searchingSessions, setSearchingSessions] = useState(false);
-  const [searchRows, setSearchRows] = useState<SessionRecord[] | null>(null);
-  const [searchRowsKey, setSearchRowsKey] = useState("");
-  const [remoteList, setRemoteList] = useState<SessionListPageResult | null>(null);
-  const [pendingListLocate, setPendingListLocate] = useState<{
-    session: SessionRecord;
-    reveal: boolean;
-  } | null>(null);
-  const [loadingSessionListPage, setLoadingSessionListPage] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [refreshActionError, setRefreshActionError] = useState("");
-  const [resumeFeedback, setResumeFeedback] = useState<Record<string, ResumeFeedbackState>>({});
-  const [pendingResumeConflict, setPendingResumeConflict] = useState<PendingResumeConflict | null>(null);
-  const [repairingResume, setRepairingResume] = useState(false);
   const [sessionToast, setSessionToast] = useState("");
   const [detailCollapsed, setDetailCollapsed] = useTabState("sessions.detailCollapsed", false);
   const [sessionLocatorRequest, setSessionLocatorRequest] = useState("");
@@ -2993,10 +2252,6 @@ export function SessionsView({
   const [projectFilterQuery, setProjectFilterQuery] = useState("");
   const [projectFilterOpen, setProjectFilterOpen] = useState(false);
   const [debouncedQuery, setDebouncedQuery] = useState(() => query.trim().toLowerCase());
-  const transcriptItemsRef = useRef(items);
-  const nextTranscriptCursorRef = useRef(nextTranscriptCursor);
-  transcriptItemsRef.current = items;
-  nextTranscriptCursorRef.current = nextTranscriptCursor;
   const importInputRef = useRef<HTMLInputElement | null>(null);
   const sessionListBodyRef = useRef<HTMLDivElement | null>(null);
   const keyboardNavigationScopeRef = useRef<KeyboardNavigationScope>(KeyboardNavigationScope.List);
@@ -3020,74 +2275,12 @@ export function SessionsView({
     return () => window.removeEventListener("keydown", handleKeyDown, true);
   }, [keyboardNavigationScopeRef]);
   const handledExternalSessionKeyRef = useRef("");
-  const importWorkerRef = useRef<{ worker: Worker; cancel: () => void } | null>(null);
   const projectFilterInputRef = useRef<HTMLInputElement | null>(null);
-  const importFeedbackTimerRef = useRef<number | undefined>(undefined);
-  const resumeFeedbackTimerRef = useRef<Record<string, number>>({});
   const sessionToastTimerRef = useRef<number | undefined>(undefined);
-  const skillLinksRequestKeyRef = useRef("");
-  const transcriptRequestAuthorityRef = useRef(createLatestRequestAuthority());
-  const transcriptCacheRef = useRef(new Map<string, TranscriptPage>());
-  const loadedTranscriptIdentityRef = useRef("");
-  const loadedTranscriptLogicalIdentityRef = useRef("");
-  const transcriptLocatorRequestAuthorityRef = useRef(createLatestRequestAuthority());
-  const transcriptLocatorCacheRef = useRef(new Map<string, TranscriptLocatorPage>());
-  const pendingTranscriptLocatorRef = useRef<{ key: string; session: SessionRecord } | null>(null);
-  const transcriptLocatorInFlightRef = useRef<{ key: string; promise: Promise<void> } | null>(null);
-  const transcriptSourceVersionRef = useRef("");
-  const transcriptInitialLoadInFlightRef = useRef<{
-    key: string;
-    promise: Promise<TranscriptLoadMoreResult["status"]>;
-  } | null>(null);
-  const loadMoreTranscriptInFlightRef = useRef<{ key: string; promise: Promise<TranscriptLoadMoreResult> } | null>(null);
-  const loadAllTranscriptInFlightRef = useRef<{ key: string; promise: Promise<void> } | null>(null);
   const normalizedInputQuery = query.trim().toLowerCase();
   const normalizedQuery = debouncedQuery;
   const initialNormalizedQueryRef = useRef(true);
   const remoteSearchActive = Boolean(normalizedQuery);
-  const clearImportFeedbackTimer = useCallback(() => {
-    if (importFeedbackTimerRef.current !== undefined) {
-      window.clearTimeout(importFeedbackTimerRef.current);
-      importFeedbackTimerRef.current = undefined;
-    }
-  }, []);
-  const finishImportFeedback = useCallback((state: Exclude<ImportFeedbackState, ImportFeedbackState.Idle | ImportFeedbackState.Loading>) => {
-    clearImportFeedbackTimer();
-    setImportFeedback(state);
-    if (state === ImportFeedbackState.Success) {
-      importFeedbackTimerRef.current = window.setTimeout(() => {
-        setImportFeedback(ImportFeedbackState.Idle);
-        importFeedbackTimerRef.current = undefined;
-      }, 1600);
-    }
-  }, [clearImportFeedbackTimer]);
-  const finishResumeFeedback = useCallback((sessionId: string, state: AsyncStatus.Success | AsyncStatus.Error) => {
-    const existingTimer = resumeFeedbackTimerRef.current[sessionId];
-    if (existingTimer !== undefined) {
-      window.clearTimeout(existingTimer);
-    }
-    setResumeFeedback((current) => ({ ...current, [sessionId]: state }));
-    resumeFeedbackTimerRef.current[sessionId] = window.setTimeout(() => {
-      setResumeFeedback((current) => {
-        const next = { ...current };
-        delete next[sessionId];
-        return next;
-      });
-      delete resumeFeedbackTimerRef.current[sessionId];
-    }, 1800);
-  }, []);
-  const clearResumeFeedback = useCallback((sessionId: string) => {
-    const existingTimer = resumeFeedbackTimerRef.current[sessionId];
-    if (existingTimer !== undefined) {
-      window.clearTimeout(existingTimer);
-      delete resumeFeedbackTimerRef.current[sessionId];
-    }
-    setResumeFeedback((current) => {
-      const next = { ...current };
-      delete next[sessionId];
-      return next;
-    });
-  }, []);
   const showSessionError = useCallback((message: string) => {
     if (sessionToastTimerRef.current !== undefined) {
       window.clearTimeout(sessionToastTimerRef.current);
@@ -3105,19 +2298,25 @@ export function SessionsView({
     }
     setSessionToast("");
   }, []);
+  const handleImportedSession = useCallback((session: SessionRecord) => {
+    setActiveRowId(sessionTableRowId(session));
+    setDetailCollapsed(false);
+  }, [setActiveRowId, setDetailCollapsed]);
+  const {
+    importedSessions,
+    importedTranscripts,
+    importFeedback,
+    importError,
+    importJsonl,
+  } = useSessionImport({
+    providerId: transcriptImportProvider,
+    showSessionError,
+    onImported: handleImportedSession,
+  });
   useEffect(() => () => {
-    clearImportFeedbackTimer();
-    dismissSessionError();
-    importWorkerRef.current?.cancel();
-    importWorkerRef.current = null;
-    Object.values(resumeFeedbackTimerRef.current).forEach((timer) => window.clearTimeout(timer));
-  }, [clearImportFeedbackTimer, dismissSessionError]);
+    if (sessionToastTimerRef.current !== undefined) window.clearTimeout(sessionToastTimerRef.current);
+  }, []);
   const useLocalSessionList = importedSessions.length > 0;
-  const sessionSearchLoading = Boolean(
-    normalizedInputQuery
-      && (normalizedInputQuery !== normalizedQuery
-        || (useLocalSessionList ? searchingSessions : loadingSessionListPage)),
-  );
   const allSessionItems = useMemo(() => {
     const byId = new Map<string, SessionRecord>();
     for (const session of [...importedSessions, ...sessionItems]) byId.set(sessionTableRowId(session), session);
@@ -3137,29 +2336,26 @@ export function SessionsView({
     showChildSessions,
   );
   const requestedPage = pageSelection.contextKey === pageContextKey ? pageSelection.page : 0;
-  const localListView = useMemo(() => {
-    if (!useLocalSessionList) return null;
-    return selectSessionListView({
-      sessions: sessionItems,
-      importedSessions,
-      searchRows: searchRows ?? undefined,
-      searchRowsKey,
-      query: normalizedQuery,
-      remoteSearch: true,
-      searchSort,
-      sort,
-      pageSize,
-      groupBy,
-      showChildSessions,
-      selectedProjectKeys,
-      projectFilterQuery,
-      missingSessionProjectPolicy,
-      projects,
-      sessionProjects,
-      currentPage: pageSelection.page,
-      pageSelectionContextKey: pageSelection.contextKey,
-    });
-  }, [groupBy, importedSessions, missingSessionProjectPolicy, normalizedQuery, pageSelection, pageSize, projectFilterQuery, projects, searchRows, searchRowsKey, searchSort, selectedProjectKeys, sessionItems, sessionProjects, showChildSessions, sort, useLocalSessionList]);
+  const { localListView, searchingSessions } = useSessionListWorkspace({
+    enabled: useLocalSessionList,
+    sessions: sessionItems,
+    importedSessions,
+    query: normalizedQuery,
+    searchSort,
+    sort,
+    pageSize,
+    groupBy,
+    showChildSessions,
+    selectedProjectKeys,
+    projectFilterQuery,
+    missingSessionProjectPolicy,
+    projects,
+    sessionProjects,
+    currentPage: pageSelection.page,
+    pageSelectionContextKey: pageSelection.contextKey,
+    searchSessions,
+    onSearchError: showSessionError,
+  });
   const remoteListBaseRequest = useMemo<SessionListPageRequest>(() => ({
     query: normalizedQuery,
     agent: sessionAgentFilter,
@@ -3170,69 +2366,51 @@ export function SessionsView({
     showChildSessions,
     selectedProjectKeys,
   }), [activeSort, groupBy, normalizedQuery, pageSize, requestedPage, selectedProjectKeys, sessionAgentFilter, showChildSessions]);
-  const remoteListRequest = useMemo<SessionListPageRequest>(() => ({
-    ...remoteListBaseRequest,
-    locate: pendingListLocate?.session,
-  }), [pendingListLocate, remoteListBaseRequest]);
-  useEffect(() => {
-    if (useLocalSessionList) return;
-    let cancelled = false;
-    setLoadingSessionListPage(true);
-    void listSessions(remoteListRequest)
-      .then((result) => {
-        if (cancelled) return;
-        setRemoteList(result);
-        setLoadingSessionListPage(false);
-        if (!pendingListLocate) return;
-
-        const targetRowId = sessionTableRowId(pendingListLocate.session);
-        const located = result.rows.some((session) => sessionTableRowId(session) === targetRowId);
-        if (located) {
-          setPageSelection({ contextKey: pageContextKey, page: result.page });
-          setActiveRowId(targetRowId);
-          setSessionLocatorRequest(targetRowId);
-          setPendingListLocate(null);
-          return;
-        }
-        if (pendingListLocate.reveal) {
-          setPendingListLocate(null);
-          return;
-        }
-
-        const showChildren = showChildSessions || sessionKind(pendingListLocate.session) === SessionKind.Child;
-        setQuery("");
-        setDebouncedQuery("");
-        setSearchRows(null);
-        setSearchRowsKey("");
-        setSearchSort(null);
-        setSelectedProjectKeys([]);
-        setProjectFilterQuery("");
-        if (showChildren && !showChildSessions) setShowChildSessions(true);
-        setPageSelection({
-          contextKey: sessionPageContextKey(sort, groupBy, "", pageSize, "", showChildren),
-          page: 0,
-        });
-        setPendingListLocate({ session: pendingListLocate.session, reveal: true });
-      })
-      .catch((listError) => {
-        if (cancelled) return;
-        logger.warn("sessions list failed", { error: listError });
-        setLoadingSessionListPage(false);
-        showSessionError("Could not load sessions. Try again.");
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [groupBy, listSessions, pageContextKey, pageSize, pendingListLocate, remoteListRequest, sessionMembershipKey, showChildSessions, showSessionError, sort, useLocalSessionList]);
-  const projectOptions = localListView?.projectOptions ?? remoteList?.projectOptions ?? EMPTY_SESSION_PROJECT_OPTIONS;
-  const visibleProjectOptions = localListView?.visibleProjectOptions ?? projectOptions
-    .filter((option) => selectedProjectKeys.includes(option.key) || !projectFilterQuery || projectSearchRank(option.label, projectFilterQuery) !== null)
-    .sort((left, right) => {
-      const leftSelected = selectedProjectKeys.includes(left.key);
-      const rightSelected = selectedProjectKeys.includes(right.key);
-      if (leftSelected !== rightSelected) return leftSelected ? -1 : 1;
-      return right.count - left.count || left.label.localeCompare(right.label) || left.title.localeCompare(right.title);
+  const onRemoteSessionLocated = useCallback((session: SessionRecord, page?: number) => {
+    const targetRowId = sessionTableRowId(session);
+    if (page !== undefined) setPageSelection({ contextKey: pageContextKey, page });
+    setActiveRowId(targetRowId);
+    setSessionLocatorRequest(targetRowId);
+  }, [pageContextKey]);
+  const revealRemoteSessionForLocate = useCallback((session: SessionRecord) => {
+    const showChildren = showChildSessions || sessionKind(session) === SessionKind.Child;
+    setQuery("");
+    setDebouncedQuery("");
+    setSearchSort(null);
+    setSelectedProjectKeys([]);
+    setProjectFilterQuery("");
+    if (showChildren && !showChildSessions) setShowChildSessions(true);
+    setPageSelection({
+      contextKey: sessionPageContextKey(sort, groupBy, "", pageSize, "", showChildren),
+      page: 0,
     });
+  }, [groupBy, pageSize, setSelectedProjectKeys, setSearchSort, setShowChildSessions, setPageSelection, showChildSessions, sort]);
+  const onRemoteSessionListError = useCallback((listError: unknown) => {
+    logger.warn("sessions list failed", { error: listError });
+    showSessionError("Could not load sessions. Try again.");
+  }, [showSessionError]);
+  const {
+    remoteList,
+    loading: loadingSessionListPage,
+    locate: locateRemoteSession,
+  } = useSessionRemoteListWorkspace({
+    enabled: !useLocalSessionList,
+    request: remoteListBaseRequest,
+    sessionMembershipKey,
+    pageContextKey,
+    listSessions,
+    onLocated: onRemoteSessionLocated,
+    onRevealRequired: revealRemoteSessionForLocate,
+    onError: onRemoteSessionListError,
+  });
+  const sessionSearchLoading = Boolean(
+    normalizedInputQuery
+      && (normalizedInputQuery !== normalizedQuery
+        || (useLocalSessionList ? searchingSessions : loadingSessionListPage)),
+  );
+  const projectOptions = localListView?.projectOptions ?? remoteList?.projectOptions ?? EMPTY_SESSION_PROJECT_OPTIONS;
+  const visibleProjectOptions = localListView?.visibleProjectOptions
+    ?? selectVisibleSessionProjectOptions(projectOptions, selectedProjectKeys, projectFilterQuery);
   const childSessionCount = localListView?.childSessionCount ?? remoteList?.childSessionCount ?? 0;
   const currentPage = localListView?.currentPage ?? requestedPage;
   const sortedSessions = localListView?.sortedSessions ?? remoteList?.rows ?? EMPTY_SESSION_ROWS;
@@ -3278,39 +2456,6 @@ export function SessionsView({
     return () => window.clearTimeout(timer);
   }, [normalizedInputQuery]);
   useEffect(() => {
-    if (!useLocalSessionList || !normalizedQuery) {
-      setSearchRows(null);
-      setSearchRowsKey("");
-      setSearchingSessions(false);
-      return;
-    }
-
-    let cancelled = false;
-    setSearchingSessions(true);
-    setSearchRows([]);
-    const searchRequestKey = localListView?.searchRequestKey ?? "";
-    setSearchRowsKey(searchRequestKey);
-
-    const runSearch = async () => {
-      try {
-        const rows = await searchSessions(normalizedQuery);
-        if (cancelled) return;
-        setSearchRows(rows);
-        if (!cancelled) setSearchingSessions(false);
-      } catch (error) {
-        if (!cancelled) {
-          logger.warn("sessions search failed", { error });
-          setSearchingSessions(false);
-          showSessionError("Could not search sessions. Try again.");
-        }
-      }
-    };
-    void runSearch();
-    return () => {
-      cancelled = true;
-    };
-  }, [localListView?.searchRequestKey, normalizedQuery, searchSessions, showSessionError, useLocalSessionList]);
-  useEffect(() => {
     if (sessionListError && !sessionRefreshError && sessionItems.length === 0) {
       showSessionError("Could not load sessions. Try again.");
     }
@@ -3335,31 +2480,12 @@ export function SessionsView({
   const revealSessionInList = useCallback((session: SessionRecord) => {
     const targetRowId = sessionTableRowId(session);
     const showChildren = showChildSessions || sessionKind(session) === SessionKind.Child;
-    if (!useLocalSessionList) {
-      keyboardNavigationScopeRef.current = KeyboardNavigationScope.List;
-      setQuery("");
-      setDebouncedQuery("");
-      setSearchRows(null);
-      setSearchRowsKey("");
-      setSearchSort(null);
-      setSelectedProjectKeys([]);
-      setProjectFilterQuery("");
-      if (showChildren && !showChildSessions) setShowChildSessions(true);
-      setPageSelection({
-        contextKey: sessionPageContextKey(sort, groupBy, "", pageSize, "", showChildren),
-        page: 0,
-      });
-      setPendingListLocate({ session, reveal: true });
-      return;
-    }
     const targetPage = sessionPageForRow(allSessionItems, targetRowId, sort, groupBy, pageSize, showChildren);
     if (targetPage < 0) return;
 
     keyboardNavigationScopeRef.current = KeyboardNavigationScope.List;
     setQuery("");
     setDebouncedQuery("");
-    setSearchRows(null);
-    setSearchRowsKey("");
     setSearchSort(null);
     setSelectedProjectKeys([]);
     setProjectFilterQuery("");
@@ -3370,18 +2496,14 @@ export function SessionsView({
     });
     setActiveRowId(targetRowId);
     setSessionLocatorRequest(targetRowId);
-  }, [allSessionItems, groupBy, pageSize, showChildSessions, sort, useLocalSessionList]);
+  }, [allSessionItems, groupBy, pageSize, showChildSessions, sort]);
   const locateSessionInList = useCallback((session: SessionRecord) => {
     const targetRowId = sessionTableRowId(session);
     if (!useLocalSessionList) {
       if (!allSessionItems.some((candidate) => sessionTableRowId(candidate) === targetRowId)) return;
       keyboardNavigationScopeRef.current = KeyboardNavigationScope.List;
-      if (tableSessions.some((candidate) => sessionTableRowId(candidate) === targetRowId)) {
-        setActiveRowId(targetRowId);
-        setSessionLocatorRequest(targetRowId);
-      } else {
-        setPendingListLocate({ session, reveal: false });
-      }
+      const visible = tableSessions.some((candidate) => sessionTableRowId(candidate) === targetRowId);
+      locateRemoteSession(session, true, visible);
       return;
     }
     const plan = planSessionListLocation({
@@ -3407,7 +2529,7 @@ export function SessionsView({
     keyboardNavigationScopeRef.current = KeyboardNavigationScope.List;
     setActiveRowId(targetRowId);
     setSessionLocatorRequest(targetRowId);
-  }, [allSessionItems, groupBy, groupedPages, pageSize, revealSessionInList, setCurrentPage, sortedSessions, tableSessions, useLocalSessionList]);
+  }, [allSessionItems, groupBy, groupedPages, locateRemoteSession, pageSize, revealSessionInList, setCurrentPage, sortedSessions, tableSessions, useLocalSessionList]);
   const completeSessionLocator = useCallback((rowId: string) => {
     setSessionLocatorRequest((current) => current === rowId ? "" : current);
   }, []);
@@ -3535,160 +2657,30 @@ export function SessionsView({
       setRefreshing(false);
     }
   }, [onRefreshSessions, refreshing, showSessionError]);
-  const importJsonl = useCallback(async (file: File) => {
-    clearImportFeedbackTimer();
-    setImportFeedback(ImportFeedbackState.Loading);
-    setImportError("");
-    try {
-      if (!transcriptImportProvider) {
-        setImportError("Choose a transcript provider before importing");
-        showSessionError("Choose a transcript provider before importing.");
-        finishImportFeedback(ImportFeedbackState.Error);
-        return;
-      }
-      const parsed = await parseImportedTranscript(file, transcriptImportProvider, importWorkerRef);
-      if (parsed.parsedCount === 0) {
-        setImportError("Could not import JSONL transcript");
-        showSessionError("Could not import JSONL transcript. Check the file and try again.");
-        finishImportFeedback(ImportFeedbackState.Error);
-        return;
-      }
-      if (parsed.items.length === 0) {
-        setImportError("Could not import JSONL transcript");
-        showSessionError("Could not import JSONL transcript. Check the file and try again.");
-        finishImportFeedback(ImportFeedbackState.Error);
-        return;
-      }
-      const id = `import:${file.name}:${file.lastModified}:${Date.now()}`;
-      const session = createImportedSessionRecord({ id, fileName: file.name, lastModified: file.lastModified, parsed });
-      setImportedTranscripts((current) => ({ ...current, [id]: parsed.items as TranscriptItemRecord[] }));
-      setImportedSessions((current) => [session, ...current]);
-      setActiveRowId(sessionTableRowId(session));
-      setDetailCollapsed(false);
-      setImportError(parsed.warnings.length ? `${parsed.warnings.length} invalid lines skipped` : "");
-      finishImportFeedback(parsed.warnings.length ? ImportFeedbackState.Warning : ImportFeedbackState.Success);
-    } catch (error) {
-      logger.warn("sessions transcript import failed", { error });
-      setImportError("Could not import JSONL transcript");
-      showSessionError("Could not import JSONL transcript. Check the file and try again.");
-      finishImportFeedback(ImportFeedbackState.Error);
-    }
-  }, [clearImportFeedbackTimer, finishImportFeedback, showSessionError, transcriptImportProvider]);
   const handleImportJsonlChange = useCallback((event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     event.target.value = "";
     if (!file) return;
     importJsonl(file);
   }, [importJsonl]);
-  const resumeSession = useCallback(async (
-    session: SessionRecord,
-    target?: Exclude<SessionResumeTarget, SessionResumeTarget.Auto>,
-    options?: { reconcile?: boolean },
-  ) => {
-    if (session.agent === IMPORTED_SESSION_AGENT) {
-      finishResumeFeedback(session.id, AsyncStatus.Error);
-      showSessionError("Imported sessions cannot be opened.");
-      return;
-    }
-    if (!onResumeSession) {
-      finishResumeFeedback(session.id, AsyncStatus.Error);
-      showSessionError("Resume is unavailable.");
-      return;
-    }
-    dismissSessionError();
-    setResumeFeedback((current) => ({ ...current, [session.id]: AsyncStatus.Loading }));
-    try {
-      const result = await onResumeSession(session, target, options);
-      if (result?.status === SessionResumeOutcomeStatus.ActiveWriter) {
-        clearResumeFeedback(session.id);
-        setPendingResumeConflict({ session, target });
-      } else if (result?.status === SessionResumeOutcomeStatus.Launched) {
-        finishResumeFeedback(session.id, AsyncStatus.Success);
-        setPendingResumeConflict(null);
-      } else if (result?.status === SessionResumeOutcomeStatus.Failed) {
-        finishResumeFeedback(session.id, AsyncStatus.Error);
-        showSessionError(sessionResumeErrorMessage(result.error));
-      } else {
-        finishResumeFeedback(session.id, AsyncStatus.Error);
-        showSessionError(sessionResumeErrorMessage(
-          sessionResumeError(
-            SessionResumeErrorCode.Internal,
-            null,
-            true,
-            SessionResumeErrorAction.Retry,
-          ),
-        ));
-      }
-    } catch (error) {
-      finishResumeFeedback(session.id, AsyncStatus.Error);
-      logger.warn("sessions resume failed", { error });
-      showSessionError(sessionResumeErrorMessage(
-        sessionResumeError(
-          SessionResumeErrorCode.DesktopCommandFailed,
-          null,
-          true,
-          SessionResumeErrorAction.Retry,
-        ),
-      ));
-    }
-  }, [clearResumeFeedback, dismissSessionError, finishResumeFeedback, onResumeSession, showSessionError]);
-  const repairAndResume = useCallback(async () => {
-    if (!pendingResumeConflict || repairingResume) return;
-    setRepairingResume(true);
-    try {
-      await resumeSession(
-        pendingResumeConflict.session,
-        pendingResumeConflict.target,
-        { reconcile: true },
-      );
-    } finally {
-      setRepairingResume(false);
-    }
-  }, [pendingResumeConflict, repairingResume, resumeSession]);
-  const cancelResumeConflict = useCallback(() => {
-    if (repairingResume) return;
-    if (pendingResumeConflict) clearResumeFeedback(pendingResumeConflict.session.id);
-    setPendingResumeConflict(null);
-  }, [clearResumeFeedback, pendingResumeConflict, repairingResume]);
-  const getResumeState = useCallback((session: SessionRecord): SessionResumeState => (
-    resumeFeedback[session.id] ?? AsyncStatus.Idle
-  ), [resumeFeedback]);
+  const {
+    pendingResumeConflict,
+    repairingResume,
+    resumeSession,
+    repairAndResume,
+    cancelResumeConflict,
+    getResumeState,
+  } = useSessionResumeOperations({ onResumeSession, showSessionError, dismissSessionError });
   const activeSession = useMemo(
     () => allSessionItems.find((session) => sessionTableRowId(session) === activeRowId),
     [activeRowId, allSessionItems],
   );
-  const [inferredResumeTargets, setInferredResumeTargets] = useState<Record<string, Exclude<SessionResumeTarget, SessionResumeTarget.Auto>>>({});
-  useEffect(() => {
-    if (sessionResumeTarget !== SessionResumeTarget.Auto) {
-      setInferredResumeTargets((current) => Object.keys(current).length === 0 ? current : {});
-      return;
-    }
-    let cancelled = false;
-    const resumableSessions = [...new Map(
-      [...tableSessions, ...(activeSession ? [activeSession] : [])]
-        .filter((session) => (
-          session.agent !== IMPORTED_SESSION_AGENT
-          && Boolean(session.id && session.agent && session.path.trim())
-        ))
-        .map((session) => [sessionSourceIdentity(session), session] as const),
-    ).values()];
-    void Promise.all(resumableSessions.map(async (session) => (
-      [sessionSourceIdentity(session), await resolveSessionResumeTarget(session)] as const
-    ))).then((entries) => {
-      if (cancelled) return;
-      const retainedKeys = new Set(resumableSessions.map(sessionSourceIdentity));
-      setInferredResumeTargets((current) => {
-        const next = Object.fromEntries(
-          Object.entries(current).filter(([key]) => retainedKeys.has(key)),
-        );
-        for (const [key, target] of entries) next[key] = target;
-        return next;
-      });
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, [activeSession, resolveSessionResumeTarget, sessionResumeTarget, tableSessions]);
+  const inferredResumeTargets = useInferredSessionResumeTargets({
+    sessions: tableSessions,
+    activeSession,
+    sessionResumeTarget,
+    resolveSessionResumeTarget,
+  });
   const activeSessionVisibleInList = Boolean(
     activeSession && tableSessions.some((session) => sessionTableRowId(session) === sessionTableRowId(activeSession)),
   );
@@ -3740,8 +2732,6 @@ export function SessionsView({
   const locateActiveSession = useCallback(() => {
     if (activeSession) locateSessionInList(activeSession);
   }, [activeSession, locateSessionInList]);
-  const activeSessionForTranscriptRef = useRef(activeSession);
-  activeSessionForTranscriptRef.current = activeSession;
   const sessionRelationships = useMemo(
     () => selectSessionRelationships(allSessionItems, activeSession),
     [activeSession, allSessionItems],
@@ -3766,11 +2756,26 @@ export function SessionsView({
       ? `${activeSessionTranscriptKey}:${activeSession.updatedAt ?? ""}:${activeSession.messages ?? ""}`
       : ""
   ), [activeSession?.messages, activeSession?.updatedAt, activeSessionTranscriptKey]);
-  const scrollRestorationReady = Boolean(
-    activeSessionTranscriptKey
-      && loadedTranscriptIdentityRef.current === activeSessionTranscriptKey
-      && !loading,
-  );
+  const {
+    items,
+    locatorItems: activeTranscriptLocatorItems,
+    loading,
+    loadingMore: loadingMoreTranscript,
+    hasMore: hasMoreTranscript,
+    scrollRestorationReady,
+    loadMore: loadMoreTranscript,
+    loadAll: loadAllTranscript,
+    loadUntilTarget: loadTranscriptUntilTarget,
+  } = useSessionTranscript({
+    session: activeSession ?? null,
+    transcriptKey: activeSessionTranscriptKey,
+    logicalKey: activeSessionLogicalKey,
+    refreshKey: activeSessionTranscriptRefreshKey,
+    importedItems: activeImportedTranscript,
+    loadTranscript,
+    loadTranscriptLocator,
+    onError: showSessionError,
+  });
   const activeSessionLinkKey = useMemo(() => (
     activeSession ? sessionKey(activeSession) : ""
   ), [activeSession?.agent, activeSession?.id, activeSession?.path]);
@@ -3781,48 +2786,20 @@ export function SessionsView({
       skillIndexStatus?.last_indexed_at ?? "",
     ].join(":");
   }, [activeSession, activeSessionLinkKey, skillIndexStatus?.last_indexed_at]);
-  const skillLinksLoading = loadingSkillLinks;
-  const activeTranscriptLocatorItems = transcriptLocatorState?.key === activeSessionTranscriptKey
-    ? transcriptLocatorState.items
-    : undefined;
-  const drainTranscriptLocator = useCallback(() => {
-    if (!loadTranscriptLocator) return;
-    const pending = pendingTranscriptLocatorRef.current;
-    if (!pending || pending.key !== activeSessionTranscriptKey) return;
-    const existing = transcriptLocatorInFlightRef.current;
-    if (existing?.key === pending.key) return;
-    pendingTranscriptLocatorRef.current = null;
-    const requestRevision = transcriptLocatorRequestAuthorityRef.current.begin();
-    const promise = loadTranscriptLocator(pending.session).then((page) => {
-      if (!transcriptLocatorRequestAuthorityRef.current.isCurrent(requestRevision)) return;
-      if (pending.key !== activeSessionTranscriptKey) return;
-      const currentSourceVersion = transcriptSourceVersionRef.current;
-      if (currentSourceVersion && page.sourceVersion && page.sourceVersion !== currentSourceVersion) return;
-      transcriptLocatorCacheRef.current.set(pending.key, page);
-      setTranscriptLocatorState({ key: pending.key, items: page.locatorItems });
-    }).catch((error) => {
-      if (transcriptLocatorRequestAuthorityRef.current.isCurrent(requestRevision)) {
-        logger.warn("sessions transcript locator load failed", { error });
-      }
-    });
-    transcriptLocatorInFlightRef.current = { key: pending.key, promise };
-    void promise.then(() => {
-      if (transcriptLocatorInFlightRef.current?.promise === promise) transcriptLocatorInFlightRef.current = null;
-    });
-  }, [activeSessionTranscriptKey, loadTranscriptLocator]);
-  const queueTranscriptLocator = useCallback((session: SessionRecord, key: string) => {
-    const cached = transcriptLocatorCacheRef.current.get(key);
-    if (cached) {
-      setTranscriptLocatorState({ key, items: cached.locatorItems });
-      return;
-    }
-    if (transcriptLocatorInFlightRef.current?.key === key) return;
-    pendingTranscriptLocatorRef.current = { key, session };
-    drainTranscriptLocator();
-  }, [drainTranscriptLocator]);
-  useEffect(() => {
-    drainTranscriptLocator();
-  }, [drainTranscriptLocator]);
+  const {
+    links: skillLinks,
+    loading: skillLinksLoading,
+    loaded: skillLinksLoaded,
+    error: skillLinksError,
+    retry: retryActiveSessionSkillLinks,
+  } = useSessionSkillLinks({
+    session: activeSession ?? null,
+    sessionIdentityKey: activeSessionLinkKey,
+    requestKey: activeSessionSkillLinksKey,
+    loadSessionSkillLinks,
+    importedAgent: IMPORTED_SESSION_AGENT,
+    onToastError: showSessionError,
+  });
   const columns = useMemo(
     (): ColumnDef<SessionRecord>[] => createSessionTableColumns({
       normalizedQuery,
@@ -3896,363 +2873,6 @@ export function SessionsView({
       </>
     );
   }, [inferredResumeTargets, resumeSession, sessionResumeTarget]);
-  useEffect(() => {
-    const transcriptSession = activeSessionForTranscriptRef.current;
-    const requestRevision = transcriptRequestAuthorityRef.current.begin();
-    transcriptLocatorRequestAuthorityRef.current.begin();
-    pendingTranscriptLocatorRef.current = null;
-    const identityChanged = loadedTranscriptIdentityRef.current !== activeSessionTranscriptKey;
-    const logicalIdentityChanged = loadedTranscriptLogicalIdentityRef.current !== activeSessionLogicalKey;
-    if (identityChanged) {
-      loadedTranscriptIdentityRef.current = activeSessionTranscriptKey;
-      loadedTranscriptLogicalIdentityRef.current = activeSessionLogicalKey;
-      transcriptSourceVersionRef.current = "";
-      if (logicalIdentityChanged) transcriptItemsRef.current = [];
-      nextTranscriptCursorRef.current = undefined;
-      if (logicalIdentityChanged) setItems([]);
-      setTranscriptLocatorState(null);
-      setNextTranscriptCursor(undefined);
-    }
-    loadMoreTranscriptInFlightRef.current = null;
-    loadAllTranscriptInFlightRef.current = null;
-    transcriptInitialLoadInFlightRef.current = null;
-    setLoadingMoreTranscript(false);
-    setLoading(Boolean(transcriptSession));
-    if (!transcriptSession) {
-      loadedTranscriptIdentityRef.current = "";
-      loadedTranscriptLogicalIdentityRef.current = "";
-      return;
-    }
-    if (activeImportedTranscript) {
-      transcriptItemsRef.current = activeImportedTranscript;
-      setItems(activeImportedTranscript);
-      setLoading(false);
-      return;
-    }
-    const cached = transcriptCacheRef.current.get(activeSessionTranscriptKey);
-    if (identityChanged && cached) {
-      transcriptItemsRef.current = cached.items;
-      nextTranscriptCursorRef.current = cached.nextCursor;
-      if (cached.locatorItems.length > 0) {
-        const cachedLocator: TranscriptLocatorPage = {
-          locatorItems: cached.locatorItems,
-          warnings: cached.warnings,
-          sourceVersion: cached.sourceVersion,
-        };
-        transcriptLocatorCacheRef.current.set(activeSessionTranscriptKey, cachedLocator);
-        setTranscriptLocatorState({ key: activeSessionTranscriptKey, items: cached.locatorItems });
-      }
-      transcriptCacheRef.current.delete(activeSessionTranscriptKey);
-      transcriptCacheRef.current.set(activeSessionTranscriptKey, cached);
-      setItems(cached.items);
-      setNextTranscriptCursor(cached.nextCursor);
-      setLoading(false);
-    }
-    const knownSourceVersion = transcriptSourceVersionRef.current || cached?.sourceVersion;
-    const previousTranscriptItemCount = transcriptItemsRef.current.length;
-    let initialLoadStatus: TranscriptLoadMoreResult["status"] = "loaded";
-    const initialLoadPromise = loadTranscript(transcriptSession, undefined, knownSourceVersion).then(async (page) => {
-      if (!transcriptRequestAuthorityRef.current.isCurrent(requestRevision)) {
-        initialLoadStatus = "cancelled";
-        return;
-      }
-      if (page.unchanged) {
-        transcriptSourceVersionRef.current = page.sourceVersion || knownSourceVersion || "";
-        queueTranscriptLocator(transcriptSession, activeSessionTranscriptKey);
-        return;
-      }
-      let refreshedPage = page;
-      const shouldReloadAll = previousTranscriptItemCount > page.items.length;
-      if (shouldReloadAll) {
-        let nextCursor = page.nextCursor;
-        let restartCount = 0;
-        let allItems = [...page.items];
-        let allWarnings = [...page.warnings];
-        let latestSourceVersion = page.sourceVersion;
-        while (nextCursor) {
-          const nextPage = await loadTranscript(transcriptSession, nextCursor);
-          if (!transcriptRequestAuthorityRef.current.isCurrent(requestRevision)) {
-            initialLoadStatus = "cancelled";
-            return;
-          }
-          if (nextPage.restartRequired) {
-            if (restartCount >= 1) throw new Error("Transcript changed while refreshing");
-            restartCount += 1;
-            const restarted = await loadTranscript(transcriptSession);
-            if (!transcriptRequestAuthorityRef.current.isCurrent(requestRevision)) {
-              initialLoadStatus = "cancelled";
-              return;
-            }
-            allItems = [...restarted.items];
-            allWarnings = [...restarted.warnings];
-            latestSourceVersion = restarted.sourceVersion;
-            nextCursor = restarted.nextCursor;
-            refreshedPage = restarted;
-            continue;
-          }
-          allItems = mergeTranscriptItems(allItems, nextPage.items);
-          allWarnings.push(...nextPage.warnings);
-          latestSourceVersion = nextPage.sourceVersion || latestSourceVersion;
-          nextCursor = nextPage.nextCursor;
-        }
-        refreshedPage = {
-          ...refreshedPage,
-          items: allItems,
-          warnings: allWarnings,
-          sourceVersion: latestSourceVersion,
-          nextCursor: nextCursor ?? undefined,
-          done: !nextCursor,
-          restartRequired: false,
-          unchanged: false,
-        };
-      }
-      const sourceChanged = Boolean(
-        transcriptSourceVersionRef.current
-          && refreshedPage.sourceVersion
-          && refreshedPage.sourceVersion !== transcriptSourceVersionRef.current,
-      );
-      const sourcePrefixRewritten = sourceChanged && !transcriptItemsSharePrefix(transcriptItemsRef.current, refreshedPage.items);
-      if (sourcePrefixRewritten) {
-        transcriptLocatorRequestAuthorityRef.current.begin();
-        transcriptLocatorCacheRef.current.delete(activeSessionTranscriptKey);
-        setTranscriptLocatorState(null);
-      }
-      const refreshedItems = shouldReloadAll
-        ? refreshedPage.items
-        : preserveTranscriptTail(transcriptItemsRef.current, refreshedPage.items);
-      const pageToCache = refreshedItems === refreshedPage.items
-        ? refreshedPage
-        : { ...refreshedPage, items: refreshedItems };
-      transcriptCacheRef.current.set(activeSessionTranscriptKey, pageToCache);
-      trimTranscriptCache(transcriptCacheRef.current);
-      transcriptItemsRef.current = refreshedItems;
-      nextTranscriptCursorRef.current = pageToCache.nextCursor;
-      transcriptSourceVersionRef.current = pageToCache.sourceVersion;
-      if (pageToCache.locatorItems.length > 0) {
-        const locatorPage: TranscriptLocatorPage = {
-          locatorItems: pageToCache.locatorItems,
-          warnings: pageToCache.warnings,
-          sourceVersion: pageToCache.sourceVersion,
-        };
-        transcriptLocatorCacheRef.current.set(activeSessionTranscriptKey, locatorPage);
-        setTranscriptLocatorState({ key: activeSessionTranscriptKey, items: pageToCache.locatorItems });
-      }
-      setItems(refreshedItems);
-      setNextTranscriptCursor(pageToCache.nextCursor);
-      queueTranscriptLocator(transcriptSession, activeSessionTranscriptKey);
-    }).catch((error) => {
-      initialLoadStatus = "failed";
-      if (transcriptRequestAuthorityRef.current.isCurrent(requestRevision)) {
-        logger.warn("sessions transcript load failed", {
-          requestRevision,
-          id: transcriptSession.id,
-          error,
-        });
-      }
-      if (transcriptRequestAuthorityRef.current.isCurrent(requestRevision)) {
-        showSessionError("Could not load session details. Try again.");
-      }
-    }).finally(() => {
-      if (transcriptRequestAuthorityRef.current.isCurrent(requestRevision)) {
-        setLoading(false);
-      }
-    }).then(() => initialLoadStatus);
-    transcriptInitialLoadInFlightRef.current = {
-      key: activeSessionTranscriptKey,
-      promise: initialLoadPromise,
-    };
-    void initialLoadPromise.then(() => {
-      if (transcriptInitialLoadInFlightRef.current?.promise === initialLoadPromise) {
-        transcriptInitialLoadInFlightRef.current = null;
-      }
-    });
-    return () => {
-      transcriptRequestAuthorityRef.current.invalidate(requestRevision);
-    };
-  }, [activeImportedTranscript, activeSessionLogicalKey, activeSessionTranscriptKey, activeSessionTranscriptRefreshKey, loadTranscript, queueTranscriptLocator, showSessionError]);
-  const loadMoreTranscript = useCallback((): Promise<TranscriptLoadMoreResult> => {
-    const requestKey = activeSessionTranscriptKey;
-    const existing = loadMoreTranscriptInFlightRef.current;
-    if (existing?.key === requestKey) return existing.promise;
-
-    const initial = transcriptInitialLoadInFlightRef.current;
-    if (initial?.key === requestKey) {
-      return initial.promise.then((status) => {
-        if (transcriptInitialLoadInFlightRef.current?.promise === initial.promise) {
-          transcriptInitialLoadInFlightRef.current = null;
-        }
-        if (status !== "loaded") {
-          return { items: transcriptItemsRef.current, status };
-        }
-        if (!activeSession || !nextTranscriptCursorRef.current) {
-          return { items: transcriptItemsRef.current, status: "exhausted" as const };
-        }
-        return loadMoreTranscript();
-      });
-    }
-
-    const cursor = nextTranscriptCursorRef.current;
-    if (!activeSession || !cursor) {
-      return Promise.resolve({ items: transcriptItemsRef.current, status: "exhausted" as const });
-    }
-    const requestRevision = transcriptRequestAuthorityRef.current.begin();
-    const currentItems = transcriptItemsRef.current;
-    setLoadingMoreTranscript(true);
-    const promise = (async () => {
-      try {
-        const page = await loadTranscript(activeSession, cursor);
-        if (!transcriptRequestAuthorityRef.current.isCurrent(requestRevision)) {
-          return { items: currentItems, status: "cancelled" as const };
-        }
-        if (page.restartRequired) {
-          const restarted = await loadTranscript(activeSession);
-          if (!transcriptRequestAuthorityRef.current.isCurrent(requestRevision)) {
-            return { items: currentItems, status: "cancelled" as const };
-          }
-          transcriptLocatorRequestAuthorityRef.current.begin();
-          transcriptLocatorCacheRef.current.delete(requestKey);
-          setTranscriptLocatorState(null);
-          transcriptSourceVersionRef.current = restarted.sourceVersion;
-          transcriptCacheRef.current.set(requestKey, restarted);
-          trimTranscriptCache(transcriptCacheRef.current);
-          transcriptItemsRef.current = restarted.items;
-          nextTranscriptCursorRef.current = restarted.nextCursor;
-          setItems(restarted.items);
-          setNextTranscriptCursor(restarted.nextCursor);
-          queueTranscriptLocator(activeSession, requestKey);
-          return {
-            items: restarted.items,
-            status: restarted.nextCursor ? "loaded" as const : "exhausted" as const,
-          };
-        }
-        const sourceChanged = Boolean(
-          transcriptSourceVersionRef.current
-            && page.sourceVersion
-            && page.sourceVersion !== transcriptSourceVersionRef.current,
-        );
-        if (sourceChanged) {
-          transcriptLocatorRequestAuthorityRef.current.begin();
-          transcriptLocatorCacheRef.current.delete(requestKey);
-          setTranscriptLocatorState(null);
-        }
-        transcriptSourceVersionRef.current = page.sourceVersion;
-        const cached = transcriptCacheRef.current.get(requestKey);
-        const merged: TranscriptPage = {
-          items: mergeTranscriptItems(cached?.items ?? currentItems, page.items),
-          locatorItems: cached?.locatorItems ?? page.locatorItems,
-          warnings: [...(cached?.warnings ?? []), ...page.warnings],
-          nextCursor: page.nextCursor,
-          done: page.done,
-          sourceVersion: page.sourceVersion,
-          restartRequired: false,
-          unchanged: false,
-        };
-        transcriptCacheRef.current.delete(requestKey);
-        transcriptCacheRef.current.set(requestKey, merged);
-        trimTranscriptCache(transcriptCacheRef.current);
-        transcriptItemsRef.current = merged.items;
-        nextTranscriptCursorRef.current = merged.nextCursor;
-        setItems(merged.items);
-        setNextTranscriptCursor(merged.nextCursor);
-        if (sourceChanged) queueTranscriptLocator(activeSession, requestKey);
-        return {
-          items: merged.items,
-          status: merged.nextCursor ? "loaded" as const : "exhausted" as const,
-        };
-      } catch (error) {
-        if (transcriptRequestAuthorityRef.current.isCurrent(requestRevision)) {
-          logger.warn("sessions transcript page load failed", { error });
-          showSessionError("Could not load session details. Try again.");
-        }
-        return { items: currentItems, status: "failed" as const };
-      } finally {
-        if (transcriptRequestAuthorityRef.current.isCurrent(requestRevision)) {
-          setLoadingMoreTranscript(false);
-        }
-      }
-    })();
-    loadMoreTranscriptInFlightRef.current = { key: requestKey, promise };
-    void promise.then(
-      () => {
-        if (loadMoreTranscriptInFlightRef.current?.promise === promise) loadMoreTranscriptInFlightRef.current = null;
-      },
-      () => {
-        if (loadMoreTranscriptInFlightRef.current?.promise === promise) loadMoreTranscriptInFlightRef.current = null;
-      },
-    );
-    return promise;
-  }, [activeSession, activeSessionTranscriptKey, loadTranscript, queueTranscriptLocator, showSessionError]);
-  const loadAllTranscript = useCallback((): Promise<void> => {
-    const requestKey = activeSessionTranscriptKey;
-    const existing = loadAllTranscriptInFlightRef.current;
-    if (existing?.key === requestKey) return existing.promise;
-
-    const loadAll = async () => {
-      while (nextTranscriptCursorRef.current) {
-        const cursorBefore = nextTranscriptCursorRef.current;
-        const result = await loadMoreTranscript();
-        if (result.status === "failed" || result.status === "cancelled") break;
-        if (nextTranscriptCursorRef.current === cursorBefore) break;
-      }
-    };
-    const promise = loadAll();
-    loadAllTranscriptInFlightRef.current = { key: requestKey, promise };
-    void promise.then(
-      () => {
-        if (loadAllTranscriptInFlightRef.current?.promise === promise) loadAllTranscriptInFlightRef.current = null;
-      },
-      () => {
-        if (loadAllTranscriptInFlightRef.current?.promise === promise) loadAllTranscriptInFlightRef.current = null;
-      },
-    );
-    return promise;
-  }, [activeSessionTranscriptKey, loadMoreTranscript]);
-  useEffect(() => {
-    setSkillLinks([]);
-    setSkillLinksKey("");
-    setSkillLinksAttemptKey("");
-    setSkillLinksError("");
-    setLoadingSkillLinks(false);
-    skillLinksRequestKeyRef.current = "";
-  }, [activeSessionLinkKey]);
-  const loadActiveSessionSkillLinks = useCallback(async (force = false) => {
-    if (!activeSession || !loadSessionSkillLinks || !activeSessionSkillLinksKey) return;
-    if (activeSession.agent === IMPORTED_SESSION_AGENT) {
-      setSkillLinks([]);
-      setSkillLinksError("");
-      setSkillLinksKey(activeSessionSkillLinksKey);
-      setLoadingSkillLinks(false);
-      return;
-    }
-    if (loadingSkillLinks) return;
-    if (!force && (skillLinksKey === activeSessionSkillLinksKey || skillLinksAttemptKey === activeSessionSkillLinksKey)) return;
-    const requestKey = activeSessionSkillLinksKey;
-    skillLinksRequestKeyRef.current = requestKey;
-    setSkillLinksAttemptKey(requestKey);
-    setLoadingSkillLinks(true);
-    setSkillLinksError("");
-    try {
-      const links = await loadSessionSkillLinks(activeSession);
-      if (skillLinksRequestKeyRef.current !== requestKey) return;
-      setSkillLinks(Array.isArray(links) ? links : []);
-      setSkillLinksKey(requestKey);
-    } catch (error) {
-      if (skillLinksRequestKeyRef.current === requestKey) {
-        logger.warn("sessions skill links load failed", { error });
-        setSkillLinksError("Could not load skills used by this session.");
-        showSessionError("Could not load skills used by this session. Try again.");
-      }
-    } finally {
-      if (skillLinksRequestKeyRef.current === requestKey) setLoadingSkillLinks(false);
-    }
-  }, [activeSession, activeSessionSkillLinksKey, loadSessionSkillLinks, loadingSkillLinks, showSessionError, skillLinksAttemptKey, skillLinksKey]);
-  const retryActiveSessionSkillLinks = useCallback(() => {
-    void loadActiveSessionSkillLinks(true);
-  }, [loadActiveSessionSkillLinks]);
-  useEffect(() => {
-    loadActiveSessionSkillLinks();
-  }, [loadActiveSessionSkillLinks]);
-
   const importButtonStateClass = importFeedback === ImportFeedbackState.Success
     ? "isSuccess"
     : importFeedback === ImportFeedbackState.Warning
@@ -4530,11 +3150,11 @@ export function SessionsView({
             loading={loading}
             scrollRestorationReady={scrollRestorationReady}
             onReportError={showSessionError}
-            hasMore={Boolean(nextTranscriptCursor)}
+            hasMore={hasMoreTranscript}
             loadingMore={loadingMoreTranscript}
             skillLinks={skillLinks}
               loadingSkillLinks={skillLinksLoading}
-              skillLinksLoaded={skillLinksKey === activeSessionSkillLinksKey}
+              skillLinksLoaded={skillLinksLoaded}
               skillLinksError={skillLinksError}
             onCollapse={() => {
               keyboardNavigationScopeRef.current = KeyboardNavigationScope.List;
@@ -4545,6 +3165,7 @@ export function SessionsView({
             onOpenSkill={onOpenSkill}
             onLoadSkills={retryActiveSessionSkillLinks}
             onLoadMore={loadMoreTranscript}
+            loadUntilTarget={loadTranscriptUntilTarget}
             onLoadAll={loadAllTranscript}
             searchTranscript={searchTranscript}
             onSavePrompt={onSavePrompt}

@@ -83,6 +83,7 @@ impl Store {
                 Ok(())
             })?;
         }
+        store.purge_git_skill_snapshots()?;
         Ok(store)
     }
 
@@ -118,15 +119,6 @@ impl Store {
             schema::ANALYTICS_MIGRATION_KEY,
             "migration.analytics_json",
             schema::migrate_analytics_json_batch,
-            deadline,
-        )? {
-            return Ok(false);
-        }
-        if !run_migration_until_complete(
-            self,
-            schema::SESSION_SEARCH_FTS_MIGRATION_KEY,
-            "migration.session_search_fts",
-            schema::migrate_session_search_fts_batch,
             deadline,
         )? {
             return Ok(false);

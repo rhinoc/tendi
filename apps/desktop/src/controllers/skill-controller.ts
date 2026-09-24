@@ -2,9 +2,13 @@ import type { RuntimeData } from "../lib/data.ts";
 import {
   SkillVisibility,
   normalizeSkill,
+  isReadOnlySkillSource,
+  isSkillSelectable,
+  skillTargets,
   type NormalizedSkill,
   type RawSkillRecord,
   type AvailableSkill,
+  type SkillInstallResult,
   type SkillOperation,
 } from "../lib/skills.ts";
 import { SkillOperationStatus, SkillUpdateAvailability } from "../lib/skill-status.ts";
@@ -166,6 +170,128 @@ export function isExistingSkillOperationStatus(status: SkillOperationStatus | un
 
 export function isSelectableOperationStatus(status: SkillOperationStatus | undefined): boolean {
   return isNewSkillOperationStatus(status) || isExistingSkillOperationStatus(status);
+}
+
+export function isSkillInstallDependencyLocked(
+  name: string,
+  selectedRootNames: ReadonlySet<string>,
+  dependencyReasonsByName: ReadonlyMap<string, readonly string[]>,
+): boolean {
+  return (dependencyReasonsByName.get(name)?.length ?? 0) > 0 && !selectedRootNames.has(name);
+}
+
+export function canToggleSkillInstallRoot(
+  name: string,
+  selectedNames: ReadonlySet<string>,
+  selectedRootNames: ReadonlySet<string>,
+  operationByName: ReadonlyMap<string, SkillOperation>,
+  dependencyReasonsByName: ReadonlyMap<string, readonly string[]>,
+): boolean {
+  if (!isSelectableOperationStatus(operationByName.get(name)?.status)) return false;
+  return !(selectedNames.has(name) && isSkillInstallDependencyLocked(name, selectedRootNames, dependencyReasonsByName));
+}
+
+export function skillInstallRootsForPreset<T extends { name: string }>(
+  preset: SkillInstallFilter,
+  selectableSkills: readonly T[],
+  newSkills: readonly T[],
+  existingSkills: readonly T[],
+  selectableNames: ReadonlySet<string>,
+): string[] {
+  const skills = preset === SkillInstallFilter.All
+    ? selectableSkills
+    : preset === SkillInstallFilter.New
+      ? newSkills
+      : existingSkills;
+  return skills.filter((skill) => selectableNames.has(skill.name)).map((skill) => skill.name);
+}
+
+export function canInstallSkillSelection(input: {
+  resolvedTarget: string;
+  source: string;
+  hasPlan: boolean;
+  selected: readonly string[];
+  selectedHasExisting: boolean;
+  replaceExisting: boolean;
+  busy: boolean;
+}): boolean {
+  return Boolean(
+    input.resolvedTarget
+    && input.source.trim()
+    && input.hasPlan
+    && input.selected.length > 0
+    && (!input.selectedHasExisting || input.replaceExisting)
+    && !input.busy,
+  );
+}
+
+export function installedSkillName(result: SkillInstallResult): string | null {
+  const rows = result.updated ?? result.skills ?? [];
+  const installedNames = new Set(rows.flatMap((skill) => typeof skill.name === "string" ? [skill.name] : []));
+  return result.report.plan.selected
+    .map((skill) => skill.name)
+    .find((name) => installedNames.has(name)) ?? null;
+}
+
+export function suggestedWrapperName(selectedSkills: readonly { name: string }[]): string {
+  const names = selectedSkills.map((skill) => skill.name).filter(Boolean);
+  if (names.length === 0) return "wrapper";
+  const prefixes = names
+    .map((name) => name.split(/[-_]/)[0])
+    .filter((prefix) => prefix.length > 1);
+  return prefixes.length > 0 && prefixes.every((prefix) => prefix === prefixes[0]) ? prefixes[0] : "wrapper";
+}
+
+function childSkillSummary(selectedSkills: readonly { name: string }[]): string {
+  const names = selectedSkills.map((skill) => skill.name).filter(Boolean);
+  if (names.length === 0) return "the selected child skills";
+  const visibleNames = names.slice(0, 4);
+  const suffix = names.length > visibleNames.length ? `, and ${names.length - visibleNames.length} more` : "";
+  return `${visibleNames.join(", ")}${suffix}`;
+}
+
+export function suggestedWrapperDescription(name: string, selectedSkills: readonly { name: string }[] = []): string {
+  const domain = name.trim().replace(/[-_]+/g, " ");
+  return domain ? `Use when the request is about ${domain} and matches one of these child skills: ${childSkillSummary(selectedSkills)}.` : "";
+}
+
+export function selectMovableSkills<T extends NormalizedSkill>(skills: readonly T[]): T[] {
+  return skills.filter((skill) => !isReadOnlySkillSource(skill) && skillTargets(skill).length > 0);
+}
+
+export function selectSkillInstallTargetOptions<T extends { id: string; supportsGlobal: boolean }>(
+  targetOptions: readonly T[],
+  installedAgentKeys: readonly string[],
+  agentIdentityKey: (agent: unknown) => string,
+  isVisibleAgent: (agent: unknown) => boolean,
+): T[] {
+  const installed = new Set(installedAgentKeys);
+  return targetOptions
+    .map((option, index) => ({
+      option,
+      index,
+      installed: installed.has(agentIdentityKey(option.id)),
+    }))
+    .filter(({ option }) => option.supportsGlobal && option.id !== "universal" && isVisibleAgent(option.id))
+    .sort((left, right) => {
+      if (left.option.id === "shared") return -1;
+      if (right.option.id === "shared") return 1;
+      if (left.installed !== right.installed) return left.installed ? -1 : 1;
+      return left.index - right.index;
+    })
+    .map(({ option }) => option);
+}
+
+export function skillSelectionTargets(skills: readonly NormalizedSkill[]): {
+  updateNames: string[];
+  deletableNames: string[];
+} {
+  return {
+    updateNames: skills
+      .filter((skill) => skill.updateAvailability === SkillUpdateAvailability.UpdateAvailable)
+      .map((skill) => skill.id),
+    deletableNames: skills.filter(isSkillSelectable).map((skill) => skill.id),
+  };
 }
 
 export function selectedExistingSkillOperation(

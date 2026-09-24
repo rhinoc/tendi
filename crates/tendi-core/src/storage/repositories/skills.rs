@@ -16,6 +16,7 @@ fn canonical_skill_visibility_path(path: &Path) -> PathBuf {
 }
 
 const INSTALLATION_SCOPE_KEY: &str = "installation:default";
+const GIT_SKILL_SNAPSHOT_CLEANUP_KEY: &str = "storage.git_skill_snapshots_removed_v1";
 
 fn installation_scope_key() -> ScopeKey {
     ScopeKey::new(INSTALLATION_SCOPE_KEY).expect("installation scope key is valid")
@@ -33,7 +34,7 @@ fn skill_visibility_scope(workspace_root: &Path, skill_path: &Path) -> Result<Sc
 
 fn migrate_global_skill_visibility_scopes(tx: &Transaction<'_>) -> Result<()> {
     let mut statement = tx.prepare(
-        "SELECT scope_key, skill_path, visibility
+        "SELECT scope_key, skill_path, visibility, locked
          FROM scoped_skill_visibility
          WHERE scope_key LIKE 'workspace:%'
          ORDER BY scope_key, skill_path",
@@ -44,12 +45,13 @@ fn migrate_global_skill_visibility_scopes(tx: &Transaction<'_>) -> Result<()> {
                 row.get::<_, String>(0)?,
                 row.get::<_, String>(1)?,
                 row.get::<_, String>(2)?,
+                row.get::<_, bool>(3)?,
             ))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     drop(statement);
 
-    for (scope_key, skill_path, visibility) in rows {
+    for (scope_key, skill_path, visibility, locked) in rows {
         let Some(workspace) = scope_key.strip_prefix("workspace:") else {
             continue;
         };
@@ -61,12 +63,20 @@ fn migrate_global_skill_visibility_scopes(tx: &Transaction<'_>) -> Result<()> {
             continue;
         }
         tx.execute(
-            "INSERT OR IGNORE INTO scoped_skill_visibility (scope_key, skill_path, visibility)
-             VALUES (?1, ?2, ?3)",
+            "INSERT INTO scoped_skill_visibility (scope_key, skill_path, visibility, locked)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(scope_key, skill_path) DO UPDATE SET
+                visibility = CASE
+                    WHEN excluded.locked AND NOT scoped_skill_visibility.locked
+                    THEN excluded.visibility
+                    ELSE scoped_skill_visibility.visibility
+                END,
+                locked = MAX(scoped_skill_visibility.locked, excluded.locked)",
             params![
                 INSTALLATION_SCOPE_KEY,
                 canonical_skill_path.display().to_string(),
-                visibility
+                visibility,
+                locked,
             ],
         )?;
         tx.execute(
@@ -74,6 +84,74 @@ fn migrate_global_skill_visibility_scopes(tx: &Transaction<'_>) -> Result<()> {
              WHERE scope_key = ?1 AND skill_path = ?2",
             params![scope_key, skill_path],
         )?;
+    }
+    Ok(())
+}
+
+fn git_skill_snapshot_keys(conn: &Connection) -> Result<Vec<(String, String, String)>> {
+    let mut statement = conn.prepare(
+        "SELECT DISTINCT sources.scope_key, sources.skill_path, sources.source_kind
+         FROM scoped_skill_sources AS sources
+         JOIN scoped_skill_snapshots AS snapshots
+           ON snapshots.scope_key = sources.scope_key
+          AND snapshots.skill_path = sources.skill_path",
+    )?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows
+        .into_iter()
+        .filter(|(_, _, source_kind)| crate::skills::is_git_source_kind(source_kind))
+        .collect())
+}
+
+fn persist_skill_snapshots_in_tx(
+    tx: &Transaction<'_>,
+    scope_key: &str,
+    source_records: &[SkillSourceRecord],
+    snapshots: &[SkillSnapshot],
+) -> Result<()> {
+    let git_skill_paths = source_records
+        .iter()
+        .filter(|record| crate::skills::is_git_source_kind(&record.source_kind))
+        .map(|record| record.skill_path.clone())
+        .collect::<BTreeSet<_>>();
+    for skill_path in &git_skill_paths {
+        tx.execute(
+            "DELETE FROM scoped_skill_snapshots
+             WHERE scope_key = ?1 AND skill_path = ?2",
+            params![scope_key, skill_path.display().to_string()],
+        )?;
+    }
+    for snapshot in snapshots {
+        if git_skill_paths.contains(&snapshot.skill_path) {
+            continue;
+        }
+        tx.execute(
+            "DELETE FROM scoped_skill_snapshots
+             WHERE scope_key = ?1 AND skill_path = ?2",
+            params![scope_key, snapshot.skill_path.display().to_string()],
+        )?;
+        for file in &snapshot.files {
+            tx.execute(
+                "INSERT INTO scoped_skill_snapshots (
+                    scope_key, skill_path, source_version, relative_path, content
+                 ) VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![
+                    scope_key,
+                    snapshot.skill_path.display().to_string(),
+                    snapshot.source_version,
+                    file.relative_path,
+                    file.content,
+                ],
+            )?;
+        }
     }
     Ok(())
 }
@@ -87,12 +165,29 @@ impl Store {
                     scope_key TEXT NOT NULL,
                     skill_path TEXT NOT NULL,
                     visibility TEXT NOT NULL,
+                    locked INTEGER NOT NULL DEFAULT 0 CHECK (locked IN (0, 1)),
                     PRIMARY KEY (scope_key, skill_path)
                 );
                 CREATE INDEX IF NOT EXISTS idx_scoped_skill_visibility_path
                     ON scoped_skill_visibility(skill_path);
                 ",
             )?;
+            let has_locked_column = {
+                let mut statement = tx.prepare("PRAGMA table_info(scoped_skill_visibility)")?;
+                let columns = statement
+                    .query_map([], |row| row.get::<_, String>(1))?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                columns.iter().any(|column| column == "locked")
+            };
+            if !has_locked_column {
+                // Existing visibility rows were seeded from provider scans and
+                // cannot be distinguished from explicit user choices. Keep
+                // them as unlocked defaults; explicit writes set this flag.
+                tx.execute_batch(
+                    "ALTER TABLE scoped_skill_visibility
+                     ADD COLUMN locked INTEGER NOT NULL DEFAULT 0 CHECK (locked IN (0, 1));",
+                )?;
+            }
             migrate_global_skill_visibility_scopes(tx)?;
             // Skills projections are owned by workspace scopes. Older builds
             // accidentally created an installation-scope dirty receipt while
@@ -107,6 +202,7 @@ impl Store {
         })
     }
 
+    /// Return visibility choices explicitly locked by a user or a legacy Tendi setting.
     pub fn skill_visibilities_for_workspace(
         &self,
         workspace_root: &Path,
@@ -116,7 +212,7 @@ impl Store {
         let mut statement = self.conn.prepare(
             "SELECT scope_key, skill_path, visibility
              FROM scoped_skill_visibility
-             WHERE scope_key IN (?1, ?2)
+             WHERE scope_key IN (?1, ?2) AND locked = 1
              ORDER BY skill_path",
         )?;
         let rows =
@@ -182,19 +278,30 @@ impl Store {
             let mut changed = 0;
             for (path, visibility) in &values {
                 let scope_key = skill_visibility_scope(&workspace_root, path)?;
-                let row_changed = tx.execute(
-                    "INSERT INTO scoped_skill_visibility (scope_key, skill_path, visibility)
-                     VALUES (?1, ?2, ?3)
-                     ON CONFLICT(scope_key, skill_path) DO UPDATE SET
-                        visibility = excluded.visibility
-                     WHERE NOT ?4 AND scoped_skill_visibility.visibility != excluded.visibility",
-                    params![
-                        scope_key.as_str(),
-                        path.display().to_string(),
-                        visibility.label(),
-                        initialize_only
-                    ],
-                )?;
+                let row_changed = if initialize_only {
+                    tx.execute(
+                        "INSERT INTO scoped_skill_visibility
+                            (scope_key, skill_path, visibility, locked)
+                         VALUES (?1, ?2, ?3, 0)
+                         ON CONFLICT(scope_key, skill_path) DO UPDATE SET
+                            visibility = excluded.visibility
+                         WHERE scoped_skill_visibility.locked = 0
+                           AND scoped_skill_visibility.visibility != excluded.visibility",
+                        params![scope_key.as_str(), path.display().to_string(), visibility.label()],
+                    )?
+                } else {
+                    tx.execute(
+                        "INSERT INTO scoped_skill_visibility
+                            (scope_key, skill_path, visibility, locked)
+                         VALUES (?1, ?2, ?3, 1)
+                         ON CONFLICT(scope_key, skill_path) DO UPDATE SET
+                            visibility = excluded.visibility,
+                            locked = 1
+                         WHERE scoped_skill_visibility.visibility != excluded.visibility
+                            OR scoped_skill_visibility.locked != 1",
+                        params![scope_key.as_str(), path.display().to_string(), visibility.label()],
+                    )?
+                };
                 changed += row_changed;
                 if row_changed > 0 {
                     let resource = crate::coordination::canonical_resource_path(path)?;
@@ -274,13 +381,30 @@ impl Store {
         let source_scope = skill_visibility_scope(&workspace_root, &source)?;
         let destination_scope = skill_visibility_scope(&workspace_root, &destination)?;
         self.with_named_write_transaction("copy_skill_visibility_for_workspace", |tx| {
-            let Some(visibility) = tx.query_row("SELECT visibility FROM scoped_skill_visibility WHERE scope_key = ?1 AND skill_path = ?2", params![source_scope.as_str(), source.display().to_string()], |row| row.get::<_, String>(0)).optional()? else { return Ok(false); };
+            let Some((visibility, locked)) = tx
+                .query_row(
+                    "SELECT visibility, locked FROM scoped_skill_visibility
+                     WHERE scope_key = ?1 AND skill_path = ?2",
+                    params![source_scope.as_str(), source.display().to_string()],
+                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, bool>(1)?)),
+                )
+                .optional()?
+            else {
+                return Ok(false);
+            };
             tx.execute(
-                "INSERT INTO scoped_skill_visibility (scope_key, skill_path, visibility)
-                 VALUES (?1, ?2, ?3)
+                "INSERT INTO scoped_skill_visibility (scope_key, skill_path, visibility, locked)
+                 VALUES (?1, ?2, ?3, ?4)
                  ON CONFLICT(scope_key, skill_path) DO UPDATE SET
-                    visibility = excluded.visibility",
-                params![destination_scope.as_str(), destination.display().to_string(), visibility],
+                    visibility = excluded.visibility,
+                    locked = excluded.locked
+                 WHERE NOT scoped_skill_visibility.locked OR excluded.locked",
+                params![
+                    destination_scope.as_str(),
+                    destination.display().to_string(),
+                    visibility,
+                    locked
+                ],
             )?;
             if remove_source && source != destination {
                 tx.execute(
@@ -322,6 +446,53 @@ impl Store {
                     params![INSTALLATION_SCOPE_KEY, skill_path.display().to_string()],
                 )?;
             }
+            Ok(())
+        })?;
+        Ok(())
+    }
+
+    pub(crate) fn purge_git_skill_snapshots(&self) -> Result<()> {
+        let completed = self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM meta WHERE key = ?1)",
+            [GIT_SKILL_SNAPSHOT_CLEANUP_KEY],
+            |row| row.get::<_, bool>(0),
+        )?;
+        if completed {
+            return Ok(());
+        }
+        self.with_named_write_transaction("purge_git_skill_snapshots", |tx| {
+            let completed = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM meta WHERE key = ?1)",
+                [GIT_SKILL_SNAPSHOT_CLEANUP_KEY],
+                |row| row.get::<_, bool>(0),
+            )?;
+            if completed {
+                return Ok(());
+            }
+            let mut deleted_rows = 0;
+            for (scope_key, skill_path, source_kind) in git_skill_snapshot_keys(tx)? {
+                deleted_rows += tx.execute(
+                    "DELETE FROM scoped_skill_snapshots
+                     WHERE scope_key = ?1 AND skill_path = ?2
+                       AND EXISTS (
+                           SELECT 1 FROM scoped_skill_sources
+                           WHERE scope_key = ?1 AND skill_path = ?2 AND source_kind = ?3
+                    )",
+                    params![scope_key, skill_path, source_kind],
+                )?;
+            }
+            if deleted_rows > 0 {
+                tx.execute(
+                    "INSERT INTO meta(key, value) VALUES ('storage.compaction.pending', '1')
+                     ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                    [],
+                )?;
+            }
+            tx.execute(
+                "INSERT INTO meta(key, value) VALUES (?1, '1')
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                [GIT_SKILL_SNAPSHOT_CLEANUP_KEY],
+            )?;
             Ok(())
         })?;
         Ok(())
@@ -493,30 +664,7 @@ impl Store {
                 ],
             )?;
         }
-        for snapshot in snapshots {
-            tx.execute(
-                "DELETE FROM scoped_skill_snapshots
-                 WHERE scope_key = ?1 AND skill_path = ?2",
-                params![
-                    scope_key.as_str(),
-                    snapshot.skill_path.display().to_string()
-                ],
-            )?;
-            for file in &snapshot.files {
-                tx.execute(
-                    "INSERT INTO scoped_skill_snapshots (
-                        scope_key, skill_path, source_version, relative_path, content
-                     ) VALUES (?1, ?2, ?3, ?4, ?5)",
-                    params![
-                        scope_key.as_str(),
-                        snapshot.skill_path.display().to_string(),
-                        snapshot.source_version,
-                        file.relative_path,
-                        file.content,
-                    ],
-                )?;
-            }
-        }
+        persist_skill_snapshots_in_tx(tx, scope_key.as_str(), source_records, snapshots)?;
             self.mark_projection_resources_in_tx(tx, &scope_key, "skills", &resources, false, true)?;
             Ok(())
         })?;
@@ -717,27 +865,7 @@ impl Store {
                 ],
             )?;
         }
-        for snapshot in snapshots {
-            tx.execute(
-                "DELETE FROM scoped_skill_snapshots
-                 WHERE scope_key = ?1 AND skill_path = ?2",
-                params![scope_key, snapshot.skill_path.display().to_string()],
-            )?;
-            for file in &snapshot.files {
-                tx.execute(
-                    "INSERT INTO scoped_skill_snapshots (
-                        scope_key, skill_path, source_version, relative_path, content
-                     ) VALUES (?1, ?2, ?3, ?4, ?5)",
-                    params![
-                        scope_key,
-                        snapshot.skill_path.display().to_string(),
-                        snapshot.source_version,
-                        file.relative_path,
-                        file.content,
-                    ],
-                )?;
-            }
-        }
+        persist_skill_snapshots_in_tx(tx, scope_key, source_records, snapshots)?;
         Ok(())
     }
 

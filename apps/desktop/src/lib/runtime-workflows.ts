@@ -6,7 +6,7 @@ import {
   refreshSkills,
   SkillUpdateCheckState,
 } from "./runtime-gateway.ts";
-import type { CatalogMutationResponse, SkillChangeArgs, SkillChangeCommand, SkillChangeResponse, SkillRefreshResponse } from "./runtime-gateway.ts";
+import type { CatalogMutationResponse, McpMutationResponse, SkillChangeArgs, SkillChangeCommand, SkillChangeResponse, SkillRefreshResponse } from "./runtime-gateway.ts";
 import type { RawSkillRecord } from "./skills.ts";
 import type { SessionIdentityRecord } from "./sessions.ts";
 import type { RawDomainRow } from "../controllers/controller-types.ts";
@@ -62,7 +62,7 @@ export function commitHookCommandResult(store: DesktopStore, result: CatalogMuta
   return result;
 }
 
-export function commitMcpCommandResult(store: DesktopStore, result: CatalogMutationResponse): CatalogMutationResponse {
+export function commitMcpCommandResult(store: DesktopStore, result: McpMutationResponse): McpMutationResponse {
   store.actions.applyMcpCommandResult(result);
   return result;
 }

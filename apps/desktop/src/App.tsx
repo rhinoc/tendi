@@ -337,6 +337,7 @@ export function App() {
   const [commandPaletteScope, setCommandPaletteScope] = useState<CommandPaletteScope>("current");
   const [paletteLocateRequest, setPaletteLocateRequest] = useState<PaletteLocateRequest | null>(null);
   const [paletteConfigRows, setPaletteConfigRows] = useState<PaletteConfigRow[]>([]);
+  const [skillFilesChanged, setSkillFilesChanged] = useState<{ id: number; paths: readonly string[] } | null>(null);
   const deferredView = useDeferredValue(view);
   const contentView = isDetailView(view)
     ? view
@@ -850,6 +851,9 @@ export function App() {
     catalogRuntimes.get(domain)?.beginMutation() ?? (() => undefined)
   ), [catalogRuntimes]);
   const refreshSkillsForRuntime = useCallback(() => refreshSkillList(true), [refreshSkillList]);
+  const handleSkillFilesChanged = useCallback((id: number, paths: readonly string[]) => {
+    setSkillFilesChanged({ id, paths: [...paths] });
+  }, []);
 
   const refreshProjection = useCallback(async (domain: string) => {
     if (domain === RuntimeDomainKey.Agents) {
@@ -893,6 +897,7 @@ export function App() {
   } = useSessionRuntimeController({
     refreshSessionProjects,
     refreshSkills: refreshSkillsForRuntime,
+    onSkillFilesChanged: handleSkillFilesChanged,
     refreshProjection,
     setProjectionError,
     runSkillIndex,
@@ -1005,8 +1010,9 @@ export function App() {
         tags: draft.tags,
         body: draft.body,
       });
-      if (result) desktopStore.actions.applyPromptRecord(result, draft.body);
-      return result;
+      if (!result) return false;
+      desktopStore.actions.applyPromptRecord(result, draft.body);
+      return true;
     } finally {
       release();
     }
@@ -1984,6 +1990,7 @@ export function App() {
           {contentView === AppPage.SkillDetail ? (activeSkill ? (
             <MemoSkillEditorView
               skill={activeSkill}
+              skillFilesChanged={skillFilesChanged}
               skills={data.skills}
               back={backToSkills}
               onReadSkillIndexStatus={readSkillIndexStatus}

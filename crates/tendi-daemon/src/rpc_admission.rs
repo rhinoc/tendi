@@ -896,8 +896,7 @@ fn projection_dependencies(method: &str) -> &'static [&'static str] {
         | "hook_delete_many"
         | "hook_set_enabled"
         | "hook_set_enabled_many"
-        | "hook_review"
-        | "hook_source_read" => &["hooks"],
+        | "hook_review" => &["hooks"],
         "mcp_probe" | "mcp_set_enabled" | "mcp_set_enabled_many" => &["mcp"],
         "rule_file_save" | "rule_file_delete_many" => &["rules"],
         // These commands own their cache/refresh policy in the operation

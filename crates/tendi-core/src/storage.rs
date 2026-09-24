@@ -10,6 +10,7 @@ pub use crate::generated::runtime_contract::AppSettingsPatch;
 use anyhow::{Context, Result, bail};
 use chrono::Local;
 use flate2::{Compression, read::ZlibDecoder, write::ZlibEncoder};
+use sha2::{Digest, Sha256};
 use rusqlite::{
     Connection, OptionalExtension, Transaction, params, params_from_iter,
     types::{Type, Value as SqlValue},
@@ -74,7 +75,7 @@ struct ProjectState {
 const SESSION_ANALYTICS_BATCH_SIZE: usize = 64;
 // The current schema is squashed; all development revisions before this
 // release were never published as compatibility boundaries.
-pub(crate) const STORAGE_SCHEMA_VERSION: i64 = 2;
+pub(crate) const STORAGE_SCHEMA_VERSION: i64 = 3;
 const SESSION_SEARCH_INDEX_VERSION: i64 = 2;
 pub(crate) const PROJECTION_PARSER_VERSION: &str = "scan-v8";
 pub(crate) const ANALYTICS_JSON_ENCODING: &str = "zlib-v1";
@@ -188,6 +189,7 @@ pub fn database_error_kind_from_message(message: &str) -> Option<DatabaseErrorKi
         || message.contains("i/o error")
         || message.contains("ioerr")
         || message.contains("error code 522")
+        || message.contains("error code=522")
     {
         return Some(DatabaseErrorKind::Io);
     }
@@ -867,6 +869,15 @@ struct SessionSearchDocument {
     project: String,
     user_text: String,
     assistant_text: String,
+}
+
+pub(crate) fn session_search_content_hash(user_text: &str, assistant_text: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update((user_text.len() as u64).to_be_bytes());
+    hasher.update(user_text.as_bytes());
+    hasher.update((assistant_text.len() as u64).to_be_bytes());
+    hasher.update(assistant_text.as_bytes());
+    format!("{:x}", hasher.finalize())
 }
 
 pub(crate) fn compress_analytics_json(value: &str) -> Result<Vec<u8>> {

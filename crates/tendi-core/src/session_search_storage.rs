@@ -11,6 +11,8 @@ const SEARCH_WRITE_BATCH_ROWS: usize = 128;
 const SEARCH_WRITE_BATCH_TARGET: Duration = Duration::from_millis(10);
 const SESSION_SEARCH_PROJECTION_DOMAIN: &str = "session-search";
 
+type CurrentSessionSearchState = (i64, i64, String, i64, bool, Option<String>);
+
 /// The exact metadata and revision boundary committed by one index publication.
 /// Callers must not widen this span across unrelated metadata transactions.
 #[derive(Debug, Clone)]
@@ -46,6 +48,113 @@ fn check_search_cancellation(should_stop: &dyn Fn() -> bool) -> Result<()> {
 }
 
 impl Store {
+    fn session_search_current_state(
+        &self,
+        scope: &ScopeKey,
+        session: &SessionRecord,
+    ) -> Result<Option<CurrentSessionSearchState>> {
+        self.conn
+            .query_row(
+                "SELECT file_mtime, file_size, search_metadata, search_index_version,
+                    EXISTS (SELECT 1 FROM scoped_session_search_entries r
+                            WHERE r.scope_key = ?1 AND r.session_id = ?2 AND r.agent = ?3
+                              AND r.session_path = ?4 AND r.record_order = 0), search_checkpoint
+                 FROM scoped_session_search_index
+                 WHERE scope_key = ?1 AND session_id = ?2 AND agent = ?3 AND session_path = ?4",
+                params![
+                    scope.as_str(),
+                    session.id,
+                    agent_label(session.agent),
+                    session.path.to_string_lossy()
+                ],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, i64>(3)?,
+                        row.get::<_, bool>(4)?,
+                        row.get::<_, Option<String>>(5)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    fn existing_session_search_documents(
+        &self,
+        scope: &ScopeKey,
+        session: &SessionRecord,
+        content_current: bool,
+        start_record_order: usize,
+    ) -> Result<BTreeMap<usize, SessionSearchDocument>> {
+        let mut statement = self.conn.prepare(
+            "SELECT entry.record_order, entry.metadata_text, entry.title, entry.project,
+                    content.user_text, content.assistant_text
+             FROM scoped_session_search_entries AS entry
+             JOIN session_search_content_records AS content ON content.id = entry.content_id
+             WHERE entry.scope_key = ?1 AND entry.session_id = ?2 AND entry.agent = ?3
+               AND entry.session_path = ?4
+               AND (entry.record_order = 0 OR (?5 = 0 AND entry.record_order >= ?6))
+             ORDER BY entry.record_order",
+        )?;
+        statement
+            .query_map(
+                params![
+                    scope.as_str(),
+                    session.id,
+                    agent_label(session.agent),
+                    session.path.to_string_lossy(),
+                    content_current,
+                    start_record_order as i64
+                ],
+                |row| {
+                    Ok((
+                        row.get::<_, usize>(0)?,
+                        SessionSearchDocument {
+                            metadata_text: row.get(1)?,
+                            title: row.get(2)?,
+                            project: row.get(3)?,
+                            user_text: row.get(4)?,
+                            assistant_text: row.get(5)?,
+                        },
+                    ))
+                },
+            )?
+            .collect::<rusqlite::Result<BTreeMap<_, _>>>()
+            .map_err(Into::into)
+    }
+
+    fn orphan_session_search_record_ids(
+        &self,
+        scope: &ScopeKey,
+        session_id: &str,
+        agent: &str,
+        path: &str,
+    ) -> Result<Vec<i64>> {
+        self.conn
+            .prepare(
+                "SELECT r.id FROM scoped_session_search_entries r WHERE r.scope_key = ?1
+                 AND r.session_id = ?2 AND r.agent = ?3 AND r.session_path = ?4
+                 AND NOT EXISTS (SELECT 1 FROM scoped_sessions s WHERE s.scope_key = r.scope_key
+                    AND s.id = r.session_id AND s.agent = r.agent AND s.path = r.session_path)
+                 LIMIT ?5",
+            )?
+            .query_map(
+                params![
+                    scope.as_str(),
+                    session_id,
+                    agent,
+                    path,
+                    SEARCH_WRITE_BATCH_ROWS as i64
+                ],
+                |row| row.get::<_, i64>(0),
+            )?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Into::into)
+    }
+
     fn lock_session_search(&self, scope: &ScopeKey) -> Result<crate::coordination::ResourceLease> {
         crate::coordination::ResourceLease::acquire(self.path(), &session_search_lock_key(scope))
     }
@@ -271,7 +380,12 @@ impl Store {
         }
         self.with_background_write_transaction("session_search.fts_optimize", |tx| {
             tx.execute(
-                "INSERT INTO scoped_session_search_fts(scoped_session_search_fts)
+                "INSERT INTO session_search_content_fts(session_search_content_fts)
+                 VALUES ('optimize')",
+                [],
+            )?;
+            tx.execute(
+                "INSERT INTO scoped_session_search_metadata_fts(scoped_session_search_metadata_fts)
                  VALUES ('optimize')",
                 [],
             )?;
@@ -292,36 +406,9 @@ impl Store {
         payload: &str,
         should_stop: &dyn Fn() -> bool,
     ) -> Result<(Option<SessionSearchPublication>, bool)> {
-        let key = params![
-            scope.as_str(),
-            session.id,
-            agent_label(session.agent),
-            session.path.to_string_lossy()
-        ];
         let state = search_file_state(&session.path)?;
         let metadata = session_search_metadata(session);
-        let current = self
-            .conn
-            .query_row(
-                "SELECT file_mtime, file_size, search_metadata, search_index_version,
-                    EXISTS (SELECT 1 FROM scoped_session_search_records r
-                            WHERE r.scope_key = ?1 AND r.session_id = ?2 AND r.agent = ?3
-                              AND r.session_path = ?4 AND r.record_order = 0), search_checkpoint
-             FROM scoped_session_search_index
-             WHERE scope_key = ?1 AND session_id = ?2 AND agent = ?3 AND session_path = ?4",
-                key,
-                |row| {
-                    Ok((
-                        row.get::<_, i64>(0)?,
-                        row.get::<_, i64>(1)?,
-                        row.get::<_, String>(2)?,
-                        row.get::<_, i64>(3)?,
-                        row.get::<_, bool>(4)?,
-                        row.get::<_, Option<String>>(5)?,
-                    ))
-                },
-            )
-            .optional()?;
+        let current = self.session_search_current_state(scope, session)?;
         let mut checkpoint = current
             .as_ref()
             .and_then(|row| row.5.as_deref())
@@ -394,37 +481,12 @@ impl Store {
 
         // Compare before acquiring the database lock. Unchanged records retain
         // their row IDs and FTS entries, including when a transcript is appended.
-        let mut statement = self.conn.prepare(
-            "SELECT record_order, metadata_text, title, project, user_text, assistant_text
-             FROM scoped_session_search_records
-             WHERE scope_key = ?1 AND session_id = ?2 AND agent = ?3 AND session_path = ?4
-               AND (record_order = 0 OR (?5 = 0 AND record_order >= ?6)) ORDER BY record_order",
+        let existing = self.existing_session_search_documents(
+            scope,
+            session,
+            content_current,
+            start_record_order,
         )?;
-        let existing = statement
-            .query_map(
-                params![
-                    scope.as_str(),
-                    session.id,
-                    agent_label(session.agent),
-                    session.path.to_string_lossy(),
-                    content_current,
-                    start_record_order as i64
-                ],
-                |row| {
-                    Ok((
-                        row.get::<_, usize>(0)?,
-                        SessionSearchDocument {
-                            metadata_text: row.get(1)?,
-                            title: row.get(2)?,
-                            project: row.get(3)?,
-                            user_text: row.get(4)?,
-                            assistant_text: row.get(5)?,
-                        },
-                    ))
-                },
-            )?
-            .collect::<rusqlite::Result<BTreeMap<_, _>>>()?;
-        drop(statement);
         let updates = documents
             .iter()
             .filter(|(order, document)| existing.get(order) != Some(document))
@@ -498,30 +560,21 @@ impl Store {
                     break;
                 }
             }
-            let processed = self.with_background_write_transaction("session_search.upsert_batch", |tx| {
-                ensure_session_unchanged(tx, scope, session, payload)?;
-                let started = std::time::Instant::now();
-                let mut processed = 0;
-                for (order, document) in &updates[start..end] {
-                    tx.execute(
-                        "INSERT INTO scoped_session_search_records
-                         (scope_key, session_id, agent, session_path, record_order,
-                          metadata_text, title, project, user_text, assistant_text)
-                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
-                         ON CONFLICT(scope_key, session_id, agent, session_path, record_order)
-                         DO UPDATE SET metadata_text = excluded.metadata_text, title = excluded.title,
-                            project = excluded.project, user_text = excluded.user_text,
-                            assistant_text = excluded.assistant_text",
-                        params![scope.as_str(), session.id, agent_label(session.agent), session.path.to_string_lossy(),
-                            *order as i64, document.metadata_text, document.title, document.project,
-                            document.user_text, document.assistant_text],
-                    )?;
-                    processed += 1;
-                    if started.elapsed() >= SEARCH_WRITE_BATCH_TARGET { break; }
-                }
-                record_session_search_mutations_in_tx(tx, processed)?;
-                Ok(processed)
-            })?;
+            let processed =
+                self.with_background_write_transaction("session_search.upsert_batch", |tx| {
+                    ensure_session_unchanged(tx, scope, session, payload)?;
+                    let started = std::time::Instant::now();
+                    let mut processed = 0;
+                    for (order, document) in &updates[start..end] {
+                        upsert_shared_session_search_record(tx, scope, session, *order, document)?;
+                        processed += 1;
+                        if started.elapsed() >= SEARCH_WRITE_BATCH_TARGET {
+                            break;
+                        }
+                    }
+                    record_session_search_mutations_in_tx(tx, processed)?;
+                    Ok(processed)
+                })?;
             start += processed;
         }
         let mut removed_start = 0;
@@ -534,7 +587,7 @@ impl Store {
                 let mut processed = 0;
                 for order in &removed[removed_start..removed_end] {
                     tx.execute(
-                        "DELETE FROM scoped_session_search_records WHERE scope_key = ?1
+                        "DELETE FROM scoped_session_search_entries WHERE scope_key = ?1
                          AND session_id = ?2 AND agent = ?3 AND session_path = ?4 AND record_order = ?5",
                         params![scope.as_str(), session.id, agent_label(session.agent), session.path.to_string_lossy(), *order as i64],
                     )?;
@@ -645,26 +698,7 @@ impl Store {
     ) -> Result<()> {
         loop {
             check_search_cancellation(should_stop)?;
-            let ids = self
-                .conn
-                .prepare(
-                    "SELECT r.id FROM scoped_session_search_records r WHERE r.scope_key = ?1
-                 AND r.session_id = ?2 AND r.agent = ?3 AND r.session_path = ?4
-                 AND NOT EXISTS (SELECT 1 FROM scoped_sessions s WHERE s.scope_key = r.scope_key
-                    AND s.id = r.session_id AND s.agent = r.agent AND s.path = r.session_path)
-                 LIMIT ?5",
-                )?
-                .query_map(
-                    params![
-                        scope.as_str(),
-                        session_id,
-                        agent,
-                        path,
-                        SEARCH_WRITE_BATCH_ROWS as i64
-                    ],
-                    |row| row.get::<_, i64>(0),
-                )?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
+            let ids = self.orphan_session_search_record_ids(scope, session_id, agent, path)?;
             if ids.is_empty() {
                 break;
             }
@@ -674,12 +708,12 @@ impl Store {
                 let mut processed = 0;
                 for id in &ids {
                     tx.execute(
-                        "DELETE FROM scoped_session_search_records WHERE id = ?1
+                        "DELETE FROM scoped_session_search_entries WHERE id = ?1
                         AND NOT EXISTS (SELECT 1 FROM scoped_sessions s
-                            WHERE s.scope_key = scoped_session_search_records.scope_key
-                              AND s.id = scoped_session_search_records.session_id
-                              AND s.agent = scoped_session_search_records.agent
-                              AND s.path = scoped_session_search_records.session_path)",
+                            WHERE s.scope_key = scoped_session_search_entries.scope_key
+                              AND s.id = scoped_session_search_entries.session_id
+                              AND s.agent = scoped_session_search_entries.agent
+                              AND s.path = scoped_session_search_entries.session_path)",
                         [id],
                     )?;
                     processed += 1;
@@ -712,6 +746,50 @@ fn session_search_lock_key(scope: &ScopeKey) -> String {
     format!("session-search-{}", &sha256_text(scope.as_str())[..24])
 }
 
+fn upsert_shared_session_search_record(
+    tx: &Transaction<'_>,
+    scope: &ScopeKey,
+    session: &SessionRecord,
+    record_order: usize,
+    document: &SessionSearchDocument,
+) -> Result<()> {
+    let content_hash = session_search_content_hash(&document.user_text, &document.assistant_text);
+    tx.execute(
+        "INSERT OR IGNORE INTO session_search_content_records(
+             content_hash, user_text, assistant_text
+         ) VALUES (?1, ?2, ?3)",
+        params![content_hash, document.user_text, document.assistant_text],
+    )?;
+    let content_id = tx.query_row(
+        "SELECT id FROM session_search_content_records WHERE content_hash = ?1",
+        [&content_hash],
+        |row| row.get::<_, i64>(0),
+    )?;
+    tx.execute(
+        "INSERT INTO scoped_session_search_entries(
+             scope_key, session_id, agent, session_path, record_order,
+             metadata_text, title, project, content_id
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+         ON CONFLICT(scope_key, session_id, agent, session_path, record_order)
+         DO UPDATE SET metadata_text = excluded.metadata_text,
+                       title = excluded.title,
+                       project = excluded.project,
+                       content_id = excluded.content_id",
+        params![
+            scope.as_str(),
+            session.id,
+            agent_label(session.agent),
+            session.path.to_string_lossy(),
+            record_order as i64,
+            document.metadata_text,
+            document.title,
+            document.project,
+            content_id,
+        ],
+    )?;
+    Ok(())
+}
+
 fn record_session_search_mutations_in_tx(tx: &Transaction<'_>, mutations: usize) -> Result<()> {
     if mutations == 0 {
         return Ok(());
@@ -734,7 +812,7 @@ pub(super) fn mark_session_search_pending_in_tx(
          SELECT ?1, id, agent, path, 1, ?2, NULL FROM (
            SELECT id, agent, path FROM scoped_sessions WHERE scope_key = ?1
            UNION SELECT session_id, agent, session_path FROM scoped_session_search_index WHERE scope_key = ?1
-           UNION SELECT session_id, agent, session_path FROM scoped_session_search_records WHERE scope_key = ?1
+           UNION SELECT session_id, agent, session_path FROM scoped_session_search_entries WHERE scope_key = ?1
          ) WHERE true ON CONFLICT(scope_key, session_id, agent, session_path) DO UPDATE SET
          generation = generation + 1, requested_at = excluded.requested_at, last_error = NULL",
         params![scope.as_str(), unix_now().to_string()],

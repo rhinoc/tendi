@@ -894,41 +894,141 @@ pub fn write_transcript_json<W: std::io::Write>(
     Ok(warnings)
 }
 
+enum TranscriptLocatorPendingGroup {
+    CommandRun { item_count: usize, has_exec: bool },
+    ToolRun { item_count: usize, all_exec: bool },
+}
+
 #[derive(Default)]
 struct TranscriptLocatorBuilder {
     items: Vec<TranscriptLocatorItem>,
     pending_response: Option<usize>,
     grouped_index: usize,
-    previous_was_tool: bool,
+    pending_group: Option<TranscriptLocatorPendingGroup>,
 }
 
 impl TranscriptLocatorBuilder {
     fn push(&mut self, item: &TranscriptItem) {
         let kind = item.kind.as_str();
-        let item_index = if kind == "tool" && self.previous_was_tool {
-            self.grouped_index.saturating_sub(1)
-        } else {
-            let index = self.grouped_index;
-            self.grouped_index += 1;
-            index
-        };
-
-        if kind == "user" {
-            self.items.push(TranscriptLocatorItem {
-                index: item_index,
-                label: item.body.trim().to_string(),
-                response: String::new(),
-            });
-            self.pending_response = Some(self.items.len() - 1);
-        } else if kind == "assistant" {
-            if let Some(locator_index) = self.pending_response.take() {
-                self.items[locator_index].response = item.body.trim().to_string();
+        match kind {
+            "reasoning" | "thinking" => self.push_command_component(false),
+            "tool"
+                if item
+                    .tag
+                    .as_deref()
+                    .is_some_and(|tag| tag.trim().eq_ignore_ascii_case("exec")) =>
+            {
+                self.push_command_component(true)
+            }
+            "tool" => self.push_tool(),
+            _ => {
+                self.flush_pending_group();
+                let item_index = self.grouped_index;
+                if kind == "user" {
+                    self.items.push(TranscriptLocatorItem {
+                        index: item_index,
+                        label: item.body.trim().to_string(),
+                        response: String::new(),
+                    });
+                    self.pending_response = Some(self.items.len() - 1);
+                } else if kind == "assistant" {
+                    if let Some(locator_index) = self.pending_response.take() {
+                        self.items[locator_index].response = item.body.trim().to_string();
+                    }
+                }
+                self.grouped_index += 1;
             }
         }
-        self.previous_was_tool = kind == "tool";
     }
 
-    fn finish(self) -> Vec<TranscriptLocatorItem> {
+    fn push_command_component(&mut self, is_exec: bool) {
+        self.pending_group = Some(match self.pending_group.take() {
+            None => TranscriptLocatorPendingGroup::CommandRun {
+                item_count: 1,
+                has_exec: is_exec,
+            },
+            Some(TranscriptLocatorPendingGroup::CommandRun {
+                item_count,
+                has_exec,
+            }) => TranscriptLocatorPendingGroup::CommandRun {
+                item_count: item_count + 1,
+                has_exec: has_exec || is_exec,
+            },
+            Some(TranscriptLocatorPendingGroup::ToolRun {
+                item_count,
+                all_exec: true,
+            }) => TranscriptLocatorPendingGroup::CommandRun {
+                item_count: item_count + 1,
+                has_exec: true,
+            },
+            Some(TranscriptLocatorPendingGroup::ToolRun { .. }) => {
+                self.grouped_index += 1;
+                TranscriptLocatorPendingGroup::CommandRun {
+                    item_count: 1,
+                    has_exec: is_exec,
+                }
+            }
+        });
+    }
+
+    fn push_tool(&mut self) {
+        self.pending_group = Some(match self.pending_group.take() {
+            None => TranscriptLocatorPendingGroup::ToolRun {
+                item_count: 1,
+                all_exec: false,
+            },
+            Some(TranscriptLocatorPendingGroup::CommandRun {
+                item_count,
+                has_exec: true,
+            }) => {
+                if item_count > 1 {
+                    self.grouped_index += 1;
+                    TranscriptLocatorPendingGroup::ToolRun {
+                        item_count: 1,
+                        all_exec: false,
+                    }
+                } else {
+                    TranscriptLocatorPendingGroup::ToolRun {
+                        item_count: item_count + 1,
+                        all_exec: false,
+                    }
+                }
+            }
+            Some(TranscriptLocatorPendingGroup::CommandRun {
+                item_count,
+                has_exec: false,
+            }) => {
+                self.grouped_index += item_count;
+                TranscriptLocatorPendingGroup::ToolRun {
+                    item_count: 1,
+                    all_exec: false,
+                }
+            }
+            Some(TranscriptLocatorPendingGroup::ToolRun { item_count, .. }) => {
+                TranscriptLocatorPendingGroup::ToolRun {
+                    item_count: item_count + 1,
+                    all_exec: false,
+                }
+            }
+        });
+    }
+
+    fn flush_pending_group(&mut self) {
+        match self.pending_group.take() {
+            Some(TranscriptLocatorPendingGroup::CommandRun {
+                item_count,
+                has_exec: true,
+            }) if item_count > 1 => self.grouped_index += 1,
+            Some(TranscriptLocatorPendingGroup::CommandRun { item_count, .. }) => {
+                self.grouped_index += item_count
+            }
+            Some(TranscriptLocatorPendingGroup::ToolRun { .. }) => self.grouped_index += 1,
+            None => {}
+        }
+    }
+
+    fn finish(mut self) -> Vec<TranscriptLocatorItem> {
+        self.flush_pending_group();
         self.items
     }
 }

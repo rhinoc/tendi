@@ -29,6 +29,8 @@ import { SearchField } from "../components/shared/SearchField.tsx";
 import { Switch } from "../components/shared/Switch.tsx";
 import { Toast } from "../components/shared/Toast.tsx";
 import { AsyncStatus } from "../lib/async-status.ts";
+import { useHookOperations } from "../features/hooks/use-hook-operations.ts";
+import { useHookSource } from "../features/hooks/use-hook-source.ts";
 import "./HooksView.css";
 
 import {
@@ -43,57 +45,32 @@ import {
   compactCommand,
   copyText,
   formatUserPath,
+  filterHooks,
   friendlyAgent,
-  hookDeleteDisabledReason,
   hookDisplayName,
-  hookDeleteIdentity,
   hookHandlerText,
   hookItemsFromRows,
-  hookSearchText,
   hookSelectionActionIds,
   hookSourcePath,
   hookTypeLabel,
   isWebSource,
-  selectionDeleteErrorLabel,
-  type HookRecord,
   safeInvoke,
   scopeColumn,
   selectionDeleteLoadingLabel,
   suppressNextClick,
   type ProjectSummary,
 } from "../lib/index.ts";
-import { readHookSource, type CatalogMutationResponse } from "../lib/runtime-gateway.ts";
+import { hookEnableDisabledReason, hookReviewDisabledReason, hookSelectionTargets } from "../lib/hooks.ts";
+import type { HookItem, HookRecord } from "../lib/hooks.ts";
+import type { CatalogMutationResponse } from "../lib/runtime-gateway.ts";
 
 const HookSourcePreview = lazy(() => import("../features/hooks/HookSourcePreview.tsx").then(({ HookSourcePreview: component }) => ({ default: component })));
-
-type HookItem = { key: string; hook: HookRecord };
 
 function hookSelectionIdentity(hook: HookRecord | null | undefined) {
   if (!hook) return "";
   return [hook.agent, hook.path, hook.event, hook.matcher, hook.hook_type]
     .map((value) => `${value ?? ""}`).join("|");
 }
-
-function hookSourceIdentity(hook: HookRecord | null | undefined) {
-  if (!hook) return "";
-  return [
-    hook.agent,
-    hook.path,
-    hook.event,
-    hook.matcher,
-    hook.hook_type,
-    hook.command,
-    hook.url,
-    hook.prompt,
-    hook.filter,
-  ].map((value) => `${value ?? ""}`).join("|");
-}
-
-type HookSourceData = {
-  content?: string;
-  source_line?: number | null;
-  path?: string;
-} | null;
 
 type HookMenuComponents = {
   Item: ComponentType<{
@@ -104,13 +81,6 @@ type HookMenuComponents = {
     children?: ReactNode;
   }>;
   Separator: ComponentType<{ className?: string }>;
-};
-
-type HookSourceState = {
-  key: string;
-  loading: boolean;
-  data: HookSourceData;
-  error: string;
 };
 
 type HookParameterRow =
@@ -149,11 +119,6 @@ type HooksViewProps = {
 
 const defaultSort: SortState = { key: "event", direction: SortDirection.Asc };
 
-function hookOperationError(result: CatalogMutationResponse | undefined): string | undefined {
-  if (!result || !("error" in result)) return undefined;
-  return typeof result.error === "string" ? result.error : undefined;
-}
-
 export function HookDetailRow({ label, value, mono = false, copyable = false }: HookDetailRowProps) {
   const text = `${value ?? ""}`;
   return (
@@ -175,22 +140,8 @@ export function HookDetailRow({ label, value, mono = false, copyable = false }: 
   );
 }
 
-function hookEnableDisabledReason(hook: HookRecord | null): string {
-  if (!hook) return "Missing hook source path";
-  const path = hookSourcePath(hook);
-  if (!path) return "Missing hook source path";
-  const readOnlyReason = hook.read_only_reason;
-  if (readOnlyReason) return readOnlyReason;
-  return "";
-}
-
 function hookEnableDisabledReasonForView(hook: HookRecord | null, updating: boolean): string {
   return hookEnableDisabledReason(hook) || (updating ? "Updating hooks" : "");
-}
-
-function hookReviewDisabledReason(hook: HookRecord | null): string {
-  if (!hook?.needs_review) return "Hook does not need review";
-  return "";
 }
 
 function HookEnabledSwitch({ checked, disabledReason = "", updating = false, onToggle }: HookEnabledSwitchProps) {
@@ -247,9 +198,7 @@ function hookSelectionActions(
 ): DataTableSelectionActionDefinition[] {
   const singleItem = selectedRows.length === 1 ? selectedRows[0] : undefined;
   const path = singleItem ? hookSourcePath(singleItem.hook) : "";
-  const deletable = selectedRows.filter((item) => !hookDeleteDisabledReason(item.hook));
-  const enableTargets = selectedRows.filter((item) => !hookEnableDisabledReason(item.hook) && !item.hook.enabled);
-  const disableTargets = selectedRows.filter((item) => !hookEnableDisabledReason(item.hook) && Boolean(item.hook.enabled));
+  const { deletable, enable: enableTargets, disable: disableTargets } = hookSelectionTargets(selectedRows);
   const deleteLabel = selectionDeleteLabel("hook", selectedRows.length);
   const actions: Record<string, DataTableSelectionActionDefinition> = {
     [TableSelectionActionId.OpenEditor]: {
@@ -314,14 +263,29 @@ export function HooksView({ rows, loadingRows = false, loadError = "", hasRows =
   const [selected, setSelected] = useState<string[]>([]);
   const [query, setQuery] = useTabState("hooks.query", "");
   const [detailCollapsed, setDetailCollapsed] = useTabState("hooks.detailCollapsed", false);
-  const [deletingKey, setDeletingKey] = useState("");
-  const [updatingEnabledKeys, setUpdatingEnabledKeys] = useState<Set<string>>(() => new Set());
-  const [reviewingKey, setReviewingKey] = useState("");
   const [pendingReviewItem, setPendingReviewItem] = useState<HookItem | null>(null);
-  const [deleteError, setDeleteError] = useState("");
   const [pendingDeleteItems, setPendingDeleteItems] = useState<HookItem[]>([]);
-  const [sourceState, setSourceState] = useState<HookSourceState>({ key: "", loading: false, data: null, error: "" });
   const [hookLocatorRequest, setHookLocatorRequest] = useState("");
+  const clearSelection = useCallback(() => setSelected([]), []);
+  const {
+    deletingKey,
+    updatingEnabledKeys,
+    reviewingKey,
+    error: deleteError,
+    clearError: clearDeleteError,
+    setHookEnabled,
+    setSelectedHooksEnabled,
+    reviewHook,
+    deleteHooks,
+  } = useHookOperations({
+    rows,
+    onDeleteHook,
+    onDeleteHooks,
+    onSetHookEnabled,
+    onSetHooksEnabled,
+    onReviewHook,
+    clearSelection,
+  });
   const activeHookSelectionIdentityRef = useRef("");
   const normalizedQuery = query.trim().toLowerCase();
   useEffect(() => {
@@ -333,80 +297,7 @@ export function HooksView({ rows, loadingRows = false, loadError = "", hasRows =
     setHookLocatorRequest((current) => current === id ? "" : current);
     onLocateHookComplete?.(id);
   }, [onLocateHookComplete]);
-  const filteredHooks = useMemo(() => {
-    if (!normalizedQuery) return hookItems;
-    return hookItems.filter((item) => hookSearchText(item.hook).includes(normalizedQuery));
-  }, [hookItems, normalizedQuery]);
-  const setHookEnabled = useCallback(async (item: HookItem, enabled: boolean) => {
-    if (!item?.hook || updatingEnabledKeys.size > 0) return;
-    const disabledReason = hookEnableDisabledReason(item.hook);
-    if (disabledReason) return;
-    setUpdatingEnabledKeys(new Set([item.key]));
-    setDeleteError("");
-    try {
-      const result = await onSetHookEnabled?.(item.hook, enabled);
-      const updateError = hookOperationError(result);
-      if (updateError) setDeleteError(updateError);
-      else if (!result) setDeleteError("Could not update hook.");
-    } catch (error) {
-      setDeleteError(`${error}`);
-    } finally {
-      setUpdatingEnabledKeys(new Set());
-    }
-  }, [onSetHookEnabled, updatingEnabledKeys.size]);
-  const setSelectedHooksEnabled = useCallback(async (items: HookItem[], enabled: boolean) => {
-    if (updatingEnabledKeys.size > 0) return;
-    const targets = items.filter((item) => (
-      !hookEnableDisabledReason(item.hook) && Boolean(item.hook.enabled) !== enabled
-    ));
-    if (targets.length === 0) return;
-
-    setUpdatingEnabledKeys(new Set(targets.map((item) => item.key)));
-    setDeleteError("");
-    try {
-      if (targets.length > 1 && onSetHooksEnabled) {
-        const result = await onSetHooksEnabled(targets.map((item) => item.hook), enabled);
-        const updateError = hookOperationError(result);
-        if (updateError) setDeleteError(updateError);
-        else if (!result) setDeleteError("Could not update selected hooks.");
-        else setSelected([]);
-        return;
-      }
-      let firstError = "";
-      for (const item of targets) {
-        const identity = hookDeleteIdentity(item.hook);
-        const hook = rows.find((row) => hookDeleteIdentity(row) === identity);
-        if (!hook) {
-          firstError ||= "Could not find selected hook.";
-          continue;
-        }
-        try {
-          const result = await onSetHookEnabled?.(hook, enabled);
-          const updateError = hookOperationError(result);
-          if (updateError) firstError ||= updateError;
-          else if (!result) firstError ||= "Could not update selected hooks.";
-        } catch (error) {
-          firstError ||= `${error}`;
-        }
-      }
-      if (firstError) setDeleteError(firstError);
-      else setSelected([]);
-    } finally {
-      setUpdatingEnabledKeys(new Set());
-    }
-  }, [onSetHookEnabled, onSetHooksEnabled, rows, updatingEnabledKeys.size]);
-  const reviewHook = useCallback(async (item: HookItem) => {
-    if (!item?.hook || reviewingKey) return;
-    const disabledReason = hookReviewDisabledReason(item.hook);
-    if (disabledReason) return;
-    setReviewingKey(item.key);
-    setDeleteError("");
-    const result = await onReviewHook?.(item.hook);
-    setReviewingKey("");
-    const reviewError = hookOperationError(result);
-    if (reviewError) setDeleteError(reviewError);
-    else if (!result) setDeleteError("Could not review hook.");
-  }, [onReviewHook, reviewingKey]);
+  const filteredHooks = useMemo(() => filterHooks(hookItems, query), [hookItems, query]);
   const requestReviewHook = useCallback((item: HookItem) => {
     if (hookReviewDisabledReason(item.hook)) return;
     setPendingReviewItem(item);
@@ -418,7 +309,7 @@ export function HooksView({ rows, loadingRows = false, loadError = "", hasRows =
     await reviewHook(item);
   }, [pendingReviewItem, reviewHook]);
   const requestDeleteHooks = useCallback((items: HookItem[]) => {
-    const deletable = items.filter((item) => !hookDeleteDisabledReason(item.hook));
+    const { deletable } = hookSelectionTargets(items);
     if (deletable.length === 0) return;
     setPendingDeleteItems(deletable);
   }, []);
@@ -426,47 +317,8 @@ export function HooksView({ rows, loadingRows = false, loadError = "", hasRows =
     const targets = pendingDeleteItems;
     if (targets.length === 0 || deletingKey) return;
     setPendingDeleteItems([]);
-    setDeleteError("");
-    if (targets.length > 1 && onDeleteHooks) {
-      setDeletingKey("batch");
-      try {
-        const result = await onDeleteHooks(targets.map((item) => item.hook));
-        const deleteResultError = hookOperationError(result);
-        if (deleteResultError) setDeleteError(deleteResultError);
-        else if (!result) setDeleteError(selectionDeleteErrorLabel("hook", targets.length));
-      } catch (error) {
-        setDeleteError(`${error}`);
-      } finally {
-        setDeletingKey("");
-        setSelected([]);
-      }
-      return;
-    }
-    try {
-      for (const item of targets) {
-        const identity = hookDeleteIdentity(item.hook);
-        if (!identity) continue;
-        const hook = rows.find((row) => hookDeleteIdentity(row) === identity);
-        if (!hook) continue;
-        setDeletingKey(identity);
-        const result = await onDeleteHook?.(hook);
-        const deleteResultError = hookOperationError(result);
-        if (deleteResultError) {
-          setDeleteError(deleteResultError);
-          break;
-        }
-        if (!result) {
-          setDeleteError(selectionDeleteErrorLabel("hook", 1));
-          break;
-        }
-      }
-    } catch (error) {
-      setDeleteError(`${error}`);
-    } finally {
-      setDeletingKey("");
-      setSelected([]);
-    }
-  }, [deletingKey, onDeleteHook, onDeleteHooks, pendingDeleteItems, rows]);
+    await deleteHooks(targets);
+  }, [deleteHooks, deletingKey, pendingDeleteItems]);
   const pendingDeleteLoadingLabel = selectionDeleteLoadingLabel("hook", pendingDeleteItems.length);
   const pendingDeleteMessage = pendingDeleteItems.length === 1
     ? `Delete this hook from ${formatUserPath(hookSourcePath(pendingDeleteItems[0]?.hook))}?`
@@ -566,9 +418,14 @@ export function HooksView({ rows, loadingRows = false, loadError = "", hasRows =
       : undefined;
   }, [activeKey, hookItems]);
   const activeHook = activeItem?.hook ?? null;
+  const {
+    state: sourceState,
+    data: sourceData,
+    requestIdentity: sourceRequestIdentity,
+    clearError: clearSourceError,
+  } = useHookSource(activeHook);
+  useEffect(() => clearDeleteError(), [clearDeleteError, sourceRequestIdentity]);
   activeHookSelectionIdentityRef.current = hookSelectionIdentity(activeHook);
-  const activeSourceIdentity = hookSourceIdentity(activeHook);
-  const sourceData = sourceState.key === activeSourceIdentity ? sourceState.data : null;
   const activeEnableControl = useMemo(() => activeItem ? (
     <HookEnabledSwitch
       checked={Boolean(activeHook?.enabled)}
@@ -609,55 +466,6 @@ export function HooksView({ rows, loadingRows = false, loadError = "", hasRows =
       ariaLabel="More selected hook actions"
     />
   ), [deletingKey, requestDeleteHooks, setSelectedHooksEnabled, updatingEnabledKeys.size]);
-
-  useEffect(() => {
-    setDeleteError("");
-    if (!activeHook) {
-      setSourceState({ key: "", loading: false, data: null, error: "" });
-      return undefined;
-    }
-    const path = hookSourcePath(activeHook);
-    if (!path) {
-      setSourceState({ key: activeSourceIdentity, loading: false, data: null, error: "Missing hook source path" });
-      return undefined;
-    }
-    let cancelled = false;
-    setSourceState((current) => ({
-      key: activeSourceIdentity,
-      loading: true,
-      data: current.key === activeSourceIdentity ? current.data : null,
-      error: "",
-    }));
-    readHookSource({ id: activeHook.id })
-      .then((data) => {
-        if (!cancelled) setSourceState({ key: activeSourceIdentity, loading: false, data, error: "" });
-      })
-      .catch((error) => {
-        if (!cancelled) setSourceState((current) => ({
-          key: activeSourceIdentity,
-          loading: false,
-          data: current.key === activeSourceIdentity ? current.data : null,
-          error: `${error}`,
-        }));
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [
-    activeHook?.agent,
-    activeHook?.command,
-    activeHook?.enabled,
-    activeHook?.event,
-    activeHook?.filter,
-    activeHook?.hook_type,
-    activeHook?.matcher,
-    activeHook?.path,
-    activeHook?.prompt,
-    activeHook?.status_message,
-    activeHook?.trust_hash,
-    activeHook?.url,
-    activeSourceIdentity,
-  ]);
 
   useEffect(() => {
     if (!activeKey && hookItems[0]) setActiveKey(hookItems[0].key);
@@ -739,7 +547,7 @@ export function HooksView({ rows, loadingRows = false, loadError = "", hasRows =
             onCollapse={() => setDetailCollapsed(true)}
           >
             <div className="hookDetailBody">
-              {deleteError ? <Toast tone="error" message={deleteError} onDismiss={() => setDeleteError("")} /> : null}
+              {deleteError ? <Toast tone="error" message={deleteError} onDismiss={clearDeleteError} /> : null}
               {parameterRows.length ? (
                 <section className="hookDetailSection hookParametersSection">
                   <h3>Parameters</h3>
@@ -786,7 +594,7 @@ export function HooksView({ rows, loadingRows = false, loadError = "", hasRows =
                   <Toast
                     tone="error"
                     message={sourceState.error}
-                    onDismiss={() => setSourceState((current) => ({ ...current, error: "" }))}
+                    onDismiss={clearSourceError}
                   />
                 ) : sourceData?.content ? (
                   <div className="hookSourcePreview">
@@ -802,7 +610,7 @@ export function HooksView({ rows, loadingRows = false, loadError = "", hasRows =
                         <Toast
                           tone="error"
                           message={sourceState.error}
-                          onDismiss={() => setSourceState((current) => ({ ...current, error: "" }))}
+                          onDismiss={clearSourceError}
                         />
                       </div>
                     ) : null}

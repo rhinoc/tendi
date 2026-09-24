@@ -838,14 +838,14 @@ export async function setConfigProfile(agent: string, profile: string | null): P
   return { configProfiles: response.configProfiles };
 }
 
-export async function readSkillFiles(args: { skillId: string; locationId?: string }): Promise<SkillFileEntry[]> {
+export async function readSkillFiles(args: { skillName: string; skillPath: string }): Promise<SkillFileEntry[]> {
   return normalizeSkillFileEntries(await invokeCommand(TauriCommand.SkillFiles, args));
 }
 
 export async function readSkillFile(args: {
-  skillId: string;
+  skillName: string;
+  skillPath: string;
   relativePath: string;
-  locationId?: string;
 }): Promise<SkillFileReadResponse> {
   const response = await invokeCommand(TauriCommand.SkillFileRead, args);
   if (typeof response.content !== "string" || typeof response.sha256 !== "string") {

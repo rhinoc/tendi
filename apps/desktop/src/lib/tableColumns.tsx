@@ -3,7 +3,7 @@ import { AgentBadge } from "../components/shared/AgentBadge.tsx";
 import { AgentChips } from "../components/shared/AgentChips.tsx";
 import { McpServerIcon } from "../components/shared/McpServerIcon.tsx";
 import { Tooltip } from "../components/shared/Tooltip.tsx";
-import { basename, EMPTY_DISPLAY_VALUE, friendlyAgent, mcpDisplayName, scopeNameForValue } from "./index.ts";
+import { basename, EMPTY_DISPLAY_VALUE, friendlyAgent, mcpDisplayName, mcpToolCount, scopeNameForValue } from "./index.ts";
 import type { McpRecord, RuleRecord } from "./index.ts";
 
 type AgentRow = { agent?: string | null };
@@ -91,7 +91,7 @@ export const mcpColumns: ColumnDef<McpRow>[] = [
     type: ColumnDataType.Text,
     width: "72px",
     sortValue: (row) => row.tools.length,
-    value: (row) => row.probe_state === "ready" || row.probe_state === "ready-empty" ? row.tools.length : EMPTY_DISPLAY_VALUE,
+    value: (row) => mcpToolCount(row) ?? EMPTY_DISPLAY_VALUE,
     title: (row) => row.probe_error || undefined,
   },
   {
