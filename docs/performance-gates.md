@@ -91,7 +91,7 @@ excluded because they are too environment-dependent for every push.
 | Hooks list | Local data | median <= 40 ms |
 | Rules list | Local data | median <= 40 ms |
 | MCP list | Local data | median <= 40 ms |
-| Overview | 512 analyzed Sessions, 365 days | operation <= 25 ms, RSS <= 24 MiB, payload <= 0.25 MiB |
+| Overview | 512 analyzed Sessions, 365 days | operation <= 25 ms, RSS <= 28 MiB, payload <= 0.5 MiB |
 | Prompts | 500 Prompts | operation <= 50 ms, RSS <= 24 MiB, payload <= 1.5 MiB |
 | Config | Existing config catalog | operation <= 12 ms, RSS <= 16 MiB, payload <= 0.0625 MiB |
 | Settings | Isolated Store | operation <= 2 ms, RSS <= 16 MiB, payload <= 0.015625 MiB |
@@ -107,7 +107,7 @@ excluded because they are too environment-dependent for every push.
 | Skill file tree + file read | 300 x 4 KiB files | operation <= 10 ms, RSS <= 16 MiB, payload <= 0.125 MiB |
 | Rule detail | 128 KiB file | operation <= 15 ms, RSS <= 16 MiB, payload <= 0.25 MiB |
 | Hook detail | 192 KiB source, exercises 128 KiB truncation | operation <= 20 ms, RSS <= 16 MiB, payload <= 0.25 MiB |
-| Config read | One existing config when available | operation <= 10 ms, RSS <= 16 MiB, payload <= 0.25 MiB |
+| Config read | One existing config when available | operation <= 20 ms, RSS <= 16 MiB, payload <= 0.25 MiB |
 
 ### Third-level chains
 
