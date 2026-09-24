@@ -393,12 +393,6 @@ impl Store {
         rank_days: u32,
         end_date: Option<&str>,
     ) -> Result<OverviewAnalytics> {
-        let scoped_sessions = self.list_sessions_for_scope(scope_key)?.sessions;
-        let allowed = scoped_sessions
-            .iter()
-            .filter(|session| agent.is_none_or(|expected| session.agent == expected))
-            .map(|session| (session.id.clone(), session.agent, session.path.clone()))
-            .collect::<HashSet<_>>();
         let today = end_date
             .map(|value| {
                 chrono::NaiveDate::parse_from_str(value, "%Y-%m-%d")
@@ -433,11 +427,19 @@ impl Store {
             entry.duration |= provider_capabilities.duration;
             entry.rate_limit_history |= provider_capabilities.rate_limit_history;
         }
-        let total_sessions = allowed.len();
         let agent_value = agent.map(agent_label);
-        let (first, last, indexed_sessions, analyzed_sessions) = self.conn.query_row(
+        let (
+            first,
+            last,
+            total_sessions,
+            indexed_sessions,
+            analyzed_sessions,
+        ) = self.conn.query_row(
             "SELECT MIN(overview.event_min_date),
                     MAX(overview.event_max_date),
+                    (SELECT COUNT(*) FROM scoped_sessions AS session
+                     WHERE session.scope_key = ?1
+                       AND (?2 IS NULL OR session.agent = ?2)),
                     COUNT(*),
                     COALESCE(SUM(CASE WHEN overview.has_activity THEN 1 ELSE 0 END), 0)
              FROM scoped_session_analytics_overview AS overview
@@ -457,6 +459,7 @@ impl Store {
                     row.get::<_, Option<String>>(1)?,
                     row.get::<_, i64>(2)? as usize,
                     row.get::<_, i64>(3)? as usize,
+                    row.get::<_, i64>(4)? as usize,
                 ))
             },
         )?;
