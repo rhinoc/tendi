@@ -3,7 +3,7 @@
   "openrpc": "1.3.2",
   "protocolVersion": 2,
   "schemaVersion": 1,
-  "contractFingerprint": "4d97bc00c50396f62aa7ca72b51ddf189916d3e7b4fa2accd2aa11e7834acf01",
+  "contractFingerprint": "51c444d46529decedf5b1535de7141889b51b70d6cefa11d3c75dce2d263d483",
   "methods": [
     {
       "name": "scan",
@@ -809,6 +809,24 @@
       "execution": "write"
     },
     {
+      "name": "database_storage_status",
+      "owner": "desktop",
+      "wire": "tauri",
+      "clients": [
+        "desktop"
+      ],
+      "execution": "read"
+    },
+    {
+      "name": "database_reset",
+      "owner": "desktop",
+      "wire": "tauri",
+      "clients": [
+        "desktop"
+      ],
+      "execution": "write"
+    },
+    {
       "name": "cli_status",
       "owner": "desktop",
       "wire": "tauri",
@@ -1110,6 +1128,8 @@
       "daemon_next_event",
       "daemon_subscribe_events",
       "daemon_unsubscribe_events",
+      "database_reset",
+      "database_storage_status",
       "editor_app_test",
       "install_update",
       "log_event",
@@ -1164,6 +1184,8 @@
       "cli_status",
       "config_profile_create",
       "config_profile_set",
+      "database_reset",
+      "database_storage_status",
       "editor_app_test",
       "hook_delete",
       "hook_delete_many",

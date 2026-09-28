@@ -250,6 +250,12 @@ pub(crate) fn overview_record(record: &SessionAnalyticsRecord) -> SessionAnalyti
             model_usage.total_tokens = model_usage
                 .total_tokens
                 .saturating_add(response.usage.total_tokens);
+            model_usage.input_tokens = model_usage
+                .input_tokens
+                .saturating_add(response.usage.input_tokens);
+            model_usage.cached_input_tokens = model_usage
+                .cached_input_tokens
+                .saturating_add(response.usage.cached_input_tokens);
             model_usage.cost.add_assign(cost);
             model_usage.responses += 1;
         }
@@ -468,6 +474,8 @@ pub(crate) struct SessionAnalyticsOverviewDay {
 pub(crate) struct SessionAnalyticsOverviewModel {
     pub model: String,
     pub total_tokens: u64,
+    pub input_tokens: u64,
+    pub cached_input_tokens: u64,
     pub responses: u64,
     #[serde(default)]
     pub cost: AnalyticsCost,
@@ -512,8 +520,19 @@ pub struct AnalyticsRunSummary {
 pub struct AnalyticsModelUsage {
     pub model: String,
     pub total_tokens: u64,
+    pub input_tokens: u64,
+    pub cached_input_tokens: u64,
+    pub runs: u64,
     pub total_ms: u64,
     pub completed_runs: u64,
+    pub cost: AnalyticsCost,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AnalyticsAgentUsage {
+    pub agent: AgentKind,
+    pub usage: AnalyticsTokenUsage,
     pub cost: AnalyticsCost,
 }
 
@@ -534,6 +553,13 @@ pub struct AnalyticsDay {
     pub responses: u64,
     pub sessions: usize,
     pub sessions_by_agent: BTreeMap<AgentKind, usize>,
+    pub agents: Vec<AnalyticsAgentUsage>,
+    pub runs_by_agent: BTreeMap<AgentKind, u64>,
+    pub run_ms_by_agent: BTreeMap<AgentKind, u64>,
+    pub tools_by_agent: BTreeMap<AgentKind, u64>,
+    pub tools_by_project: BTreeMap<String, u64>,
+    pub skills_by_agent: BTreeMap<AgentKind, u64>,
+    pub skills_by_project: BTreeMap<String, u64>,
     pub runs: AnalyticsRunSummary,
     pub aborted: u64,
     pub compacted: u64,
@@ -611,19 +637,35 @@ struct DayAccumulator {
     aborted: u64,
     compacted: u64,
     models: BTreeMap<String, ModelUsageAccumulator>,
+    agents: BTreeMap<AgentKind, AgentUsageAccumulator>,
     projects: BTreeMap<String, projects::ProjectUsageAccumulator>,
     tools: BTreeMap<(String, String), u64>,
     skills: BTreeMap<String, u64>,
     rate_limits: BTreeMap<u32, f64>,
     sessions: BTreeSet<String>,
     sessions_by_agent: BTreeMap<AgentKind, BTreeSet<String>>,
+    runs_by_agent: BTreeMap<AgentKind, u64>,
+    run_ms_by_agent: BTreeMap<AgentKind, u64>,
+    tools_by_agent: BTreeMap<AgentKind, u64>,
+    tools_by_project: BTreeMap<String, u64>,
+    skills_by_agent: BTreeMap<AgentKind, u64>,
+    skills_by_project: BTreeMap<String, u64>,
 }
 
 #[derive(Default)]
 struct ModelUsageAccumulator {
     total_tokens: u64,
+    input_tokens: u64,
+    cached_input_tokens: u64,
+    runs: u64,
     total_ms: u64,
     completed_runs: u64,
+    cost: AnalyticsCost,
+}
+
+#[derive(Default)]
+struct AgentUsageAccumulator {
+    usage: AnalyticsTokenUsage,
     cost: AnalyticsCost,
 }
 
@@ -693,6 +735,9 @@ pub(crate) fn aggregate_overview(
                 .analytics_cost(&response.model, response.usage)
                 .unwrap_or_default();
             slot.cost.add_assign(cost);
+            let agent_usage = slot.agents.entry(analytics.agent).or_default();
+            agent_usage.usage.add_assign(response.usage);
+            agent_usage.cost.add_assign(cost);
             if let Some(project) = analytics.project.as_ref() {
                 slot.projects.entry(project.id.clone()).or_default().add(
                     &project.name,
@@ -702,17 +747,16 @@ pub(crate) fn aggregate_overview(
                 );
             }
             slot.responses += 1;
-            record_session(slot, analytics.agent, &identity);
+            record_session(slot, analytics.agent, &identity, analytics.project.as_ref());
             if !response.model.trim().is_empty() {
-                slot.models
+                let model_usage = slot
+                    .models
                     .entry(response.model.trim().to_string())
-                    .or_default()
-                    .total_tokens += response.usage.total_tokens;
-                slot.models
-                    .get_mut(response.model.trim())
-                    .expect("model accumulator was just inserted")
-                    .cost
-                    .add_assign(cost);
+                    .or_default();
+                model_usage.total_tokens += response.usage.total_tokens;
+                model_usage.input_tokens += response.usage.input_tokens;
+                model_usage.cached_input_tokens += response.usage.cached_input_tokens;
+                model_usage.cost.add_assign(cost);
             }
         }
         for run in analytics.snapshot_runs(&record.state) {
@@ -722,7 +766,8 @@ pub(crate) fn aggregate_overview(
                     continue;
                 }
                 let slot = by_day.entry(date.to_string()).or_default();
-                record_session(slot, analytics.agent, &identity);
+                slot.agents.entry(analytics.agent).or_default();
+                record_session(slot, analytics.agent, &identity, analytics.project.as_ref());
                 add_run(
                     &mut slot.runs,
                     &contribution,
@@ -733,6 +778,24 @@ pub(crate) fn aggregate_overview(
                     &contribution,
                     analytics.capabilities().duration,
                 );
+                add_turn_dimensions(
+                    slot,
+                    analytics.agent,
+                    analytics.project.as_ref(),
+                    &contribution,
+                );
+                if let Some(total_ms) =
+                    run_duration_ms(&contribution, analytics.capabilities().duration)
+                {
+                    let run_ms = slot.run_ms_by_agent.entry(analytics.agent).or_default();
+                    *run_ms = run_ms.saturating_add(total_ms);
+                    if let Some(project) = analytics.project.as_ref() {
+                        slot.projects
+                            .entry(project.id.clone())
+                            .or_default()
+                            .add_total_ms(&project.name, total_ms);
+                    }
+                }
             }
         }
         for timestamp in &analytics.aborts {
@@ -740,7 +803,7 @@ pub(crate) fn aggregate_overview(
             if let Some(date) = analytics_date(timestamp).filter(|date| *date >= since) {
                 let slot = by_day.entry(date.to_string()).or_default();
                 slot.aborted += 1;
-                record_session(slot, analytics.agent, &identity);
+                record_session(slot, analytics.agent, &identity, analytics.project.as_ref());
             }
         }
         for timestamp in &analytics.compactions {
@@ -748,7 +811,7 @@ pub(crate) fn aggregate_overview(
             if let Some(date) = analytics_date(timestamp).filter(|date| *date >= since) {
                 let slot = by_day.entry(date.to_string()).or_default();
                 slot.compacted += 1;
-                record_session(slot, analytics.agent, &identity);
+                record_session(slot, analytics.agent, &identity, analytics.project.as_ref());
                 compacted_sessions.insert(identity.clone());
             }
         }
@@ -783,7 +846,14 @@ pub(crate) fn aggregate_overview(
                     .tools
                     .entry((call.server.clone(), call.name.clone()))
                     .or_default() += 1;
-                record_session(slot, analytics.agent, &identity);
+                add_call_dimensions(
+                    &mut slot.tools_by_agent,
+                    &mut slot.tools_by_project,
+                    analytics.agent,
+                    analytics.project.as_ref(),
+                    1,
+                );
+                record_session(slot, analytics.agent, &identity, analytics.project.as_ref());
             }
             if date < rank_since {
                 continue;
@@ -808,7 +878,14 @@ pub(crate) fn aggregate_overview(
             if date >= since {
                 let slot = by_day.entry(date.to_string()).or_default();
                 *slot.skills.entry(call.name.clone()).or_default() += 1;
-                record_session(slot, analytics.agent, &identity);
+                add_call_dimensions(
+                    &mut slot.skills_by_agent,
+                    &mut slot.skills_by_project,
+                    analytics.agent,
+                    analytics.project.as_ref(),
+                    1,
+                );
+                record_session(slot, analytics.agent, &identity, analytics.project.as_ref());
             }
             if date < rank_since {
                 continue;
@@ -836,6 +913,13 @@ pub(crate) fn aggregate_overview(
                 .into_iter()
                 .map(|(agent, sessions)| (agent, sessions.len()))
                 .collect(),
+            agents: slot.agents.into_iter().map(finish_agent_usage).collect(),
+            run_ms_by_agent: slot.run_ms_by_agent,
+            runs_by_agent: slot.runs_by_agent,
+            tools_by_agent: slot.tools_by_agent,
+            tools_by_project: slot.tools_by_project,
+            skills_by_agent: slot.skills_by_agent,
+            skills_by_project: slot.skills_by_project,
             runs: slot.runs,
             aborted: slot.aborted,
             compacted: slot.compacted,
@@ -996,6 +1080,9 @@ pub(crate) fn aggregate_overview_records_until(
             let slot = by_day.entry(date.clone()).or_default();
             slot.usage.add_assign(contribution.usage);
             slot.cost.add_assign(contribution.cost);
+            let agent_usage = slot.agents.entry(record.agent).or_default();
+            agent_usage.usage.add_assign(contribution.usage);
+            agent_usage.cost.add_assign(contribution.cost);
             if let Some(project) = record.project.as_ref() {
                 slot.projects.entry(project.id.clone()).or_default().add(
                     &project.name,
@@ -1012,24 +1099,34 @@ pub(crate) fn aggregate_overview_records_until(
                 || !contribution.tools.is_empty()
                 || !contribution.skills.is_empty()
             {
-                record_session(slot, record.agent, &identity);
+                record_session(slot, record.agent, &identity, record.project.as_ref());
             }
             for model in &contribution.models {
                 if !model.model.trim().is_empty() {
-                    slot.models
+                    let model_usage = slot
+                        .models
                         .entry(model.model.trim().to_string())
-                        .or_default()
-                        .total_tokens += model.total_tokens;
-                    slot.models
-                        .get_mut(model.model.trim())
-                        .expect("model accumulator was just inserted")
-                        .cost
-                        .add_assign(model.cost);
+                        .or_default();
+                    model_usage.total_tokens += model.total_tokens;
+                    model_usage.input_tokens += model.input_tokens;
+                    model_usage.cached_input_tokens += model.cached_input_tokens;
+                    model_usage.cost.add_assign(model.cost);
                 }
             }
             for run in &contribution.runs {
                 add_run(&mut slot.runs, run, duration_supported);
                 add_model_run(&mut slot.models, run, duration_supported);
+                add_turn_dimensions(slot, record.agent, record.project.as_ref(), run);
+                if let Some(total_ms) = run_duration_ms(run, duration_supported) {
+                    let run_ms = slot.run_ms_by_agent.entry(record.agent).or_default();
+                    *run_ms = run_ms.saturating_add(total_ms);
+                    if let Some(project) = record.project.as_ref() {
+                        slot.projects
+                            .entry(project.id.clone())
+                            .or_default()
+                            .add_total_ms(&project.name, total_ms);
+                    }
+                }
             }
             slot.aborted += contribution.aborted;
             slot.compacted += contribution.compacted;
@@ -1046,9 +1143,23 @@ pub(crate) fn aggregate_overview_records_until(
                     .tools
                     .entry((call.server.clone(), call.name.clone()))
                     .or_default() += call.calls;
+                add_call_dimensions(
+                    &mut slot.tools_by_agent,
+                    &mut slot.tools_by_project,
+                    record.agent,
+                    record.project.as_ref(),
+                    call.calls,
+                );
             }
             for call in &contribution.skills {
                 *slot.skills.entry(call.name.clone()).or_default() += call.calls;
+                add_call_dimensions(
+                    &mut slot.skills_by_agent,
+                    &mut slot.skills_by_project,
+                    record.agent,
+                    record.project.as_ref(),
+                    call.calls,
+                );
             }
 
             if date_value >= rank_since {
@@ -1086,6 +1197,13 @@ pub(crate) fn aggregate_overview_records_until(
                 .into_iter()
                 .map(|(agent, sessions)| (agent, sessions.len()))
                 .collect(),
+            agents: slot.agents.into_iter().map(finish_agent_usage).collect(),
+            run_ms_by_agent: slot.run_ms_by_agent,
+            runs_by_agent: slot.runs_by_agent,
+            tools_by_agent: slot.tools_by_agent,
+            tools_by_project: slot.tools_by_project,
+            skills_by_agent: slot.skills_by_agent,
+            skills_by_project: slot.skills_by_project,
             runs: slot.runs,
             aborted: slot.aborted,
             compacted: slot.compacted,
@@ -1174,21 +1292,85 @@ pub(crate) fn aggregate_overview_records_until(
     }
 }
 
-fn record_session(slot: &mut DayAccumulator, agent: AgentKind, identity: &str) {
+fn record_session(
+    slot: &mut DayAccumulator,
+    agent: AgentKind,
+    identity: &str,
+    project: Option<&projects::AnalyticsProjectIdentity>,
+) {
     slot.sessions.insert(identity.to_string());
     slot.sessions_by_agent
         .entry(agent)
         .or_default()
         .insert(identity.to_string());
+    if let Some(project) = project {
+        slot.projects
+            .entry(project.id.clone())
+            .or_default()
+            .add_session(&project.name, identity);
+    }
 }
 
 fn finish_model_usage((model, usage): (String, ModelUsageAccumulator)) -> AnalyticsModelUsage {
     AnalyticsModelUsage {
         model: model.trim().to_string(),
         total_tokens: usage.total_tokens,
+        input_tokens: usage.input_tokens,
+        cached_input_tokens: usage.cached_input_tokens,
+        runs: usage.runs,
         total_ms: usage.total_ms,
         completed_runs: usage.completed_runs,
         cost: usage.cost,
+    }
+}
+
+fn finish_agent_usage((agent, usage): (AgentKind, AgentUsageAccumulator)) -> AnalyticsAgentUsage {
+    AnalyticsAgentUsage {
+        agent,
+        usage: usage.usage,
+        cost: usage.cost,
+    }
+}
+
+fn add_call_dimensions(
+    by_agent: &mut BTreeMap<AgentKind, u64>,
+    by_project: &mut BTreeMap<String, u64>,
+    agent: AgentKind,
+    project: Option<&projects::AnalyticsProjectIdentity>,
+    calls: u64,
+) {
+    let agent_calls = by_agent.entry(agent).or_default();
+    *agent_calls = agent_calls.saturating_add(calls);
+    if let Some(project) = project {
+        let project_calls = by_project.entry(project.id.clone()).or_default();
+        *project_calls = project_calls.saturating_add(calls);
+    }
+}
+
+fn add_turn_dimensions(
+    slot: &mut DayAccumulator,
+    agent: AgentKind,
+    project: Option<&projects::AnalyticsProjectIdentity>,
+    contribution: &AnalyticsRunContribution,
+) {
+    if !contribution.counted {
+        return;
+    }
+    let agent_runs = slot.runs_by_agent.entry(agent).or_default();
+    *agent_runs = agent_runs.saturating_add(1);
+    if !contribution.run.model.trim().is_empty() {
+        let model_runs = &mut slot
+            .models
+            .entry(contribution.run.model.trim().to_string())
+            .or_default()
+            .runs;
+        *model_runs = model_runs.saturating_add(1);
+    }
+    if let Some(project) = project {
+        slot.projects
+            .entry(project.id.clone())
+            .or_default()
+            .add_runs(&project.name, 1);
     }
 }
 
@@ -1197,19 +1379,7 @@ fn add_model_run(
     contribution: &AnalyticsRunContribution,
     duration_supported: bool,
 ) {
-    if !contribution.run.completed {
-        return;
-    }
-    if contribution.run.model.trim().is_empty() {
-        return;
-    }
-    if !duration_supported {
-        return;
-    }
-    let Some(elapsed) = contribution
-        .duration_ms
-        .or_else(|| measured_run_elapsed_ms(&contribution.run))
-    else {
+    let Some(elapsed) = run_duration_ms(contribution, duration_supported) else {
         return;
     };
     let model = models
@@ -1238,16 +1408,7 @@ fn add_run(
     if contribution.counted {
         summary.completed += 1;
     }
-    if !duration_supported {
-        return;
-    }
-    if contribution.run.model.trim().is_empty() {
-        return;
-    }
-    let Some(elapsed) = contribution
-        .duration_ms
-        .or_else(|| measured_run_elapsed_ms(&contribution.run))
-    else {
+    let Some(elapsed) = run_duration_ms(contribution, duration_supported) else {
         return;
     };
     summary.total_ms = summary.total_ms.saturating_add(elapsed);
@@ -1257,6 +1418,21 @@ fn add_run(
             summary.max_ms = summary.max_ms.max(full_elapsed);
         }
     }
+}
+
+fn run_duration_ms(
+    contribution: &AnalyticsRunContribution,
+    duration_supported: bool,
+) -> Option<u64> {
+    if !contribution.run.completed
+        || !duration_supported
+        || contribution.run.model.trim().is_empty()
+    {
+        return None;
+    }
+    contribution
+        .duration_ms
+        .or_else(|| measured_run_elapsed_ms(&contribution.run))
 }
 
 fn measured_run_elapsed_ms(run: &AnalyticsRun) -> Option<u64> {

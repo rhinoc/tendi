@@ -113,6 +113,8 @@ export class RuntimeClient {
   async skillPathRename(request: RequestFor<"skill_path_rename">): Promise<ResponseFor<"skill_path_rename">> { return this.call("skill_path_rename", request); }
   async skillPathDelete(request: RequestFor<"skill_path_delete">): Promise<ResponseFor<"skill_path_delete">> { return this.call("skill_path_delete", request); }
   async appIconSet(request: RequestFor<"app_icon_set">): Promise<ResponseFor<"app_icon_set">> { return this.call("app_icon_set", request); }
+  async databaseStorageStatus(request: RequestFor<"database_storage_status">): Promise<ResponseFor<"database_storage_status">> { return this.call("database_storage_status", request); }
+  async databaseReset(request: RequestFor<"database_reset">): Promise<ResponseFor<"database_reset">> { return this.call("database_reset", request); }
   async cliStatus(request: RequestFor<"cli_status">): Promise<ResponseFor<"cli_status">> { return this.call("cli_status", request); }
   async cliInstall(request: RequestFor<"cli_install">): Promise<ResponseFor<"cli_install">> { return this.call("cli_install", request); }
   async cliRemove(request: RequestFor<"cli_remove">): Promise<ResponseFor<"cli_remove">> { return this.call("cli_remove", request); }

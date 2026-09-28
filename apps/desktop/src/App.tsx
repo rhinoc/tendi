@@ -1736,7 +1736,12 @@ export function App() {
     } finally {
       releaseSkillMutation();
     }
-    if (!result) await refreshSkillList(true);
+    const updatedIds = new Set((result?.updated ?? []).flatMap((skill) => (
+      typeof skill.id === "string" ? [skill.id] : []
+    )));
+    if (!result || names.some((id) => !updatedIds.has(id))) {
+      await refreshSkillList(true);
+    }
   }, [beginSkillMutation, refreshSkillList]);
 
   const applyWrapperSkill = useCallback(

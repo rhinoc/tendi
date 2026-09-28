@@ -1,5 +1,6 @@
 #[path = "cli_install.rs"]
 mod cli_registration;
+mod database_storage;
 mod terminals;
 
 use std::{
@@ -320,6 +321,27 @@ async fn cli_remove() -> Result<runtime_schema::CliInstallStatus, String> {
         .map_err(|error| error.to_string())?
         .map_err(|error| error.to_string())?;
     runtime_cli_status(status)
+}
+
+#[tauri::command]
+fn database_storage_status() -> Result<runtime_schema::DatabaseStorageStatus, String> {
+    let path = tendi_core::storage::default_db_path().map_err(|error| error.to_string())?;
+    let bytes = database_storage::storage_bytes(&path).map_err(|error| error.to_string())?;
+    Ok(runtime_schema::DatabaseStorageStatus {
+        bytes: bytes.min(9_007_199_254_740_991),
+    })
+}
+
+#[tauri::command]
+fn database_reset(app: tauri::AppHandle) -> Result<(), String> {
+    let path = tendi_core::storage::default_db_path().map_err(|error| error.to_string())?;
+    database_storage::schedule_reset(&path).map_err(|error| error.to_string())?;
+    tendi_core::logging::global().warn(
+        "database reset scheduled",
+        serde_json::json!({ "database": path }),
+    );
+    app.request_restart();
+    Ok(())
 }
 
 async fn check_for_updates_inner(
@@ -1143,6 +1165,7 @@ fn build_main_window(app: &tauri::AppHandle) -> tauri::Result<tauri::WebviewWind
         .accept_first_mouse(true)
         .inner_size(1280.0, 820.0)
         .min_inner_size(920.0, 640.0)
+        .center()
         .visible(false);
     #[cfg(target_os = "macos")]
     let builder = builder
@@ -1196,6 +1219,14 @@ pub fn run() {
         .setup(|app| {
             app.set_activation_policy(ActivationPolicy::Regular);
             let cwd = active_cwd().map_err(std::io::Error::other)?;
+            let database_path =
+                tendi_core::storage::default_db_path().map_err(std::io::Error::other)?;
+            if database_storage::apply_pending_reset(&database_path)? {
+                tendi_core::logging::global().warn(
+                    "database reset completed",
+                    serde_json::json!({ "database": database_path }),
+                );
+            }
             let startup_store =
                 tendi_core::storage::Store::open_default().map_err(std::io::Error::other)?;
             let project_roots = startup_store
@@ -1213,7 +1244,6 @@ pub fn run() {
             });
             app.set_menu(build_app_menu(app.handle())?)?;
             let window = build_main_window(app.handle())?;
-            let _ = window.center();
             let _ = window.show();
             let _ = window.set_focus();
             Ok(())

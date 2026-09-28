@@ -1212,6 +1212,33 @@ impl RuntimeClient {
         let result = Self::decode_response(CommandName::AppIconSet, request_id, value)?;
         Ok(serde_json::from_value(result)?)
     }
+    pub fn database_storage_status(
+        &mut self,
+        params: tendi_core::generated::runtime_contract::DatabaseStorageStatusRequest,
+    ) -> JsonRpcRequest {
+        self.request(CommandName::DatabaseStorageStatus, params)
+    }
+    pub fn decode_database_storage_status_response(
+        request_id: &Value,
+        value: Value,
+    ) -> anyhow::Result<tendi_core::generated::runtime_contract::DatabaseStorageStatusResponse>
+    {
+        let result = Self::decode_response(CommandName::DatabaseStorageStatus, request_id, value)?;
+        Ok(serde_json::from_value(result)?)
+    }
+    pub fn database_reset(
+        &mut self,
+        params: tendi_core::generated::runtime_contract::DatabaseResetRequest,
+    ) -> JsonRpcRequest {
+        self.request(CommandName::DatabaseReset, params)
+    }
+    pub fn decode_database_reset_response(
+        request_id: &Value,
+        value: Value,
+    ) -> anyhow::Result<tendi_core::generated::runtime_contract::DatabaseResetResponse> {
+        let result = Self::decode_response(CommandName::DatabaseReset, request_id, value)?;
+        Ok(serde_json::from_value(result)?)
+    }
     pub fn cli_status(
         &mut self,
         params: tendi_core::generated::runtime_contract::CliStatusRequest,

@@ -67,7 +67,17 @@ requireText(schema, "CREATE TABLE IF NOT EXISTS scoped_skill_snapshots", "skill 
 requireText(repositories, "pub fn upsert_skill_source_records_for_workspace", "skill source scope write");
 requireText(repositories, "persist_skill_update_persistence_for_workspace_with_deleted", "atomic skill persistence");
 requireText(repositories, "save_sessions_at_with_scope_in_tx", "atomic session persistence");
-requireText(repositories, "finalize_projection_domain_in_tx", "atomic projection persistence");
+const projectionFinalizeStart = repositories.indexOf(
+  'with_named_write_transaction("save_scan_projection_finalize"',
+);
+const projectionFinalizeEnd = repositories.indexOf("\n        })", projectionFinalizeStart);
+if (projectionFinalizeStart < 0 || projectionFinalizeEnd < 0) {
+  throw new Error("atomic projection persistence: missing finalization transaction");
+}
+const projectionFinalize = repositories.slice(projectionFinalizeStart, projectionFinalizeEnd);
+requireText(projectionFinalize, "write_normalized_snapshot_json_in_tx", "atomic projection persistence");
+requireText(projectionFinalize, "write_projection_context_in_tx", "atomic projection persistence");
+requireText(projectionFinalize, "advance_projection_head_in_tx", "atomic projection persistence");
 requireText(repositories, "pub fn overview_analytics_for_scope", "analytics scope read");
 requireText(schema, "CREATE TABLE IF NOT EXISTS scoped_session_analytics", "analytics physical scope");
 requireText(schema, "PRIMARY KEY (scope_key, session_id, agent, session_path)", "analytics composite identity");
@@ -83,7 +93,8 @@ requireText(virtualization, "export type VirtualizationContract", "virtualizatio
 requireText(virtualization, "start: Math.min(start, end)", "virtualization range invariant");
 requireText(virtualization, "end: Math.max(start, end)", "virtualization range invariant");
 requireText(dataTable, "virtualRangeFor({", "data table virtualization contract");
-requireText(sessionsView, "measured,", "transcript measured virtualization contract");
+requireText(sessionsView, "measuredHeightsRef.current.set", "transcript measured virtualization contract");
+requireText(sessionsView, "resizeObserverRef.current?.observe", "transcript measured virtualization contract");
 requireText(transcript, "parseJsonlTranscriptForProvider", "provider-owned import parser");
 requireText(transcriptWorker, "providerId: string", "explicit import provider boundary");
 requireText(tauri, "headers[\"last-event-id\"]", "event stream replay reconnect");

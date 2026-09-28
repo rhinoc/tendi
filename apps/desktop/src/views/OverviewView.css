@@ -176,8 +176,8 @@
   outline-offset: -2px;
 }
 
-.overviewAnalyticsControls > .selectControlTrigger {
-  width: 96px;
+.overviewUsageSelector {
+  width: 184px;
 }
 
 .overviewMetricMenuItem {
@@ -354,6 +354,12 @@
   vector-effect: non-scaling-stroke;
 }
 
+.overviewTrendLinePath.category0 { stroke: var(--chart-cat-0); }
+.overviewTrendLinePath.category1 { stroke: var(--chart-cat-1); }
+.overviewTrendLinePath.category2 { stroke: var(--chart-cat-2); }
+.overviewTrendLinePath.category3 { stroke: var(--chart-cat-3); }
+.overviewTrendLinePath.categoryOther { stroke: var(--chart-other, var(--faint)); }
+
 .overviewTrendBarButton {
   position: relative;
   display: flex;
@@ -520,15 +526,6 @@
   text-align: center;
   white-space: nowrap;
 }
-
-.overviewAnalyticsWarning {
-  margin: 0;
-  color: var(--muted);
-  font-size: var(--text-xs);
-  line-height: var(--leading-body);
-}
-
-.overviewAnalyticsWarning { color: var(--tone-warn); }
 
 .overviewAnalyticsEmpty {
   display: flex;

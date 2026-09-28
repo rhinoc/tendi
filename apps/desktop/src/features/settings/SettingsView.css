@@ -249,6 +249,14 @@
   font-size: var(--text-ui);
 }
 
+.settingsDatabaseStorageRow {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+  min-height: var(--control-height);
+}
+
 .settingsTextarea::placeholder,
 .selectControlEditableInput::placeholder {
   color: var(--faint);

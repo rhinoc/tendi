@@ -83,6 +83,19 @@ impl Store {
                 Ok(())
             })?;
         }
+        let fs_manifest_rebuild_pending: bool = store.conn.query_row(
+            "SELECT EXISTS(
+                 SELECT 1 FROM meta WHERE key = ?1 AND value = '1'
+             )",
+            [schema::FS_MANIFEST_REBUILD_PENDING_KEY],
+            |row| row.get(0),
+        )?;
+        if fs_manifest_rebuild_pending {
+            store.with_named_write_transaction("schema.finish_fs_manifest_rebuild", |tx| {
+                schema::finish_pending_fs_manifest_rebuild(tx)?;
+                Ok(())
+            })?;
+        }
         store.purge_git_skill_snapshots()?;
         Ok(store)
     }
@@ -331,6 +344,10 @@ fn run_migration_until_complete(
 
 pub(crate) fn rebuild_corrupt_session_skill_links(conn: &Connection) -> Result<()> {
     schema::rebuild_scoped_session_skill_links(conn)
+}
+
+pub(crate) fn rebuild_corrupt_fs_manifest(conn: &Connection) -> Result<()> {
+    schema::rebuild_corrupt_fs_manifest(conn)
 }
 
 pub(crate) fn run_workspace(store: &Store, cwd: &Path, project_roots: &[PathBuf]) -> Result<()> {

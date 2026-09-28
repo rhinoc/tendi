@@ -826,6 +826,22 @@ pub(crate) fn skill_overlay_providers(agent: AgentKind) -> Vec<&'static dyn Agen
     providers
 }
 
+/// Providers whose current visibility policy applies to a skill directory.
+/// Shared manifests can be consumed through both frontmatter and provider
+/// overlays, so scanning checks the owners of both policy forms.
+pub(crate) fn skill_visibility_providers(agent: AgentKind) -> Vec<&'static dyn AgentProvider> {
+    let mut providers = skill_frontmatter_visibility_providers(agent);
+    for provider in skill_overlay_providers(agent) {
+        if providers
+            .iter()
+            .all(|current: &&'static dyn AgentProvider| current.kind() != provider.kind())
+        {
+            providers.push(provider);
+        }
+    }
+    providers
+}
+
 pub(crate) fn skill_frontmatter_visibility_keys(agent: AgentKind) -> Vec<&'static str> {
     let mut keys = Vec::new();
     for provider in skill_frontmatter_visibility_providers(agent) {

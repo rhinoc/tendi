@@ -17,8 +17,8 @@ import { IconButton } from "../components/shared/IconButton.tsx";
 import { LoadingDots } from "../components/shared/LoadingDots.tsx";
 import { LoadingIcon } from "../components/shared/LoadingIcon.tsx";
 import { PageHeader } from "../components/shared/PageHeader.tsx";
-import { Toast } from "../components/shared/Toast.tsx";
 import { SelectControl } from "../components/shared/SelectControl.tsx";
+import { Toast } from "../components/shared/Toast.tsx";
 import { SessionTitleText, TranscriptLinkText } from "../components/shared/TranscriptLinkText.tsx";
 import { SKILL_BADGE_TONES } from "../features/skills/skill-badge-tones.ts";
 import { sessionProject, type SessionRecord } from "../lib/sessions.ts";
@@ -32,7 +32,14 @@ import {
 } from "../lib/analytics.ts";
 import { useOverviewAnalytics } from "../features/overview/use-overview-analytics.ts";
 import { OpenInEditorMenuItem } from "../components/shared/DataTableMenus.tsx";
-import { OverviewTrendChart, OverviewUsageMetric } from "./OverviewTrendChart.tsx";
+import {
+  DEFAULT_OVERVIEW_USAGE_GROUPS,
+  OVERVIEW_USAGE_GROUPS,
+  OVERVIEW_USAGE_GROUP_LABELS,
+  OverviewTrendChart,
+  OverviewUsageGroup,
+  OverviewUsageMetric,
+} from "./OverviewTrendChart.tsx";
 import { DOMAIN_NAV_ITEMS, EMPTY_DISPLAY_VALUE, RuntimeDomainKey } from "../lib/index.ts";
 import type { DomainKey } from "../lib/index.ts";
 import { SessionListStatus } from "../store/desktop-store.ts";
@@ -55,11 +62,11 @@ export type OverviewViewProps = {
 };
 
 let retainedUsageMetric: OverviewUsageMetric = OverviewUsageMetric.Tokens;
+let retainedUsageGroups = { ...DEFAULT_OVERVIEW_USAGE_GROUPS };
 const USAGE_METRICS = [
   OverviewUsageMetric.Sessions,
   OverviewUsageMetric.Turns,
   OverviewUsageMetric.Tokens,
-  OverviewUsageMetric.Projects,
   OverviewUsageMetric.Cost,
   OverviewUsageMetric.Cache,
   OverviewUsageMetric.Time,
@@ -70,13 +77,20 @@ const USAGE_METRIC_LABELS: Record<OverviewUsageMetric, string> = {
   [OverviewUsageMetric.Sessions]: "Sessions",
   [OverviewUsageMetric.Turns]: "Turns",
   [OverviewUsageMetric.Tokens]: "Tokens",
-  [OverviewUsageMetric.Projects]: "Projects",
   [OverviewUsageMetric.Cost]: "Cost",
   [OverviewUsageMetric.Cache]: "Cache",
   [OverviewUsageMetric.Time]: "Time",
-  [OverviewUsageMetric.Tools]: "Tools",
+  [OverviewUsageMetric.Tools]: "Toolcalls",
   [OverviewUsageMetric.Skills]: "Skills",
 };
+const USAGE_SELECT_GROUPS = USAGE_METRICS.map((metric) => ({
+  value: metric,
+  label: USAGE_METRIC_LABELS[metric],
+  options: OVERVIEW_USAGE_GROUPS[metric].map((group) => ({
+    value: `${metric}:${group}`,
+    label: OVERVIEW_USAGE_GROUP_LABELS[group],
+  })),
+}));
 const OVERVIEW_INVENTORY = DOMAIN_NAV_ITEMS.map(({ domain, label }) => ({ id: domain, label }));
 
 function AnalyticsLoadingState({
@@ -143,6 +157,8 @@ export const OverviewView = memo(function OverviewView({
   const [granularityOverride, setGranularityOverride] = useState<AnalyticsGranularity | null>(null);
   const granularity = granularityOverride ?? automaticGranularity;
   const [usageMetric, setUsageMetric] = useState<OverviewUsageMetric>(retainedUsageMetric);
+  const [usageGroups, setUsageGroups] = useState(retainedUsageGroups);
+  const usageGroup = usageGroups[usageMetric];
   const showAnalyticsLoading = !analyticsRevisionError && analyticsLoading && !analytics;
   const analyticsRefreshing = analyticsLoading
     || analyticsProgress?.running === true;
@@ -155,6 +171,14 @@ export const OverviewView = memo(function OverviewView({
   const overviewCountErrorLabels = OVERVIEW_INVENTORY
     .filter((item) => overviewCountErrors.has(item.id))
     .map((item) => item.label);
+
+  const selectUsageView = (metric: OverviewUsageMetric, group: OverviewUsageGroup) => {
+    retainedUsageMetric = metric;
+    setUsageMetric(metric);
+    const nextGroups = { ...usageGroups, [metric]: group };
+    retainedUsageGroups = nextGroups;
+    setUsageGroups(nextGroups);
+  };
 
   return (
     <section className="content overviewPage">
@@ -208,16 +232,28 @@ export const OverviewView = memo(function OverviewView({
             </div>
             <div className="overviewAnalyticsControls">
               <SelectControl
+                className="overviewUsageSelector"
                 contentClassName="overviewMetricMenu"
                 itemClassName="overviewMetricMenuItem"
-                label={`Usage metric: ${USAGE_METRIC_LABELS[usageMetric]}`}
-                value={usageMetric}
+                label={`Usage metric: ${USAGE_METRIC_LABELS[usageMetric]}${OVERVIEW_USAGE_GROUPS[usageMetric].length > 1 ? ` ${OVERVIEW_USAGE_GROUP_LABELS[usageGroup]}` : ""}`}
+                value={`${usageMetric}:${usageGroup}`}
+                groups={USAGE_SELECT_GROUPS}
                 onValueChange={(value) => {
-                  const metric = value as OverviewUsageMetric;
-                  retainedUsageMetric = metric;
-                  setUsageMetric(metric);
+                  const separatorIndex = value.indexOf(":");
+                  selectUsageView(
+                    value.slice(0, separatorIndex) as OverviewUsageMetric,
+                    value.slice(separatorIndex + 1) as OverviewUsageGroup,
+                  );
                 }}
-                options={USAGE_METRICS.map((value) => ({ value, label: USAGE_METRIC_LABELS[value] }))}
+                renderValue={(option) => {
+                  if (!option) return USAGE_METRIC_LABELS[usageMetric];
+                  const separatorIndex = option.value.indexOf(":");
+                  const metric = option.value.slice(0, separatorIndex) as OverviewUsageMetric;
+                  const group = option.value.slice(separatorIndex + 1) as OverviewUsageGroup;
+                  return OVERVIEW_USAGE_GROUPS[metric].length > 1
+                    ? `${USAGE_METRIC_LABELS[metric]} · ${OVERVIEW_USAGE_GROUP_LABELS[group]}`
+                    : USAGE_METRIC_LABELS[metric];
+                }}
                 align="end"
               />
               <IconButton type="button" onClick={() => void loadAnalytics(true)} disabled={analyticsRefreshing} aria-label="Refresh analytics" aria-busy={analyticsRefreshing}>
@@ -245,10 +281,10 @@ export const OverviewView = memo(function OverviewView({
                 hasOlder={hasOlderAnalytics}
                 loadingOlder={loadingOlderAnalytics}
                 metric={usageMetric}
+                groupBy={usageGroup}
                 onLoadOlder={loadOlderAnalytics}
                 onGranularityChange={setGranularityOverride}
               />
-              {analytics.warnings.length ? <p className="overviewAnalyticsWarning">{analytics.warnings.length} transcript files could not be fully analyzed.</p> : null}
             </>
           ) : analyticsRevisionError ? null : showAnalyticsLoading ? null : analyticsError ? (
             <Toast

@@ -1074,6 +1074,7 @@ export function AssistantOrb({ agent, agentLabel, agentOptions, workspace, getCo
       const host = assistantHostRef.current;
       const target = event.target;
       if (!host || !(target instanceof Node) || host.contains(target)) return;
+      if (target instanceof Element && target.closest(".assistantAgentSelectContent")) return;
       closeAssistant();
     };
     document.addEventListener("pointerdown", handleOutsidePointerDown);

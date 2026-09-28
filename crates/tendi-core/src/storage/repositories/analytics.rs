@@ -1,22 +1,23 @@
 //! analytics persistence through the database-owned transaction boundary.
 use super::super::*;
 
-impl Store {
-    pub fn analytics_revision(&self) -> Result<u64> {
-        with_database_read_lock_retry(|| self.analytics_revision_once())
-    }
+struct SessionAnalyticsOverviewCacheRepair {
+    session_id: String,
+    agent: String,
+    session_path: String,
+    overview: analytics::SessionAnalyticsOverviewRecord,
+    analytics_json: Vec<u8>,
+    parser_state_json: String,
+}
 
-    pub(in crate::storage) fn analytics_revision_once(&self) -> Result<u64> {
-        self.conn
-            .query_row(
-                "SELECT value FROM meta WHERE key = 'analytics_revision'",
-                [],
-                |row| row.get::<_, String>(0),
-            )
-            .optional()?
-            .map(|value| value.parse::<u64>().context("invalid analytics revision"))
-            .transpose()
-            .map(|value| value.unwrap_or(0))
+impl Store {
+    pub fn analytics_revision_for_scope(&self, scope_key: &ScopeKey) -> Result<u64> {
+        with_database_read_lock_retry(|| {
+            Ok(self
+                .projection_head(scope_key, "analytics")?
+                .map(|head| head.revision.value())
+                .unwrap_or_default())
+        })
     }
 
     pub(in crate::storage) fn analytics_overview_index_warnings_for_scope(
@@ -428,14 +429,9 @@ impl Store {
             entry.rate_limit_history |= provider_capabilities.rate_limit_history;
         }
         let agent_value = agent.map(agent_label);
-        let (
-            first,
-            last,
-            total_sessions,
-            indexed_sessions,
-            analyzed_sessions,
-        ) = self.conn.query_row(
-            "SELECT MIN(overview.event_min_date),
+        let (first, last, total_sessions, indexed_sessions, analyzed_sessions) =
+            self.conn.query_row(
+                "SELECT MIN(overview.event_min_date),
                     MAX(overview.event_max_date),
                     (SELECT COUNT(*) FROM scoped_sessions AS session
                      WHERE session.scope_key = ?1
@@ -452,17 +448,17 @@ impl Store {
                      AND session.agent = overview.agent
                      AND session.path = overview.session_path
                )",
-            params![scope_key.as_str(), agent_value],
-            |row| {
-                Ok((
-                    row.get::<_, Option<String>>(0)?,
-                    row.get::<_, Option<String>>(1)?,
-                    row.get::<_, i64>(2)? as usize,
-                    row.get::<_, i64>(3)? as usize,
-                    row.get::<_, i64>(4)? as usize,
-                ))
-            },
-        )?;
+                params![scope_key.as_str(), agent_value],
+                |row| {
+                    Ok((
+                        row.get::<_, Option<String>>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, i64>(2)? as usize,
+                        row.get::<_, i64>(3)? as usize,
+                        row.get::<_, i64>(4)? as usize,
+                    ))
+                },
+            )?;
         overview.revision = self
             .projection_head(scope_key, "analytics")?
             .map(|head| head.revision.value())
@@ -498,8 +494,9 @@ impl Store {
         let mut records = Vec::new();
         let mut warnings = Vec::new();
         let mut invalid = false;
+        let mut invalid_overview_keys = std::collections::HashSet::new();
         let mut stmt = self.conn.prepare(
-            "SELECT overview_json
+            "SELECT session_id, agent, session_path, overview_json
              FROM scoped_session_analytics_overview
              WHERE scope_key = ?1
                AND (?2 IS NULL OR agent = ?2)
@@ -508,16 +505,22 @@ impl Store {
         )?;
         let rows = stmt.query_map(
             params![scope_key.as_str(), agent_value, cutoff, end_date],
-            |row| row.get::<_, String>(0),
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            },
         )?;
         for row in rows {
-            match serde_json::from_str::<SessionAnalyticsOverviewRecord>(&row?) {
+            let (session_id, agent, session_path, overview_json) = row?;
+            match serde_json::from_str::<SessionAnalyticsOverviewRecord>(&overview_json) {
                 Ok(record) => records.push(record),
-                Err(error) => {
+                Err(_) => {
                     invalid = true;
-                    warnings.push(format!(
-                        "invalid scoped analytics overview cache row: {error}"
-                    ));
+                    invalid_overview_keys.insert((session_id, agent, session_path));
                 }
             }
         }
@@ -525,8 +528,9 @@ impl Store {
 
         if invalid {
             records.clear();
+            let mut cache_repairs = Vec::new();
             let mut stmt = self.conn.prepare(
-                "SELECT analytics_json, parser_state_json
+                "SELECT session_id, agent, session_path, analytics_json, parser_state_json
                  FROM scoped_session_analytics
                  WHERE scope_key = ?1
                    AND (?2 IS NULL OR agent = ?2)
@@ -534,11 +538,17 @@ impl Store {
                    AND event_max_date >= ?3",
             )?;
             let rows = stmt.query_map(params![scope_key.as_str(), agent_value, cutoff], |row| {
-                Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, String>(1)?))
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, Vec<u8>>(3)?,
+                    row.get::<_, String>(4)?,
+                ))
             })?;
             for row in rows {
-                let (analytics_json, parser_state_json) = row?;
-                let analytics_json = match decompress_analytics_json(&analytics_json) {
+                let (session_id, agent, session_path, source_json, parser_state_json) = row?;
+                let analytics_json = match decompress_analytics_json(&source_json) {
                     Ok(value) => value,
                     Err(error) => {
                         warnings.push(format!("invalid scoped analytics cache row: {error}"));
@@ -552,19 +562,123 @@ impl Store {
                     ),
                 ) {
                     (Ok(analytics), Ok(state)) => {
-                        records.push(analytics::overview_record(&SessionAnalyticsRecord {
+                        let source_record = SessionAnalyticsRecord {
                             analytics,
                             state,
                             file_mtime: 0,
                             file_size: 0,
-                        }));
+                        };
+                        let overview = analytics::overview_record(&source_record);
+                        if invalid_overview_keys.contains(&(
+                            session_id.clone(),
+                            agent.clone(),
+                            session_path.clone(),
+                        )) {
+                            cache_repairs.push(SessionAnalyticsOverviewCacheRepair {
+                                session_id,
+                                agent,
+                                session_path,
+                                overview: overview.clone(),
+                                analytics_json: source_json,
+                                parser_state_json,
+                            });
+                        }
+                        records.push(overview);
                     }
                     (Err(error), _) | (_, Err(error)) => {
                         warnings.push(format!("invalid scoped analytics cache row: {error}"));
                     }
                 }
             }
+
+            if !cache_repairs.is_empty() {
+                match self
+                    .repair_session_analytics_overview_cache_for_scope(scope_key, &cache_repairs)
+                {
+                    Ok(repaired_count) if repaired_count > 0 => {
+                        crate::logging::global().info(
+                            "analytics overview cache repaired",
+                            serde_json::json!({
+                                "scopeKey": scope_key.as_str(),
+                                "recordCount": repaired_count,
+                            }),
+                        );
+                    }
+                    Ok(_) => {}
+                    Err(error) => {
+                        crate::logging::global().warn(
+                            "analytics overview cache repair failed",
+                            serde_json::json!({
+                                "scopeKey": scope_key.as_str(),
+                                "recordCount": cache_repairs.len(),
+                                "error": format!("{error:#}"),
+                            }),
+                        );
+                    }
+                }
+            }
         }
         Ok((records, warnings))
+    }
+
+    fn repair_session_analytics_overview_cache_for_scope(
+        &self,
+        scope_key: &ScopeKey,
+        repairs: &[SessionAnalyticsOverviewCacheRepair],
+    ) -> Result<usize> {
+        struct PreparedRepair<'a> {
+            repair: &'a SessionAnalyticsOverviewCacheRepair,
+            overview_json: String,
+        }
+
+        let prepared = repairs
+            .iter()
+            .map(|repair| {
+                Ok(PreparedRepair {
+                    repair,
+                    overview_json: serde_json::to_string(&repair.overview)?,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+
+        self.with_named_write_transaction("repair_session_analytics_overview_cache", |tx| {
+            let mut repaired_count = 0;
+            for prepared in &prepared {
+                let repair = prepared.repair;
+                repaired_count += tx.execute(
+                    "UPDATE scoped_session_analytics_overview
+                     SET event_min_date = ?1,
+                         event_max_date = ?2,
+                         has_activity = ?3,
+                         overview_json = ?4
+                     WHERE scope_key = ?5
+                       AND session_id = ?6
+                       AND agent = ?7
+                       AND session_path = ?8
+                       AND EXISTS (
+                           SELECT 1 FROM scoped_session_analytics source
+                           WHERE source.scope_key = ?5
+                             AND source.session_id = ?6
+                             AND source.agent = ?7
+                             AND source.session_path = ?8
+                             AND source.analytics_json = ?9
+                             AND source.parser_state_json = ?10
+                       )",
+                    params![
+                        repair.overview.first,
+                        repair.overview.last,
+                        repair.overview.has_activity,
+                        prepared.overview_json,
+                        scope_key.as_str(),
+                        repair.session_id,
+                        repair.agent,
+                        repair.session_path,
+                        repair.analytics_json,
+                        repair.parser_state_json,
+                    ],
+                )?;
+            }
+            Ok(repaired_count)
+        })
     }
 }

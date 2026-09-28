@@ -922,7 +922,7 @@ fn reads_remain_available_during_uncommitted_writer() {
     let _ = read_after_transient_exclusive_lock(&db, || store.list_sessions_for_scope(&scope));
     let _ =
         read_after_transient_exclusive_lock(&db, || store.list_session_projects_for_scope(&scope));
-    let _ = read_after_transient_exclusive_lock(&db, || store.analytics_revision());
+    let _ = read_after_transient_exclusive_lock(&db, || store.analytics_revision_for_scope(&scope));
     let _ = read_after_transient_exclusive_lock(&db, || {
         store.search_sessions_for_scope(&scope, "session", None)
     });
@@ -1858,11 +1858,10 @@ fn scoped_analytics_ignores_records_from_another_workspace() {
     store
         .ensure_scoped_session_search_for_scope(&second_scope)
         .unwrap();
-    let mut first_analytics =
-        analytics_record("same", AgentKind::Codex, "2026-08-28T10:00:00Z", 11);
+    let event_time = Local::now().to_rfc3339();
+    let mut first_analytics = analytics_record("same", AgentKind::Codex, &event_time, 11);
     first_analytics.analytics.session_path = first_session.path;
-    let mut second_analytics =
-        analytics_record("same", AgentKind::Codex, "2026-08-28T10:00:00Z", 99);
+    let mut second_analytics = analytics_record("same", AgentKind::Codex, &event_time, 99);
     second_analytics.analytics.session_path = second_session.path;
     store
         .save_session_analytics_records_for_scope(&first_scope, &[first_analytics])
@@ -1871,12 +1870,133 @@ fn scoped_analytics_ignores_records_from_another_workspace() {
         .save_session_analytics_records_for_scope(&second_scope, &[second_analytics])
         .unwrap();
 
+    assert_eq!(store.analytics_revision_for_scope(&first_scope).unwrap(), 1);
+    assert_eq!(
+        store.analytics_revision_for_scope(&second_scope).unwrap(),
+        1
+    );
+    assert_eq!(
+        store
+            .analytics_revision_for_scope(&ScopeKey::new("workspace:empty").unwrap())
+            .unwrap(),
+        0
+    );
+
     let overview = store
         .overview_analytics_for_scope(&first_scope, None, 30, 30)
         .unwrap();
     assert_eq!(overview.coverage.total_sessions, 1);
     assert_eq!(overview.summary.usage.total_tokens, 11);
     assert_eq!(overview.summary.sessions, 1);
+
+    let mut updated_analytics = analytics_record("same", AgentKind::Codex, &event_time, 12);
+    updated_analytics.analytics.session_path = PathBuf::from("/tmp/scope-first.jsonl");
+    store
+        .save_session_analytics_records_for_scope(&first_scope, &[updated_analytics])
+        .unwrap();
+    assert_eq!(store.analytics_revision_for_scope(&first_scope).unwrap(), 2);
+    assert_eq!(
+        store.analytics_revision_for_scope(&second_scope).unwrap(),
+        1
+    );
+
+    drop(store);
+    fs::remove_dir_all(temp).unwrap();
+}
+
+#[test]
+fn scoped_analytics_repairs_older_model_usage_overview_cache() {
+    let temp = temp_dir("tendi-storage-analytics-overview-cache-repair");
+    fs::create_dir_all(&temp).unwrap();
+    let store = Store::open(temp.join("tendi.sqlite3")).unwrap();
+    let scope = ScopeKey::new("workspace:overview-cache-repair").unwrap();
+    let event_time = Local::now().to_rfc3339();
+    let record = analytics_record("legacy", AgentKind::Codex, &event_time, 11);
+    store
+        .save_session_analytics_records_for_scope(&scope, &[record])
+        .unwrap();
+
+    let mut legacy_overview: serde_json::Value = store
+        .conn
+        .query_row(
+            "SELECT overview_json FROM scoped_session_analytics_overview
+             WHERE scope_key = ?1 AND session_id = 'legacy'",
+            [scope.as_str()],
+            |row| row.get::<_, String>(0),
+        )
+        .map(|json| serde_json::from_str(&json).unwrap())
+        .unwrap();
+    let mut removed_model_fields = 0;
+    for day in legacy_overview["days"]
+        .as_object_mut()
+        .unwrap()
+        .values_mut()
+    {
+        for model in day["models"].as_array_mut().unwrap() {
+            let model = model.as_object_mut().unwrap();
+            removed_model_fields += usize::from(model.remove("input_tokens").is_some());
+            removed_model_fields += usize::from(model.remove("cached_input_tokens").is_some());
+        }
+    }
+    assert_eq!(removed_model_fields, 2);
+    let legacy_overview_json = serde_json::to_string(&legacy_overview).unwrap();
+    store
+        .with_named_write_transaction("test_legacy_analytics_overview_cache", |tx| {
+            tx.execute(
+                "UPDATE scoped_session_analytics_overview
+                 SET overview_json = ?1
+                 WHERE scope_key = ?2 AND session_id = 'legacy'",
+                rusqlite::params![legacy_overview_json, scope.as_str()],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+
+    let overview = store
+        .overview_analytics_for_scope(&scope, None, 30, 30)
+        .unwrap();
+    assert!(overview.warnings.is_empty(), "{:?}", overview.warnings);
+    let day = overview
+        .days
+        .iter()
+        .find(|day| day.date == Local::now().date_naive().to_string())
+        .unwrap();
+    let model = day
+        .models
+        .iter()
+        .find(|model| model.model == "test-model")
+        .unwrap();
+    assert_eq!(model.input_tokens, 11);
+
+    let repaired_overview_json: String = store
+        .conn
+        .query_row(
+            "SELECT overview_json FROM scoped_session_analytics_overview
+             WHERE scope_key = ?1 AND session_id = 'legacy'",
+            [scope.as_str()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let repaired_overview: serde_json::Value =
+        serde_json::from_str(&repaired_overview_json).unwrap();
+    let repaired_model = &repaired_overview["days"]
+        .as_object()
+        .unwrap()
+        .values()
+        .next()
+        .unwrap()["models"][0];
+    assert_eq!(repaired_model["input_tokens"], 11);
+    assert_eq!(repaired_model["cached_input_tokens"], 0);
+
+    let next_overview = store
+        .overview_analytics_for_scope(&scope, None, 30, 30)
+        .unwrap();
+    assert!(
+        next_overview.warnings.is_empty(),
+        "{:?}",
+        next_overview.warnings
+    );
+    assert_eq!(next_overview.summary.usage.total_tokens, 11);
 
     drop(store);
     fs::remove_dir_all(temp).unwrap();

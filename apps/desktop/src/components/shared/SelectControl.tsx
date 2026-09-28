@@ -1,5 +1,5 @@
 import { useState, type ComponentPropsWithoutRef, type FocusEventHandler, type KeyboardEventHandler, type ReactNode } from "react";
-import { Check, ChevronDown } from "lucide-react";
+import { Check, ChevronDown, ChevronRight } from "lucide-react";
 import { DropdownMenu, Select } from "radix-ui";
 
 import { MenuContent } from "./MenuContent.tsx";
@@ -12,6 +12,12 @@ export type SelectOption = {
   value: string;
   label: string;
   available?: boolean;
+};
+
+export type SelectOptionGroup = {
+  value: string;
+  label: string;
+  options: SelectOption[];
 };
 
 export type SelectMenuAction = {
@@ -28,7 +34,8 @@ export type SelectControlProps = {
   value: string;
   onValueChange: (value: string) => void;
   label: string;
-  options: SelectOption[];
+  options?: SelectOption[];
+  groups?: SelectOptionGroup[];
   className?: string;
   contentClassName?: string;
   itemClassName?: string;
@@ -53,18 +60,19 @@ export type SelectControlProps = {
 const SELECT_MENU_ACTION_VALUE = "__select_control_menu_action__";
 export function SelectControl({
   variant = "default",
+  groups,
   ...props
 }: SelectControlProps) {
-  return variant === "editable"
-    ? <EditableSelectControl {...props} variant={variant} />
-    : <StandardSelectControl {...props} variant={variant} />;
+  if (variant === "editable") return <EditableSelectControl {...props} variant={variant} />;
+  if (groups) return <GroupedSelectControl {...props} groups={groups} variant={variant} />;
+  return <StandardSelectControl {...props} variant={variant} />;
 }
 
 function StandardSelectControl({
   value,
   onValueChange,
   label,
-  options,
+  options = [],
   className = "",
   contentClassName = "",
   itemClassName = "",
@@ -167,11 +175,141 @@ function StandardSelectControl({
   );
 }
 
+function GroupedSelectControl({
+  value,
+  onValueChange,
+  label,
+  groups,
+  className = "",
+  contentClassName = "",
+  itemClassName = "",
+  renderOption,
+  renderValue,
+  side,
+  align,
+  indicatorPosition = "right",
+  showChevron = true,
+  disabled = false,
+  variant: _variant,
+  options: _options,
+  menuAction: _menuAction,
+  inputId: _inputId,
+  inputAriaLabel: _inputAriaLabel,
+  inputPlaceholder: _inputPlaceholder,
+  inputValue: _inputValue,
+  onInputChange: _onInputChange,
+  onInputBlur: _onInputBlur,
+  onInputKeyDown: _onInputKeyDown,
+  menuAriaLabel: _menuAriaLabel,
+}: SelectControlProps & { groups: SelectOptionGroup[] }) {
+  const notifyRowMenuOpenChange = useRowMenuOpenChange();
+  const { ref: triggerRef, size: triggerSize } = useElementSize<HTMLButtonElement>({ width: 0, height: 0 });
+  const options = groups.flatMap((group) => group.options);
+  const resolvedValue = resolveSelectValue(value, options);
+  const selectedOption = options.find((option) => option.value === resolvedValue);
+  const indicatorClass = indicatorPosition === "right" ? "selectItemIndicatorRight" : "";
+  const renderMenuOption = (
+    option: SelectOption,
+    selected: boolean,
+    accessibleLabel = option.label,
+    visibleLabel?: ReactNode,
+  ) => {
+    const indicator = (
+      <span className="selectItemLeadingIcon" aria-hidden="true">
+        {selected ? <Check className="selectItemIndicator" size={14} /> : null}
+      </span>
+    );
+    return (
+      <DropdownMenu.Item
+        className={["menuItem", indicatorClass, itemClassName].filter(Boolean).join(" ")}
+        data-state={selected ? "checked" : undefined}
+        aria-label={`${accessibleLabel}${selected ? ", selected" : ""}`}
+        key={option.value}
+        onSelect={() => onValueChange(option.value)}
+      >
+        {indicatorPosition === "left" ? indicator : null}
+        <span className="selectItemText">
+          {visibleLabel ?? (renderOption ? renderOption(option) : option.label)}
+        </span>
+        {indicatorPosition === "right" ? indicator : null}
+      </DropdownMenu.Item>
+    );
+  };
+
+  return (
+    <DropdownMenu.Root onOpenChange={(open) => notifyRowMenuOpenChange?.(open)}>
+      <DropdownMenu.Trigger asChild>
+        <button
+          ref={triggerRef}
+          type="button"
+          className={["selectControlTrigger", className].filter(Boolean).join(" ")}
+          aria-label={label}
+          disabled={disabled}
+        >
+          <span className="selectValueText">
+            {renderValue
+              ? renderValue(selectedOption)
+              : renderOption && selectedOption
+                ? renderOption(selectedOption)
+                : selectedOption?.label ?? value}
+          </span>
+          {showChevron ? <ChevronDown size={14} aria-hidden="true" /> : null}
+        </button>
+      </DropdownMenu.Trigger>
+      <DropdownMenu.Portal>
+        <MenuContent
+          variant="select"
+          className={contentClassName}
+          style={{ width: "max-content", minWidth: triggerSize.width || undefined }}
+          side={side}
+          align={align ?? "end"}
+          sideOffset={8}
+          data-no-drag
+        >
+          {groups.map((group) => {
+            if (group.options.length === 1) {
+              const option = group.options[0];
+              return renderMenuOption(
+                option,
+                option.value === resolvedValue,
+                `${group.label}, ${option.label}`,
+                group.label,
+              );
+            }
+            return (
+              <DropdownMenu.Sub key={group.value}>
+                <DropdownMenu.SubTrigger className={["menuItem", "menuSubTrigger", itemClassName].filter(Boolean).join(" ")}>
+                  <span className="selectItemText">{group.label}</span>
+                  <ChevronRight className="menuSubIcon" size={14} aria-hidden="true" />
+                </DropdownMenu.SubTrigger>
+                <DropdownMenu.Portal>
+                  <DropdownMenu.SubContent
+                    className={["menuContent", "selectControlContent", contentClassName].filter(Boolean).join(" ")}
+                    sideOffset={8}
+                    alignOffset={-6}
+                    style={{ width: "max-content" }}
+                    data-no-drag
+                  >
+                    {group.options.map((option) => renderMenuOption(
+                      option,
+                      option.value === resolvedValue,
+                    ))}
+                  </DropdownMenu.SubContent>
+                </DropdownMenu.Portal>
+              </DropdownMenu.Sub>
+            );
+          })}
+        </MenuContent>
+      </DropdownMenu.Portal>
+    </DropdownMenu.Root>
+  );
+}
+
 function EditableSelectControl({
   value,
   onValueChange,
   label,
-  options,
+  options = [],
   className = "",
   contentClassName = "",
   itemClassName = "",

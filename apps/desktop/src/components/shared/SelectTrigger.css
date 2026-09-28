@@ -46,7 +46,7 @@
   color: var(--muted);
   font: inherit;
   font-size: var(--text-ui);
-  line-height: 20px;
+  line-height: var(--leading-body);
   text-align: left;
   cursor: pointer;
   transition: background-color 140ms var(--ease-out-soft), color 140ms var(--ease-out-soft);
@@ -164,7 +164,7 @@
   color: var(--text);
   font: inherit;
   font-size: var(--text-ui);
-  line-height: 20px;
+  line-height: var(--leading-body);
   text-align: left;
   cursor: pointer;
   transition-property: border-color, color;
@@ -266,7 +266,7 @@
   color: inherit;
   font: inherit;
   font-size: var(--text-ui);
-  line-height: 20px;
+  line-height: var(--leading-body);
 }
 
 .selectControlEditableInput::placeholder {

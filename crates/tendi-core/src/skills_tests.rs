@@ -664,10 +664,14 @@ fn projection_visibility_initialization_preserves_command_winner() {
         skills: vec![test_skill("demo", "Demo", &skill_dir)],
     };
     let projected = super::apply_persisted_skill_visibilities(&store, &root, scan).unwrap();
-    assert_eq!(projected.skills[0].visibility, SkillVisibility::Off);
+    assert_eq!(projected.skills[0].visibility, SkillVisibility::Auto);
     assert_eq!(
         projected.skills[0].paths[0].effective_visibility,
-        SkillVisibility::Off
+        SkillVisibility::Auto
+    );
+    assert_eq!(
+        projected.skills[0].paths[0].tendi_visibility,
+        Some(SkillVisibility::Off)
     );
     drop(store);
     fs::remove_dir_all(root).unwrap();
@@ -717,7 +721,7 @@ fn global_skill_visibility_is_shared_across_workspace_scopes() {
 #[test]
 fn reconciliation_reloads_visibility_after_resource_admission() {
     let root = temp_dir("tendi-reconcile-resource-race");
-    let skill_dir = root.join("demo");
+    let skill_dir = root.join(".agents/skills/demo");
     fs::create_dir_all(&skill_dir).unwrap();
     fs::write(skill_dir.join("SKILL.md"), "---\nname: demo\n---\n").unwrap();
     let database = root.join("test.sqlite3");
@@ -730,10 +734,7 @@ fn reconciliation_reloads_visibility_after_resource_admission() {
         .unwrap();
     let resources =
         crate::coordination::acquire_file_resources(std::slice::from_ref(&skill_dir)).unwrap();
-    let mut skill = test_skill("demo", "Demo", &skill_dir);
-    // Exercise admission and database authority only. Provider-specific
-    // configuration behavior has separate explicit temporary-path fixtures.
-    skill.paths[0].agent = AgentKind::Unknown;
+    let skill = test_skill("demo", "Demo", &skill_dir);
     let scan = SkillScan {
         roots: Vec::new(),
         skills: vec![skill],
@@ -2890,16 +2891,9 @@ fn database_visibility_survives_external_provider_rewrite() {
         skills: vec![test_skill("demo", "Demo", &skill_dir)],
         warnings: Vec::new(),
     };
-    let projected = super::apply_persisted_skill_visibilities(&store, &root, scan).unwrap();
+    let projected =
+        super::reconcile_skill_visibility_for_workspace(&store, &root, scan, &[]).unwrap();
     let skill = projected.skills.first().unwrap();
-    let changes = super::plan_skill_visibility_at_path(
-        &skill_dir,
-        AgentKind::Shared,
-        skill.paths[0].effective_visibility,
-        false,
-    )
-    .unwrap();
-    super::apply_changes(&ChangeSet { changes }).unwrap();
 
     assert_eq!(skill.visibility, SkillVisibility::Manual);
     assert!(

@@ -30,13 +30,72 @@ export enum OverviewUsageMetric {
   Sessions = "sessions",
   Turns = "turns",
   Tokens = "tokens",
-  Projects = "projects",
   Cost = "cost",
   Cache = "cache",
   Time = "time",
   Tools = "tools",
   Skills = "skills",
 }
+
+export enum OverviewUsageGroup {
+  Agent = "agent",
+  Status = "status",
+  Model = "model",
+  Project = "project",
+  Tool = "tool",
+  Server = "server",
+  Skill = "skill",
+  Overall = "overall",
+}
+
+export const OVERVIEW_USAGE_GROUPS: Record<OverviewUsageMetric, readonly OverviewUsageGroup[]> = {
+  [OverviewUsageMetric.Sessions]: [OverviewUsageGroup.Agent, OverviewUsageGroup.Project],
+  [OverviewUsageMetric.Turns]: [
+    OverviewUsageGroup.Agent,
+    OverviewUsageGroup.Model,
+    OverviewUsageGroup.Project,
+    OverviewUsageGroup.Status,
+  ],
+  [OverviewUsageMetric.Tokens]: [OverviewUsageGroup.Agent, OverviewUsageGroup.Model, OverviewUsageGroup.Project],
+  [OverviewUsageMetric.Cost]: [OverviewUsageGroup.Agent, OverviewUsageGroup.Model, OverviewUsageGroup.Project],
+  [OverviewUsageMetric.Cache]: [
+    OverviewUsageGroup.Overall,
+    OverviewUsageGroup.Agent,
+    OverviewUsageGroup.Model,
+    OverviewUsageGroup.Project,
+  ],
+  [OverviewUsageMetric.Time]: [OverviewUsageGroup.Agent, OverviewUsageGroup.Model, OverviewUsageGroup.Project],
+  [OverviewUsageMetric.Tools]: [
+    OverviewUsageGroup.Agent,
+    OverviewUsageGroup.Project,
+    OverviewUsageGroup.Tool,
+    OverviewUsageGroup.Server,
+  ],
+  [OverviewUsageMetric.Skills]: [OverviewUsageGroup.Agent, OverviewUsageGroup.Project, OverviewUsageGroup.Skill],
+};
+
+export const OVERVIEW_USAGE_GROUP_LABELS: Record<OverviewUsageGroup, string> = {
+  [OverviewUsageGroup.Agent]: "by agent",
+  [OverviewUsageGroup.Status]: "by status",
+  [OverviewUsageGroup.Model]: "by model",
+  [OverviewUsageGroup.Project]: "by project",
+  [OverviewUsageGroup.Tool]: "by tool",
+  [OverviewUsageGroup.Server]: "by server",
+  [OverviewUsageGroup.Skill]: "by skill",
+  [OverviewUsageGroup.Overall]: "Overall",
+};
+
+export const DEFAULT_OVERVIEW_USAGE_GROUPS: Record<OverviewUsageMetric, OverviewUsageGroup> = {
+  [OverviewUsageMetric.Sessions]: OverviewUsageGroup.Agent,
+  [OverviewUsageMetric.Turns]: OverviewUsageGroup.Status,
+  [OverviewUsageMetric.Tokens]: OverviewUsageGroup.Model,
+  [OverviewUsageMetric.Cost]: OverviewUsageGroup.Model,
+  [OverviewUsageMetric.Cache]: OverviewUsageGroup.Overall,
+  [OverviewUsageMetric.Time]: OverviewUsageGroup.Model,
+  [OverviewUsageMetric.Tools]: OverviewUsageGroup.Tool,
+  [OverviewUsageMetric.Skills]: OverviewUsageGroup.Skill,
+};
+
 type TrendSegment = {
   key: string;
   label: string;
@@ -131,6 +190,58 @@ function rungWidth(periodIndex: number, rungIndex: number, segmentIndex: number)
 function cacheRate(period: AnalyticsPeriod): number | null {
   if (period.inputTokens <= 0) return null;
   return period.cachedInputTokens / period.inputTokens * 100;
+}
+
+function projectCacheRate(project: AnalyticsPeriod["projects"][number] | undefined): number | null {
+  if (!project || project.usage.inputTokens <= 0) return null;
+  return project.usage.cachedInputTokens / project.usage.inputTokens * 100;
+}
+
+function modelCacheRate(model: AnalyticsPeriod["models"][number] | undefined): number | null {
+  if (!model || model.inputTokens <= 0) return null;
+  return model.cachedInputTokens / model.inputTokens * 100;
+}
+
+function agentCacheRate(period: AnalyticsPeriod, agent: string): number | null {
+  const usage = period.agents.find((item) => item.agent === agent)?.usage;
+  if (!usage || usage.inputTokens <= 0) return null;
+  return usage.cachedInputTokens / usage.inputTokens * 100;
+}
+
+function otherProjectCacheRate(period: AnalyticsPeriod, topProjectIds: ReadonlySet<string>): number | null {
+  let inputTokens = period.inputTokens;
+  let cachedInputTokens = period.cachedInputTokens;
+  for (const project of period.projects) {
+    if (!topProjectIds.has(project.id)) continue;
+    inputTokens -= project.usage.inputTokens;
+    cachedInputTokens -= project.usage.cachedInputTokens;
+  }
+  if (inputTokens <= 0) return null;
+  return Math.max(0, cachedInputTokens) / inputTokens * 100;
+}
+
+function otherModelCacheRate(period: AnalyticsPeriod, topModelIds: ReadonlySet<string>): number | null {
+  let inputTokens = period.inputTokens;
+  let cachedInputTokens = period.cachedInputTokens;
+  for (const model of period.models) {
+    if (!topModelIds.has(model.model)) continue;
+    inputTokens -= model.inputTokens;
+    cachedInputTokens -= model.cachedInputTokens;
+  }
+  if (inputTokens <= 0) return null;
+  return Math.max(0, cachedInputTokens) / inputTokens * 100;
+}
+
+function otherAgentCacheRate(period: AnalyticsPeriod, topAgentKeys: ReadonlySet<string>): number | null {
+  let inputTokens = period.inputTokens;
+  let cachedInputTokens = period.cachedInputTokens;
+  for (const agent of period.agents) {
+    if (!topAgentKeys.has(`agent:${agent.agent}`)) continue;
+    inputTokens -= agent.usage.inputTokens;
+    cachedInputTokens -= agent.usage.cachedInputTokens;
+  }
+  if (inputTokens <= 0) return null;
+  return Math.max(0, cachedInputTokens) / inputTokens * 100;
 }
 
 function tokensPerResponse(period: AnalyticsPeriod): number | null {
@@ -249,15 +360,10 @@ function callTotal(calls: AnalyticsPeriod["tools"]): number {
   return calls.reduce((sum, call) => sum + call.calls, 0);
 }
 
-function projectTokenTotal(period: AnalyticsPeriod): number {
-  return period.projects.reduce((sum, project) => sum + project.usage.totalTokens, 0);
-}
-
 function metricValue(period: AnalyticsPeriod, metric: OverviewUsageMetric): number {
   if (metric === OverviewUsageMetric.Sessions) return period.sessions;
   if (metric === OverviewUsageMetric.Turns) return period.runs;
   if (metric === OverviewUsageMetric.Cache) return cacheRate(period) ?? 0;
-  if (metric === OverviewUsageMetric.Projects) return projectTokenTotal(period);
   if (metric === OverviewUsageMetric.Cost) return period.cost.totalUsd;
   if (metric === OverviewUsageMetric.Time) return period.totalRunMs;
   if (metric === OverviewUsageMetric.Tools) return callTotal(period.tools);
@@ -266,7 +372,7 @@ function metricValue(period: AnalyticsPeriod, metric: OverviewUsageMetric): numb
 }
 
 function formatMetricValue(value: number, metric: OverviewUsageMetric): string {
-  if (metric === OverviewUsageMetric.Tokens || metric === OverviewUsageMetric.Projects) return formatTokenCount(value);
+  if (metric === OverviewUsageMetric.Tokens) return formatTokenCount(value);
   if (metric === OverviewUsageMetric.Cost) return formatUsd(value);
   if (metric === OverviewUsageMetric.Cache) return `${value.toFixed(1)}%`;
   if (metric === OverviewUsageMetric.Time) return formatDuration(value);
@@ -276,7 +382,6 @@ function formatMetricValue(value: number, metric: OverviewUsageMetric): string {
 function metricLabel(metric: OverviewUsageMetric, granularity?: AnalyticsGranularity): string {
   if (metric === OverviewUsageMetric.Sessions) return granularity && granularity !== AnalyticsGranularity.Day ? "peak daily sessions" : "active sessions";
   if (metric === OverviewUsageMetric.Cache) return "cache rate";
-  if (metric === OverviewUsageMetric.Projects) return "project tokens";
   if (metric === OverviewUsageMetric.Cost) return "estimated cost";
   if (metric === OverviewUsageMetric.Time) return "total time";
   if (metric === OverviewUsageMetric.Tools) return "tool calls";
@@ -316,33 +421,133 @@ function sessionSegments(period: AnalyticsPeriod): TrendSegment[] {
     }));
 }
 
-function breakdownItems(period: AnalyticsPeriod, metric: OverviewUsageMetric): BreakdownItem[] {
-  if (metric === OverviewUsageMetric.Tokens || metric === OverviewUsageMetric.Time || metric === OverviewUsageMetric.Cost) {
-    return period.models.map((model) => ({
-      key: model.model,
-      label: model.model,
-      value: metric === OverviewUsageMetric.Time
-        ? model.totalMs
+function breakdownItems(
+  period: AnalyticsPeriod,
+  metric: OverviewUsageMetric,
+  group: OverviewUsageGroup,
+): BreakdownItem[] {
+  if (group === OverviewUsageGroup.Model) {
+    return period.models
+      .filter((model) => metric !== OverviewUsageMetric.Turns || model.runs > 0)
+      .map((model) => ({
+        key: model.model,
+        label: model.model,
+        value: metric === OverviewUsageMetric.Turns
+          ? model.runs
+          : metric === OverviewUsageMetric.Cache
+            ? model.inputTokens
+            : metric === OverviewUsageMetric.Time
+              ? model.totalMs
+              : metric === OverviewUsageMetric.Cost
+                ? model.cost.totalUsd
+                : model.totalTokens,
+      }));
+  }
+  if (group === OverviewUsageGroup.Project) {
+    return period.projects
+      .filter((project) => metric === OverviewUsageMetric.Turns
+        ? project.runs > 0
+        : metric === OverviewUsageMetric.Sessions
+          ? (period.sessionsByProject[project.id] ?? 0) > 0
+          : metric === OverviewUsageMetric.Cache
+            ? project.usage.inputTokens > 0
+            : metric === OverviewUsageMetric.Tools
+              ? (period.toolsByProject[project.id] ?? 0) > 0
+              : metric === OverviewUsageMetric.Skills
+                ? (period.skillsByProject[project.id] ?? 0) > 0
+                : true)
+      .map((project) => ({
+        key: project.id,
+        label: project.name,
+        value: metric === OverviewUsageMetric.Turns
+          ? project.runs
+          : metric === OverviewUsageMetric.Sessions
+            ? period.sessionsByProject[project.id] ?? 0
+            : metric === OverviewUsageMetric.Cache
+              ? project.usage.inputTokens
+              : metric === OverviewUsageMetric.Time
+                ? project.totalMs
+                : metric === OverviewUsageMetric.Cost
+                  ? project.cost.totalUsd
+                  : metric === OverviewUsageMetric.Tools
+                    ? period.toolsByProject[project.id] ?? 0
+                    : metric === OverviewUsageMetric.Skills
+                      ? period.skillsByProject[project.id] ?? 0
+                      : project.usage.totalTokens,
+      }));
+  }
+  if (
+    group === OverviewUsageGroup.Agent
+    && metric !== OverviewUsageMetric.Sessions
+  ) {
+    if (metric === OverviewUsageMetric.Turns || metric === OverviewUsageMetric.Time) {
+      const values = metric === OverviewUsageMetric.Turns ? period.runsByAgent : period.runMsByAgent;
+      return Object.entries(values)
+        .map(([agent, value]) => ({
+          key: `agent:${agent}`,
+          label: sessionAgentLabel(agent),
+          value,
+        }))
+        .sort((left, right) => sessionAgentSort(left.key.slice("agent:".length), right.key.slice("agent:".length)));
+    }
+    if (metric === OverviewUsageMetric.Tools || metric === OverviewUsageMetric.Skills) {
+      const values = metric === OverviewUsageMetric.Tools ? period.toolsByAgent : period.skillsByAgent;
+      return Object.entries(values).map(([agent, value]) => ({
+        key: `agent:${agent}`,
+        label: sessionAgentLabel(agent),
+        value,
+      }));
+    }
+    return period.agents.map((agent) => ({
+      key: `agent:${agent.agent}`,
+      label: sessionAgentLabel(agent.agent),
+      value: metric === OverviewUsageMetric.Cache
+        ? agent.usage.inputTokens
         : metric === OverviewUsageMetric.Cost
-          ? model.cost.totalUsd
-          : model.totalTokens,
+          ? agent.cost.totalUsd
+          : agent.usage.totalTokens,
     }));
   }
-  if (metric === OverviewUsageMetric.Projects) {
-    return period.projects.map((project) => ({
-      key: project.id,
-      label: project.name,
-      value: project.usage.totalTokens,
-    }));
-  }
-  if (metric === OverviewUsageMetric.Tools || metric === OverviewUsageMetric.Skills) {
-    return period[metric].map((call) => ({
+  if (group === OverviewUsageGroup.Tool && metric === OverviewUsageMetric.Tools) {
+    return period.tools.map((call) => ({
       key: `${call.server}\0${call.name}`,
       label: call.server ? `${call.server} · ${call.name}` : call.name,
       value: call.calls,
     }));
   }
+  if (group === OverviewUsageGroup.Server && metric === OverviewUsageMetric.Tools) {
+    const servers = new Map<string, BreakdownItem>();
+    for (const call of period.tools) {
+      const key = call.server.trim();
+      const current = servers.get(key);
+      if (current) current.value += call.calls;
+      else servers.set(key, { key: `server:${key}`, label: key || "Unknown server", value: call.calls });
+    }
+    return [...servers.values()];
+  }
+  if (group === OverviewUsageGroup.Skill && metric === OverviewUsageMetric.Skills) {
+    return period.skills.map((call) => ({
+      key: call.name,
+      label: call.name,
+      value: call.calls,
+    }));
+  }
   return [];
+}
+
+function hasCategoricalGroup(group: OverviewUsageGroup, metric: OverviewUsageMetric): boolean {
+  return group === OverviewUsageGroup.Model
+    || group === OverviewUsageGroup.Project
+    || group === OverviewUsageGroup.Tool
+    || group === OverviewUsageGroup.Server
+    || group === OverviewUsageGroup.Skill
+    || (group === OverviewUsageGroup.Agent && metric !== OverviewUsageMetric.Sessions);
+}
+
+function hasCacheCategoryGroup(group: OverviewUsageGroup): boolean {
+  return group === OverviewUsageGroup.Agent
+    || group === OverviewUsageGroup.Model
+    || group === OverviewUsageGroup.Project;
 }
 
 function periodAriaLabel(
@@ -406,13 +611,40 @@ function initialTrendWindow(count: number): TrendWindow {
 export function buildTrendTooltipSegments(
   period: AnalyticsPeriod,
   metric: OverviewUsageMetric,
+  group: OverviewUsageGroup,
   topCategories: BreakdownItem[],
   segments: TrendSegment[],
 ): Array<BreakdownItem & { className: string }> {
-  if (metric === OverviewUsageMetric.Cache) return [];
-  if (metric === OverviewUsageMetric.Tokens || metric === OverviewUsageMetric.Time || metric === OverviewUsageMetric.Cost || metric === OverviewUsageMetric.Projects || metric === OverviewUsageMetric.Tools || metric === OverviewUsageMetric.Skills) {
-    const items = breakdownItems(period, metric).filter((item) => item.value > 0);
+  if (metric === OverviewUsageMetric.Cache) {
+    if (!hasCacheCategoryGroup(group)) return [];
+    const categoryIds = new Set(topCategories.map((category) => category.key));
+    const groupedItems = topCategories.flatMap((category) => {
+      const rate = group === OverviewUsageGroup.Project
+        ? projectCacheRate(period.projects.find((project) => project.id === category.key))
+        : group === OverviewUsageGroup.Model
+          ? modelCacheRate(period.models.find((model) => model.model === category.key))
+          : agentCacheRate(period, category.key.slice("agent:".length));
+      return rate === null ? [] : [{ ...category, value: rate }];
+    });
+    const otherRate = group === OverviewUsageGroup.Project
+      ? otherProjectCacheRate(period, categoryIds)
+      : group === OverviewUsageGroup.Model
+        ? otherModelCacheRate(period, categoryIds)
+        : otherAgentCacheRate(period, categoryIds);
+    if (otherRate !== null) groupedItems.push({ key: "ungrouped", label: "Other", value: otherRate });
+    return groupedItems.map((item) => {
+      const categoryIndex = topCategories.findIndex((category) => category.key === item.key);
+      return { ...item, className: categoryIndex >= 0 ? `category${categoryIndex}` : "categoryOther" };
+    });
+  }
+  if (hasCategoricalGroup(group, metric)) {
+    const items = breakdownItems(period, metric, group).filter((item) => item.value > 0);
     if (items.length || metric !== OverviewUsageMetric.Time) {
+      const groupedTotal = items.reduce((sum, item) => sum + item.value, 0);
+      const ungroupedValue = Math.max(0, metricValue(period, metric) - groupedTotal);
+      if (ungroupedValue > Math.max(1e-9, Math.abs(metricValue(period, metric)) * 1e-9)) {
+        items.push({ key: "ungrouped", label: "Other", value: ungroupedValue });
+      }
       return items
         .map((item) => {
           const categoryIndex = topCategories.findIndex((category) => category.key === item.key);
@@ -433,6 +665,7 @@ export function buildTrendPeriodModel(
   period: AnalyticsPeriod,
   index: number,
   metric: OverviewUsageMetric,
+  group: OverviewUsageGroup,
   topCategories: BreakdownItem[],
   hasOtherCategories: boolean,
   rungUnit: number,
@@ -441,13 +674,15 @@ export function buildTrendPeriodModel(
   // Rung geometry is only needed for the virtualized window. Tooltip rows are
   // optional so callers can skip them for off-screen / non-hovered periods.
   const includeTooltip = options.includeTooltip === true;
-  const periodBreakdown = (metric === OverviewUsageMetric.Tokens || metric === OverviewUsageMetric.Time || metric === OverviewUsageMetric.Cost || metric === OverviewUsageMetric.Projects || metric === OverviewUsageMetric.Tools || metric === OverviewUsageMetric.Skills)
-    ? breakdownItems(period, metric)
+  const periodBreakdown = hasCategoricalGroup(group, metric)
+    ? breakdownItems(period, metric, group)
     : [];
   const periodValues = new Map(periodBreakdown.map((item) => [item.key, item.value]));
   const knownValue = topCategories.reduce((sum, item) => sum + (periodValues.get(item.key) ?? 0), 0);
   const otherValue = Math.max(0, metricValue(period, metric) - knownValue);
-  const segments: TrendSegment[] = (metric === OverviewUsageMetric.Tokens || metric === OverviewUsageMetric.Time || metric === OverviewUsageMetric.Cost || metric === OverviewUsageMetric.Projects || metric === OverviewUsageMetric.Tools || metric === OverviewUsageMetric.Skills)
+  const segments: TrendSegment[] = metric === OverviewUsageMetric.Cache && group === OverviewUsageGroup.Project
+    ? buildTrendTooltipSegments(period, metric, group, topCategories, [])
+    : hasCategoricalGroup(group, metric)
     && (metric !== OverviewUsageMetric.Time || periodBreakdown.length > 0)
     ? [
         ...topCategories.map((item, categoryIndex) => ({
@@ -484,7 +719,7 @@ export function buildTrendPeriodModel(
     }] : [];
   });
   const tooltipSegments = includeTooltip
-    ? buildTrendTooltipSegments(period, metric, topCategories, segments)
+    ? buildTrendTooltipSegments(period, metric, group, topCategories, segments)
     : [];
   return { period, index, total, totalRungs, segments, rungs, tooltipSegments };
 }
@@ -496,6 +731,7 @@ export const OverviewTrendChart = memo(function OverviewTrendChart({
   hasOlder,
   loadingOlder,
   metric,
+  groupBy,
   onLoadOlder,
   onGranularityChange,
 }: {
@@ -504,6 +740,7 @@ export const OverviewTrendChart = memo(function OverviewTrendChart({
   hasOlder: boolean;
   loadingOlder: boolean;
   metric: OverviewUsageMetric;
+  groupBy: OverviewUsageGroup;
   onLoadOlder: (minimumRange?: number) => void;
   onGranularityChange?: (granularity: AnalyticsGranularity) => void;
 }) {
@@ -515,8 +752,8 @@ export const OverviewTrendChart = memo(function OverviewTrendChart({
   const periods = useMemo(() => groupAnalyticsDays(chartDays, granularity), [chartDays, granularity]);
   const visible = periods;
   const periodBreakdowns = useMemo(
-    () => visible.map((period) => breakdownItems(period, metric)),
-    [metric, visible],
+    () => visible.map((period) => breakdownItems(period, metric, groupBy)),
+    [groupBy, metric, visible],
   );
   const categoryTotals = useMemo(() => {
     const totals = new Map<string, BreakdownItem>();
@@ -562,8 +799,17 @@ export const OverviewTrendChart = memo(function OverviewTrendChart({
     return counts;
   }, [chartDays, granularity]);
   const hasOtherCategories = useMemo(
-    () => periodBreakdowns.some((items) => items.some((item) => !topCategorySet.has(item.key) && item.value > 0)),
-    [periodBreakdowns, topCategorySet],
+    () => hasCategoricalGroup(groupBy, metric) && visible.some((period, index) => {
+      if (metric === OverviewUsageMetric.Cache && hasCacheCategoryGroup(groupBy)) {
+        const knownInputTokens = topCategories.reduce((sum, item) => sum + (periodBreakdowns[index].find((entry) => entry.key === item.key)?.value ?? 0), 0);
+        return period.inputTokens - knownInputTokens > Math.max(1e-9, period.inputTokens * 1e-9);
+      }
+      const values = new Map(periodBreakdowns[index].map((item) => [item.key, item.value]));
+      const knownTotal = topCategories.reduce((sum, item) => sum + (values.get(item.key) ?? 0), 0);
+      const total = metricValue(period, metric);
+      return total - knownTotal > Math.max(1e-9, Math.abs(total) * 1e-9);
+    }),
+    [groupBy, metric, periodBreakdowns, topCategories, visible],
   );
   const hasMetricActivity = visible.some((period) => (
     metric === OverviewUsageMetric.Cache ? period.inputTokens > 0 : metricValue(period, metric) > 0
@@ -595,7 +841,7 @@ export const OverviewTrendChart = memo(function OverviewTrendChart({
     {
       ref: viewportRef,
       axis: "horizontal",
-      refreshKey: `${metric}:${granularity}:${visible[0]?.key ?? ""}:${visible.length}`,
+      refreshKey: `${metric}:${groupBy}:${granularity}:${visible[0]?.key ?? ""}:${visible.length}`,
       readSize: (element) => ({ width: element.clientWidth, height: element.clientHeight }),
       isValidSize: ({ width }) => width > 0,
       isEqual: (current, next) => current.width === next.width,
@@ -614,11 +860,12 @@ export const OverviewTrendChart = memo(function OverviewTrendChart({
       period,
       windowStart + localIndex,
       metric,
+      groupBy,
       topCategories,
       hasOtherCategories,
       rungUnit,
     )),
-    [hasOtherCategories, metric, rungUnit, topCategories, visible, windowStart, windowEnd],
+    [groupBy, hasOtherCategories, metric, rungUnit, topCategories, visible, windowStart, windowEnd],
   );
 
   const syncTrendWindow = useCallback((viewport: HTMLDivElement, scrollLeft = viewport.scrollLeft) => {
@@ -653,7 +900,7 @@ export const OverviewTrendChart = memo(function OverviewTrendChart({
   useLayoutEffect(() => {
     const viewport = viewportRef.current;
     if (!viewport) return;
-    const viewKey = `${metric}:${granularity}`;
+    const viewKey = `${metric}:${groupBy}:${granularity}`;
     const firstKey = visible[0]?.key ?? "";
     const previous = scrollSnapshotRef.current;
     if (!previous || previous.viewKey !== viewKey) {
@@ -709,7 +956,7 @@ export const OverviewTrendChart = memo(function OverviewTrendChart({
       });
       onLoadOlder(targetRange);
     }
-  }, [analytics.daysRequested, granularity, hasOlder, loadingOlder, metric, onLoadOlder, trendViewportSize.width, visible, windowed]);
+  }, [analytics.daysRequested, granularity, groupBy, hasOlder, loadingOlder, metric, onLoadOlder, trendViewportSize.width, visible, windowed]);
 
   useEffect(() => {
     const pendingIndex = pendingFocusIndexRef.current;
@@ -852,41 +1099,81 @@ export const OverviewTrendChart = memo(function OverviewTrendChart({
     }
   };
 
-  const legend: ChartLegendItem[] = metric === OverviewUsageMetric.Tokens
+  const legend: ChartLegendItem[] = metric === OverviewUsageMetric.Cache
+    ? hasCacheCategoryGroup(groupBy)
+      ? [
+          ...topCategories.map((item, index) => ({ key: item.key, label: item.label, swatchClassName: `category${index}` })),
+          ...(hasOtherCategories ? [{ key: "other", label: "Other", swatchClassName: "categoryOther" }] : []),
+        ]
+      : []
+    : metric === OverviewUsageMetric.Tokens
     ? [
         ...topCategories.map((item, index) => ({ key: item.key, label: item.label, swatchClassName: `category${index}` })),
         ...(hasOtherCategories ? [{ key: "other", label: "Other", swatchClassName: "categoryOther" }] : []),
         { key: "tokensPerResponse", label: "Avg tokens / response", swatchClassName: "tokensPerResponse" },
       ]
+    : metric === OverviewUsageMetric.Turns && hasCategoricalGroup(groupBy, metric)
+      ? [
+          ...topCategories.map((item, index) => ({ key: item.key, label: item.label, swatchClassName: `category${index}` })),
+          ...(hasOtherCategories ? [{ key: "other", label: "Other", swatchClassName: "categoryOther" }] : []),
+        ]
     : metric === OverviewUsageMetric.Time
       ? [
           ...topCategories.map((item, index) => ({ key: item.key, label: item.label, swatchClassName: `category${index}` })),
           ...(hasOtherCategories ? [{ key: "other", label: "Other", swatchClassName: "categoryOther" }] : []),
           { key: "averageTurnTime", label: "Avg turn time", swatchClassName: "averageTurnTime" },
         ]
-    : metric === OverviewUsageMetric.Tools || metric === OverviewUsageMetric.Skills || metric === OverviewUsageMetric.Projects || metric === OverviewUsageMetric.Cost
+    : metric === OverviewUsageMetric.Tools || metric === OverviewUsageMetric.Skills || metric === OverviewUsageMetric.Cost
     ? [
         ...topCategories.map((item, index) => ({ key: item.key, label: item.label, swatchClassName: `category${index}` })),
         ...(hasOtherCategories ? [{ key: "other", label: "Other", swatchClassName: "categoryOther" }] : []),
       ]
       : metric === OverviewUsageMetric.Sessions
-        ? sessionAgentKeys.map((agent) => ({
-          key: `session-agent:${agent}`,
-          label: sessionAgentLabel(agent),
-          swatchClassName: sessionAgentClass(agent),
-        }))
-      : metric === OverviewUsageMetric.Cache
-        ? []
-        : [
+        ? groupBy === OverviewUsageGroup.Project
+          ? [
+              ...topCategories.map((item, index) => ({ key: item.key, label: item.label, swatchClassName: `category${index}` })),
+              ...(hasOtherCategories ? [{ key: "other", label: "Other", swatchClassName: "categoryOther" }] : []),
+            ]
+          : sessionAgentKeys.map((agent) => ({
+              key: `session-agent:${agent}`,
+              label: sessionAgentLabel(agent),
+              swatchClassName: sessionAgentClass(agent),
+            }))
+      : [
           { key: "completed", label: "Completed", swatchClassName: "statusCompleted" },
           { key: "aborted", label: "Aborted", swatchClassName: "statusAborted" },
           { key: "unclosed", label: "Other unclosed", swatchClassName: "statusUnclosed" },
         ];
   const renderedModels = periodModels;
   const renderedPeriods = visible.slice(windowStart, windowEnd);
-  const cacheLinePath = metric === OverviewUsageMetric.Cache
-    ? trendLinePath(renderedModels, cacheRate, cacheRatePlotPosition)
-    : "";
+  const cacheLineSeries = metric !== OverviewUsageMetric.Cache
+    ? []
+    : hasCacheCategoryGroup(groupBy)
+      ? [
+          ...topCategories.map((category, categoryIndex) => ({
+            key: category.key,
+            className: `category${categoryIndex}`,
+            path: trendLinePath(
+              renderedModels,
+              (period) => groupBy === OverviewUsageGroup.Project
+                ? projectCacheRate(period.projects.find((project) => project.id === category.key))
+                : groupBy === OverviewUsageGroup.Model
+                  ? modelCacheRate(period.models.find((model) => model.model === category.key))
+                  : agentCacheRate(period, category.key.slice("agent:".length)),
+              cacheRatePlotPosition,
+            ),
+          })),
+          ...(hasOtherCategories ? [{
+            key: "other",
+            className: "categoryOther",
+            path: trendLinePath(renderedModels, (period) => groupBy === OverviewUsageGroup.Project
+              ? otherProjectCacheRate(period, topCategorySet)
+              : groupBy === OverviewUsageGroup.Model
+                ? otherModelCacheRate(period, topCategorySet)
+                : otherAgentCacheRate(period, topCategorySet), cacheRatePlotPosition),
+          }] : []),
+        ]
+      : [{ key: "cache", className: "", path: trendLinePath(renderedModels, cacheRate, cacheRatePlotPosition) }];
   const tokensPerResponsePath = metric === OverviewUsageMetric.Tokens
     ? trendLinePath(
       renderedModels,
@@ -921,8 +1208,8 @@ export const OverviewTrendChart = memo(function OverviewTrendChart({
 
   return (
     <ChartFrame
-      ariaLabel={`${metricLabel(metric, granularity)} trend`}
-      legend={metric === OverviewUsageMetric.Cache ? <ChartLegend items={[]} /> : (
+      ariaLabel={`${metricLabel(metric, granularity)} trend grouped ${OVERVIEW_USAGE_GROUP_LABELS[groupBy].toLowerCase()}`}
+      legend={metric === OverviewUsageMetric.Cache && !hasCacheCategoryGroup(groupBy) ? <ChartLegend items={[]} /> : (
         <ChartLegend
           items={legend.map((item) => ({
             ...item,
@@ -934,6 +1221,7 @@ export const OverviewTrendChart = memo(function OverviewTrendChart({
     >
       <p id="overview-trend-instructions" className="overviewVisuallyHidden">
         {granularity === AnalyticsGranularity.Day ? null : "Click a period to zoom in. "}
+        {groupBy === OverviewUsageGroup.Overall ? null : `${OVERVIEW_USAGE_GROUP_LABELS[groupBy]}. `}
         {metric === OverviewUsageMetric.Tokens ? "The line shows average tokens per response. " : null}
         {metric === OverviewUsageMetric.Time ? "The line shows average turn time. " : null}
         {metric === OverviewUsageMetric.Cache ? "Cache rate uses a logarithmic scale based on uncached input. " : null}
@@ -959,7 +1247,7 @@ export const OverviewTrendChart = memo(function OverviewTrendChart({
               className="overviewTrendBars"
               ref={barsRef}
               role="listbox"
-              aria-label={`${granularity} ${metricLabel(metric, granularity)}`}
+              aria-label={`${granularity} ${metricLabel(metric, granularity)} ${OVERVIEW_USAGE_GROUP_LABELS[groupBy].toLowerCase()}`}
               aria-describedby="overview-trend-instructions"
               style={windowStyle}
             >
@@ -979,7 +1267,9 @@ export const OverviewTrendChart = memo(function OverviewTrendChart({
                   preserveAspectRatio="none"
                   aria-hidden="true"
                 >
-                  <path className="overviewTrendLinePath" d={cacheLinePath} />
+                  {cacheLineSeries.map((series) => (
+                    <path className={`overviewTrendLinePath ${series.className}`.trim()} key={series.key} d={series.path} />
+                  ))}
                 </svg>
               ) : null}
               {renderedModels.map(({ period, index, total, totalRungs, segments, rungs }) => {
@@ -993,7 +1283,7 @@ export const OverviewTrendChart = memo(function OverviewTrendChart({
                 const tokensPerResponseValue = metric === OverviewUsageMetric.Tokens ? tokensPerResponse(period) : null;
                 const averageTurnTimeValue = metric === OverviewUsageMetric.Time ? averageTurnMs(period) : null;
                 const tooltipSegments = (isActive || isHovered || openTooltipKey === period.key)
-                  ? buildTrendTooltipSegments(period, metric, topCategories, segments)
+                  ? buildTrendTooltipSegments(period, metric, groupBy, topCategories, segments)
                   : [];
                 return (
                   <Tooltip
@@ -1036,7 +1326,7 @@ export const OverviewTrendChart = memo(function OverviewTrendChart({
                           value: (
                             <>
                               {formatMetricValue(segment.value, metric)}
-                              {tooltipSegments.length > 1 && total > 0 ? ` · ${Math.round(segment.value / total * 100)}%` : ""}
+                              {metric !== OverviewUsageMetric.Cache && tooltipSegments.length > 1 && total > 0 ? ` · ${Math.round(segment.value / total * 100)}%` : ""}
                             </>
                           ),
                         }))}
@@ -1059,11 +1349,6 @@ export const OverviewTrendChart = memo(function OverviewTrendChart({
                             <p className="chartTooltipMeta">
                             {period.timedCompletedRuns.toLocaleString()} timed turns
                             {` · Longest ${period.maxRunMs ? formatDuration(period.maxRunMs) : EMPTY_DISPLAY_VALUE}`}
-                          </p>
-                        ) : metric === OverviewUsageMetric.Projects ? (
-                            <p className="chartTooltipMeta">
-                            {period.projects.length.toLocaleString()} projects
-                            {` · ${period.responses.toLocaleString()} responses`}
                           </p>
                         ) : metric === OverviewUsageMetric.Cost ? (
                             <p className="chartTooltipMeta">
@@ -1108,7 +1393,7 @@ export const OverviewTrendChart = memo(function OverviewTrendChart({
                           aria-hidden="true"
                         />
                       )}
-                      {metric === OverviewUsageMetric.Cache ? cacheValue === null || !isHovered ? null : (
+                      {metric === OverviewUsageMetric.Cache ? cacheValue === null || !isHovered || groupBy !== OverviewUsageGroup.Overall ? null : (
                         <span
                           className="overviewTrendLineMarker isHovered"
                           style={{ bottom: `${cacheRatePlotPosition(cacheValue) * 100}%` }}

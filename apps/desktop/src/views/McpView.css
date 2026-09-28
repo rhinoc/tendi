@@ -303,7 +303,7 @@
   background: var(--inset-fill);
   color: var(--faint);
   font-size: var(--text-xs);
-  line-height: 1.35;
+  line-height: var(--leading-micro);
 }
 
 .mcpToolPlaceholder {

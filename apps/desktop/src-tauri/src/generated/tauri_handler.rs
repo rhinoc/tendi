@@ -10,6 +10,8 @@ tauri::generate_handler![
     assistant_chat_sessions,
     tokenizer_count,
     app_icon_set,
+    database_storage_status,
+    database_reset,
     cli_status,
     cli_install,
     cli_remove,

@@ -69,9 +69,9 @@
   background: var(--control-fill);
   color: var(--muted);
   font-family: inherit;
-  font-size: 11px;
+  font-size: var(--text-xs);
   font-weight: 600;
-  line-height: 1;
+  line-height: var(--leading-micro);
   white-space: nowrap;
 }
 
@@ -89,7 +89,7 @@
   min-width: 28px;
   height: 20px;
   padding: 0 5px;
-  font-size: 10px;
+  font-size: var(--text-xs);
 }
 
 .commandPaletteResults {

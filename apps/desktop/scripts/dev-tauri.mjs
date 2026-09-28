@@ -93,7 +93,70 @@ if (cliBuild.error || cliBuild.status !== 0) {
 }
 
 const tauriCommand = process.platform === "win32" ? "tauri.cmd" : "tauri";
-const child = spawnOwned(tauriCommand, ["dev", ...process.argv.slice(2)], {
+const tauriArgs = ["dev", ...process.argv.slice(2)];
+const hasCustomRunner = tauriArgs.some((argument) => (
+  argument === "--runner" || argument === "-r" || argument.startsWith("--runner=")
+));
+if (process.platform === "darwin" && !hasCustomRunner) {
+  tauriArgs.splice(1, 0, "--runner", resolve(scriptDir, "dev-tauri-macos-cargo-runner.mjs"));
+}
+const managesMacOsDevApp = process.platform === "darwin" && !hasCustomRunner;
+const forwardedArgs = process.argv.slice(2);
+const targetAssignment = forwardedArgs.find((argument) => argument.startsWith("--target="));
+const targetIndex = forwardedArgs.indexOf("--target");
+const cargoTarget = targetAssignment
+  ? targetAssignment.slice("--target=".length)
+  : targetIndex >= 0
+    ? forwardedArgs[targetIndex + 1]
+    : null;
+const appOutputDir = cargoTarget ? resolve(targetDir, cargoTarget) : targetDir;
+const devAppExecutable = resolve(
+  appOutputDir,
+  "debug",
+  "bundle",
+  "macos",
+  "tendi.app",
+  "Contents",
+  "MacOS",
+  "tendi-desktop",
+);
+
+function runningDevAppPids() {
+  if (!managesMacOsDevApp) return [];
+  const result = spawnSync("ps", ["-axo", "pid=,command="], { encoding: "utf8" });
+  if (result.status !== 0) return [];
+  return result.stdout.split("\n").flatMap((line) => {
+    const match = line.trim().match(/^(\d+)\s+(.+)$/);
+    if (!match || (match[2] !== devAppExecutable && !match[2].startsWith(`${devAppExecutable} `))) {
+      return [];
+    }
+    return [Number.parseInt(match[1], 10)];
+  });
+}
+
+async function stopDevApp() {
+  const managedPids = () => runningDevAppPids();
+  const signalPids = (pids, signal) => {
+    for (const pid of pids) {
+      try {
+        process.kill(pid, signal);
+      } catch (error) {
+        if (error?.code !== "ESRCH") throw error;
+      }
+    }
+  };
+
+  signalPids(managedPids(), "SIGTERM");
+  const deadline = Date.now() + 2_000;
+  while (Date.now() < deadline && managedPids().length > 0) {
+    await new Promise((done) => setTimeout(done, 100));
+  }
+  signalPids(managedPids(), "SIGKILL");
+}
+
+if (managesMacOsDevApp) await stopDevApp();
+
+const child = spawnOwned(tauriCommand, tauriArgs, {
   cwd: desktopDir,
   env: {
     ...devEnv,
@@ -106,8 +169,9 @@ let shuttingDown = false;
 async function shutdown(code = 0) {
   if (shuttingDown) return;
   shuttingDown = true;
-  releaseLock();
   await stopOwned(child);
+  await stopDevApp();
+  releaseLock();
   process.exit(code);
 }
 

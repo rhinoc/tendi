@@ -766,6 +766,9 @@ export type SessionResumeResponse = {
   error?: SessionResumeError;
 };
 export type LogsExportResponse = string;
+export type DatabaseStorageStatus = {
+  bytes: number;
+};
 export type AgentKind = "codex" | "cursor" | "claude" | "shared" | "unknown";
 export type AgentRecord = {
   kind: AgentKind;
@@ -1206,6 +1209,9 @@ export type AnalyticsProjectUsage = {
   name: string;
   usage: AnalyticsTokenUsage;
   responses: number;
+  sessions: number;
+  runs: number;
+  totalMs: number;
   cost: AnalyticsCost;
 };
 export type AnalyticsCapabilities = {
@@ -1226,8 +1232,16 @@ export type AnalyticsRunSummary = {
 export type AnalyticsModelUsage = {
   model: string;
   totalTokens: number;
+  inputTokens: number;
+  cachedInputTokens: number;
+  runs: number;
   totalMs: number;
   completedRuns: number;
+  cost: AnalyticsCost;
+};
+export type AnalyticsAgentUsage = {
+  agent: string;
+  usage: AnalyticsTokenUsage;
   cost: AnalyticsCost;
 };
 export type AnalyticsCallUsage = {
@@ -1242,6 +1256,13 @@ export type AnalyticsDay = {
   responses: number;
   sessions: number;
   sessionsByAgent: Record<string, number>;
+  agents: AnalyticsAgentUsage[];
+  runsByAgent: Record<string, number>;
+  runMsByAgent: Record<string, number>;
+  toolsByAgent: Record<string, number>;
+  toolsByProject: Record<string, number>;
+  skillsByAgent: Record<string, number>;
+  skillsByProject: Record<string, number>;
   runs: AnalyticsRunSummary;
   aborted: number;
   compacted: number;
@@ -1480,7 +1501,7 @@ export type JsonRpcError = { code: number; message: string; data?: JsonRpcErrorD
 export type JsonRpcResponse = { jsonrpc: "2.0"; id: JsonRpcId; result?: JsonValue; error?: JsonRpcError };
 export type RuntimeEventEnvelope = { id: number; event: string; payload: JsonValue; scopeKey?: string; domain?: string; operationId?: string; baseRevision?: number; revision?: number; sourceVersion?: string | null };
 
-export type CommandName = "scan" | "agents_list" | "bundled_skill_status" | "bundled_skill_install" | "bundled_skill_remove" | "bundled_skill_prompt_dismiss" | "skills_list" | "skills_refresh" | "sessions_snapshot" | "sessions_list" | "sessions_scan_start" | "sessions_search" | "analytics_overview" | "analytics_revision" | "session_skill_index_status" | "session_skill_index_run" | "session_skill_links" | "skill_session_links" | "settings_get" | "settings_save" | "assistant_ask" | "assistant_cancel" | "assistant_chat_sessions" | "tokenizer_count" | "session_projects_list" | "project_scan_scopes_list" | "project_scan_scopes_save" | "projects_list" | "projects_scan" | "terminal_apps_list" | "agent_configs_list" | "agent_config_watch" | "agent_config_read" | "agent_config_save" | "agent_configs_delete_many" | "config_profile_create" | "config_profile_set" | "rules_list" | "rule_file_read" | "rule_file_save" | "rule_file_delete_many" | "hooks_list" | "hook_delete" | "hook_delete_many" | "hook_set_enabled" | "hook_set_enabled_many" | "hook_review" | "hook_source_read" | "mcp_list" | "mcp_probe" | "mcp_set_enabled" | "mcp_set_enabled_many" | "prompts_list" | "prompt_save" | "prompts_delete_many" | "session_transcript" | "session_transcript_locator" | "session_transcript_search" | "skills_targets" | "skills_backup_status" | "skills_backup_configure" | "skills_backup_sync" | "skills_backup_now" | "skills_backup_versions" | "skills_backup_restore" | "skills_backup_adopt" | "skills_backup_adopt_many" | "skills_backup_disconnect" | "skills_add" | "skills_add_preview_read" | "skills_distribute" | "skills_remove_locations" | "skills_set" | "skills_wrap" | "skills_updates" | "skills_updates_cancel" | "skills_update" | "skills_update_many" | "skills_delete_many" | "skills_marketplace_search" | "skill_files" | "skill_file_read" | "skill_file_save" | "skill_file_create" | "skill_folder_create" | "skill_path_rename" | "skill_path_delete" | "app_icon_set" | "cli_status" | "cli_install" | "cli_remove" | "terminal_app_test" | "editor_app_test" | "session_resume_target" | "session_resume_in_terminal" | "open_in_editor" | "reveal_in_finder" | "logs_export" | "open_url" | "check_for_updates" | "install_update";
+export type CommandName = "scan" | "agents_list" | "bundled_skill_status" | "bundled_skill_install" | "bundled_skill_remove" | "bundled_skill_prompt_dismiss" | "skills_list" | "skills_refresh" | "sessions_snapshot" | "sessions_list" | "sessions_scan_start" | "sessions_search" | "analytics_overview" | "analytics_revision" | "session_skill_index_status" | "session_skill_index_run" | "session_skill_links" | "skill_session_links" | "settings_get" | "settings_save" | "assistant_ask" | "assistant_cancel" | "assistant_chat_sessions" | "tokenizer_count" | "session_projects_list" | "project_scan_scopes_list" | "project_scan_scopes_save" | "projects_list" | "projects_scan" | "terminal_apps_list" | "agent_configs_list" | "agent_config_watch" | "agent_config_read" | "agent_config_save" | "agent_configs_delete_many" | "config_profile_create" | "config_profile_set" | "rules_list" | "rule_file_read" | "rule_file_save" | "rule_file_delete_many" | "hooks_list" | "hook_delete" | "hook_delete_many" | "hook_set_enabled" | "hook_set_enabled_many" | "hook_review" | "hook_source_read" | "mcp_list" | "mcp_probe" | "mcp_set_enabled" | "mcp_set_enabled_many" | "prompts_list" | "prompt_save" | "prompts_delete_many" | "session_transcript" | "session_transcript_locator" | "session_transcript_search" | "skills_targets" | "skills_backup_status" | "skills_backup_configure" | "skills_backup_sync" | "skills_backup_now" | "skills_backup_versions" | "skills_backup_restore" | "skills_backup_adopt" | "skills_backup_adopt_many" | "skills_backup_disconnect" | "skills_add" | "skills_add_preview_read" | "skills_distribute" | "skills_remove_locations" | "skills_set" | "skills_wrap" | "skills_updates" | "skills_updates_cancel" | "skills_update" | "skills_update_many" | "skills_delete_many" | "skills_marketplace_search" | "skill_files" | "skill_file_read" | "skill_file_save" | "skill_file_create" | "skill_folder_create" | "skill_path_rename" | "skill_path_delete" | "app_icon_set" | "database_storage_status" | "database_reset" | "cli_status" | "cli_install" | "cli_remove" | "terminal_app_test" | "editor_app_test" | "session_resume_target" | "session_resume_in_terminal" | "open_in_editor" | "reveal_in_finder" | "logs_export" | "open_url" | "check_for_updates" | "install_update";
 export const TauriCommand = {
   Scan: "scan",
   AgentsList: "agents_list",
@@ -1570,6 +1591,8 @@ export const TauriCommand = {
   SkillPathRename: "skill_path_rename",
   SkillPathDelete: "skill_path_delete",
   AppIconSet: "app_icon_set",
+  DatabaseStorageStatus: "database_storage_status",
+  DatabaseReset: "database_reset",
   CliStatus: "cli_status",
   CliInstall: "cli_install",
   CliRemove: "cli_remove",
@@ -1702,6 +1725,10 @@ export type SkillFolderCreateResponse = SkillFileMutationResponse;
 export type SkillPathRenameResponse = SkillFileMutationResponse;
 export type SkillPathDeleteResponse = SkillFileMutationResponse;
 export type AppIconSetResponse = Unit;
+export type DatabaseStorageStatusRequest = EmptyRequest;
+export type DatabaseStorageStatusResponse = DatabaseStorageStatus;
+export type DatabaseResetRequest = EmptyRequest;
+export type DatabaseResetResponse = Unit;
 export type CliStatusRequest = EmptyRequest;
 export type CliStatusResponse = CliInstallStatus;
 export type CliInstallRequest = EmptyRequest;
@@ -1809,6 +1836,8 @@ export type RuntimeRequests = {
   "skill_path_rename": SkillPathRenameRequest;
   "skill_path_delete": SkillPathDeleteRequest;
   "app_icon_set": AppIconSetRequest;
+  "database_storage_status": DatabaseStorageStatusRequest;
+  "database_reset": DatabaseResetRequest;
   "cli_status": CliStatusRequest;
   "cli_install": CliInstallRequest;
   "cli_remove": CliRemoveRequest;
@@ -1912,6 +1941,8 @@ export type RuntimeResponses = {
   "skill_path_rename": SkillPathRenameResponse;
   "skill_path_delete": SkillPathDeleteResponse;
   "app_icon_set": AppIconSetResponse;
+  "database_storage_status": DatabaseStorageStatusResponse;
+  "database_reset": DatabaseResetResponse;
   "cli_status": CliStatusResponse;
   "cli_install": CliInstallResponse;
   "cli_remove": CliRemoveResponse;
@@ -2017,6 +2048,8 @@ export const COMMAND_METADATA = {
   "skill_path_rename": { owner: "daemon", wire: "jsonrpc", clients: ["desktop"], execution: "write", serializedWrite: true, internal: false, deprecated: false },
   "skill_path_delete": { owner: "daemon", wire: "jsonrpc", clients: ["desktop"], execution: "write", serializedWrite: true, internal: false, deprecated: false },
   "app_icon_set": { owner: "desktop", wire: "tauri", clients: ["desktop"], execution: "write", serializedWrite: true, internal: false, deprecated: false },
+  "database_storage_status": { owner: "desktop", wire: "tauri", clients: ["desktop"], execution: "read", serializedWrite: false, internal: false, deprecated: false },
+  "database_reset": { owner: "desktop", wire: "tauri", clients: ["desktop"], execution: "write", serializedWrite: true, internal: false, deprecated: false },
   "cli_status": { owner: "desktop", wire: "tauri", clients: ["desktop"], execution: "read", serializedWrite: false, internal: false, deprecated: false },
   "cli_install": { owner: "desktop", wire: "tauri", clients: ["desktop"], execution: "write", serializedWrite: true, internal: false, deprecated: false },
   "cli_remove": { owner: "desktop", wire: "tauri", clients: ["desktop"], execution: "write", serializedWrite: true, internal: false, deprecated: false },
@@ -2040,5 +2073,5 @@ export function isDesktopCommand(command: string): command is CommandName {
 }
 export const PROTOCOL_VERSION = 2;
 export const SCHEMA_VERSION = 1;
-export const RUNTIME_CONTRACT_FINGERPRINT = "4d97bc00c50396f62aa7ca72b51ddf189916d3e7b4fa2accd2aa11e7834acf01";
+export const RUNTIME_CONTRACT_FINGERPRINT = "51c444d46529decedf5b1535de7141889b51b70d6cefa11d3c75dce2d263d483";
 export const RUNTIME_ERROR_CODES = {"INVALID_REQUEST":-32600,"METHOD_NOT_FOUND":-32601,"INVALID_PARAMS":-32602,"INVALID_ARGUMENT":-32602,"INTERNAL":-32603,"CORE_ERROR":-32603,"CONFLICT":-32002,"UNAUTHORIZED":-32003,"UNSUPPORTED_TRANSPORT":-32004,"CONTRACT_VIOLATION":-32005,"DAEMON_ERROR":-32001} as const;

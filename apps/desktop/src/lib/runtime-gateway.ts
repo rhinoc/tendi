@@ -796,6 +796,15 @@ export async function exportLogs(): Promise<string> {
   return invokeCommand(TauriCommand.LogsExport) as Promise<string>;
 }
 
+export async function readDatabaseStorage(): Promise<number> {
+  const status = await invokeCommand(TauriCommand.DatabaseStorageStatus);
+  return status.bytes;
+}
+
+export async function resetDatabase(): Promise<void> {
+  await invokeCommand(TauriCommand.DatabaseReset);
+}
+
 export async function watchAgentConfig(path: string): Promise<void> {
   await invokeCommand(TauriCommand.AgentConfigWatch, { path });
 }

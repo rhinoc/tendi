@@ -99,6 +99,8 @@
     { "name": "skill_path_rename", "params": [{ "name": "request", "required": true, "schema": { "$ref": "#/components/schemas/SkillPathRenameRequest" } }], "result": { "name": "result", "schema": { "$ref": "#/components/schemas/SkillFileMutationResponse" } }, "x-tendi": { "owner": "daemon", "wire": "jsonrpc", "clients": ["desktop"], "execution": "write" } },
     { "name": "skill_path_delete", "params": [{ "name": "request", "required": true, "schema": { "$ref": "#/components/schemas/SkillPathDeleteRequest" } }], "result": { "name": "result", "schema": { "$ref": "#/components/schemas/SkillFileMutationResponse" } }, "x-tendi": { "owner": "daemon", "wire": "jsonrpc", "clients": ["desktop"], "execution": "write" } },
     { "name": "app_icon_set", "params": [{ "name": "request", "required": true, "schema": { "$ref": "#/components/schemas/AppIconSetRequest" } }], "result": { "name": "result", "schema": { "$ref": "#/components/schemas/Unit" } }, "x-tendi": { "owner": "desktop", "wire": "tauri", "clients": ["desktop"], "execution": "write" } },
+    { "name": "database_storage_status", "params": [], "result": { "name": "result", "schema": { "$ref": "#/components/schemas/DatabaseStorageStatus" } }, "x-tendi": { "owner": "desktop", "wire": "tauri", "clients": ["desktop"], "execution": "read" } },
+    { "name": "database_reset", "params": [], "result": { "name": "result", "schema": { "$ref": "#/components/schemas/Unit" } }, "x-tendi": { "owner": "desktop", "wire": "tauri", "clients": ["desktop"], "execution": "write" } },
     { "name": "cli_status", "params": [], "result": { "name": "result", "schema": { "$ref": "#/components/schemas/CliInstallStatus" } }, "x-tendi": { "owner": "desktop", "wire": "tauri", "clients": ["desktop"], "execution": "read" } },
     { "name": "cli_install", "params": [], "result": { "name": "result", "schema": { "$ref": "#/components/schemas/CliInstallStatus" } }, "x-tendi": { "owner": "desktop", "wire": "tauri", "clients": ["desktop"], "execution": "write" } },
     { "name": "cli_remove", "params": [], "result": { "name": "result", "schema": { "$ref": "#/components/schemas/CliInstallStatus" } }, "x-tendi": { "owner": "desktop", "wire": "tauri", "clients": ["desktop"], "execution": "write" } },
@@ -1108,6 +1110,14 @@
         "additionalProperties": false
       },
       "LogsExportResponse": { "type": "string", "minLength": 1 },
+      "DatabaseStorageStatus": {
+        "type": "object",
+        "properties": {
+          "bytes": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 }
+        },
+        "required": ["bytes"],
+        "additionalProperties": false
+      },
       "EmptyRequest": {
         "type": "object",
         "additionalProperties": false
@@ -1851,9 +1861,12 @@
           "name": { "type": "string" },
           "usage": { "$ref": "#/components/schemas/AnalyticsTokenUsage" },
           "responses": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
+          "sessions": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
+          "runs": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
+          "totalMs": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
           "cost": { "$ref": "#/components/schemas/AnalyticsCost" }
         },
-        "required": ["id", "name", "usage", "responses", "cost"],
+        "required": ["id", "name", "usage", "responses", "sessions", "runs", "totalMs", "cost"],
         "additionalProperties": false
       },
       "AnalyticsCapabilities": {
@@ -1886,11 +1899,24 @@
         "properties": {
           "model": { "type": "string" },
           "totalTokens": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
+          "inputTokens": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
+          "cachedInputTokens": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
+          "runs": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
           "totalMs": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
           "completedRuns": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
           "cost": { "$ref": "#/components/schemas/AnalyticsCost" }
         },
-        "required": ["model", "totalTokens", "totalMs", "completedRuns", "cost"],
+        "required": ["model", "totalTokens", "inputTokens", "cachedInputTokens", "runs", "totalMs", "completedRuns", "cost"],
+        "additionalProperties": false
+      },
+      "AnalyticsAgentUsage": {
+        "type": "object",
+        "properties": {
+          "agent": { "type": "string" },
+          "usage": { "$ref": "#/components/schemas/AnalyticsTokenUsage" },
+          "cost": { "$ref": "#/components/schemas/AnalyticsCost" }
+        },
+        "required": ["agent", "usage", "cost"],
         "additionalProperties": false
       },
       "AnalyticsCallUsage": {
@@ -1912,6 +1938,13 @@
           "responses": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
           "sessions": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
           "sessionsByAgent": { "type": "object", "additionalProperties": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 } },
+          "agents": { "type": "array", "items": { "$ref": "#/components/schemas/AnalyticsAgentUsage" } },
+          "runsByAgent": { "type": "object", "additionalProperties": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 } },
+          "runMsByAgent": { "type": "object", "additionalProperties": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 } },
+          "toolsByAgent": { "type": "object", "additionalProperties": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 } },
+          "toolsByProject": { "type": "object", "additionalProperties": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 } },
+          "skillsByAgent": { "type": "object", "additionalProperties": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 } },
+          "skillsByProject": { "type": "object", "additionalProperties": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 } },
           "runs": { "$ref": "#/components/schemas/AnalyticsRunSummary" },
           "aborted": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
           "compacted": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
@@ -1921,7 +1954,7 @@
           "skills": { "type": "array", "items": { "$ref": "#/components/schemas/AnalyticsCallUsage" } },
           "rateLimits": { "type": "object", "additionalProperties": { "type": "number" } }
         },
-        "required": ["date", "usage", "cost", "responses", "sessions", "sessionsByAgent", "runs", "aborted", "compacted", "models", "projects", "tools", "skills", "rateLimits"],
+        "required": ["date", "usage", "cost", "responses", "sessions", "sessionsByAgent", "agents", "runsByAgent", "runMsByAgent", "toolsByAgent", "toolsByProject", "skillsByAgent", "skillsByProject", "runs", "aborted", "compacted", "models", "projects", "tools", "skills", "rateLimits"],
         "additionalProperties": false
       },
       "AnalyticsRankItem": {

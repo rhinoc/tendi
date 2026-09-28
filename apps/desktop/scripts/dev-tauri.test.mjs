@@ -63,7 +63,12 @@ test("disables incremental compilation for both dev Cargo entry points", () => {
       },
       {
         command: "tauri",
-        args: ["dev"],
+        args: [
+          "dev",
+          ...(process.platform === "darwin"
+            ? ["--runner", join(desktopDir, "scripts", "dev-tauri-macos-cargo-runner.mjs")]
+            : []),
+        ],
         cargoIncremental: "0",
         cargoTargetDir: targetDir,
       },

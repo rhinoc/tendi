@@ -27,9 +27,11 @@ import {
   installCli as installCliCommand,
   readBundledSkillStatus,
   readCliStatus,
+  readDatabaseStorage,
   readProjectScanScopes,
   readTerminalApps,
   removeCli as removeCliCommand,
+  resetDatabase as resetDatabaseCommand,
   saveProjectScanScopes as saveProjectScanScopesCommand,
   saveSettings,
   scanProjects as scanProjectsCommand,
@@ -37,6 +39,7 @@ import {
   testTerminalApp,
 } from "../../lib/runtime-gateway.ts";
 import { logger } from "../../lib/logger.ts";
+import { isTauriRuntime } from "../../lib/tauri.ts";
 import "./SettingsView.css";
 
 type TerminalApp = {
@@ -54,6 +57,13 @@ const terminalAppLabels: Record<string, string> = {
   orca: "Orca",
   superset: "Superset",
 };
+
+function formatStorageBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  const units = ["KiB", "MiB", "GiB", "TiB"];
+  const index = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)) - 1, units.length - 1);
+  return `${new Intl.NumberFormat(undefined, { maximumFractionDigits: 1 }).format(bytes / 1024 ** (index + 1))} ${units[index]}`;
+}
 
 const projectTableColumns: CompactTableColumn<ProjectSummary>[] = [
   { key: "name", header: "Project", width: "160px", cellClassName: "compactTableCell--title", empty: "" },
@@ -345,6 +355,11 @@ export function SettingsView({ appearance, themePreferences, fontFamily, termina
   const [settingsLoadError, setSettingsLoadError] = useState("");
   const [logExportState, setLogExportState] = useState<AsyncStatus>(AsyncStatus.Idle);
   const [logExportError, setLogExportError] = useState("");
+  const [databaseBytes, setDatabaseBytes] = useState<number | null>(null);
+  const [databaseStorageError, setDatabaseStorageError] = useState("");
+  const [databaseResetOpen, setDatabaseResetOpen] = useState(false);
+  const [databaseResetBusy, setDatabaseResetBusy] = useState(false);
+  const [databaseResetError, setDatabaseResetError] = useState("");
   useEffect(() => {
     const timer = window.setInterval(() => setRelativeTimeNow(Date.now()), 30_000);
     return () => window.clearInterval(timer);
@@ -767,6 +782,33 @@ export function SettingsView({ appearance, themePreferences, fontFamily, termina
     }
   };
 
+  const loadDatabaseStorage = useCallback(async () => {
+    setDatabaseBytes(null);
+    setDatabaseStorageError("");
+    try {
+      setDatabaseBytes(await readDatabaseStorage());
+    } catch (error) {
+      setDatabaseStorageError(errorMessage(error));
+    }
+  }, []);
+
+  useEffect(() => {
+    if (isTauriRuntime()) void loadDatabaseStorage();
+  }, [loadDatabaseStorage]);
+
+  const resetDatabase = async () => {
+    if (databaseResetBusy) return;
+    setDatabaseResetBusy(true);
+    setDatabaseResetError("");
+    try {
+      await resetDatabaseCommand();
+    } catch (error) {
+      setDatabaseResetBusy(false);
+      setDatabaseResetOpen(false);
+      setDatabaseResetError(errorMessage(error));
+    }
+  };
+
   const changeCliRegistration = async () => {
     if (cliBusy) return;
     invalidateSettingsLoad();
@@ -846,6 +888,17 @@ export function SettingsView({ appearance, themePreferences, fontFamily, termina
         busy={cliBusy !== null}
         onOpenChange={setConfirmRemoveCli}
         onConfirm={() => { void removeCli(); }}
+      />
+      <DeleteConfirmationDialog
+        open={databaseResetOpen}
+        items={["Tendi database"]}
+        itemLabel="database"
+        title="Reset Tendi's local data?"
+        description="This resets Tendi's settings, saved prompts, and local indexes. Your agent files will not be deleted or modified."
+        confirmLabel="Reset"
+        busy={databaseResetBusy}
+        onOpenChange={setDatabaseResetOpen}
+        onConfirm={() => { void resetDatabase(); }}
       />
       <AddSkillDialog
         open={bundledSkillInstallOpen}
@@ -1182,6 +1235,20 @@ export function SettingsView({ appearance, themePreferences, fontFamily, termina
             </div>
             {developerModeError ? <Toast tone="error" message={developerModeError} /> : null}
           </SettingsSection>
+          {isTauriRuntime() ? (
+            <SettingsSection title="Resource usage">
+              <div className="settingsDatabaseStorageRow">
+                <span className="settingsMuted" role="status">
+                  {databaseBytes === null ? (databaseStorageError ? "Database size unavailable" : "Checking database size…") : `Database ${formatStorageBytes(databaseBytes)}`}
+                </span>
+                <Button variant="secondary" size="sm" onClick={() => setDatabaseResetOpen(true)}>Reset database</Button>
+              </div>
+              {databaseStorageError ? (
+                <Toast tone="error" message={databaseStorageError} action={{ label: "Retry", onClick: () => { void loadDatabaseStorage(); } }} />
+              ) : null}
+              {databaseResetError ? <Toast tone="error" message={databaseResetError} /> : null}
+            </SettingsSection>
+          ) : null}
           <SettingsSection title="Logs">
             <StatefulButton
               size="sm"

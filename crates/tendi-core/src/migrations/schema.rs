@@ -7,8 +7,10 @@ pub(super) const SESSION_LIST_MIGRATION_KEY: &str = "storage.scoped_session_list
 pub(super) const ANALYTICS_MIGRATION_KEY: &str = "storage.analytics_json.v2";
 const SESSION_LIST_MIGRATION_BATCH_SIZE: i64 = 128;
 const ANALYTICS_MIGRATION_BATCH_SIZE: i64 = 32;
+pub(super) const FS_MANIFEST_REBUILD_PENDING_KEY: &str = "storage.fs_manifest_rebuild_pending";
 
 pub(super) fn bootstrap(conn: &Connection) -> Result<()> {
+    let fs_manifest_missing = !table_exists(conn, "fs_manifest")?;
     conn.execute_batch(
         "
         CREATE TABLE IF NOT EXISTS meta (
@@ -57,26 +59,6 @@ pub(super) fn bootstrap(conn: &Connection) -> Result<()> {
         );
         CREATE INDEX IF NOT EXISTS idx_scoped_skill_visibility_path
             ON scoped_skill_visibility(skill_path);
-        CREATE TABLE IF NOT EXISTS fs_manifest (
-            scope_key TEXT NOT NULL DEFAULT 'installation:default',
-            source_kind TEXT NOT NULL,
-            path TEXT NOT NULL,
-            root TEXT NOT NULL,
-            agent TEXT,
-            scope TEXT,
-            mtime_ns INTEGER,
-            size INTEGER,
-            inode INTEGER,
-            device INTEGER,
-            sha256 TEXT,
-            parser_version TEXT NOT NULL,
-            last_seen_at INTEGER NOT NULL,
-            parse_status TEXT NOT NULL,
-            resource_path TEXT,
-            PRIMARY KEY (scope_key, source_kind, path)
-        );
-        CREATE INDEX IF NOT EXISTS idx_fs_manifest_root_kind_path
-            ON fs_manifest(scope_key, root, source_kind, path);
         CREATE TABLE IF NOT EXISTS normalized_snapshots (
             scope_key TEXT NOT NULL,
             domain TEXT NOT NULL,
@@ -387,6 +369,132 @@ pub(super) fn bootstrap(conn: &Connection) -> Result<()> {
         );
         ",
     )?;
+    ensure_fs_manifest(conn)?;
+    if fs_manifest_missing {
+        mark_all_fs_manifest_projections_stale(conn)?;
+        conn.execute(
+            "DELETE FROM meta WHERE key = ?1",
+            [FS_MANIFEST_REBUILD_PENDING_KEY],
+        )?;
+    }
+    Ok(())
+}
+
+fn ensure_fs_manifest(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS fs_manifest (
+            scope_key TEXT NOT NULL DEFAULT 'installation:default',
+            source_kind TEXT NOT NULL,
+            path TEXT NOT NULL,
+            root TEXT NOT NULL,
+            agent TEXT,
+            scope TEXT,
+            mtime_ns INTEGER,
+            size INTEGER,
+            inode INTEGER,
+            device INTEGER,
+            sha256 TEXT,
+            parser_version TEXT NOT NULL,
+            last_seen_at INTEGER NOT NULL,
+            parse_status TEXT NOT NULL,
+            resource_path TEXT,
+            PRIMARY KEY (scope_key, source_kind, path)
+        );
+        CREATE INDEX IF NOT EXISTS idx_fs_manifest_root_kind_path
+            ON fs_manifest(scope_key, root, source_kind, path);
+        CREATE INDEX IF NOT EXISTS idx_fs_manifest_resource_scope
+            ON fs_manifest(source_kind, resource_path, scope_key);",
+    )?;
+    Ok(())
+}
+
+pub(super) fn rebuild_corrupt_fs_manifest(conn: &Connection) -> Result<()> {
+    let tx = conn.unchecked_transaction()?;
+    tx.execute(
+        "INSERT INTO meta (key, value) VALUES (?1, '1')
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        [FS_MANIFEST_REBUILD_PENDING_KEY],
+    )?;
+    tx.commit()?;
+
+    conn.execute_batch(
+        "PRAGMA writable_schema = ON;
+         DELETE FROM sqlite_master WHERE tbl_name = 'fs_manifest';
+         PRAGMA writable_schema = OFF;
+         VACUUM;",
+    )?;
+    ensure_fs_manifest(conn)?;
+    finish_pending_fs_manifest_rebuild(conn)?;
+    Ok(())
+}
+
+pub(super) fn finish_pending_fs_manifest_rebuild(conn: &Connection) -> Result<bool> {
+    let pending: bool = conn.query_row(
+        "SELECT EXISTS(
+             SELECT 1 FROM meta WHERE key = ?1 AND value = '1'
+         )",
+        [FS_MANIFEST_REBUILD_PENDING_KEY],
+        |row| row.get(0),
+    )?;
+    if !pending {
+        return Ok(false);
+    }
+    let tx = conn.unchecked_transaction()?;
+    mark_all_fs_manifest_projections_stale(&tx)?;
+    tx.execute(
+        "DELETE FROM meta WHERE key = ?1",
+        [FS_MANIFEST_REBUILD_PENDING_KEY],
+    )?;
+    tx.commit()?;
+    Ok(true)
+}
+
+fn mark_all_fs_manifest_projections_stale(conn: &Connection) -> Result<()> {
+    let projections = {
+        let mut statement = conn.prepare(
+            "SELECT scope_key, domain FROM scoped_projection_contexts
+             UNION
+             SELECT scope_key, domain FROM projection_heads",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    for (scope_key, domain) in projections {
+        conn.execute(
+            "UPDATE scoped_projection_contexts
+             SET state = 'stale', scanned_at = NULL, error = NULL
+             WHERE scope_key = ?1 AND domain = ?2",
+            rusqlite::params![scope_key, domain],
+        )?;
+        conn.execute(
+            "INSERT INTO projection_heads (
+                scope_key, domain, revision, source_version, schema_version, status, updated_at
+             ) VALUES (
+                ?1, ?2, 1, NULL, 1, 'stale', CAST(strftime('%s', 'now') AS INTEGER)
+             )
+             ON CONFLICT(scope_key, domain) DO UPDATE SET
+                revision = projection_heads.revision + 1,
+                source_version = NULL,
+                status = 'stale',
+                updated_at = excluded.updated_at",
+            rusqlite::params![scope_key, domain],
+        )?;
+        let revision: i64 = conn.query_row(
+            "SELECT revision FROM projection_heads WHERE scope_key = ?1 AND domain = ?2",
+            rusqlite::params![scope_key, domain],
+            |row| row.get(0),
+        )?;
+        conn.execute(
+            "INSERT INTO projection_dirty_resources (
+                scope_key, domain, resource_key, generation, reconcile_generation
+             ) VALUES (?1, ?2, '', ?3, 0)
+             ON CONFLICT(scope_key, domain, resource_key) DO UPDATE SET
+                generation = excluded.generation",
+            rusqlite::params![scope_key, domain, revision],
+        )?;
+    }
     Ok(())
 }
 
@@ -428,6 +536,7 @@ pub(super) fn rebuild_scoped_session_skill_links(conn: &Connection) -> Result<()
 
 pub(super) fn needs_current_shape(conn: &Connection) -> Result<bool> {
     Ok(!table_exists(conn, "storage_migrations")?
+        || !table_exists(conn, "fs_manifest")?
         || !column_exists(conn, "scoped_session_search_index", "search_checkpoint")?
         || !column_exists(conn, "scoped_sessions", "cached_input_tokens")?
         || !column_exists(conn, "scoped_sessions", "started_at_ms")?
@@ -583,8 +692,6 @@ fn queue_session_search_rebuild(conn: &Connection) -> Result<()> {
 fn ensure_storage_indexes(conn: &Connection) -> Result<()> {
     conn.execute_batch(
         "
-        CREATE INDEX IF NOT EXISTS idx_fs_manifest_resource_scope
-            ON fs_manifest(source_kind, resource_path, scope_key);
         CREATE INDEX IF NOT EXISTS idx_prompts_updated_title
             ON prompts(updated_at DESC, title ASC);
         CREATE INDEX IF NOT EXISTS idx_assistant_chat_sessions_updated

@@ -4,7 +4,7 @@ use super::{
     transaction,
 };
 use anyhow::{Context, Result};
-use rusqlite::{Connection, DatabaseName, Transaction};
+use rusqlite::{Connection, MAIN_DB, Transaction};
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
@@ -82,13 +82,65 @@ impl DatabaseWriter {
         path: &Path,
         require_application_schema: bool,
     ) -> Result<()> {
-        match Self::probe_connection(connection, require_application_schema) {
-            Ok(()) => Ok(()),
-            Err(error) if Self::repairs_session_skill_links(connection, path, &error)? => {
-                Self::probe_connection(connection, require_application_schema)
+        let mut repair_count = 0;
+        loop {
+            match Self::probe_connection(connection, require_application_schema) {
+                Ok(()) => return Ok(()),
+                Err(error) if repair_count < 2 => {
+                    let repaired = Self::repairs_fs_manifest(connection, path, &error)?
+                        || Self::repairs_session_skill_links(connection, path, &error)?;
+                    if repaired {
+                        repair_count += 1;
+                        continue;
+                    }
+                    return Err(error);
+                }
+                Err(error) => return Err(error),
             }
-            Err(error) => Err(error),
         }
+    }
+
+    fn repairs_fs_manifest(
+        connection: &Connection,
+        path: &Path,
+        error: &anyhow::Error,
+    ) -> Result<bool> {
+        let message = format!("{error:#}");
+        if !message.contains("database health probe quick_check returned") {
+            return Ok(false);
+        }
+        let mut statement = connection.prepare(
+            "SELECT rootpage FROM sqlite_master
+             WHERE tbl_name = 'fs_manifest' AND rootpage > 0",
+        )?;
+        let root_pages = statement
+            .query_map([], |row| row.get::<_, i64>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        drop(statement);
+        let tree_corruption = root_pages.iter().any(|root_page| {
+            message
+                .lines()
+                .any(|line| line.contains(&format!("Tree {root_page} page ")))
+        });
+        if !tree_corruption && !message.contains("fs_manifest") {
+            return Ok(false);
+        }
+
+        let backup_path = Self::backup_corrupt_database(connection, path)?;
+        crate::migrations::rebuild_corrupt_fs_manifest(connection).with_context(|| {
+            format!(
+                "rebuild corrupt filesystem manifest; backup={}",
+                backup_path.display()
+            )
+        })?;
+        crate::logging::global().warn(
+            "rebuilt corrupt filesystem manifest",
+            serde_json::json!({
+                "database": path,
+                "backup": backup_path,
+            }),
+        );
+        Ok(true)
     }
 
     fn repairs_session_skill_links(
@@ -148,7 +200,7 @@ impl DatabaseWriter {
         let backup_path =
             path.with_file_name(format!("{file_name}.corrupt-backup-{timestamp}.sqlite3"));
         connection
-            .backup(DatabaseName::Main, &backup_path, None)
+            .backup(MAIN_DB, &backup_path, None)
             .with_context(|| format!("backup corrupt database to {}", backup_path.display()))?;
         Ok(backup_path)
     }

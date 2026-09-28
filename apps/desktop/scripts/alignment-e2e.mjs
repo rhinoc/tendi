@@ -75,9 +75,9 @@ function chromiumExecutablePath() {
 // ----- fabricated report (matches the shapes each normalizer/column reads) ---
 function buildReport() {
   const skills = [
-    { id: "alpha-skill", installationId: "installation-alpha", name: "alpha-skill", description: "First local skill.", agents: ["codex", "cursor"], tags: [], dependencies: [], dependents: [], dependencyIds: [], dependentIds: [], visibility: "manual", source_summary: "github", install_targets: ["shared"], update_status: "update-available", is_system: false, paths: [{ path: "/Users/dev/.cursor/projects/project-1/.cursor/skills/alpha/SKILL.md", root: "/Users/dev/.cursor/projects/project-1/.cursor/skills", scope: "project", agent: "cursor", install_target: "cursor:project", source_kind: "github", symlink_status: "fixture", update_status: "update-available", sha256: "skill-sha-alpha", tags: [], effective_visibility: "manual" }] },
-    { id: "beta-skill", installationId: "installation-beta", name: "beta-skill", description: "Second local skill.", agents: ["codex"], tags: [], dependencies: [], dependents: [], dependencyIds: [], dependentIds: [], visibility: "auto", source_summary: "local", install_targets: ["shared"], update_status: "local", is_system: false, paths: [{ path: "/Users/dev/.claude/skills/beta/SKILL.md", root: "/Users/dev/.claude/skills", scope: "global", agent: "claude", install_target: "claude:global", source_kind: "local", symlink_status: "fixture", update_status: "local", sha256: "skill-sha-beta", tags: [], effective_visibility: "auto" }] },
-    { id: "system-skill", installationId: "installation-system", name: "system-skill", description: "Managed system skill.", agents: ["codex"], tags: [], dependencies: [], dependents: [], dependencyIds: [], dependentIds: [], visibility: "auto", source_summary: "system", install_targets: ["codex"], update_status: "local", is_system: true, paths: [{ path: "/Users/dev/.codex/skills/system/SKILL.md", root: "/Users/dev/.codex/skills", scope: "global", agent: "codex", install_target: "codex:global", source_kind: "system" }] },
+    { id: "alpha-skill", installationId: "installation-alpha", name: "alpha-skill", description: "First local skill.", agents: ["codex", "cursor"], tags: [], dependencies: [], dependents: [], dependencyIds: [], dependentIds: [], is_wrapper: false, visibility: "manual", source_summary: "github", install_targets: ["shared"], update_status: "update-available", is_system: false, paths: [{ path: "/Users/dev/.cursor/projects/project-1/.cursor/skills/alpha/SKILL.md", root: "/Users/dev/.cursor/projects/project-1/.cursor/skills", scope: "project", agent: "cursor", install_target: "cursor:project", source_kind: "github", symlink_status: "fixture", update_status: "update-available", sha256: "skill-sha-alpha", tags: [], effective_visibility: "manual" }] },
+    { id: "beta-skill", installationId: "installation-beta", name: "beta-skill", description: "Second local skill.", agents: ["codex"], tags: [], dependencies: [], dependents: [], dependencyIds: [], dependentIds: [], is_wrapper: false, visibility: "auto", source_summary: "local", install_targets: ["shared"], update_status: "local", is_system: false, paths: [{ path: "/Users/dev/.claude/skills/beta/SKILL.md", root: "/Users/dev/.claude/skills", scope: "global", agent: "claude", install_target: "claude:global", source_kind: "local", symlink_status: "fixture", update_status: "local", sha256: "skill-sha-beta", tags: [], effective_visibility: "auto" }] },
+    { id: "system-skill", installationId: "installation-system", name: "system-skill", description: "Managed system skill.", agents: ["codex"], tags: [], dependencies: [], dependents: [], dependencyIds: [], dependentIds: [], is_wrapper: false, visibility: "auto", source_summary: "system", install_targets: ["codex"], update_status: "local", is_system: true, paths: [{ path: "/Users/dev/.codex/skills/system/SKILL.md", root: "/Users/dev/.codex/skills", scope: "global", agent: "codex", install_target: "codex:global", source_kind: "system" }] },
   ];
   for (const skill of skills) {
     skill.paths = skill.paths.map((path) => ({
@@ -163,7 +163,7 @@ const tabs = [
   { id: "sessions", nav: "Sessions", heading: "Sessions", compact: true, selectable: false, listHeader: "table", tableHeader: true, frozen: true },
   { id: "rules", nav: "Rules", heading: "Rules", compact: true, selectable: true, listHeader: "table", tableHeader: true, frozen: true },
   { id: "hooks", nav: "Hooks", heading: "Hooks", compact: true, selectable: true, listHeader: "table", tableHeader: true, frozen: true },
-  { id: "mcp", nav: "MCPs", heading: "MCP", compact: false, selectable: true, listHeader: "table", tableHeader: true, frozen: true },
+  { id: "mcp", nav: "MCPs", heading: "MCP", compact: true, selectable: true, listHeader: "table", tableHeader: true, frozen: true },
 ];
 
 const failures = [];
@@ -190,6 +190,7 @@ async function runPageHeaderChecks(page, tab, heading, expectedCompact) {
       pageTopInset: toPx(rootStyle.getPropertyValue("--page-top-inset")),
       pageHeaderBottomInset: toPx(rootStyle.getPropertyValue("--page-header-bottom-inset")),
       parentPaddingTop: toPx(getComputedStyle(node.parentElement ?? node).paddingTop),
+      parentClass: (node.parentElement ?? node).className,
     };
   });
   check(tab, "header-title", metrics.title === heading, `title ${JSON.stringify(metrics.title)}`);
@@ -201,6 +202,10 @@ async function runPageHeaderChecks(page, tab, heading, expectedCompact) {
     metrics.pageTopInset > 0 && Math.abs(metrics.titleTop - metrics.pageTopInset) <= TOLERANCE,
     `title top ${metrics.titleTop}px vs ${metrics.pageTopInset}px`,
   );
+  if (tab === "mcp") {
+    check(tab, "header-split-pane", metrics.parentClass.includes("mcpListPane"), `parent class ${metrics.parentClass}`);
+    return;
+  }
   const bottomSpaceMatches = expectedCompact
     ? Math.abs(metrics.paddingBottom - metrics.pageHeaderBottomInset) <= TOLERANCE && metrics.marginBottom <= TOLERANCE
     : metrics.paddingBottom <= TOLERANCE && Math.abs(metrics.marginBottom - metrics.pageHeaderBottomInset) <= TOLERANCE;
@@ -307,9 +312,6 @@ async function runOverviewUsageChecks(page) {
     };
   });
 
-  await page.evaluate(() => window.__releaseAnalyticsOverview?.());
-  const loadedChart = page.locator('section.chartFrame[aria-label$="trend"]').first();
-  await loadedChart.waitFor({ state: "visible", timeout: 5000 });
   const refreshState = await page.getByRole("button", { name: "Refresh analytics" }).evaluate((button) => ({
     ariaBusy: button.getAttribute("aria-busy"),
     disabled: button.disabled,
@@ -325,6 +327,9 @@ async function runOverviewUsageChecks(page) {
       && !refreshState.hasInternalIndexingCopy,
     `busy ${refreshState.ariaBusy}, disabled ${refreshState.disabled}, loading icon ${refreshState.hasLoadingIcon}, internal copy ${refreshState.hasInternalIndexingCopy}`,
   );
+  await page.evaluate(() => window.__releaseAnalyticsOverview?.());
+  const loadedChart = page.locator('section.chartFrame[aria-label*="trend grouped"]').first();
+  await loadedChart.waitFor({ state: "visible", timeout: 5000 });
   const loadedMetrics = await loadedChart.evaluate((node) => {
     const legend = node.querySelector(".chartLegend");
     const plot = node.querySelector(".overviewTrendPlotLayout");
@@ -2226,6 +2231,7 @@ try {
       skillEvidenceSessionId = "";
     };
     let skillUpdateAttempts = 0;
+    const skillUpdateRequests = [];
     const unhandledCommands = [];
     const invokedCommands = [];
     const emittedEvents = [];
@@ -2238,6 +2244,10 @@ try {
     const invokeDomainCommand = async (command, args) => {
       invokedCommands.push(command);
       if (command === "log_event") return null;
+      if (command === "tokenizer_count") {
+        return { counts: (args?.request?.texts ?? args?.texts ?? []).map((text) => text.length) };
+      }
+      if (command === "database_storage_status") return { bytes: 0 };
       if (command === "plugin:event|listen") {
         sessionScanHandler = callbacks.get(args.handler);
         return 1;
@@ -2344,16 +2354,23 @@ try {
             responses: 1,
             sessions: 1,
             sessionsByAgent: { codex: 1 },
+            agents: [{ agent: "codex", usage, cost }],
+            runsByAgent: { codex: 1 },
+            runMsByAgent: { codex: 100 },
+            toolsByAgent: {},
+            toolsByProject: {},
+            skillsByAgent: {},
+            skillsByProject: {},
             runs,
             aborted: 0,
             compacted: 0,
             models: [
-              { model: "mock-model-alpha-with-a-deliberately-long-name-for-horizontal-overflow", totalTokens: 8, totalMs: 0, completedRuns: 0, cost },
-              { model: "mock-model-beta-with-a-deliberately-long-name-for-horizontal-overflow", totalTokens: 5, totalMs: 0, completedRuns: 0, cost },
-              { model: "mock-model-gamma-with-a-deliberately-long-name-for-horizontal-overflow", totalTokens: 4, totalMs: 0, completedRuns: 0, cost },
-              { model: "mock-model-delta-with-a-deliberately-long-name-for-horizontal-overflow", totalTokens: 2, totalMs: 0, completedRuns: 0, cost },
+              { model: "mock-model-alpha-with-a-deliberately-long-name-for-horizontal-overflow", totalTokens: 8, inputTokens: 5, cachedInputTokens: 2, runs: 0, totalMs: 0, completedRuns: 0, cost },
+              { model: "mock-model-beta-with-a-deliberately-long-name-for-horizontal-overflow", totalTokens: 5, inputTokens: 4, cachedInputTokens: 0, runs: 0, totalMs: 0, completedRuns: 0, cost },
+              { model: "mock-model-gamma-with-a-deliberately-long-name-for-horizontal-overflow", totalTokens: 4, inputTokens: 3, cachedInputTokens: 0, runs: 0, totalMs: 0, completedRuns: 0, cost },
+              { model: "mock-model-delta-with-a-deliberately-long-name-for-horizontal-overflow", totalTokens: 2, inputTokens: 1, cachedInputTokens: 0, runs: 0, totalMs: 0, completedRuns: 0, cost },
             ],
-            projects: [{ id: "project-1", name: "Tendi", usage, responses: 1, cost }],
+            projects: [{ id: "project-1", name: "Tendi", usage, responses: 1, sessions: 1, runs: 1, totalMs: 100, cost }],
             tools: [],
             skills: [],
             rateLimits: {},
@@ -2630,15 +2647,43 @@ try {
       if (command === "hooks_list") return report.hooks.hooks;
       if (command === "mcp_list") return report.mcp.servers;
       if (command === "agents_list") return report.agents.agents;
-      if (command === "skills_updates") return { updateCheck: "started" };
+      if (command === "skills_updates") {
+        queueMicrotask(() => emitDaemonEvent({
+          id: 3,
+          event: "skills://updates",
+          payload: {
+            status: "completed",
+            skills: null,
+            updates: [{ id: "alpha-skill", name: "alpha-skill", status: "update-available", source_kind: "github" }],
+            error: null,
+          },
+        }));
+        return { updateCheck: "started" };
+      }
       if (command === "skills_update_many") {
+        skillUpdateRequests.push({ dryRun: args?.dryRun === true, previewId: args?.previewId ?? null });
+        const plan = {
+          file_changes: {
+            changes: [{
+              path: "skills/alpha-skill/SKILL.md",
+              beforeSha256: null,
+              before: "old",
+              after: "new",
+            }],
+          },
+          git_updates: [],
+          skipped: [],
+          source_updates: [],
+          merge_issues: [],
+        };
         if (args?.dryRun) {
           return {
-            plan: {
-              git_updates: [{
-                files: [{ path: "skills/alpha-skill/SKILL.md", before: "old", after: "new" }],
-              }],
-            },
+            summary: "One file will be updated.",
+            applied: false,
+            canApply: true,
+            plan,
+            previewId: "mock-alpha-skill-preview",
+            skills: null,
           };
         }
         skillUpdateAttempts += 1;
@@ -2646,7 +2691,14 @@ try {
         report.skills.skills = report.skills.skills.map((skill) => (
           skill.name === "alpha-skill" ? { ...skill, update_status: "checkable" } : skill
         ));
-        return { applied: true };
+        return {
+          summary: "One file was updated.",
+          applied: true,
+          canApply: true,
+          plan,
+          previewId: null,
+          updated: [],
+        };
       }
       unhandledCommands.push(command);
       throw new Error(`Unhandled alignment e2e mock command: ${command}`);
@@ -2683,6 +2735,8 @@ try {
       invokedCommands: [...invokedCommands],
       emittedEvents: emittedEvents.map((event) => event.event),
       skillEvidenceTranscriptCursors: [...skillEvidenceTranscriptCursors],
+      skillUpdateAttempts,
+      skillUpdateRequests: [...skillUpdateRequests],
     });
   }, buildReport());
 
@@ -2709,11 +2763,11 @@ try {
       return {
         active: active?.classList.contains("active") === true && active?.getAttribute("aria-current") === "page",
         fontWeights: [...new Set(buttons.map((button) => getComputedStyle(button).fontWeight))],
-        activeFontWeight: active ? getComputedStyle(active).fontWeight : "",
+      activeFontWeight: active ? getComputedStyle(active).fontWeight : "",
       };
     });
     check("navigation", "active-state-after-click", navState.active, "Skills should be the active navigation item");
-    check("navigation", "active-tab-weight", navState.activeFontWeight === "550", `active weight: ${navState.activeFontWeight}`);
+    check("navigation", "active-tab-weight", navState.activeFontWeight === "500", `active weight: ${navState.activeFontWeight}`);
     check("navigation", "inactive-tab-weight", navState.fontWeights.includes("400"), `weights: ${navState.fontWeights.join(", ")}`);
 
     writeStdout("\n== installed agent filter ==");
@@ -2800,12 +2854,29 @@ try {
         node.scrollTop = node.scrollHeight;
         node.dispatchEvent(new Event("scroll"));
       });
+      await page.waitForFunction((rowId) => {
+        const node = document.querySelector(".dataTableBodyScroll");
+        const row = [...(node?.querySelectorAll(".dataTableFrozenPane [data-row-id]") ?? [])]
+          .find((candidate) => candidate.dataset.rowId === rowId);
+        if (!node || !row || node.scrollTop <= 0) return false;
+        const viewport = node.getBoundingClientRect();
+        const header = node.querySelector(".dataTableHeader");
+        const visibleTop = Math.max(viewport.top, header?.getBoundingClientRect().bottom ?? viewport.top);
+        const bounds = row.getBoundingClientRect();
+        return bounds.bottom <= visibleTop || bounds.top >= viewport.bottom;
+      }, activeSearchRowId, { timeout: 2000 });
       const listLocator = page.getByRole("button", { name: "Locate session in list" });
       await listLocator.waitFor();
-      const targetUnmountedBeforeLocate = await searchScroller.evaluate((node, rowId) => (
-        ![...node.querySelectorAll("[data-row-id]")]
-          .some((row) => row.dataset.rowId === rowId)
-      ), activeSearchRowId);
+      const targetOutsideViewportBeforeLocate = await searchScroller.evaluate((node, rowId) => {
+        const row = [...node.querySelectorAll(".dataTableFrozenPane [data-row-id]")]
+          .find((candidate) => candidate.dataset.rowId === rowId);
+        if (!row) return false;
+        const viewport = node.getBoundingClientRect();
+        const header = node.querySelector(".dataTableHeader");
+        const visibleTop = Math.max(viewport.top, header?.getBoundingClientRect().bottom ?? viewport.top);
+        const bounds = row.getBoundingClientRect();
+        return bounds.bottom <= visibleTop || bounds.top >= viewport.bottom;
+      }, activeSearchRowId);
       await listLocator.click();
       await page.waitForFunction((rowId) => {
         const scroll = document.querySelector(".dataTableBodyScroll");
@@ -2825,11 +2896,11 @@ try {
         tab.id,
         "bug-session-list-locator-preserves-search",
         Boolean(activeSearchRowId)
-          && targetUnmountedBeforeLocate
+          && targetOutsideViewportBeforeLocate
           && locateState.query === "session"
           && locateState.snippets > 0
           && locateState.locatorVisible === false,
-        `row ${activeSearchRowId || "missing"}, unmounted ${targetUnmountedBeforeLocate}, query ${locateState.query}, snippets ${locateState.snippets}, locator visible ${locateState.locatorVisible}`,
+        `row ${activeSearchRowId || "missing"}, outside viewport ${targetOutsideViewportBeforeLocate}, query ${locateState.query}, snippets ${locateState.snippets}, locator visible ${locateState.locatorVisible}`,
       );
       await page.getByRole("button", { name: "Collapse session detail", exact: true }).click();
       const workspaceSortButton = page.locator('.dataHeaderCell[data-column="project"] [aria-label="Sort by Project"]');
@@ -2841,7 +2912,7 @@ try {
       }
       const workspaceGroupInactive = await workspaceGroupButton.getAttribute("aria-pressed") === "false";
       const workspaceValues = await page.locator('.dataRow--scrollPane .dataCell[data-column="project"]').allTextContents();
-      const expectedWorkspaceValues = [...workspaceValues].sort((left, right) => left.localeCompare(right));
+      const expectedWorkspaceValues = [...workspaceValues].sort((left, right) => left.localeCompare(right, undefined, { numeric: true }));
       check(
         tab.id,
         "bug15-header-sort-and-group-actions",
@@ -2892,7 +2963,7 @@ try {
     }
 
     if (tab.id === "skills" && !frozenOnly) {
-      const updateButton = page.getByRole("button", { name: "View update for alpha-skill" });
+      const updateButton = page.getByRole("button", { name: "Update alpha-skill" });
       if (await updateButton.count() === 0) {
         const diagnostics = await page.evaluate(() => window.__alignmentMockDiagnostics?.() ?? null);
         check(tab.id, "bug-update-badge-visible", false, `missing update badge; diagnostics ${JSON.stringify(diagnostics)}`);
@@ -2900,8 +2971,16 @@ try {
         await updateButton.click();
       const updateDialog = page.locator(".confirmDialogPanel");
       await updateDialog.getByRole("button", { name: "Apply updates" }).click();
-      const updateFailure = updateDialog.getByRole("alert");
-      await updateFailure.waitFor();
+      const updateFailure = page.locator(".appToast--error").filter({ hasText: "mock update failed" });
+      const updateFailureVisible = await updateFailure.waitFor({ state: "attached", timeout: 3000 }).then(() => true).catch(() => false);
+      if (!updateFailureVisible) {
+        const diagnostics = await page.evaluate(() => ({
+          body: document.body.textContent?.trim().slice(-1200) ?? "",
+          alerts: [...document.querySelectorAll('[role="alert"]')].map((alert) => alert.textContent?.trim() ?? ""),
+          mock: window.__alignmentMockDiagnostics?.() ?? null,
+        }));
+        throw new Error(`skill update apply did not show the expected failure: ${JSON.stringify(diagnostics)}`);
+      }
       check(
         tab.id,
         "bug-update-failure-keeps-dialog-open",
@@ -2975,18 +3054,19 @@ try {
       };
     }, tab.listHeader);
 
+    const firstTextReference = tab.id === "mcp" ? layout.listHeaderLeft : layout.firstCellLeft;
     check(
       tab.id,
       "req3-title",
-      layout.h1Left !== null && layout.firstCellLeft !== null && Math.abs(layout.h1Left - layout.firstCellLeft) <= TOLERANCE,
-      `page title text left ${layout.h1Left} vs first text left ${layout.firstCellLeft}`,
+      layout.h1Left !== null && firstTextReference !== null && Math.abs(layout.h1Left - firstTextReference) <= TOLERANCE,
+      `page title text left ${layout.h1Left} vs first text reference ${firstTextReference}`,
     );
     if (tab.listHeader !== "none") {
       check(
         tab.id,
         "req3-listhead",
-        layout.listHeaderLeft !== null && Math.abs(layout.listHeaderLeft - layout.firstCellLeft) <= TOLERANCE,
-        `list header text left ${layout.listHeaderLeft} vs first text left ${layout.firstCellLeft}`,
+        layout.listHeaderLeft !== null && firstTextReference !== null && Math.abs(layout.listHeaderLeft - firstTextReference) <= TOLERANCE,
+        `list header text left ${layout.listHeaderLeft} vs first text reference ${firstTextReference}`,
       );
     }
 
@@ -3053,13 +3133,14 @@ try {
         textLeft: textLeft(firstCell),
       };
     });
+    const separatorReference = tab.id === "mcp" ? layout.listHeaderLeft : separatorAlign.textLeft;
     check(
       tab.id,
       "req6-separator",
       separatorAlign.missing !== true
-        && separatorAlign.textLeft !== null
-        && Math.abs(separatorAlign.separatorLeft - separatorAlign.textLeft) <= TOLERANCE,
-      `separator left ${separatorAlign.separatorLeft} vs text left ${separatorAlign.textLeft}`,
+        && separatorReference !== null
+        && Math.abs(separatorAlign.separatorLeft - separatorReference) <= TOLERANCE,
+      `separator left ${separatorAlign.separatorLeft} vs text reference ${separatorReference}`,
     );
 
     // --- req7: header rule inset + group counts -----------------------------
@@ -3125,8 +3206,8 @@ try {
           .map((node) => node.textContent?.trim() ?? ""),
       )].sort());
       const expectedScopes = {
-        skills: ["Global", "project-1"],
-        rules: ["Global"],
+        skills: ["Global", "Project"],
+        rules: ["Global", "Project"],
         hooks: ["Global"],
         mcp: ["Global", "project-1", "project-2"],
       }[tab.id];

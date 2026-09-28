@@ -20,14 +20,28 @@ export type AnalyticsProjectUsage = {
   name: string;
   usage: AnalyticsTokenUsage;
   responses: number;
+  sessions: number;
+  runs: number;
+  totalMs: number;
   cost: AnalyticsCost;
 };
+
+type AnalyticsProjectPeriodUsage = Omit<AnalyticsProjectUsage, "sessions">;
 
 export type AnalyticsModelUsage = {
   model: string;
   totalTokens: number;
+  inputTokens: number;
+  cachedInputTokens: number;
+  runs: number;
   totalMs: number;
   completedRuns: number;
+  cost: AnalyticsCost;
+};
+
+export type AnalyticsAgentUsage = {
+  agent: string;
+  usage: AnalyticsTokenUsage;
   cost: AnalyticsCost;
 };
 
@@ -76,6 +90,13 @@ export type AnalyticsDay = {
   responses: number;
   sessions: number;
   sessionsByAgent: Record<string, number>;
+  agents: AnalyticsAgentUsage[];
+  runsByAgent: Record<string, number>;
+  runMsByAgent: Record<string, number>;
+  toolsByAgent: Record<string, number>;
+  toolsByProject: Record<string, number>;
+  skillsByAgent: Record<string, number>;
+  skillsByProject: Record<string, number>;
   runs: AnalyticsRunSummary;
   aborted: number;
   compacted: number;
@@ -157,6 +178,14 @@ export type AnalyticsPeriod = {
   responses: number;
   sessions: number;
   sessionsByAgent: Record<string, number>;
+  sessionsByProject: Record<string, number>;
+  agents: AnalyticsAgentUsage[];
+  runsByAgent: Record<string, number>;
+  runMsByAgent: Record<string, number>;
+  toolsByAgent: Record<string, number>;
+  toolsByProject: Record<string, number>;
+  skillsByAgent: Record<string, number>;
+  skillsByProject: Record<string, number>;
   sessionPeakDate: string;
   runs: number;
   completedRuns: number;
@@ -167,14 +196,15 @@ export type AnalyticsPeriod = {
   aborted: number;
   compacted: number;
   models: AnalyticsModelUsage[];
-  projects: AnalyticsProjectUsage[];
+  projects: AnalyticsProjectPeriodUsage[];
   tools: AnalyticsCallUsage[];
   skills: AnalyticsCallUsage[];
 };
 
 type AnalyticsPeriodAccumulator = AnalyticsPeriod & {
   modelMap: Map<string, AnalyticsModelUsage>;
-  projectMap: Map<string, AnalyticsProjectUsage>;
+  agentMap: Map<string, AnalyticsAgentUsage>;
+  projectMap: Map<string, AnalyticsProjectPeriodUsage>;
   toolMap: Map<string, AnalyticsCallUsage>;
   skillMap: Map<string, AnalyticsCallUsage>;
 };
@@ -196,17 +226,29 @@ function addCost(target: AnalyticsCost, source: AnalyticsCost) {
   target.totalUsd += source.totalUsd;
 }
 
-function addProjectUsage(target: Map<string, AnalyticsProjectUsage>, projects: AnalyticsProjectUsage[]) {
+function addCounts(target: Record<string, number>, source: Record<string, number>) {
+  for (const [key, count] of Object.entries(source)) {
+    target[key] = (target[key] ?? 0) + count;
+  }
+}
+
+function addProjectUsage(target: Map<string, AnalyticsProjectPeriodUsage>, projects: AnalyticsProjectUsage[]) {
   for (const project of projects) {
     const current = target.get(project.id);
     if (current) {
       addTokenUsage(current.usage, project.usage);
       current.responses += project.responses;
+      current.runs += project.runs;
+      current.totalMs += project.totalMs;
       addCost(current.cost, project.cost);
     } else {
       target.set(project.id, {
-        ...project,
+        id: project.id,
+        name: project.name,
         usage: { ...project.usage },
+        responses: project.responses,
+        runs: project.runs,
+        totalMs: project.totalMs,
         cost: { ...project.cost },
       });
     }
@@ -272,6 +314,14 @@ export function groupAnalyticsDays(
       responses: 0,
       sessions: 0,
       sessionsByAgent: {},
+      sessionsByProject: {},
+      agents: [],
+      runsByAgent: {},
+      runMsByAgent: {},
+      toolsByAgent: {},
+      toolsByProject: {},
+      skillsByAgent: {},
+      skillsByProject: {},
       sessionPeakDate: "",
       runs: 0,
       completedRuns: 0,
@@ -286,7 +336,8 @@ export function groupAnalyticsDays(
       tools: [],
       skills: [],
       modelMap: new Map<string, AnalyticsModelUsage>(),
-      projectMap: new Map<string, AnalyticsProjectUsage>(),
+      agentMap: new Map<string, AnalyticsAgentUsage>(),
+      projectMap: new Map<string, AnalyticsProjectPeriodUsage>(),
       toolMap: new Map<string, AnalyticsCallUsage>(),
       skillMap: new Map<string, AnalyticsCallUsage>(),
     };
@@ -296,14 +347,25 @@ export function groupAnalyticsDays(
     addCost(period.cost, day.cost);
     period.responses += day.responses;
     // Daily buckets contain distinct sessions. For wider buckets, keep the
-    // the peak day and its agent breakdown instead of double-counting sessions
-    // active on many days.
+    // peak day and its agent/project breakdown instead of double-counting
+    // sessions active on many days.
     if (day.sessions > period.sessions) {
       period.sessions = day.sessions;
       period.sessionsByAgent = { ...day.sessionsByAgent };
+      period.sessionsByProject = Object.fromEntries(day.projects.map((project) => [project.id, project.sessions]));
       period.sessionPeakDate = day.date;
     }
     period.runs += day.runs.started;
+    addCounts(period.toolsByAgent, day.toolsByAgent);
+    addCounts(period.toolsByProject, day.toolsByProject);
+    addCounts(period.skillsByAgent, day.skillsByAgent);
+    addCounts(period.skillsByProject, day.skillsByProject);
+    for (const [agent, runs] of Object.entries(day.runsByAgent)) {
+      period.runsByAgent[agent] = (period.runsByAgent[agent] ?? 0) + runs;
+    }
+    for (const [agent, totalMs] of Object.entries(day.runMsByAgent)) {
+      period.runMsByAgent[agent] = (period.runMsByAgent[agent] ?? 0) + totalMs;
+    }
     period.completedRuns += day.runs.completed;
     period.timedCompletedRuns += day.runs.timedCompleted;
     period.unclosedRuns += day.runs.unclosed;
@@ -315,25 +377,46 @@ export function groupAnalyticsDays(
       const current = period.modelMap.get(model.model) ?? {
         model: model.model,
         totalTokens: 0,
+        inputTokens: 0,
+        cachedInputTokens: 0,
+        runs: 0,
         totalMs: 0,
         completedRuns: 0,
         cost: { inputUsd: 0, cachedInputUsd: 0, cacheWriteInputUsd: 0, outputUsd: 0, totalUsd: 0 },
       };
       current.totalTokens += model.totalTokens;
+      current.inputTokens += model.inputTokens;
+      current.cachedInputTokens += model.cachedInputTokens;
+      current.runs += model.runs;
       current.totalMs += model.totalMs;
       current.completedRuns += model.completedRuns;
       addCost(current.cost, model.cost);
       period.modelMap.set(model.model, current);
+    }
+    for (const agent of day.agents) {
+      const current = period.agentMap.get(agent.agent);
+      if (current) {
+        addTokenUsage(current.usage, agent.usage);
+        addCost(current.cost, agent.cost);
+      } else {
+        period.agentMap.set(agent.agent, {
+          agent: agent.agent,
+          usage: { ...agent.usage },
+          cost: { ...agent.cost },
+        });
+      }
     }
     addProjectUsage(period.projectMap, day.projects);
     addCallUsage(period.toolMap, day.tools);
     addCallUsage(period.skillMap, day.skills);
     grouped.set(key, period);
   }
-  return [...grouped.values()].map(({ modelMap, projectMap, toolMap, skillMap, ...period }) => ({
+  return [...grouped.values()].map(({ modelMap, agentMap, projectMap, toolMap, skillMap, ...period }) => ({
     ...period,
     models: [...modelMap.values()]
       .sort((left, right) => right.totalTokens - left.totalTokens),
+    agents: [...agentMap.values()]
+      .sort((left, right) => left.agent.localeCompare(right.agent)),
     projects: [...projectMap.values()]
       .sort((left, right) => right.usage.totalTokens - left.usage.totalTokens || left.name.localeCompare(right.name)),
     tools: sortedCallUsage(toolMap.values()),

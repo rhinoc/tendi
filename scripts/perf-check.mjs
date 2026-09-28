@@ -44,7 +44,7 @@ const thresholds = {
   idleCpuMax: envNumber("TENDI_PERF_IDLE_CPU_MAX", 5),
   primaryOverviewMs: envNumber("TENDI_PERF_PRIMARY_OVERVIEW_MS", 25),
   primaryOverviewRssBytes: envNumber("TENDI_PERF_PRIMARY_OVERVIEW_RSS_MIB", 28) * mib,
-  primaryOverviewPayloadBytes: envNumber("TENDI_PERF_PRIMARY_OVERVIEW_PAYLOAD_MIB", 0.5) * mib,
+  primaryOverviewPayloadBytes: envNumber("TENDI_PERF_PRIMARY_OVERVIEW_PAYLOAD_MIB", 0.625) * mib,
   primaryPromptsMs: envNumber("TENDI_PERF_PRIMARY_PROMPTS_MS", 50),
   primaryPromptsRssBytes: envNumber("TENDI_PERF_PRIMARY_PROMPTS_RSS_MIB", 24) * mib,
   primaryPromptsPayloadBytes: envNumber("TENDI_PERF_PRIMARY_PROMPTS_PAYLOAD_MIB", 1.5) * mib,

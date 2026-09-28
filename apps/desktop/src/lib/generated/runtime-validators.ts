@@ -3513,6 +3513,20 @@ const SCHEMAS: Record<string, Record<string, unknown>> = {
     "type": "string",
     "minLength": 1
   },
+  "DatabaseStorageStatus": {
+    "type": "object",
+    "properties": {
+      "bytes": {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 9007199254740991
+      }
+    },
+    "required": [
+      "bytes"
+    ],
+    "additionalProperties": false
+  },
   "EmptyRequest": {
     "type": "object",
     "additionalProperties": false
@@ -5700,6 +5714,21 @@ const SCHEMAS: Record<string, Record<string, unknown>> = {
         "minimum": 0,
         "maximum": 9007199254740991
       },
+      "sessions": {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 9007199254740991
+      },
+      "runs": {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 9007199254740991
+      },
+      "totalMs": {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 9007199254740991
+      },
       "cost": {
         "$ref": "#/components/schemas/AnalyticsCost"
       }
@@ -5709,6 +5738,9 @@ const SCHEMAS: Record<string, Record<string, unknown>> = {
       "name",
       "usage",
       "responses",
+      "sessions",
+      "runs",
+      "totalMs",
       "cost"
     ],
     "additionalProperties": false
@@ -5796,6 +5828,21 @@ const SCHEMAS: Record<string, Record<string, unknown>> = {
         "minimum": 0,
         "maximum": 9007199254740991
       },
+      "inputTokens": {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 9007199254740991
+      },
+      "cachedInputTokens": {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 9007199254740991
+      },
+      "runs": {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 9007199254740991
+      },
       "totalMs": {
         "type": "integer",
         "minimum": 0,
@@ -5813,8 +5860,31 @@ const SCHEMAS: Record<string, Record<string, unknown>> = {
     "required": [
       "model",
       "totalTokens",
+      "inputTokens",
+      "cachedInputTokens",
+      "runs",
       "totalMs",
       "completedRuns",
+      "cost"
+    ],
+    "additionalProperties": false
+  },
+  "AnalyticsAgentUsage": {
+    "type": "object",
+    "properties": {
+      "agent": {
+        "type": "string"
+      },
+      "usage": {
+        "$ref": "#/components/schemas/AnalyticsTokenUsage"
+      },
+      "cost": {
+        "$ref": "#/components/schemas/AnalyticsCost"
+      }
+    },
+    "required": [
+      "agent",
+      "usage",
       "cost"
     ],
     "additionalProperties": false
@@ -5864,6 +5934,60 @@ const SCHEMAS: Record<string, Record<string, unknown>> = {
         "maximum": 9007199254740991
       },
       "sessionsByAgent": {
+        "type": "object",
+        "additionalProperties": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        }
+      },
+      "agents": {
+        "type": "array",
+        "items": {
+          "$ref": "#/components/schemas/AnalyticsAgentUsage"
+        }
+      },
+      "runsByAgent": {
+        "type": "object",
+        "additionalProperties": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        }
+      },
+      "runMsByAgent": {
+        "type": "object",
+        "additionalProperties": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        }
+      },
+      "toolsByAgent": {
+        "type": "object",
+        "additionalProperties": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        }
+      },
+      "toolsByProject": {
+        "type": "object",
+        "additionalProperties": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        }
+      },
+      "skillsByAgent": {
+        "type": "object",
+        "additionalProperties": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        }
+      },
+      "skillsByProject": {
         "type": "object",
         "additionalProperties": {
           "type": "integer",
@@ -5922,6 +6046,13 @@ const SCHEMAS: Record<string, Record<string, unknown>> = {
       "responses",
       "sessions",
       "sessionsByAgent",
+      "agents",
+      "runsByAgent",
+      "runMsByAgent",
+      "toolsByAgent",
+      "toolsByProject",
+      "skillsByAgent",
+      "skillsByProject",
       "runs",
       "aborted",
       "compacted",
@@ -7205,6 +7336,8 @@ const REQUEST_SCHEMAS: Record<CommandName, string> = {
   "skill_path_rename": "SkillPathRenameRequest",
   "skill_path_delete": "SkillPathDeleteRequest",
   "app_icon_set": "AppIconSetRequest",
+  "database_storage_status": "EmptyRequest",
+  "database_reset": "EmptyRequest",
   "cli_status": "EmptyRequest",
   "cli_install": "EmptyRequest",
   "cli_remove": "EmptyRequest",
@@ -7308,6 +7441,8 @@ const RESULT_SCHEMAS: Record<CommandName, string> = {
   "skill_path_rename": "SkillFileMutationResponse",
   "skill_path_delete": "SkillFileMutationResponse",
   "app_icon_set": "Unit",
+  "database_storage_status": "DatabaseStorageStatus",
+  "database_reset": "Unit",
   "cli_status": "CliInstallStatus",
   "cli_install": "CliInstallStatus",
   "cli_remove": "CliInstallStatus",

@@ -852,11 +852,8 @@ fn apply_persisted_skill_visibilities(
     for skill in &mut scan.skills {
         for path in &mut skill.paths {
             let key = canonical_skill_dir(&path.path);
-            let locked = persisted.get(&key).copied();
-            path.tendi_visibility = locked;
-            if let Some(visibility) = locked {
-                path.effective_visibility = visibility;
-            }
+            // Retain the user's target for reconciliation; display stays provider-derived.
+            path.tendi_visibility = persisted.get(&key).copied();
         }
         skill.visibility = skill_visibility_from_paths(&skill.paths);
     }
@@ -881,9 +878,15 @@ pub fn reconcile_skill_visibility_for_workspace(
     store: &crate::storage::Store,
     cwd: &Path,
     scan: SkillScan,
-    _project_roots: &[PathBuf],
+    project_roots: &[PathBuf],
 ) -> Result<SkillScan> {
-    reconcile_skill_visibility_for_workspace_with_report(store, cwd, scan).map(|(scan, _)| scan)
+    let (scan, visibility_changed) =
+        reconcile_skill_visibility_for_workspace_with_report(store, cwd, scan)?;
+    if visibility_changed {
+        scan_skills_with_source_store_for_projects_for_projection(cwd, store, project_roots)
+    } else {
+        Ok(scan)
+    }
 }
 
 fn reconcile_skill_visibility_for_workspace_with_report(
@@ -923,11 +926,7 @@ fn reconcile_skill_visibility_for_workspace_with_report(
     let mut scan = scan;
     for skill in &mut scan.skills {
         for path in &mut skill.paths {
-            let visibility = persisted.get(&canonical_skill_dir(&path.path)).copied();
-            path.tendi_visibility = visibility;
-            if let Some(visibility) = visibility {
-                path.effective_visibility = visibility;
-            }
+            path.tendi_visibility = persisted.get(&canonical_skill_dir(&path.path)).copied();
         }
         skill.visibility = skill_visibility_from_paths(&skill.paths);
     }
@@ -4726,11 +4725,36 @@ fn read_skill(
     let is_wrapper = !parse_wrapper_routes(&text).is_empty();
 
     let tendi_visibility = None;
-    let provider = crate::providers::agent_provider(root.agent);
-    let metadata =
-        provider.skill_visibility_metadata(skill_dir, skill_file, frontmatter.as_ref())?;
-    let effective_visibility =
-        provider.effective_skill_visibility(tendi_visibility, metadata.provider_visibility, root);
+    let mut effective_visibility = SkillVisibility::Auto;
+    let mut provider_allow_implicit_invocation = None;
+    let mut provider_skill_enabled = None;
+    let mut provider_disable_model_invocation = None;
+    for provider in crate::providers::skill_visibility_providers(root.agent) {
+        let metadata =
+            provider.skill_visibility_metadata(skill_dir, skill_file, frontmatter.as_ref())?;
+        let provider_visibility = provider.effective_skill_visibility(
+            tendi_visibility,
+            metadata.provider_visibility,
+            root,
+        );
+        effective_visibility =
+            preferred_skill_visibility(effective_visibility, provider_visibility);
+        provider_allow_implicit_invocation =
+            provider_allow_implicit_invocation.or(metadata.allow_implicit_invocation);
+        provider_skill_enabled = match (provider_skill_enabled, metadata.enabled) {
+            (_, Some(false)) => Some(false),
+            (None, Some(true)) => Some(true),
+            (current, None | Some(true)) => current,
+        };
+        provider_disable_model_invocation = match (
+            provider_disable_model_invocation,
+            metadata.disable_model_invocation,
+        ) {
+            (_, Some(true)) => Some(true),
+            (None, Some(false)) => Some(false),
+            (current, None) | (current, Some(false)) => current,
+        };
+    }
     let provenance_dir = skill_dir
         .canonicalize()
         .unwrap_or_else(|_| skill_dir.to_path_buf());
@@ -4775,9 +4799,9 @@ fn read_skill(
             tags,
             tendi_visibility,
             effective_visibility,
-            provider_allow_implicit_invocation: metadata.allow_implicit_invocation,
-            provider_skill_enabled: metadata.enabled,
-            provider_disable_model_invocation: metadata.disable_model_invocation,
+            provider_allow_implicit_invocation,
+            provider_skill_enabled,
+            provider_disable_model_invocation,
             plugin_id: root.plugin_id.clone(),
             plugin_enabled: root.plugin_enabled,
         },

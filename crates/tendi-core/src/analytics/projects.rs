@@ -1,4 +1,7 @@
-use std::{collections::BTreeMap, path::Path};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    path::Path,
+};
 
 use serde::{Deserialize, Serialize};
 
@@ -20,6 +23,9 @@ pub struct AnalyticsProjectUsage {
     pub name: String,
     pub usage: AnalyticsTokenUsage,
     pub responses: u64,
+    pub sessions: usize,
+    pub runs: u64,
+    pub total_ms: u64,
     pub cost: AnalyticsCost,
 }
 
@@ -28,6 +34,9 @@ pub(crate) struct ProjectUsageAccumulator {
     pub name: String,
     pub usage: AnalyticsTokenUsage,
     pub responses: u64,
+    pub sessions: BTreeSet<String>,
+    pub runs: u64,
+    pub total_ms: u64,
     pub cost: AnalyticsCost,
 }
 
@@ -47,12 +56,36 @@ impl ProjectUsageAccumulator {
         self.cost.add_assign(cost);
     }
 
+    pub(crate) fn add_total_ms(&mut self, name: &str, total_ms: u64) {
+        if self.name.is_empty() {
+            self.name = name.to_string();
+        }
+        self.total_ms = self.total_ms.saturating_add(total_ms);
+    }
+
+    pub(crate) fn add_runs(&mut self, name: &str, runs: u64) {
+        if self.name.is_empty() {
+            self.name = name.to_string();
+        }
+        self.runs = self.runs.saturating_add(runs);
+    }
+
+    pub(crate) fn add_session(&mut self, name: &str, identity: &str) {
+        if self.name.is_empty() {
+            self.name = name.to_string();
+        }
+        self.sessions.insert(identity.to_string());
+    }
+
     pub(crate) fn finish((id, usage): (String, Self)) -> AnalyticsProjectUsage {
         AnalyticsProjectUsage {
             id,
             name: usage.name,
             usage: usage.usage,
             responses: usage.responses,
+            sessions: usage.sessions.len(),
+            runs: usage.runs,
+            total_ms: usage.total_ms,
             cost: usage.cost,
         }
     }

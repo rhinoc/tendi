@@ -597,7 +597,7 @@
   overflow: hidden;
   color: var(--muted);
   font-size: var(--text-xs);
-  line-height: var(--leading-micro);
+  line-height: var(--leading-tight);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -805,7 +805,7 @@
   outline-offset: -2px;
 }
 
-.menuContent.assistantAgentSelectContent {
+.selectControlContent.assistantAgentSelectContent {
   z-index: calc(var(--z-drawer) + 1);
 }
 

@@ -664,7 +664,7 @@ impl Daemon {
         match result {
             Ok(store) => Ok(store),
             Err(error) if tendi_core::storage::is_database_recovery_error(&error) => {
-                if self.recover_storage(&error) {
+                if self.recover_storage_cause(&error) {
                     tendi_core::storage::Store::open(&self.state.database_path)
                 } else {
                     Err(error)
@@ -695,7 +695,17 @@ impl Daemon {
     }
 
     fn recover_storage(&self, reason: impl std::fmt::Display) -> bool {
-        let reason = reason.to_string();
+        self.recover_storage_inner(reason.to_string(), None)
+    }
+
+    fn recover_storage_cause(&self, error: &anyhow::Error) -> bool {
+        self.recover_storage_inner(
+            error.to_string(),
+            tendi_core::storage::sqlite_error_diagnostic(error),
+        )
+    }
+
+    fn recover_storage_inner(&self, reason: String, sqlite_error: Option<String>) -> bool {
         let now = Instant::now();
         let recovery = &self.state.storage_recovery;
         let transient_failure = storage_recovery_failure_is_transient(&reason);
@@ -745,7 +755,11 @@ impl Daemon {
 
         tendi_core::logging::global().warn(
             "database connection recovery started",
-            json!({ "database": self.state.database_path, "reason": reason }),
+            json!({
+                "database": self.state.database_path,
+                "reason": reason,
+                "sqliteError": sqlite_error,
+            }),
         );
         let started = Instant::now();
         let result = tendi_core::storage::recover_database(&self.state.database_path);
@@ -777,6 +791,7 @@ impl Daemon {
                         "durationMs": started.elapsed().as_secs_f64() * 1000.0,
                         "state": "degraded",
                         "error": error.to_string(),
+                        "sqliteError": tendi_core::storage::sqlite_error_diagnostic(&error),
                     }),
                 );
                 false
@@ -1948,10 +1963,8 @@ impl Daemon {
         let store = self.open_store().map_err(core_error)?;
         let scope_key = daemon_scope_key(self)?;
         let revision = store
-            .projection_head(&scope_key, "analytics")
-            .map_err(core_error)?
-            .map(|head| head.revision.value())
-            .unwrap_or_default();
+            .analytics_revision_for_scope(&scope_key)
+            .map_err(core_error)?;
         Ok(revision)
     }
 
@@ -3213,16 +3226,26 @@ impl Daemon {
     }
 
     fn skills_list(&self) -> Result<runtime_schema::SkillRecordList, DaemonError> {
-        let scan = self.read_cached_projection::<tendi_core::skills::SkillScan>("skills")?;
-        if let Some(scan) = &scan {
-            if let Err(error) = self.configure_skill_watcher(scan) {
-                tendi_core::logging::global().warn(
-                    "skill watcher registration failed",
-                    json!({ "error": error.message }),
-                );
+        let store = self.open_store().map_err(core_error)?;
+        let scan = match store
+            .list_skills_for_workspace(&self.state.cwd)
+            .map_err(core_error)?
+        {
+            Some(scan) => scan,
+            None => {
+                drop(store);
+                let scan = self.refresh_pending_skills()?;
+                self.schedule_skill_reconciliation();
+                scan
             }
+        };
+        if let Err(error) = self.configure_skill_watcher(&scan) {
+            tendi_core::logging::global().warn(
+                "skill watcher registration failed",
+                json!({ "error": error.message }),
+            );
         }
-        let skills = scan.map(|scan| scan.skills).unwrap_or_default();
+        let skills = scan.skills;
         serde_json::from_value(skills_runtime_value(&skills)?).map_err(internal_error)
     }
 
@@ -4374,14 +4397,11 @@ impl Daemon {
             self.invalidate_skill_projection(&paths)?;
             drop(resources);
             let refreshed = self.refresh_skill_projection(before, &ids, &[])?;
+            let updated = skills_matching_ids_or_paths(&refreshed.skills, &ids, &selected_paths);
             return serde_json::from_value(json!({
                 "summary": summary,
                 "applied": true,
-                "updated": refreshed
-                    .skills
-                    .into_iter()
-                    .filter(|skill| ids.iter().any(|id| tendi_core::skills::skill_matches_id(skill, id)))
-                    .collect::<Vec<_>>(),
+                "updated": updated,
             }))
             .map_err(internal_error);
         }
@@ -6504,7 +6524,7 @@ fn projection_recovery_loop(daemon: Daemon) {
             }
             Err(error) => {
                 if tendi_core::storage::is_database_recovery_error(&error) {
-                    daemon.recover_storage(&error);
+                    daemon.recover_storage_cause(&error);
                 } else {
                     tendi_core::logging::global().warn(
                         "projection recovery enumeration failed",
@@ -7136,7 +7156,7 @@ fn refresh_session_analytics_serialized_with_revision(
                     );
                 },
             )?;
-            let revision = store.analytics_revision()?;
+            let revision = store.analytics_revision_for_scope(&scope_key)?;
             Ok((report, revision))
         }) {
         Ok(result) => result.map_err(core_error),
@@ -7230,7 +7250,7 @@ fn session_search_loop(daemon: Daemon) {
                     Ok(report) => report,
                     Err(error) => {
                         if tendi_core::storage::is_database_recovery_error(&error) {
-                            daemon.recover_storage(&error);
+                            daemon.recover_storage_cause(&error);
                             return Err(error);
                         }
                         tendi_core::logging::global().warn(
@@ -7290,7 +7310,7 @@ fn session_search_loop(daemon: Daemon) {
             Ok(()) => retry_delay = DATABASE_RECOVERY_RETRY_INITIAL,
             Err(error) => {
                 if tendi_core::storage::is_database_recovery_error(&error) {
-                    daemon.recover_storage(&error);
+                    daemon.recover_storage_cause(&error);
                 } else {
                     tendi_core::logging::global().warn(
                         "session search worker deferred",
@@ -7329,40 +7349,8 @@ fn record_session_search_publication(
 }
 
 #[cfg(test)]
-mod session_search_lifecycle_tests {
-    use super::*;
-
-    #[test]
-    fn completed_search_publication_does_not_emit_sessions_scan() {
-        let root = std::env::temp_dir().join(format!(
-            "tendi-search-publication-event-{}-{}",
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .expect("system time before epoch")
-                .as_nanos()
-        ));
-        fs::create_dir_all(&root).expect("create search publication test workspace");
-        let daemon = Daemon::with_database(root.clone(), root.join("state.sqlite3"), false);
-        let subscription = daemon.subscribe_events();
-        let scope = tendi_core::ScopeKey::new("workspace:search-publication-test")
-            .expect("valid test scope");
-
-        record_session_search_publication(
-            &scope,
-            "session-1",
-            tendi_core::Revision::new(4),
-            tendi_core::Revision::new(5),
-        );
-
-        assert!(matches!(
-            subscription.recv_timeout(Duration::from_millis(20)),
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout)
-        ));
-        daemon.shutdown();
-        fs::remove_dir_all(root).expect("remove search publication test workspace");
-    }
-}
+#[path = "session_search_lifecycle_tests.rs"]
+mod session_search_lifecycle_tests;
 
 fn sleep_worker_retry(daemon: &Daemon, delay: Duration) {
     let deadline = Instant::now() + delay;

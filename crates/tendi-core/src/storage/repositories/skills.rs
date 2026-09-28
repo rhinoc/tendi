@@ -180,14 +180,14 @@ impl Store {
                 columns.iter().any(|column| column == "locked")
             };
             if !has_locked_column {
-                // Existing visibility rows were seeded from provider scans and
-                // cannot be distinguished from explicit user choices. Keep
-                // them as unlocked defaults; explicit writes set this flag.
+                // Existing rows do not prove a user chose the value. They
+                // become unlocked here and are discarded immediately below.
                 tx.execute_batch(
                     "ALTER TABLE scoped_skill_visibility
                      ADD COLUMN locked INTEGER NOT NULL DEFAULT 0 CHECK (locked IN (0, 1));",
                 )?;
             }
+            tx.execute("DELETE FROM scoped_skill_visibility WHERE locked = 0", [])?;
             migrate_global_skill_visibility_scopes(tx)?;
             // Skills projections are owned by workspace scopes. Older builds
             // accidentally created an installation-scope dirty receipt while
@@ -287,7 +287,11 @@ impl Store {
                             visibility = excluded.visibility
                          WHERE scoped_skill_visibility.locked = 0
                            AND scoped_skill_visibility.visibility != excluded.visibility",
-                        params![scope_key.as_str(), path.display().to_string(), visibility.label()],
+                        params![
+                            scope_key.as_str(),
+                            path.display().to_string(),
+                            visibility.label()
+                        ],
                     )?
                 } else {
                     tx.execute(
@@ -299,7 +303,11 @@ impl Store {
                             locked = 1
                          WHERE scoped_skill_visibility.visibility != excluded.visibility
                             OR scoped_skill_visibility.locked != 1",
-                        params![scope_key.as_str(), path.display().to_string(), visibility.label()],
+                        params![
+                            scope_key.as_str(),
+                            path.display().to_string(),
+                            visibility.label()
+                        ],
                     )?
                 };
                 changed += row_changed;

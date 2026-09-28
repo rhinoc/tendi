@@ -148,7 +148,7 @@ fn assistant_commands_keep_provider_specific_cli_contracts() {
         (
             AgentKind::Claude,
             "claude",
-            vec!["--print", "--output-format", "stream-json"],
+            vec!["--print", "--verbose", "--output-format", "stream-json"],
         ),
         (
             AgentKind::Cursor,

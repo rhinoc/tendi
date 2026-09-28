@@ -5,7 +5,7 @@ pub use serde_json::Value;
 pub const PROTOCOL_VERSION: u64 = 2;
 pub const SCHEMA_VERSION: u64 = 1;
 pub const RUNTIME_CONTRACT_FINGERPRINT: &str =
-    "4d97bc00c50396f62aa7ca72b51ddf189916d3e7b4fa2accd2aa11e7834acf01";
+    "51c444d46529decedf5b1535de7141889b51b70d6cefa11d3c75dce2d263d483";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -1170,6 +1170,10 @@ pub struct SessionResumeResponse {
     pub error: Option<SessionResumeError>,
 }
 pub type LogsExportResponse = String;
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DatabaseStorageStatus {
+    pub bytes: u64,
+}
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AgentKind {
     #[serde(rename = "codex")]
@@ -1891,6 +1895,10 @@ pub struct AnalyticsProjectUsage {
     pub name: String,
     pub usage: AnalyticsTokenUsage,
     pub responses: u64,
+    pub sessions: u64,
+    pub runs: u64,
+    #[serde(rename = "totalMs")]
+    pub total_ms: u64,
     pub cost: AnalyticsCost,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1922,10 +1930,21 @@ pub struct AnalyticsModelUsage {
     pub model: String,
     #[serde(rename = "totalTokens")]
     pub total_tokens: u64,
+    #[serde(rename = "inputTokens")]
+    pub input_tokens: u64,
+    #[serde(rename = "cachedInputTokens")]
+    pub cached_input_tokens: u64,
+    pub runs: u64,
     #[serde(rename = "totalMs")]
     pub total_ms: u64,
     #[serde(rename = "completedRuns")]
     pub completed_runs: u64,
+    pub cost: AnalyticsCost,
+}
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AnalyticsAgentUsage {
+    pub agent: String,
+    pub usage: AnalyticsTokenUsage,
     pub cost: AnalyticsCost,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1943,6 +1962,19 @@ pub struct AnalyticsDay {
     pub sessions: u64,
     #[serde(rename = "sessionsByAgent")]
     pub sessions_by_agent: std::collections::BTreeMap<String, u64>,
+    pub agents: Vec<AnalyticsAgentUsage>,
+    #[serde(rename = "runsByAgent")]
+    pub runs_by_agent: std::collections::BTreeMap<String, u64>,
+    #[serde(rename = "runMsByAgent")]
+    pub run_ms_by_agent: std::collections::BTreeMap<String, u64>,
+    #[serde(rename = "toolsByAgent")]
+    pub tools_by_agent: std::collections::BTreeMap<String, u64>,
+    #[serde(rename = "toolsByProject")]
+    pub tools_by_project: std::collections::BTreeMap<String, u64>,
+    #[serde(rename = "skillsByAgent")]
+    pub skills_by_agent: std::collections::BTreeMap<String, u64>,
+    #[serde(rename = "skillsByProject")]
+    pub skills_by_project: std::collections::BTreeMap<String, u64>,
     pub runs: AnalyticsRunSummary,
     pub aborted: u64,
     pub compacted: u64,
@@ -2593,6 +2625,10 @@ pub type SkillFolderCreateResponse = SkillFileMutationResponse;
 pub type SkillPathRenameResponse = SkillFileMutationResponse;
 pub type SkillPathDeleteResponse = SkillFileMutationResponse;
 pub type AppIconSetResponse = Unit;
+pub type DatabaseStorageStatusRequest = EmptyRequest;
+pub type DatabaseStorageStatusResponse = DatabaseStorageStatus;
+pub type DatabaseResetRequest = EmptyRequest;
+pub type DatabaseResetResponse = Unit;
 pub type CliStatusRequest = EmptyRequest;
 pub type CliStatusResponse = CliInstallStatus;
 pub type CliInstallRequest = EmptyRequest;
@@ -2788,6 +2824,10 @@ pub enum CommandRequest {
     SkillPathDelete(SkillPathDeleteRequest),
     #[serde(rename = "app_icon_set")]
     AppIconSet(AppIconSetRequest),
+    #[serde(rename = "database_storage_status")]
+    DatabaseStorageStatus(DatabaseStorageStatusRequest),
+    #[serde(rename = "database_reset")]
+    DatabaseReset(DatabaseResetRequest),
     #[serde(rename = "cli_status")]
     CliStatus(CliStatusRequest),
     #[serde(rename = "cli_install")]
@@ -2994,6 +3034,10 @@ pub enum CommandResult {
     SkillPathDelete(SkillPathDeleteResponse),
     #[serde(rename = "app_icon_set")]
     AppIconSet(AppIconSetResponse),
+    #[serde(rename = "database_storage_status")]
+    DatabaseStorageStatus(DatabaseStorageStatusResponse),
+    #[serde(rename = "database_reset")]
+    DatabaseReset(DatabaseResetResponse),
     #[serde(rename = "cli_status")]
     CliStatus(CliStatusResponse),
     #[serde(rename = "cli_install")]
@@ -3111,6 +3155,8 @@ pub enum CommandName {
     SkillPathRename,
     SkillPathDelete,
     AppIconSet,
+    DatabaseStorageStatus,
+    DatabaseReset,
     CliStatus,
     CliInstall,
     CliRemove,
@@ -3216,6 +3262,8 @@ impl CommandName {
             "skill_path_rename" => Some(Self::SkillPathRename),
             "skill_path_delete" => Some(Self::SkillPathDelete),
             "app_icon_set" => Some(Self::AppIconSet),
+            "database_storage_status" => Some(Self::DatabaseStorageStatus),
+            "database_reset" => Some(Self::DatabaseReset),
             "cli_status" => Some(Self::CliStatus),
             "cli_install" => Some(Self::CliInstall),
             "cli_remove" => Some(Self::CliRemove),
@@ -3322,6 +3370,8 @@ impl CommandName {
             Self::SkillPathRename => "skill_path_rename",
             Self::SkillPathDelete => "skill_path_delete",
             Self::AppIconSet => "app_icon_set",
+            Self::DatabaseStorageStatus => "database_storage_status",
+            Self::DatabaseReset => "database_reset",
             Self::CliStatus => "cli_status",
             Self::CliInstall => "cli_install",
             Self::CliRemove => "cli_remove",
@@ -4129,6 +4179,24 @@ pub fn command_metadata(name: &str) -> Option<CommandMetadata> {
             execution: Execution::Write,
             serialized_write: true,
             requires_params: true,
+            internal: false,
+            deprecated: false,
+        }),
+        "database_storage_status" => Some(CommandMetadata {
+            name: "database_storage_status",
+            owner: Owner::Desktop,
+            execution: Execution::Read,
+            serialized_write: false,
+            requires_params: false,
+            internal: false,
+            deprecated: false,
+        }),
+        "database_reset" => Some(CommandMetadata {
+            name: "database_reset",
+            owner: Owner::Desktop,
+            execution: Execution::Write,
+            serialized_write: true,
+            requires_params: false,
             internal: false,
             deprecated: false,
         }),
@@ -5081,6 +5149,11 @@ pub fn validate_result(name: &str, value: &Value) -> Result<(), String> {
         }
         "skill_path_delete" => {
             serde_json::from_value::<SkillFileMutationResponse>(value.clone())
+                .map_err(|error| format!("result is invalid: {error}"))?;
+            Ok(())
+        }
+        "database_storage_status" => {
+            serde_json::from_value::<DatabaseStorageStatus>(value.clone())
                 .map_err(|error| format!("result is invalid: {error}"))?;
             Ok(())
         }

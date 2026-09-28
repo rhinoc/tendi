@@ -650,15 +650,19 @@ fn skill_file_round_trip_and_conflict_are_protocol_errors() {
     let listed = run_method_ok(&daemon, "skills_list", json!({}));
     let demo_id = listed_skill_id(&listed, "demo");
     assert!(listed[0]["paths"][0]["locationId"].as_str().is_some());
+    let skill_path = root
+        .join(".agents/skills/demo")
+        .to_string_lossy()
+        .to_string();
     let _files = run_method_ok(
         &daemon,
         "skill_files",
-        json!({ "skillId": demo_id.clone() }),
+        json!({ "skillName": "demo", "skillPath": skill_path }),
     );
     let read = run_method_ok(
         &daemon,
         "skill_file_read",
-        json!({ "skillId": demo_id.clone(), "relativePath": "SKILL.md" }),
+        json!({ "skillName": "demo", "skillPath": root.join(".agents/skills/demo").to_string_lossy(), "relativePath": "SKILL.md" }),
     );
     let sha = read["sha256"].as_str().unwrap().to_string();
     let saved = run_method_ok(
@@ -701,12 +705,11 @@ fn skill_file_reads_refresh_when_selected_skill_is_added_after_listing() {
         "---\nname: added\ndescription: Added\n---\n\n# Added\n",
     )
     .unwrap();
-    let added_id = format!(
-        "skill@path:{}",
-        added_skill.canonicalize().unwrap().display()
+    let files = run_method_ok(
+        &daemon,
+        "skill_files",
+        json!({ "skillName": "added", "skillPath": added_skill.to_string_lossy() }),
     );
-
-    let files = run_method_ok(&daemon, "skill_files", json!({ "skillId": added_id }));
     assert!(
         files
             .as_array()
@@ -740,9 +743,9 @@ fn skill_file_changes_emit_a_runtime_event() {
     assert!(
         event.payload["paths"].as_array().is_some_and(|paths| {
             paths.iter().filter_map(|path| path.as_str()).any(|path| {
-                Path::new(path)
-                    .canonicalize()
-                    .is_ok_and(|path| path.starts_with(&canonical_skill_dir))
+                Path::new(path).canonicalize().is_ok_and(|path| {
+                    path.starts_with(&canonical_skill_dir) || canonical_skill_dir.starts_with(&path)
+                })
             })
         }),
         "unexpected skill change paths: {}",
@@ -763,11 +766,18 @@ fn direct_reads_do_not_wait_for_database_write_lock() {
         ("settings_get", json!({})),
         ("skill_session_links", json!({ "skillId": demo_id.clone() })),
         ("skills_targets", json!({})),
-        ("skill_files", json!({ "skillId": demo_id.clone() })),
+        (
+            "skill_files",
+            json!({
+                "skillName": "demo",
+                "skillPath": root.join(".agents/skills/demo").to_string_lossy(),
+            }),
+        ),
         (
             "skill_file_read",
             json!({
-                "skillId": demo_id,
+                "skillName": "demo",
+                "skillPath": root.join(".agents/skills/demo").to_string_lossy(),
                 "relativePath": "SKILL.md",
             }),
         ),
@@ -944,24 +954,32 @@ fn skill_update_preview_refreshes_when_selected_skill_changes() {
         "---\nname: demo\ndescription: Selected skill changed\n---\n\n# Demo\n",
     )
     .unwrap();
-    let _preview = run_method_ok(
+    let preview = run_method_ok(
         &daemon,
         "skills_update_many",
-        json!({ "skillIds": [demo_id], "dryRun": true }),
+        json!({ "skillIds": [demo_id.clone()], "dryRun": true }),
     );
+    assert_eq!(preview["applied"], false);
 
     let store = test_store(&daemon);
+    let mut refreshed_description = None;
     for _ in 0..100 {
-        if store.projection_status("skills", &root).unwrap()
-            == tendi_core::storage::ProjectionStatus::Stale
-        {
-            break;
+        if let Some(scan) = store.list_skills_for_workspace(&root).unwrap() {
+            refreshed_description = scan
+                .skills
+                .iter()
+                .find(|skill| tendi_core::skills::skill_matches_id(skill, &demo_id))
+                .and_then(|skill| skill.description.clone());
+            if refreshed_description.as_deref() == Some("Selected skill changed") {
+                break;
+            }
         }
         thread::sleep(Duration::from_millis(20));
     }
     assert_eq!(
-        store.projection_status("skills", &root).unwrap(),
-        tendi_core::storage::ProjectionStatus::Stale
+        refreshed_description.as_deref(),
+        Some("Selected skill changed"),
+        "preview should refresh the cached selected skill after its source changes"
     );
     let _ = fs::remove_dir_all(root);
 }
@@ -1330,7 +1348,11 @@ fn wrapper_syncs_child_content_location_and_deletion() {
     let read = run_method_ok(
         &daemon,
         "skill_file_read",
-        json!({ "skillId": child_id.clone(), "relativePath": "SKILL.md" }),
+        json!({
+            "skillName": "child",
+            "skillPath": child_dir.to_string_lossy(),
+            "relativePath": "SKILL.md",
+        }),
     );
     run_method_ok(
         &daemon,

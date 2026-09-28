@@ -81,12 +81,30 @@ function runOverviewTrend(groupAnalyticsDays, selectAnalyticsGranularity, buildT
       },
       responses: 20 + index % 13,
       sessions: 5 + index % 17,
-      runs: { started: 10 + index % 7, completed: 8 + index % 5, unclosed: index % 2, totalMs: 1000, maxMs: 5000 },
+      sessionsByAgent: { codex: 5 + index % 17 },
+      agents: [{ agent: "codex", usage: {
+        inputTokens: 10_000,
+        cachedInputTokens: 2_000,
+        cacheWriteInputTokens: 0,
+        outputTokens: 3_000,
+        reasoningOutputTokens: 0,
+        totalTokens: 13_000,
+      }, cost: { inputUsd: 0.01, cachedInputUsd: 0, cacheWriteInputUsd: 0, outputUsd: 0.01, totalUsd: 0.02 } }],
+      runsByAgent: { codex: 10 + index % 7 },
+      runMsByAgent: { codex: 1000 },
+      toolsByAgent: { codex: 5 },
+      toolsByProject: { [`project-${index % 3}`]: 5 },
+      skillsByAgent: { codex: 3 },
+      skillsByProject: { [`project-${index % 3}`]: 3 },
+      runs: { started: 10 + index % 7, completed: 8 + index % 5, timedCompleted: 8 + index % 5, unclosed: index % 2, totalMs: 1000, maxMs: 5000 },
       aborted: index % 3,
       compacted: index % 4,
       models: Array.from({ length: 6 }, (_, modelIndex) => ({
         model: `model-${modelIndex}`,
         totalTokens: 10_000 + index * (modelIndex + 1),
+        inputTokens: 8_000,
+        cachedInputTokens: 2_000,
+        runs: 1,
         totalMs: 0,
         completedRuns: 0,
         cost: { inputUsd: 0.01, cachedInputUsd: 0, cacheWriteInputUsd: 0, outputUsd: 0.01, totalUsd: 0.02 },
@@ -103,6 +121,9 @@ function runOverviewTrend(groupAnalyticsDays, selectAnalyticsGranularity, buildT
           totalTokens: 13_000,
         },
         responses: 3,
+        sessions: 1,
+        runs: 2,
+        totalMs: 1000,
         cost: { inputUsd: 0.01, cachedInputUsd: 0, cacheWriteInputUsd: 0, outputUsd: 0.01, totalUsd: 0.02 },
       })),
       tools: Array.from({ length: 10 }, (_, toolIndex) => ({ name: `tool-${toolIndex}`, server: `server-${toolIndex % 2}`, calls: 1 + ((index + toolIndex) % 9) })),
@@ -128,7 +149,7 @@ function runOverviewTrend(groupAnalyticsDays, selectAnalyticsGranularity, buildT
   const renderedPeriods = periods.slice(renderedStart);
   let renderedRungs = 0;
   for (let localIndex = 0; localIndex < renderedPeriods.length; localIndex += 1) {
-    const model = buildTrendPeriodModel(renderedPeriods[localIndex], renderedStart + localIndex, "tokens", topCategories, totals.size > topCategories.length, rungUnit);
+    const model = buildTrendPeriodModel(renderedPeriods[localIndex], renderedStart + localIndex, "tokens", "model", topCategories, totals.size > topCategories.length, rungUnit);
     renderedRungs += model.rungs.length;
     checksum = (Math.imul(checksum, 31) + model.rungs.length) >>> 0;
   }
@@ -169,6 +190,7 @@ function runOverviewTrend(groupAnalyticsDays, selectAnalyticsGranularity, buildT
       hasOlder: false,
       loadingOlder: false,
       metric: "tokens",
+      groupBy: "model",
       onLoadOlder: () => {},
     }),
   ));
