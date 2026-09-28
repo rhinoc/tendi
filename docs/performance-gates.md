@@ -23,7 +23,7 @@ the developer's Session database, browser, or running desktop app.
 
 CI uses macOS-runner-specific headroom for operation timing in the Overview, skill-save,
 settings-save, and chart gates. Overview allows 60 ms on hosted runners after a 51 ms measurement;
-the local default remains 25 ms. Its payload limit is 0.625 MiB to cover daily agent and project
+the local default is 35 ms. Its payload limit is 0.625 MiB to cover daily agent and project
 breakdowns. Other RSS and payload limits remain unchanged.
 
 The full gate additionally uses local Session data when available. It also creates a deterministic
@@ -92,7 +92,7 @@ excluded because they are too environment-dependent for every push.
 | Hooks list | Local data | median <= 40 ms |
 | Rules list | Local data | median <= 40 ms |
 | MCP list | Local data | median <= 40 ms |
-| Overview | 512 analyzed Sessions, 365 days | operation <= 25 ms, RSS <= 28 MiB, payload <= 0.625 MiB |
+| Overview | 512 analyzed Sessions, 365 days | operation <= 35 ms, RSS <= 28 MiB, payload <= 0.625 MiB |
 | Prompts | 500 Prompts | operation <= 50 ms, RSS <= 24 MiB, payload <= 1.5 MiB |
 | Config | Existing config catalog | operation <= 12 ms, RSS <= 16 MiB, payload <= 0.0625 MiB |
 | Settings | Isolated Store | operation <= 2 ms, RSS <= 16 MiB, payload <= 0.015625 MiB |

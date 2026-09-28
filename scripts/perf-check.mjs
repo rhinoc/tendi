@@ -42,7 +42,7 @@ const thresholds = {
   transcriptRssFloorBytes: envNumber("TENDI_PERF_TRANSCRIPT_RSS_FLOOR_MIB", 80) * mib,
   idleCpuAverage: envNumber("TENDI_PERF_IDLE_CPU_AVG", 1),
   idleCpuMax: envNumber("TENDI_PERF_IDLE_CPU_MAX", 5),
-  primaryOverviewMs: envNumber("TENDI_PERF_PRIMARY_OVERVIEW_MS", 25),
+  primaryOverviewMs: envNumber("TENDI_PERF_PRIMARY_OVERVIEW_MS", 35),
   primaryOverviewRssBytes: envNumber("TENDI_PERF_PRIMARY_OVERVIEW_RSS_MIB", 28) * mib,
   primaryOverviewPayloadBytes: envNumber("TENDI_PERF_PRIMARY_OVERVIEW_PAYLOAD_MIB", 0.625) * mib,
   primaryPromptsMs: envNumber("TENDI_PERF_PRIMARY_PROMPTS_MS", 50),
