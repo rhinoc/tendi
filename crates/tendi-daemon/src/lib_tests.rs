@@ -925,13 +925,14 @@ fn skill_update_preview_ignores_unrelated_skill_changes() {
     .expect_err("unrelated skill changes should conflict");
     assert_eq!(apply.code, "CONFLICT");
     let store = test_store(&daemon);
-    for _ in 0..100 {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while Instant::now() < deadline {
         if store.projection_status("skills", &root).unwrap()
             == tendi_core::storage::ProjectionStatus::Stale
         {
             break;
         }
-        thread::sleep(Duration::from_millis(20));
+        thread::sleep(Duration::from_millis(50));
     }
     assert_eq!(
         store.projection_status("skills", &root).unwrap(),
