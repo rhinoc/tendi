@@ -926,17 +926,27 @@ fn skill_update_preview_ignores_unrelated_skill_changes() {
     assert_eq!(apply.code, "CONFLICT");
     let store = test_store(&daemon);
     let deadline = Instant::now() + Duration::from_secs(10);
+    let mut unrelated_skills_refreshed = false;
     while Instant::now() < deadline {
-        if store.projection_status("skills", &root).unwrap()
-            == tendi_core::storage::ProjectionStatus::Stale
-        {
-            break;
+        if let Some(scan) = store.list_skills_for_workspace(&root).unwrap() {
+            let system_skill_updated = scan.skills.iter().any(|skill| {
+                skill.name == "unrelated"
+                    && skill.description.as_deref() == Some("Externally updated system skill")
+            });
+            let user_skill_updated = scan.skills.iter().any(|skill| {
+                skill.name == "unrelated-user"
+                    && skill.description.as_deref() == Some("Externally updated user skill")
+            });
+            if system_skill_updated && user_skill_updated {
+                unrelated_skills_refreshed = true;
+                break;
+            }
         }
         thread::sleep(Duration::from_millis(50));
     }
-    assert_eq!(
-        store.projection_status("skills", &root).unwrap(),
-        tendi_core::storage::ProjectionStatus::Stale
+    assert!(
+        unrelated_skills_refreshed,
+        "external changes should refresh unrelated skill metadata"
     );
     let _ = fs::remove_dir_all(root);
 }
