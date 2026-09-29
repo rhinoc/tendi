@@ -481,7 +481,7 @@ mod platform {
             app_dir
                 .file_name()
                 .and_then(|name| name.to_str())
-                .is_some_and(|name| name.eq_ignore_ascii_case("tendi.app"))
+                .is_some_and(|name| name.eq_ignore_ascii_case("Tendi.app"))
         })
     }
 

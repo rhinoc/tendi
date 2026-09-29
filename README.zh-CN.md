@@ -72,7 +72,7 @@ Tendi 面向已经同时使用多个 coding agent 的人。
 从 **[GitHub Releases](https://github.com/rhinoc/tendi/releases)** 下载最新的 **`tendi-<version>-aarch64.dmg`**。
 
 1. 打开 DMG。
-2. 将 **`tendi.app`** 拖到 **Applications**。
+2. 将 **`Tendi.app`** 拖到 **Applications**。
 3. 推出磁盘映像，从「应用程序」或 Spotlight 启动 **Tendi**。
 
 应用同时附带 `tendi` 命令行。可在首次运行提示中安装，之后也可在 **Settings → Developer → Coding helpers** 安装。
@@ -81,10 +81,10 @@ Tendi 面向已经同时使用多个 coding agent 的人。
 
 ### 首次启动与 Gatekeeper
 
-浏览器下载会带上 Gatekeeper 隔离属性；当前发布版和本地构建均未使用 Apple Developer ID 签名，也未公证。若 macOS 无法打开应用，请先确认 DMG 来源可信，将 `tendi.app` 放入 Applications，然后执行：
+浏览器下载会带上 Gatekeeper 隔离属性；当前发布版和本地构建均未使用 Apple Developer ID 签名，也未公证。若 macOS 无法打开应用，请先确认 DMG 来源可信，将 `Tendi.app` 放入 Applications，然后执行：
 
 ```bash
-xattr -dr com.apple.quarantine /Applications/tendi.app
+xattr -dr com.apple.quarantine /Applications/Tendi.app
 ```
 
 ## 使用

@@ -63,8 +63,8 @@ build_arch() {
   if [[ "$target" == "host" ]]; then
     bundle_root="$ROOT/target/release/bundle"
   fi
-  local app="$bundle_root/macos/tendi.app"
-  local updater_src="$bundle_root/macos/tendi.app.tar.gz"
+  local app="$bundle_root/macos/Tendi.app"
+  local updater_src="$bundle_root/macos/Tendi.app.tar.gz"
   local updater_sig_src="$updater_src.sig"
   local dmg="$ROOT/dist/tendi-${VERSION}-${arch}.dmg"
   local bundled_cli="$app/Contents/MacOS/tendi"
@@ -87,7 +87,7 @@ build_arch() {
       exit 1
     }
   fi
-  "$ROOT/scripts/build-dmg.sh" "$app" "$dmg" tendi
+  "$ROOT/scripts/build-dmg.sh" "$app" "$dmg" Tendi
 
   if [[ "$UPDATER_ENABLED" == "1" ]]; then
     [[ -f "$updater_src" ]] || { echo "error: missing updater archive at $updater_src" >&2; exit 1; }

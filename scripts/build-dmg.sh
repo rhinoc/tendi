@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 APP_PATH="${1:?usage: scripts/build-dmg.sh <app-path> <output-dmg> [volume-name]}"
 OUTPUT_DMG="${2:?usage: scripts/build-dmg.sh <app-path> <output-dmg> [volume-name]}"
-VOLNAME="${3:-tendi}"
+VOLNAME="${3:-Tendi}"
 DMG_BACKGROUND="$ROOT/apps/desktop/src-tauri/res/dmg-background.png"
 
 for path in "$APP_PATH" "$DMG_BACKGROUND"; do

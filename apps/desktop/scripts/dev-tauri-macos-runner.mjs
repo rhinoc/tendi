@@ -21,7 +21,7 @@ if (!executable || !existsSync(executable)) {
   process.exit(1);
 }
 
-const appBundle = resolve(dirname(executable), "bundle", "macos", "tendi.app");
+const appBundle = resolve(dirname(executable), "bundle", "macos", "Tendi.app");
 const contentsDir = resolve(appBundle, "Contents");
 const executableDir = resolve(contentsDir, "MacOS");
 const resourcesDir = resolve(contentsDir, "Resources");
@@ -43,8 +43,8 @@ writeFileSync(
 <dict>
   <key>CFBundleExecutable</key><string>tendi-desktop</string>
   <key>CFBundleIdentifier</key><string>${bundleIdentifier}</string>
-  <key>CFBundleDisplayName</key><string>tendi</string>
-  <key>CFBundleName</key><string>tendi</string>
+  <key>CFBundleDisplayName</key><string>Tendi</string>
+  <key>CFBundleName</key><string>Tendi</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleVersion</key><string>0.0.0</string>
   <key>CFBundleIconFile</key><string>icon.icns</string>

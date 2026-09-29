@@ -72,7 +72,7 @@ If you use a single agent and rarely touch skills or old sessions, the agent app
 Download the latest **`tendi-<version>-aarch64.dmg`** from **[GitHub Releases](https://github.com/rhinoc/tendi/releases)**.
 
 1. Open the DMG.
-2. Drag **`tendi.app`** to **Applications**.
+2. Drag **`Tendi.app`** to **Applications**.
 3. Eject the disk image, then launch **Tendi** from Applications or Spotlight.
 
 The app also ships the `tendi` CLI. Install it from the first-run prompt, or later under **Settings → Developer → Coding helpers**.
@@ -81,10 +81,10 @@ Installed apps can check for updates under **Settings → Updates**.
 
 ### First launch and Gatekeeper
 
-Browser downloads are quarantined by Gatekeeper. Release and local builds are not Apple Developer ID-signed or notarized yet. If macOS blocks the app, confirm the DMG source, move `tendi.app` to Applications, then:
+Browser downloads are quarantined by Gatekeeper. Release and local builds are not Apple Developer ID-signed or notarized yet. If macOS blocks the app, confirm the DMG source, move `Tendi.app` to Applications, then:
 
 ```bash
-xattr -dr com.apple.quarantine /Applications/tendi.app
+xattr -dr com.apple.quarantine /Applications/Tendi.app
 ```
 
 ## Usage

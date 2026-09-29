@@ -38,7 +38,7 @@ const latest = {
   version,
   notes: releaseNotesPath
     ? fs.readFileSync(releaseNotesPath, "utf8").trim()
-    : "Open the DMG and drag tendi.app to Applications.",
+    : "Open the DMG and drag Tendi.app to Applications.",
   pub_date: new Date().toISOString(),
   platforms,
 };

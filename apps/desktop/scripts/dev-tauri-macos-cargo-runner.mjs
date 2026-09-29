@@ -37,7 +37,7 @@ const appExecutable = resolve(
   "debug",
   "bundle",
   "macos",
-  "tendi.app",
+  "Tendi.app",
   "Contents",
   "MacOS",
   "tendi-desktop",

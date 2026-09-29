@@ -52,7 +52,7 @@ Local DMGs are not signed or notarized. Browser downloads may add Gatekeeper **q
 that metadata only for the app you intend to run:
 
 ```bash
-xattr -dr com.apple.quarantine /Applications/tendi.app
+xattr -dr com.apple.quarantine /Applications/Tendi.app
 ```
 
 ## Pull Requests

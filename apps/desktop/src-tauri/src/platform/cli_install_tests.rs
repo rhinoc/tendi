@@ -11,7 +11,7 @@ fn fixture(name: &str) -> (PathBuf, PathBuf, PathBuf) {
         "tendi-cli-install-{name}-{}-{unique}",
         std::process::id()
     ));
-    let bundled = root.join("tendi.app/Contents/MacOS/tendi");
+    let bundled = root.join("Tendi.app/Contents/MacOS/tendi");
     let command = root.join("bin/tendi");
     fs::create_dir_all(bundled.parent().unwrap()).unwrap();
     fs::write(&bundled, "binary").unwrap();

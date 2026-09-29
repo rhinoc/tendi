@@ -147,12 +147,12 @@ jobs:
 
             ## Installation
 
-            Open the DMG and drag `tendi.app` to Applications.
+            Open the DMG and drag `Tendi.app` to Applications.
 
             If macOS blocks first launch, verify the source and remove quarantine from the installed app:
 
             ```bash
-            xattr -dr com.apple.quarantine /Applications/tendi.app
+            xattr -dr com.apple.quarantine /Applications/Tendi.app
             ```
 
       - name: Upload updater manifest and packages

@@ -3935,7 +3935,7 @@ dependencies = [
 
 [[package]]
 name = "tendi-cli"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "anyhow",
  "chrono",
@@ -3947,7 +3947,7 @@ dependencies = [
 
 [[package]]
 name = "tendi-core"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -3972,7 +3972,7 @@ dependencies = [
 
 [[package]]
 name = "tendi-daemon"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "anyhow",
  "notify",
@@ -3984,7 +3984,7 @@ dependencies = [
 
 [[package]]
 name = "tendi-desktop"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "anyhow",
  "cocoa",
