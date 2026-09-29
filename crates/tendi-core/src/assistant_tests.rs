@@ -229,11 +229,11 @@ fn resets_timeout_when_stdout_produces_output() {
     let mut command = Command::new("sh");
     command.args([
         "-c",
-        "printf 'first'; sleep 0.15; printf 'second'; sleep 0.15",
+        "printf 'first'; sleep 1.5; printf 'second'; sleep 1.5",
     ]);
 
     let output =
-        run_command_with_timeout_streaming(command, &[], Duration::from_millis(250), None, None)
+        run_command_with_timeout_streaming(command, &[], Duration::from_millis(2_500), None, None)
             .unwrap();
 
     assert!(!output.timed_out);

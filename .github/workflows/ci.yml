@@ -66,55 +66,6 @@ jobs:
       - name: Rust check
         run: cargo check --workspace
 
-  performance:
-    name: Deterministic performance gate
-    runs-on: macos-14
-    env:
-      # macos-14 runners have higher filesystem and WebView startup variance than local runs.
-      # Add timing headroom for hosted runners. The overview payload now includes
-      # daily agent and project breakdowns; the hosted-runner sample measured 51 ms.
-      TENDI_PERF_PRIMARY_OVERVIEW_MS: 60
-      TENDI_PERF_PRIMARY_OVERVIEW_PAYLOAD_MIB: 0.625
-      TENDI_PERF_SECONDARY_SESSION_PAGE_MS: 100
-      TENDI_PERF_SECONDARY_LINKED_SESSIONS_MS: 50
-      TENDI_PERF_SECONDARY_RULE_DETAIL_MS: 50
-      TENDI_PERF_TERTIARY_SKILL_SAVE_MS: 120
-      TENDI_PERF_TERTIARY_PROMPT_CRUD_MS: 80
-      TENDI_PERF_TERTIARY_SETTINGS_SAVE_MS: 10
-      TENDI_PERF_CHART_OVERVIEW_TREND_MS: 120
-      TENDI_PERF_CHART_OVERVIEW_TREND_P95_MS: 180
-      TENDI_PERF_CHART_SKILL_SESSION_PROJECT_MS: 30
-      TENDI_PERF_CHART_SKILL_SESSION_PROJECT_P95_MS: 60
-      TENDI_PERF_CHART_RELATIONSHIP_GRAPH_MS: 120
-      TENDI_PERF_CHART_RELATIONSHIP_GRAPH_P95_MS: 180
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-
-      - uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache Rust build
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-${{ runner.arch }}-rust-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-${{ runner.arch }}-rust-
-
-      - name: Install frontend dependencies
-        run: npm ci --prefix apps/desktop
-
-      - name: Deterministic performance gate
-        run: |
-          cargo build --quiet -p tendi-cli --features perf-runner --bins
-          node scripts/perf-check.mjs --fast --no-build
-
   frontend:
     name: Frontend checks and E2E
     runs-on: macos-14
@@ -187,15 +138,13 @@ jobs:
 
   build-test:
     if: ${{ always() }}
-    needs: [rust, performance, frontend]
+    needs: [rust, frontend]
     runs-on: ubuntu-latest
     steps:
       - name: Require all validation jobs
         env:
           RUST_RESULT: ${{ needs.rust.result }}
-          PERFORMANCE_RESULT: ${{ needs.performance.result }}
           FRONTEND_RESULT: ${{ needs.frontend.result }}
         run: |
           test "$RUST_RESULT" = success
-          test "$PERFORMANCE_RESULT" = success
           test "$FRONTEND_RESULT" = success

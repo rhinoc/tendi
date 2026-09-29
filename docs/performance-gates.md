@@ -17,14 +17,10 @@ core APIs. The runner creates isolated temporary files and SQLite databases, the
 The only user-data secondary check is Config read: it reads and serializes one existing config but
 does not print or modify its content.
 
-CI runs the deterministic `--fast` profile, including the indexed Session batch-search gate. The
-full profile, local-data checks, and real-data WebView scenario remain local because they depend on
-the developer's Session database, browser, or running desktop app.
-
-CI uses macOS-runner-specific headroom for operation timing in the Overview, skill-save,
-settings-save, and chart gates. Overview allows 60 ms on hosted runners after a 51 ms measurement;
-the local default is 35 ms. Its payload limit is 0.625 MiB to cover daily agent and project
-breakdowns. Other RSS and payload limits remain unchanged.
+The Git pre-push hook runs the deterministic `--fast` profile, including the indexed Session
+batch-search gate. GitHub Actions does not repeat this gate. The full profile, local-data checks,
+and real-data WebView scenario remain local because they depend on the developer's Session
+database, browser, or running desktop app.
 
 The full gate additionally uses local Session data when available. It also creates a deterministic
 96 MiB transcript under `target/perf-fixtures`. Generated results are written to
