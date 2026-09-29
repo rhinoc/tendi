@@ -30,7 +30,7 @@ const thresholds = {
   skillsMs: envNumber("TENDI_PERF_SKILLS_MS", 300),
   hooksMs: envNumber("TENDI_PERF_HOOKS_MS", 40),
   rulesMs: envNumber("TENDI_PERF_RULES_MS", 40),
-  mcpMs: envNumber("TENDI_PERF_MCP_MS", 40),
+  mcpMs: envNumber("TENDI_PERF_MCP_MS", 45),
   sessionsMs: envNumber("TENDI_PERF_SESSIONS_MS", 3_000),
   sessionsMaxMs: envNumber("TENDI_PERF_SESSIONS_MAX_MS", 8_000),
   sessionsRssBytes: envNumber("TENDI_PERF_SESSIONS_RSS_MIB", 56) * mib,

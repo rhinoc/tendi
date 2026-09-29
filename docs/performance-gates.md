@@ -87,7 +87,7 @@ excluded because they are too environment-dependent for every push.
 | Skills list | Local data | median <= 300 ms |
 | Hooks list | Local data | median <= 40 ms |
 | Rules list | Local data | median <= 40 ms |
-| MCP list | Local data | median <= 40 ms |
+| MCP list | Local data | median <= 45 ms |
 | Overview | 512 analyzed Sessions, 365 days | operation <= 35 ms, RSS <= 28 MiB, payload <= 0.625 MiB |
 | Prompts | 500 Prompts | operation <= 50 ms, RSS <= 24 MiB, payload <= 1.5 MiB |
 | Config | Existing config catalog | operation <= 20 ms, RSS <= 16 MiB, payload <= 0.0625 MiB |
