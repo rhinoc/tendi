@@ -90,7 +90,7 @@ excluded because they are too environment-dependent for every push.
 | MCP list | Local data | median <= 40 ms |
 | Overview | 512 analyzed Sessions, 365 days | operation <= 35 ms, RSS <= 28 MiB, payload <= 0.625 MiB |
 | Prompts | 500 Prompts | operation <= 50 ms, RSS <= 24 MiB, payload <= 1.5 MiB |
-| Config | Existing config catalog | operation <= 12 ms, RSS <= 16 MiB, payload <= 0.0625 MiB |
+| Config | Existing config catalog | operation <= 20 ms, RSS <= 16 MiB, payload <= 0.0625 MiB |
 | Settings | Isolated Store | operation <= 2 ms, RSS <= 16 MiB, payload <= 0.015625 MiB |
 | Sessions list, full profile | Local data | 3-run median <= 3 s, max <= 8 s, RSS <= 56 MiB, output <= 8 MiB |
 

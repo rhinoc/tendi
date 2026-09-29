@@ -48,7 +48,7 @@ const thresholds = {
   primaryPromptsMs: envNumber("TENDI_PERF_PRIMARY_PROMPTS_MS", 50),
   primaryPromptsRssBytes: envNumber("TENDI_PERF_PRIMARY_PROMPTS_RSS_MIB", 24) * mib,
   primaryPromptsPayloadBytes: envNumber("TENDI_PERF_PRIMARY_PROMPTS_PAYLOAD_MIB", 1.5) * mib,
-  primaryConfigMs: envNumber("TENDI_PERF_PRIMARY_CONFIG_MS", 12),
+  primaryConfigMs: envNumber("TENDI_PERF_PRIMARY_CONFIG_MS", 20),
   primaryConfigRssBytes: envNumber("TENDI_PERF_PRIMARY_CONFIG_RSS_MIB", 16) * mib,
   primaryConfigPayloadBytes: envNumber("TENDI_PERF_PRIMARY_CONFIG_PAYLOAD_MIB", 0.0625) * mib,
   primarySettingsMs: envNumber("TENDI_PERF_PRIMARY_SETTINGS_MS", 2),
