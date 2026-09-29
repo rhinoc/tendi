@@ -154,16 +154,7 @@ fn skill_write_rolls_back_materialized_source() {
 fn skill_write_materializes_a_read_only_directory_without_a_symlink() {
     use std::os::unix::fs::PermissionsExt;
 
-    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../target")
-        .join(format!(
-            "tendi-skill-write-directory-{}-{}",
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
+    let root = temp_dir("tendi-skill-write-directory");
     let target = root.join(".agents/skills/example");
     fs::create_dir_all(&target).unwrap();
     fs::write(target.join("SKILL.md"), "source\n").unwrap();

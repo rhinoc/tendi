@@ -559,7 +559,16 @@ async function runFrozenNativeHoverParityFixture(page) {
     frozen?.classList.add("rowHover");
     scroll?.classList.add("rowHover");
   });
-  await page.waitForTimeout(150);
+  await page.waitForFunction(() => {
+    const frozen = document.querySelector("#align-frozen-hover-fixture .dataRow--frozenPane");
+    const scroll = document.querySelector("#align-frozen-hover-fixture .dataRow--scrollPane");
+    if (!frozen || !scroll) return false;
+    const frozenBg = getComputedStyle(frozen, "::after").backgroundColor;
+    const scrollBg = getComputedStyle(scroll, "::after").backgroundColor;
+    return frozenBg === scrollBg
+      && frozenBg !== "transparent"
+      && frozenBg !== "rgba(0, 0, 0, 0)";
+  }, { timeout: 1500 }).catch(() => {});
   const syncedHoverMetrics = await page.evaluate(() => {
     const frozen = document.querySelector("#align-frozen-hover-fixture .dataRow--frozenPane");
     const scroll = document.querySelector("#align-frozen-hover-fixture .dataRow--scrollPane");

@@ -357,13 +357,13 @@ impl SkillWriteTransaction {
             );
         }
 
-        if let Err(error) = fs::rename(path, &backup) {
+        if let Err(error) = rename_skill_directory(path, &backup) {
             let _ = fs::remove_dir_all(&temporary);
             return Err(error)
                 .with_context(|| format!("failed to preserve original skill {}", path.display()));
         }
-        if let Err(error) = fs::rename(&temporary, path) {
-            let _ = fs::rename(&backup, path);
+        if let Err(error) = rename_skill_directory(&temporary, path) {
+            let _ = rename_skill_directory(&backup, path);
             let _ = fs::remove_dir_all(&temporary);
             return Err(error)
                 .with_context(|| format!("failed to install writable skill {}", path.display()));
@@ -428,7 +428,9 @@ impl SkillWriteTransaction {
                 ));
                 continue;
             }
-            if let Err(error) = fs::rename(&materialization.backup, &materialization.target) {
+            if let Err(error) =
+                rename_skill_directory(&materialization.backup, &materialization.target)
+            {
                 failures.push(format!(
                     "failed to restore {}: {error:#}",
                     materialization.target.display()
@@ -4218,6 +4220,71 @@ fn remove_filesystem_entry(path: &Path) -> Result<()> {
         fs::remove_dir_all(path)?;
     } else {
         fs::remove_file(path)?;
+    }
+    Ok(())
+}
+
+fn rename_skill_directory(source: &Path, target: &Path) -> Result<()> {
+    let metadata = fs::symlink_metadata(source)?;
+    if !metadata.is_dir() {
+        fs::rename(source, target)?;
+        return Ok(());
+    }
+
+    let original_permissions = metadata.permissions();
+    let mut rename_permissions = original_permissions.clone();
+    let permissions_changed = {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let original_mode = rename_permissions.mode();
+            rename_permissions.set_mode(rename_permissions.mode() | 0o700);
+            original_mode != rename_permissions.mode()
+        }
+        #[cfg(not(unix))]
+        {
+            let changed = original_permissions.readonly();
+            rename_permissions.set_readonly(false);
+            changed
+        }
+    };
+    if permissions_changed {
+        fs::set_permissions(source, rename_permissions)?;
+    }
+
+    if let Err(error) = fs::rename(source, target) {
+        let restore = if permissions_changed {
+            fs::set_permissions(source, original_permissions)
+        } else {
+            Ok(())
+        };
+        return match restore {
+            Ok(()) => Err(error.into()),
+            Err(restore_error) => Err(anyhow::anyhow!(
+                "{error}; failed to restore permissions on {}: {restore_error}",
+                source.display()
+            )),
+        };
+    }
+
+    if permissions_changed {
+        if let Err(error) = fs::set_permissions(target, original_permissions.clone()) {
+            if let Err(rollback_error) = fs::rename(target, source) {
+                return Err(anyhow::anyhow!(
+                    "failed to restore directory permissions after rename: {error}; ".to_owned()
+                        + &format!("failed to move {} back: {rollback_error}", source.display())
+                ));
+            }
+            if let Err(restore_error) = fs::set_permissions(source, original_permissions) {
+                return Err(anyhow::anyhow!(
+                    "failed to restore directory permissions after rename: {error}; ".to_owned()
+                        + &format!("failed to restore {}: {restore_error}", source.display())
+                ));
+            }
+            return Err(anyhow::anyhow!(
+                "failed to restore directory permissions after rename: {error}"
+            ));
+        }
     }
     Ok(())
 }
