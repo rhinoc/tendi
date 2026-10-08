@@ -32,6 +32,95 @@ fn skill_reconciliation_projection_resources_are_scoped() {
 }
 
 #[test]
+fn skill_add_admission_includes_skills_cli_lock_resource() {
+    let root = std::env::temp_dir().join(format!(
+        "tendi-skill-add-admission-{}-{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    fs::create_dir_all(&root).unwrap();
+    let database = root.join("state.sqlite3");
+    let store = tendi_core::storage::Store::open(&database).unwrap();
+    let scan = tendi_core::skills::SkillScan {
+        roots: vec![],
+        skills: vec![],
+        warnings: vec![],
+    };
+    assert!(
+        store
+            .save_skills_for_workspace_if_revision(&root, &scan, tendi_core::Revision::ZERO)
+            .unwrap()
+    );
+    let daemon = Daemon::with_database(root.clone(), database, false);
+    let target: tendi_core::SkillTarget = tendi_core::AgentKind::Shared.into();
+    let options = tendi_core::skills::SkillAddOptions {
+        source: "https://example.com/skills".into(),
+        target: target.clone(),
+        scope: tendi_core::SkillInstallScope::Project,
+        skills: vec![],
+        copy: true,
+        overwrite: false,
+        visibility: tendi_core::skills::SkillVisibility::Auto,
+    };
+    let plan = tendi_core::skills::SkillAddPlan {
+        source: options.source.clone(),
+        source_kind: "github".into(),
+        source_ref: None,
+        source_root: root.join("source"),
+        target,
+        scope: options.scope,
+        mode: "copy".into(),
+        available: vec![],
+        selected: vec![],
+        operations: vec![],
+    };
+    daemon
+        .state
+        .add_preview
+        .lock()
+        .unwrap()
+        .insert(
+            "preview".into(),
+            SkillAddPreview {
+                options,
+                plan: plan.clone(),
+                source_fingerprint: String::new(),
+            },
+        )
+        .unwrap();
+
+    let resources = daemon
+        .rpc_resources(
+            &store,
+            "skills_add",
+            &json!({"previewId": "preview", "source": "https://example.com/skills"}),
+        )
+        .unwrap();
+    let admitted_paths = resources
+        .iter()
+        .find_map(|resource| match resource {
+            tendi_core::coordination::ResourceRequest::Paths { paths, .. } => Some(paths),
+            tendi_core::coordination::ResourceRequest::Named { .. } => None,
+        })
+        .expect("skill add admission should reserve file resources");
+    let required_paths =
+        tendi_core::skills::skill_add_resource_paths_for_workspace(&plan, &root).unwrap();
+    assert!(
+        required_paths
+            .iter()
+            .all(|path| admitted_paths.contains(path)),
+        "all daemon skill-add resources must be reserved before execution"
+    );
+
+    drop(daemon);
+    drop(store);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn cache_owned_skill_operations_do_not_pre_refresh_the_projection() {
     for method in [
         "skills_refresh",

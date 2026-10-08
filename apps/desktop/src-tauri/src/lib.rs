@@ -14,7 +14,7 @@ use std::{
         Arc, Mutex,
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use serde_json::Value;
@@ -1217,6 +1217,7 @@ pub fn run() {
         .manage(AssistantState::default())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
+            let setup_started = Instant::now();
             app.set_activation_policy(ActivationPolicy::Regular);
             let cwd = active_cwd().map_err(std::io::Error::other)?;
             let database_path =
@@ -1227,16 +1228,22 @@ pub fn run() {
                     serde_json::json!({ "database": database_path }),
                 );
             }
+            let store_started = Instant::now();
             let startup_store =
                 tendi_core::storage::Store::open_default().map_err(std::io::Error::other)?;
+            let store_ms = store_started.elapsed().as_secs_f64() * 1000.0;
+            let projects_started = Instant::now();
             let project_roots = startup_store
                 .list_projects()
                 .map_err(std::io::Error::other)?
                 .into_iter()
                 .map(|project| project.root_path)
                 .collect::<Vec<_>>();
+            let project_ms = projects_started.elapsed().as_secs_f64() * 1000.0;
+            let initialize_started = Instant::now();
             tendi_core::initialize_workspace(&startup_store, &cwd, &project_roots)
                 .map_err(std::io::Error::other)?;
+            let initialize_ms = initialize_started.elapsed().as_secs_f64() * 1000.0;
             app.manage(DaemonState {
                 daemon: Arc::new(tendi_daemon::Daemon::new(cwd)),
                 subscriptions: Mutex::new(HashMap::new()),
@@ -1246,6 +1253,16 @@ pub fn run() {
             let window = build_main_window(app.handle())?;
             let _ = window.show();
             let _ = window.set_focus();
+            tendi_core::logging::global().info(
+                "desktop setup completed",
+                serde_json::json!({
+                    "storeMs": store_ms,
+                    "projectsMs": project_ms,
+                    "initializeWorkspaceMs": initialize_ms,
+                    "totalMs": setup_started.elapsed().as_secs_f64() * 1000.0,
+                    "projectCount": project_roots.len(),
+                }),
+            );
             Ok(())
         })
         .on_menu_event(|app, event| {

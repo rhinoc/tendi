@@ -20,7 +20,7 @@ pub(crate) mod projects;
 pub use cost::AnalyticsCost;
 pub use projects::{AnalyticsProjectIdentity, AnalyticsProjectUsage};
 
-const ANALYTICS_PARSER_VERSION: u32 = 12;
+pub(crate) const ANALYTICS_PARSER_VERSION: u32 = 12;
 
 #[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -2085,9 +2085,10 @@ pub(crate) fn record_rate_limits(
     }
 }
 
-pub(crate) fn parser_state_is_current(serialized: &str) -> bool {
+pub(crate) fn parser_state_version(serialized: &str) -> u32 {
     serde_json::from_str::<AnalyticsParserState>(serialized)
-        .is_ok_and(|state| state.parser_version == ANALYTICS_PARSER_VERSION)
+        .map(|state| state.parser_version)
+        .unwrap_or_default()
 }
 
 fn message_usage(value: &Value) -> AnalyticsTokenUsage {

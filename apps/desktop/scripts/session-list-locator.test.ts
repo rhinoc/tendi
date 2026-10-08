@@ -9,6 +9,8 @@ import {
 
 const sessionsView = await readFile(new URL("../src/views/SessionsView.tsx", import.meta.url), "utf8");
 const sessionController = await readFile(new URL("../src/controllers/session-controller.ts", import.meta.url), "utf8");
+const sessionModels = await readFile(new URL("../src/lib/sessions.ts", import.meta.url), "utf8");
+const sessionTranscript = await readFile(new URL("../src/features/sessions/useSessionTranscript.ts", import.meta.url), "utf8");
 const sessionsCss = await readFile(new URL("../src/views/SessionsView.css", import.meta.url), "utf8");
 
 test("shows the list locator only for an expanded detail whose session is outside the list viewport", () => {
@@ -65,10 +67,11 @@ test("reveals only a target excluded by the current context and ignores missing 
 });
 
 test("uses logical row identity while keeping source-sensitive identity separate", () => {
-  assert.match(sessionsView, /return sessionIdentity\(session\)/);
-  assert.doesNotMatch(sessionsView, /function sessionTableRowId/);
-  assert.match(sessionController, /return JSON\.stringify\(\[session\.agent, session\.id\]\)/);
-  assert.doesNotMatch(sessionController, /JSON\.stringify\(\[session\.agent, session\.id, session\.path\]\)/);
+  assert.match(sessionsView, /getRowId=\{sessionTableRowId\}/);
+  assert.match(sessionController, /export function sessionTableRowId[\s\S]*?return JSON\.stringify\(\[session\.agent, session\.id\]\)/);
+  assert.match(sessionModels, /export function sessionIdentity[\s\S]*?session\.path/);
+  assert.match(sessionModels, /export function sessionLogicalIdentity[\s\S]*?session\.id/);
+  assert.doesNotMatch(sessionModels, /export function sessionLogicalIdentity[\s\S]*?session\.path/);
   assert.doesNotMatch(sessionsView, /preserveLocatedSessionPageRef/);
   assert.match(sessionsView, /scrollResetKey=\{`\$\{pageContextKey\}\\u0000\$\{boundedCurrentPage\}`\}/);
 });
@@ -76,6 +79,7 @@ test("uses logical row identity while keeping source-sensitive identity separate
 test("keeps transcript scroll identity stable when a source path changes", () => {
   assert.match(sessionsView, /useTranscriptVirtualizer\([\s\S]*?sessionExternalKey\(session\),\s*scrollRestorationReady/);
   assert.match(sessionsView, /const activeSessionLogicalKey = useMemo\(\(\) =>/);
-  assert.match(sessionsView, /if \(logicalIdentityChanged\) setItems\(\[\]\);/);
+  assert.match(sessionTranscript, /const logicalIdentityChanged = loadedLogicalIdentityRef\.current !== logicalKey/);
+  assert.match(sessionTranscript, /if \(logicalIdentityChanged\) setItems\(\[\]\);/);
   assert.match(sessionsCss, /\.transcript\s*\{[\s\S]*overflow-anchor:\s*none;/);
 });

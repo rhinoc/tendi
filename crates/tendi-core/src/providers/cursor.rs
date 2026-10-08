@@ -182,7 +182,7 @@ pub(crate) fn scan_project_mcp(
     }
 }
 
-fn cursor_state_db_path(projects_root: &Path) -> Option<PathBuf> {
+pub(super) fn cursor_state_db_path(projects_root: &Path) -> Option<PathBuf> {
     let home = projects_root.parent()?.parent()?;
     #[cfg(target_os = "macos")]
     let path = home.join("Library/Application Support/Cursor/User/globalStorage/state.vscdb");
@@ -1532,6 +1532,7 @@ impl super::AgentProvider for CursorProvider {
         _warnings: &mut Vec<String>,
         cache: Option<&SessionScanCache>,
     ) -> Result<()> {
+        let _project_scan = cursor_sessions::project_scan_cache();
         if let Some(home) = &ctx.home {
             cursor_sessions::scan_cursor_meta(
                 &home.join(".cursor/acp-sessions"),
@@ -1565,6 +1566,43 @@ impl super::AgentProvider for CursorProvider {
             home.join(".cursor/chats"),
             home.join(".cursor/projects"),
         ]
+    }
+
+    fn current_session_env_key(&self) -> Option<&'static str> {
+        Some("CURSOR_CONVERSATION_ID")
+    }
+
+    fn current_session_transcript(
+        &self,
+        ctx: &ProviderContext,
+        id: &str,
+        env: &BTreeMap<String, String>,
+    ) -> Result<Option<PathBuf>> {
+        if let Some(path) = env
+            .get("CURSOR_TRANSCRIPT_PATH")
+            .filter(|path| !path.is_empty())
+        {
+            let path = PathBuf::from(path);
+            if path.extension().is_none_or(|ext| ext != "jsonl") {
+                bail!(
+                    "Cursor current transcript must be JSONL: {}",
+                    path.display()
+                );
+            }
+            return Ok(path.is_file().then_some(path));
+        }
+        let roots = env
+            .get("AGENT_TRANSCRIPTS")
+            .map(|path| vec![PathBuf::from(path)])
+            .unwrap_or_else(|| {
+                ctx.home
+                    .as_ref()
+                    .map(|home| vec![home.join(".cursor/projects")])
+                    .unwrap_or_default()
+            });
+        sessions::current::find_transcript(&roots, 4, |path| {
+            self.session_id_from_path(path).as_deref() == Some(id)
+        })
     }
 
     fn scan_rules(
@@ -1669,8 +1707,11 @@ impl super::AgentProvider for CursorProvider {
     }
 
     fn session_requires_rescan(&self, session: &SessionRecord) -> Option<bool> {
+        if !cursor_sessions::cached_project_is_current(session) {
+            return Some(true);
+        }
         if session.started_at.is_some() && session.updated_at.is_some() {
-            return None;
+            return Some(false);
         }
         if session
             .path
@@ -1678,12 +1719,13 @@ impl super::AgentProvider for CursorProvider {
             .and_then(|extension| extension.to_str())
             != Some("jsonl")
         {
-            return None;
+            return Some(false);
         }
-        fs::read_to_string(&session.path)
-            .ok()
-            .is_some_and(|text| text.contains("<timestamp>") && text.contains("</timestamp>"))
-            .then_some(true)
+        Some(
+            fs::read_to_string(&session.path)
+                .ok()
+                .is_some_and(|text| text.contains("<timestamp>") && text.contains("</timestamp>")),
+        )
     }
 
     fn update_session_metadata(
@@ -1792,7 +1834,7 @@ impl super::AgentProvider for CursorProvider {
     }
 
     fn infer_session_project(&self, path: &Path, project: Option<PathBuf>) -> Option<PathBuf> {
-        project.or_else(|| cursor_sessions::cursor_project_from_transcript_path(path))
+        cursor_sessions::session_project(path, project)
     }
 
     fn infer_meta_project(&self, value: &Value) -> Option<PathBuf> {
@@ -1821,6 +1863,23 @@ impl super::AgentProvider for CursorProvider {
 
     fn session_scan_source_paths(&self, path: &Path) -> Vec<PathBuf> {
         cursor_sessions::session_scan_source_paths(path)
+    }
+
+    fn session_scan_cache_scope(&self) -> Box<dyn std::any::Any> {
+        Box::new(cursor_sessions::project_scan_cache())
+    }
+
+    fn session_scan_source_state_current(
+        &self,
+        path: &Path,
+        _cached_mtime: i64,
+        cached_size: i64,
+    ) -> Option<bool> {
+        cursor_sessions::cursor_store_source_state_current(path, cached_size)
+    }
+
+    fn session_scan_source_index_state(&self, path: &Path) -> Option<(i64, i64)> {
+        cursor_sessions::cursor_store_source_index_state(path)
     }
 
     fn session_project_aliases(&self, path: &str) -> Vec<String> {
@@ -2015,11 +2074,20 @@ impl super::AgentProvider for CursorProvider {
         crate::hooks::delete_json_hooks(requests, source)
     }
 
-    fn set_hook_enabled(&self, request: &HookSetEnabledRequest, source: &str) -> Result<String> {
-        if request.path.extension().and_then(|value| value.to_str()) != Some("json") {
+    fn set_hooks_enabled(
+        &self,
+        requests: &[HookSetEnabledRequest],
+        source: &str,
+    ) -> Result<String> {
+        if requests[0]
+            .path
+            .extension()
+            .and_then(|value| value.to_str())
+            != Some("json")
+        {
             bail!("Cursor hook source must be JSON");
         }
-        crate::hooks::set_json_hook_enabled(request, source)
+        crate::hooks::set_json_hooks_enabled(requests, source)
     }
 
     fn backup_hook_entry(&self, path: &Path, identity: &HookSourceMatch) -> Result<Value> {

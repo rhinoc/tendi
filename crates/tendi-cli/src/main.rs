@@ -14,6 +14,8 @@ use tendi_core::generated::runtime_contract::{AgentKind as RuntimeAgentKind, Jso
 mod runtime_client;
 use runtime_client::RuntimeClient;
 
+mod session_cli;
+
 #[derive(Debug, Parser)]
 #[command(name = "tendi", version, about = "Local agent control plane")]
 struct Cli {
@@ -255,6 +257,13 @@ enum SetupCommand {
 
 #[derive(Debug, Subcommand)]
 enum SessionCommand {
+    /// Identify the session that invoked Tendi.
+    Current {
+        #[arg(long)]
+        agent: Option<AgentArg>,
+        #[arg(long)]
+        json: bool,
+    },
     List {
         #[arg(long)]
         json: bool,
@@ -263,13 +272,25 @@ enum SessionCommand {
         query: String,
         #[arg(long)]
         json: bool,
+        #[command(flatten)]
+        options: session_cli::SearchArgs,
     },
-    Transcript {
-        path: String,
-        #[arg(long)]
-        agent: AgentArg,
+    /// Scan provider sources and update the persistent search index.
+    Refresh {
         #[arg(long)]
         json: bool,
+    },
+    Transcript {
+        #[arg(required_unless_present_any = ["current", "session"], conflicts_with_all = ["current", "session"])]
+        path: Option<String>,
+        #[arg(long, conflicts_with = "session")]
+        current: bool,
+        #[arg(long, required_unless_present_any = ["current", "session"])]
+        agent: Option<AgentArg>,
+        #[arg(long)]
+        json: bool,
+        #[command(flatten)]
+        options: session_cli::TranscriptArgs,
     },
 }
 
@@ -538,26 +559,6 @@ fn try_daemon_sessions_snapshot(
         RuntimeClient::decode_sessions_snapshot_response,
     )?
     .map(Ok)
-    .transpose()
-}
-
-fn try_daemon_sessions_search(
-    cwd: &std::path::Path,
-    query: String,
-) -> Result<Option<Vec<tendi_core::SessionSearchHit>>> {
-    let request = tendi_core::generated::runtime_contract::SessionsSearchRequest {
-        query,
-        candidates: None,
-    };
-    try_daemon_request(
-        cwd,
-        |runtime_client| Ok(runtime_client.sessions_search(request)),
-        RuntimeClient::decode_sessions_search_response,
-    )?
-    .map(|hits| {
-        let value = serde_json::to_value(hits)?;
-        Ok(serde_json::from_value(value)?)
-    })
     .transpose()
 }
 
@@ -1724,6 +1725,22 @@ fn main() -> Result<()> {
             }
         },
         Command::Sessions { command } => match command {
+            SessionCommand::Current { agent, json } => {
+                let session = tendi_core::sessions::current_session(&cwd, agent.map(Into::into))?;
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&session)?);
+                } else {
+                    println!("agent: {}\nid: {}", session.agent.label(), session.id);
+                    println!(
+                        "path: {}",
+                        session
+                            .path
+                            .as_ref()
+                            .map(|path| path.display().to_string())
+                            .unwrap_or_else(|| "unavailable".to_string())
+                    );
+                }
+            }
             SessionCommand::List { json } => {
                 if let Some(snapshot) = try_daemon_sessions_snapshot(&cwd)? {
                     let scope_key = workspace_scope_key(&cwd)?;
@@ -1796,59 +1813,15 @@ fn main() -> Result<()> {
                     print_sessions(&report.sessions)?;
                 }
             }
-            SessionCommand::Search { query, json } => {
-                if let Some(hits) = try_daemon_sessions_search(&cwd, query.clone())? {
-                    if json {
-                        println!("{}", serde_json::to_string_pretty(&hits)?);
-                    } else {
-                        print_session_search_hits(&hits)?;
-                    }
-                    return Ok(());
-                }
-                let store = tendi_core::storage::Store::open_default()?;
-                let scope_key = workspace_scope_key(&cwd)?;
-                let cache = store.session_scan_cache_for_scope(&scope_key)?;
-                let report = tendi_core::sessions::scan_sessions_with_additional_roots_cached(
-                    &cwd,
-                    &[],
-                    &cache,
-                )?;
-                let tendi_core::sessions::SessionScan { sessions, warnings } = report;
-                let mut sessions = sessions;
-                store.resolve_session_projects_for_scope(&scope_key, &mut sessions)?;
-                store.save_sessions_at_for_scope(
-                    &scope_key,
-                    &tendi_core::sessions::SessionScan {
-                        sessions: sessions.clone(),
-                        warnings: warnings.clone(),
-                    },
-                    unix_now(),
-                )?;
-                refresh_session_search(&store, &scope_key)?;
-                let hits = store.search_sessions_for_scope(&scope_key, &query, None)?;
-                if json {
-                    println!("{}", serde_json::to_string_pretty(&hits)?);
-                } else {
-                    print_session_search_hits(&hits)?;
-                }
+            SessionCommand::Search { query, json, options } => {
+                session_cli::search(&cwd, query, options, json)?;
             }
-            SessionCommand::Transcript { path, agent, json } => {
-                if json {
-                    let stdout = std::io::stdout();
-                    let mut output = stdout.lock();
-                    tendi_core::transcript::write_transcript_json(
-                        std::path::Path::new(&path),
-                        agent.into(),
-                        &mut output,
-                    )?;
-                    writeln!(output)?;
-                } else {
-                    let transcript = tendi_core::transcript::parse_transcript(
-                        std::path::Path::new(&path),
-                        agent.into(),
-                    )?;
-                    print_transcript(&transcript.items)?;
-                }
+            SessionCommand::Refresh { json } => {
+                let report = session_cli::refresh(&cwd)?;
+                if json { println!("{}", serde_json::to_string(&report)?); }
+            }
+            SessionCommand::Transcript { path, current, agent, json, options } => {
+                session_cli::transcript(&cwd, path, current, agent, options, json)?;
             }
         },
         Command::Rules { command } => match command {
@@ -2240,25 +2213,10 @@ fn print_sessions(sessions: &[tendi_core::SessionRecord]) -> Result<()> {
     Ok(())
 }
 
-fn print_session_search_hits(hits: &[tendi_core::SessionSearchHit]) -> Result<()> {
-    let mut stdout = std::io::stdout().lock();
-    for hit in hits {
-        writeln!(
-            stdout,
-            "[{}] {}  {}",
-            agent_label(hit.session.agent),
-            hit.session.id,
-            hit.session.title.as_deref().unwrap_or("-"),
-        )?;
-        writeln!(stdout, "  {}", hit.search_snippet)?;
-    }
-    Ok(())
-}
-
 fn print_transcript(items: &[tendi_core::TranscriptItem]) -> Result<()> {
     let mut stdout = std::io::stdout().lock();
     writeln!(stdout, "{:<9} {:<8} {:<16} body", "kind", "time", "tag")?;
-    for item in items.iter().take(120) {
+    for item in items {
         writeln!(
             stdout,
             "{:<9} {:<8} {:<16} {}",
@@ -2440,6 +2398,9 @@ fn maybe_offer_bundled_skill(command: &Command) -> Result<()> {
             command: SkillCommand::Guide { .. }
         } | Command::Setup {
             command: SetupCommand::Skills { .. }
+        } | Command::Sessions {
+            command: SessionCommand::Current { .. }
+                | SessionCommand::Transcript { current: true, .. }
         }
     ) {
         return Ok(());

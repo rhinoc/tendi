@@ -84,12 +84,21 @@ const thresholds = {
   tertiaryHookDeleteMs: envNumber("TENDI_PERF_TERTIARY_HOOK_DELETE_MS", 55),
   tertiaryHookDeleteRssBytes: envNumber("TENDI_PERF_TERTIARY_HOOK_DELETE_RSS_MIB", 24) * mib,
   tertiaryHookDeletePayloadBytes: envNumber("TENDI_PERF_TERTIARY_HOOK_DELETE_PAYLOAD_MIB", 0.25) * mib,
+  tertiaryHookToggleMs: envNumber("TENDI_PERF_TERTIARY_HOOK_TOGGLE_MS", 55),
+  tertiaryHookToggleRssBytes: envNumber("TENDI_PERF_TERTIARY_HOOK_TOGGLE_RSS_MIB", 24) * mib,
+  tertiaryHookTogglePayloadBytes: envNumber("TENDI_PERF_TERTIARY_HOOK_TOGGLE_PAYLOAD_MIB", 0.25) * mib,
+  tertiaryMcpToggleMs: envNumber("TENDI_PERF_TERTIARY_MCP_TOGGLE_MS", 40),
+  tertiaryMcpToggleRssBytes: envNumber("TENDI_PERF_TERTIARY_MCP_TOGGLE_RSS_MIB", 16) * mib,
+  tertiaryMcpTogglePayloadBytes: envNumber("TENDI_PERF_TERTIARY_MCP_TOGGLE_PAYLOAD_MIB", 0.015625) * mib,
   tertiaryPromptCrudMs: envNumber("TENDI_PERF_TERTIARY_PROMPT_CRUD_MS", 40),
   tertiaryPromptCrudRssBytes: envNumber("TENDI_PERF_TERTIARY_PROMPT_CRUD_RSS_MIB", 24) * mib,
   tertiaryPromptCrudPayloadBytes: envNumber("TENDI_PERF_TERTIARY_PROMPT_CRUD_PAYLOAD_MIB", 1) * mib,
   tertiaryRuleSaveMs: envNumber("TENDI_PERF_TERTIARY_RULE_SAVE_MS", 40),
   tertiaryRuleSaveRssBytes: envNumber("TENDI_PERF_TERTIARY_RULE_SAVE_RSS_MIB", 16) * mib,
   tertiaryRuleSavePayloadBytes: envNumber("TENDI_PERF_TERTIARY_RULE_SAVE_PAYLOAD_MIB", 0.25) * mib,
+  tertiaryRuleDeleteMs: envNumber("TENDI_PERF_TERTIARY_RULE_DELETE_MS", 40),
+  tertiaryRuleDeleteRssBytes: envNumber("TENDI_PERF_TERTIARY_RULE_DELETE_RSS_MIB", 16) * mib,
+  tertiaryRuleDeletePayloadBytes: envNumber("TENDI_PERF_TERTIARY_RULE_DELETE_PAYLOAD_MIB", 0.015625) * mib,
   tertiarySettingsSaveMs: envNumber("TENDI_PERF_TERTIARY_SETTINGS_SAVE_MS", 3),
   tertiarySettingsSaveRssBytes: envNumber("TENDI_PERF_TERTIARY_SETTINGS_SAVE_RSS_MIB", 16) * mib,
   tertiarySettingsSavePayloadBytes: envNumber("TENDI_PERF_TERTIARY_SETTINGS_SAVE_PAYLOAD_MIB", 0.015625) * mib,
@@ -202,6 +211,16 @@ benchmarkCoreScenario("tertiary-hook-delete", {
   maxRssBytes: thresholds.tertiaryHookDeleteRssBytes,
   maxPayloadBytes: thresholds.tertiaryHookDeletePayloadBytes,
 });
+benchmarkCoreScenario("tertiary-hook-toggle", {
+  maxOperationMs: thresholds.tertiaryHookToggleMs,
+  maxRssBytes: thresholds.tertiaryHookToggleRssBytes,
+  maxPayloadBytes: thresholds.tertiaryHookTogglePayloadBytes,
+});
+benchmarkCoreScenario("tertiary-mcp-toggle", {
+  maxOperationMs: thresholds.tertiaryMcpToggleMs,
+  maxRssBytes: thresholds.tertiaryMcpToggleRssBytes,
+  maxPayloadBytes: thresholds.tertiaryMcpTogglePayloadBytes,
+});
 benchmarkCoreScenario("tertiary-prompt-crud", {
   maxOperationMs: thresholds.tertiaryPromptCrudMs,
   maxRssBytes: thresholds.tertiaryPromptCrudRssBytes,
@@ -211,6 +230,11 @@ benchmarkCoreScenario("tertiary-rule-save", {
   maxOperationMs: thresholds.tertiaryRuleSaveMs,
   maxRssBytes: thresholds.tertiaryRuleSaveRssBytes,
   maxPayloadBytes: thresholds.tertiaryRuleSavePayloadBytes,
+});
+benchmarkCoreScenario("tertiary-rule-delete", {
+  maxOperationMs: thresholds.tertiaryRuleDeleteMs,
+  maxRssBytes: thresholds.tertiaryRuleDeleteRssBytes,
+  maxPayloadBytes: thresholds.tertiaryRuleDeletePayloadBytes,
 });
 benchmarkCoreScenario("tertiary-settings-save", {
   maxOperationMs: thresholds.tertiarySettingsSaveMs,
@@ -273,6 +297,8 @@ if (options.profile === "full") {
   else skip("desktop-idle-cpu", "pass --app-pid <pid> while the app is idle");
 }
 
+if (options.only?.size) failNow(`unknown or unavailable checks: ${[...options.only].join(", ")}`);
+
 const report = {
   schemaVersion: 2,
   createdAt: new Date().toISOString(),
@@ -299,6 +325,7 @@ function parseArgs(args) {
     saveBaseline: false,
     baseline: null,
     appPid: null,
+    only: null,
   };
   for (let index = 0; index < args.length; index += 1) {
     const arg = args[index];
@@ -309,6 +336,7 @@ function parseArgs(args) {
     else if (arg === "--save-baseline") parsed.saveBaseline = true;
     else if (arg === "--baseline") parsed.baseline = args[++index];
     else if (arg === "--app-pid") parsed.appPid = Number(args[++index]);
+    else if (arg === "--only") parsed.only = new Set((args[++index] ?? "").split(",").filter(Boolean));
     else if (arg === "--help" || arg === "-h") {
       writeStdout(`Usage: node scripts/perf-check.mjs [options]
 
@@ -316,6 +344,7 @@ function parseArgs(args) {
   --full                    Run local-data and memory checks (default)
   --no-build                Reuse target/debug/tendi and tendi-perf
   --app-pid <pid>           Include a 10-second idle CPU gate
+  --only <a,b>              Run selected fast checks without other local-data checks
   --save-baseline           Save target/perf/baseline.json
   --baseline <path>         Compare with a saved result
 
@@ -329,7 +358,15 @@ Thresholds can be overridden with TENDI_PERF_* environment variables.`);
   if (parsed.appPid !== null && (!Number.isInteger(parsed.appPid) || parsed.appPid <= 0)) {
     failNow("--app-pid must be a positive integer");
   }
+  if (parsed.only && (parsed.profile !== "fast" || parsed.only.size === 0)) {
+    failNow("--only requires --fast and at least one check name");
+  }
   return parsed;
+}
+
+function selected(name) {
+  if (!options.only) return true;
+  return options.only.delete(name);
 }
 
 function envNumber(name, fallback) {
@@ -363,6 +400,7 @@ function runBinary(args, captureStderr = false) {
 }
 
 function benchmarkRepeated(name, args, maxMedianMs) {
+  if (!selected(name)) return;
   runBinary(args);
   const samplesMs = [];
   for (let index = 0; index < 5; index += 1) samplesMs.push(runBinary(args).elapsedMs);
@@ -372,6 +410,7 @@ function benchmarkRepeated(name, args, maxMedianMs) {
 }
 
 function benchmarkCoreScenario(name, limits) {
+  if (!selected(name)) return;
   const measured = measureExecutable(name, perfBinary, [name], true);
   let scenario;
   try {
@@ -402,6 +441,7 @@ function benchmarkCoreScenario(name, limits) {
 }
 
 function benchmarkFrontendScenario(name, scenario, limits) {
+  if (!selected(name)) return;
   if (!existsSync(chartPerformanceRunner)) failNow(`missing chart performance runner: ${chartPerformanceRunner}`);
   const measured = measureExecutable(
     name,

@@ -1,7 +1,7 @@
 use std::{
     collections::BTreeMap,
     fs,
-    io::{BufRead, BufReader},
+    io::{BufRead, BufReader, Seek, SeekFrom},
     path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -20,7 +20,6 @@ use crate::{
 
 const OBSERVED_CONFIDENCE: &str = "observed";
 const EXPLICIT_CONFIDENCE: &str = "explicit";
-const SESSION_SKILL_INDEX_VERSION: &str = "7";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionSkillLink {
@@ -120,6 +119,7 @@ pub fn run_index_for_scope(
     scope_key: &ScopeKey,
     force: bool,
 ) -> Result<SessionSkillIndexReport> {
+    let started = std::time::Instant::now();
     let store = Store::open_default()?;
     let _lease = crate::coordination::ResourceLease::try_acquire(
         store.path(),
@@ -128,7 +128,8 @@ pub fn run_index_for_scope(
     .context("session-skill index is already running for this scope")?;
     let skill_scan = load_skills_for_index(&store, cwd)?;
     let session_scan = store.list_sessions_for_scope(scope_key)?;
-    store.ensure_session_skill_index_version_for_scope(scope_key, SESSION_SKILL_INDEX_VERSION)?;
+    let loaded_at = started.elapsed();
+    crate::migrations::ensure_session_skill_index_version_for_scope(&store, scope_key)?;
     if force {
         store.clear_session_skill_index_for_scope(scope_key)?;
     }
@@ -139,7 +140,9 @@ pub fn run_index_for_scope(
     } else {
         store.session_skill_index_states_for_scope(scope_key)?
     };
+    let prepared_at = started.elapsed();
     let mut parsed = 0;
+    let mut appended = 0;
     let mut skipped = 0;
     let mut failed = 0;
 
@@ -164,17 +167,25 @@ pub fn run_index_for_scope(
             session.agent.label().to_string(),
             session.path.display().to_string(),
         );
-        if indexed_states
-            .get(&index_key)
-            .is_some_and(|indexed| *indexed == (state.file_mtime, state.file_size))
-        {
+        let previous = indexed_states.get(&index_key).copied();
+        if previous == Some((state.file_mtime, state.file_size)) {
             skipped += 1;
             continue;
         }
 
-        match extract_session_skill_links(session, &lookup) {
+        let append_offset = session_skill_append_offset(session, &state, previous);
+        match extract_session_skill_links_from_offset(session, &lookup, append_offset.unwrap_or(0))
+        {
             Ok(links) => {
-                store.replace_session_skill_links_for_scope(scope_key, session, &state, &links)?;
+                if append_offset.is_some() {
+                    store
+                        .append_session_skill_links_for_scope(scope_key, session, &state, &links)?;
+                    appended += 1;
+                } else {
+                    store.replace_session_skill_links_for_scope(
+                        scope_key, session, &state, &links,
+                    )?;
+                }
                 parsed += 1;
             }
             Err(err) => {
@@ -191,6 +202,21 @@ pub fn run_index_for_scope(
     }
 
     let status = store.session_skill_index_status_for_scope(scope_key, false)?;
+    crate::logging::global().info(
+        "session skill index completed",
+        serde_json::json!({
+            "scopeKey": scope_key,
+            "force": force,
+            "totalSessions": session_scan.sessions.len(),
+            "parsed": parsed,
+            "appended": appended,
+            "skipped": skipped,
+            "failed": failed,
+            "loadMs": loaded_at.as_secs_f64() * 1000.0,
+            "prepareMs": (prepared_at - loaded_at).as_secs_f64() * 1000.0,
+            "indexMs": (started.elapsed() - prepared_at).as_secs_f64() * 1000.0,
+        }),
+    );
     Ok(SessionSkillIndexReport {
         status,
         parsed,
@@ -226,6 +252,20 @@ pub fn session_file_state(path: &Path) -> Result<SessionFileState> {
     })
 }
 
+fn session_skill_append_offset(
+    session: &SessionRecord,
+    state: &SessionFileState,
+    previous: Option<(i64, i64)>,
+) -> Option<u64> {
+    let (mtime, size) = previous?;
+    (session.agent == AgentKind::Codex
+        && size >= 0
+        && state.file_size > size
+        && state.file_mtime >= mtime)
+        .then_some(size as u64)
+        .filter(|offset| crate::sessions::is_line_boundary(&session.path, *offset))
+}
+
 fn session_skill_index_state(session: &SessionRecord) -> Result<SessionFileState> {
     let provider = crate::providers::agent_provider(session.agent);
     let mut source_paths = provider.session_scan_source_paths(&session.path);
@@ -238,10 +278,18 @@ fn session_skill_index_state(session: &SessionRecord) -> Result<SessionFileState
 
     let mut digest = Sha256::new();
     for path in source_paths {
-        let state = session_file_state(&path).unwrap_or(SessionFileState {
-            file_mtime: 0,
-            file_size: 0,
-        });
+        let state = provider
+            .session_scan_source_index_state(&path)
+            .map(|(file_mtime, file_size)| SessionFileState {
+                file_mtime,
+                file_size,
+            })
+            .unwrap_or_else(|| {
+                session_file_state(&path).unwrap_or(SessionFileState {
+                    file_mtime: 0,
+                    file_size: 0,
+                })
+            });
         digest.update(path.to_string_lossy().as_bytes());
         digest.update(state.file_mtime.to_le_bytes());
         digest.update(state.file_size.to_le_bytes());
@@ -255,9 +303,18 @@ fn session_skill_index_state(session: &SessionRecord) -> Result<SessionFileState
     })
 }
 
+#[cfg(test)]
 fn extract_session_skill_links(
     session: &SessionRecord,
     lookup: &SkillLookup,
+) -> Result<Vec<SessionSkillLink>> {
+    extract_session_skill_links_from_offset(session, lookup, 0)
+}
+
+fn extract_session_skill_links_from_offset(
+    session: &SessionRecord,
+    lookup: &SkillLookup,
+    offset: u64,
 ) -> Result<Vec<SessionSkillLink>> {
     let mut links_by_key: BTreeMap<String, SessionSkillLink> = BTreeMap::new();
 
@@ -266,8 +323,9 @@ fn extract_session_skill_links(
         provider.session_path_role(&session.path),
         crate::providers::SessionPathRole::Transcript | crate::providers::SessionPathRole::Metadata
     ) {
-        let file = fs::File::open(&session.path)
+        let mut file = fs::File::open(&session.path)
             .with_context(|| format!("failed to read {}", session.path.display()))?;
+        file.seek(SeekFrom::Start(offset))?;
         for line in BufReader::new(file).lines() {
             let line =
                 line.with_context(|| format!("failed to read {}", session.path.display()))?;

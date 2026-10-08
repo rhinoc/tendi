@@ -1049,6 +1049,62 @@ enabled = false
 }
 
 #[test]
+fn batch_toggles_codex_hooks_in_one_toml_source() {
+    let root = std::env::temp_dir().join(format!(
+        "tendi-hook-batch-toggle-{}-{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos(),
+    ));
+    fs::create_dir_all(&root).unwrap();
+    let path = root.join("config.toml");
+    fs::write(
+        &path,
+        r#"
+[[hooks.PreToolUse]]
+matcher = "Bash"
+[[hooks.PreToolUse.hooks]]
+type = "command"
+command = "/bin/echo one"
+enabled = false
+[[hooks.PreToolUse.hooks]]
+type = "command"
+command = "/bin/echo two"
+enabled = false
+"#,
+    )
+    .unwrap();
+    let expected_trust_hash = super::sha256_file(&path).unwrap();
+    let requests = ["/bin/echo one", "/bin/echo two"]
+        .into_iter()
+        .map(|command| super::HookSetEnabledRequest {
+            agent: AgentKind::Codex,
+            path: path.clone(),
+            expected_trust_hash: expected_trust_hash.clone(),
+            event: "PreToolUse".to_string(),
+            matcher: Some("Bash".to_string()),
+            hook_type: Some("command".to_string()),
+            command: Some(command.to_string()),
+            url: None,
+            prompt: None,
+            filter: None,
+            status_message: None,
+            enabled: true,
+        })
+        .collect();
+    super::set_hooks_enabled(requests).unwrap();
+    let mut hooks = Vec::new();
+    let mut warnings = Vec::new();
+    scan_codex_config_hooks(&path, &mut hooks, &mut warnings);
+    assert!(warnings.is_empty());
+    assert_eq!(hooks.len(), 2);
+    assert!(hooks.iter().all(|hook| hook.enabled));
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn reads_known_hook_source_with_management_metadata() {
     let root = std::env::temp_dir().join(format!(
         "tendi-hooks-read-source-{}-{}",

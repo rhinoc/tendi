@@ -10,6 +10,9 @@ const ANALYTICS_MIGRATION_BATCH_SIZE: i64 = 32;
 pub(super) const FS_MANIFEST_REBUILD_PENDING_KEY: &str = "storage.fs_manifest_rebuild_pending";
 
 pub(super) fn bootstrap(conn: &Connection) -> Result<()> {
+    if crate::storage::shared_cache::installed(conn)? {
+        return Ok(());
+    }
     let fs_manifest_missing = !table_exists(conn, "fs_manifest")?;
     conn.execute_batch(
         "
@@ -499,6 +502,9 @@ fn mark_all_fs_manifest_projections_stale(conn: &Connection) -> Result<()> {
 }
 
 pub(super) fn rebuild_scoped_session_skill_links(conn: &Connection) -> Result<()> {
+    if crate::storage::shared_cache::installed(conn)? {
+        return crate::storage::shared_cache::rebuild_skill_links(conn);
+    }
     conn.execute_batch(
         "PRAGMA writable_schema = ON;
          DELETE FROM sqlite_master
@@ -536,6 +542,8 @@ pub(super) fn rebuild_scoped_session_skill_links(conn: &Connection) -> Result<()
 
 pub(super) fn needs_current_shape(conn: &Connection) -> Result<bool> {
     Ok(!table_exists(conn, "storage_migrations")?
+        || !table_exists(conn, "session_scan_empty_sources")?
+        || !table_exists(conn, "skill_installation_times")?
         || !table_exists(conn, "fs_manifest")?
         || !column_exists(conn, "scoped_session_search_index", "search_checkpoint")?
         || !column_exists(conn, "scoped_sessions", "cached_input_tokens")?
@@ -566,11 +574,35 @@ pub(super) fn has_user_schema(conn: &Connection) -> Result<bool> {
 /// shape. Unreleased scoped-schema revisions are not migration boundaries.
 /// New scoped projections start empty and are populated by normal source scans.
 pub(super) fn run(conn: &Connection, existing_schema: bool) -> Result<()> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS session_scan_empty_sources (
+            agent TEXT NOT NULL,
+            path TEXT NOT NULL,
+            parser_version TEXT NOT NULL,
+            sources_json TEXT NOT NULL,
+            PRIMARY KEY (agent, path)
+        );",
+    )?;
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS skill_installation_times (
+            skill_path TEXT PRIMARY KEY,
+            installation_id TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_skill_installation_times_id
+            ON skill_installation_times(installation_id);",
+    )?;
+    if crate::storage::shared_cache::installed(conn)? {
+        crate::storage::shared_cache::refresh_projections(conn)?;
+        super::session_skill_index::invalidate_previous_versions(conn)?;
+        conn.pragma_update(None, "user_version", STORAGE_SCHEMA_VERSION)?;
+        return Ok(());
+    }
     let previous_version: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
     let analytics_migration_needed = analytics_json_needs_migration(conn)?;
     let legacy_search_records_exist = table_exists(conn, "scoped_session_search_records")?;
-    let reset_session_search = existing_schema
-        && (previous_version < STORAGE_SCHEMA_VERSION || legacy_search_records_exist);
+    let reset_session_search =
+        existing_schema && (previous_version < 3 || legacy_search_records_exist);
     ensure_prompt_tags_column(conn)?;
     ensure_skill_visibility_lock_column(conn)?;
     ensure_session_search_index_version_column(conn)?;
@@ -585,7 +617,7 @@ pub(super) fn run(conn: &Connection, existing_schema: bool) -> Result<()> {
     initialize_migration_state(
         conn,
         SESSION_LIST_MIGRATION_KEY,
-        existing_schema && (previous_version < STORAGE_SCHEMA_VERSION || list_columns_added),
+        existing_schema && (previous_version < 3 || list_columns_added),
     )?;
     initialize_migration_state(conn, ANALYTICS_MIGRATION_KEY, analytics_migration_needed)?;
     conn.execute(
@@ -614,6 +646,8 @@ pub(super) fn run(conn: &Connection, existing_schema: bool) -> Result<()> {
             [],
         )?;
     }
+    crate::storage::shared_cache::install(conn)?;
+    super::session_skill_index::invalidate_previous_versions(conn)?;
     conn.execute_batch(&format!(
         "PRAGMA user_version = {};",
         STORAGE_SCHEMA_VERSION
@@ -805,7 +839,7 @@ pub(super) struct MigrationBatch {
 fn table_exists(conn: &Connection, table: &str) -> Result<bool> {
     conn.query_row(
         "SELECT EXISTS(
-             SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1
+             SELECT 1 FROM sqlite_master WHERE type IN ('table', 'view') AND name = ?1
          )",
         [table],
         |row| row.get(0),

@@ -16,7 +16,6 @@ fn canonical_skill_visibility_path(path: &Path) -> PathBuf {
 }
 
 const INSTALLATION_SCOPE_KEY: &str = "installation:default";
-const GIT_SKILL_SNAPSHOT_CLEANUP_KEY: &str = "storage.git_skill_snapshots_removed_v1";
 
 fn installation_scope_key() -> ScopeKey {
     ScopeKey::new(INSTALLATION_SCOPE_KEY).expect("installation scope key is valid")
@@ -30,85 +29,6 @@ fn skill_visibility_scope(workspace_root: &Path, skill_path: &Path) -> Result<Sc
     } else {
         Ok(installation_scope_key())
     }
-}
-
-fn migrate_global_skill_visibility_scopes(tx: &Transaction<'_>) -> Result<()> {
-    let mut statement = tx.prepare(
-        "SELECT scope_key, skill_path, visibility, locked
-         FROM scoped_skill_visibility
-         WHERE scope_key LIKE 'workspace:%'
-         ORDER BY scope_key, skill_path",
-    )?;
-    let rows = statement
-        .query_map([], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, bool>(3)?,
-            ))
-        })?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    drop(statement);
-
-    for (scope_key, skill_path, visibility, locked) in rows {
-        let Some(workspace) = scope_key.strip_prefix("workspace:") else {
-            continue;
-        };
-        let workspace = PathBuf::from(workspace);
-        let skill_path_buf = PathBuf::from(&skill_path);
-        let canonical_workspace = canonical_workspace_root(&workspace);
-        let canonical_skill_path = canonical_skill_visibility_path(&skill_path_buf);
-        if canonical_skill_path.starts_with(&canonical_workspace) {
-            continue;
-        }
-        tx.execute(
-            "INSERT INTO scoped_skill_visibility (scope_key, skill_path, visibility, locked)
-             VALUES (?1, ?2, ?3, ?4)
-             ON CONFLICT(scope_key, skill_path) DO UPDATE SET
-                visibility = CASE
-                    WHEN excluded.locked AND NOT scoped_skill_visibility.locked
-                    THEN excluded.visibility
-                    ELSE scoped_skill_visibility.visibility
-                END,
-                locked = MAX(scoped_skill_visibility.locked, excluded.locked)",
-            params![
-                INSTALLATION_SCOPE_KEY,
-                canonical_skill_path.display().to_string(),
-                visibility,
-                locked,
-            ],
-        )?;
-        tx.execute(
-            "DELETE FROM scoped_skill_visibility
-             WHERE scope_key = ?1 AND skill_path = ?2",
-            params![scope_key, skill_path],
-        )?;
-    }
-    Ok(())
-}
-
-fn git_skill_snapshot_keys(conn: &Connection) -> Result<Vec<(String, String, String)>> {
-    let mut statement = conn.prepare(
-        "SELECT DISTINCT sources.scope_key, sources.skill_path, sources.source_kind
-         FROM scoped_skill_sources AS sources
-         JOIN scoped_skill_snapshots AS snapshots
-           ON snapshots.scope_key = sources.scope_key
-          AND snapshots.skill_path = sources.skill_path",
-    )?;
-    let rows = statement
-        .query_map([], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-            ))
-        })?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    Ok(rows
-        .into_iter()
-        .filter(|(_, _, source_kind)| crate::skills::is_git_source_kind(source_kind))
-        .collect())
 }
 
 fn persist_skill_snapshots_in_tx(
@@ -157,51 +77,6 @@ fn persist_skill_snapshots_in_tx(
 }
 
 impl Store {
-    pub(crate) fn ensure_skill_visibility_table(&self) -> Result<()> {
-        self.with_named_write_transaction("ensure_skill_visibility_table", |tx| {
-            tx.execute_batch(
-                "
-                CREATE TABLE IF NOT EXISTS scoped_skill_visibility (
-                    scope_key TEXT NOT NULL,
-                    skill_path TEXT NOT NULL,
-                    visibility TEXT NOT NULL,
-                    locked INTEGER NOT NULL DEFAULT 0 CHECK (locked IN (0, 1)),
-                    PRIMARY KEY (scope_key, skill_path)
-                );
-                CREATE INDEX IF NOT EXISTS idx_scoped_skill_visibility_path
-                    ON scoped_skill_visibility(skill_path);
-                ",
-            )?;
-            let has_locked_column = {
-                let mut statement = tx.prepare("PRAGMA table_info(scoped_skill_visibility)")?;
-                let columns = statement
-                    .query_map([], |row| row.get::<_, String>(1))?
-                    .collect::<rusqlite::Result<Vec<_>>>()?;
-                columns.iter().any(|column| column == "locked")
-            };
-            if !has_locked_column {
-                // Existing rows do not prove a user chose the value. They
-                // become unlocked here and are discarded immediately below.
-                tx.execute_batch(
-                    "ALTER TABLE scoped_skill_visibility
-                     ADD COLUMN locked INTEGER NOT NULL DEFAULT 0 CHECK (locked IN (0, 1));",
-                )?;
-            }
-            tx.execute("DELETE FROM scoped_skill_visibility WHERE locked = 0", [])?;
-            migrate_global_skill_visibility_scopes(tx)?;
-            // Skills projections are owned by workspace scopes. Older builds
-            // accidentally created an installation-scope dirty receipt while
-            // persisting global visibility; it has no worker that can consume
-            // it and must not keep the database looking perpetually dirty.
-            tx.execute(
-                "DELETE FROM projection_dirty_resources
-                 WHERE scope_key = ?1 AND domain = 'skills'",
-                params![INSTALLATION_SCOPE_KEY],
-            )?;
-            Ok(())
-        })
-    }
-
     /// Return visibility choices explicitly locked by a user or a legacy Tendi setting.
     pub fn skill_visibilities_for_workspace(
         &self,
@@ -454,53 +329,6 @@ impl Store {
                     params![INSTALLATION_SCOPE_KEY, skill_path.display().to_string()],
                 )?;
             }
-            Ok(())
-        })?;
-        Ok(())
-    }
-
-    pub(crate) fn purge_git_skill_snapshots(&self) -> Result<()> {
-        let completed = self.conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM meta WHERE key = ?1)",
-            [GIT_SKILL_SNAPSHOT_CLEANUP_KEY],
-            |row| row.get::<_, bool>(0),
-        )?;
-        if completed {
-            return Ok(());
-        }
-        self.with_named_write_transaction("purge_git_skill_snapshots", |tx| {
-            let completed = tx.query_row(
-                "SELECT EXISTS(SELECT 1 FROM meta WHERE key = ?1)",
-                [GIT_SKILL_SNAPSHOT_CLEANUP_KEY],
-                |row| row.get::<_, bool>(0),
-            )?;
-            if completed {
-                return Ok(());
-            }
-            let mut deleted_rows = 0;
-            for (scope_key, skill_path, source_kind) in git_skill_snapshot_keys(tx)? {
-                deleted_rows += tx.execute(
-                    "DELETE FROM scoped_skill_snapshots
-                     WHERE scope_key = ?1 AND skill_path = ?2
-                       AND EXISTS (
-                           SELECT 1 FROM scoped_skill_sources
-                           WHERE scope_key = ?1 AND skill_path = ?2 AND source_kind = ?3
-                    )",
-                    params![scope_key, skill_path, source_kind],
-                )?;
-            }
-            if deleted_rows > 0 {
-                tx.execute(
-                    "INSERT INTO meta(key, value) VALUES ('storage.compaction.pending', '1')
-                     ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-                    [],
-                )?;
-            }
-            tx.execute(
-                "INSERT INTO meta(key, value) VALUES (?1, '1')
-                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-                [GIT_SKILL_SNAPSHOT_CLEANUP_KEY],
-            )?;
             Ok(())
         })?;
         Ok(())
@@ -1397,8 +1225,114 @@ impl Store {
                     "DELETE FROM scoped_skill_snapshots WHERE scope_key = ?1 AND skill_path = ?2",
                     params![scope_key.as_str(), path.display().to_string()],
                 )?;
+                tx.execute(
+                    "DELETE FROM skill_installation_times WHERE skill_path = ?1",
+                    params![path.display().to_string()],
+                )?;
             }
             self.mark_projection_resources_in_tx(tx, &scope_key, "skills", &resources, false, true)
+        })
+    }
+
+    /// Keep Created stable across file updates and path materialization. Each
+    /// observed provider path carries the installation time so a symlink that
+    /// becomes a writable directory keeps the same timestamp. Rows sharing a
+    /// canonical installation id share the earliest known timestamp.
+    pub(crate) fn reconcile_skill_installation_times(
+        &self,
+        entries: &[(PathBuf, PathBuf, Option<String>)],
+    ) -> Result<BTreeMap<PathBuf, String>> {
+        if entries.is_empty() {
+            return Ok(BTreeMap::new());
+        }
+        let mut grouped = BTreeMap::<PathBuf, (BTreeSet<PathBuf>, Option<String>)>::new();
+        for (installation_id, skill_path, observed_created_at) in entries {
+            let group = grouped
+                .entry(installation_id.clone())
+                .or_insert_with(|| (BTreeSet::new(), None));
+            group.0.insert(skill_path.clone());
+            if let Some(candidate) = observed_created_at {
+                if group
+                    .1
+                    .as_deref()
+                    .is_none_or(|current| candidate.as_str() < current)
+                {
+                    group.1 = Some(candidate.clone());
+                }
+            }
+        }
+
+        self.with_named_write_transaction("reconcile_skill_installation_times", |tx| {
+            let mut result = BTreeMap::new();
+            for (installation_id, (skill_paths, observed_created_at)) in &grouped {
+                let installation_key = installation_id.display().to_string();
+                let mut created_at = observed_created_at.clone();
+                let mut include_created_at = |candidate: String| {
+                    if created_at
+                        .as_deref()
+                        .is_none_or(|current| candidate.as_str() < current)
+                    {
+                        created_at = Some(candidate);
+                    }
+                };
+
+                {
+                    let mut statement = tx.prepare(
+                        "SELECT created_at FROM skill_installation_times
+                         WHERE installation_id = ?1",
+                    )?;
+                    let rows = statement.query_map([&installation_key], |row| row.get(0))?;
+                    for row in rows {
+                        include_created_at(row?);
+                    }
+                }
+                for skill_path in skill_paths {
+                    let existing = tx
+                        .query_row(
+                            "SELECT created_at FROM skill_installation_times
+                             WHERE skill_path = ?1",
+                            [skill_path.display().to_string()],
+                            |row| row.get::<_, String>(0),
+                        )
+                        .optional()?;
+                    if let Some(existing) = existing {
+                        include_created_at(existing);
+                    }
+                }
+
+                let Some(created_at) = created_at else {
+                    continue;
+                };
+                for skill_path in skill_paths {
+                    let path_key = skill_path.display().to_string();
+                    let existing = tx
+                        .query_row(
+                            "SELECT installation_id, created_at FROM skill_installation_times
+                             WHERE skill_path = ?1",
+                            [&path_key],
+                            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+                        )
+                        .optional()?;
+                    if existing.as_ref() == Some(&(installation_key.clone(), created_at.clone())) {
+                        continue;
+                    }
+                    tx.execute(
+                        "INSERT INTO skill_installation_times
+                            (skill_path, installation_id, created_at)
+                         VALUES (?1, ?2, ?3)
+                         ON CONFLICT(skill_path) DO UPDATE SET
+                            installation_id = excluded.installation_id,
+                            created_at = CASE
+                                WHEN excluded.created_at < skill_installation_times.created_at
+                                THEN excluded.created_at
+                                ELSE skill_installation_times.created_at
+                            END",
+                        params![path_key, installation_key, created_at],
+                    )?;
+                }
+                result.insert(installation_id.clone(), created_at);
+            }
+            Ok(result)
         })
     }
 

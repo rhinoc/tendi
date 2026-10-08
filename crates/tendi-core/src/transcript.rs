@@ -16,6 +16,10 @@ use crate::{providers::agent_provider, skills::AgentKind, time::timestamp_ms};
 mod search;
 pub(crate) use search::{SearchCheckpoint, read_search_delta};
 
+#[path = "transcript_excerpt.rs"]
+mod excerpt;
+pub use excerpt::{TranscriptExcerpt, TranscriptExcerptItem, TranscriptExcerptOptions, read_transcript_excerpt};
+
 #[derive(Debug, Clone, Serialize)]
 pub struct TranscriptItem {
     pub kind: String,

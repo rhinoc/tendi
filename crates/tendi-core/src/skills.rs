@@ -822,7 +822,9 @@ pub(crate) fn scan_skills_for_workspace_initialization(
 ) -> Result<SkillScan> {
     let source_records = store.skill_source_records_for_workspace(cwd)?;
     let mut provenance_resolver = ProvenanceResolver::managed(cwd, source_records, project_roots);
-    scan_skills_with_resolver_for_projects(cwd, &mut provenance_resolver, project_roots)
+    let scan =
+        scan_skills_with_resolver_for_projects(cwd, &mut provenance_resolver, project_roots)?;
+    apply_persisted_skill_creation_times(store, scan)
 }
 
 fn scan_skills_with_source_store_for_projects(
@@ -842,7 +844,80 @@ fn scan_skills_with_source_store_for_projects_for_projection(
     let mut provenance_resolver = ProvenanceResolver::managed(cwd, source_records, project_roots);
     let scan =
         scan_skills_with_resolver_for_projects(cwd, &mut provenance_resolver, project_roots)?;
+    let scan = apply_persisted_skill_creation_times(store, scan)?;
     apply_persisted_skill_visibilities(store, cwd, scan)
+}
+
+fn apply_persisted_skill_creation_times(
+    store: &crate::storage::Store,
+    mut scan: SkillScan,
+) -> Result<SkillScan> {
+    let entries = scan
+        .skills
+        .iter()
+        .flat_map(|skill| {
+            let installation_id = skill
+                .paths
+                .first()
+                .map(|path| canonical_skill_dir(&path.path));
+            skill.paths.iter().filter_map(move |path| {
+                installation_id.as_ref().map(|installation_id| {
+                    (
+                        installation_id.clone(),
+                        path.path.clone(),
+                        skill.ctime.clone(),
+                    )
+                })
+            })
+        })
+        .collect::<Vec<_>>();
+    let created_at_by_installation = store.reconcile_skill_installation_times(&entries)?;
+    for skill in &mut scan.skills {
+        let Some(path) = skill.paths.first() else {
+            continue;
+        };
+        if let Some(created_at) = created_at_by_installation.get(&canonical_skill_dir(&path.path)) {
+            skill.ctime = Some(created_at.clone());
+        }
+    }
+    Ok(scan)
+}
+
+fn skill_creation_times_by_path(scan: &SkillScan) -> BTreeMap<PathBuf, String> {
+    let mut created_at_by_path = BTreeMap::new();
+    for skill in &scan.skills {
+        let Some(created_at) = skill.ctime.as_deref() else {
+            continue;
+        };
+        for path in &skill.paths {
+            created_at_by_path
+                .entry(path.path.clone())
+                .and_modify(|current: &mut String| {
+                    let mut oldest = Some(current.clone());
+                    update_oldest_timestamp(&mut oldest, Some(created_at.to_string()));
+                    *current = oldest.expect("existing skill creation time is present");
+                })
+                .or_insert_with(|| created_at.to_string());
+        }
+    }
+    created_at_by_path
+}
+
+fn preserve_skill_creation_times(
+    scan: &mut SkillScan,
+    previous_created_at: &BTreeMap<PathBuf, String>,
+) {
+    for skill in &mut scan.skills {
+        let mut oldest = None;
+        for path in &skill.paths {
+            if let Some(created_at) = previous_created_at.get(&path.path) {
+                update_oldest_timestamp(&mut oldest, Some(created_at.clone()));
+            }
+        }
+        if let Some(created_at) = oldest {
+            skill.ctime = Some(created_at);
+        }
+    }
 }
 
 fn apply_persisted_skill_visibilities(
@@ -1081,6 +1156,7 @@ pub fn refresh_skill_scan(
     skill_ids: &[String],
     extra_skill_dirs: &[PathBuf],
 ) -> Result<SkillScan> {
+    let previous_created_at = skill_creation_times_by_path(&scan);
     let provenance_resolver = ProvenanceResolver::from_skills(scan.skills.iter().filter(|skill| {
         skill_ids.iter().any(|id| skill_matches_id(skill, id))
             || skill
@@ -1088,7 +1164,15 @@ pub fn refresh_skill_scan(
                 .iter()
                 .any(|path| extra_skill_dirs.iter().any(|dir| dir == &path.path))
     }));
-    refresh_skill_scan_with_resolver(cwd, scan, skill_ids, extra_skill_dirs, provenance_resolver)
+    let mut refreshed = refresh_skill_scan_with_resolver(
+        cwd,
+        scan,
+        skill_ids,
+        extra_skill_dirs,
+        provenance_resolver,
+    )?;
+    preserve_skill_creation_times(&mut refreshed, &previous_created_at);
+    Ok(refreshed)
 }
 
 pub fn refresh_skill_scan_for_workspace(
@@ -1098,14 +1182,17 @@ pub fn refresh_skill_scan_for_workspace(
     skill_ids: &[String],
     extra_skill_dirs: &[PathBuf],
 ) -> Result<SkillScan> {
+    let previous_created_at = skill_creation_times_by_path(&scan);
     let source_records = store.skill_source_records_for_workspace(cwd)?;
-    let refreshed = refresh_skill_scan_with_resolver(
+    let mut refreshed = refresh_skill_scan_with_resolver(
         cwd,
         scan,
         skill_ids,
         extra_skill_dirs,
         ProvenanceResolver::managed(cwd, source_records, &[]),
     )?;
+    preserve_skill_creation_times(&mut refreshed, &previous_created_at);
+    let refreshed = apply_persisted_skill_creation_times(store, refreshed)?;
     apply_persisted_skill_visibilities(store, cwd, refreshed)
 }
 
@@ -1118,8 +1205,9 @@ pub fn refresh_skill_scan_for_workspace_projection(
     skill_ids: &[String],
     extra_skill_dirs: &[PathBuf],
 ) -> Result<SkillScan> {
+    let previous_created_at = skill_creation_times_by_path(&scan);
     let source_records = store.skill_source_records_for_workspace(cwd)?;
-    let refreshed = refresh_skill_scan_with_wrapper_sync(
+    let mut refreshed = refresh_skill_scan_with_wrapper_sync(
         cwd,
         scan,
         skill_ids,
@@ -1127,6 +1215,8 @@ pub fn refresh_skill_scan_for_workspace_projection(
         ProvenanceResolver::managed(cwd, source_records, &[]),
         false,
     )?;
+    preserve_skill_creation_times(&mut refreshed, &previous_created_at);
+    let refreshed = apply_persisted_skill_creation_times(store, refreshed)?;
     apply_persisted_skill_visibilities(store, cwd, refreshed)
 }
 
@@ -1246,7 +1336,10 @@ pub fn refresh_dirty_skill_projection(
     project_roots: &[PathBuf],
 ) -> Result<SkillScan> {
     if full {
-        return scan_skills_for_project_roots_with_store(cwd, store, project_roots);
+        let previous_created_at = skill_creation_times_by_path(&cached);
+        let mut refreshed = scan_skills_for_project_roots_with_store(cwd, store, project_roots)?;
+        preserve_skill_creation_times(&mut refreshed, &previous_created_at);
+        return apply_persisted_skill_creation_times(store, refreshed);
     }
     // A newly created provider root was absent from the previous snapshot. Ask
     // the provider owner for roots only when the dirty path has no cached root;
@@ -2941,6 +3034,20 @@ pub fn skill_add_resource_paths(plan: &SkillAddPlan) -> Result<Vec<PathBuf>> {
     Ok(paths)
 }
 
+pub fn skill_add_resource_paths_for_workspace(
+    plan: &SkillAddPlan,
+    cwd: &Path,
+) -> Result<Vec<PathBuf>> {
+    let mut paths = skill_add_resource_paths(plan)?;
+    if matches!(
+        plan.source_kind.as_str(),
+        "well-known" | "github" | "git" | "gitlab" | "huggingface"
+    ) {
+        paths.push(crate::skill_lock::lock_path(plan.scope, cwd)?);
+    }
+    Ok(paths)
+}
+
 fn skill_visibility_resource_paths(
     skill_dir: &Path,
     agent: AgentKind,
@@ -3226,6 +3333,8 @@ fn resolve_add_source(
                     &root,
                     git::never_cancelled(),
                 )?;
+            } else if persistent_remote {
+                refresh_cached_git_source(&root, &parsed.url, parsed.git_ref.as_deref())?;
             }
             let discovery_root = match parsed.subpath {
                 Some(subpath) => {
@@ -3269,6 +3378,8 @@ fn resolve_add_source(
                     let _ = fs::remove_dir_all(&root);
                     return Err(error);
                 }
+            } else if parsed.kind == "well-known" {
+                crate::skill_source::ensure_well_known_lock_metadata(&parsed.url, &root)?;
             }
             Ok(ResolvedAddSource {
                 root,
@@ -3497,6 +3608,45 @@ fn run_git_clone(
         bail!(
             "git clone failed for {source}: {}",
             String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Ok(())
+}
+
+fn refresh_cached_git_source(repo: &Path, source: &str, git_ref: Option<&str>) -> Result<()> {
+    let status = git::run_git(
+        repo,
+        ["status", "--porcelain", "--untracked-files=all"],
+        git::LOCAL_COMMAND_TIMEOUT,
+        git::never_cancelled(),
+    )?;
+    if !status.status.success() {
+        bail!("failed to inspect cached skill source {}", repo.display());
+    }
+    if !String::from_utf8_lossy(&status.stdout).trim().is_empty() {
+        bail!("cached skill source has local changes: {}", repo.display());
+    }
+
+    run_git_fetch(
+        repo,
+        [
+            "--no-tags".to_string(),
+            source.to_string(),
+            git_ref.unwrap_or("HEAD").to_string(),
+        ],
+        git::never_cancelled(),
+    )?;
+    let checkout = git::run_git(
+        repo,
+        ["checkout", "--detach", "FETCH_HEAD"],
+        git::LOCAL_COMMAND_TIMEOUT,
+        git::never_cancelled(),
+    )?;
+    if !checkout.status.success() {
+        bail!(
+            "failed to check out refreshed skill source {}: {}",
+            repo.display(),
+            String::from_utf8_lossy(&checkout.stderr).trim()
         );
     }
     Ok(())
@@ -5326,7 +5476,7 @@ fn merge_skill(name: String, raws: Vec<RawSkill>) -> SkillRecord {
 
     for raw in raws {
         let (raw_ctime, raw_mtime) = skill_times(&raw.path.path, &raw.path.path.join("SKILL.md"));
-        update_latest_timestamp(&mut ctime, raw_ctime);
+        update_oldest_timestamp(&mut ctime, raw_ctime);
         update_latest_timestamp(&mut mtime, raw_mtime);
         is_system &= raw.is_system;
         is_wrapper |= raw.is_wrapper;
@@ -5420,6 +5570,18 @@ fn update_latest_timestamp(current: &mut Option<String>, candidate: Option<Strin
     if current
         .as_deref()
         .is_none_or(|value| compare_timestamps(Some(candidate.as_str()), Some(value)).is_gt())
+    {
+        *current = Some(candidate);
+    }
+}
+
+fn update_oldest_timestamp(current: &mut Option<String>, candidate: Option<String>) {
+    let Some(candidate) = candidate else {
+        return;
+    };
+    if current
+        .as_deref()
+        .is_none_or(|value| compare_timestamps(Some(candidate.as_str()), Some(value)).is_lt())
     {
         *current = Some(candidate);
     }
@@ -6901,6 +7063,9 @@ fn merge_file_maps(
             let before_bytes = local.get(&path);
             let base_bytes = base.get(&path);
             let incoming_bytes = incoming.get(&path);
+            if before_bytes == base_bytes && base_bytes == incoming_bytes {
+                return None;
+            }
             let before = before_bytes.map(|bytes| String::from_utf8(bytes.clone()).ok());
             let base_text = base_bytes.map(|bytes| String::from_utf8(bytes.clone()).ok());
             let incoming_text = incoming_bytes.map(|bytes| String::from_utf8(bytes.clone()).ok());

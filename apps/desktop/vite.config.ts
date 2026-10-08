@@ -1,7 +1,7 @@
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 
-const viteCacheDir = "node_modules/.vite-tendi";
+const viteCacheDir = "node_modules/.vite-tendi-dev";
 
 export default defineConfig({
   optimizeDeps: {
@@ -9,6 +9,8 @@ export default defineConfig({
   },
   cacheDir: viteCacheDir,
   server: {
+    // WKWebView persists optimized modules across dev runs; always fetch the current graph.
+    headers: { "Cache-Control": "no-store" },
     proxy: {
       "/__tendi": "http://127.0.0.1:5188",
     },

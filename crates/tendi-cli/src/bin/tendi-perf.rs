@@ -7,9 +7,14 @@ use std::{
 use anyhow::{Context, Result, bail};
 use chrono::{Duration, Local};
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use tendi_core::{
     AgentKind, ScopeKey, SessionRecord, SessionScan,
-    hooks::{HookDeleteRequest, delete_hooks, read_hook_source_at_path, scan_hooks},
+    hooks::{
+        HookDeleteRequest, HookSetEnabledRequest, delete_hooks, read_hook_source_at_path,
+        scan_hooks, set_hooks_enabled,
+    },
+    mcp::{McpSetEnabledRequest, set_server_enabled},
     rules::read_rule_file_at_path,
     session_skills::{SessionFileState, SessionSkillLink},
     sessions::SessionIdentity,
@@ -49,8 +54,11 @@ fn main() -> Result<()> {
         "secondary-config-read" => secondary_config_read(),
         "tertiary-skill-save" => tertiary_skill_save(),
         "tertiary-hook-delete" => tertiary_hook_delete(),
+        "tertiary-hook-toggle" => tertiary_hook_toggle(),
+        "tertiary-mcp-toggle" => tertiary_mcp_toggle(),
         "tertiary-prompt-crud" => tertiary_prompt_crud(),
         "tertiary-rule-save" => tertiary_rule_save(),
+        "tertiary-rule-delete" => tertiary_rule_delete(),
         "tertiary-settings-save" => tertiary_settings_save(),
         _ => bail!("unknown performance scenario: {scenario}"),
     }?;
@@ -567,20 +575,7 @@ fn tertiary_skill_save() -> Result<Value> {
 
 fn tertiary_hook_delete() -> Result<Value> {
     let scratch = Scratch::new("hook-delete")?;
-    let settings_dir = scratch.path().join(".claude");
-    let path = settings_dir.join("settings.json");
-    fs::create_dir_all(&settings_dir)?;
-    let handlers = (0..HOOK_COUNT)
-        .map(|index| json!({ "type": "command", "command": format!("echo perf-{index:03}") }))
-        .collect::<Vec<_>>();
-    fs::write(
-        &path,
-        serde_json::to_vec_pretty(&json!({
-            "hooks": {
-                "PreToolUse": [{ "matcher": "*", "hooks": handlers }]
-            }
-        }))?,
-    )?;
+    let path = hook_fixture(&scratch)?;
     let scan = scan_hooks(scratch.path())?;
     let source_hooks = scan
         .hooks
@@ -623,12 +618,105 @@ fn tertiary_hook_delete() -> Result<Value> {
     })
 }
 
+fn hook_fixture(scratch: &Scratch) -> Result<PathBuf> {
+    let settings_dir = scratch.path().join(".claude");
+    let path = settings_dir.join("settings.json");
+    fs::create_dir_all(&settings_dir)?;
+    let handlers = (0..HOOK_COUNT)
+        .map(|index| json!({ "type": "command", "command": format!("echo perf-{index:03}") }))
+        .collect::<Vec<_>>();
+    fs::write(
+        &path,
+        serde_json::to_vec_pretty(&json!({
+            "hooks": {
+                "PreToolUse": [{ "matcher": "*", "hooks": handlers }]
+            }
+        }))?,
+    )?;
+    Ok(path)
+}
+
+fn tertiary_hook_toggle() -> Result<Value> {
+    let scratch = Scratch::new("hook-toggle")?;
+    let path = hook_fixture(&scratch)?;
+    let scan = scan_hooks(scratch.path())?;
+    let source_hooks = scan
+        .hooks
+        .iter()
+        .filter(|hook| hook.path == path)
+        .take(HOOK_DELETE_COUNT)
+        .collect::<Vec<_>>();
+    if source_hooks.len() != HOOK_DELETE_COUNT {
+        bail!("hook fixture scan found only {} hooks", source_hooks.len());
+    }
+    let requests = source_hooks
+        .into_iter()
+        .map(|hook| HookSetEnabledRequest {
+            agent: hook.agent,
+            path: hook.path.clone(),
+            expected_trust_hash: hook.trust_hash.clone(),
+            event: hook.event.clone(),
+            matcher: hook.matcher.clone(),
+            hook_type: hook.hook_type.clone(),
+            command: hook.command.clone(),
+            url: hook.url.clone(),
+            prompt: hook.prompt.clone(),
+            filter: hook.filter.clone(),
+            status_message: hook.status_message.clone(),
+            enabled: false,
+        })
+        .collect::<Vec<_>>();
+
+    measured(|| {
+        set_hooks_enabled(requests)?;
+        let disabled = scan_hooks(scratch.path())?
+            .hooks
+            .into_iter()
+            .filter(|hook| hook.path == path && !hook.enabled)
+            .collect::<Vec<_>>();
+        if disabled.len() != HOOK_DELETE_COUNT {
+            bail!("unexpected disabled hook count: {}", disabled.len());
+        }
+        let count = disabled.len();
+        Ok((disabled, count))
+    })
+}
+
+fn tertiary_mcp_toggle() -> Result<Value> {
+    let scratch = Scratch::new("mcp-toggle")?;
+    let path = scratch.path().join("mcp.json");
+    let source = r#"{"mcpServers":{"demo":{"command":"demo"}}}"#;
+    fs::write(&path, source)?;
+    let trust_hash = format!("{:x}", Sha256::digest(source.as_bytes()));
+    measured(|| {
+        let updated_hash = set_server_enabled(McpSetEnabledRequest {
+            agent: AgentKind::Cursor,
+            path: path.clone(),
+            expected_trust_hash: trust_hash,
+            name: "demo".to_string(),
+            enabled: false,
+            server_path: Vec::new(),
+        })?;
+        let updated: Value = serde_json::from_slice(&fs::read(&path)?)?;
+        if updated["mcpServers"]["demo"]["disabled"] != true {
+            bail!("MCP server was not disabled");
+        }
+        Ok((json!({ "trustHash": updated_hash }), 1))
+    })
+}
+
 fn tertiary_prompt_crud() -> Result<Value> {
     let scratch = Scratch::new("prompt-crud")?;
     let store = Store::open(scratch.path().join("prompts.sqlite3"))?;
     let ids = seed_prompts(&store)?;
 
     measured(|| {
+        store.save_prompt(PromptWrite {
+            id: Some("perf-prompt-new".to_string()),
+            title: "New performance prompt".to_string(),
+            tags: vec!["perf".to_string()],
+            body: "created body".to_string(),
+        })?;
         store.save_prompt(PromptWrite {
             id: Some("perf-prompt-0250".to_string()),
             title: "Updated performance prompt".to_string(),
@@ -641,6 +729,9 @@ fn tertiary_prompt_crud() -> Result<Value> {
         }
         let prompts = store.list_prompts()?;
         let count = prompts.len();
+        if count != PROMPT_COUNT - 99 {
+            bail!("unexpected remaining prompt count: {count}");
+        }
         Ok((prompts, count))
     })
 }
@@ -654,6 +745,19 @@ fn tertiary_rule_save() -> Result<Value> {
     measured(|| {
         let saved = tendi_core::rules::save_rule_file_at_path(&path, &before.sha256, &after)?;
         Ok((saved, 1))
+    })
+}
+
+fn tertiary_rule_delete() -> Result<Value> {
+    let scratch = Scratch::new("rule-delete")?;
+    let path = scratch.path().join("AGENTS.md");
+    fs::write(&path, format!("# Rule fixture\n{}", "r".repeat(128 * 1024)))?;
+    measured(|| {
+        tendi_core::rules::delete_rule_files(std::slice::from_ref(&path))?;
+        if path.exists() {
+            bail!("rule file still exists after delete");
+        }
+        Ok((json!({ "deleted": 1 }), 1))
     })
 }
 

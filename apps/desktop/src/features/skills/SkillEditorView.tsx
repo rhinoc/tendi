@@ -86,8 +86,7 @@ export function SkillEditorView({ skill, skillFilesChanged, skills, back, onRead
   const skillLocation = currentSkill.paths.find((path) => path.path);
   const locationId = skillLocation?.location_id;
   const skillPath = skillLocation?.path;
-  const skillContentHash = skillLocation?.sha256;
-  const fileSourceKey = `${currentSkill.id}\u0000${skillPath ?? ""}\u0000${skillContentHash ?? ""}`;
+  const fileSourceKey = `${currentSkill.id}\u0000${skillPath ?? ""}`;
   const readOnly = isReadOnlySkillSource(currentSkill);
   const editorState = useSkillEditorState(currentSkill.id);
   const { activePath, selectedPath, drafts, createdPaths, fileTreeCollapsed, collapsedFolders } = editorState;
@@ -220,7 +219,7 @@ export function SkillEditorView({ skill, skillFilesChanged, skills, back, onRead
     return () => {
       cancelled = true;
     };
-  }, [currentSkill.id, currentSkill.name, fileSourceKey, skillContentHash, skillPath]);
+  }, [currentSkill.id, currentSkill.name, fileSourceKey, skillPath]);
 
   useEffect(() => {
     setSaveState(SaveStatus.Idle);

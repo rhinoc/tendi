@@ -1280,7 +1280,7 @@ export function DataTable<TRow extends Record<string, unknown>>({
 
   const isEmpty = rows.length === 0;
   const renderEmptyState = (belowHeader = false) => isEmpty ? (
-    <div className={`dataTableEmpty${belowHeader ? " dataTableEmpty--belowHeader" : ""}`}>
+    <div className={`dataTableEmpty${belowHeader ? " dataTableEmpty--belowHeader" : ""}${loading ? " dataTableEmpty--loading" : ""}`}>
       {loading ? <LoadingState label={loadingLabel} /> : emptyState}
     </div>
   ) : null;
@@ -1313,7 +1313,10 @@ export function DataTable<TRow extends Record<string, unknown>>({
           if (Array.isArray(nextValue)) setExpandedGroups(nextValue);
         }}
         separateExpandedItems={false}
-        reduceMotion={initialGroupingMountRef.current}
+        // Frozen tables render the two group bodies separately. The scrolling
+        // pane applies expanded row geometry immediately, so animating only
+        // the frozen accordion height makes the paired rows drift out of sync.
+        reduceMotion={initialGroupingMountRef.current || Boolean(freezeColumn)}
         items={items}
       />
     );

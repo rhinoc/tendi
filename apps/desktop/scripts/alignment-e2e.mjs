@@ -51,7 +51,8 @@ const appDir = join(dirname(fileURLToPath(import.meta.url)), "..");
 // intent (visually identical) while tolerating rounding.
 const TOLERANCE = 1.5;
 const PORT = 5193;
-const frozenOnly = process.argv.includes("--frozen-only");
+const mcpOnly = process.argv.includes("--mcp-only");
+const frozenOnly = process.argv.includes("--frozen-only") || mcpOnly;
 
 function loadPlaywrightCore() {
   try {
@@ -189,6 +190,7 @@ async function runPageHeaderChecks(page, tab, heading, expectedCompact) {
       marginBottom: toPx(style.marginBottom),
       pageTopInset: toPx(rootStyle.getPropertyValue("--page-top-inset")),
       pageHeaderBottomInset: toPx(rootStyle.getPropertyValue("--page-header-bottom-inset")),
+      controlHeight: toPx(rootStyle.getPropertyValue("--control-height")),
       parentPaddingTop: toPx(getComputedStyle(node.parentElement ?? node).paddingTop),
       parentClass: (node.parentElement ?? node).className,
     };
@@ -204,7 +206,6 @@ async function runPageHeaderChecks(page, tab, heading, expectedCompact) {
   );
   if (tab === "mcp") {
     check(tab, "header-split-pane", metrics.parentClass.includes("mcpListPane"), `parent class ${metrics.parentClass}`);
-    return;
   }
   const bottomSpaceMatches = expectedCompact
     ? Math.abs(metrics.paddingBottom - metrics.pageHeaderBottomInset) <= TOLERANCE && metrics.marginBottom <= TOLERANCE
@@ -216,6 +217,13 @@ async function runPageHeaderChecks(page, tab, heading, expectedCompact) {
     `${expectedCompact ? "padding-bottom" : "margin-bottom"} ${expectedCompact ? metrics.paddingBottom : metrics.marginBottom}px vs ${metrics.pageHeaderBottomInset}px`,
   );
   if (expectedCompact) {
+    const expectedHeight = metrics.pageTopInset + metrics.pageHeaderBottomInset + metrics.controlHeight;
+    check(
+      tab,
+      "header-compact-height",
+      expectedHeight > 0 && Math.abs(metrics.height - expectedHeight) <= TOLERANCE,
+      `height ${metrics.height}px vs shared compact height ${expectedHeight}px`,
+    );
     check(
       tab,
       "header-top-space",
@@ -2810,7 +2818,12 @@ try {
     await runBadgePaddingChecks(page);
   }
 
-  for (const tab of (frozenOnly ? tabs.filter((item) => item.frozen) : tabs)) {
+  const tabsToRun = mcpOnly
+    ? tabs.filter((item) => item.id === "mcp")
+    : frozenOnly
+      ? tabs.filter((item) => item.frozen)
+      : tabs;
+  for (const tab of tabsToRun) {
     writeStdout(`\n== ${tab.heading} ==`);
     if (tab.id !== "skills") {
       // Dismiss any overlay (e.g. a row click that opened an editor dialog)
@@ -3157,9 +3170,12 @@ try {
       const headerSep = await page.evaluate(() => {
         const round = (value) => Math.round(value * 100) / 100;
         // The header underline is the sticky header's own `::after` rule.
-        const header = document.querySelector(".dataTableHeader--frozen") ?? document.querySelector(".dataTableHeader");
-        const row = document.querySelector(".dataRow.rowFrame");
-        if (!header || !row) return { missing: true };
+        const page = document.querySelector(".sessionListPane") ?? document.querySelector(".promptsPage");
+        const header = page?.querySelector(".dataTableHeader--frozen") ?? page?.querySelector(".dataTableHeader");
+        const pageHeader = page?.querySelector(".pageHeader");
+        const tableBody = page?.querySelector(".sessionListBody") ?? page?.querySelector(".dataTableBodyScroll");
+        const row = page?.querySelector(".dataRow.rowFrame");
+        if (!header || !pageHeader || !tableBody || !row) return { missing: true };
         const headerRect = header.getBoundingClientRect();
         const afterLeft = parseFloat(getComputedStyle(header, "::after").left);
         const rowRect = row.getBoundingClientRect();
@@ -3168,6 +3184,12 @@ try {
           headerSepLeft: round(headerRect.left + (Number.isNaN(afterLeft) ? 0 : afterLeft)),
           rowSepLeft: round(rowRect.left + (Number.isNaN(beforeLeft) ? 0 : beforeLeft)),
           ruleLeft: round(headerRect.left),
+          headerTop: round(headerRect.top),
+          headerSepTop: round(headerRect.bottom - 1),
+          pageHeaderBottom: round(pageHeader.getBoundingClientRect().bottom),
+          pageHeaderGap: round(Number.parseFloat(getComputedStyle(pageHeader).marginBottom) || 0),
+          tableBodyTop: round(tableBody.getBoundingClientRect().top),
+          headerHeight: round(headerRect.height),
         };
       });
       check(
@@ -3189,6 +3211,14 @@ try {
         "req7-header-sep-border",
         headerSep.missing !== true,
         "header rule element should exist",
+      );
+      check(
+        tab.id,
+        "req7-header-sep-y",
+        headerSep.missing !== true
+          && Math.abs(headerSep.headerTop - (headerSep.pageHeaderBottom + headerSep.pageHeaderGap)) <= TOLERANCE
+          && Math.abs(headerSep.headerTop - headerSep.tableBodyTop) <= TOLERANCE,
+        `table header top ${headerSep.headerTop}px vs page header bottom + gap ${headerSep.pageHeaderBottom + headerSep.pageHeaderGap}px and table body top ${headerSep.tableBodyTop}px (underline y ${headerSep.headerSepTop}px, height ${headerSep.headerHeight}px)`,
       );
     }
 

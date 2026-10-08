@@ -25,6 +25,7 @@ import { sessionProject, type SessionRecord } from "../lib/sessions.ts";
 import { summarizeSessionUsage } from "../lib/overview.ts";
 import { summarizeSessionPreviewRecord } from "../lib/session-preview.ts";
 import { formatRelativeTime } from "../lib/strings.ts";
+import { logger } from "../lib/logger.ts";
 import { dialogCopy } from "../lib/dialog-copy.ts";
 import {
   type AnalyticsGranularity,
@@ -44,6 +45,9 @@ import { DOMAIN_NAV_ITEMS, EMPTY_DISPLAY_VALUE, RuntimeDomainKey } from "../lib/
 import type { DomainKey } from "../lib/index.ts";
 import { SessionListStatus } from "../store/desktop-store.ts";
 import "./OverviewView.css";
+
+let firstUsageChartFrameLogged = false;
+let firstUsageDataFrameLogged = false;
 
 export type OverviewViewProps = {
   counts: Record<DomainKey, number>;
@@ -162,6 +166,31 @@ export const OverviewView = memo(function OverviewView({
   const showAnalyticsLoading = !analyticsRevisionError && analyticsLoading && !analytics;
   const analyticsRefreshing = analyticsLoading
     || analyticsProgress?.running === true;
+  useEffect(() => {
+    if (!analytics) return;
+    const hasActivity = analytics.days.some((day) => (
+      day.sessions > 0 || day.responses > 0 || day.usage.totalTokens > 0 || day.runs.started > 0
+    ));
+    if (firstUsageChartFrameLogged && (!hasActivity || firstUsageDataFrameLogged)) return;
+    let nextFrame = 0;
+    const frame = window.requestAnimationFrame(() => {
+      nextFrame = window.requestAnimationFrame(() => {
+        if (hasActivity ? firstUsageDataFrameLogged : firstUsageChartFrameLogged) return;
+        firstUsageChartFrameLogged = true;
+        if (hasActivity) firstUsageDataFrameLogged = true;
+        logger.info(hasActivity ? "first usage data frame completed" : "first usage chart frame completed", {
+          revision: analytics.revision,
+          days: analytics.days.length,
+          hasActivity,
+          visibility: document.visibilityState,
+        });
+      });
+    });
+    return () => {
+      window.cancelAnimationFrame(frame);
+      if (nextFrame) window.cancelAnimationFrame(nextFrame);
+    };
+  }, [analytics]);
   useEffect(() => {
     setGranularityOverride(null);
   }, [automaticGranularity]);

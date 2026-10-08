@@ -22,6 +22,7 @@ pub mod sessions;
 pub mod skill_backup;
 pub mod skill_marketplace;
 pub mod skill_restore;
+pub mod skill_lock;
 mod skill_source;
 pub mod skill_targets;
 pub mod skills;
@@ -80,8 +81,22 @@ pub fn initialize_workspace(
     test_support::ensure_isolated_environment();
 
     let cwd = cwd.as_ref();
-    migrations::run_workspace(store, cwd, project_roots)?;
-    store.invalidate_projection("skills", cwd)?;
+    let migration_scan_ran = migrations::run_workspace(store, cwd, project_roots)?;
+    // Migrations are complete. Preserve cache-link cleanup using the last
+    // projection and rely on manifest freshness to schedule a scan only when
+    // a skill source changed.
+    let links_changed = if !migration_scan_ran {
+        if let Some(scan) = store.list_skills_cached_for_workspace(cwd)? {
+            skills::materialize_tendi_cache_links(&scan)?
+        } else {
+            false
+        }
+    } else {
+        false
+    };
+    if migration_scan_ran || links_changed {
+        store.invalidate_projection("skills", cwd)?;
+    }
     Ok(())
 }
 

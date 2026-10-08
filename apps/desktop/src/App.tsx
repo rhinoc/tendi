@@ -150,7 +150,7 @@ function SkillChangeDialogFallbackContent({
             <p id="skill-changes-description" className="confirmDialogDescription">
               {skillChangeDescription(command)}
             </p>
-            <div className="skillDeleteNames" data-selectable-text>
+            <div className="deleteConfirmationNames" data-selectable-text>
               {displayNames.map((name) => <span key={name}>{name}</span>)}
             </div>
           </>
@@ -373,7 +373,7 @@ export function App() {
     void applyAppIcon(nextAppIcon);
   }, []);
   const appearanceChangeRevision = useRef(0);
-  const domainLoadInFlight = useRef(new Map<DomainKey, Promise<void>>());
+  const domainLoadInFlight = useRef(new Map<RuntimeDomainKey, Promise<void>>());
   const skillIndexRunInFlight = useRef<Promise<SkillIndexStatus> | null>(null);
   const skillIndexStatusRefreshInFlight = useRef<Promise<SkillIndexStatus | null> | null>(null);
   const sessionResumeTargetRequests = useRef(new Map<string, Promise<Exclude<SessionResumeTarget, SessionResumeTarget.Auto>>>());
@@ -523,13 +523,21 @@ export function App() {
     persistSidebarFilters(sidebarFilters);
   }, [sidebarFilters]);
   useEffect(() => {
-    const syncBackup = () => { void syncSkillBackup(); };
+    let pendingSync: number | null = null;
+    const syncBackup = () => {
+      if (pendingSync !== null) window.clearTimeout(pendingSync);
+      pendingSync = window.setTimeout(() => {
+        pendingSync = null;
+        void syncSkillBackup();
+      }, 100);
+    };
     const syncWhenVisible = () => {
       if (document.visibilityState === "visible") syncBackup();
     };
     window.addEventListener("focus", syncBackup);
     document.addEventListener("visibilitychange", syncWhenVisible);
     return () => {
+      if (pendingSync !== null) window.clearTimeout(pendingSync);
       window.removeEventListener("focus", syncBackup);
       document.removeEventListener("visibilitychange", syncWhenVisible);
     };
@@ -1224,8 +1232,26 @@ export function App() {
   }, [setSessionRefreshError]);
 
   useEffect(() => {
-    void whenEventsReady()
-      .then(() => catalogRuntimes.get(RuntimeDomainKey.Agents)?.refresh(false));
+    if (domainLoadInFlight.current.has(RuntimeDomainKey.Agents)) return;
+    const startedAt = performance.now();
+    const visibilityAtStart = document.visibilityState;
+    const request = whenEventsReady()
+      .then(() => catalogRuntimes.get(RuntimeDomainKey.Agents)?.refresh(false))
+      .then((result) => logger.info("catalog domain load completed", {
+        domain: RuntimeDomainKey.Agents,
+        durationMs: performance.now() - startedAt,
+        succeeded: result != null,
+        firstLoad: true,
+        visibilityAtStart,
+        visibilityAtEnd: document.visibilityState,
+      }))
+      .catch((error) => logger.error("startup domain load failed", { domain: RuntimeDomainKey.Agents, error }))
+      .finally(() => {
+        if (domainLoadInFlight.current.get(RuntimeDomainKey.Agents) === request) {
+          domainLoadInFlight.current.delete(RuntimeDomainKey.Agents);
+        }
+      });
+    domainLoadInFlight.current.set(RuntimeDomainKey.Agents, request);
   }, [catalogRuntimes, whenEventsReady]);
 
   useEffect(() => {
@@ -1317,10 +1343,13 @@ export function App() {
         return;
       }
       const request = (async () => {
-        await whenEventsReady();
-        setDomainLoading(domain, true);
-        setDomainError(domain, "");
+        const startedAt = performance.now();
+        const visibilityAtStart = document.visibilityState;
+        const firstLoad = !desktopStore.getSnapshot().catalogs.loadedDomains.has(domain);
         try {
+          await whenEventsReady();
+          setDomainLoading(domain, true);
+          setDomainError(domain, "");
           if (domain === RuntimeDomainKey.Skills) {
             // Overview needs the local catalog for counts. The remote update
             // check is independent and must not block every other catalog
@@ -1349,6 +1378,15 @@ export function App() {
           }
         } finally {
           setDomainLoading(domain, false);
+          logger.info("catalog domain load completed", {
+            domain,
+            durationMs: performance.now() - startedAt,
+            firstLoad,
+            loaded: desktopStore.getSnapshot().catalogs.loadedDomains.has(domain),
+            hasError: Boolean(desktopStore.getSnapshot().catalogs.errors[domain]),
+            visibilityAtStart,
+            visibilityAtEnd: document.visibilityState,
+          });
         }
       })();
       domainLoadInFlight.current.set(domain, request);

@@ -298,41 +298,6 @@ impl Store {
         Ok(())
     }
 
-    pub fn ensure_session_skill_index_version_for_scope(
-        &self,
-        scope_key: &ScopeKey,
-        version: &str,
-    ) -> Result<bool> {
-        let meta_key = format!("session_skill_index_version:{}", scope_key.as_str());
-        self.with_named_write_transaction("ensure_session_skill_index_version_for_scope", |tx| {
-            let current = tx
-                .query_row(
-                    "SELECT value FROM meta WHERE key = ?1",
-                    [&meta_key],
-                    |row| row.get::<_, String>(0),
-                )
-                .optional()?;
-            if current.as_deref() == Some(version) {
-                return Ok(false);
-            }
-
-            tx.execute(
-                "DELETE FROM scoped_session_skill_links WHERE scope_key = ?1",
-                [scope_key.as_str()],
-            )?;
-            tx.execute(
-                "DELETE FROM scoped_session_skill_index WHERE scope_key = ?1",
-                [scope_key.as_str()],
-            )?;
-            tx.execute(
-                "INSERT INTO meta (key, value) VALUES (?1, ?2)
-             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-                params![meta_key, version],
-            )?;
-            Ok(true)
-        })
-    }
-
     pub fn session_skill_index_is_current_for_scope(
         &self,
         scope_key: &ScopeKey,
@@ -395,17 +360,40 @@ impl Store {
         state: &SessionFileState,
         links: &[SessionSkillLink],
     ) -> Result<()> {
-        self.with_named_write_transaction("replace_session_skill_links_for_scope", |tx| {
+        self.write_session_skill_links_for_scope(scope_key, session, state, links, false)
+    }
+
+    pub fn append_session_skill_links_for_scope(
+        &self,
+        scope_key: &ScopeKey,
+        session: &SessionRecord,
+        state: &SessionFileState,
+        links: &[SessionSkillLink],
+    ) -> Result<()> {
+        self.write_session_skill_links_for_scope(scope_key, session, state, links, true)
+    }
+
+    fn write_session_skill_links_for_scope(
+        &self,
+        scope_key: &ScopeKey,
+        session: &SessionRecord,
+        state: &SessionFileState,
+        links: &[SessionSkillLink],
+        append: bool,
+    ) -> Result<()> {
+        self.with_named_write_transaction("write_session_skill_links_for_scope", |tx| {
             let agent = agent_label(session.agent);
             let session_path = session.path.display().to_string();
-            tx.execute(
-                "DELETE FROM scoped_session_skill_links
-             WHERE scope_key = ?1 AND session_id = ?2 AND agent = ?3 AND session_path = ?4",
-                params![scope_key.as_str(), session.id, agent, session_path],
-            )?;
-            for link in links {
+            if !append {
                 tx.execute(
-                    "INSERT INTO scoped_session_skill_links (
+                    "DELETE FROM scoped_session_skill_links
+             WHERE scope_key = ?1 AND session_id = ?2 AND agent = ?3 AND session_path = ?4",
+                    params![scope_key.as_str(), session.id, agent, session_path],
+                )?;
+            }
+            for link in links {
+                shared_cache::execute_changed(tx,
+                    "INSERT OR IGNORE INTO scoped_session_skill_links (
                     scope_key, session_id, agent, session_path, skill_name, skill_path,
                     skill_agent, skill_scope, evidence_kind, evidence_text,
                     evidence_time, confidence
@@ -427,18 +415,12 @@ impl Store {
                     ],
                 )?;
             }
-            tx.execute(
+            shared_cache::execute_changed(tx,
                 "INSERT INTO scoped_session_skill_index (
                 scope_key, session_id, agent, session_path, file_mtime, file_size,
                 indexed_at, status, error
              )
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'indexed', NULL)
-             ON CONFLICT(scope_key, session_id, agent, session_path) DO UPDATE SET
-                file_mtime = excluded.file_mtime,
-                file_size = excluded.file_size,
-                indexed_at = excluded.indexed_at,
-                status = excluded.status,
-                error = NULL",
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'indexed', NULL)",
                 params![
                     scope_key.as_str(),
                     session.id,
@@ -463,18 +445,12 @@ impl Store {
         error: &str,
     ) -> Result<()> {
         self.with_named_write_transaction("mark_session_skill_index_failed_for_scope", |tx| {
-            tx.execute(
+            shared_cache::execute_changed(tx,
                 "INSERT INTO scoped_session_skill_index (
                 scope_key, session_id, agent, session_path, file_mtime, file_size,
                 indexed_at, status, error
              )
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'failed', ?8)
-             ON CONFLICT(scope_key, session_id, agent, session_path) DO UPDATE SET
-                file_mtime = excluded.file_mtime,
-                file_size = excluded.file_size,
-                indexed_at = excluded.indexed_at,
-                status = excluded.status,
-                error = excluded.error",
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'failed', ?8)",
                 params![
                     scope_key.as_str(),
                     session.id,

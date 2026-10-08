@@ -2182,49 +2182,6 @@ fn extract_token_usage(value: &Value) -> Option<crate::sessions::SessionTokenUsa
     })
 }
 
-fn session_metadata(path: &Path) -> Option<crate::sessions::SessionMetadata> {
-    path.is_file()
-        .then(|| crate::sessions::scan_jsonl_metadata(path, AgentKind::Codex))
-}
-
-pub(crate) fn session_title(path: &Path) -> Option<String> {
-    if path
-        .extension()
-        .is_none_or(|extension| extension != "jsonl")
-    {
-        return None;
-    }
-    let file = fs::File::open(path).ok()?;
-    let inherited_history_start_ordinal =
-        crate::transcript::transcript_inherited_history_start_ordinal(path, AgentKind::Codex)
-            .ok()
-            .flatten();
-    let mut provider_title = None;
-    for line in std::io::BufRead::lines(std::io::BufReader::new(file)).map_while(Result::ok) {
-        let Ok(value) = serde_json::from_str::<Value>(&line) else {
-            continue;
-        };
-        if provider_title.is_none() {
-            provider_title = extract_provider_title(&value);
-        }
-        if crate::transcript::is_inherited_transcript_value(&value, inherited_history_start_ordinal)
-        {
-            continue;
-        }
-        if let Some(title) = extract_goal_objective(&value)
-            .and_then(|objective| crate::sessions::clean_title(&objective))
-        {
-            return provider_title.or(Some(title));
-        }
-        if let Some(title) =
-            crate::sessions::extract_session_title_for_agent(AgentKind::Codex, &value)
-        {
-            return provider_title.or(Some(title));
-        }
-    }
-    provider_title
-}
-
 pub(super) fn codex_thread_writer_lock_path(
     session_path: &Path,
     session_id: &str,
@@ -3558,6 +3515,27 @@ impl super::AgentProvider for CodexProvider {
         ]
     }
 
+    fn current_session_env_key(&self) -> Option<&'static str> {
+        Some("CODEX_THREAD_ID")
+    }
+
+    fn current_session_transcript(
+        &self,
+        ctx: &ProviderContext,
+        id: &str,
+        env: &BTreeMap<String, String>,
+    ) -> Result<Option<PathBuf>> {
+        let root = env
+            .get("CODEX_HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| codex_home(ctx));
+        sessions::current::find_transcript(
+            &[root.join("sessions"), root.join("archived_sessions")],
+            6,
+            |path| self.session_id_from_path(path).as_deref() == Some(id),
+        )
+    }
+
     fn session_watch_targets(
         &self,
         root: &Path,
@@ -3719,22 +3697,6 @@ impl super::AgentProvider for CodexProvider {
 
     fn active_session_writer(&self, session: &SessionRecord) -> Result<Option<SessionWriter>> {
         active_session_writer(session)
-    }
-
-    fn session_requires_rescan(&self, session: &SessionRecord) -> Option<bool> {
-        if session.parent_session_id.is_none() {
-            return None;
-        }
-        if let Some(meta) = session_metadata(&session.path) {
-            return Some(
-                meta.title != session.title
-                    || meta.first_user_message != session.first_user_message
-                    || meta.last_user_message != session.last_user_message
-                    || meta.last_assistant_message != session.last_assistant_message
-                    || meta.parent_session_id != session.parent_session_id,
-            );
-        }
-        session_title(&session.path).map(|title| Some(title) != session.title)
     }
 
     fn session_line_has_content(&self, prefix: &str) -> Option<bool> {
@@ -4054,10 +4016,18 @@ impl super::AgentProvider for CodexProvider {
         }
     }
 
-    fn set_hook_enabled(&self, request: &HookSetEnabledRequest, source: &str) -> Result<String> {
-        match request.path.extension().and_then(|value| value.to_str()) {
-            Some("json") => crate::hooks::set_json_hook_enabled(request, source),
-            Some("toml") => crate::hooks::set_toml_hook_enabled(request, source),
+    fn set_hooks_enabled(
+        &self,
+        requests: &[HookSetEnabledRequest],
+        source: &str,
+    ) -> Result<String> {
+        match requests[0]
+            .path
+            .extension()
+            .and_then(|value| value.to_str())
+        {
+            Some("json") => crate::hooks::set_json_hooks_enabled(requests, source),
+            Some("toml") => crate::hooks::set_toml_hooks_enabled(requests, source),
             _ => bail!("Codex hook source must be JSON or TOML"),
         }
     }

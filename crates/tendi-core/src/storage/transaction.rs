@@ -36,7 +36,10 @@ pub(super) fn write<T>(
     let slow = queue_wait + sqlite_wait + transaction_time >= Duration::from_millis(500);
     if slow || result.is_err() || logger.debug_enabled() {
         let error = result.as_ref().err();
-        let fields = serde_json::json!({"operation": operation, "priority": format!("{priority:?}"), "database": database, "queueWaitMs": queue_wait.as_secs_f64() * 1000.0, "sqliteWaitMs": sqlite_wait.as_secs_f64() * 1000.0, "transactionMs": transaction_time.as_secs_f64() * 1000.0, "succeeded": result.is_ok(), "error": error.map(ToString::to_string), "sqliteError": error.and_then(crate::storage::sqlite_error_diagnostic)});
+        let files = error
+            .filter(|error| crate::storage::is_database_recovery_error(error))
+            .map(|_| crate::storage::database_file_diagnostics(database));
+        let fields = serde_json::json!({"operation": operation, "priority": format!("{priority:?}"), "database": database, "queueWaitMs": queue_wait.as_secs_f64() * 1000.0, "sqliteWaitMs": sqlite_wait.as_secs_f64() * 1000.0, "transactionMs": transaction_time.as_secs_f64() * 1000.0, "succeeded": result.is_ok(), "error": error.map(ToString::to_string), "sqliteError": error.and_then(crate::storage::sqlite_error_diagnostic), "files": files});
         if slow || result.is_err() {
             logger.warn("database write completed", fields);
         } else {

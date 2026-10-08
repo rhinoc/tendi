@@ -3,7 +3,8 @@ use std::{
     fs,
     io::{BufRead, BufReader, Read, Seek, SeekFrom},
     path::{Path, PathBuf},
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    sync::{Arc, Mutex},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::Result;
@@ -17,6 +18,9 @@ use crate::{
     skills::AgentKind,
     time::compare_timestamps,
 };
+
+pub(crate) mod current;
+pub use current::{CurrentSession, current_session};
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct SessionTokenUsage {
@@ -122,7 +126,7 @@ pub struct SessionScanCacheEntry {
     pub additional_file_states: Vec<SessionScanSourceState>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct SessionScanSourceState {
     pub path: PathBuf,
     pub file_mtime: i64,
@@ -132,14 +136,21 @@ pub struct SessionScanSourceState {
 #[derive(Debug, Clone, Default)]
 pub struct SessionScanCache {
     entries: BTreeMap<(AgentKind, PathBuf), SessionScanCacheEntry>,
+    entries_by_id: BTreeMap<(AgentKind, String), PathBuf>,
     #[cfg(unix)]
     entries_by_file: BTreeMap<(AgentKind, SessionFileIdentity), PathBuf>,
+    empty_sources: Arc<Mutex<BTreeMap<(AgentKind, PathBuf), Vec<SessionScanSourceState>>>>,
+    invalidated_empty: Arc<Mutex<BTreeSet<(AgentKind, PathBuf)>>>,
 }
 
 impl SessionScanCache {
     pub fn from_entries(entries: impl IntoIterator<Item = SessionScanCacheEntry>) -> Self {
         let mut cache = Self::default();
         for entry in entries {
+            cache.entries_by_id.insert(
+                (entry.session.agent, entry.session.id.clone()),
+                entry.session.path.clone(),
+            );
             #[cfg(unix)]
             if let Some(identity) = session_file_identity(&entry.session.path) {
                 cache
@@ -161,6 +172,74 @@ impl SessionScanCache {
         cache
     }
 
+    pub(crate) fn load_empty_source(
+        &self,
+        agent: AgentKind,
+        path: PathBuf,
+        sources: Vec<SessionScanSourceState>,
+    ) {
+        self.empty_sources
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert((agent, path), sources);
+    }
+
+    pub(crate) fn empty_source_if_current(&self, agent: AgentKind, path: &Path) -> bool {
+        let mut entries = self.empty_sources.lock().unwrap_or_else(|e| e.into_inner());
+        let key = (agent, path.to_path_buf());
+        let Some(sources) = entries.get(&key) else {
+            return false;
+        };
+        let provider = crate::providers::agent_provider(agent);
+        let paths = provider.session_scan_source_paths(path);
+        let current = paths.len() == sources.len()
+            && sources.iter().all(|source| {
+                paths.contains(&source.path) && scan_source_state_current(agent, source)
+            });
+        if !current {
+            entries.remove(&key);
+            self.invalidated_empty
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(key);
+        }
+        current
+    }
+
+    pub(crate) fn record_empty_source(
+        &self,
+        agent: AgentKind,
+        path: &Path,
+        sources: Vec<SessionScanSourceState>,
+    ) {
+        if sources
+            .iter()
+            .all(|source| scan_source_state_current(agent, source))
+        {
+            self.load_empty_source(agent, path.to_path_buf(), sources);
+        }
+    }
+
+    pub(crate) fn empty_source_entries(
+        &self,
+    ) -> Vec<(AgentKind, PathBuf, Vec<SessionScanSourceState>)> {
+        self.empty_sources
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .map(|((agent, path), sources)| (*agent, path.clone(), sources.clone()))
+            .collect()
+    }
+
+    pub(crate) fn invalidated_empty_sources(&self) -> Vec<(AgentKind, PathBuf)> {
+        self.invalidated_empty
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .cloned()
+            .collect()
+    }
+
     pub(crate) fn session_if_current(
         &self,
         agent: AgentKind,
@@ -180,17 +259,36 @@ impl SessionScanCache {
         agent: AgentKind,
         id: &str,
     ) -> Option<SessionRecord> {
-        self.entries.values().find_map(|entry| {
-            if entry.session.agent != agent || entry.session.id != id {
-                return None;
-            }
-            let (file_mtime, file_size) = file_state(&entry.session.path)?;
-            (entry.file_mtime == file_mtime
-                && entry.file_size == file_size
-                && self.additional_file_states_current(entry)
-                && !session_requires_rescan(&entry.session))
-            .then(|| entry.session.clone())
-        })
+        let path = self.entries_by_id.get(&(agent, id.to_string()))?;
+        let entry = self.entries.get(&(agent, path.clone()))?;
+        let (file_mtime, file_size) = file_state(&entry.session.path)?;
+        (entry.file_mtime == file_mtime
+            && entry.file_size == file_size
+            && self.additional_file_states_current(entry)
+            && !session_requires_rescan(&entry.session))
+        .then(|| entry.session.clone())
+    }
+
+    pub(crate) fn session_id_cache_miss_reason(&self, agent: AgentKind, id: &str) -> &'static str {
+        let Some(path) = self.entries_by_id.get(&(agent, id.to_string())) else {
+            return "id_missing";
+        };
+        let Some(entry) = self.entries.get(&(agent, path.clone())) else {
+            return "entry_missing";
+        };
+        let Some((file_mtime, file_size)) = file_state(&entry.session.path) else {
+            return "primary_unavailable";
+        };
+        if (file_mtime, file_size) != (entry.file_mtime, entry.file_size) {
+            return "primary_changed";
+        }
+        if !self.additional_file_states_current(entry) {
+            return "source_changed";
+        }
+        if session_requires_rescan(&entry.session) {
+            return "provider_rescan";
+        }
+        "current"
     }
 
     pub(crate) fn session_if_appended(
@@ -296,26 +394,91 @@ impl SessionScanCache {
     }
 
     fn additional_file_states_current(&self, entry: &SessionScanCacheEntry) -> bool {
-        entry.additional_file_states.iter().all(|source| {
-            file_state(&source.path).unwrap_or((0, 0)) == (source.file_mtime, source.file_size)
-        })
+        let paths = crate::providers::agent_provider(entry.session.agent)
+            .session_scan_source_paths(&entry.session.path);
+        paths.iter().all(|path| {
+            *path == entry.session.path
+                || entry
+                    .additional_file_states
+                    .iter()
+                    .any(|source| source.path == *path)
+                || scan_source_state_current(
+                    entry.session.agent,
+                    &SessionScanSourceState {
+                        path: path.clone(),
+                        file_mtime: 0,
+                        file_size: 0,
+                    },
+                )
+        }) && entry
+            .additional_file_states
+            .iter()
+            .all(|source| scan_source_state_current(entry.session.agent, source))
     }
 
     pub fn changed_sessions(&self, sessions: &[SessionRecord]) -> Vec<SessionRecord> {
-        sessions
-            .iter()
-            .filter(|session| {
-                self.entries
-                    .get(&(session.agent, session.path.clone()))
-                    .is_none_or(|entry| {
-                        entry.session != **session
-                            || file_state(&session.path).unwrap_or((0, 0))
-                                != (entry.file_mtime, entry.file_size)
-                            || !self.additional_file_states_current(entry)
-                    })
-            })
-            .cloned()
-            .collect()
+        let mut changed = Vec::new();
+        let mut reasons = BTreeMap::<String, usize>::new();
+        let mut examples = Vec::new();
+        for session in sessions {
+            let reason = match self.entries.get(&(session.agent, session.path.clone())) {
+                None => Some("missing_cache"),
+                Some(entry) if !scan_record_matches_cached(&entry.session, session) => {
+                    Some("metadata_changed")
+                }
+                Some(entry)
+                    if file_state(&session.path).unwrap_or((0, 0))
+                        != (entry.file_mtime, entry.file_size) =>
+                {
+                    Some("primary_file_changed")
+                }
+                Some(entry) if !self.additional_file_states_current(entry) => {
+                    Some("source_file_changed")
+                }
+                Some(_) => None,
+            };
+            if let Some(reason) = reason {
+                let key = format!("{}:{reason}", session.agent.label());
+                *reasons.entry(key).or_default() += 1;
+                if examples.len() < 5 {
+                    let changed_fields = self
+                        .entries
+                        .get(&(session.agent, session.path.clone()))
+                        .filter(|entry| {
+                            reason == "metadata_changed"
+                                && !scan_record_matches_cached(&entry.session, session)
+                        })
+                        .and_then(|entry| {
+                            let cached = serde_json::to_value(&entry.session).ok()?;
+                            let current = serde_json::to_value(session).ok()?;
+                            let fields = cached
+                                .as_object()?
+                                .keys()
+                                .chain(current.as_object()?.keys())
+                                .collect::<BTreeSet<_>>();
+                            Some(
+                                fields
+                                    .into_iter()
+                                    .filter(|field| cached.get(*field) != current.get(*field))
+                                    .cloned()
+                                    .collect::<Vec<_>>(),
+                            )
+                        });
+                    examples.push(serde_json::json!({
+                        "agent": session.agent.label(),
+                        "sessionId": session.id,
+                        "reason": reason,
+                        "changedFields": changed_fields,
+                    }));
+                }
+                changed.push(session.clone());
+            }
+        }
+        crate::logging::global().info(
+            "session scan cache changes",
+            serde_json::json!({"reasons": reasons, "examples": examples}),
+        );
+        changed
     }
 
     fn agent_for_path(&self, path: &Path) -> Option<AgentKind> {
@@ -337,6 +500,43 @@ impl SessionScanCache {
         }
         None
     }
+}
+
+fn scan_record_matches_cached(cached: &SessionRecord, scanned: &SessionRecord) -> bool {
+    if cached == scanned {
+        return true;
+    }
+    let mut comparable = scanned.clone();
+    comparable.logical_project_id = cached.logical_project_id.clone();
+    comparable.logical_project_name = cached.logical_project_name.clone();
+    cached == &comparable
+}
+
+fn scan_source_state_current(agent: AgentKind, source: &SessionScanSourceState) -> bool {
+    crate::providers::agent_provider(agent)
+        .session_scan_source_state_current(&source.path, source.file_mtime, source.file_size)
+        .unwrap_or_else(|| {
+            file_state(&source.path).unwrap_or((0, 0)) == (source.file_mtime, source.file_size)
+        })
+}
+
+pub(crate) fn scan_source_states(agent: AgentKind, path: &Path) -> Vec<SessionScanSourceState> {
+    let provider = crate::providers::agent_provider(agent);
+    provider
+        .session_scan_source_paths(path)
+        .into_iter()
+        .map(|path| {
+            let (file_mtime, file_size) = provider
+                .session_scan_source_index_state(&path)
+                .or_else(|| file_state(&path))
+                .unwrap_or((0, 0));
+            SessionScanSourceState {
+                path,
+                file_mtime,
+                file_size,
+            }
+        })
+        .collect()
 }
 
 #[cfg(unix)]
@@ -386,9 +586,19 @@ fn scan_sessions_with_additional_roots_with_cache(
 
     let ctx = crate::providers::ProviderContext::new(cwd);
     for provider in crate::providers::agent_providers() {
+        let started = Instant::now();
+        let before = sessions.len();
         if let Err(err) = provider.scan_sessions(&ctx, &mut sessions, &mut warnings, cache) {
             warnings.push(format!("{:?}: {err:#}", provider.kind()));
         }
+        crate::logging::global().info(
+            "session provider scan completed",
+            serde_json::json!({
+                "agent": provider.kind().label(),
+                "durationMs": started.elapsed().as_secs_f64() * 1000.0,
+                "sessionCount": sessions.len() - before,
+            }),
+        );
     }
     scan_additional_session_roots(additional_session_roots, &mut sessions, cache);
 
@@ -702,7 +912,7 @@ fn file_state(path: &Path) -> Option<(i64, i64)> {
     Some((file_mtime, file_size))
 }
 
-fn is_line_boundary(path: &Path, offset: u64) -> bool {
+pub(crate) fn is_line_boundary(path: &Path, offset: u64) -> bool {
     if offset == 0 {
         return true;
     }
@@ -1180,10 +1390,6 @@ pub(crate) fn scan_jsonl_meta_for_agent(path: &Path, agent: Option<AgentKind>) -
     }
 
     meta
-}
-
-pub(crate) fn scan_jsonl_metadata(path: &Path, agent: AgentKind) -> SessionMetadata {
-    scan_jsonl_meta_for_agent(path, Some(agent))
 }
 
 pub(crate) fn scan_jsonl_meta_from_offset(

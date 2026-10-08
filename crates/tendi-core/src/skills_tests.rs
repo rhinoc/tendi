@@ -127,6 +127,126 @@ fn skill_write_keeps_same_source_projections_shared() {
 
 #[cfg(unix)]
 #[test]
+fn skill_created_time_survives_new_projections_and_directory_replacement() {
+    use std::os::unix::fs::{PermissionsExt, symlink};
+
+    let root = temp_dir("tendi-skill-created-time");
+    let source = root.join("source/demo");
+    let first = root.join(".agents/skills/demo");
+    let second = root.join(".claude/skills/demo");
+    fs::create_dir_all(&source).unwrap();
+    fs::create_dir_all(first.parent().unwrap()).unwrap();
+    fs::create_dir_all(second.parent().unwrap()).unwrap();
+    fs::write(
+        source.join("SKILL.md"),
+        "---\nname: demo\ndescription: Original\n---\n\nOriginal\n",
+    )
+    .unwrap();
+    symlink(&source, &first).unwrap();
+    fs::set_permissions(&source, fs::Permissions::from_mode(0o555)).unwrap();
+
+    let store = crate::storage::Store::open(root.join("tendi.sqlite3")).unwrap();
+    let scan = super::scan_skills_with_source_store_for_projects_for_projection(&root, &store, &[])
+        .unwrap();
+    let created_at = scan
+        .skills
+        .iter()
+        .find(|skill| skill.name == "demo")
+        .unwrap()
+        .ctime
+        .clone()
+        .expect("skill directory creation time is available");
+
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    symlink(&source, &second).unwrap();
+    let later_created_at = fs::symlink_metadata(&second)
+        .unwrap()
+        .created()
+        .ok()
+        .and_then(super::system_time_to_iso)
+        .expect("provider projection creation time is available");
+    assert!(created_at < later_created_at);
+    let scan = super::scan_skills_with_source_store_for_projects_for_projection(&root, &store, &[])
+        .unwrap();
+    let skill = scan
+        .skills
+        .iter()
+        .find(|skill| skill.name == "demo")
+        .unwrap();
+    assert_eq!(skill.ctime.as_deref(), Some(created_at.as_str()));
+    assert_eq!(skill.paths.len(), 2);
+    let cached_scan = scan.clone();
+
+    drop(store);
+    {
+        let conn = rusqlite::Connection::open(root.join("tendi.sqlite3")).unwrap();
+        conn.execute("DROP TABLE skill_installation_times", [])
+            .unwrap();
+        conn.pragma_update(None, "user_version", crate::storage::STORAGE_SCHEMA_VERSION)
+            .unwrap();
+    }
+    let store = crate::storage::Store::open(root.join("tendi.sqlite3")).unwrap();
+
+    let write = SkillWriteTransaction::prepare(&[first.clone(), second.clone()]).unwrap();
+    write.commit();
+    assert!(fs::symlink_metadata(&first).unwrap().is_dir());
+    assert!(
+        fs::symlink_metadata(&second)
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+
+    let replacement = first.with_file_name("demo-update");
+    fs::create_dir(&replacement).unwrap();
+    fs::write(
+        replacement.join("SKILL.md"),
+        "---\nname: demo\ndescription: Updated\n---\n\nUpdated\n",
+    )
+    .unwrap();
+    fs::remove_dir_all(&first).unwrap();
+    fs::rename(&replacement, &first).unwrap();
+
+    let scan = super::refresh_dirty_skill_projection(
+        &root,
+        &store,
+        cached_scan,
+        std::slice::from_ref(&first),
+        true,
+        &[],
+    )
+    .unwrap();
+    let skill = scan
+        .skills
+        .iter()
+        .find(|skill| skill.name == "demo")
+        .unwrap();
+    assert_eq!(skill.description.as_deref(), Some("Updated"));
+    assert_eq!(skill.ctime.as_deref(), Some(created_at.as_str()));
+
+    fs::remove_file(&second).unwrap();
+    fs::remove_dir_all(&first).unwrap();
+    store
+        .delete_skill_sources_for_workspace(&root, &[first.clone(), second.clone()], &[])
+        .unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    symlink(&source, &first).unwrap();
+    let scan = super::scan_skills_with_source_store_for_projects_for_projection(&root, &store, &[])
+        .unwrap();
+    let reinstalled = scan
+        .skills
+        .iter()
+        .find(|skill| skill.name == "demo")
+        .unwrap();
+    assert_ne!(reinstalled.ctime.as_deref(), Some(created_at.as_str()));
+
+    drop(store);
+    fs::set_permissions(&source, fs::Permissions::from_mode(0o755)).unwrap();
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
 fn skill_write_rolls_back_materialized_source() {
     use std::os::unix::fs::{PermissionsExt, symlink};
 
@@ -1123,6 +1243,53 @@ fn git_clone_checks_out_requested_ref() {
         records[0].source_relative_path.as_deref(),
         Some("skills/demo")
     );
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn resolve_add_source_refreshes_existing_persistent_git_checkout() {
+    let root = temp_dir("tendi-refresh-persistent-source-test");
+    let repository = root.join("repository");
+    let remote = root.join("remote.git");
+    fs::create_dir_all(&repository).unwrap();
+    fs::create_dir_all(&remote).unwrap();
+    run_test_git(&repository, &["init", "-b", "main"]);
+    run_test_git(&repository, &["config", "user.email", "test@example.com"]);
+    run_test_git(&repository, &["config", "user.name", "Test"]);
+    run_test_git(&remote, &["init", "--bare", "-b", "main"]);
+    run_test_git(
+        &repository,
+        &["remote", "add", "origin", remote.to_str().unwrap()],
+    );
+    fs::create_dir_all(repository.join("skills/demo")).unwrap();
+    fs::write(repository.join("skills/demo/SKILL.md"), "version one\n").unwrap();
+    run_test_git(&repository, &["add", "."]);
+    run_test_git(&repository, &["commit", "-m", "version one"]);
+    run_test_git(&repository, &["push", "--quiet", "-u", "origin", "main"]);
+
+    let source = format!("file://{}", remote.display());
+    let first = super::resolve_add_source(&root, &source, true).unwrap();
+    let cached_source = super::persistent_source_root(&source).unwrap();
+    assert_eq!(
+        fs::read_to_string(first.root.join("skills/demo/SKILL.md")).unwrap(),
+        "version one\n"
+    );
+
+    fs::write(repository.join("skills/demo/SKILL.md"), "version two\n").unwrap();
+    run_test_git(&repository, &["add", "."]);
+    run_test_git(&repository, &["commit", "-m", "version two"]);
+    run_test_git(&repository, &["push", "--quiet", "origin", "main"]);
+    let latest = run_test_git(&repository, &["rev-parse", "HEAD"]);
+
+    let second = super::resolve_add_source(&root, &source, true).unwrap();
+    assert_eq!(second.root, first.root);
+    assert_eq!(
+        fs::read_to_string(second.root.join("skills/demo/SKILL.md")).unwrap(),
+        "version two\n"
+    );
+    assert_eq!(run_test_git(&cached_source, &["rev-parse", "HEAD"]), latest);
+
+    let _ = fs::remove_dir_all(cached_source);
     let _ = fs::remove_dir_all(root);
 }
 
@@ -3209,6 +3376,42 @@ fn shared_skill_merge_skips_managed_provider_files() {
     );
 
     assert!(files.is_empty());
+}
+
+#[test]
+fn identical_binary_skill_files_do_not_report_an_update() {
+    let base = vec![0x89, b'P', b'N', b'G', 0, 0xff];
+    let changed = vec![0x89, b'P', b'N', b'G', 0, 0xfe];
+    let files = merge_file_maps(
+        Some(BTreeMap::from([(
+            "assets/icon.png".to_string(),
+            base.clone(),
+        )])),
+        BTreeMap::from([("assets/icon.png".to_string(), base.clone())]),
+        BTreeMap::from([("assets/icon.png".to_string(), base.clone())]),
+        "",
+        "/tmp/demo",
+        SkillVisibility::Auto,
+        AgentKind::Shared,
+    );
+
+    assert!(files.is_empty());
+
+    let files = merge_file_maps(
+        Some(BTreeMap::from([(
+            "assets/icon.png".to_string(),
+            base.clone(),
+        )])),
+        BTreeMap::from([("assets/icon.png".to_string(), base)]),
+        BTreeMap::from([("assets/icon.png".to_string(), changed)]),
+        "",
+        "/tmp/demo",
+        SkillVisibility::Auto,
+        AgentKind::Shared,
+    );
+
+    assert_eq!(files.len(), 1);
+    assert_eq!(files[0].status, "binary");
 }
 
 #[test]

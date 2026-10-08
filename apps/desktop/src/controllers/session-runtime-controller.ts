@@ -17,6 +17,7 @@ import type { SessionIdentityRecord } from "../lib/sessions.ts";
 import type { RawDomainRow } from "./controller-types.ts";
 import { applySkillUpdateEvent } from "./skill-update-controller.ts";
 import { desktopStore } from "../store/desktop-store.ts";
+import { startAsyncSubscription } from "./async-subscription.ts";
 
 const SESSION_EVENT_FLUSH_MS = 200;
 const SESSION_REFRESH_ERROR = "Could not refresh sessions. Try again.";
@@ -79,7 +80,6 @@ export function useSessionRuntimeController(
     pending: boolean;
     promise: Promise<void>;
   }>());
-  const disposed = useRef(false);
 
   const refreshProjectionFromEvent = useCallback((domain: string): Promise<void> => {
     const existing = projectionRefreshes.current.get(domain);
@@ -236,10 +236,7 @@ export function useSessionRuntimeController(
   }, [finishSessionScanWaiters, flushBufferedSessionEvents, resyncSessionSnapshot, scheduleSessionEventFlush, setSessionLoadError, setSessionRefreshError]);
 
   useEffect(() => {
-    disposed.current = false;
-    let unsubscribe: (() => void) | null = null;
-    const setup = subscribeRuntimeEvents((event) => {
-      if (disposed.current) return;
+    const subscription = startAsyncSubscription(subscribeRuntimeEvents, (event) => {
       const previousEventId = lastDaemonEventId.current;
       lastDaemonEventId.current = event.id;
       const isCurrentScopeEvent = !event.scopeKey
@@ -310,16 +307,12 @@ export function useSessionRuntimeController(
           );
         });
       }
+    }, (error) => {
+      logger.warn("daemon event subscription failed", { error });
     });
-    sessionEventReady.current = setup.then((cleanup) => {
-      if (disposed.current) cleanup();
-      else unsubscribe = cleanup;
-    }).catch((error) => {
-      if (!disposed.current) logger.warn("daemon event subscription failed", { error });
-    });
+    sessionEventReady.current = subscription.ready;
     return () => {
-      disposed.current = true;
-      unsubscribe?.();
+      subscription.dispose();
       if (sessionEventFlushTimer.current !== undefined) {
         window.clearTimeout(sessionEventFlushTimer.current);
         sessionEventFlushTimer.current = undefined;

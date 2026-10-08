@@ -1,5 +1,6 @@
 use std::{
     fs,
+    io::Write,
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -74,6 +75,105 @@ fn extracts_codex_shell_skill_read() {
     assert_eq!(links[0].skill_name, "foo");
     assert_eq!(links[0].evidence_kind, "exec_command");
     let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn appended_codex_evidence_keeps_existing_links_and_reads_only_new_lines() {
+    let root = temp_dir("codex-appended-skill-links");
+    let foo = root.join("skills/foo");
+    let bar = root.join("skills/bar");
+    fs::create_dir_all(&foo).unwrap();
+    fs::create_dir_all(&bar).unwrap();
+    let transcript = root.join("session.jsonl");
+    let line = |path: &Path, timestamp: &str| {
+        format!(
+            "{}\n",
+            json!({
+                "type": "response_item",
+                "timestamp": timestamp,
+                "payload": {
+                    "type": "function_call",
+                    "name": "exec_command",
+                    "arguments": format!("{{\"cmd\":\"cat {}\"}}", path.join("SKILL.md").display()),
+                },
+            })
+        )
+    };
+    fs::write(&transcript, line(&foo, "2026-06-24T10:00:00Z")).unwrap();
+    let session = session(&transcript, AgentKind::Codex);
+    let scan = crate::SkillScan {
+        roots: vec![],
+        skills: [
+            skill_scan("foo", &foo, AgentKind::Codex).skills,
+            skill_scan("bar", &bar, AgentKind::Codex).skills,
+        ]
+        .concat(),
+        warnings: vec![],
+    };
+    let lookup = SkillLookup::new(&scan);
+    let store = Store::open(root.join("database.sqlite3")).unwrap();
+    let scope = ScopeKey::new("workspace:/index-test").unwrap();
+    let first_state = session_file_state(&transcript).unwrap();
+    let first_links = extract_session_skill_links(&session, &lookup).unwrap();
+    store
+        .replace_session_skill_links_for_scope(&scope, &session, &first_state, &first_links)
+        .unwrap();
+
+    let mut file = fs::OpenOptions::new()
+        .append(true)
+        .open(&transcript)
+        .unwrap();
+    file.write_all(line(&foo, "2026-06-24T10:01:00Z").as_bytes())
+        .unwrap();
+    file.write_all(line(&bar, "2026-06-24T10:02:00Z").as_bytes())
+        .unwrap();
+    drop(file);
+    let next_state = session_file_state(&transcript).unwrap();
+    let offset = session_skill_append_offset(
+        &session,
+        &next_state,
+        Some((first_state.file_mtime, first_state.file_size)),
+    )
+    .unwrap();
+    assert_eq!(offset, first_state.file_size as u64);
+    let new_links = extract_session_skill_links_from_offset(&session, &lookup, offset).unwrap();
+    store
+        .append_session_skill_links_for_scope(&scope, &session, &next_state, &new_links)
+        .unwrap();
+    let links = store
+        .session_skill_links_for_scope(&scope, &session.id, AgentKind::Codex)
+        .unwrap();
+    assert_eq!(links.len(), 2);
+    assert_eq!(
+        links
+            .iter()
+            .find(|link| link.skill_name == "foo")
+            .unwrap()
+            .evidence_time
+            .as_deref(),
+        Some("2026-06-24T10:00:00Z")
+    );
+    assert_eq!(
+        links
+            .iter()
+            .find(|link| link.skill_name == "bar")
+            .unwrap()
+            .evidence_time
+            .as_deref(),
+        Some("2026-06-24T10:02:00Z")
+    );
+
+    fs::write(&transcript, "rewritten\n").unwrap();
+    assert!(
+        session_skill_append_offset(
+            &session,
+            &session_file_state(&transcript).unwrap(),
+            Some((next_state.file_mtime, next_state.file_size)),
+        )
+        .is_none()
+    );
+    drop(store);
+    fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
@@ -243,6 +343,20 @@ fn skill_index_state_tracks_cursor_store_changes() {
 
     let session = session(&meta_path, AgentKind::Cursor);
     let first = session_skill_index_state(&session).unwrap();
+    let wal_path = root.join("store.db-wal");
+    fs::write(&wal_path, "").unwrap();
+    let empty_wal = session_skill_index_state(&session).unwrap();
+    assert_eq!(
+        (empty_wal.file_mtime, empty_wal.file_size),
+        (first.file_mtime, first.file_size)
+    );
+    fs::write(&wal_path, "new evidence").unwrap();
+    let nonempty_wal = session_skill_index_state(&session).unwrap();
+    assert_ne!(
+        (nonempty_wal.file_mtime, nonempty_wal.file_size),
+        (first.file_mtime, first.file_size)
+    );
+    fs::remove_file(&wal_path).unwrap();
     fs::write(&store_path, "updated store evidence\n").unwrap();
     let second = session_skill_index_state(&session).unwrap();
 

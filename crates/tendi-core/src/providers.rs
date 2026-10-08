@@ -171,6 +171,23 @@ pub(crate) trait AgentProvider: Sync {
         vec![path.to_path_buf()]
     }
 
+    fn session_scan_cache_scope(&self) -> Box<dyn std::any::Any> {
+        Box::new(())
+    }
+
+    fn session_scan_source_state_current(
+        &self,
+        _path: &Path,
+        _cached_mtime: i64,
+        _cached_size: i64,
+    ) -> Option<bool> {
+        None
+    }
+
+    fn session_scan_source_index_state(&self, _path: &Path) -> Option<(i64, i64)> {
+        None
+    }
+
     fn session_message_kind(&self, value: &Value) -> Option<SessionMessageKind> {
         default_session_message_kind(value)
     }
@@ -326,6 +343,22 @@ pub(crate) trait AgentProvider: Sync {
 
     fn session_roots(&self, _ctx: &ProviderContext) -> Vec<PathBuf> {
         Vec::new()
+    }
+
+    fn current_session_env_key(&self) -> Option<&'static str> {
+        None
+    }
+
+    fn current_session_transcript(
+        &self,
+        _ctx: &ProviderContext,
+        _id: &str,
+        _env: &BTreeMap<String, String>,
+    ) -> Result<Option<PathBuf>> {
+        bail!(
+            "current sessions are not supported for {}",
+            self.storage_key()
+        )
     }
 
     fn session_watch_targets(&self, _root: &Path) -> Option<(Vec<SessionWatchTarget>, bool)> {
@@ -624,7 +657,11 @@ pub(crate) trait AgentProvider: Sync {
         bail!("hook deletion is not supported for {}", self.storage_key())
     }
 
-    fn set_hook_enabled(&self, _request: &HookSetEnabledRequest, _source: &str) -> Result<String> {
+    fn set_hooks_enabled(
+        &self,
+        _requests: &[HookSetEnabledRequest],
+        _source: &str,
+    ) -> Result<String> {
         bail!(
             "hook enable/disable is not supported for {}",
             self.storage_key()

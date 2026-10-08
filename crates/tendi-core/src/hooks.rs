@@ -328,15 +328,17 @@ pub fn set_hooks_enabled(requests: Vec<HookSetEnabledRequest>) -> Result<()> {
             }
         }
 
-        let mut after = before.clone();
-        for request in &path_requests {
-            after = crate::providers::agent_provider(request.agent)
-                .set_hook_enabled(request, &after)
-                .map_err(|error| {
-                    let _ = rollback_hook_writes(&committed);
-                    error
-                })?;
+        let agent = path_requests[0].agent;
+        if path_requests.iter().any(|request| request.agent != agent) {
+            rollback_hook_writes(&committed)?;
+            bail!("hook toggle requests disagree about the provider");
         }
+        let after = crate::providers::agent_provider(agent)
+            .set_hooks_enabled(&path_requests, &before)
+            .map_err(|error| {
+                let _ = rollback_hook_writes(&committed);
+                error
+            })?;
         atomic_write(&path, &after).map_err(|error| {
             let _ = rollback_hook_writes(&committed);
             error
@@ -932,25 +934,29 @@ pub(crate) fn delete_toml_hooks(requests: &[HookDeleteRequest], source: &str) ->
     ))
 }
 
-pub(crate) fn set_json_hook_enabled(
-    request: &HookSetEnabledRequest,
+pub(crate) fn set_json_hooks_enabled(
+    requests: &[HookSetEnabledRequest],
     source: &str,
 ) -> Result<String> {
     let mut value = serde_json::from_str::<Value>(source)?;
     let before = value.clone();
-    if !set_json_hook_enabled_in_value(&mut value, request) {
-        bail!("matching hook was not found");
+    for request in requests {
+        if !set_json_hook_enabled_in_value(&mut value, request) {
+            bail!("matching hook was not found");
+        }
     }
     crate::json_edit::patch_json_text(source, &before, &value)
 }
 
-pub(crate) fn set_toml_hook_enabled(
-    request: &HookSetEnabledRequest,
+pub(crate) fn set_toml_hooks_enabled(
+    requests: &[HookSetEnabledRequest],
     source: &str,
 ) -> Result<String> {
     let mut value = source.parse::<DocumentMut>()?;
-    if !set_toml_hook_enabled_in_document(&mut value, request) {
-        bail!("matching hook was not found");
+    for request in requests {
+        if !set_toml_hook_enabled_in_document(&mut value, request) {
+            bail!("matching hook was not found");
+        }
     }
     Ok(crate::fsutil::preserve_newline_style(
         source,

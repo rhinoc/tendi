@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::BTreeMap,
     env, fs,
     path::{Path, PathBuf},
 };
@@ -38,41 +38,39 @@ struct SkillsCliLockDatabase {
     projects: Vec<(PathBuf, BTreeMap<String, SkillsCliLockEntry>)>,
 }
 
-/// Import source provenance from Skills CLI lock files into the scoped source table.
-///
-/// This is deliberately a migration operation. Runtime skill scanning must only read the
-/// scoped source table; it must not fall back to lock files after this import has completed.
+/// Import source provenance from Skills CLI lock files into the scoped source table when the
+/// lock inputs change. Runtime skill scanning reads only the scoped source table.
 pub(super) fn migrate_scan(store: &Store, cwd: &Path, scan: &mut SkillScan) -> Result<bool> {
-    let workspace_root = canonical_workspace_root(cwd);
-    let scope_key = workspace_scope_key(&workspace_root)?;
-    let migration_key = format!("{SKILLS_CLI_SOURCE_MIGRATION_KEY}:{}", scope_key.as_str());
-    if super::migration_completed(store, &migration_key)? {
-        return Ok(false);
-    }
-
-    let existing_paths = store
+    let migration_key = migration_key_for_workspace(cwd)?;
+    let existing_records = store
         .skill_source_records_for_workspace(cwd)?
         .into_iter()
-        .map(|record| record.skill_path)
-        .collect::<BTreeSet<_>>();
+        .map(|record| (record.skill_path.clone(), record))
+        .collect::<BTreeMap<_, _>>();
     let (locks, lock_warnings) = SkillsCliLockDatabase::load(cwd);
     let has_lock_warnings = !lock_warnings.is_empty();
     scan.warnings.extend(lock_warnings);
     let mut records = Vec::new();
-    let mut seen_paths = existing_paths;
 
     for skill in &scan.skills {
         for path in &skill.paths {
-            if seen_paths.contains(&path.path) {
-                continue;
-            }
             let Some(entry) = locks.entry(&skill.name, &path.scope, &path.path) else {
                 continue;
             };
-            records.push(SkillSourceRecord {
+            let existing = existing_records.get(&path.path);
+            let source_kind = entry.source_type.trim().to_ascii_lowercase();
+            // Lock entries are authoritative for paths they identify. Upgrade inferred local
+            // provenance and refresh records previously imported from the lock, while leaving
+            // paths already attributed to a different source kind untouched.
+            if existing.is_some_and(|record| {
+                record.source_kind != "local" && record.source_kind != source_kind
+            }) {
+                continue;
+            }
+            let record = SkillSourceRecord {
                 skill_name: skill.name.clone(),
                 skill_path: path.path.clone(),
-                source_kind: entry.source_type.trim().to_ascii_lowercase(),
+                source_kind,
                 source: Some(normalize_locked_source(
                     entry.source(),
                     entry.source_type.as_str(),
@@ -85,28 +83,74 @@ pub(super) fn migrate_scan(store: &Store, cwd: &Path, scan: &mut SkillScan) -> R
                     .or_else(|| non_empty(entry.computed_hash.as_deref())),
                 source_relative_path: non_empty(entry.skill_path.as_deref()),
                 update_status: "tracked".to_string(),
-                origin: "skills-cli-lock".to_string(),
-            });
-            seen_paths.insert(path.path.clone());
+                origin: existing
+                    .map(|record| record.origin.clone())
+                    .unwrap_or_else(|| "skills-cli-lock".to_string()),
+            };
+            if existing.is_none_or(|existing| !same_source_record(existing, &record)) {
+                records.push(record);
+            }
         }
     }
 
     if records.is_empty() {
-        if !has_lock_warnings {
+        if !has_lock_warnings && !super::migration_completed(store, &migration_key)? {
             super::mark_migration_completed(store, &migration_key)?;
         }
         return Ok(false);
     }
 
-    store.with_named_write_transaction("migration.skill_sources", |tx| {
-        store
-            .insert_skill_source_records_if_missing_for_workspace_in_tx(tx, &scope_key, &records)?;
-        if !has_lock_warnings {
-            super::mark_migration_completed_in_tx(tx, &migration_key)?;
+    let changed = store.upsert_skill_source_records_for_workspace(cwd, &records)? > 0;
+    if !has_lock_warnings && !super::migration_completed(store, &migration_key)? {
+        super::mark_migration_completed(store, &migration_key)?;
+    }
+    Ok(changed)
+}
+
+fn same_source_record(left: &SkillSourceRecord, right: &SkillSourceRecord) -> bool {
+    left.skill_name == right.skill_name
+        && left.skill_path == right.skill_path
+        && left.source_kind == right.source_kind
+        && left.source == right.source
+        && left.source_ref == right.source_ref
+        && left.source_version == right.source_version
+        && left.source_relative_path == right.source_relative_path
+        && left.update_status == right.update_status
+}
+
+pub(super) fn migration_completed_for_workspace(store: &Store, cwd: &Path) -> Result<bool> {
+    let migration_key = migration_key_for_workspace(cwd)?;
+    super::migration_completed(store, &migration_key)
+}
+
+pub(super) fn migration_key_for_workspace(cwd: &Path) -> Result<String> {
+    let workspace_root = canonical_workspace_root(cwd);
+    let scope_key = workspace_scope_key(&workspace_root)?;
+    let mut lock_inputs = String::new();
+    for (path, _) in skills_cli_lock_paths(cwd) {
+        lock_inputs.push_str(&path.display().to_string());
+        lock_inputs.push('\n');
+        match fs::read_to_string(&path) {
+            Ok(contents) => {
+                lock_inputs.push_str("present\n");
+                lock_inputs.push_str(&contents);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                lock_inputs.push_str("missing\n");
+            }
+            Err(error) => {
+                lock_inputs.push_str("unreadable:");
+                lock_inputs.push_str(&error.kind().to_string());
+                lock_inputs.push('\n');
+            }
         }
-        Ok(())
-    })?;
-    Ok(true)
+        lock_inputs.push('\n');
+    }
+    let lock_fingerprint = crate::fsutil::sha256_text(&lock_inputs);
+    Ok(format!(
+        "{SKILLS_CLI_SOURCE_MIGRATION_KEY}:{}:{lock_fingerprint}",
+        scope_key.as_str(),
+    ))
 }
 
 impl SkillsCliLockDatabase {
@@ -114,16 +158,15 @@ impl SkillsCliLockDatabase {
         let mut database = Self::default();
         let mut warnings = Vec::new();
 
-        if let Some(path) = global_skills_cli_lock_path() {
-            if let Some(lock) = read_skills_cli_lock(&path, 3, &mut warnings) {
-                database.global = lock.skills;
-            }
-        }
-
-        for project_dir in skill_project_dirs(cwd) {
-            let path = project_dir.join("skills-lock.json");
-            if let Some(lock) = read_skills_cli_lock(&path, 1, &mut warnings) {
-                database.projects.push((project_dir, lock.skills));
+        for (path, expected_version) in skills_cli_lock_paths(cwd) {
+            if let Some(lock) = read_skills_cli_lock(&path, expected_version, &mut warnings) {
+                if expected_version == 3 {
+                    database.global = lock.skills;
+                } else if let Some(project_dir) = path.parent() {
+                    database
+                        .projects
+                        .push((project_dir.to_path_buf(), lock.skills));
+                }
             }
         }
 
@@ -196,6 +239,19 @@ fn global_skills_cli_lock_path() -> Option<PathBuf> {
         .map(PathBuf::from)
         .map(|root| root.join("skills/.skill-lock.json"))
         .or_else(|| dirs::home_dir().map(|home| home.join(".agents/.skill-lock.json")))
+}
+
+fn skills_cli_lock_paths(cwd: &Path) -> Vec<(PathBuf, u64)> {
+    let mut paths = global_skills_cli_lock_path()
+        .into_iter()
+        .map(|path| (path, 3))
+        .collect::<Vec<_>>();
+    paths.extend(
+        skill_project_dirs(cwd)
+            .into_iter()
+            .map(|directory| (directory.join("skills-lock.json"), 1)),
+    );
+    paths
 }
 
 fn skill_project_dirs(cwd: &Path) -> Vec<PathBuf> {

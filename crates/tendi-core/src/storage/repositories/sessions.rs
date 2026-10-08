@@ -2,9 +2,25 @@
 use super::super::*;
 use crate::{sessions::SessionTokenUsage, time::parse_timestamp};
 
+const SESSION_SOURCE_BATCH_SIZE: usize = 64;
+const SESSION_SCAN_PERSIST_BATCH_SIZE: usize = 8;
+
 pub(in crate::storage) struct PreparedSessionSource {
     sources: Vec<SessionScanSourceState>,
     search_needs_refresh: bool,
+}
+
+struct CachedSessionRow {
+    path: String,
+    data_json: String,
+    title: Option<String>,
+    project: Option<String>,
+    started_at: Option<String>,
+    updated_at: Option<String>,
+    message_count: Option<i64>,
+    first_user_message: Option<String>,
+    last_user_message: Option<String>,
+    last_assistant_message: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -720,50 +736,11 @@ impl Store {
                  VALUES (?1, ?2, ?3)",
                 params![session.id, agent, path],
             )?;
-            let changed = tx.execute(
+            let changed = shared_cache::execute_changed(tx,
                 &format!(
                     "INSERT INTO {SCOPED_SESSION_TABLE}
                     (scope_key, id, agent, title, project, path, started_at, updated_at, message_count, first_user_message, last_user_message, last_assistant_message, repository, repository_url, logical_project_id, logical_project_name, started_at_ms, updated_at_ms, turn_count, parent_session_id, input_tokens, cached_input_tokens, data_json)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23)
-                 ON CONFLICT(scope_key, id, agent, path) DO UPDATE SET
-                    title = excluded.title,
-                    project = excluded.project,
-                    started_at = excluded.started_at,
-                    updated_at = excluded.updated_at,
-                    message_count = excluded.message_count,
-                    first_user_message = excluded.first_user_message,
-                    last_user_message = excluded.last_user_message,
-                    last_assistant_message = excluded.last_assistant_message,
-                    repository = excluded.repository,
-                    repository_url = excluded.repository_url,
-                    logical_project_id = excluded.logical_project_id,
-                    logical_project_name = excluded.logical_project_name,
-                    started_at_ms = excluded.started_at_ms,
-                    updated_at_ms = excluded.updated_at_ms,
-                    turn_count = excluded.turn_count,
-                    parent_session_id = excluded.parent_session_id,
-                    input_tokens = excluded.input_tokens,
-                    cached_input_tokens = excluded.cached_input_tokens,
-                    data_json = excluded.data_json
-                 WHERE {SCOPED_SESSION_TABLE}.data_json IS NOT excluded.data_json
-                    OR {SCOPED_SESSION_TABLE}.title IS NOT excluded.title
-                    OR {SCOPED_SESSION_TABLE}.project IS NOT excluded.project
-                    OR {SCOPED_SESSION_TABLE}.started_at IS NOT excluded.started_at
-                    OR {SCOPED_SESSION_TABLE}.updated_at IS NOT excluded.updated_at
-                    OR {SCOPED_SESSION_TABLE}.message_count IS NOT excluded.message_count
-                    OR {SCOPED_SESSION_TABLE}.first_user_message IS NOT excluded.first_user_message
-                    OR {SCOPED_SESSION_TABLE}.last_user_message IS NOT excluded.last_user_message
-                    OR {SCOPED_SESSION_TABLE}.last_assistant_message IS NOT excluded.last_assistant_message
-                    OR {SCOPED_SESSION_TABLE}.repository IS NOT excluded.repository
-                    OR {SCOPED_SESSION_TABLE}.repository_url IS NOT excluded.repository_url
-                    OR {SCOPED_SESSION_TABLE}.logical_project_id IS NOT excluded.logical_project_id
-                    OR {SCOPED_SESSION_TABLE}.logical_project_name IS NOT excluded.logical_project_name
-                    OR {SCOPED_SESSION_TABLE}.started_at_ms IS NOT excluded.started_at_ms
-                    OR {SCOPED_SESSION_TABLE}.updated_at_ms IS NOT excluded.updated_at_ms
-                    OR {SCOPED_SESSION_TABLE}.turn_count IS NOT excluded.turn_count
-                    OR {SCOPED_SESSION_TABLE}.parent_session_id IS NOT excluded.parent_session_id
-                    OR {SCOPED_SESSION_TABLE}.input_tokens IS NOT excluded.input_tokens
-                    OR {SCOPED_SESSION_TABLE}.cached_input_tokens IS NOT excluded.cached_input_tokens"
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23)"
                 ),
                 params![
                     scope_key.as_str(),
@@ -1015,123 +992,115 @@ impl Store {
         sources: &PreparedSessionSources,
     ) -> Result<Vec<SessionRecord>> {
         let mut changed = Vec::new();
-        for session in sessions {
-            let agent = agent_label(session.agent);
-            let existing_session = tx
-                .query_row(
-                    "SELECT data_json FROM scoped_sessions
-                     WHERE scope_key = ?1 AND id = ?2 AND agent = ?3 LIMIT 1",
-                    params![scope_key.as_str(), session.id, agent],
-                    |row| row.get::<_, String>(0),
-                )
-                .optional()?
-                .and_then(|data_json| serde_json::from_str::<SessionRecord>(&data_json).ok());
-            let mut canonical = session.clone();
-            if let Some(existing) = existing_session.as_ref() {
-                let existing_is_transcript = existing
-                    .path
-                    .extension()
-                    .is_some_and(|extension| extension == "jsonl");
-                let incoming_is_transcript = canonical
-                    .path
-                    .extension()
-                    .is_some_and(|extension| extension == "jsonl");
-                if existing_is_transcript && !incoming_is_transcript {
-                    canonical.path = existing.path.clone();
-                    if canonical.token_usage.is_none() {
-                        canonical.token_usage = existing.token_usage.clone();
+        for batch in sessions.chunks(SESSION_SOURCE_BATCH_SIZE) {
+            let placeholders = vec!["(?, ?)"; batch.len()].join(", ");
+            let sql = format!(
+                "SELECT id, agent, path, data_json, title, project, started_at, updated_at,
+                        message_count, first_user_message, last_user_message, last_assistant_message
+                 FROM scoped_sessions WHERE scope_key = ? AND (id, agent) IN ({placeholders})
+                 ORDER BY id, agent, path"
+            );
+            let parameters = std::iter::once(scope_key.as_str()).chain(
+                batch
+                    .iter()
+                    .flat_map(|session| [session.id.as_str(), agent_label(session.agent)]),
+            );
+            let mut statement = tx.prepare(&sql)?;
+            let rows = statement.query_map(rusqlite::params_from_iter(parameters), |row| {
+                Ok((
+                    (row.get::<_, String>(0)?, row.get::<_, String>(1)?),
+                    CachedSessionRow {
+                        path: row.get(2)?,
+                        data_json: row.get(3)?,
+                        title: row.get(4)?,
+                        project: row.get(5)?,
+                        started_at: row.get(6)?,
+                        updated_at: row.get(7)?,
+                        message_count: row.get(8)?,
+                        first_user_message: row.get(9)?,
+                        last_user_message: row.get(10)?,
+                        last_assistant_message: row.get(11)?,
+                    },
+                ))
+            })?;
+            let mut existing = std::collections::HashMap::<_, Vec<CachedSessionRow>>::new();
+            for row in rows {
+                let (key, value) = row?;
+                existing.entry(key).or_default().push(value);
+            }
+            drop(statement);
+            for session in batch {
+                let agent = agent_label(session.agent);
+                let identity = (session.id.clone(), agent.to_string());
+                let rows = existing.entry(identity).or_default();
+                let existing_session = rows
+                    .first()
+                    .and_then(|row| serde_json::from_str::<SessionRecord>(&row.data_json).ok());
+                let mut canonical = session.clone();
+                if let Some(existing) = existing_session.as_ref() {
+                    let existing_is_transcript = existing
+                        .path
+                        .extension()
+                        .is_some_and(|extension| extension == "jsonl");
+                    let incoming_is_transcript = canonical
+                        .path
+                        .extension()
+                        .is_some_and(|extension| extension == "jsonl");
+                    if existing_is_transcript && !incoming_is_transcript {
+                        canonical.path = existing.path.clone();
+                        if canonical.token_usage.is_none() {
+                            canonical.token_usage = existing.token_usage.clone();
+                        }
                     }
                 }
-            }
-            canonical.title = clean_session_title(canonical.title.take());
-            let path = canonical.path.display().to_string();
-            let projection = session_list_projection_values(&canonical)?;
-            let data_json = Self::session_metadata_json(&canonical)?;
-            let title = canonical.title.clone();
-            let project = canonical
-                .project
-                .as_ref()
-                .map(|path| path.display().to_string());
-            let started_at = canonical.started_at.clone();
-            let updated_at = canonical.updated_at.clone();
-            let message_count = canonical.message_count.map(|value| value as i64);
-            let first_user_message = bound_session_preview(canonical.first_user_message.clone());
-            let last_user_message = bound_session_preview(canonical.last_user_message.clone());
-            let last_assistant_message =
-                bound_session_preview(canonical.last_assistant_message.clone());
-            let current = tx
-                .query_row(
-                    "SELECT data_json, title, project, started_at, updated_at, message_count,
-                            first_user_message, last_user_message, last_assistant_message
-                     FROM scoped_sessions
-                     WHERE scope_key = ?1 AND id = ?2 AND agent = ?3 AND path = ?4",
-                    params![scope_key.as_str(), canonical.id, agent, path],
-                    |row| {
-                        Ok((
-                            row.get::<_, String>(0)?,
-                            row.get::<_, Option<String>>(1)?,
-                            row.get::<_, Option<String>>(2)?,
-                            row.get::<_, Option<String>>(3)?,
-                            row.get::<_, Option<String>>(4)?,
-                            row.get::<_, Option<i64>>(5)?,
-                            row.get::<_, Option<String>>(6)?,
-                            row.get::<_, Option<String>>(7)?,
-                            row.get::<_, Option<String>>(8)?,
-                        ))
-                    },
-                )
-                .optional()?;
-            if current.as_ref().is_some_and(|current| {
-                current.0 == data_json
-                    && current.1 == title
-                    && current.2 == project
-                    && current.3 == started_at
-                    && current.4 == updated_at
-                    && current.5 == message_count
-                    && current.6 == first_user_message
-                    && current.7 == last_user_message
-                    && current.8 == last_assistant_message
-            }) {
-                replace_scoped_session_scan_sources(tx, scope_key, &canonical, sources)?;
-                continue;
-            }
-            let replaced = tx.prepare(
-                "SELECT data_json FROM scoped_sessions WHERE scope_key = ?1 AND id = ?2 AND agent = ?3 AND path <> ?4"
-            )?.query_map(params![scope_key.as_str(), canonical.id, agent, path], |row| row.get::<_, String>(0))?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
-            for payload in replaced {
-                let old: SessionRecord = serde_json::from_str(&payload)?;
-                session_search_storage::mark_session_key_pending_in_tx(tx, scope_key, &old)?;
-            }
-            tx.execute(
-                "DELETE FROM scoped_sessions
+                canonical.title = clean_session_title(canonical.title.take());
+                let path = canonical.path.display().to_string();
+                let projection = session_list_projection_values(&canonical)?;
+                let data_json = Self::session_metadata_json(&canonical)?;
+                let title = canonical.title.clone();
+                let project = canonical
+                    .project
+                    .as_ref()
+                    .map(|path| path.display().to_string());
+                let started_at = canonical.started_at.clone();
+                let updated_at = canonical.updated_at.clone();
+                let message_count = canonical.message_count.map(|value| value as i64);
+                let first_user_message =
+                    bound_session_preview(canonical.first_user_message.clone());
+                let last_user_message = bound_session_preview(canonical.last_user_message.clone());
+                let last_assistant_message =
+                    bound_session_preview(canonical.last_assistant_message.clone());
+                if rows
+                    .iter()
+                    .find(|row| row.path == path)
+                    .is_some_and(|current| {
+                        current.data_json == data_json
+                            && current.title == title
+                            && current.project == project
+                            && current.started_at == started_at
+                            && current.updated_at == updated_at
+                            && current.message_count == message_count
+                            && current.first_user_message == first_user_message
+                            && current.last_user_message == last_user_message
+                            && current.last_assistant_message == last_assistant_message
+                    })
+                {
+                    replace_scoped_session_scan_sources(tx, scope_key, &canonical, sources)?;
+                    continue;
+                }
+                for replaced in rows.iter().filter(|row| row.path != path) {
+                    let old: SessionRecord = serde_json::from_str(&replaced.data_json)?;
+                    session_search_storage::mark_session_key_pending_in_tx(tx, scope_key, &old)?;
+                }
+                tx.execute(
+                    "DELETE FROM scoped_sessions
                  WHERE scope_key = ?1 AND id = ?2 AND agent = ?3 AND path <> ?4",
-                params![scope_key.as_str(), canonical.id, agent, path],
-            )?;
-            tx.execute(
+                    params![scope_key.as_str(), canonical.id, agent, path],
+                )?;
+                shared_cache::execute_changed(tx,
                 "INSERT INTO scoped_sessions
                 (scope_key, id, agent, title, project, path, started_at, updated_at, message_count, first_user_message, last_user_message, last_assistant_message, repository, repository_url, logical_project_id, logical_project_name, started_at_ms, updated_at_ms, turn_count, parent_session_id, input_tokens, cached_input_tokens, data_json)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23)
-             ON CONFLICT(scope_key, id, agent, path) DO UPDATE SET
-                title = excluded.title,
-                project = excluded.project,
-                started_at = excluded.started_at,
-                updated_at = excluded.updated_at,
-                message_count = excluded.message_count,
-                first_user_message = excluded.first_user_message,
-                last_user_message = excluded.last_user_message,
-                last_assistant_message = excluded.last_assistant_message,
-                repository = excluded.repository,
-                repository_url = excluded.repository_url,
-                logical_project_id = excluded.logical_project_id,
-                logical_project_name = excluded.logical_project_name,
-                started_at_ms = excluded.started_at_ms,
-                updated_at_ms = excluded.updated_at_ms,
-                turn_count = excluded.turn_count,
-                parent_session_id = excluded.parent_session_id,
-                input_tokens = excluded.input_tokens,
-                cached_input_tokens = excluded.cached_input_tokens,
-                data_json = excluded.data_json",
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23)",
                 params![
                     scope_key.as_str(),
                     canonical.id,
@@ -1158,9 +1127,23 @@ impl Store {
                     data_json,
                 ],
             )?;
-            replace_scoped_session_scan_sources(tx, scope_key, &canonical, sources)?;
-            session_search_storage::mark_session_key_pending_in_tx(tx, scope_key, &canonical)?;
-            changed.push(canonical);
+                replace_scoped_session_scan_sources(tx, scope_key, &canonical, sources)?;
+                session_search_storage::mark_session_key_pending_in_tx(tx, scope_key, &canonical)?;
+                rows.clear();
+                rows.push(CachedSessionRow {
+                    path: path.clone(),
+                    data_json,
+                    title,
+                    project,
+                    started_at,
+                    updated_at,
+                    message_count,
+                    first_user_message,
+                    last_user_message,
+                    last_assistant_message,
+                });
+                changed.push(canonical);
+            }
         }
         Ok(changed)
     }
@@ -1191,6 +1174,12 @@ impl Store {
     }
 
     pub fn session_scan_cache_for_scope(&self, scope_key: &ScopeKey) -> Result<SessionScanCache> {
+        // Projections remain scoped; provider source parsing is shared.
+        let _ = scope_key;
+        self.shared_session_scan_cache()
+    }
+
+    fn scoped_session_scan_sources(&self, scope_key: &ScopeKey) -> Result<SessionScanCache> {
         let sessions = self.list_sessions_for_scope(scope_key)?.sessions;
         let mut source_states_by_session: HashMap<
             (String, String, String),
@@ -1251,6 +1240,139 @@ impl Store {
             })
         });
         Ok(SessionScanCache::from_entries(entries))
+    }
+
+    /// Source metadata is provider-owned and reusable across workspace projections.
+    /// Each entry retains its complete primary and additional source-state bundle.
+    pub fn shared_session_scan_cache(&self) -> Result<SessionScanCache> {
+        let mut statement = self.conn.prepare(
+            "WITH ranked AS (
+                SELECT p.scope_key, p.session_id, p.agent, p.session_path,
+                       p.file_mtime, p.file_size,
+                       row_number() OVER (
+                           PARTITION BY p.agent, p.session_path
+                           ORDER BY p.file_mtime DESC, p.file_size DESC,
+                                    CAST(marker.value AS INTEGER) DESC, p.scope_key
+                       ) AS rank
+                FROM scoped_session_scan_sources p
+                LEFT JOIN meta marker ON marker.key = 'sessions_last_scan_at:' || p.scope_key
+                WHERE p.source_path = p.session_path AND p.parser_version = ?1
+                  AND EXISTS (SELECT 1 FROM scoped_sessions s
+                      WHERE s.scope_key = p.scope_key AND s.id = p.session_id
+                        AND s.agent = p.agent AND s.path = p.session_path)
+                  AND NOT EXISTS (SELECT 1 FROM scoped_session_scan_sources invalid
+                      WHERE invalid.scope_key = p.scope_key AND invalid.session_id = p.session_id
+                        AND invalid.agent = p.agent AND invalid.session_path = p.session_path
+                        AND invalid.parser_version != ?1)
+             ), selected AS MATERIALIZED (SELECT * FROM ranked WHERE rank = 1)
+             SELECT s.data_json, p.file_mtime, p.file_size,
+                    (SELECT json_group_array(json_object(
+                        'path', source_path, 'file_mtime', file_mtime, 'file_size', file_size))
+                     FROM scoped_session_scan_sources a
+                     WHERE a.scope_key = p.scope_key AND a.session_id = p.session_id
+                       AND a.agent = p.agent AND a.session_path = p.session_path
+                       AND a.source_path != p.session_path)
+             FROM selected p JOIN scoped_sessions s
+               ON s.scope_key = p.scope_key AND s.id = p.session_id
+              AND s.agent = p.agent AND s.path = p.session_path",
+        )?;
+        let rows = statement.query_map([SESSION_SCAN_CACHE_PARSER_VERSION], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        })?;
+        let mut entries = Vec::new();
+        for row in rows {
+            let (json, file_mtime, file_size, sources) = row?;
+            entries.push(SessionScanCacheEntry {
+                session: Self::normalize_cached_session(serde_json::from_str(&json)?),
+                file_mtime,
+                file_size,
+                additional_file_states: serde_json::from_str(&sources)?,
+            });
+        }
+        let cache = SessionScanCache::from_entries(entries);
+        let mut statement = self.conn.prepare(
+            "SELECT agent, path, sources_json FROM session_scan_empty_sources WHERE parser_version = ?1",
+        )?;
+        let rows = statement.query_map([SESSION_SCAN_CACHE_PARSER_VERSION], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })?;
+        for row in rows {
+            let (agent, path, json) = row?;
+            cache.load_empty_source(
+                crate::providers::parse_agent(&agent)?,
+                PathBuf::from(path),
+                serde_json::from_str(&json)?,
+            );
+        }
+        Ok(cache)
+    }
+
+    /// Reconcile source changes against this projection, even when another scope
+    /// already refreshed the shared provider cache. A new scope must be seeded.
+    pub fn persist_session_scan_for_scope(
+        &self,
+        scope_key: &ScopeKey,
+        report: &SessionScan,
+        cache: &SessionScanCache,
+        scanned_at: u64,
+    ) -> Result<Vec<SessionRecord>> {
+        let _cache_scopes: Vec<_> = crate::providers::agent_providers()
+            .into_iter()
+            .map(|provider| provider.session_scan_cache_scope())
+            .collect();
+        let changed = self
+            .scoped_session_scan_sources(scope_key)?
+            .changed_sessions(&report.sessions);
+        for batch in changed.chunks(SESSION_SCAN_PERSIST_BATCH_SIZE) {
+            self.apply_session_delta_and_resolve_projects_for_scope(scope_key, batch)?;
+        }
+        self.finalize_session_scan_for_scope(scope_key, report, scanned_at)?;
+        let empty = cache
+            .empty_source_entries()
+            .into_iter()
+            .map(|(agent, path, sources)| {
+                let json = path
+                    .is_file()
+                    .then(|| serde_json::to_string(&sources))
+                    .transpose()?;
+                Ok((agent, path, json))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let invalidated = cache.invalidated_empty_sources();
+        self.with_named_write_transaction("save_empty_session_sources", |tx| {
+            let mut upsert = tx.prepare(
+                "INSERT INTO session_scan_empty_sources (agent, path, parser_version, sources_json)
+                 VALUES (?1, ?2, ?3, ?4) ON CONFLICT(agent, path) DO UPDATE SET
+                 parser_version = excluded.parser_version, sources_json = excluded.sources_json
+                 WHERE parser_version != excluded.parser_version OR sources_json != excluded.sources_json",
+            )?;
+            tx.execute("DELETE FROM session_scan_empty_sources WHERE parser_version != ?1",
+                [SESSION_SCAN_CACHE_PARSER_VERSION])?;
+            for (agent, path) in &invalidated {
+                tx.execute("DELETE FROM session_scan_empty_sources WHERE agent = ?1 AND path = ?2",
+                    params![agent_label(*agent), path.to_string_lossy()])?;
+            }
+            for (agent, path, json) in &empty {
+                if let Some(json) = json {
+                    upsert.execute(params![agent_label(*agent), path.to_string_lossy(),
+                        SESSION_SCAN_CACHE_PARSER_VERSION, json])?;
+                } else {
+                    tx.execute("DELETE FROM session_scan_empty_sources WHERE agent = ?1 AND path = ?2",
+                        params![agent_label(*agent), path.to_string_lossy()])?;
+                }
+            }
+            Ok(())
+        })?;
+        Ok(changed)
     }
 
     pub fn sessions_last_scan_at_for_scope(&self, scope_key: &ScopeKey) -> Result<Option<u64>> {
@@ -1483,7 +1605,7 @@ impl Store {
         for session in sessions.iter() {
             let projection = session_list_projection_values(session)?;
             let data_json = Self::session_metadata_json(session)?;
-            let changed = tx.execute(
+            let changed = shared_cache::execute_changed(tx,
                 &format!(
                     "UPDATE {SCOPED_SESSION_TABLE}
                      SET repository = ?1,
@@ -1943,73 +2065,132 @@ impl Store {
         scope_key: &ScopeKey,
         sessions: &[SessionRecord],
     ) -> Result<PreparedSessionSources> {
+        let _cache_scopes: Vec<_> = crate::providers::agent_providers()
+            .into_iter()
+            .map(|provider| provider.session_scan_cache_scope())
+            .collect();
         let mut sources = PreparedSessionSources::new();
-        let mut statement = self.conn.prepare("SELECT data_json FROM scoped_sessions WHERE scope_key = ?1 AND id = ?2 AND agent = ?3 LIMIT 1")?;
-        for session in sessions {
-            if !sources.contains_key(&session.path) {
+        for batch in sessions.chunks(SESSION_SOURCE_BATCH_SIZE) {
+            let identity_placeholders = vec!["(?, ?)"; batch.len()].join(", ");
+            let identity_sql = format!(
+                "SELECT id, agent, data_json FROM scoped_sessions
+                 WHERE scope_key = ? AND (id, agent) IN ({identity_placeholders})
+                 ORDER BY id, agent, path"
+            );
+            let identity_params = std::iter::once(scope_key.as_str()).chain(
+                batch
+                    .iter()
+                    .flat_map(|session| [session.id.as_str(), agent_label(session.agent)]),
+            );
+            let mut statement = self.conn.prepare(&identity_sql)?;
+            let rows = statement.query_map(rusqlite::params_from_iter(identity_params), |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })?;
+            let mut existing = std::collections::HashMap::new();
+            for row in rows {
+                let (id, agent, data_json) = row?;
+                existing.entry((id, agent)).or_insert(data_json);
+            }
+
+            let mut source_sessions = Vec::new();
+            for session in batch {
+                source_sessions.push(session.clone());
+                if let Some(current) =
+                    existing.get(&(session.id.clone(), agent_label(session.agent).to_string()))
+                {
+                    source_sessions.push(serde_json::from_str::<SessionRecord>(current)?);
+                }
+            }
+            let index_placeholders = vec!["(?, ?, ?)"; source_sessions.len()].join(", ");
+            let index_sql = format!(
+                "SELECT session_id, agent, session_path, search_index_version,
+                        search_checkpoint, file_mtime, file_size
+                 FROM scoped_session_search_index
+                 WHERE scope_key = ? AND (session_id, agent, session_path) IN ({index_placeholders})"
+            );
+            let source_keys = source_sessions
+                .iter()
+                .map(|session| {
+                    (
+                        session.id.clone(),
+                        agent_label(session.agent).to_string(),
+                        session.path.to_string_lossy().into_owned(),
+                    )
+                })
+                .collect::<Vec<_>>();
+            let index_params = std::iter::once(scope_key.as_str()).chain(
+                source_keys
+                    .iter()
+                    .flat_map(|(id, agent, path)| [id.as_str(), agent.as_str(), path.as_str()]),
+            );
+            let mut statement = self.conn.prepare(&index_sql)?;
+            let rows = statement.query_map(rusqlite::params_from_iter(index_params), |row| {
+                Ok((
+                    (
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                    ),
+                    (
+                        row.get::<_, i64>(3)?,
+                        row.get::<_, Option<String>>(4)?,
+                        row.get::<_, i64>(5)?,
+                        row.get::<_, i64>(6)?,
+                    ),
+                ))
+            })?;
+            let index = rows.collect::<rusqlite::Result<std::collections::HashMap<_, _>>>()?;
+            for session in source_sessions {
+                if sources.contains_key(&session.path) {
+                    continue;
+                }
+                let key = (
+                    session.id.clone(),
+                    agent_label(session.agent).to_string(),
+                    session.path.to_string_lossy().into_owned(),
+                );
                 sources.insert(
                     session.path.clone(),
-                    self.prepare_session_source(scope_key, session)?,
+                    Self::prepare_session_source(&session, index.get(&key)),
                 );
-            }
-            let current = statement
-                .query_row(
-                    params![scope_key.as_str(), session.id, agent_label(session.agent)],
-                    |row| row.get::<_, String>(0),
-                )
-                .optional()?;
-            if let Some(current) = current {
-                let current: SessionRecord = serde_json::from_str(&current)?;
-                if !sources.contains_key(&current.path) {
-                    sources.insert(
-                        current.path.clone(),
-                        self.prepare_session_source(scope_key, &current)?,
-                    );
-                }
             }
         }
         Ok(sources)
     }
 
     fn prepare_session_source(
-        &self,
-        scope: &ScopeKey,
         session: &SessionRecord,
-    ) -> Result<PreparedSessionSource> {
+        current: Option<&(i64, Option<String>, i64, i64)>,
+    ) -> PreparedSessionSource {
         // File identity checks belong to preparation, outside the writer lease.
         // mtime/size alone misses rename-over replacements preserving timestamps.
-        let current = self.conn.query_row(
-            "SELECT search_index_version, search_checkpoint, file_mtime, file_size
-             FROM scoped_session_search_index WHERE scope_key = ?1 AND session_id = ?2 AND agent = ?3 AND session_path = ?4",
-            params![scope.as_str(), session.id, agent_label(session.agent), session.path.to_string_lossy()],
-            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, Option<String>>(1)?, row.get::<_, i64>(2)?, row.get::<_, i64>(3)?))
-        ).optional()?;
-        let search_needs_refresh =
-            current
-                .as_ref()
-                .is_none_or(|(version, encoded, mtime, size)| {
-                    if *version != SESSION_SEARCH_INDEX_VERSION {
-                        return true;
-                    }
-                    if let Some(checkpoint) = encoded.as_deref().and_then(|encoded| {
-                        serde_json::from_str::<transcript::SearchCheckpoint>(encoded).ok()
-                    }) {
-                        let parser = crate::providers::agent_provider(session.agent)
-                            .transcript_search_append_version()
-                            .unwrap_or("full-search-v1");
-                        checkpoint.parser_version != parser
-                            || !checkpoint.matches_source(&session.path).unwrap_or(false)
-                    } else {
-                        !(*mtime == 0
-                            && *size == 0
-                            && fs::metadata(&session.path)
-                                .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound))
-                    }
-                });
-        Ok(PreparedSessionSource {
-            sources: session_scan_source_states(session),
+        let search_needs_refresh = current.is_none_or(|(version, encoded, mtime, size)| {
+            if *version != SESSION_SEARCH_INDEX_VERSION {
+                return true;
+            }
+            if let Some(checkpoint) = encoded.as_deref().and_then(|encoded| {
+                serde_json::from_str::<transcript::SearchCheckpoint>(encoded).ok()
+            }) {
+                let parser = crate::providers::agent_provider(session.agent)
+                    .transcript_search_append_version()
+                    .unwrap_or("full-search-v1");
+                checkpoint.parser_version != parser
+                    || !checkpoint.matches_source(&session.path).unwrap_or(false)
+            } else {
+                !(*mtime == 0
+                    && *size == 0
+                    && fs::metadata(&session.path)
+                        .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound))
+            }
+        });
+        PreparedSessionSource {
+            sources: crate::sessions::scan_source_states(session.agent, &session.path),
             search_needs_refresh,
-        })
+        }
     }
 
     pub fn list_sessions_for_scope(&self, scope_key: &ScopeKey) -> Result<SessionScan> {

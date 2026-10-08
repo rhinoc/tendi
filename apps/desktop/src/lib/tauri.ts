@@ -154,7 +154,7 @@ async function invokeCommandDirect<C extends CommandName>(command: C, request: R
     throw error;
   } finally {
     const durationMs = performance.now() - startedAt;
-    if (durationMs >= 100 || !succeeded) {
+    if (durationMs >= 100 || !succeeded || COMMAND_METADATA[command].execution === "write") {
       logger.info("tendi command completed", {
         command,
         durationMs,
@@ -168,6 +168,7 @@ async function invokeCommandDirect<C extends CommandName>(command: C, request: R
 export function invokeCommand<C extends CommandName>(command: C, args?: RequestFor<C>): Promise<ResponseFor<C>> {
   const request = (args === undefined ? {} : omitUndefinedProperties(args)) as RequestFor<C>;
   const invoke = () => invokeCommandDirect(command, request);
+  if (COMMAND_METADATA[command].execution === "write") return invoke();
   const key = singleFlightKey(`runtime-command:${command}`, request);
   // Reads are snapshots, so callers sharing the same request can safely await
   // one in-flight RPC. This covers App bootstrap plus a page mounting at the

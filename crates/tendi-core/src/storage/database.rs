@@ -7,6 +7,7 @@ use anyhow::{Context, Result};
 use rusqlite::{Connection, MAIN_DB, Transaction};
 use std::{
     collections::HashMap,
+    fs::File,
     path::{Path, PathBuf},
     sync::{Arc, LazyLock, Mutex, Weak},
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -20,12 +21,15 @@ pub(super) struct DatabaseWriter {
     path: PathBuf,
     queue: WriterQueue,
     connection: Mutex<Connection>,
+    // Rust drops fields in declaration order: close SQLite before releasing this lock.
+    _sqlite_compatibility: File,
 }
 
 impl DatabaseWriter {
     fn open_connection_unleased(path: &Path) -> Result<Connection> {
         let connection = Connection::open(path)
             .with_context(|| format!("failed to open database writer {}", path.display()))?;
+        super::shared_cache::register_functions(&connection)?;
         connection.busy_timeout(Duration::from_secs(30))?;
         connection.pragma_update(None, "journal_mode", "WAL")?;
         Ok(connection)
@@ -63,12 +67,14 @@ impl DatabaseWriter {
         Ok(())
     }
 
-    fn open_and_probe(path: &Path, require_application_schema: bool) -> Result<Connection> {
+    fn open_and_probe(path: &Path, require_application_schema: bool) -> Result<()> {
+        let _sqlite_compatibility = super::database_compatibility::acquire(path)?;
         let started = std::time::Instant::now();
         let _database_lease = acquire_database_lease(path, started)?;
         let connection = Self::open_connection_unleased(path)?;
         Self::probe_or_repair_connection(&connection, path, require_application_schema)?;
-        Ok(connection)
+        drop(connection);
+        Ok(())
     }
 
     fn open_with_lease(path: &Path) -> Result<Connection> {
@@ -156,6 +162,8 @@ impl DatabaseWriter {
             "SELECT rootpage FROM sqlite_master
              WHERE name IN (
                  'scoped_session_skill_links',
+                 'scoped_session_skill_links_storage',
+                 'sqlite_autoindex_scoped_session_skill_links_storage_1',
                  'sqlite_autoindex_scoped_session_skill_links_1',
                  'idx_scoped_session_skill_links_session',
                  'idx_scoped_session_skill_links_skill'
@@ -228,12 +236,29 @@ impl DatabaseWriter {
         if let Some(database) = current.upgrade() {
             return Ok(database);
         }
+        let sqlite_compatibility = super::database_compatibility::acquire(path)?;
         let connection = Self::open_with_lease(path)?;
+        let journal_mode =
+            connection.query_row("PRAGMA journal_mode", [], |row| row.get::<_, String>(0));
+        let wal_autocheckpoint =
+            connection.query_row("PRAGMA wal_autocheckpoint", [], |row| row.get::<_, i64>(0));
         let database = Arc::new(Self {
             path: path.to_path_buf(),
             queue: WriterQueue::default(),
             connection: Mutex::new(connection),
+            _sqlite_compatibility: sqlite_compatibility,
         });
+        crate::logging::global().debug(
+            "database writer opened",
+            serde_json::json!({
+                "database": path,
+                "files": super::database_file_diagnostics(path),
+                "journalMode": journal_mode.as_ref().ok(),
+                "journalModeError": journal_mode.as_ref().err().map(ToString::to_string),
+                "walAutocheckpointPages": wal_autocheckpoint.as_ref().ok(),
+                "walAutocheckpointError": wal_autocheckpoint.as_ref().err().map(ToString::to_string),
+            }),
+        );
         *current = Arc::downgrade(&database);
         Ok(database)
     }
@@ -257,7 +282,7 @@ impl DatabaseWriter {
         // probing under the same cross-process lease still proves that a
         // subsequent Store::open may safely create its writer; it never
         // creates or substitutes an empty database.
-        let _connection = Self::open_and_probe(path, true)?;
+        Self::open_and_probe(path, true)?;
         Ok(())
     }
 
@@ -308,7 +333,7 @@ impl DatabaseWriter {
             .map_err(|_| anyhow::anyhow!("database writer connection poisoned"))?;
         connection.busy_timeout(Duration::from_secs(30))?;
         let started = std::time::Instant::now();
-        connection.execute_batch("VACUUM")?;
+        connection.execute_batch("VACUUM; PRAGMA wal_checkpoint(TRUNCATE)")?;
         crate::logging::global().info(
             "database vacuum completed",
             serde_json::json!({
@@ -338,7 +363,7 @@ impl DatabaseWriter {
             .map_err(|_| anyhow::anyhow!("database writer connection poisoned"))?;
         connection.busy_timeout(Duration::from_millis(1))?;
         let started = std::time::Instant::now();
-        match connection.execute_batch("VACUUM") {
+        match connection.execute_batch("VACUUM; PRAGMA wal_checkpoint(TRUNCATE)") {
             Ok(()) => {
                 crate::logging::global().info(
                     "database idle vacuum completed",

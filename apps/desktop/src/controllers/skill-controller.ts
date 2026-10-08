@@ -272,7 +272,11 @@ export function selectSkillInstallTargetOptions<T extends { id: string; supports
       index,
       installed: installed.has(agentIdentityKey(option.id)),
     }))
-    .filter(({ option }) => option.supportsGlobal && option.id !== "universal" && isVisibleAgent(option.id))
+    .filter(({ option }) => (
+      option.supportsGlobal
+      && option.id !== "universal"
+      && (option.id === "shared" || isVisibleAgent(option.id))
+    ))
     .sort((left, right) => {
       if (left.option.id === "shared") return -1;
       if (right.option.id === "shared") return 1;

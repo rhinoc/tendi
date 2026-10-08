@@ -450,6 +450,14 @@
   top: var(--data-table-header-height, 34px);
 }
 
+.dataTableEmpty--loading {
+  padding: 0;
+}
+
+.dataTableEmpty--loading > .loadingState {
+  min-height: 0;
+}
+
 /* Table layout (frozen first column) reuses the existing selectable-table
    header chrome; widths flow from `--data-grid-columns` / freeze width. The
    header shares the body scroller so flexible tracks use the same available

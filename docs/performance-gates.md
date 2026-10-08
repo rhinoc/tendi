@@ -6,6 +6,12 @@ Run the fast local gate:
 node scripts/perf-check.mjs --fast
 ```
 
+Run only isolated CRUD fixtures while a desktop instance is using the local database:
+
+```sh
+node scripts/perf-check.mjs --fast --no-build --only tertiary-hook-toggle,tertiary-mcp-toggle,tertiary-rule-delete,tertiary-prompt-crud
+```
+
 Run the full local gate:
 
 ```sh
@@ -112,9 +118,12 @@ excluded because they are too environment-dependent for every push.
 | --- | --- | --- |
 | Skill save + create + rename + delete + targeted refresh | 240-Skill authority snapshot | operation <= 45 ms, RSS <= 24 MiB, payload <= 0.0625 MiB |
 | Hook batch delete + rescan | Delete 100 of 500 Hooks | operation <= 55 ms, RSS <= 24 MiB, payload <= 0.25 MiB |
-| Prompt update + 100-row delete + list | 500 Prompts | operation <= 40 ms, RSS <= 24 MiB, payload <= 1 MiB |
+| Hook batch toggle + rescan | Disable 100 of 500 Hooks | operation <= 55 ms, RSS <= 24 MiB, payload <= 0.25 MiB |
+| MCP toggle | Disable one Cursor MCP server | operation <= 40 ms, RSS <= 16 MiB, payload <= 0.015625 MiB |
+| Prompt create + update + 100-row delete + list | 500 Prompts | operation <= 40 ms, RSS <= 24 MiB, payload <= 1 MiB |
 | Session project merge + split | Merge 10 projects; split 100 of 500 Sessions | operation <= 10 ms, RSS <= 24 MiB, payload <= 0.0625 MiB |
 | Rule save | 128 KiB file | operation <= 40 ms, RSS <= 16 MiB, payload <= 0.25 MiB |
+| Rule delete | 128 KiB file | operation <= 40 ms, RSS <= 16 MiB, payload <= 0.015625 MiB |
 | Settings save | 32 additional Session roots | operation <= 3 ms, RSS <= 16 MiB, payload <= 0.015625 MiB |
 
 ### Large-input and runtime gates
@@ -130,6 +139,46 @@ the only result. The maximum limit still fails a single long stall. CI uses macO
 headroom for operation timing in the session-page, linked-session, rule-detail, prompt-CRUD, and
 chart gates. RSS, payload, and local default limits remain unchanged.
 
+## Startup and Usage checkpoints
+
+The Overview and chart gates above time an isolated core query and chart computation. They do not
+measure how long the packaged app takes to display Usage, or how soon Usage updates during a fresh
+analytics backfill. Keep these local checkpoints separate from the deterministic gates:
+
+| Checkpoint | 2026-09-29 local observation | Remaining work |
+| --- | --- | --- |
+| Packaged app launch to first Usage query completion, with an indexed database | 4.41 s by log timestamps: 3.20 s to frontend start, 0.34 s to the revision response, then 0.87 s to query completion | Compare the new first data frame marker on repeated packaged launches and reduce the startup and query delay; the batch notification change does not shorten this path. |
+| Fresh analytics backfill to a usable Usage chart | The initial backfill took about 4 minutes before its final revision. The daemon now publishes the first committed batch and further revisions at most every 5 seconds. | Measure time to `first usage data frame completed` and total backfill time on an isolated, repeatable Session fixture. Do not use final revision time as a proxy for first visible data. |
+| Skills list at startup | 33.2 s before watcher batching; 2.92 s after batching on the local packaged app | Add an app startup gate if this latency needs an enforced limit; the 300 ms Skills CLI gate excludes watcher registration. |
+| Warm startup Session scan and Skills reference index | Before the cache-path fix, a local workspace with 6,293 sessions and 33.86 GiB of transcripts spent about 88 s in Session scan and 58 s in Skills reference indexing. Two warm launches after the fixes, with 6,299 sessions, took 5.36–5.49 s for the full scan; Cursor took 0.301–0.331 s. The Skills reference index parsed 5–6 changed sessions in 0.128–0.188 s (0.35–2.30 s including loading). | Add a repeatable app startup gate with a fixed Session fixture; require unchanged transcripts and Cursor stores to remain on the cache path and growing Codex transcripts to use append indexing. |
+| Live dev app startup, process 40148 | Desktop setup took 223 ms. First Prompts, Agents, Hooks, Rules, MCP, and Skills loads completed 389–429 ms after frontend start. Session watcher registration took 23 ms; its worker scanned 6,305 sessions, including 17 changed sessions, in 7.14 s. First Usage query completed 0.83 s after frontend start. | Repeat in a packaged foreground launch with a fixed fixture; the dev app and hidden WebView are not comparable to a packaged first-paint gate. |
+
+In the isolated 500-Hook fixture, disabling 100 Hooks in one source took 117 ms before provider
+batch mutation. Parsing and patching the source once per batch reduced four local runs to
+41.5–49.2 ms. The gate above enforces 55 ms for this fixture.
+
+For a warm-start comparison, restart the packaged app and correlate `desktop process starting`,
+`desktop setup completed`, `frontend started`, `catalog domain load completed`,
+`projection refresh completed`, `session scan completed`, `analytics_revision`,
+`overview analytics query completed`, and `first usage data frame completed` in
+`~/Library/Application Support/tendi/logs/tendi.log` by process ID. The frame marker is emitted
+after two animation frames following a chart commit; it is a display milestone, not a pixel-level
+paint measurement. `catalog domain load completed` includes subscription readiness and the frontend
+request and records window visibility at start and end. During one hidden dev-window run, the
+Sessions backend scan finished in 7.14 s but the frontend completion marker arrived 187.8 s
+after request start, when the window became visible. Do not attribute hidden-WebView delay to disk
+scanning. `projection refresh completed` separates scheduler queue time from scanning and saving.
+Slow catalog reads also emit `cached projection read completed` with database open, cached read,
+status, and refresh scheduling times. Subtract these from the corresponding JSON-RPC method time
+to locate work such as watcher registration or response encoding. `session watcher configured`
+splits the synchronous `sessions_scan_start` setup into settings, watch-plan, and watcher-registration
+times; the scan itself completes later on a worker. Compare these times before attributing fan
+activity to a provider scan.
+
+The real-data WebView scenario supplies analytics synthesized from
+Session metadata and cannot measure the daemon's indexing or Overview query latency. A fresh-index
+gate needs an isolated database and a stable transcript fixture; it must not reset the user's data.
+
 `operation` measures only the production API call and response serialization. Fixture setup is
 outside that timer. `process` is still recorded for diagnosis, and RSS covers the whole process,
 including fixture setup.
@@ -140,19 +189,25 @@ including fixture setup.
 | --- | --- | --- |
 | Overview | N/A: chart changes the same aggregate query | N/A |
 | Skills | File tree/read; Linked Sessions | File CRUD and targeted refresh |
-| Prompts | N/A: row body is already in the list payload | Save and batch delete |
+| Prompts | N/A: row body is already in the list payload | Create, update, and batch delete |
 | Sessions | Transcript page and indexed batch search | Project merge and split |
-| Rules | Rule read | Rule save |
-| Hooks | Source preview | Batch delete and rescan |
-| MCP | N/A: no row detail | N/A: no mutation UI |
+| Rules | Rule read | Rule save and delete |
+| Hooks | Source preview | Batch delete and toggle, each with rescan |
+| MCP | N/A: no row detail | Cursor toggle; no probe gate because it depends on external servers |
 | Config | Config read | Not automated: the public API only permits real user config paths |
 | Settings | N/A: no row detail | Settings save |
 
-The core gates do not measure WebView DOM/layout/paint. Session pagination bounds each backend page,
-while the desktop Git update checker reuses a successful result for 60 seconds and invalidates it when
-the skill scan changes. Git commands are still bounded by local/network timeouts and can be cancelled.
-but repeatedly loading pages can still grow the transcript DOM. Browser automation is intentionally
-not used by this gate.
+The core gates do not measure WebView DOM/layout/paint.
+All daemon JSON-RPC writes log `runtime operation completed` with their method and duration, and
+frontend writes log `tendi command completed` with full request latency. Reads log when they take
+at least 100 ms or fail. The CRUD logs cover operations without an isolated gate, while the fixture
+gates above enforce the repeatable local paths. Repeated identical reads share an in-flight request;
+writes execute individually.
+
+Session pagination bounds each backend page, but repeatedly loading pages can still grow the
+transcript DOM. The desktop Git update checker reuses a successful result for 60 seconds and
+invalidates it when the skill scan changes. Git commands are bounded by local and network timeouts
+and can be cancelled. Browser automation is not used by this gate.
 
 ## Threshold overrides
 

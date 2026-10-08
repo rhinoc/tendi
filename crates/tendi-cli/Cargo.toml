@@ -11,9 +11,10 @@ chrono = { workspace = true, optional = true }
 clap.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha2 = { workspace = true, optional = true }
 
 [features]
-perf-runner = ["dep:chrono"]
+perf-runner = ["dep:chrono", "dep:sha2"]
 
 [[bin]]
 name = "tendi"

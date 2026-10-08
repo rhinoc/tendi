@@ -523,8 +523,11 @@ impl Daemon {
                     .get(text("previewId")?)
                     .ok_or_else(|| conflict_error("skill add preview expired"))?;
                 paths.extend(
-                    tendi_core::skills::skill_add_resource_paths(&preview.plan)
-                        .map_err(core_error)?,
+                    tendi_core::skills::skill_add_resource_paths_for_workspace(
+                        &preview.plan,
+                        &self.state.cwd,
+                    )
+                    .map_err(core_error)?,
                 );
                 if params
                     .get("source")

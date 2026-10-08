@@ -69,12 +69,12 @@ fn search_snippet_context_counts_cjk_characters() {
     let value = format!("{}命中{}", "前".repeat(81), "后".repeat(81));
     let snippet = highlight_contains_match(&value, "命中").unwrap();
 
-    assert!(!snippet.starts_with("… "));
+    assert!(snippet.starts_with("… "));
     assert!(snippet.ends_with(" …"));
     assert!(snippet.contains("⟦命中⟧"));
     let marker_start = snippet.find('⟦').unwrap();
-    assert_eq!(snippet[..marker_start].chars().count(), 0);
-    assert_eq!(snippet.chars().count(), 86);
+    assert_eq!(snippet[..marker_start].chars().count(), 42);
+    assert_eq!(snippet.chars().count(), 128);
 }
 
 #[test]
@@ -244,6 +244,259 @@ fn finalizing_a_batched_session_scan_prunes_stale_rows() {
         )
         .unwrap();
     assert_eq!(stale_search_rows_after, 0);
+
+    drop(store);
+    fs::remove_dir_all(temp).unwrap();
+}
+
+#[test]
+fn incremental_session_scan_seeds_scopes_and_reconciles_stale_projections() {
+    let temp = temp_dir("tendi-incremental-scope-scan");
+    fs::create_dir_all(&temp).unwrap();
+    let store = Store::open(temp.join("tendi.sqlite3")).unwrap();
+    let first = ScopeKey::new("workspace:first").unwrap();
+    let second = ScopeKey::new("workspace:second").unwrap();
+    let mut item = session("session", "Original");
+    item.path = temp.join("session.jsonl");
+    fs::write(&item.path, "{\"role\":\"user\",\"content\":\"queue\"}\n").unwrap();
+    let mut report = SessionScan {
+        sessions: vec![item],
+        warnings: Vec::new(),
+    };
+    let cache = store.shared_session_scan_cache().unwrap();
+    assert_eq!(
+        store
+            .persist_session_scan_for_scope(&first, &report, &cache, 1)
+            .unwrap()
+            .len(),
+        1
+    );
+    let cache = store.shared_session_scan_cache().unwrap();
+    assert!(cache.changed_sessions(&report.sessions).is_empty());
+    assert_eq!(
+        store
+            .persist_session_scan_for_scope(&second, &report, &cache, 2)
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(
+        store
+            .persist_session_scan_for_scope(&second, &report, &cache, 3)
+            .unwrap()
+            .is_empty()
+    );
+    report.sessions[0].title = Some("Updated".into());
+    store
+        .persist_session_scan_for_scope(&first, &report, &cache, 4)
+        .unwrap();
+    let cache = store.shared_session_scan_cache().unwrap();
+    assert!(cache.changed_sessions(&report.sessions).is_empty());
+    assert_eq!(
+        store
+            .persist_session_scan_for_scope(&second, &report, &cache, 5)
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        store.list_sessions_for_scope(&second).unwrap().sessions[0]
+            .title
+            .as_deref(),
+        Some("Updated")
+    );
+    report.sessions.clear();
+    report.warnings.push("provider could not be read".into());
+    store
+        .persist_session_scan_for_scope(&second, &report, &cache, 6)
+        .unwrap();
+    assert_eq!(
+        store
+            .list_sessions_for_scope(&second)
+            .unwrap()
+            .sessions
+            .len(),
+        1
+    );
+    report.warnings.clear();
+    store
+        .persist_session_scan_for_scope(&second, &report, &cache, 7)
+        .unwrap();
+    assert!(
+        store
+            .list_sessions_for_scope(&second)
+            .unwrap()
+            .sessions
+            .is_empty()
+    );
+    assert_eq!(
+        store
+            .list_sessions_for_scope(&first)
+            .unwrap()
+            .sessions
+            .len(),
+        1
+    );
+    fs::remove_dir_all(temp).unwrap();
+}
+
+#[test]
+fn incremental_session_scan_reports_source_changes_without_metadata_changes() {
+    let temp = temp_dir("tendi-source-only-scan-change");
+    fs::create_dir_all(&temp).unwrap();
+    let store = Store::open(temp.join("tendi.sqlite3")).unwrap();
+    let scope = ScopeKey::new("workspace:source-only").unwrap();
+    let mut item = session("source", "Original");
+    item.path = temp.join("source.jsonl");
+    fs::write(&item.path, "{\"role\":\"user\",\"content\":\"queue\"}\n").unwrap();
+    let mut report = SessionScan {
+        sessions: vec![item],
+        warnings: Vec::new(),
+    };
+    let cache = store.shared_session_scan_cache().unwrap();
+    store
+        .persist_session_scan_for_scope(&scope, &report, &cache, 1)
+        .unwrap();
+    store
+        .refresh_pending_session_search_for_scope(&scope)
+        .unwrap();
+    report.sessions = store.list_sessions_for_scope(&scope).unwrap().sessions;
+    let cache = store.shared_session_scan_cache().unwrap();
+    fs::write(&report.sessions[0].path,
+        "{\"role\":\"user\",\"content\":\"queue\"}\n{\"role\":\"tool\",\"content\":\"updated tool output\"}\n").unwrap();
+    let changed = store
+        .persist_session_scan_for_scope(&scope, &report, &cache, 2)
+        .unwrap();
+    assert_eq!(changed, report.sessions);
+    assert_eq!(
+        store.list_sessions_for_scope(&scope).unwrap().sessions,
+        report.sessions
+    );
+    let (_, errors, pending) = store
+        .refresh_pending_session_search_for_scope(&scope)
+        .unwrap();
+    assert!(errors.is_empty());
+    assert!(!pending);
+    fs::remove_dir_all(temp).unwrap();
+}
+
+#[test]
+fn opening_an_existing_store_adds_empty_source_cache_without_losing_sessions() {
+    let temp = temp_dir("tendi-empty-source-cache-shape");
+    fs::create_dir_all(&temp).unwrap();
+    let database = temp.join("tendi.sqlite3");
+    let scope = ScopeKey::new("workspace:existing-shape").unwrap();
+    let item = session("keep", "Keep");
+    {
+        let store = Store::open(&database).unwrap();
+        store
+            .save_sessions_at_for_scope(
+                &scope,
+                &SessionScan {
+                    sessions: vec![item.clone()],
+                    warnings: Vec::new(),
+                },
+                1,
+            )
+            .unwrap();
+    }
+    Connection::open(&database)
+        .unwrap()
+        .execute("DROP TABLE session_scan_empty_sources", [])
+        .unwrap();
+    let store = Store::open(&database).unwrap();
+    assert_eq!(
+        store.list_sessions_for_scope(&scope).unwrap().sessions,
+        vec![item]
+    );
+    assert!(
+        store
+            .shared_session_scan_cache()
+            .unwrap()
+            .empty_source_entries()
+            .is_empty()
+    );
+    assert_eq!(
+        store.sessions_last_scan_at_for_scope(&scope).unwrap(),
+        Some(1)
+    );
+    fs::remove_dir_all(temp).unwrap();
+}
+
+#[test]
+fn session_delta_batches_reuse_existing_rows_and_preserve_in_batch_updates() {
+    let temp = temp_dir("tendi-session-delta-batches");
+    fs::create_dir_all(&temp).unwrap();
+    let store = Store::open(temp.join("tendi.sqlite3")).unwrap();
+    let scope = ScopeKey::new("workspace:/repo").unwrap();
+    let sessions = (0..65)
+        .map(|index| session(&format!("batch-{index}"), "Original"))
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        store
+            .apply_session_delta_for_scope(&scope, &sessions)
+            .unwrap()
+            .len(),
+        65
+    );
+    assert!(
+        store
+            .apply_session_delta_for_scope(&scope, &sessions)
+            .unwrap()
+            .is_empty()
+    );
+
+    let mut first = sessions[0].clone();
+    first.title = Some("First update".to_string());
+    let mut second = first.clone();
+    second.title = Some("Second update".to_string());
+    let changed = store
+        .apply_session_delta_for_scope(&scope, &[first, second.clone()])
+        .unwrap();
+    assert_eq!(changed.len(), 2);
+    assert_eq!(
+        store
+            .list_sessions_for_scope(&scope)
+            .unwrap()
+            .sessions
+            .iter()
+            .find(|record| record.id == second.id)
+            .unwrap()
+            .title,
+        second.title,
+    );
+
+    drop(store);
+    fs::remove_dir_all(temp).unwrap();
+}
+
+#[test]
+fn analytics_refresh_batches_reuse_cached_rows() {
+    let temp = temp_dir("tendi-analytics-refresh-batches");
+    fs::create_dir_all(&temp).unwrap();
+    let store = Store::open(temp.join("tendi.sqlite3")).unwrap();
+    let scope = ScopeKey::new("workspace:/repo").unwrap();
+    let sessions = (0..65)
+        .map(|index| {
+            let mut record = session(&format!("analytics-{index}"), "Analytics");
+            record.path = temp.join(format!("analytics-{index}.jsonl"));
+            fs::write(&record.path, "").unwrap();
+            record
+        })
+        .collect::<Vec<_>>();
+    store
+        .apply_session_delta_for_scope(&scope, &sessions)
+        .unwrap();
+
+    let first = store
+        .refresh_session_analytics_for_scope_with_progress(&scope, &sessions, |_| {})
+        .unwrap();
+    assert_eq!(first.parsed, 65);
+    let second = store
+        .refresh_session_analytics_for_scope_with_progress(&scope, &sessions, |_| {})
+        .unwrap();
+    assert_eq!(second.skipped, 65);
 
     drop(store);
     fs::remove_dir_all(temp).unwrap();
@@ -664,7 +917,7 @@ fn session_list_uses_derived_numeric_projection_for_sql_page_ordering() {
 }
 
 #[test]
-fn session_search_ranks_hits_with_fts_bm25() {
+fn session_search_repetition_does_not_inflate_relevance() {
     let temp = temp_dir("tendi-storage-session-search-bm25");
     fs::create_dir_all(&temp).unwrap();
     let store = Store::open(temp.join("tendi.sqlite3")).unwrap();
@@ -692,8 +945,7 @@ fn session_search_ranks_hits_with_fts_bm25() {
         .search_sessions_for_scope(&scope, "needle", None)
         .unwrap();
     assert_eq!(hits.len(), 2);
-    assert_eq!(hits[0].session.id, "repeated-hit");
-    assert!(hits[0].search_score > hits[1].search_score);
+    assert_eq!(hits[0].search_score, hits[1].search_score);
     assert!(hits[1].search_score > 0.0);
 
     drop(store);
@@ -765,6 +1017,39 @@ fn session_search_fts_optimize_resets_due_mutation_counter() {
         .unwrap();
     assert_eq!(state.0, 0);
     assert!(state.1 > 0);
+
+    drop(store);
+    fs::remove_dir_all(temp).unwrap();
+}
+
+#[test]
+fn current_schema_without_skill_installation_times_is_repaired_on_open() {
+    let temp = temp_dir("tendi-skill-installation-times-shape");
+    fs::create_dir_all(&temp).unwrap();
+    let db = temp.join("tendi.sqlite3");
+    drop(Store::open(&db).unwrap());
+
+    {
+        let conn = Connection::open(&db).unwrap();
+        conn.execute("DROP TABLE skill_installation_times", [])
+            .unwrap();
+        conn.pragma_update(None, "user_version", crate::storage::STORAGE_SCHEMA_VERSION)
+            .unwrap();
+    }
+
+    let store = Store::open(&db).unwrap();
+    let table_exists: bool = store
+        .conn
+        .query_row(
+            "SELECT EXISTS(
+                 SELECT 1 FROM sqlite_master
+                 WHERE type = 'table' AND name = 'skill_installation_times'
+             )",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(table_exists);
 
     drop(store);
     fs::remove_dir_all(temp).unwrap();

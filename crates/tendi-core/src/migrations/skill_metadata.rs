@@ -26,11 +26,11 @@ fn default_schema_version() -> u32 {
 }
 
 pub(super) fn migrate_scan(store: &Store, cwd: &Path, scan: &SkillScan) -> Result<bool> {
-    let workspace_root = canonical_workspace_root(cwd);
-    let migration_key = format!("{MIGRATION_KEY}:{}", workspace_root.display());
+    let migration_key = migration_key_for_workspace(cwd);
     if super::migration_completed(store, &migration_key)? {
         return Ok(false);
     }
+    let workspace_root = canonical_workspace_root(cwd);
 
     let persisted = store.skill_visibilities_for_workspace(&workspace_root)?;
     let mut explicit_values = Vec::<(PathBuf, SkillVisibility)>::new();
@@ -95,6 +95,16 @@ pub(super) fn migrate_scan(store: &Store, cwd: &Path, scan: &SkillScan) -> Resul
         super::mark_migration_completed(store, &migration_key)?;
     }
     Ok(changed)
+}
+
+pub(super) fn migration_completed_for_workspace(store: &Store, cwd: &Path) -> Result<bool> {
+    let migration_key = migration_key_for_workspace(cwd);
+    super::migration_completed(store, &migration_key)
+}
+
+fn migration_key_for_workspace(cwd: &Path) -> String {
+    let workspace_root = canonical_workspace_root(cwd);
+    format!("{MIGRATION_KEY}:{}", workspace_root.display())
 }
 
 fn read_legacy_visibility(skill_dir: &Path) -> Result<Option<SkillVisibility>> {

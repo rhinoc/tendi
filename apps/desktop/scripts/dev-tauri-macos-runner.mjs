@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { spawn, spawnSync } from "node:child_process";
+import { spawn } from "node:child_process";
 import {
   chmodSync,
   copyFileSync,
@@ -11,6 +11,7 @@ import {
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { stopOwned } from "./process-lifecycle.mjs";
+import { runningMacOsDevAppPids } from "./macos-dev-app-process.mjs";
 
 const desktopDir = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const executable = process.argv[2];
@@ -57,16 +58,7 @@ writeFileSync(
 );
 
 function runningBundlePids() {
-  const result = spawnSync("ps", ["-axo", "pid=,command="], { encoding: "utf8" });
-  if (result.status !== 0) return [];
-
-  return result.stdout.split("\n").flatMap((line) => {
-    const match = line.trim().match(/^(\d+)\s+(.+)$/);
-    if (!match || (match[2] !== appExecutable && !match[2].startsWith(`${appExecutable} `))) {
-      return [];
-    }
-    return [Number.parseInt(match[1], 10)];
-  });
+  return runningMacOsDevAppPids(appExecutable);
 }
 
 function isRunning(pid) {

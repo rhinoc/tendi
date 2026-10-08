@@ -39,9 +39,10 @@ pub const SKILL_CHANGED_EVENT: &str = runtime_schema::EventName::SkillsChanged.a
 pub const PROJECTION_CHANGED_EVENT: &str = runtime_schema::EventName::ProjectionChanged.as_str();
 pub const CONFIG_CHANGED_EVENT: &str = runtime_schema::EventName::ConfigChanged.as_str();
 const SESSION_SCAN_BATCH_SIZE: usize = 32;
-const SESSION_SCAN_PERSIST_BATCH_SIZE: usize = 8;
+const ANALYTICS_PARTIAL_REVISION_INTERVAL: Duration = Duration::from_secs(5);
 const SESSION_WATCH_DEBOUNCE: Duration = Duration::from_millis(500);
 const CONFIG_WATCH_DEBOUNCE: Duration = Duration::from_millis(150);
+const SKILL_WATCH_DEBOUNCE: Duration = Duration::from_millis(150);
 const BACKUP_SYNC_INTERVAL: Duration = Duration::from_secs(10 * 60);
 const SESSION_WATCH_RETRY_INITIAL: Duration = Duration::from_millis(500);
 const SESSION_WATCH_RETRY_MAX: Duration = Duration::from_secs(30);
@@ -694,18 +695,20 @@ impl Daemon {
         self.storage_degraded_reason().is_some()
     }
 
-    fn recover_storage(&self, reason: impl std::fmt::Display) -> bool {
-        self.recover_storage_inner(reason.to_string(), None)
-    }
-
     fn recover_storage_cause(&self, error: &anyhow::Error) -> bool {
         self.recover_storage_inner(
             error.to_string(),
             tendi_core::storage::sqlite_error_diagnostic(error),
+            None,
         )
     }
 
-    fn recover_storage_inner(&self, reason: String, sqlite_error: Option<String>) -> bool {
+    fn recover_storage_inner(
+        &self,
+        reason: String,
+        sqlite_error: Option<String>,
+        operation: Option<&str>,
+    ) -> bool {
         let now = Instant::now();
         let recovery = &self.state.storage_recovery;
         let transient_failure = storage_recovery_failure_is_transient(&reason);
@@ -759,6 +762,8 @@ impl Daemon {
                 "database": self.state.database_path,
                 "reason": reason,
                 "sqliteError": sqlite_error,
+                "operation": operation,
+                "files": tendi_core::storage::database_file_diagnostics(&self.state.database_path),
             }),
         );
         let started = Instant::now();
@@ -791,7 +796,9 @@ impl Daemon {
                         "durationMs": started.elapsed().as_secs_f64() * 1000.0,
                         "state": "degraded",
                         "error": error.to_string(),
+                        "operation": operation,
                         "sqliteError": tendi_core::storage::sqlite_error_diagnostic(&error),
+                        "files": tendi_core::storage::database_file_diagnostics(&self.state.database_path),
                     }),
                 );
                 false
@@ -800,6 +807,10 @@ impl Daemon {
     }
 
     fn recover_storage_error(&self, error: &DaemonError) -> bool {
+        self.recover_storage_error_for(error, None)
+    }
+
+    fn recover_storage_error_for(&self, error: &DaemonError, operation: Option<&str>) -> bool {
         let recoverable = error
             .data
             .as_ref()
@@ -807,7 +818,7 @@ impl Daemon {
             .and_then(Value::as_bool)
             .unwrap_or(false);
         if recoverable {
-            return self.recover_storage(&error.message);
+            return self.recover_storage_inner(error.message.clone(), None, operation);
         }
         false
     }
@@ -1101,12 +1112,16 @@ impl Daemon {
         let operation_started = Instant::now();
         let operation_result = self.execute_method(&request.method, &request.params);
         let operation_duration_ms = operation_started.elapsed().as_secs_f64() * 1000.0;
-        if operation_duration_ms >= 100.0 || operation_result.is_err() {
+        if operation_duration_ms >= 100.0
+            || operation_result.is_err()
+            || metadata.execution == runtime_schema::Execution::Write
+        {
             let fields = json!({
                 "requestId": request.id.clone(),
                 "method": &request.method,
                 "durationMs": operation_duration_ms,
                 "succeeded": operation_result.is_ok(),
+                "execution": format!("{:?}", metadata.execution),
                 "scheduled": request_scheduler::workload_for_request(&request.method, &request.params).is_some(),
             });
             if operation_result.is_ok() {
@@ -1161,14 +1176,14 @@ impl Daemon {
         if let Err(error) = &result {
             let read_command = runtime_schema::command_metadata(command)
                 .is_some_and(|metadata| metadata.execution == runtime_schema::Execution::Read);
-            if read_command && self.recover_storage_error(error) {
+            if read_command && self.recover_storage_error_for(error, Some(command)) {
                 let retry = runtime_dispatch!(self, command, args);
                 if let Err(error) = &retry {
-                    self.recover_storage_error(error);
+                    self.recover_storage_error_for(error, Some(command));
                 }
                 return retry;
             }
-            self.recover_storage_error(error);
+            self.recover_storage_error_for(error, Some(command));
         }
         result
     }
@@ -1263,15 +1278,34 @@ impl Daemon {
     where
         T: serde::de::DeserializeOwned,
     {
+        let started = Instant::now();
         let cwd = self.state.cwd.clone();
         let store = self.open_store().map_err(core_error)?;
+        let open_ms = started.elapsed().as_secs_f64() * 1000.0;
         let cached = store
             .read_cached_projection(domain, &cwd)
             .map_err(core_error)?;
-        if store.projection_status(domain, &cwd).map_err(core_error)?
-            != tendi_core::storage::ProjectionStatus::Fresh
-        {
+        let read_ms = started.elapsed().as_secs_f64() * 1000.0 - open_ms;
+        let status = store.projection_status(domain, &cwd).map_err(core_error)?;
+        let status_ms = started.elapsed().as_secs_f64() * 1000.0 - open_ms - read_ms;
+        if status != tendi_core::storage::ProjectionStatus::Fresh {
             self.schedule_projection_refresh(domain);
+        }
+        let total_ms = started.elapsed().as_secs_f64() * 1000.0;
+        if total_ms >= 100.0 {
+            tendi_core::logging::global().info(
+                "cached projection read completed",
+                json!({
+                    "domain": domain,
+                    "openMs": open_ms,
+                    "readMs": read_ms,
+                    "statusMs": status_ms,
+                    "scheduleMs": total_ms - open_ms - read_ms - status_ms,
+                    "totalMs": total_ms,
+                    "cached": cached.is_some(),
+                    "status": format!("{status:?}"),
+                }),
+            );
         }
         Ok(cached)
     }
@@ -1337,9 +1371,23 @@ impl Daemon {
         } else {
             request_scheduler::Workload::Compute
         };
+        let queued_at = Instant::now();
         let step = request_scheduler::Step::acquire(workload, resources, move || {
             let _cleanup = cleanup;
+            let queue_duration = queued_at.elapsed();
+            let refresh_started = Instant::now();
             let result = daemon.refresh_projection_domain(domain);
+            tendi_core::logging::global().info(
+                "projection refresh completed",
+                json!({
+                    "domain": domain,
+                    "queueMs": queue_duration.as_secs_f64() * 1000.0,
+                    "refreshMs": refresh_started.elapsed().as_secs_f64() * 1000.0,
+                    "succeeded": result.is_ok(),
+                    "changed": result.as_ref().ok(),
+                    "error": result.as_ref().err().map(|error| error.message.as_str()),
+                }),
+            );
             match result {
                 Ok(true) => daemon.emit_event(
                     PROJECTION_CHANGED_EVENT,
@@ -1750,6 +1798,7 @@ impl Daemon {
     }
 
     fn sessions_scan_start(&self) -> Result<runtime_schema::SessionScanStartResponse, DaemonError> {
+        let watcher_started = Instant::now();
         let additional_session_roots = {
             let store = self.open_store().map_err(core_error)?;
             store
@@ -1760,9 +1809,23 @@ impl Daemon {
                 .map(PathBuf::from)
                 .collect::<Vec<_>>()
         };
+        let settings_ms = watcher_started.elapsed().as_secs_f64() * 1000.0;
+        let plan_started = Instant::now();
         let watch_plan =
             tendi_core::sessions::session_watch_plan(&self.state.cwd, &additional_session_roots);
+        let plan_ms = plan_started.elapsed().as_secs_f64() * 1000.0;
+        let registration_started = Instant::now();
         self.configure_session_watcher(&watch_plan)?;
+        tendi_core::logging::global().info(
+            "session watcher configured",
+            json!({
+                "settingsMs": settings_ms,
+                "planMs": plan_ms,
+                "registrationMs": registration_started.elapsed().as_secs_f64() * 1000.0,
+                "targetCount": watch_plan.targets.len(),
+                "dynamicRootCount": watch_plan.dynamic_roots.len(),
+            }),
+        );
         let runtime = &self.state.session_runtime;
         if runtime.scan_running.load(Ordering::SeqCst) {
             return Ok(session_scan_start_response(
@@ -2174,16 +2237,20 @@ impl Daemon {
         &self,
         request: runtime_schema::AgentConfigSaveRequest,
     ) -> Result<runtime_schema::AgentConfigWriteResult, DaemonError> {
+        let path = PathBuf::from(request.path);
+        let watcher_handles_change = self.config_paths_are_watched(std::slice::from_ref(&path));
         let _resources =
-            tendi_core::coordination::acquire_file_resources(&[PathBuf::from(&request.path)])
+            tendi_core::coordination::acquire_file_resources(std::slice::from_ref(&path))
                 .map_err(core_error)?;
         match tendi_core::config::save_agent_config(
-            Path::new(&request.path),
+            &path,
             &request.expected_sha256,
             &request.content,
         ) {
             Ok(saved) => {
-                self.invalidate_config_projections()?;
+                if !watcher_handles_change {
+                    self.invalidate_config_projections()?;
+                }
                 serde_json::from_value(serde_json::to_value(saved).map_err(internal_error)?)
                     .map_err(internal_error)
             }
@@ -2211,6 +2278,7 @@ impl Daemon {
             .into_iter()
             .map(PathBuf::from)
             .collect::<Vec<_>>();
+        let watcher_handles_change = self.config_paths_are_watched(&paths);
         let configs = tendi_core::config::list_agent_configs().map_err(core_error)?;
         let _resources =
             tendi_core::coordination::acquire_file_resources(&paths).map_err(core_error)?;
@@ -2230,7 +2298,9 @@ impl Daemon {
         let settings = store
             .clear_config_profiles_if_matching(&removed_profiles)
             .map_err(core_error)?;
-        self.invalidate_config_projections()?;
+        if !watcher_handles_change {
+            self.invalidate_config_projections()?;
+        }
         let remaining = configs
             .into_iter()
             .filter_map(|mut config| {
@@ -2350,34 +2420,44 @@ impl Daemon {
             }
         }
 
-        for directory in state
+        let removed_directories = state
             .watched_dirs
             .difference(&directories)
             .cloned()
-            .collect::<Vec<_>>()
-        {
-            if let Some(watcher) = state.watcher.as_mut() {
-                let _ = watcher.unwatch(&directory);
-            }
-        }
+            .collect::<Vec<_>>();
         let added_directories = directories
             .difference(&state.watched_dirs)
             .cloned()
             .collect::<Vec<_>>();
-        for directory in added_directories {
-            let result = state
+        if !removed_directories.is_empty() || !added_directories.is_empty() {
+            let mut paths = state
                 .watcher
                 .as_mut()
                 .expect("rule watcher was initialized")
-                .watch(&directory, RecursiveMode::NonRecursive);
-            match result {
-                Ok(()) => {
-                    state.watched_dirs.insert(directory);
+                .paths_mut();
+            for directory in &removed_directories {
+                let _ = paths.remove(directory);
+            }
+            let mut registered = Vec::new();
+            for directory in added_directories {
+                match paths.add(&directory, RecursiveMode::NonRecursive) {
+                    Ok(()) => registered.push(directory),
+                    Err(error) => tendi_core::logging::global().warn(
+                        "rule watcher registration failed",
+                        json!({"path": directory, "error": error.to_string()}),
+                    ),
                 }
-                Err(error) => tendi_core::logging::global().warn(
+            }
+            if let Err(error) = paths.commit() {
+                tendi_core::logging::global().warn(
                     "rule watcher registration failed",
-                    json!({"path": directory, "error": error.to_string()}),
-                ),
+                    json!({"error": error.to_string()}),
+                );
+                return;
+            }
+            state.watched_dirs.extend(registered);
+            for directory in removed_directories {
+                state.watched_dirs.remove(&directory);
             }
         }
         let watched_dirs = state.watched_dirs.clone();
@@ -2388,14 +2468,6 @@ impl Daemon {
                     .is_some_and(|parent| watched_dirs.contains(parent))
             })
             .collect();
-        for directory in state
-            .watched_dirs
-            .difference(&directories)
-            .cloned()
-            .collect::<Vec<_>>()
-        {
-            state.watched_dirs.remove(&directory);
-        }
     }
 
     fn rule_paths_for_watch_event(&self, changed: &Path) -> Vec<PathBuf> {
@@ -3076,19 +3148,32 @@ impl Daemon {
         })
         .map_err(internal_error)?;
         let mut watched_paths = BTreeSet::new();
-        for target in plan.targets.iter().filter(|target| target.path.exists()) {
-            let mode = if target.recursive {
-                RecursiveMode::Recursive
-            } else {
-                RecursiveMode::NonRecursive
-            };
-            watcher.watch(&target.path, mode).map_err(|error| {
-                internal_error(format!(
-                    "failed to watch {}: {error}",
-                    target.path.display()
-                ))
-            })?;
-            watched_paths.insert(target.path.clone());
+        {
+            let mut paths = watcher.paths_mut();
+            let mut error = None;
+            for target in plan.targets.iter().filter(|target| target.path.exists()) {
+                let mode = if target.recursive {
+                    RecursiveMode::Recursive
+                } else {
+                    RecursiveMode::NonRecursive
+                };
+                match paths.add(&target.path, mode) {
+                    Ok(()) => {
+                        watched_paths.insert(target.path.clone());
+                    }
+                    Err(cause) => {
+                        error = Some(internal_error(format!(
+                            "failed to watch {}: {cause}",
+                            target.path.display()
+                        )));
+                        break;
+                    }
+                }
+            }
+            paths.commit().map_err(internal_error)?;
+            if let Some(error) = error {
+                return Err(error);
+            }
         }
         *self
             .state
@@ -3107,14 +3192,77 @@ impl Daemon {
         let Ok(configs) = tendi_core::config::list_agent_configs() else {
             return;
         };
-        for config in configs {
-            if let Err(error) = self.register_config_watch_path(&config.path) {
+        let mut directories = BTreeSet::new();
+        for config in &configs {
+            if let Some(directory) = existing_watch_directory(&config.path) {
+                directories.insert(directory);
+            } else {
                 tendi_core::logging::global().warn(
                     "config watcher registration failed",
-                    json!({ "path": config.path, "error": error.message }),
+                    json!({ "path": config.path, "error": "config parent directory is unavailable" }),
                 );
             }
         }
+        if directories.is_empty() {
+            return;
+        }
+        let Ok(mut state) = self.state.config_runtime.watcher.lock() else {
+            tendi_core::logging::global().warn("config watcher is unavailable", json!({}));
+            return;
+        };
+        if state.watcher.is_none() {
+            let tx = self.state.config_runtime.watch_tx.clone();
+            match notify::recommended_watcher(move |result: notify::Result<Event>| {
+                let _ = tx.send(result);
+            }) {
+                Ok(watcher) => state.watcher = Some(watcher),
+                Err(error) => {
+                    tendi_core::logging::global().warn(
+                        "config watcher registration failed",
+                        json!({ "error": error.to_string() }),
+                    );
+                    return;
+                }
+            }
+        }
+        let new_directories = directories
+            .difference(&state.watched_dirs)
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut registered = Vec::new();
+        {
+            let mut paths = state
+                .watcher
+                .as_mut()
+                .expect("config watcher was initialized")
+                .paths_mut();
+            for directory in new_directories {
+                match paths.add(&directory, RecursiveMode::NonRecursive) {
+                    Ok(()) => registered.push(directory),
+                    Err(error) => tendi_core::logging::global().warn(
+                        "config watcher registration failed",
+                        json!({ "path": directory, "error": error.to_string() }),
+                    ),
+                }
+            }
+            if let Err(error) = paths.commit() {
+                tendi_core::logging::global().warn(
+                    "config watcher registration failed",
+                    json!({ "error": error.to_string() }),
+                );
+                return;
+            }
+        }
+        state.watched_dirs.extend(registered);
+        let watched_paths = configs
+            .into_iter()
+            .map(|config| config.path)
+            .filter(|path| {
+                existing_watch_directory(path)
+                    .is_some_and(|directory| state.watched_dirs.contains(&directory))
+            })
+            .collect::<Vec<_>>();
+        state.watched_paths.extend(watched_paths);
     }
 
     fn configure_skill_watcher(
@@ -3156,22 +3304,38 @@ impl Daemon {
                 .map_err(internal_error)?,
             );
         }
-        for path in paths {
-            if state.watched_paths.contains(&path) {
-                continue;
-            }
-            state
+        let new_paths = paths
+            .difference(&state.watched_paths)
+            .cloned()
+            .collect::<Vec<_>>();
+        if new_paths.is_empty() {
+            return Ok(());
+        }
+        let mut registered = Vec::new();
+        let mut error = None;
+        {
+            let mut watcher_paths = state
                 .watcher
                 .as_mut()
                 .expect("skill watcher was initialized")
-                .watch(&path, RecursiveMode::Recursive)
-                .map_err(|error| {
-                    internal_error(format!(
-                        "failed to watch skill directory {}: {error}",
-                        path.display()
-                    ))
-                })?;
-            state.watched_paths.insert(path);
+                .paths_mut();
+            for path in new_paths {
+                match watcher_paths.add(&path, RecursiveMode::Recursive) {
+                    Ok(()) => registered.push(path),
+                    Err(cause) => {
+                        error = Some(internal_error(format!(
+                            "failed to watch skill directory {}: {cause}",
+                            path.display()
+                        )));
+                        break;
+                    }
+                }
+            }
+            watcher_paths.commit().map_err(internal_error)?;
+        }
+        state.watched_paths.extend(registered);
+        if let Some(error) = error {
+            return Err(error);
         }
         Ok(())
     }
@@ -3225,15 +3389,24 @@ impl Daemon {
             .unwrap_or_default()
     }
 
+    fn config_paths_are_watched(&self, paths: &[PathBuf]) -> bool {
+        self.state.background_enabled
+            && !paths.is_empty()
+            && self
+                .state
+                .config_runtime
+                .watcher
+                .lock()
+                .map(|state| paths.iter().all(|path| state.watched_paths.contains(path)))
+                .unwrap_or(false)
+    }
+
     fn skills_list(&self) -> Result<runtime_schema::SkillRecordList, DaemonError> {
-        let store = self.open_store().map_err(core_error)?;
-        let scan = match store
-            .list_skills_for_workspace(&self.state.cwd)
-            .map_err(core_error)?
-        {
+        // An existing snapshot can populate read-only UI immediately while a
+        // stale projection is refreshed in the background.
+        let scan = match self.read_cached_projection::<tendi_core::skills::SkillScan>("skills")? {
             Some(scan) => scan,
             None => {
-                drop(store);
                 let scan = self.refresh_pending_skills()?;
                 self.schedule_skill_reconciliation();
                 scan
@@ -3704,7 +3877,11 @@ impl Daemon {
         };
         let before = self.skill_projection_for_mutation()?;
         let resources = tendi_core::coordination::acquire_file_resources(
-            &tendi_core::skills::skill_add_resource_paths(&preview.plan).map_err(core_error)?,
+            &tendi_core::skills::skill_add_resource_paths_for_workspace(
+                &preview.plan,
+                &self.state.cwd,
+            )
+            .map_err(core_error)?,
         )
         .map_err(core_error)?;
         if tendi_core::skills::skill_add_catalog_fingerprint(&preview.plan).map_err(core_error)?
@@ -3743,6 +3920,12 @@ impl Daemon {
                 &snapshots,
             )
             .map_err(core_error)?;
+        if let Err(error) = tendi_core::skill_lock::record_install(&report, &self.state.cwd) {
+            tendi_core::logging::global().warn(
+                "failed to update Skills CLI lock file after skill installation",
+                json!({ "error": error.to_string() }),
+            );
+        }
         let refresh_ids = Vec::new();
         let extra_skill_dirs = report
             .results
@@ -6154,6 +6337,7 @@ fn run_session_scan(
     additional_session_roots: &[PathBuf],
     operation_id: &tendi_core::OperationId,
 ) -> Result<(), DaemonError> {
+    let started = Instant::now();
     let scan_started_at = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
@@ -6237,6 +6421,7 @@ fn run_session_scan(
         ),
     );
 
+    let recent_duration = started.elapsed();
     let cache = store
         .session_scan_cache_for_scope(&scope_key)
         .map_err(core_error)?;
@@ -6246,20 +6431,16 @@ fn run_session_scan(
         &cache,
     )
     .map_err(core_error)?;
-    let changed_sessions = cache.changed_sessions(&report.sessions);
+    let backfill_duration = started.elapsed() - recent_duration;
     let base_revision = store
         .projection_head(&scope_key, "sessions")
         .map_err(core_error)?
         .map(|head| head.revision)
         .unwrap_or(tendi_core::Revision::ZERO);
-    for sessions in changed_sessions.chunks(SESSION_SCAN_PERSIST_BATCH_SIZE) {
-        store
-            .apply_session_delta_and_resolve_projects_for_scope(&scope_key, sessions)
-            .map_err(core_error)?;
-    }
-    store
-        .finalize_session_scan_for_scope(&scope_key, &report, scan_started_at)
+    let changed_sessions = store
+        .persist_session_scan_for_scope(&scope_key, &report, &cache, scan_started_at)
         .map_err(core_error)?;
+    let changed_count = changed_sessions.len();
     let revision = store
         .projection_head(&scope_key, "sessions")
         .map_err(core_error)?
@@ -6296,6 +6477,18 @@ fn run_session_scan(
             scope_key: scope_key.clone(),
             sessions: analytics_sessions,
         });
+    tendi_core::logging::global().info(
+        "session scan completed",
+        json!({
+            "scopeKey": scope_key,
+            "recentPaths": scanned,
+            "totalSessions": report.sessions.len(),
+            "changedSessions": changed_count,
+            "recentMs": recent_duration.as_secs_f64() * 1000.0,
+            "backfillMs": backfill_duration.as_secs_f64() * 1000.0,
+            "totalMs": started.elapsed().as_secs_f64() * 1000.0,
+        }),
+    );
     Ok(())
 }
 
@@ -6327,11 +6520,15 @@ fn existing_watch_directory(path: &Path) -> Option<PathBuf> {
 
 fn config_watch_loop(daemon: Daemon, receiver: Receiver<notify::Result<Event>>) {
     let mut pending = BTreeSet::new();
+    let mut pending_since = None;
     loop {
         if daemon.is_shutting_down() || daemon.is_storage_degraded() {
             break;
         }
-        match receiver.recv_timeout(CONFIG_WATCH_DEBOUNCE) {
+        let wait = pending_since
+            .map(|since: Instant| CONFIG_WATCH_DEBOUNCE.saturating_sub(since.elapsed()))
+            .unwrap_or(CONFIG_WATCH_DEBOUNCE);
+        match receiver.recv_timeout(wait) {
             Ok(Ok(event)) => {
                 let watched_paths = daemon.config_watch_paths();
                 for path in &watched_paths {
@@ -6345,12 +6542,17 @@ fn config_watch_loop(daemon: Daemon, receiver: Receiver<notify::Result<Event>>) 
                         let _ = daemon.register_config_watch_path(path);
                     }
                 }
+                if !pending.is_empty() {
+                    pending_since = Some(Instant::now());
+                }
+                continue;
             }
             Ok(Err(error)) => {
                 tendi_core::logging::global().error(
                     "config watcher failed",
                     json!({ "error": error.to_string() }),
                 );
+                continue;
             }
             Err(RecvTimeoutError::Disconnected) => break,
             Err(RecvTimeoutError::Timeout) => {}
@@ -6358,6 +6560,7 @@ fn config_watch_loop(daemon: Daemon, receiver: Receiver<notify::Result<Event>>) 
         if pending.is_empty() {
             continue;
         }
+        pending_since = None;
         let paths = std::mem::take(&mut pending).into_iter().collect::<Vec<_>>();
         if let Err(error) = daemon.invalidate_config_projections() {
             tendi_core::logging::global().warn(
@@ -6385,22 +6588,33 @@ fn config_watch_loop(daemon: Daemon, receiver: Receiver<notify::Result<Event>>) 
 
 fn skill_watch_loop(daemon: Daemon, receiver: Receiver<notify::Result<Event>>) {
     let mut pending = BTreeSet::new();
+    let mut pending_since = None;
     loop {
         if daemon.is_shutting_down() || daemon.is_storage_degraded() {
             break;
         }
-        match receiver.recv_timeout(CONFIG_WATCH_DEBOUNCE) {
-            Ok(Ok(event)) => pending.extend(
-                event
-                    .paths
-                    .into_iter()
-                    .filter(|path| !is_skill_watcher_transient_path(path)),
-            ),
+        let wait = pending_since
+            .map(|since: Instant| SKILL_WATCH_DEBOUNCE.saturating_sub(since.elapsed()))
+            .unwrap_or(SKILL_WATCH_DEBOUNCE);
+        match receiver.recv_timeout(wait) {
+            Ok(Ok(event)) => {
+                pending.extend(
+                    event
+                        .paths
+                        .into_iter()
+                        .filter(|path| !is_skill_watcher_transient_path(path)),
+                );
+                if !pending.is_empty() {
+                    pending_since = Some(Instant::now());
+                }
+                continue;
+            }
             Ok(Err(error)) => {
                 tendi_core::logging::global().error(
                     "skill watcher failed",
                     json!({ "error": error.to_string() }),
                 );
+                continue;
             }
             Err(RecvTimeoutError::Disconnected) => break,
             Err(RecvTimeoutError::Timeout) => {}
@@ -6408,6 +6622,7 @@ fn skill_watch_loop(daemon: Daemon, receiver: Receiver<notify::Result<Event>>) {
         if pending.is_empty() {
             continue;
         }
+        pending_since = None;
         let paths = std::mem::take(&mut pending).into_iter().collect::<Vec<_>>();
         if let Err(error) = daemon.reconcile_skill_visibility_after_external_change(&paths) {
             tendi_core::logging::global().warn(
@@ -6509,11 +6724,18 @@ fn backup_sync_loop(daemon: Daemon) {
 
 fn projection_recovery_loop(daemon: Daemon) {
     let mut retry_delay = DATABASE_RECOVERY_RETRY_INITIAL;
+    let mut store = None;
     while !daemon.is_shutting_down() && !daemon.is_storage_degraded() {
-        match daemon
-            .open_store()
-            .and_then(|store| store.pending_projection_scopes("skills"))
-        {
+        let scopes = (|| {
+            if store.is_none() {
+                store = Some(daemon.open_store()?);
+            }
+            store
+                .as_ref()
+                .expect("projection recovery store was opened")
+                .pending_projection_scopes("skills")
+        })();
+        match scopes {
             Ok(scopes) => {
                 retry_delay = DATABASE_RECOVERY_RETRY_INITIAL;
                 for scope in scopes {
@@ -6523,6 +6745,7 @@ fn projection_recovery_loop(daemon: Daemon) {
                 }
             }
             Err(error) => {
+                store = None;
                 if tendi_core::storage::is_database_recovery_error(&error) {
                     daemon.recover_storage_cause(&error);
                 } else {
@@ -7134,6 +7357,8 @@ fn refresh_session_analytics_serialized_with_revision(
         .analytics_operations
         .execute(operation_id, move || {
             let store = daemon_for_job.open_store()?;
+            let mut last_published_at = None;
+            let mut last_published_parsed = 0;
             let report = store.refresh_session_analytics_for_scope_with_progress(
                 &scope_key,
                 &sessions,
@@ -7154,6 +7379,30 @@ fn refresh_session_analytics_serialized_with_revision(
                             }),
                         ),
                     );
+                    if progress.completed < progress.total
+                        && progress.parsed > last_published_parsed
+                        && last_published_at.is_none_or(|at: Instant| {
+                            at.elapsed() >= ANALYTICS_PARTIAL_REVISION_INTERVAL
+                        })
+                    {
+                        match store.analytics_revision_for_scope(&scope_key) {
+                            Ok(revision) => {
+                                daemon_for_job.emit_event(
+                                    ANALYTICS_REVISION_EVENT,
+                                    runtime_event(
+                                        ANALYTICS_REVISION_EVENT,
+                                        json!({ "scopeKey": scope_key, "revision": revision }),
+                                    ),
+                                );
+                                last_published_at = Some(Instant::now());
+                                last_published_parsed = progress.parsed;
+                            }
+                            Err(error) => tendi_core::logging::global().warn(
+                                "analytics partial revision read failed",
+                                json!({ "error": format!("{error:#}") }),
+                            ),
+                        }
+                    }
                 },
             )?;
             let revision = store.analytics_revision_for_scope(&scope_key)?;
@@ -7227,9 +7476,13 @@ fn refresh_session_analytics_serialized(
 fn session_search_loop(daemon: Daemon) {
     let mut retry_delay = DATABASE_RECOVERY_RETRY_INITIAL;
     let mut next_maintenance_at = Instant::now();
+    let mut store = None;
     while !daemon.is_shutting_down() && !daemon.is_storage_degraded() {
         let result = (|| -> anyhow::Result<()> {
-            let store = daemon.open_store()?;
+            if store.is_none() {
+                store = Some(daemon.open_store()?);
+            }
+            let store = store.as_ref().expect("session search store was opened");
             let active_scope =
                 daemon_scope_key(&daemon).map_err(|error| anyhow::anyhow!(error.message))?;
             let mut pending_search = false;
@@ -7250,7 +7503,6 @@ fn session_search_loop(daemon: Daemon) {
                     Ok(report) => report,
                     Err(error) => {
                         if tendi_core::storage::is_database_recovery_error(&error) {
-                            daemon.recover_storage_cause(&error);
                             return Err(error);
                         }
                         tendi_core::logging::global().warn(
@@ -7309,6 +7561,7 @@ fn session_search_loop(daemon: Daemon) {
         match result {
             Ok(()) => retry_delay = DATABASE_RECOVERY_RETRY_INITIAL,
             Err(error) => {
+                store = None;
                 if tendi_core::storage::is_database_recovery_error(&error) {
                     daemon.recover_storage_cause(&error);
                 } else {

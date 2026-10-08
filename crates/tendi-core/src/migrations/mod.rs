@@ -17,13 +17,16 @@ use crate::{
     storage::{PROJECTION_PARSER_VERSION, STORAGE_SCHEMA_VERSION, Store},
 };
 
+mod git_skill_snapshots;
 mod schema;
+mod session_skill_index;
 mod skill_metadata;
 mod skill_sources;
+mod skill_visibility;
 
 const CODEX_GLOBAL_SKILL_CONFIG_MIGRATION_KEY: &str = "codex_global_skill_config_migrated_v1";
 const GIT_SOURCE_VERSION_LONG_SHA_MIGRATION_KEY: &str = "git_source_version_long_sha_migrated_v1";
-const MAX_SQUASHED_DEVELOPMENT_SCHEMA_VERSION: i64 = 3;
+const MAX_SQUASHED_DEVELOPMENT_SCHEMA_VERSION: i64 = 5;
 const STORAGE_MAINTENANCE_TIME_SLICE: Duration = Duration::from_millis(100);
 
 static STORAGE_MAINTENANCE_SCHEDULED: LazyLock<Mutex<HashSet<PathBuf>>> =
@@ -51,16 +54,29 @@ impl Store {
             fs::create_dir_all(parent)
                 .with_context(|| format!("failed to create {}", parent.display()))?;
         }
-        fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&path)
-            .with_context(|| format!("failed to create sqlite database {}", path.display()))?;
-        let path = fs::canonicalize(&path)
-            .with_context(|| format!("failed to resolve sqlite database {}", path.display()))?;
+        let path = match fs::canonicalize(&path) {
+            Ok(path) => path,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                let parent = path
+                    .parent()
+                    .context("sqlite database has no parent directory")?;
+                let file_name = path
+                    .file_name()
+                    .context("sqlite database has no file name")?;
+                fs::canonicalize(parent)
+                    .with_context(|| format!("failed to resolve {}", parent.display()))?
+                    .join(file_name)
+            }
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!("failed to resolve sqlite database {}", path.display())
+                });
+            }
+        };
         let writer = super::database::DatabaseWriter::open(&path)?;
         let conn = Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
             .with_context(|| format!("failed to open sqlite reader {}", path.display()))?;
+        super::shared_cache::register_functions(&conn)?;
         conn.busy_timeout(Duration::from_secs(30))?;
         let store = Self { conn, path, writer };
         let existing_schema = schema::has_user_schema(&store.conn)?;
@@ -96,7 +112,7 @@ impl Store {
                 Ok(())
             })?;
         }
-        store.purge_git_skill_snapshots()?;
+        git_skill_snapshots::purge(&store)?;
         Ok(store)
     }
 
@@ -350,11 +366,24 @@ pub(crate) fn rebuild_corrupt_fs_manifest(conn: &Connection) -> Result<()> {
     schema::rebuild_corrupt_fs_manifest(conn)
 }
 
-pub(crate) fn run_workspace(store: &Store, cwd: &Path, project_roots: &[PathBuf]) -> Result<()> {
+pub(crate) fn ensure_session_skill_index_version_for_scope(
+    store: &Store,
+    scope_key: &crate::runtime_contract::ScopeKey,
+) -> Result<bool> {
+    session_skill_index::ensure_current_version(store, scope_key)
+}
+
+pub(crate) fn run_workspace(store: &Store, cwd: &Path, project_roots: &[PathBuf]) -> Result<bool> {
     store.schedule_pending_storage_work();
-    store.ensure_skill_visibility_table()?;
+    skill_visibility::migrate_legacy_data(store)?;
     migrate_codex_global_skill_config(store)?;
     invalidate_old_projection_contexts(store)?;
+
+    if skill_metadata::migration_completed_for_workspace(store, cwd)?
+        && skill_sources::migration_completed_for_workspace(store, cwd)?
+    {
+        return Ok(false);
+    }
 
     let mut scan =
         crate::skills::scan_skills_for_workspace_initialization(cwd, store, project_roots)?;
@@ -367,7 +396,7 @@ pub(crate) fn run_workspace(store: &Store, cwd: &Path, project_roots: &[PathBuf]
         let metadata_changed = skill_metadata::migrate_scan(store, cwd, &scan)?;
         let source_changed = skill_sources::migrate_scan(store, cwd, &mut scan)?;
         if !metadata_changed && !source_changed {
-            return Ok(());
+            return Ok(true);
         }
         scan = crate::skills::scan_skills_for_workspace_initialization(cwd, store, project_roots)?;
     }
@@ -383,18 +412,20 @@ fn migrate_codex_global_skill_config(store: &Store) -> Result<()> {
 }
 
 fn invalidate_old_projection_contexts(store: &Store) -> Result<()> {
-    let needs_invalidation = store.conn.query_row(
-        "SELECT EXISTS(
-             SELECT 1 FROM scoped_projection_contexts WHERE parser_version != ?1
-         )",
-        params![PROJECTION_PARSER_VERSION],
-        |row| row.get::<_, bool>(0),
-    )?;
-    if !needs_invalidation {
+    let migration_key =
+        format!("projection_context_parser_migrated_v1:{PROJECTION_PARSER_VERSION}");
+    if migration_completed(store, &migration_key)? {
         return Ok(());
     }
 
     store.with_named_write_transaction("migration.invalidate_old_projection_contexts", |tx| {
+        if tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM meta WHERE key = ?1)",
+            [&migration_key],
+            |row| row.get::<_, bool>(0),
+        )? {
+            return Ok(());
+        }
         let mut statement = tx.prepare(
             "SELECT scope_key, domain FROM scoped_projection_contexts
              WHERE parser_version != ?1",
@@ -421,6 +452,7 @@ fn invalidate_old_projection_contexts(store: &Store) -> Result<()> {
              WHERE parser_version != ?1",
             params![PROJECTION_PARSER_VERSION],
         )?;
+        mark_migration_completed_in_tx(tx, &migration_key)?;
         Ok(())
     })?;
     Ok(())
@@ -759,3 +791,7 @@ pub(super) fn mark_migration_completed_in_tx(
     )?;
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "workspace_tests.rs"]
+mod workspace_tests;

@@ -25,6 +25,13 @@ pub use fs_manifest::{FsManifestEntry, canonical_workspace_root};
 mod session_search_storage;
 pub use session_search_storage::SessionSearchPublication;
 
+#[path = "session_recall.rs"]
+mod session_recall;
+pub use session_recall::{
+    SessionRecallHit, SessionRecallOptions, SessionRecallPage, SessionRecallRole, SessionRecallSort,
+    SessionRecallStatus,
+};
+
 #[path = "storage/repositories/mod.rs"]
 mod repositories;
 pub use repositories::ProjectionRefreshState;
@@ -35,6 +42,13 @@ mod database_writer;
 
 #[path = "storage/database.rs"]
 mod database;
+#[path = "storage/shared_cache.rs"]
+mod shared_cache;
+#[path = "storage/database_compatibility.rs"]
+mod database_compatibility;
+#[path = "storage/diagnostics.rs"]
+mod diagnostics;
+pub use diagnostics::database_file_diagnostics;
 #[path = "migrations/mod.rs"]
 pub(crate) mod migrations;
 #[path = "storage/transaction.rs"]
@@ -75,7 +89,7 @@ struct ProjectState {
 const SESSION_ANALYTICS_BATCH_SIZE: usize = 64;
 // The current schema is squashed; all development revisions before this
 // release were never published as compatibility boundaries.
-pub(crate) const STORAGE_SCHEMA_VERSION: i64 = 3;
+pub(crate) const STORAGE_SCHEMA_VERSION: i64 = 5;
 const SESSION_SEARCH_INDEX_VERSION: i64 = 2;
 pub(crate) const PROJECTION_PARSER_VERSION: &str = "scan-v9";
 pub(crate) const ANALYTICS_JSON_ENCODING: &str = "zlib-v1";
@@ -282,23 +296,6 @@ where
         }
     }
     unreachable!("database read retry loop always returns");
-}
-
-fn session_scan_source_states(session: &SessionRecord) -> Vec<SessionScanSourceState> {
-    crate::providers::agent_provider(session.agent)
-        .session_scan_source_paths(&session.path)
-        .into_iter()
-        .map(|path| {
-            let (file_mtime, file_size) = crate::session_skills::session_file_state(&path)
-                .map(|state| (state.file_mtime, state.file_size))
-                .unwrap_or((0, 0));
-            SessionScanSourceState {
-                path,
-                file_mtime,
-                file_size,
-            }
-        })
-        .collect()
 }
 
 type PreparedSessionSources = HashMap<PathBuf, repositories::PreparedSessionSource>;
@@ -1523,7 +1520,7 @@ fn compact_search_snippet(value: &str) -> String {
     value.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-const SEARCH_SNIPPET_LEADING_CONTEXT_CHARS: usize = 0;
+const SEARCH_SNIPPET_LEADING_CONTEXT_CHARS: usize = 40;
 const SEARCH_SNIPPET_TRAILING_CONTEXT_CHARS: usize = 80;
 
 fn snippet_context_start(value: &str, end: usize) -> usize {
@@ -1547,24 +1544,33 @@ fn snippet_context_end(value: &str, start: usize) -> usize {
 }
 
 fn contains_search_score(document: &SessionSearchDocument, terms: &[String]) -> f64 {
-    terms
-        .iter()
-        .map(|term| {
-            [
-                (document.metadata_text.as_str(), 0.5),
-                (document.title.as_str(), 10.0),
-                (document.user_text.as_str(), 6.0),
-                (document.project.as_str(), 5.0),
-                (document.assistant_text.as_str(), 3.0),
-            ]
-            .into_iter()
-            .find_map(|(value, weight)| {
-                let matches = value.to_lowercase().match_indices(term).count();
-                (matches > 0).then_some(weight * matches as f64)
-            })
-            .unwrap_or(0.0)
-        })
-        .sum()
+    [
+        (document.title.as_str(), 30.0),
+        (document.user_text.as_str(), 20.0),
+        (document.assistant_text.as_str(), 5.0),
+        (document.project.as_str(), 3.0),
+        (document.metadata_text.as_str(), 1.0),
+    ]
+    .into_iter()
+    .map(|(value, weight)| {
+        let value = value.to_lowercase();
+        let matched = terms
+            .iter()
+            .filter(|term| value.contains(term.as_str()))
+            .count();
+        let same_message = if matched == terms.len() {
+            weight * 2.0
+        } else {
+            0.0
+        };
+        let phrase = if value.contains(&terms.join(" ")) {
+            weight
+        } else {
+            0.0
+        };
+        weight * matched as f64 + same_message + phrase
+    })
+    .fold(0.0, f64::max)
 }
 
 fn contains_search_terms(document: &SessionSearchDocument, terms: &[String]) -> bool {
@@ -1589,37 +1595,84 @@ fn contains_search_snippet(document: &SessionSearchDocument, terms: &[String]) -
         &document.assistant_text,
         &document.metadata_text,
     ];
-    for term in terms {
-        for candidate in candidates {
-            if let Some(snippet) = highlight_contains_match(candidate, term) {
-                return compact_search_snippet(&snippet);
-            }
-        }
-    }
-    String::new()
+    let candidate = candidates
+        .into_iter()
+        .enumerate()
+        .max_by_key(|(index, candidate)| {
+            let lower = candidate.to_lowercase();
+            (
+                terms
+                    .iter()
+                    .filter(|term| lower.contains(term.as_str()))
+                    .count(),
+                usize::MAX - index,
+            )
+        })
+        .map(|(_, candidate)| candidate);
+    candidate
+        .and_then(|value| highlight_contains_matches(value, terms))
+        .map(|snippet| compact_search_snippet(&snippet))
+        .unwrap_or_default()
 }
 
+#[cfg(test)]
 fn highlight_contains_match(value: &str, term: &str) -> Option<String> {
-    let match_start = value.to_lowercase().find(term)?;
-    let match_end = match_start + term.len();
-    if !value.is_char_boundary(match_start) || !value.is_char_boundary(match_end) {
+    highlight_contains_matches(value, &[term.to_string()])
+}
+
+fn highlight_contains_matches(value: &str, terms: &[String]) -> Option<String> {
+    let lower = value.to_lowercase();
+    let mut positions: Vec<_> = terms
+        .iter()
+        .filter_map(|term| lower.find(term).map(|start| (start, start + term.len())))
+        .collect();
+    positions.sort_unstable();
+    let &(first, first_end) = positions.first()?;
+    if !value.is_char_boundary(first) || !value.is_char_boundary(first_end) {
         return Some(value.chars().take(160).collect());
     }
-
-    let start = snippet_context_start(value, match_start);
-    let end = snippet_context_end(value, match_end);
-    Some(format!(
-        "{}{}⟦{}⟧{}{}",
-        if start > 0 && start < match_start {
-            "… "
-        } else {
-            ""
-        },
-        &value[start..match_start],
-        &value[match_start..match_end],
-        &value[match_end..end],
-        if end < value.len() { " …" } else { "" },
-    ))
+    let start = snippet_context_start(value, first);
+    let mut end = snippet_context_end(value, first_end);
+    for &(_, term_end) in &positions {
+        if term_end <= value.len()
+            && value.is_char_boundary(term_end)
+            && value[first..term_end].chars().count() <= 160
+        {
+            end = end.max(term_end);
+        }
+    }
+    let context = &value[start..end];
+    let lower = context.to_lowercase();
+    let mut spans: Vec<_> = terms
+        .iter()
+        .flat_map(|term| {
+            lower
+                .match_indices(term)
+                .map(|(offset, _)| (offset, offset + term.len()))
+        })
+        .filter(|(start, end)| context.is_char_boundary(*start) && context.is_char_boundary(*end))
+        .collect();
+    spans.sort_unstable();
+    let mut snippet = String::new();
+    if start > 0 {
+        snippet.push_str("… ");
+    }
+    let mut offset = 0;
+    for (start, end) in spans {
+        if start < offset {
+            continue;
+        }
+        snippet.push_str(&context[offset..start]);
+        snippet.push('⟦');
+        snippet.push_str(&context[start..end]);
+        snippet.push('⟧');
+        offset = end;
+    }
+    snippet.push_str(&context[offset..]);
+    if end < value.len() {
+        snippet.push_str(" …");
+    }
+    Some(snippet)
 }
 
 pub(crate) fn unix_now() -> u64 {

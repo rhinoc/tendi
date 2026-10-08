@@ -1111,7 +1111,7 @@ export function SettingsView({ appearance, themePreferences, fontFamily, termina
               id="settings-project-scan-scopes"
               className="settingsTextarea"
               aria-label="Project scan scopes"
-              placeholder="~/dev\n!~/dev/**/archive"
+              placeholder={"~/dev\n!~/dev/**/archive"}
               spellCheck={false}
               value={projectScanScopesInput}
                 onChange={(event) => {

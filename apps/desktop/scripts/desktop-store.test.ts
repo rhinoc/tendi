@@ -11,7 +11,21 @@ if (typeof mock.module !== "function") {
     namedExports: { agentIcons: {} },
   });
   mock.module("lucide-react", {
-    namedExports: { Share2: () => null },
+    namedExports: {
+      FileCode: () => null,
+      Folder: () => null,
+      GitBranch: () => null,
+      Globe: () => null,
+      LayoutDashboard: () => null,
+      MessageSquareText: () => null,
+      MessagesSquare: () => null,
+      ScrollText: () => null,
+      Server: () => null,
+      Settings: () => null,
+      Share2: () => null,
+      Sparkles: () => null,
+      Webhook: () => null,
+    },
   });
   mock.module("../src/lib/app-icon.ts", {
     namedExports: { readCachedAppIcon: () => "sakura-pop" },
@@ -26,11 +40,14 @@ if (typeof mock.module !== "function") {
         AlreadyInstalled: "already-installed",
         Replace: "replace",
       },
+      isReadOnlySkillSource: () => false,
+      isSkillSelectable: () => true,
       normalizeSkill: (row: unknown) => {
         const skill = row as Record<string, unknown>;
         return { ...skill, id: skill.id ?? skill.name, agents: [], paths: [] };
       },
       skillSection: () => "",
+      skillTargets: () => [],
     },
   });
   const hookRefs: Array<{ current: unknown }> = [];

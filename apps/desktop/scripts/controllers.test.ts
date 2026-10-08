@@ -21,8 +21,11 @@ if (typeof mock.module !== "function") {
         AlreadyInstalled: "already-installed",
         Replace: "replace",
       },
+      isReadOnlySkillSource: () => false,
+      isSkillSelectable: () => true,
       normalizeSkill: () => undefined,
       skillSection: () => "",
+      skillTargets: () => [],
     },
   });
 
@@ -193,15 +196,16 @@ if (typeof mock.module !== "function") {
     assert.deepEqual(result.tableSessions.map((session) => session.id), ["two"]);
 
     const source = await readFile(new URL("../src/views/SessionsView.tsx", import.meta.url), "utf8");
-    const effectStart = source.indexOf("  useEffect(() => {\n    if (!useLocalSessionList || !normalizedQuery)");
-    const effectEnd = source.indexOf("\n  useEffect(() => {", effectStart + 1);
+    const searchWorkspace = await readFile(new URL("../src/features/sessions/useSessionListWorkspace.ts", import.meta.url), "utf8");
+    const effectStart = searchWorkspace.indexOf("  useEffect(() => {\n    if (!enabled || !query)");
+    const effectEnd = searchWorkspace.indexOf("\n\n  return { localListView", effectStart + 1);
     assert.ok(effectStart >= 0 && effectEnd > effectStart);
-    const dependencyList = source.slice(effectStart, effectEnd).slice(source.slice(effectStart, effectEnd).lastIndexOf("  }, ["));
+    const dependencyList = searchWorkspace.slice(effectStart, effectEnd).slice(searchWorkspace.slice(effectStart, effectEnd).lastIndexOf("  }, ["));
     assert.match(dependencyList, /searchRequestKey/);
     assert.doesNotMatch(dependencyList, /searchCandidates/);
 
     const requestStart = source.indexOf("  const remoteListBaseRequest = useMemo<SessionListPageRequest>");
-    const requestEnd = source.indexOf("\n  const remoteListRequest =", requestStart);
+    const requestEnd = source.indexOf("\n  const onRemoteSessionLocated =", requestStart);
     assert.ok(requestStart >= 0 && requestEnd > requestStart);
     const requestSource = source.slice(requestStart, requestEnd);
     assert.match(requestSource, /query: normalizedQuery/);

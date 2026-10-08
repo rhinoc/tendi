@@ -18,6 +18,18 @@ void applyAppIcon(readCachedAppIcon());
 const root = document.getElementById("root");
 if (!root) throw new Error("Root element #root not found");
 
+window.addEventListener("error", (event) => {
+  logger.error("frontend uncaught error", {
+    error: event.error ?? event.message,
+    filename: event.filename,
+    line: event.lineno,
+    column: event.colno,
+  });
+});
+window.addEventListener("unhandledrejection", (event) => {
+  logger.error("frontend unhandled rejection", { error: event.reason });
+});
+
 createRoot(root).render(
   <React.StrictMode>
     <TooltipProvider>

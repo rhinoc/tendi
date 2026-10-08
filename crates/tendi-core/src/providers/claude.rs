@@ -1090,6 +1090,28 @@ impl super::AgentProvider for ClaudeProvider {
             .unwrap_or_default()
     }
 
+    fn current_session_env_key(&self) -> Option<&'static str> {
+        Some("CLAUDE_CODE_SESSION_ID")
+    }
+
+    fn current_session_transcript(
+        &self,
+        ctx: &ProviderContext,
+        id: &str,
+        env: &BTreeMap<String, String>,
+    ) -> Result<Option<PathBuf>> {
+        let root = env
+            .get("CLAUDE_CONFIG_DIR")
+            .map(PathBuf::from)
+            .or_else(|| ctx.home.as_ref().map(|home| home.join(".claude")));
+        let roots = root
+            .map(|root| vec![root.join("projects")])
+            .unwrap_or_default();
+        sessions::current::find_transcript(&roots, 5, |path| {
+            self.session_id_from_path(path).as_deref() == Some(id)
+        })
+    }
+
     fn scan_rules(
         &self,
         ctx: &ProviderContext,
@@ -1416,11 +1438,20 @@ impl super::AgentProvider for ClaudeProvider {
         crate::hooks::delete_json_hooks(requests, source)
     }
 
-    fn set_hook_enabled(&self, request: &HookSetEnabledRequest, source: &str) -> Result<String> {
-        if request.path.extension().and_then(|value| value.to_str()) != Some("json") {
+    fn set_hooks_enabled(
+        &self,
+        requests: &[HookSetEnabledRequest],
+        source: &str,
+    ) -> Result<String> {
+        if requests[0]
+            .path
+            .extension()
+            .and_then(|value| value.to_str())
+            != Some("json")
+        {
             bail!("Claude Code hook source must be JSON");
         }
-        crate::hooks::set_json_hook_enabled(request, source)
+        crate::hooks::set_json_hooks_enabled(requests, source)
     }
 
     fn backup_hook_entry(&self, path: &Path, identity: &HookSourceMatch) -> Result<Value> {

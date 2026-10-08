@@ -1,6 +1,8 @@
 use std::{
-    collections::{HashMap, VecDeque},
+    cell::RefCell,
+    collections::{BTreeMap, HashMap, VecDeque},
     fs,
+    io::{BufRead, BufReader},
     path::{Path, PathBuf},
     sync::{LazyLock, Mutex},
     time::UNIX_EPOCH,
@@ -28,6 +30,10 @@ pub(crate) fn scan_cursor_meta(
         return;
     }
 
+    let mut cache_hits = 0;
+    let mut cache_misses = 0;
+    let mut miss_reasons = BTreeMap::<&'static str, usize>::new();
+
     for entry in WalkDir::new(root)
         .follow_links(true)
         .max_depth(4)
@@ -36,7 +42,14 @@ pub(crate) fn scan_cursor_meta(
         .filter(|entry| entry.file_type().is_file() && entry.file_name() == "meta.json")
     {
         let path = entry.into_path();
-        scan_cursor_meta_file(&path, sessions, agent, cache);
+        if scan_cursor_meta_file(&path, sessions, agent, cache) {
+            cache_hits += 1;
+        } else {
+            cache_misses += 1;
+            *miss_reasons
+                .entry(cursor_cache_miss_reason(&path, agent, cache))
+                .or_default() += 1;
+        }
     }
 
     for entry in WalkDir::new(root)
@@ -50,8 +63,37 @@ pub(crate) fn scan_cursor_meta(
         if path.with_file_name("meta.json").is_file() {
             continue;
         }
-        scan_cursor_store_file(&path, sessions, agent, cache);
+        if scan_cursor_store_file(&path, sessions, agent, cache) {
+            cache_hits += 1;
+        } else {
+            cache_misses += 1;
+            *miss_reasons
+                .entry(cursor_cache_miss_reason(&path, agent, cache))
+                .or_default() += 1;
+        }
     }
+    crate::logging::global().info(
+        "cursor store scan completed",
+        serde_json::json!({"cacheHits": cache_hits, "cacheMisses": cache_misses, "missReasons": miss_reasons}),
+    );
+}
+
+fn cursor_cache_miss_reason(
+    path: &Path,
+    agent: AgentKind,
+    cache: Option<&SessionScanCache>,
+) -> &'static str {
+    let Some(cache) = cache else {
+        return "cache_absent";
+    };
+    let Some(id) = path
+        .parent()
+        .and_then(Path::file_name)
+        .and_then(|id| id.to_str())
+    else {
+        return "id_unavailable";
+    };
+    cache.session_id_cache_miss_reason(agent, id)
 }
 
 pub(crate) fn is_cursor_meta_file(path: &Path) -> bool {
@@ -67,7 +109,7 @@ pub(crate) fn scan_cursor_meta_file(
     sessions: &mut Vec<SessionRecord>,
     agent: AgentKind,
     cache: Option<&SessionScanCache>,
-) {
+) -> bool {
     let Some(id) = path
         .parent()
         .and_then(Path::file_name)
@@ -76,19 +118,22 @@ pub(crate) fn scan_cursor_meta_file(
         .filter(|id| !id.is_empty())
         .map(str::to_string)
     else {
-        return;
+        return false;
     };
-    if let Some(session) = cache.and_then(|cache| cache.session_if_current_id(agent, &id))
-        && is_cursor_transcript_path(&session.path)
-    {
-        sessions.push(session);
-        return;
+    if cache.is_some_and(|cache| cache.empty_source_if_current(agent, path)) {
+        return true;
     }
+    if let Some(session) = cache.and_then(|cache| cache.session_if_current_id(agent, &id)) {
+        sessions.push(session);
+        return true;
+    }
+    let source_states = sessions::scan_source_states(agent, path);
     let value = fs::read_to_string(path)
         .ok()
         .and_then(|text| serde_json::from_str::<Value>(&text).ok());
     let file_updated_at = sessions::file_modified_iso(path);
     let store_path = path.parent().map(|parent| parent.join("store.db"));
+    let store_available = store_path.as_ref().is_some_and(|path| path.is_file());
     let store_meta = scan_cursor_store_db(store_path);
     let explicit_title = sessions::clean_session_title(sessions::string_field(
         value
@@ -110,7 +155,12 @@ pub(crate) fn scan_cursor_meta_file(
         && store_meta.last_user_message.is_none()
         && store_meta.last_assistant_message.is_none()
     {
-        return;
+        if value.is_some() && (!store_available || store_meta.scan_complete) {
+            if let Some(cache) = cache {
+                cache.record_empty_source(agent, path, source_states);
+            }
+        }
+        return false;
     }
     sessions.push(SessionRecord {
         id,
@@ -143,6 +193,7 @@ pub(crate) fn scan_cursor_meta_file(
         parent_session_id: store_meta.parent_session_id,
         token_usage: None,
     });
+    false
 }
 
 pub(crate) fn scan_cursor_store_file(
@@ -150,7 +201,7 @@ pub(crate) fn scan_cursor_store_file(
     sessions: &mut Vec<SessionRecord>,
     agent: AgentKind,
     cache: Option<&SessionScanCache>,
-) {
+) -> bool {
     let Some(id) = path
         .parent()
         .and_then(Path::file_name)
@@ -159,14 +210,16 @@ pub(crate) fn scan_cursor_store_file(
         .filter(|id| !id.is_empty())
         .map(str::to_string)
     else {
-        return;
+        return false;
     };
-    if let Some(session) = cache.and_then(|cache| cache.session_if_current_id(agent, &id)) {
-        if is_cursor_transcript_path(&session.path) {
-            sessions.push(session);
-            return;
-        }
+    if cache.is_some_and(|cache| cache.empty_source_if_current(agent, path)) {
+        return true;
     }
+    if let Some(session) = cache.and_then(|cache| cache.session_if_current_id(agent, &id)) {
+        sessions.push(session);
+        return true;
+    }
+    let source_states = sessions::scan_source_states(agent, path);
     let file_updated_at = sessions::file_modified_iso(path);
     let store_meta = scan_cursor_store_db(Some(path.to_path_buf()));
     if store_meta.title.is_none()
@@ -180,7 +233,12 @@ pub(crate) fn scan_cursor_store_file(
         && store_meta.last_user_message.is_none()
         && store_meta.last_assistant_message.is_none()
     {
-        return;
+        if store_meta.scan_complete {
+            if let Some(cache) = cache {
+                cache.record_empty_source(agent, path, source_states);
+            }
+        }
+        return false;
     }
     let title = store_meta.title.filter(|title| {
         store_meta.parent_session_id.is_none() || !title.eq_ignore_ascii_case("New Agent")
@@ -209,23 +267,25 @@ pub(crate) fn scan_cursor_store_file(
         parent_session_id: store_meta.parent_session_id,
         token_usage: None,
     });
-}
-
-fn is_cursor_transcript_path(path: &Path) -> bool {
-    path.extension().is_some_and(|ext| ext == "jsonl")
-        && path
-            .components()
-            .any(|component| component.as_os_str() == "agent-transcripts")
+    false
 }
 
 pub(crate) fn session_scan_source_paths(path: &Path) -> Vec<PathBuf> {
     let mut paths = vec![path.to_path_buf()];
-    let store_path = match path.file_name().and_then(|name| name.to_str()) {
-        Some("store.db") => Some(path.to_path_buf()),
-        Some("meta.json") => path.parent().map(|parent| parent.join("store.db")),
-        _ => find_cursor_store_db(path),
+    let store_paths = match path.file_name().and_then(|name| name.to_str()) {
+        Some("store.db") => vec![path.to_path_buf()],
+        Some("meta.json") => path
+            .parent()
+            .map(|parent| parent.join("store.db"))
+            .into_iter()
+            .collect(),
+        _ if cursor_transcript_project_dir(path).is_some() => native_session_meta_paths(path)
+            .into_iter()
+            .map(|path| path.with_file_name("store.db"))
+            .collect(),
+        _ => find_cursor_store_db(path).into_iter().collect(),
     };
-    if let Some(store_path) = store_path {
+    for store_path in store_paths {
         if !paths.contains(&store_path) {
             paths.push(store_path.clone());
         }
@@ -233,7 +293,7 @@ pub(crate) fn session_scan_source_paths(path: &Path) -> Vec<PathBuf> {
         if !paths.contains(&meta_path) {
             paths.push(meta_path);
         }
-        for suffix in ["-wal", "-shm", "-journal"] {
+        for suffix in ["-wal", "-journal"] {
             let sidecar = cursor_store_sidecar(&store_path, suffix);
             if !paths.contains(&sidecar) {
                 paths.push(sidecar);
@@ -247,6 +307,7 @@ const CURSOR_STORE_CACHE_MAX_ENTRIES: usize = 128;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct CursorStoreMeta {
+    scan_complete: bool,
     pub(crate) message_count: Option<usize>,
     pub(crate) first_user_message: Option<String>,
     pub(crate) last_user_message: Option<String>,
@@ -284,8 +345,23 @@ struct CursorStoreFileMetadata {
 struct CursorStoreVersion {
     database: CursorStoreFileMetadata,
     wal: Option<CursorStoreFileMetadata>,
-    shm: Option<CursorStoreFileMetadata>,
     journal: Option<CursorStoreFileMetadata>,
+}
+
+pub(crate) fn cursor_store_source_state_current(path: &Path, cached_size: i64) -> Option<bool> {
+    match path.file_name().and_then(|name| name.to_str()) {
+        Some("store.db-shm") => Some(true),
+        Some("store.db-wal") if cached_size == 0 => {
+            Some(fs::metadata(path).map_or(true, |metadata| metadata.len() == 0))
+        }
+        _ => None,
+    }
+}
+
+pub(crate) fn cursor_store_source_index_state(path: &Path) -> Option<(i64, i64)> {
+    (path.file_name().and_then(|name| name.to_str()) == Some("store.db-wal")
+        && fs::metadata(path).map_or(true, |metadata| metadata.len() == 0))
+    .then_some((0, 0))
 }
 
 #[derive(Debug, Clone)]
@@ -334,8 +410,8 @@ fn cursor_store_sidecar(path: &Path, suffix: &str) -> PathBuf {
 fn cursor_store_version(path: &Path) -> Option<CursorStoreVersion> {
     Some(CursorStoreVersion {
         database: cursor_store_file_metadata(path)?,
-        wal: cursor_store_file_metadata(&cursor_store_sidecar(path, "-wal")),
-        shm: cursor_store_file_metadata(&cursor_store_sidecar(path, "-shm")),
+        wal: cursor_store_file_metadata(&cursor_store_sidecar(path, "-wal"))
+            .filter(|metadata| metadata.size > 0),
         journal: cursor_store_file_metadata(&cursor_store_sidecar(path, "-journal")),
     })
 }
@@ -413,10 +489,16 @@ pub(crate) fn scan_cursor_store_db(path: Option<PathBuf>) -> CursorStoreMeta {
         return CursorStoreMeta::default();
     };
 
-    let stored_meta = connection
-        .query_row("select value from meta where key = '0'", [], |row| {
+    let stored_meta_result =
+        connection.query_row("select value from meta where key = '0'", [], |row| {
             row.get::<_, String>(0)
-        })
+        });
+    let stored_meta_valid = match &stored_meta_result {
+        Ok(text) => parse_cursor_store_value(text).is_some(),
+        Err(rusqlite::Error::QueryReturnedNoRows) => true,
+        Err(_) => false,
+    };
+    let stored_meta = stored_meta_result
         .ok()
         .and_then(|text| parse_cursor_store_value(&text));
     let mut title = stored_meta.as_ref().and_then(|value| {
@@ -465,9 +547,15 @@ pub(crate) fn scan_cursor_store_db(path: Option<PathBuf>) -> CursorStoreMeta {
     let mut models = Vec::new();
     let mut tool_calls = Vec::new();
     let mut pending_tool_results = HashMap::new();
+    let mut scan_complete = false;
     if let Ok(mut statement) = connection.prepare("select data from blobs") {
         if let Ok(rows) = statement.query_map([], |row| row.get::<_, Vec<u8>>(0)) {
-            for bytes in rows.filter_map(Result::ok) {
+            scan_complete = stored_meta_valid;
+            for bytes in rows {
+                let Ok(bytes) = bytes else {
+                    scan_complete = false;
+                    continue;
+                };
                 let Ok(value) = serde_json::from_slice::<Value>(&bytes) else {
                     continue;
                 };
@@ -560,6 +648,7 @@ pub(crate) fn scan_cursor_store_db(path: Option<PathBuf>) -> CursorStoreMeta {
     }
 
     let meta = CursorStoreMeta {
+        scan_complete,
         message_count: (message_count > 0).then_some(message_count),
         first_user_message,
         last_user_message,
@@ -576,7 +665,9 @@ pub(crate) fn scan_cursor_store_db(path: Option<PathBuf>) -> CursorStoreMeta {
         parent_session_id,
         tool_calls,
     };
-    cursor_store_cache_put(&path, version, meta.clone());
+    if scan_complete {
+        cursor_store_cache_put(&path, version, meta.clone());
+    }
     meta
 }
 
@@ -645,7 +736,7 @@ fn collect_cursor_skill_evidence(value: &Value, out: &mut Vec<SkillEvidenceCandi
     };
     for item in content {
         let item_type = item.get("type").and_then(Value::as_str);
-        if !matches!(item_type, Some("tool-call" | "tool-result")) {
+        if item_type != Some("tool-call") {
             continue;
         }
         let tool_name = item
@@ -741,6 +832,16 @@ fn cursor_agent_skill_paths(text: &str) -> Vec<String> {
     let mut search_from = 0;
     while let Some(relative_start) = text[search_from..].find("<agent_skill") {
         let start = search_from + relative_start;
+        if let Some(catalog_start) = text[..=start].rfind("<available_skills") {
+            let catalog_closed = text[catalog_start..start].contains("</available_skills>");
+            if !catalog_closed {
+                let Some(end) = text[start..].find("</available_skills>") else {
+                    break;
+                };
+                search_from = start + end + "</available_skills>".len();
+                continue;
+            }
+        }
         let Some(relative_end) = text[start..].find('>') else {
             break;
         };
@@ -860,28 +961,306 @@ pub(crate) fn cursor_time_field(value: Option<&Value>, keys: &[&str]) -> Option<
 }
 
 pub(crate) fn cursor_project_from_transcript_path(path: &Path) -> Option<PathBuf> {
-    let mut components = path.components();
-    while let Some(component) = components.next() {
-        if component.as_os_str() == "projects" {
-            let project = components.next()?.as_os_str().to_str()?;
-            return decode_cursor_project_dir(project);
+    let project_dir = cursor_transcript_project_dir(path)?;
+    memoized_project(project_dir, || resolve_cursor_project(project_dir))
+}
+
+fn resolve_cursor_project(project_dir: &Path) -> Option<PathBuf> {
+    let key = project_dir.file_name()?.to_str()?;
+    let terminals = project_dir.join("terminals");
+    let mut sources = vec![terminals.clone()];
+    let terminal_files = cursor_directory_files(&terminals, "txt");
+    sources.extend(terminal_files.iter().cloned());
+    let workspace_root = super::cursor::cursor_state_db_path(project_dir.parent()?)?
+        .parent()?
+        .parent()?
+        .join("workspaceStorage");
+    sources.push(workspace_root.clone());
+    let workspaces: Vec<_> = fs::read_dir(&workspace_root)
+        .into_iter()
+        .flatten()
+        .filter_map(Result::ok)
+        .map(|entry| entry.path().join("workspace.json"))
+        .filter(|path| path.is_file())
+        .collect();
+    sources.extend(workspaces.iter().cloned());
+    sources.sort();
+    let version: Vec<_> = sources
+        .into_iter()
+        .map(|path| {
+            let state = cursor_store_file_metadata(&path);
+            (path, state)
+        })
+        .collect();
+    let mut cache = CURSOR_PROJECT_CACHE.lock().ok()?;
+    if let Some((cached_version, project)) = cache.get(project_dir) {
+        if cached_version == &version {
+            return project.clone();
+        }
+    }
+    let mut candidates = std::collections::BTreeSet::new();
+    for path in terminal_files {
+        if let Some(project) = cursor_terminal_cwd(&path) {
+            for ancestor in project.ancestors() {
+                if cursor_project_key(ancestor) == key {
+                    candidates.insert(ancestor.to_path_buf());
+                }
+            }
+        }
+    }
+    for path in workspaces {
+        let project = fs::read_to_string(path)
+            .ok()
+            .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+            .and_then(|value| {
+                value
+                    .get("folder")
+                    .and_then(Value::as_str)
+                    .and_then(|uri| url::Url::parse(uri).ok())
+                    .and_then(|url| url.to_file_path().ok())
+            });
+        if let Some(project) = project {
+            if cursor_project_key(&project) == key {
+                candidates.insert(project);
+            }
+        }
+    }
+    // The directory key is lossy. Only unambiguous original paths are evidence.
+    let project = (candidates.len() == 1)
+        .then(|| candidates.into_iter().next())
+        .flatten();
+    if cache.len() >= 128 {
+        cache.clear();
+    }
+    cache.insert(project_dir.to_path_buf(), (version, project.clone()));
+    project
+}
+
+type CursorProjectVersion = Vec<(PathBuf, Option<CursorStoreFileMetadata>)>;
+type CursorProjectCache = HashMap<PathBuf, (CursorProjectVersion, Option<PathBuf>)>;
+static CURSOR_PROJECT_CACHE: LazyLock<Mutex<CursorProjectCache>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+type CursorScanProjects = HashMap<PathBuf, Option<PathBuf>>;
+type CursorNativeSources = HashMap<PathBuf, HashMap<String, Vec<PathBuf>>>;
+thread_local! {
+    static CURSOR_SCAN_PROJECTS: RefCell<Option<CursorScanProjects>> = const { RefCell::new(None) };
+    static CURSOR_SCAN_NATIVE_SOURCES: RefCell<Option<CursorNativeSources>> = const { RefCell::new(None) };
+}
+
+pub(super) struct CursorProjectScanCache {
+    projects: Option<CursorScanProjects>,
+    native_sources: Option<CursorNativeSources>,
+    entered: bool,
+}
+
+pub(super) fn project_scan_cache() -> CursorProjectScanCache {
+    if CURSOR_SCAN_PROJECTS.with(|cache| cache.borrow().is_some()) {
+        return CursorProjectScanCache {
+            projects: None,
+            native_sources: None,
+            entered: false,
+        };
+    }
+    CursorProjectScanCache {
+        projects: CURSOR_SCAN_PROJECTS.with(|cache| cache.replace(Some(HashMap::new()))),
+        native_sources: CURSOR_SCAN_NATIVE_SOURCES
+            .with(|cache| cache.replace(Some(HashMap::new()))),
+        entered: true,
+    }
+}
+
+impl Drop for CursorProjectScanCache {
+    fn drop(&mut self) {
+        if !self.entered {
+            return;
+        }
+        CURSOR_SCAN_PROJECTS.with(|cache| cache.replace(self.projects.take()));
+        CURSOR_SCAN_NATIVE_SOURCES.with(|cache| cache.replace(self.native_sources.take()));
+    }
+}
+
+fn native_session_meta_paths(path: &Path) -> Vec<PathBuf> {
+    let Some(root) = path
+        .ancestors()
+        .find(|path| path.file_name().is_some_and(|name| name == ".cursor"))
+    else {
+        return Vec::new();
+    };
+    let Some(id) = path.file_stem().and_then(|id| id.to_str()) else {
+        return Vec::new();
+    };
+    let cached = CURSOR_SCAN_NATIVE_SOURCES.with(|cache| {
+        cache
+            .borrow()
+            .as_ref()
+            .and_then(|cache| cache.get(root))
+            .map(|index| index.get(id).cloned().unwrap_or_default())
+    });
+    if let Some(paths) = cached {
+        return paths;
+    }
+    let mut index = HashMap::<String, Vec<PathBuf>>::new();
+    // Match provider scan order: ACP metadata precedes chat metadata.
+    for directory in ["acp-sessions", "chats"] {
+        let mut paths: Vec<_> = WalkDir::new(root.join(directory))
+            .follow_links(true)
+            .max_depth(4)
+            .into_iter()
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                entry.file_type().is_file()
+                    && matches!(entry.file_name().to_str(), Some("meta.json" | "store.db"))
+            })
+            .map(|entry| entry.into_path().with_file_name("meta.json"))
+            .collect();
+        paths.sort();
+        paths.dedup();
+        for meta in paths {
+            if let Some(id) = meta
+                .parent()
+                .and_then(Path::file_name)
+                .and_then(|id| id.to_str())
+            {
+                index.entry(id.to_string()).or_default().push(meta);
+            }
+        }
+    }
+    let paths = index.get(id).cloned().unwrap_or_default();
+    CURSOR_SCAN_NATIVE_SOURCES.with(|cache| {
+        if let Some(cache) = cache.borrow_mut().as_mut() {
+            cache.insert(root.to_path_buf(), index);
+        }
+    });
+    paths
+}
+
+pub(super) fn session_project(path: &Path, explicit: Option<PathBuf>) -> Option<PathBuf> {
+    native_session_project(path)
+        .or(explicit)
+        .or_else(|| cursor_project_from_transcript_path(path))
+}
+
+fn native_session_project(path: &Path) -> Option<PathBuf> {
+    native_session_meta_paths(path)
+        .into_iter()
+        .find_map(|meta| {
+            memoized_project(&meta, || {
+                let value = fs::read_to_string(&meta)
+                    .ok()
+                    .and_then(|text| serde_json::from_str::<Value>(&text).ok());
+                cursor_project_from_meta(value.as_ref())
+            })
+        })
+}
+
+fn memoized_project(path: &Path, resolve: impl FnOnce() -> Option<PathBuf>) -> Option<PathBuf> {
+    if let Some(project) = CURSOR_SCAN_PROJECTS.with(|cache| {
+        cache
+            .borrow()
+            .as_ref()
+            .and_then(|cache| cache.get(path).cloned())
+    }) {
+        return project;
+    }
+    let project = resolve();
+    CURSOR_SCAN_PROJECTS.with(|cache| {
+        if let Some(cache) = cache.borrow_mut().as_mut() {
+            cache.insert(path.to_path_buf(), project.clone());
+        }
+    });
+    project
+}
+
+fn cursor_transcript_project_dir(path: &Path) -> Option<&Path> {
+    path.ancestors().find(|path| {
+        path.parent().is_some_and(|parent| {
+            parent.file_name().is_some_and(|name| name == "projects")
+                && parent
+                    .parent()
+                    .is_some_and(|cursor| cursor.file_name().is_some_and(|name| name == ".cursor"))
+        })
+    })
+}
+
+fn cursor_project_key(path: &Path) -> String {
+    path.to_string_lossy()
+        .chars()
+        .filter(|ch| *ch != '.')
+        .map(|ch| {
+            if ch.is_alphanumeric() || ch == '-' {
+                ch
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>()
+        .trim_start_matches('-')
+        .to_string()
+}
+
+fn cursor_directory_files(path: &Path, extension: &str) -> Vec<PathBuf> {
+    fs::read_dir(path)
+        .into_iter()
+        .flatten()
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().is_some_and(|ext| ext == extension))
+        .collect()
+}
+
+fn cursor_terminal_cwd(path: &Path) -> Option<PathBuf> {
+    let mut lines = BufReader::new(fs::File::open(path).ok()?).lines();
+    if lines.next()?.ok()?.trim() != "---" {
+        return None;
+    }
+    for line in lines.take(16).map_while(Result::ok) {
+        if line.trim() == "---" {
+            break;
+        }
+        if let Some(value) = line.strip_prefix("cwd:") {
+            let value: serde_yaml::Value = serde_yaml::from_str(value.trim()).ok()?;
+            let path = PathBuf::from(value.as_str()?);
+            return path.is_absolute().then_some(path);
         }
     }
     None
 }
 
-pub(crate) fn decode_cursor_project_dir(value: &str) -> Option<PathBuf> {
-    let parts = value
-        .split('-')
-        .filter(|part| !part.is_empty())
-        .collect::<Vec<_>>();
-    if parts.is_empty() {
-        return None;
+pub(crate) fn cached_project_is_current(session: &SessionRecord) -> bool {
+    if cursor_transcript_project_dir(&session.path).is_none() {
+        return true;
     }
-    if parts[0] == "Users" {
-        return Some(PathBuf::from(format!("/{}", parts.join("/"))));
+    if let Some(project) = native_session_project(&session.path) {
+        return session.project.as_ref() == Some(&project);
     }
-    Some(PathBuf::from(parts.join("/")))
+    let project = cursor_project_from_transcript_path(&session.path);
+    if project == session.project {
+        return true;
+    }
+    // Session metadata and explicit transcript cwd precede project-wide evidence.
+    let explicit = memoized_project(&session.path, || {
+        let version = vec![(
+            session.path.clone(),
+            cursor_store_file_metadata(&session.path),
+        )];
+        if let Ok(mut cache) = CURSOR_PROJECT_CACHE.lock() {
+            if let Some((cached_version, explicit)) = cache.get(&session.path) {
+                if cached_version == &version {
+                    return explicit.clone();
+                }
+            }
+            let explicit =
+                sessions::scan_jsonl_meta_for_agent(&session.path, Some(AgentKind::Cursor)).project;
+            if cache.len() >= 128 {
+                cache.clear();
+            }
+            cache.insert(session.path.clone(), (version, explicit.clone()));
+            return explicit;
+        }
+        None
+    });
+    explicit.or(project) == session.project
 }
 
 #[cfg(test)]

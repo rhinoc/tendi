@@ -8,6 +8,7 @@ import {
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnOwned, stopOwned } from "./process-lifecycle.mjs";
+import { runningMacOsDevAppPids } from "./macos-dev-app-process.mjs";
 import { writeStderr, writeStdout } from "./stdio.mjs";
 
 const scriptDir = dirname(fileURLToPath(import.meta.url));
@@ -122,16 +123,7 @@ const devAppExecutable = resolve(
 );
 
 function runningDevAppPids() {
-  if (!managesMacOsDevApp) return [];
-  const result = spawnSync("ps", ["-axo", "pid=,command="], { encoding: "utf8" });
-  if (result.status !== 0) return [];
-  return result.stdout.split("\n").flatMap((line) => {
-    const match = line.trim().match(/^(\d+)\s+(.+)$/);
-    if (!match || (match[2] !== devAppExecutable && !match[2].startsWith(`${devAppExecutable} `))) {
-      return [];
-    }
-    return [Number.parseInt(match[1], 10)];
-  });
+  return managesMacOsDevApp ? runningMacOsDevAppPids(devAppExecutable) : [];
 }
 
 async function stopDevApp() {

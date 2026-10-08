@@ -88,6 +88,7 @@ impl Store {
         session: &SessionRecord,
         content_current: bool,
         start_record_order: usize,
+        expected_checkpoint: Option<&str>,
     ) -> Result<BTreeMap<usize, SessionSearchDocument>> {
         let mut statement = self.conn.prepare(
             "SELECT entry.record_order, entry.metadata_text, entry.title, entry.project,
@@ -97,6 +98,11 @@ impl Store {
              WHERE entry.scope_key = ?1 AND entry.session_id = ?2 AND entry.agent = ?3
                AND entry.session_path = ?4
                AND (entry.record_order = 0 OR (?5 = 0 AND entry.record_order >= ?6))
+               AND (?7 IS NULL OR EXISTS (
+                 SELECT 1 FROM scoped_session_search_index published
+                 WHERE published.scope_key = entry.scope_key AND published.session_id = entry.session_id
+                   AND published.agent = entry.agent AND published.session_path = entry.session_path
+                   AND published.search_index_version = ?8 AND published.search_checkpoint = ?7))
              ORDER BY entry.record_order",
         )?;
         statement
@@ -107,7 +113,9 @@ impl Store {
                     agent_label(session.agent),
                     session.path.to_string_lossy(),
                     content_current,
-                    start_record_order as i64
+                    start_record_order as i64,
+                    expected_checkpoint,
+                    SESSION_SEARCH_INDEX_VERSION
                 ],
                 |row| {
                     Ok((
@@ -333,7 +341,7 @@ impl Store {
     pub fn rebuild_scoped_session_search_for_scope(&self, scope: &ScopeKey) -> Result<usize> {
         let _search_lock = self.lock_session_search(scope)?;
         self.with_background_write_transaction("session_search.rebuild", |tx| {
-            tx.execute(
+            shared_cache::execute_changed(tx,
                 "UPDATE scoped_session_search_index SET search_index_version = 0 WHERE scope_key = ?1",
                 [scope.as_str()],
             )?;
@@ -408,7 +416,33 @@ impl Store {
     ) -> Result<(Option<SessionSearchPublication>, bool)> {
         let state = search_file_state(&session.path)?;
         let metadata = session_search_metadata(session);
-        let current = self.session_search_current_state(scope, session)?;
+        let mut current = self.session_search_current_state(scope, session)?;
+        let mut donor = None;
+        if current.is_none() {
+            let mut statement = self.conn.prepare(
+                "SELECT scope_key FROM scoped_session_search_index
+                 WHERE session_id = ?1 AND agent = ?2 AND session_path = ?3
+                   AND scope_key != ?4 AND search_index_version = ?5 ORDER BY indexed_at DESC")?;
+            let scopes = statement.query_map(params![session.id, agent_label(session.agent),
+                session.path.to_string_lossy(), scope.as_str(), SESSION_SEARCH_INDEX_VERSION],
+                |row| row.get::<_, String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
+            for candidate in scopes {
+                let candidate = ScopeKey::new(candidate)?;
+                let cached = self.session_search_current_state(&candidate, session)?;
+                let reusable = cached.as_ref().and_then(|row| row.5.as_deref())
+                    .and_then(|value| serde_json::from_str::<transcript::SearchCheckpoint>(value).ok())
+                    .is_some_and(|checkpoint| {
+                        crate::providers::agent_provider(session.agent).transcript_search_append_version()
+                            == Some(checkpoint.parser_version.as_str())
+                            && checkpoint.matches_source(&session.path).unwrap_or(false)
+                    });
+                if reusable {
+                    let documents = self.existing_session_search_documents(&candidate, session, false, 1,
+                        cached.as_ref().and_then(|row| row.5.as_deref()))?;
+                    if !documents.is_empty() { current = cached; donor = Some(documents); break; }
+                }
+            }
+        }
         let mut checkpoint = current
             .as_ref()
             .and_then(|row| row.5.as_deref())
@@ -429,11 +463,19 @@ impl Store {
                 && row.4
                 && ((parser_current && source_current) || state == (0, 0))
         });
-        if content_current && current.as_ref().is_some_and(|row| row.2 == metadata) {
+        if donor.is_some() && !content_current {
+            current = None;
+            checkpoint = None;
+            donor = None;
+        }
+        if donor.is_none() && content_current && current.as_ref().is_some_and(|row| row.2 == metadata) {
             return Ok((None, false));
         }
 
         let mut documents = vec![(0, session_search_metadata_document(session))];
+        if let Some(donor) = donor {
+            documents.extend(donor.into_iter().filter(|(order, _)| *order > 0));
+        }
         let mut start_record_order = 1;
         check_search_cancellation(should_stop)?;
         if !content_current && state != (0, 0) {
@@ -486,6 +528,7 @@ impl Store {
             session,
             content_current,
             start_record_order,
+            None,
         )?;
         let updates = documents
             .iter()
@@ -517,7 +560,7 @@ impl Store {
                 });
             self.with_background_write_transaction("session_search.source_version", |tx| {
                 ensure_session_unchanged(tx, scope, session, payload)?;
-                tx.execute(
+                shared_cache::execute_changed(tx,
                     "UPDATE scoped_session_search_index SET file_mtime = ?5, file_size = ?6, indexed_at = ?7, search_metadata = ?8, search_checkpoint = ?9
                      WHERE scope_key = ?1 AND session_id = ?2 AND agent = ?3 AND session_path = ?4",
                     params![scope.as_str(), session.id, agent_label(session.agent),
@@ -531,19 +574,19 @@ impl Store {
             ensure_session_unchanged(tx, scope, session, payload)?;
             // A failed or interrupted build remains unpublished and is repaired
             // by the next refresh, even if metadata was already committed.
-            tx.execute(
+            shared_cache::execute_changed(tx,
+                "UPDATE scoped_session_search_index SET search_index_version=0
+                 WHERE scope_key=?1 AND session_id=?2 AND agent=?3 AND session_path=?4",
+                params![scope.as_str(), session.id, agent_label(session.agent), session.path.to_string_lossy()],
+            )?;
+            shared_cache::execute_changed(tx,
                 "INSERT INTO scoped_session_search_index
                  (scope_key, session_id, agent, session_path, file_mtime, file_size,
                   indexed_at, search_metadata, search_index_version)
-                 VALUES (?1, ?2, ?3, ?4, 0, 0, '', '', 0)
-                 ON CONFLICT(scope_key, session_id, agent, session_path)
-                 DO UPDATE SET search_index_version = 0",
-                params![
-                    scope.as_str(),
-                    session.id,
-                    agent_label(session.agent),
-                    session.path.to_string_lossy()
-                ],
+                 SELECT ?1, ?2, ?3, ?4, 0, 0, '', '', 0
+                 WHERE NOT EXISTS(SELECT 1 FROM scoped_session_search_index
+                     WHERE scope_key=?1 AND session_id=?2 AND agent=?3 AND session_path=?4)",
+                params![scope.as_str(), session.id, agent_label(session.agent), session.path.to_string_lossy()],
             )?;
             Ok(())
         })?;
@@ -609,7 +652,7 @@ impl Store {
         let publication =
             self.with_background_write_transaction("session_search.publish", |tx| {
                 ensure_session_unchanged(tx, scope, session, payload)?;
-                tx.execute(
+                shared_cache::execute_changed(tx,
                     "UPDATE scoped_session_search_index SET file_mtime = ?5, file_size = ?6,
                  search_metadata = ?7, search_index_version = ?8, indexed_at = ?9, search_checkpoint = ?10
                  WHERE scope_key = ?1 AND session_id = ?2 AND agent = ?3 AND session_path = ?4",
@@ -765,16 +808,11 @@ fn upsert_shared_session_search_record(
         [&content_hash],
         |row| row.get::<_, i64>(0),
     )?;
-    tx.execute(
+    shared_cache::execute_changed(tx,
         "INSERT INTO scoped_session_search_entries(
              scope_key, session_id, agent, session_path, record_order,
              metadata_text, title, project, content_id
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
-         ON CONFLICT(scope_key, session_id, agent, session_path, record_order)
-         DO UPDATE SET metadata_text = excluded.metadata_text,
-                       title = excluded.title,
-                       project = excluded.project,
-                       content_id = excluded.content_id",
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
         params![
             scope.as_str(),
             session.id,

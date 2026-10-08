@@ -1,6 +1,6 @@
 ---
 name: tendi
-description: Use the local Tendi CLI to search, inspect, and resume coding-agent sessions; list, inspect, install, update, and configure agent skills; or query agent, rule, hook, MCP, and configuration inventory. Trigger when the user mentions Tendi, asks what an earlier Codex, Claude Code, or Cursor session did, wants to find local agent history, or wants to manage installed skills through Tendi.
+description: Use the local Tendi CLI to identify the current coding-agent session, read its transcript, search earlier sessions, or manage installed agent skills and configuration. Trigger when the user mentions Tendi, asks for the current session ID or transcript, wants to find local agent history, or wants to manage installed skills through Tendi.
 ---
 
 # Tendi

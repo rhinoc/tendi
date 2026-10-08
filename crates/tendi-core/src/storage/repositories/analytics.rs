@@ -83,36 +83,52 @@ impl Store {
         for (batch_index, batch) in sessions.chunks(SESSION_ANALYTICS_BATCH_SIZE).enumerate() {
             let mut updates = Vec::new();
             {
-                let mut state_stmt = self.conn.prepare(
-                    "SELECT file_mtime, file_size, parser_state_json
+                let keys = batch
+                    .iter()
+                    .map(|session| {
+                        (
+                            session.id.clone(),
+                            agent_label(session.agent).to_string(),
+                            session.path.display().to_string(),
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                let placeholders = vec!["(?, ?, ?)"; keys.len()].join(", ");
+                let sql = format!(
+                    "SELECT session_id, agent, session_path, file_mtime, file_size,
+                            parser_version
                      FROM scoped_session_analytics
-                     WHERE scope_key = ?1 AND session_id = ?2 AND agent = ?3 AND session_path = ?4",
-                )?;
-                let mut cache_stmt = self.conn.prepare(
-                    "SELECT file_mtime, file_size, analytics_json, parser_state_json
-                     FROM scoped_session_analytics
-                     WHERE scope_key = ?1 AND session_id = ?2 AND agent = ?3 AND session_path = ?4",
-                )?;
+                     WHERE scope_key = ? AND (session_id, agent, session_path) IN ({placeholders})"
+                );
+                let parameters = std::iter::once(scope_key.as_str())
+                    .chain(keys.iter().flat_map(|(id, agent, path)| {
+                        [id.as_str(), agent.as_str(), path.as_str()]
+                    }));
+                let mut statement = self.conn.prepare(&sql)?;
+                let rows = statement.query_map(rusqlite::params_from_iter(parameters), |row| {
+                    Ok((
+                        (
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, String>(2)?,
+                        ),
+                        (
+                            row.get::<_, i64>(3)?,
+                            row.get::<_, i64>(4)?,
+                            row.get::<_, u32>(5)?,
+                        ),
+                    ))
+                })?;
+                let cached_rows =
+                    rows.collect::<rusqlite::Result<std::collections::HashMap<_, _>>>()?;
 
                 for session in batch {
-                    let session_path = session.path.display().to_string();
-                    let cached_state = state_stmt
-                        .query_row(
-                            params![
-                                scope_key.as_str(),
-                                session.id,
-                                agent_label(session.agent),
-                                session_path,
-                            ],
-                            |row| {
-                                Ok((
-                                    row.get::<_, i64>(0)?,
-                                    row.get::<_, i64>(1)?,
-                                    row.get::<_, String>(2)?,
-                                ))
-                            },
-                        )
-                        .optional()?;
+                    let key = (
+                        session.id.clone(),
+                        agent_label(session.agent).to_string(),
+                        session.path.display().to_string(),
+                    );
+                    let cached_row = cached_rows.get(&key);
                     let file_state = match crate::session_skills::session_file_state(&session.path)
                     {
                         Ok(state) => state,
@@ -126,44 +142,34 @@ impl Store {
                             continue;
                         }
                     };
-                    if cached_state.is_some_and(|(file_mtime, file_size, parser_state_json)| {
-                        file_mtime == file_state.file_mtime
-                            && file_size == file_state.file_size
-                            && analytics::parser_state_is_current(&parser_state_json)
+                    if cached_row.is_some_and(|(file_mtime, file_size, parser_version)| {
+                        *file_mtime == file_state.file_mtime
+                            && *file_size == file_state.file_size
+                            && *parser_version == analytics::ANALYTICS_PARSER_VERSION
                     }) {
                         report.skipped += 1;
                         continue;
                     }
-                    let cached_row = cache_stmt
-                        .query_row(
-                            params![
-                                scope_key.as_str(),
-                                session.id,
-                                agent_label(session.agent),
-                                session.path.display().to_string(),
-                            ],
-                            |row| {
-                                Ok((
-                                    row.get::<_, i64>(0)?,
-                                    row.get::<_, i64>(1)?,
-                                    row.get::<_, Vec<u8>>(2)?,
-                                    row.get::<_, String>(3)?,
-                                ))
-                            },
-                        )
-                        .optional()?;
-                    let cached = cached_row.and_then(
-                        |(file_mtime, file_size, analytics_json, parser_state_json)| match (
-                            decompress_analytics_json(&analytics_json).and_then(|json| {
-                                serde_json::from_str(&json).map_err(anyhow::Error::from)
-                            }),
-                            serde_json::from_str(&parser_state_json).map_err(anyhow::Error::from),
+                    let payload = if cached_row.is_some() {
+                        self.conn.query_row(
+                            "SELECT analytics_text, parser_state_json FROM scoped_session_analytics
+                             WHERE scope_key=?1 AND session_id=?2 AND agent=?3 AND session_path=?4",
+                            params![scope_key.as_str(), key.0, key.1, key.2],
+                            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+                        ).optional()?
+                    } else {
+                        None
+                    };
+                    let cached = cached_row.zip(payload.as_ref()).and_then(
+                        |((file_mtime, file_size, _), (analytics_json, parser_state_json))| match (
+                            serde_json::from_str(analytics_json).map_err(anyhow::Error::from),
+                            serde_json::from_str(parser_state_json).map_err(anyhow::Error::from),
                         ) {
                             (Ok(analytics), Ok(state)) => Some(SessionAnalyticsRecord {
                                 analytics,
                                 state,
-                                file_mtime,
-                                file_size,
+                                file_mtime: *file_mtime,
+                                file_size: *file_size,
                             }),
                             (Err(err), _) | (_, Err(err)) => {
                                 warnings.push(format!(
@@ -302,7 +308,7 @@ impl Store {
             let record = prepared.record;
             let overview = &prepared.overview;
             let overview_record = &prepared.overview_record;
-            tx.execute(
+            shared_cache::execute_changed(tx,
                 "INSERT INTO scoped_session_analytics (
                     scope_key, session_id, agent, session_path, file_mtime, file_size,
                     indexed_at, analytics_json, parser_state_json,
@@ -310,22 +316,7 @@ impl Store {
                     capability_token_usage, capability_reasoning_tokens,
                     capability_explicit_runs, capability_rate_limit_history,
                     overview_indexed, overview_index_error
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, 1, NULL)
-                 ON CONFLICT(scope_key, session_id, agent, session_path) DO UPDATE SET
-                    file_mtime = excluded.file_mtime,
-                    file_size = excluded.file_size,
-                    indexed_at = excluded.indexed_at,
-                    analytics_json = excluded.analytics_json,
-                    parser_state_json = excluded.parser_state_json,
-                    event_min_date = excluded.event_min_date,
-                    event_max_date = excluded.event_max_date,
-                    has_activity = excluded.has_activity,
-                    capability_token_usage = excluded.capability_token_usage,
-                    capability_reasoning_tokens = excluded.capability_reasoning_tokens,
-                    capability_explicit_runs = excluded.capability_explicit_runs,
-                    capability_rate_limit_history = excluded.capability_rate_limit_history,
-                    overview_indexed = 1,
-                    overview_index_error = NULL",
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, 1, NULL)",
                 params![
                     scope_key.as_str(),
                     record.analytics.session_id,
@@ -345,16 +336,11 @@ impl Store {
                     overview.capabilities.rate_limit_history,
                 ],
             )?;
-            tx.execute(
+            shared_cache::execute_changed(tx,
                 "INSERT INTO scoped_session_analytics_overview (
                     scope_key, session_id, agent, session_path, event_min_date,
                     event_max_date, has_activity, overview_json
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
-                 ON CONFLICT(scope_key, session_id, agent, session_path) DO UPDATE SET
-                    event_min_date = excluded.event_min_date,
-                    event_max_date = excluded.event_max_date,
-                    has_activity = excluded.has_activity,
-                    overview_json = excluded.overview_json",
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
                 params![
                     scope_key.as_str(),
                     &overview_record.session_id,
@@ -645,7 +631,8 @@ impl Store {
             let mut repaired_count = 0;
             for prepared in &prepared {
                 let repair = prepared.repair;
-                repaired_count += tx.execute(
+                repaired_count += shared_cache::execute_changed(
+                    tx,
                     "UPDATE scoped_session_analytics_overview
                      SET event_min_date = ?1,
                          event_max_date = ?2,

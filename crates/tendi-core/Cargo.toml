@@ -19,6 +19,7 @@ toml.workspace = true
 toml_edit.workspace = true
 rusqlite.workspace = true
 ureq.workspace = true
+url.workspace = true
 walkdir.workspace = true
 tar.workspace = true
 zip.workspace = true

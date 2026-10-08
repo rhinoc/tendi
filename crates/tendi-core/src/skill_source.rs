@@ -460,6 +460,7 @@ pub(crate) fn materialize_well_known(source: &str, target: &Path) -> Result<()> 
             continue;
         };
         if materialize_index(&index_url, &index, target)? {
+            write_well_known_lock_metadata(&index_url, &index, target)?;
             return Ok(());
         }
     }
@@ -488,6 +489,98 @@ pub(crate) fn materialize_well_known(source: &str, target: &Path) -> Result<()> 
     bail!(
         "no skills found at {source}; expected /.well-known/agent-skills/index.json, /.well-known/skills/index.json, or a SKILL.md URL"
     )
+}
+
+pub(crate) fn ensure_well_known_lock_metadata(source: &str, target: &Path) -> Result<()> {
+    if target.join(".tendi-well-known-lock.json").is_file() {
+        return Ok(());
+    }
+    for index_url in discovery_index_candidates(source)? {
+        let Some(index_text) = fetch_text_optional(&index_url)? else {
+            continue;
+        };
+        let Ok(index) = serde_json::from_str::<DiscoveryIndex>(&index_text) else {
+            continue;
+        };
+        write_well_known_lock_metadata(&index_url, &index, target)?;
+        return Ok(());
+    }
+    Ok(())
+}
+
+fn write_well_known_lock_metadata(
+    index_url: &str,
+    index: &DiscoveryIndex,
+    target: &Path,
+) -> Result<()> {
+    let mut skills = serde_json::Map::new();
+    for entry in &index.skills {
+        let skill_root = target.join(&entry.name);
+        if !skill_root.join("SKILL.md").is_file() {
+            continue;
+        }
+        let digest = match entry.digest.as_deref() {
+            Some(digest) => digest.to_string(),
+            None => skill_content_digest(&skill_root)?,
+        };
+        let source_url = entry
+            .url
+            .as_deref()
+            .map(|url| resolve_http_url(index_url, url))
+            .transpose()?
+            .unwrap_or_else(|| {
+                format!(
+                    "{}{}/SKILL.md",
+                    index_url.trim_end_matches("index.json"),
+                    entry.name
+                )
+            });
+        skills.insert(
+            entry.name.clone(),
+            serde_json::json!({ "digest": digest, "sourceUrl": source_url }),
+        );
+    }
+    let metadata = serde_json::json!({ "skills": skills });
+    crate::fsutil::atomic_write(
+        &target.join(".tendi-well-known-lock.json"),
+        &serde_json::to_string_pretty(&metadata)?,
+    )
+}
+
+fn skill_content_digest(root: &Path) -> Result<String> {
+    let mut files = Vec::new();
+    collect_skill_files(root, root, &mut files)?;
+    files.sort_by(|left: &(String, Vec<u8>), right| left.0.cmp(&right.0));
+    let mut hash = Sha256::new();
+    for (path, content) in files {
+        hash.update(path.as_bytes());
+        hash.update([0]);
+        hash.update(content);
+        hash.update([0]);
+    }
+    Ok(format!("sha256:{:x}", hash.finalize()))
+}
+
+fn collect_skill_files(
+    root: &Path,
+    current: &Path,
+    files: &mut Vec<(String, Vec<u8>)>,
+) -> Result<()> {
+    for entry in fs::read_dir(current)? {
+        let entry = entry?;
+        let path = entry.path();
+        let metadata = entry.file_type()?;
+        if metadata.is_dir() {
+            collect_skill_files(root, &path, files)?;
+        } else if metadata.is_file() {
+            let relative = path
+                .strip_prefix(root)?
+                .to_string_lossy()
+                .replace('\\', "/");
+            files.push((relative, fs::read(path)?));
+        }
+    }
+    Ok(())
 }
 
 fn discovery_index_candidates(source: &str) -> Result<Vec<String>> {

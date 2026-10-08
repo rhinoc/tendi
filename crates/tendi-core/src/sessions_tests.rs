@@ -21,11 +21,11 @@ use super::{
     compare_timestamps, extract_session_message, extract_session_title_for_agent, file_state,
     infer_session_project, infer_session_resume_target, is_session_candidate_path, merge_sessions,
     normalize_session_projects, repository_from_git_snapshot, scan_additional_session_roots,
-    scan_jsonl_meta_for_agent, scan_jsonl_sessions, session_requires_rescan, session_watch_plan,
+    scan_jsonl_meta_for_agent, scan_jsonl_sessions, session_watch_plan,
     should_replace_session_path,
 };
 
-use cursor_sessions::{decode_cursor_project_dir, scan_cursor_meta};
+use cursor_sessions::{cursor_project_from_transcript_path, scan_cursor_meta};
 
 fn temp_dir(prefix: &str) -> PathBuf {
     std::env::temp_dir().join(format!(
@@ -266,10 +266,12 @@ fn session_repository_resolver_skips_non_git_and_caches_repository() {
 }
 
 #[test]
-fn cursor_project_folder_decodes_to_workspace_path() {
+fn cursor_project_folder_without_path_evidence_is_unknown() {
     assert_eq!(
-        decode_cursor_project_dir("Users-test-dev-example-nextop").as_deref(),
-        Some(Path::new("/Users/test/dev/example/nextop"))
+        cursor_project_from_transcript_path(Path::new(
+            "/Users/test/.cursor/projects/Users-test-dev-example-nextop/agent-transcripts/session.jsonl"
+        )),
+        None
     );
 }
 
@@ -423,6 +425,52 @@ fn cached_empty_codex_session_is_rechecked_instead_of_reused() {
 
     assert!(sessions.is_empty());
 
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn scan_changes_ignore_storage_resolved_project_fields() {
+    let root = temp_dir("tendi-scan-storage-fields-test");
+    fs::create_dir_all(&root).unwrap();
+    let path = root.join("session.jsonl");
+    fs::write(&path, "{}\n").unwrap();
+    let (file_mtime, file_size) = file_state(&path).unwrap();
+    let cached = SessionRecord {
+        id: "session-id".to_string(),
+        agent: AgentKind::Codex,
+        title: None,
+        project: None,
+        repository: None,
+        repository_url: None,
+        logical_project_id: Some("resolved-id".to_string()),
+        logical_project_name: Some("Resolved project".to_string()),
+        path,
+        started_at: None,
+        updated_at: None,
+        message_count: Some(1),
+        first_user_message: None,
+        last_user_message: None,
+        last_assistant_message: None,
+        turn_count: None,
+        model: None,
+        mode: None,
+        approval_mode: None,
+        is_run_everything: None,
+        parent_session_id: None,
+        token_usage: None,
+    };
+    let cache = SessionScanCache::from_entries([SessionScanCacheEntry {
+        session: cached.clone(),
+        file_mtime,
+        file_size,
+        additional_file_states: Vec::new(),
+    }]);
+    let mut scanned = cached.clone();
+    scanned.logical_project_id = None;
+    scanned.logical_project_name = None;
+    assert!(cache.changed_sessions(&[scanned.clone()]).is_empty());
+    scanned.message_count = Some(2);
+    assert_eq!(cache.changed_sessions(&[scanned]).len(), 1);
     fs::remove_dir_all(root).unwrap();
 }
 
@@ -821,35 +869,16 @@ fn child_jsonl_title_skips_inherited_history_without_spawn_task_name() {
 
     let mut first_scan = Vec::new();
     scan_codex_jsonl(&root, &mut first_scan, None);
+    assert_eq!(first_scan[0].title.as_deref(), Some("Child-specific task"));
     assert_eq!(
-        crate::providers::codex::session_title(&path).as_deref(),
-        Some("Child-specific task")
-    );
-    let (file_mtime, file_size) = file_state(&path).unwrap();
-    let mut cached_session = first_scan[0].clone();
-    cached_session.title = Some("Follow-up".to_string());
-    cached_session.first_user_message = Some("Inherited label".to_string());
-    assert!(session_requires_rescan(&cached_session));
-    let cache = SessionScanCache::from_entries([SessionScanCacheEntry {
-        session: cached_session,
-        file_mtime,
-        file_size,
-        additional_file_states: Vec::new(),
-    }]);
-
-    let mut rescanned = Vec::new();
-    scan_codex_jsonl(&root, &mut rescanned, Some(&cache));
-
-    assert_eq!(rescanned[0].title.as_deref(), Some("Child-specific task"));
-    assert_eq!(
-        rescanned[0].first_user_message.as_deref(),
+        first_scan[0].first_user_message.as_deref(),
         Some("Child-specific task")
     );
     let _ = fs::remove_dir_all(root);
 }
 
 #[test]
-fn child_jsonl_title_uses_spawn_task_name_and_refreshes_cached_parent_title() {
+fn child_jsonl_title_uses_spawn_task_name() {
     let root = temp_dir("tendi-child-spawn-task-title-test");
     fs::create_dir_all(&root).unwrap();
     let path = root.join("rollout-12345678-1234-1234-1234-123456789012.jsonl");
@@ -870,28 +899,15 @@ fn child_jsonl_title_uses_spawn_task_name_and_refreshes_cached_parent_title() {
 
     let mut first_scan = Vec::new();
     scan_codex_jsonl(&root, &mut first_scan, None);
-    let (file_mtime, file_size) = file_state(&path).unwrap();
-    let mut cached_session = first_scan[0].clone();
-    cached_session.title = Some("Parent orchestration".to_string());
-    let cache = SessionScanCache::from_entries([SessionScanCacheEntry {
-        session: cached_session,
-        file_mtime,
-        file_size,
-        additional_file_states: Vec::new(),
-    }]);
-
-    let mut rescanned = Vec::new();
-    scan_codex_jsonl(&root, &mut rescanned, Some(&cache));
-
     assert_eq!(
-        rescanned[0].title.as_deref(),
+        first_scan[0].title.as_deref(),
         Some("composer_connection_reuse")
     );
     let _ = fs::remove_dir_all(root);
 }
 
 #[test]
-fn child_jsonl_cache_clears_inherited_preview_without_child_user_message() {
+fn child_jsonl_preview_excludes_inherited_user_message() {
     let root = temp_dir("tendi-child-preview-boundary-test");
     fs::create_dir_all(&root).unwrap();
     let path = root.join("rollout-12345678-1234-1234-1234-123456789012.jsonl");
@@ -917,27 +933,6 @@ fn child_jsonl_cache_clears_inherited_preview_without_child_user_message() {
         Some("Child follow-up")
     );
 
-    let (file_mtime, file_size) = file_state(&path).unwrap();
-    let mut cached_session = first_scan[0].clone();
-    cached_session.first_user_message = Some("Parent user message".to_string());
-    cached_session.last_user_message = Some("Parent user message".to_string());
-    assert!(session_requires_rescan(&cached_session));
-    let cache = SessionScanCache::from_entries([SessionScanCacheEntry {
-        session: cached_session,
-        file_mtime,
-        file_size,
-        additional_file_states: Vec::new(),
-    }]);
-
-    let mut rescanned = Vec::new();
-    scan_codex_jsonl(&root, &mut rescanned, Some(&cache));
-
-    assert_eq!(rescanned[0].first_user_message, None);
-    assert_eq!(rescanned[0].last_user_message, None);
-    assert_eq!(
-        rescanned[0].last_assistant_message.as_deref(),
-        Some("Child follow-up")
-    );
     let _ = fs::remove_dir_all(root);
 }
 
@@ -1020,10 +1015,6 @@ fn codex_goal_message_provides_session_title_and_user_preview() {
         Some("Check the final result")
     );
     assert_eq!(meta.turn_count, Some(2));
-    assert_eq!(
-        crate::providers::codex::session_title(&path).as_deref(),
-        Some("Ship the release:")
-    );
 
     let _ = fs::remove_dir_all(root);
 }
@@ -1244,20 +1235,74 @@ fn cursor_store_changes_invalidate_cached_subagent_metadata() {
 
     let mut sessions = Vec::new();
     cursor_sessions::scan_cursor_meta_file(&meta_path, &mut sessions, AgentKind::Cursor, None);
-    let session = sessions.pop().unwrap();
+    let mut session = sessions.pop().unwrap();
     assert_eq!(session.parent_session_id, None);
+    session.title = Some("Cached Cursor title".to_string());
+    session.parent_session_id = Some("cached-parent".to_string());
+    session.first_user_message = Some("Different child request".to_string());
     let (file_mtime, file_size) = file_state(&meta_path).unwrap();
     let (store_mtime, store_size) = file_state(&store_path).unwrap();
     let cache = SessionScanCache::from_entries([SessionScanCacheEntry {
         session,
         file_mtime,
         file_size,
-        additional_file_states: vec![SessionScanSourceState {
-            path: store_path.clone(),
-            file_mtime: store_mtime,
-            file_size: store_size,
-        }],
+        additional_file_states: vec![
+            SessionScanSourceState {
+                path: store_path.clone(),
+                file_mtime: store_mtime,
+                file_size: store_size,
+            },
+            SessionScanSourceState {
+                path: store_path.with_file_name("store.db-shm"),
+                file_mtime: 0,
+                file_size: 0,
+            },
+            SessionScanSourceState {
+                path: store_path.with_file_name("store.db-wal"),
+                file_mtime: 0,
+                file_size: 0,
+            },
+        ],
     }]);
+
+    fs::write(
+        store_path.with_file_name("store.db-shm"),
+        b"reader coordination",
+    )
+    .unwrap();
+    fs::write(store_path.with_file_name("store.db-wal"), b"").unwrap();
+    assert!(
+        cache
+            .session_if_current_id(AgentKind::Cursor, "session-id")
+            .is_some()
+    );
+    let mut cached_meta = Vec::new();
+    cursor_sessions::scan_cursor_meta_file(
+        &meta_path,
+        &mut cached_meta,
+        AgentKind::Cursor,
+        Some(&cache),
+    );
+    assert_eq!(cached_meta[0].title.as_deref(), Some("Cached Cursor title"));
+    let mut cached_store = Vec::new();
+    cursor_sessions::scan_cursor_store_file(
+        &store_path,
+        &mut cached_store,
+        AgentKind::Cursor,
+        Some(&cache),
+    );
+    assert_eq!(
+        cached_store[0].title.as_deref(),
+        Some("Cached Cursor title")
+    );
+    fs::write(store_path.with_file_name("store.db-wal"), b"new content").unwrap();
+    assert!(
+        cache
+            .session_if_current_id(AgentKind::Cursor, "session-id")
+            .is_none()
+    );
+    fs::remove_file(store_path.with_file_name("store.db-shm")).unwrap();
+    fs::remove_file(store_path.with_file_name("store.db-wal")).unwrap();
 
     std::thread::sleep(Duration::from_millis(2));
     let connection = Connection::open(&store_path).unwrap();

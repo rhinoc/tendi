@@ -1323,7 +1323,7 @@ export function SkillsView({
   const [selected, setSelected] = useState<string[]>([]);
   const [query, setQuery] = useTabState("skills.query", "");
   const [viewMode, setViewMode] = useTabState("skills.viewMode", SkillsViewMode.List);
-  const [sort, setSort] = useTabState<SortState | null>("skills.sort", { key: "mtime", direction: SortDirection.Desc });
+  const [sort, setSort] = useTabState<SortState | null>("skills.sort", { key: "ctime", direction: SortDirection.Desc });
   const [groupBy, setGroupBy] = useTabState<string | null>("skills.groupBy", "origin");
   const [showWrapper, setShowWrapper] = useState(false);
   const [wrapperScopeDialogOpen, setWrapperScopeDialogOpen] = useState(false);

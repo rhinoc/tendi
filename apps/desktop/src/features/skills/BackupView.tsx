@@ -49,6 +49,10 @@ const BACKUP_CATEGORY_ACCORDION_RADIUS = 12;
 
 type BackupTarget = SkillTargetResponse;
 
+function isVisibleBackupTarget(target: BackupTarget) {
+  return target.id === "shared" || isVisibleAgent(target.id);
+}
+
 type BackupRestorePlan = {
   revision: string;
   targetRoot: string;
@@ -211,7 +215,7 @@ export function BackupSettings({
     const timer = window.setInterval(() => setRelativeTimeNow(Date.now()), 30_000);
     return () => window.clearInterval(timer);
   }, []);
-  const visibleTargets = targets.filter((target) => isVisibleAgent(target.id));
+  const visibleTargets = targets.filter(isVisibleBackupTarget);
   const restoreTargetOptions = visibleTargets.map((target) => ({ value: target.id, label: target.displayName }));
   const resolvedRestoreTarget = resolveSelectValue(restoreTarget, restoreTargetOptions);
   const backupConfig = data?.config;
@@ -238,7 +242,7 @@ export function BackupSettings({
       setRestoreTarget((current) => resolveSelectValue(
         current,
         targetOptions
-          .filter((target) => isVisibleAgent(target.id))
+          .filter(isVisibleBackupTarget)
           .map((target) => ({ value: target.id, label: target.displayName })),
       ));
     } catch (loadError) {

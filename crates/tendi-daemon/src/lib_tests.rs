@@ -165,7 +165,9 @@ fn recovery_waits_for_shared_cross_process_database_lease() {
     )
     .unwrap();
     let recovery_daemon = daemon.clone();
-    let recovery = thread::spawn(move || recovery_daemon.recover_storage("lease test"));
+    let recovery = thread::spawn(move || {
+        recovery_daemon.recover_storage_inner("lease test".to_string(), None, None)
+    });
 
     thread::sleep(Duration::from_millis(100));
     assert!(
@@ -752,6 +754,54 @@ fn skill_file_changes_emit_a_runtime_event() {
         event.payload["paths"]
     );
 
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn skill_watch_coalesces_file_events_into_one_notification() {
+    let _test_lock = TEST_LOCK.lock().unwrap();
+    let root = temp_workspace();
+    let daemon = test_daemon_without_background(root.clone());
+    let subscription = daemon.subscribe_events();
+    let (sender, receiver) = mpsc::channel();
+    let watcher_daemon = daemon.clone();
+    let watcher = thread::spawn(move || skill_watch_loop(watcher_daemon, receiver));
+    let skill_dir = root.join(".agents/skills/demo");
+    let first = skill_dir.join("SKILL.md");
+    let second = skill_dir.join("reference.md");
+    sender
+        .send(Ok(
+            Event::new(notify::EventKind::Any).add_path(first.clone())
+        ))
+        .unwrap();
+    sender
+        .send(Ok(
+            Event::new(notify::EventKind::Any).add_path(second.clone())
+        ))
+        .unwrap();
+
+    let event = subscription.recv_timeout(Duration::from_secs(3)).unwrap();
+    assert_eq!(event.event, SKILL_CHANGED_EVENT);
+    let paths = event.payload["paths"].as_array().unwrap();
+    assert!(
+        paths
+            .iter()
+            .any(|path| path.as_str() == Some(first.to_str().unwrap()))
+    );
+    assert!(
+        paths
+            .iter()
+            .any(|path| path.as_str() == Some(second.to_str().unwrap()))
+    );
+    assert!(
+        subscription
+            .recv_timeout(Duration::from_millis(300))
+            .is_err()
+    );
+
+    drop(sender);
+    watcher.join().unwrap();
+    daemon.shutdown();
     let _ = fs::remove_dir_all(root);
 }
 
@@ -1867,6 +1917,56 @@ fn analytics_refresh_completes_while_session_lane_is_blocked() {
         .expect("analytics should complete while session lane is blocked")
         .expect("analytics refresh should succeed");
     assert_eq!(report.total, 0);
+    daemon.shutdown();
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn analytics_refresh_publishes_committed_batches_before_completion() {
+    let _test_lock = TEST_LOCK.lock().unwrap();
+    let root = temp_workspace();
+    let daemon = test_daemon_without_background(root.clone());
+    let scope = daemon_scope_key(&daemon).unwrap();
+    let sessions = (0..65).map(|index| {
+        let path = root.join(format!("analytics-{index}.jsonl"));
+        fs::write(&path, "{\"timestamp\":\"2026-09-29T01:00:00Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\"}}\n").unwrap();
+        tendi_core::SessionRecord {
+            id: format!("analytics-{index}"),
+            agent: tendi_core::AgentKind::Codex,
+            title: None,
+            project: None,
+            repository: None,
+            repository_url: None,
+            logical_project_id: None,
+            logical_project_name: None,
+            path,
+            started_at: None,
+            updated_at: None,
+            message_count: None,
+            first_user_message: None,
+            last_user_message: None,
+            last_assistant_message: None,
+            turn_count: None,
+            model: None,
+            mode: None,
+            approval_mode: None,
+            is_run_everything: None,
+            parent_session_id: None,
+            token_usage: None,
+        }
+    }).collect::<Vec<_>>();
+    let events = daemon.subscribe_events();
+    let (report, final_revision) =
+        refresh_session_analytics_serialized_with_revision(&daemon, "test", &scope, &sessions)
+            .unwrap();
+    let partial_revisions =
+        std::iter::from_fn(|| events.recv_timeout(Duration::from_millis(1)).ok())
+            .filter(|event| event.event == ANALYTICS_REVISION_EVENT)
+            .filter_map(|event| event.payload["revision"].as_u64())
+            .collect::<Vec<_>>();
+    assert_eq!(report.parsed, 65);
+    assert_eq!(partial_revisions.len(), 1);
+    assert!(partial_revisions[0] < final_revision);
     daemon.shutdown();
     let _ = fs::remove_dir_all(root);
 }

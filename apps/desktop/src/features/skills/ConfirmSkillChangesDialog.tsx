@@ -419,7 +419,7 @@ export function ConfirmSkillChangesDialogContent({
         </p>
         {previewLoading && <LoadingState className="skillUpdatePreviewLoading" label={skillChangeLoadingCopy.previewLabel} />}
         {command === SkillChangeCommand.DeleteMany && names.length > 0 && (
-          <div className="skillDeleteNames" data-selectable-text>
+          <div className="deleteConfirmationNames" data-selectable-text>
             {displayNames.map((name) => <span key={name}>{name}</span>)}
           </div>
         )}
