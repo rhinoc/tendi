@@ -89,7 +89,7 @@ struct ProjectState {
 const SESSION_ANALYTICS_BATCH_SIZE: usize = 64;
 // The current schema is squashed; all development revisions before this
 // release were never published as compatibility boundaries.
-pub(crate) const STORAGE_SCHEMA_VERSION: i64 = 5;
+pub(crate) const STORAGE_SCHEMA_VERSION: i64 = 6;
 const SESSION_SEARCH_INDEX_VERSION: i64 = 2;
 pub(crate) const PROJECTION_PARSER_VERSION: &str = "scan-v9";
 pub(crate) const ANALYTICS_JSON_ENCODING: &str = "zlib-v1";

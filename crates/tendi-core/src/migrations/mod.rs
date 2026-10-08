@@ -26,7 +26,7 @@ mod skill_visibility;
 
 const CODEX_GLOBAL_SKILL_CONFIG_MIGRATION_KEY: &str = "codex_global_skill_config_migrated_v1";
 const GIT_SOURCE_VERSION_LONG_SHA_MIGRATION_KEY: &str = "git_source_version_long_sha_migrated_v1";
-const MAX_SQUASHED_DEVELOPMENT_SCHEMA_VERSION: i64 = 5;
+const MAX_SQUASHED_DEVELOPMENT_SCHEMA_VERSION: i64 = 6;
 const STORAGE_MAINTENANCE_TIME_SLICE: Duration = Duration::from_millis(100);
 
 static STORAGE_MAINTENANCE_SCHEDULED: LazyLock<Mutex<HashSet<PathBuf>>> =

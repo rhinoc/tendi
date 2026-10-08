@@ -481,36 +481,41 @@ impl Store {
         let mut warnings = Vec::new();
         let mut invalid = false;
         let mut invalid_overview_keys = std::collections::HashSet::new();
-        let mut stmt = self.conn.prepare(
-            "SELECT session_id, agent, session_path, overview_json
-             FROM scoped_session_analytics_overview
-             WHERE scope_key = ?1
-               AND (?2 IS NULL OR agent = ?2)
-               AND event_max_date >= ?3
-               AND (?4 IS NULL OR event_min_date <= ?4)",
-        )?;
-        let rows = stmt.query_map(
-            params![scope_key.as_str(), agent_value, cutoff, end_date],
-            |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, String>(3)?,
-                ))
+        shared_cache::visit_overview_payloads(
+            &self.conn,
+            scope_key.as_str(),
+            agent_value.as_deref(),
+            cutoff,
+            end_date,
+            |session_id, agent, session_path, overview_json, project_overlay| {
+                let record =
+                    serde_json::from_slice::<SessionAnalyticsOverviewRecord>(overview_json)
+                        .map_err(anyhow::Error::from)
+                        .and_then(|mut record| {
+                            record.project = project_overlay
+                                .map(
+                                    serde_json::from_slice::<
+                                        Option<crate::analytics::AnalyticsProjectIdentity>,
+                                    >,
+                                )
+                                .transpose()?
+                                .flatten();
+                            Ok(record)
+                        });
+                match record {
+                    Ok(record) => records.push(record),
+                    Err(_) => {
+                        invalid = true;
+                        invalid_overview_keys.insert((
+                            session_id.to_string(),
+                            agent.to_string(),
+                            session_path.to_string(),
+                        ));
+                    }
+                }
+                Ok(())
             },
         )?;
-        for row in rows {
-            let (session_id, agent, session_path, overview_json) = row?;
-            match serde_json::from_str::<SessionAnalyticsOverviewRecord>(&overview_json) {
-                Ok(record) => records.push(record),
-                Err(_) => {
-                    invalid = true;
-                    invalid_overview_keys.insert((session_id, agent, session_path));
-                }
-            }
-        }
-        drop(stmt);
 
         if invalid {
             records.clear();

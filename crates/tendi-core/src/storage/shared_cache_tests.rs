@@ -131,7 +131,80 @@ fn compressed_analytics_share_source_data_and_keep_scoped_projects() {
             |r| r.get(0),
         )
         .unwrap();
-    assert_eq!(blob_count, 3);
+    assert_eq!(blob_count, 2);
+    let overview_count: i64 = store
+        .conn
+        .query_row(
+            "SELECT count(*) FROM shared_cache_values
+             WHERE kind='overview_json' AND typeof(value)='text'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(overview_count, 1);
+}
+
+#[test]
+fn projection_upgrade_converts_compressed_overview_payloads() {
+    let (_dir, store) = store();
+    store
+        .with_named_write_transaction("test.shared_overview_upgrade_seed", |tx| {
+            tx.execute(
+                "INSERT INTO scoped_session_analytics_overview(
+                    scope_key,session_id,agent,session_path,has_activity,overview_json
+                 ) VALUES('workspace:/a','s','codex','/s.jsonl',0,'{\"project\":{\"name\":\"old\"}}')",
+                [],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    let path = store.path().to_owned();
+    drop(store);
+
+    let conn = Connection::open(&path).unwrap();
+    register_functions(&conn).unwrap();
+    let overview_json: String = conn
+        .query_row(
+            "SELECT CAST(value AS TEXT) FROM shared_cache_values WHERE kind='overview_json'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    conn.execute(
+        "UPDATE shared_cache_values SET value=?1 WHERE kind='overview_json'",
+        [compress_analytics_json(&overview_json).unwrap()],
+    )
+    .unwrap();
+    conn.pragma_update(None, "user_version", 5).unwrap();
+    drop(conn);
+
+    let store = Store::open(path).unwrap();
+    let schema_version: i64 = store
+        .conn
+        .query_row("PRAGMA user_version", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(schema_version, 6);
+    let value_type: String = store
+        .conn
+        .query_row(
+            "SELECT typeof(value) FROM shared_cache_values WHERE kind='overview_json'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(value_type, "text");
+    let restored: String = store
+        .conn
+        .query_row(
+            "SELECT overview_json FROM scoped_session_analytics_overview",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&restored).unwrap(),
+        json!({"project": {"name": "old"}})
+    );
 }
 
 #[test]

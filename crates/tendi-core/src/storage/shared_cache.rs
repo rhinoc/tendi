@@ -1,5 +1,5 @@
 //! Shared cache values and source identities, with workspace projections kept separate.
-use super::{compress_analytics_json, decompress_analytics_json};
+use super::{ANALYTICS_JSON_ENCODING, compress_analytics_json, decompress_analytics_json};
 use anyhow::{Context, Result};
 use rusqlite::{Connection, Params, functions::FunctionFlags, types::ValueRef};
 use sha2::{Digest, Sha256};
@@ -25,6 +25,34 @@ pub(super) fn register_functions(conn: &Connection) -> Result<()> {
     })?;
     conn.create_scalar_function("tendi_cache_decompress", 1, flags, |ctx| {
         decompress_analytics_json(&ctx.get::<Vec<u8>>(0)?).map_err(function_error)
+    })?;
+    conn.create_scalar_function("tendi_cache_restore_json", 2, flags, |ctx| {
+        let encoded = match ctx.get_raw(0) {
+            ValueRef::Text(value) | ValueRef::Blob(value) => value,
+            ValueRef::Null => return Ok(None::<String>),
+            _ => {
+                return Err(rusqlite::Error::InvalidParameterName(
+                    "cache JSON value must be text or bytes".into(),
+                ));
+            }
+        };
+        let decoded = decode_overview_json(encoded).map_err(function_error)?;
+        let Some(project_json) = ctx.get::<Option<String>>(1)? else {
+            return Ok(Some(decoded));
+        };
+        let Ok(mut value) = serde_json::from_str::<serde_json::Value>(&decoded) else {
+            return Ok(Some(decoded));
+        };
+        let project = serde_json::from_str::<serde_json::Value>(&project_json)
+            .map_err(|error| function_error(error.into()))?;
+        if let serde_json::Value::Object(object) = &mut value {
+            object.insert("project".into(), project);
+            serde_json::to_string(&value)
+                .map(Some)
+                .map_err(|error| function_error(error.into()))
+        } else {
+            Ok(Some(decoded))
+        }
     })?;
     conn.create_scalar_function("tendi_analytics_text", 1, flags, |ctx| {
         match ctx.get_raw(0) {
@@ -59,6 +87,55 @@ pub(super) fn execute_changed(
     let before = conn.total_changes();
     conn.execute(sql, params)?;
     Ok(usize::from(conn.total_changes() != before))
+}
+
+pub(super) fn visit_overview_payloads(
+    conn: &Connection,
+    scope_key: &str,
+    agent: Option<&str>,
+    cutoff: &str,
+    end_date: Option<&str>,
+    mut visit: impl FnMut(&str, &str, &str, &[u8], Option<&[u8]>) -> rusqlite::Result<()>,
+) -> rusqlite::Result<()> {
+    let mut statement = conn.prepare(
+        "SELECT session.session_id, session.agent, session.session_path,
+                CAST(payload.value AS TEXT), overview.project_overlay
+         FROM scoped_session_analytics_overview_storage AS overview
+         JOIN cache_scopes AS scope ON scope.id=overview.scope_ref
+         JOIN cache_sessions AS session ON session.id=overview.session_ref
+         JOIN shared_cache_values AS payload ON payload.id=overview.overview_json_ref
+         WHERE scope.scope_key=?1
+           AND (?2 IS NULL OR session.agent=?2)
+           AND overview.event_max_date >= ?3
+           AND (?4 IS NULL OR overview.event_min_date <= ?4)",
+    )?;
+    let mut rows = statement.query(rusqlite::params![scope_key, agent, cutoff, end_date])?;
+    while let Some(row) = rows.next()? {
+        let session_id: String = row.get(0)?;
+        let agent: String = row.get(1)?;
+        let session_path: String = row.get(2)?;
+        let overview_json = row.get_ref(3)?.as_bytes()?;
+        let project_overlay = match row.get_ref(4)? {
+            ValueRef::Null => None,
+            value => Some(value.as_bytes()?),
+        };
+        visit(
+            &session_id,
+            &agent,
+            &session_path,
+            overview_json,
+            project_overlay,
+        )?;
+    }
+    Ok(())
+}
+
+fn decode_overview_json(encoded: &[u8]) -> Result<String> {
+    if encoded.starts_with(ANALYTICS_JSON_ENCODING.as_bytes()) {
+        decompress_analytics_json(encoded)
+    } else {
+        String::from_utf8(encoded.to_vec()).map_err(Into::into)
+    }
 }
 
 pub(super) fn installed(conn: &Connection) -> Result<bool> {
@@ -448,10 +525,8 @@ fn create_projection(
                     "CASE WHEN {alias}.id IS NOT NULL THEN tendi_cache_decompress({alias}.value) END"
                 ),
                 Codec::Analytics | Codec::Overview => {
-                    let plain = format!("tendi_cache_decompress({alias}.value)");
-                    let restored = format!(
-                        "CASE WHEN r.project_overlay IS NOT NULL AND json_valid({plain}) THEN json_set({plain},'$.project',json(r.project_overlay)) ELSE {plain} END"
-                    );
+                    let restored =
+                        format!("tendi_cache_restore_json({alias}.value,r.project_overlay)");
                     if matches!(codec, Codec::Analytics) {
                         select.push(format!("{restored} AS analytics_text"));
                         format!("tendi_cache_compress({restored})")
@@ -481,7 +556,7 @@ fn create_projection(
     }
     for (field, codec) in layout.payloads {
         let plain = layout.plain(field, *codec);
-        let encoded = if matches!(codec, Codec::Text) {
+        let encoded = if matches!(codec, Codec::Text | Codec::Overview) {
             plain.clone()
         } else {
             format!("tendi_cache_compress({plain})")
@@ -567,6 +642,17 @@ fn create_projection(
 }
 
 pub(super) fn refresh_projections(conn: &Connection) -> Result<()> {
+    conn.execute(
+        "UPDATE shared_cache_values
+         SET value=tendi_cache_decompress(value)
+         WHERE kind='overview_json'
+           AND typeof(value)='blob'
+           AND substr(value,1,?1)=?2",
+        rusqlite::params![
+            ANALYTICS_JSON_ENCODING.len(),
+            ANALYTICS_JSON_ENCODING.as_bytes()
+        ],
+    )?;
     for layout in LAYOUTS {
         let storage = format!("{}_storage", layout.table);
         let physical = columns(conn, &storage)?;
@@ -682,7 +768,7 @@ fn migrate_rows(
              ) SELECT source_rowid,tendi_cache_hash(plain) AS digest,plain FROM payloads;
              CREATE UNIQUE INDEX {stage}_row ON {stage}(source_rowid);"
         ))?;
-        let encoded = if matches!(codec, Codec::Text) {
+        let encoded = if matches!(codec, Codec::Text | Codec::Overview) {
             "plain"
         } else {
             "tendi_cache_compress(plain)"
