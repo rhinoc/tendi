@@ -577,30 +577,6 @@ fn skills_set_materializes_a_read_only_skill_before_provider_writes() {
 }
 
 #[test]
-fn scheduled_backup_claim_consumes_dirty_and_releases_when_clean() {
-    let dirty = AtomicBool::new(true);
-    let running = AtomicBool::new(false);
-
-    assert!(claim_scheduled_skill_backup(&dirty, &running));
-    assert!(!dirty.load(Ordering::Acquire));
-    assert!(running.load(Ordering::Acquire));
-
-    running.store(false, Ordering::Release);
-    assert!(!claim_scheduled_skill_backup(&dirty, &running));
-    assert!(!running.load(Ordering::Acquire));
-}
-
-#[test]
-fn scheduled_backup_claim_keeps_dirty_when_another_backup_is_running() {
-    let dirty = AtomicBool::new(true);
-    let running = AtomicBool::new(true);
-
-    assert!(!claim_scheduled_skill_backup(&dirty, &running));
-    assert!(dirty.load(Ordering::Acquire));
-    assert!(running.load(Ordering::Acquire));
-}
-
-#[test]
 fn sessions_scan_start_marks_current_scan_as_not_started() {
     let _test_lock = TEST_LOCK.lock().unwrap();
     let root = temp_workspace();
@@ -625,6 +601,278 @@ fn sessions_scan_start_marks_current_scan_as_not_started() {
 
     assert_eq!(result.generation, 7);
     assert!(!result.started);
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn legacy_background_sync_does_not_publish_a_receiving_devices_inventory() {
+    let _test_lock = TEST_LOCK.lock().unwrap();
+    let root = temp_workspace();
+    let daemon = test_daemon(root.clone());
+    let checkout = root.join("sync-checkout");
+    daemon
+        .open_store()
+        .unwrap()
+        .save_skill_backup_config(&tendi_core::skill_backup::BackupConfig::new(
+            "",
+            checkout.clone(),
+        ))
+        .unwrap();
+    let response = daemon.skills_backup_sync().unwrap();
+    assert!(!response.scheduled);
+    assert!(!checkout.exists());
+    let _ = fs::remove_dir_all(root);
+}
+
+fn publish_pull_test_artifacts(
+    checkout: &Path,
+    artifacts: Vec<(tendi_core::skill_backup::BackupArtifact, String)>,
+) {
+    fs::create_dir_all(checkout).unwrap();
+    let git = |args: &[&str]| {
+        let output = std::process::Command::new("git")
+            .args(args)
+            .current_dir(checkout)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    };
+    if !checkout.join(".git").exists() {
+        git(&["init", "--quiet"]);
+    }
+    let mut manifest = tendi_core::skill_backup::BackupManifest::default();
+    manifest.version = 1;
+    for (mut artifact, content) in artifacts {
+        let path = if artifact.category == "rules" {
+            "rule.md"
+        } else {
+            "entry.json"
+        };
+        let destination = checkout.join(&artifact.category).join(&artifact.id);
+        fs::create_dir_all(&destination).unwrap();
+        fs::write(destination.join(path), &content).unwrap();
+        artifact.files = vec![tendi_core::skill_backup::BackupFile {
+            path: path.into(),
+            sha256: tendi_core::rules::read_rule_file_at_path(&destination.join(path))
+                .unwrap()
+                .sha256,
+            size: content.len() as u64,
+        }];
+        manifest.artifacts.push(artifact);
+    }
+    tendi_core::skill_backup::write_snapshot(&manifest, checkout).unwrap();
+    git(&["add", "--all"]);
+    git(&[
+        "-c",
+        "user.name=Tendi test",
+        "-c",
+        "user.email=tendi-test@example.com",
+        "commit",
+        "--quiet",
+        "-m",
+        "publish test set",
+    ]);
+}
+
+#[test]
+fn daemon_pull_admits_provider_config_paths_and_tracks_entry_removal() {
+    let _test_lock = TEST_LOCK.lock().unwrap();
+    let root = temp_workspace();
+    let daemon = test_daemon_without_background(root.clone());
+    let checkout = root.join("sync-checkout");
+    let prefix = root.file_name().unwrap().to_string_lossy();
+    let mut artifacts = Vec::new();
+    let mut targets = Vec::new();
+    for agent in [
+        tendi_core::AgentKind::Codex,
+        tendi_core::AgentKind::Claude,
+        tendi_core::AgentKind::Cursor,
+    ] {
+        let is_toml = agent == tendi_core::AgentKind::Codex;
+        let relative = format!("{prefix}/config.{}", if is_toml { "toml" } else { "json" });
+        let skill_root = tendi_core::skill_targets::skill_target_root(
+            &root,
+            &agent.into(),
+            tendi_core::SkillInstallScope::Global,
+        )
+        .unwrap();
+        let target = skill_root.parent().unwrap().join(&relative);
+        fs::create_dir_all(target.parent().unwrap()).unwrap();
+        fs::write(
+            &target,
+            if is_toml {
+                "title = 'keep'\n[mcp_servers.local]\ncommand = 'local'\n"
+            } else {
+                "{\"title\":\"keep\",\"mcpServers\":{\"local\":{\"command\":\"local\"}}}\n"
+            },
+        )
+        .unwrap();
+        artifacts.push((
+            tendi_core::skill_backup::BackupArtifact {
+                id: format!("mcp-{}", agent.label()),
+                category: "mcp".into(),
+                name: "synced".into(),
+                agent: agent.label().into(),
+                source_relative_path: relative,
+                entry_key: "synced".into(),
+                entry_selector: vec![if is_toml { "mcp_servers" } else { "mcpServers" }.into()],
+                files: vec![],
+            },
+            "{\n  \"command\": \"synced\"\n}\n".into(),
+        ));
+        targets.push(target);
+    }
+    publish_pull_test_artifacts(&checkout, artifacts);
+    daemon
+        .open_store()
+        .unwrap()
+        .save_skill_backup_config(&tendi_core::skill_backup::BackupConfig::new(
+            "",
+            checkout.clone(),
+        ))
+        .unwrap();
+    let request = json!({"target": "shared", "scope": "project", "dryRun": true});
+    let preview = run_method_ok(&daemon, "skills_backup_pull", request.clone());
+    let applied = run_method_ok(
+        &daemon,
+        "skills_backup_pull",
+        json!({
+            "target": "shared", "scope": "project", "confirmed": true, "revision": preview["revision"],
+        }),
+    );
+    assert!(
+        applied["operations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|operation| operation["status"] == "restored")
+    );
+    for target in &targets {
+        let content = fs::read_to_string(target).unwrap();
+        assert!(content.contains("synced"));
+        assert!(content.contains("local"));
+        assert!(content.contains("keep"));
+    }
+    let repeated = run_method_ok(&daemon, "skills_backup_pull", request.clone());
+    assert!(
+        repeated["operations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|operation| operation["status"] == "current")
+    );
+
+    publish_pull_test_artifacts(&checkout, vec![]);
+    let preview = run_method_ok(&daemon, "skills_backup_pull", request);
+    let removed = run_method_ok(
+        &daemon,
+        "skills_backup_pull",
+        json!({
+            "target": "shared", "scope": "project", "confirmed": true, "revision": preview["revision"],
+        }),
+    );
+    assert!(
+        removed["operations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|operation| operation["status"] == "removed")
+    );
+    for target in targets {
+        let content = fs::read_to_string(&target).unwrap();
+        assert!(!content.contains("synced"));
+        assert!(content.contains("local"));
+        assert!(content.contains("keep"));
+        fs::remove_dir_all(target.parent().unwrap()).unwrap();
+    }
+    daemon.shutdown();
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn daemon_pull_invalidates_rules_without_relying_on_file_watchers() {
+    let _test_lock = TEST_LOCK.lock().unwrap();
+    let root = temp_workspace();
+    let daemon = test_daemon_without_background(root.clone());
+    let checkout = root.join("sync-checkout");
+    let relative = format!("{}/AGENTS.md", root.file_name().unwrap().to_string_lossy());
+    let skill_root = tendi_core::skill_targets::skill_target_root(
+        &root,
+        &tendi_core::AgentKind::Codex.into(),
+        tendi_core::SkillInstallScope::Global,
+    )
+    .unwrap();
+    let target = skill_root.parent().unwrap().join(&relative);
+    publish_pull_test_artifacts(
+        &checkout,
+        vec![(
+            tendi_core::skill_backup::BackupArtifact {
+                id: "global-rule".into(),
+                category: "rules".into(),
+                name: "AGENTS.md".into(),
+                agent: "codex".into(),
+                source_relative_path: relative,
+                ..Default::default()
+            },
+            "Published rule\n".into(),
+        )],
+    );
+    let store = daemon.open_store().unwrap();
+    store
+        .save_skill_backup_config(&tendi_core::skill_backup::BackupConfig::new(
+            "",
+            checkout.clone(),
+        ))
+        .unwrap();
+    let preview = run_method_ok(
+        &daemon,
+        "skills_backup_pull",
+        json!({"target": "shared", "scope": "project", "dryRun": true}),
+    );
+    assert_eq!(
+        store.projection_status("rules", &root).unwrap(),
+        tendi_core::storage::ProjectionStatus::Fresh
+    );
+    run_method_ok(
+        &daemon,
+        "skills_backup_pull",
+        json!({
+            "target": "shared", "scope": "project", "confirmed": true, "revision": preview["revision"],
+        }),
+    );
+    assert_eq!(fs::read_to_string(&target).unwrap(), "Published rule\n");
+    assert_ne!(
+        store.projection_status("rules", &root).unwrap(),
+        tendi_core::storage::ProjectionStatus::Fresh
+    );
+    publish_pull_test_artifacts(&checkout, vec![]);
+    let preview = run_method_ok(
+        &daemon,
+        "skills_backup_pull",
+        json!({"target": "shared", "scope": "project", "dryRun": true}),
+    );
+    assert_eq!(
+        store.projection_status("rules", &root).unwrap(),
+        tendi_core::storage::ProjectionStatus::Fresh
+    );
+    run_method_ok(
+        &daemon,
+        "skills_backup_pull",
+        json!({
+            "target": "shared", "scope": "project", "confirmed": true, "revision": preview["revision"],
+        }),
+    );
+    assert!(!target.exists());
+    assert_ne!(
+        store.projection_status("rules", &root).unwrap(),
+        tendi_core::storage::ProjectionStatus::Fresh
+    );
+    fs::remove_dir_all(target.parent().unwrap()).unwrap();
+    daemon.shutdown();
     let _ = fs::remove_dir_all(root);
 }
 

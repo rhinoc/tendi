@@ -186,6 +186,20 @@ enum BackupCommand {
         #[arg(long)]
         json: bool,
     },
+    Pull {
+        #[arg(long = "to", default_value = "shared")]
+        to: tendi_core::SkillTarget,
+        #[arg(long, default_value = "global")]
+        scope: tendi_core::SkillInstallScope,
+        #[arg(long)]
+        dry_run: bool,
+        #[arg(long)]
+        yes: bool,
+        #[arg(long, value_enum)]
+        conflict: Option<BackupRestoreConflictArg>,
+        #[arg(long)]
+        json: bool,
+    },
     Versions {
         #[arg(long, default_value_t = 50)]
         limit: usize,
@@ -426,6 +440,63 @@ fn refresh_projection<T>(
         }
     }
     anyhow::bail!("{domain} projection changed during refresh; refresh remains pending")
+}
+
+fn refresh_backup_inventory(
+    store: &tendi_core::storage::Store,
+    cwd: &std::path::Path,
+) -> Result<()> {
+    let config = store
+        .skill_backup_config()?
+        .context("skill backup is not configured")?;
+    let project_roots = store
+        .list_projects()?
+        .into_iter()
+        .map(|project| project.root_path)
+        .collect::<Vec<_>>();
+    if config.contents.skills.enabled {
+        refresh_projection(
+            store,
+            cwd,
+            "skills",
+            || {
+                tendi_core::skills::scan_skills_for_project_roots_with_store(
+                    cwd,
+                    store,
+                    &project_roots,
+                )
+            },
+            |scan, revision| store.save_skills_for_workspace_if_revision(cwd, scan, revision),
+        )?;
+    }
+    if config.contents.mcp.enabled {
+        refresh_projection(
+            store,
+            cwd,
+            "mcp",
+            || tendi_core::mcp::scan_mcp_for_project_roots(cwd, &project_roots),
+            |scan, revision| store.save_mcp_for_workspace_if_revision(cwd, scan, revision),
+        )?;
+    }
+    if config.contents.rules.enabled {
+        refresh_projection(
+            store,
+            cwd,
+            "rules",
+            || tendi_core::rules::scan_rules_for_project_roots(cwd, &project_roots),
+            |scan, revision| store.save_rules_for_workspace_if_revision(cwd, scan, revision),
+        )?;
+    }
+    if config.contents.hooks.enabled {
+        refresh_projection(
+            store,
+            cwd,
+            "hooks",
+            || tendi_core::hooks::scan_hooks(cwd),
+            |scan, revision| store.save_hooks_for_workspace_if_revision(cwd, scan, revision),
+        )?;
+    }
+    Ok(())
 }
 
 fn refresh_session_search(
@@ -873,6 +944,7 @@ fn main() -> Result<()> {
                         return Ok(());
                     }
                     let store = tendi_core::storage::Store::open_default()?;
+                    refresh_backup_inventory(&store, &cwd)?;
                     let report = tendi_core::skill_backup::backup_now(&store, &cwd)?;
                     if json {
                         println!("{}", serde_json::to_string_pretty(&report)?);
@@ -884,6 +956,122 @@ fn main() -> Result<()> {
                         );
                     } else {
                         println!("Sync is already current");
+                    }
+                }
+                BackupCommand::Pull {
+                    to,
+                    scope,
+                    dry_run,
+                    yes,
+                    conflict,
+                    json,
+                } => {
+                    let request =
+                        tendi_core::generated::runtime_contract::SkillsBackupPullRequest {
+                            target: to.to_string(),
+                            scope: runtime_scope(scope).to_string(),
+                            dry_run: Some(true),
+                            confirmed: None,
+                            revision: None,
+                            resolutions: None,
+                        };
+                    let daemon_plan = try_daemon_request(
+                        &cwd,
+                        |runtime_client| Ok(runtime_client.skills_backup_pull(request.clone())),
+                        RuntimeClient::decode_skills_backup_pull_response,
+                    )?;
+                    if let Some(preview) = daemon_plan {
+                        if dry_run {
+                            println!("{}", serde_json::to_string_pretty(&preview)?);
+                            return Ok(());
+                        }
+                        let conflicts = preview
+                            .operations
+                            .iter()
+                            .filter(|operation| operation.status == "conflict")
+                            .collect::<Vec<_>>();
+                        if !conflicts.is_empty() && conflict.is_none() {
+                            anyhow::bail!(
+                                "pull has local conflicts; pass --conflict skip, replace, or keep-both"
+                            );
+                        }
+                        if json && !yes {
+                            anyhow::bail!("--json requires --yes for a real pull");
+                        }
+                        if !yes && !confirm("Pull the published set onto this device? [y/N] ")? {
+                            return Ok(());
+                        }
+                        let resolutions = conflict.map(|action| {
+                            conflicts
+                                .into_iter()
+                                .map(|operation| {
+                                    tendi_core::generated::runtime_contract::BackupRestoreResolution {
+                                        id: operation.id.clone(),
+                                        action: action.action().into(),
+                                    }
+                                })
+                                .collect()
+                        });
+                        let apply =
+                            tendi_core::generated::runtime_contract::SkillsBackupPullRequest {
+                                dry_run: Some(false),
+                                confirmed: Some(true),
+                                revision: preview.revision,
+                                resolutions,
+                                ..request
+                            };
+                        let result = try_daemon_request(
+                            &cwd,
+                            |runtime_client| Ok(runtime_client.skills_backup_pull(apply)),
+                            RuntimeClient::decode_skills_backup_pull_response,
+                        )?
+                        .context("daemon disappeared during pull")?;
+                        println!("{}", serde_json::to_string_pretty(&result)?);
+                    } else {
+                        let store = tendi_core::storage::Store::open_default()?;
+                        let plan = tendi_core::skill_backup::plan_backup_pull(
+                            &store, &cwd, &to, scope, None,
+                        )?;
+                        if dry_run {
+                            println!("{}", serde_json::to_string_pretty(&plan)?);
+                            return Ok(());
+                        }
+                        let conflicts = plan
+                            .operations
+                            .iter()
+                            .filter(|operation| operation.status == "conflict")
+                            .collect::<Vec<_>>();
+                        if !conflicts.is_empty() && conflict.is_none() {
+                            anyhow::bail!(
+                                "pull has local conflicts; pass --conflict skip, replace, or keep-both"
+                            );
+                        }
+                        if json && !yes {
+                            anyhow::bail!("--json requires --yes for a real pull");
+                        }
+                        if !yes && !confirm("Pull the published set onto this device? [y/N] ")? {
+                            return Ok(());
+                        }
+                        let resolutions = conflict
+                            .map(|action| {
+                                conflicts
+                                    .into_iter()
+                                    .map(|operation| {
+                                        tendi_core::skill_backup::BackupRestoreResolution {
+                                            id: operation.id.clone(),
+                                            action: action.action().into(),
+                                        }
+                                    })
+                                    .collect::<Vec<_>>()
+                            })
+                            .unwrap_or_default();
+                        let result = tendi_core::skill_backup::apply_backup_pull(
+                            &plan,
+                            &store,
+                            &cwd,
+                            &resolutions,
+                        )?;
+                        println!("{}", serde_json::to_string_pretty(&result)?);
                     }
                 }
                 BackupCommand::Versions { limit, json } => {

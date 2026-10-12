@@ -50,6 +50,7 @@ fn skill_projection_writer(method: &str) -> bool {
             | "bundled_skill_install"
             | "bundled_skill_remove"
             | "skills_backup_restore"
+            | "skills_backup_pull"
             | "skills_backup_adopt"
             | "skills_backup_adopt_many"
     )
@@ -244,6 +245,9 @@ impl Daemon {
             if method == "mcp_probe" {
                 return Ok(daemon.mcp_probe_step(params, execute));
             }
+            if method == "skills_backup_pull" {
+                return Ok(daemon.skills_backup_pull_step(params, workload, execute));
+            }
             if method == "skills_update" {
                 let request: runtime_schema::SkillsUpdateRequest =
                     serde_json::from_value(params)
@@ -340,6 +344,80 @@ impl Daemon {
                 }
                 Ok(Step::Complete(execute(None)))
             }))
+        })
+    }
+
+    fn skills_backup_pull_step(
+        &self,
+        params: Value,
+        workload: Workload,
+        execute: Execute,
+    ) -> Step<RpcResult> {
+        let daemon = self.clone();
+        Step::acquire(Workload::Prepare, Vec::new(), move || {
+            let request: runtime_schema::SkillsBackupPullRequest =
+                serde_json::from_value(params.clone())
+                    .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+            let store = daemon.open_store()?;
+            let config = store
+                .skill_backup_config()?
+                .ok_or_else(|| anyhow::anyhow!("sync is not configured"))?;
+            let checkout_paths =
+                tendi_core::skill_backup::checkout_mutation_resource_paths(&config.checkout_path)?;
+            Ok(Step::acquire(
+                Workload::ExternalIo,
+                vec![ResourceRequest::files(checkout_paths.clone())?],
+                move || {
+                    let store = daemon.open_store()?;
+                    // The configured checkout may change while admission waits.
+                    if !store.skill_backup_config()?.is_some_and(|current| {
+                        current.remote_url == config.remote_url
+                            && current.checkout_path == config.checkout_path
+                    }) {
+                        return Ok(daemon.prepare_rpc_step(
+                            "skills_backup_pull".into(),
+                            params,
+                            workload,
+                            execute,
+                        ));
+                    }
+                    let plan = match daemon.prepare_backup_pull(&store, &request) {
+                        Ok(plan) => plan,
+                        Err(error) => {
+                            return Ok(Step::Complete(execute(Some(Box::new(move || Err(error))))));
+                        }
+                    };
+                    if request.dry_run.unwrap_or(false) {
+                        return Ok(Step::Complete(execute(Some(Box::new(move || {
+                            serde_json::to_value(plan).map_err(internal_error)
+                        })))));
+                    }
+                    let mut paths = tendi_core::skill_backup::pull_resource_paths(&plan);
+                    paths.extend(checkout_paths);
+                    let resources = vec![
+                        skills_projection_resource(&store),
+                        ResourceRequest::files(paths)?,
+                    ];
+                    Ok(Step::acquire(workload, resources, move || {
+                        let store = daemon.open_store()?;
+                        if !tendi_core::skill_backup::backup_pull_plan_is_current(&plan, &store)? {
+                            return Ok(daemon.prepare_rpc_step(
+                                "skills_backup_pull".into(),
+                                params,
+                                workload,
+                                execute,
+                            ));
+                        }
+                        Ok(Step::Complete(execute(Some(Box::new(move || {
+                            daemon
+                                .finish_backup_pull(request, plan)
+                                .and_then(|response| {
+                                    serde_json::to_value(response).map_err(internal_error)
+                                })
+                        })))))
+                    }))
+                },
+            ))
         })
     }
 
@@ -877,6 +955,7 @@ fn keep_cleanup<T: Send + 'static>(step: Step<T>, cleanup: Cleanup) -> Step<T> {
 fn projection_dependencies(method: &str) -> &'static [&'static str] {
     match method {
         "scan" => &["agents", "skills", "rules", "hooks", "mcp"],
+        "skills_backup_pull" => &["skills", "mcp", "hooks", "rules"],
         "skill_file_save"
         | "skill_file_create"
         | "skill_folder_create"

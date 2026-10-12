@@ -15,6 +15,14 @@ const BACKUP_MANIFEST_VERSION: u32 = 1;
 const MAX_SKILL_BYTES: u64 = 100 * 1024 * 1024;
 const MAX_SKILL_FILES: usize = 1_000;
 
+#[path = "skill_pull.rs"]
+mod pull;
+pub(crate) use pull::PullReceipt;
+pub use pull::{
+    BackupPullPlan, apply_backup_pull, backup_pull_plan_is_current, plan_backup_pull,
+    pull_resource_paths,
+};
+
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BackupCategorySelection {
@@ -378,6 +386,24 @@ pub fn plan_backup_restore(
     })
 }
 
+fn restored_skill_source_record(
+    skill: &BackupSkill,
+    target: &Path,
+    revision: &str,
+) -> SkillSourceRecord {
+    SkillSourceRecord {
+        skill_name: skill.name.clone(),
+        skill_path: target.to_path_buf(),
+        source_kind: "tendi-backup".to_string(),
+        source: None,
+        source_ref: Some(revision.to_string()),
+        source_version: skill.source.source_version.clone(),
+        source_relative_path: Some(format!("skills/{}", skill.id)),
+        update_status: "local".to_string(),
+        origin: "tendi-backup-restore".to_string(),
+    }
+}
+
 fn restore_artifact_target(artifact: &BackupArtifact) -> Result<PathBuf> {
     let agent = crate::providers::parse_agent(&artifact.agent)
         .with_context(|| format!("backup artifact {} has an unknown provider", artifact.name))?;
@@ -418,14 +444,11 @@ pub fn apply_backup_restore(
     Ok(result.operations)
 }
 
-pub fn apply_backup_restore_without_database(
+fn resolve_restore_operations(
     plan: &BackupRestorePlan,
     resolutions: &[BackupRestoreResolution],
-) -> Result<BackupRestoreApplyResult> {
-    let _resources =
-        crate::coordination::acquire_file_resources(&backup_restore_resource_paths(plan))?;
+) -> Result<Vec<BackupRestoreOperation>> {
     let mut operations = plan.operations.clone();
-    let mut source_records = Vec::new();
     let mut resolutions_by_id = BTreeMap::new();
     for resolution in resolutions {
         if resolutions_by_id
@@ -461,6 +484,15 @@ pub fn apply_backup_restore_without_database(
                 operation.message = None;
             }
             "keep-both" => {
+                if plan
+                    .artifacts
+                    .get(&operation.id)
+                    .is_some_and(|artifact| !artifact.entry_key.is_empty())
+                {
+                    bail!(
+                        "entry sync contents support keep existing or replace; keep-both is not supported"
+                    );
+                }
                 reserved_targets.remove(&operation.target);
                 operation.target = if operation.category == "skills" {
                     unique_restore_target(&operation.target, &reserved_targets)?
@@ -474,18 +506,20 @@ pub fn apply_backup_restore_without_database(
             _ => bail!("unknown sync restore resolution {action}"),
         }
     }
+    Ok(operations)
+}
+
+pub fn apply_backup_restore_without_database(
+    plan: &BackupRestorePlan,
+    resolutions: &[BackupRestoreResolution],
+) -> Result<BackupRestoreApplyResult> {
+    let _resources =
+        crate::coordination::acquire_file_resources(&backup_restore_resource_paths(plan))?;
+    let mut operations = resolve_restore_operations(plan, resolutions)?;
+    let mut source_records = Vec::new();
     for operation in &mut operations {
         if operation.status != "planned" && operation.status != "replace" {
             continue;
-        }
-        let replacing = operation.status == "replace";
-        if replacing && operation.category == "skills" {
-            remove_restore_target(&plan.target_root, &operation.target)?;
-            operation.status = "planned".to_string();
-        } else if replacing && operation.target.exists() {
-            fs::remove_file(&operation.target)
-                .with_context(|| format!("failed to replace {}", operation.target.display()))?;
-            operation.status = "planned".to_string();
         }
         let is_entry_artifact = if operation.category == "skills" {
             false
@@ -494,6 +528,15 @@ pub fn apply_backup_restore_without_database(
                 .get(&operation.id)
                 .is_some_and(|artifact| !artifact.entry_key.is_empty())
         };
+        let replacing = operation.status == "replace";
+        if replacing && operation.category == "skills" {
+            remove_restore_target(&plan.target_root, &operation.target)?;
+            operation.status = "planned".to_string();
+        } else if replacing && !is_entry_artifact && operation.target.exists() {
+            fs::remove_file(&operation.target)
+                .with_context(|| format!("failed to replace {}", operation.target.display()))?;
+            operation.status = "planned".to_string();
+        }
         if !is_entry_artifact && operation.target.exists() {
             bail!(
                 "restore target {} changed after the preview; create a new restore plan",
@@ -532,17 +575,7 @@ pub fn apply_backup_restore_without_database(
                 fs::write(&target, content)
                     .with_context(|| format!("failed to restore {}", target.display()))?;
             }
-            let record = SkillSourceRecord {
-                skill_name: skill.name.clone(),
-                skill_path: operation.target.clone(),
-                source_kind: "tendi-backup".to_string(),
-                source: None,
-                source_ref: Some(plan.revision.clone()),
-                source_version: skill.source.source_version.clone(),
-                source_relative_path: Some(format!("skills/{}", skill.id)),
-                update_status: "local".to_string(),
-                origin: "tendi-backup-restore".to_string(),
-            };
+            let record = restored_skill_source_record(skill, &operation.target, &plan.revision);
             source_records.push(record);
         } else {
             let artifact = plan
@@ -753,6 +786,14 @@ pub fn backup_statuses_for_paths(
 }
 
 pub fn backup_catalog(store: &Store, cwd: &Path) -> Result<BackupCatalog> {
+    backup_catalog_with_contents(store, cwd, None)
+}
+
+fn backup_catalog_with_contents(
+    store: &Store,
+    cwd: &Path,
+    contents: Option<&BackupContents>,
+) -> Result<BackupCatalog> {
     let mut catalog = BackupCatalog::default();
     if let Some(scan) = store.list_skills_cached_for_workspace(cwd)? {
         let mut skills = Vec::new();
@@ -788,9 +829,12 @@ pub fn backup_catalog(store: &Store, cwd: &Path) -> Result<BackupCatalog> {
         catalog.skills = skills;
     }
 
+    let mcp_inventory = store.list_mcp_for_workspace(cwd)?;
+    if contents.is_some_and(|contents| contents.mcp.enabled) && mcp_inventory.is_none() {
+        bail!("refresh the MCP inventory before syncing the selected set");
+    }
     catalog.mcp = catalog_entry_items(
-        store
-            .list_mcp_for_workspace(cwd)?
+        mcp_inventory
             .map(|scan| scan.servers)
             .unwrap_or_default()
             .into_iter()
@@ -810,9 +854,12 @@ pub fn backup_catalog(store: &Store, cwd: &Path) -> Result<BackupCatalog> {
             .collect(),
         "mcp",
     );
+    let rules_inventory = store.list_rules_for_workspace(cwd)?;
+    if contents.is_some_and(|contents| contents.rules.enabled) && rules_inventory.is_none() {
+        bail!("refresh the rules inventory before syncing the selected set");
+    }
     catalog.rules = catalog_source_files(
-        store
-            .list_rules_for_workspace(cwd)?
+        rules_inventory
             .map(|scan| scan.rules)
             .unwrap_or_default()
             .into_iter()
@@ -829,9 +876,12 @@ pub fn backup_catalog(store: &Store, cwd: &Path) -> Result<BackupCatalog> {
             .collect(),
         "rules",
     );
+    let hooks_inventory = store.list_hooks_for_workspace(cwd)?;
+    if contents.is_some_and(|contents| contents.hooks.enabled) && hooks_inventory.is_none() {
+        bail!("refresh the hooks inventory before syncing the selected set");
+    }
     catalog.hooks = catalog_entry_items(
-        store
-            .list_hooks_for_workspace(cwd)?
+        hooks_inventory
             .map(|scan| scan.hooks)
             .unwrap_or_default()
             .into_iter()
@@ -973,55 +1023,46 @@ pub fn backup_now(store: &Store, cwd: &Path) -> Result<BackupSyncReport> {
         &checkout_mutation_resource_paths(&config.checkout_path)?,
     )?;
     let has_remote = ensure_checkout(&config)?;
-    let (existing_manifest, preserved_checkout) = if has_remote {
-        synchronize_remote_checkout(&config)?
-    } else {
-        (read_checkout_manifest(&config.checkout_path)?, None)
-    };
-    let temporary_root = preserved_checkout.as_ref().map(|(_, root)| root.clone());
-    let existing_manifest = match preserved_checkout {
-        Some((preserved, _)) => Some(merge_manifests(existing_manifest, preserved)?),
-        None => existing_manifest,
-    };
-    let result = if local_manifest.skills.is_empty()
-        && local_manifest.artifacts.is_empty()
-        && existing_manifest.is_some()
-    {
-        // A newly connected device has no managed skills until the user chooses
-        // restore targets. Never turn that empty local state into a destructive
-        // remote commit.
-        Ok(BackupSyncReport {
-            manifest: existing_manifest.expect("checked above"),
-            commit: None,
-            pushed: false,
-        })
-    } else {
-        (|| {
-            let manifest = merge_manifests(existing_manifest, local_manifest)?;
-            write_snapshot(&manifest, &config.checkout_path)?;
-            let changed = commit_checkout(&config, &manifest, &machine_name)?;
-            let needs_push = has_remote && (changed || checkout_needs_push(&config.checkout_path)?);
-            if needs_push {
-                run_git_success(
-                    &config.checkout_path,
-                    ["push", "--set-upstream", "origin", "main"],
-                    true,
-                )?;
+    let merge_started = has_remote && prepare_publish_checkout(&config)?;
+    // A sync publishes the selected current state. Earlier states remain in
+    // Git history rather than becoming additional entries in the live set.
+    let result = (|| {
+        let manifest = local_manifest;
+        let publish = write_snapshot(&manifest, &config.checkout_path)
+            .and_then(|()| commit_checkout(&config, &manifest, &machine_name));
+        let changed = match publish {
+            Ok(changed) => changed,
+            Err(error) => {
+                if merge_started {
+                    if let Err(rollback_error) =
+                        run_git_success(&config.checkout_path, ["merge", "--abort"], false)
+                    {
+                        return Err(error.context(format!(
+                            "failed to abort the sync merge: {rollback_error:#}"
+                        )));
+                    }
+                }
+                return Err(error);
             }
-            Ok(BackupSyncReport {
-                manifest,
-                commit: if changed || needs_push {
-                    Some(current_commit(&config.checkout_path)?)
-                } else {
-                    None
-                },
-                pushed: needs_push,
-            })
-        })()
-    };
-    if let Some(root) = temporary_root {
-        let _ = fs::remove_dir_all(root);
-    }
+        };
+        let needs_push = has_remote && (changed || checkout_needs_push(&config.checkout_path)?);
+        if needs_push {
+            run_git_success(
+                &config.checkout_path,
+                ["push", "--set-upstream", "origin", "main"],
+                true,
+            )?;
+        }
+        Ok(BackupSyncReport {
+            manifest,
+            commit: if changed || needs_push {
+                Some(current_commit(&config.checkout_path)?)
+            } else {
+                None
+            },
+            pushed: needs_push,
+        })
+    })();
     result
 }
 
@@ -1035,11 +1076,10 @@ pub fn sync_checkout_for_restore(config: &BackupConfig) -> Result<Option<BackupM
     if !has_remote {
         return read_checkout_manifest(&config.checkout_path);
     }
-    let (manifest, preserved_checkout) = synchronize_remote_checkout(config)?;
-    if let Some((_, temporary_root)) = preserved_checkout {
-        let _ = fs::remove_dir_all(temporary_root);
-    }
-    Ok(manifest)
+    let revision = refresh_remote_checkout(config)?;
+    revision
+        .map(|revision| manifest_at_revision(&config.checkout_path, &revision))
+        .transpose()
 }
 
 pub fn backup_versions(store: &Store, limit: usize) -> Result<Vec<BackupVersion>> {
@@ -1198,20 +1238,9 @@ pub fn build_manifest(
                 continue;
             }
         };
-        let base_id = backup_skill_id(record);
-        let content_id = sha256_hex(
-            serde_json::to_string(&files)
-                .expect("backup file metadata serializes")
-                .as_bytes(),
-        );
-        let mut id = base_id.clone();
+        let id = backup_skill_id(record);
         if skills.iter().any(|skill: &BackupSkill| skill.id == id) {
-            id = format!("{base_id}-{}", &content_id[..8]);
-        }
-        let mut suffix = 2usize;
-        while skills.iter().any(|skill: &BackupSkill| skill.id == id) {
-            id = format!("{base_id}-{}-{suffix}", &content_id[..8]);
-            suffix += 1;
+            bail!("multiple skill installations have the same sync identity {id}");
         }
         source_paths.insert(id.clone(), record.skill_path.clone());
         skills.push(BackupSkill {
@@ -1248,7 +1277,14 @@ pub fn build_backup_manifest(
     config: &BackupConfig,
     machine_name: &str,
 ) -> Result<BackupManifest> {
-    let catalog = backup_catalog(store, cwd)?;
+    let inventory_available = store.list_skills_cached_for_workspace(cwd)?.is_some();
+    if !inventory_available
+        && config.contents.skills.enabled
+        && !config.contents.skills.excluded.is_empty()
+    {
+        bail!("refresh the skill inventory before syncing the selected set");
+    }
+    let catalog = backup_catalog_with_contents(store, cwd, Some(&config.contents))?;
     let skill_ids = catalog
         .skills
         .iter()
@@ -1269,7 +1305,7 @@ pub fn build_backup_manifest(
             if !config.contents.skills.enabled {
                 return false;
             }
-            if catalog.skills.is_empty() {
+            if !inventory_available {
                 return true;
             }
             let path = record
@@ -1285,6 +1321,17 @@ pub fn build_backup_manifest(
             device_label: machine_name.to_string(),
         },
     )?;
+    if let Some(excluded) = manifest
+        .excluded
+        .iter()
+        .find(|skill| skill.reason != "missing-skill-file")
+    {
+        bail!(
+            "cannot sync selected skill {}: {}; fix it or exclude it before syncing",
+            excluded.name,
+            excluded.reason
+        );
+    }
     let mut artifact_source_paths = BTreeMap::new();
     let mut artifact_contents = BTreeMap::new();
     for (category, selection, items) in [
@@ -1388,6 +1435,15 @@ pub fn write_snapshot(manifest: &BackupManifest, destination: &Path) -> Result<(
     let _resources = crate::coordination::acquire_file_resources(&[destination.to_path_buf()])?;
     fs::create_dir_all(destination)
         .with_context(|| format!("failed to create backup snapshot {}", destination.display()))?;
+    let previous = read_checkout_manifest(destination)?;
+    for category in ["skills", "mcp", "rules", "hooks"] {
+        let root = destination.join(category);
+        if let Ok(metadata) = fs::symlink_metadata(&root) {
+            if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                bail!("sync category {} must be a directory", root.display());
+            }
+        }
+    }
     let skills_root = destination.join("skills");
     fs::create_dir_all(&skills_root)?;
     for skill in &manifest.skills {
@@ -1431,6 +1487,30 @@ pub fn write_snapshot(manifest: &BackupManifest, destination: &Path) -> Result<(
             verify_snapshot_artifact(artifact, &target)?;
         }
     }
+    // Remove only paths owned by the previous manifest. Unrelated repository
+    // files are not part of the synchronized set.
+    if let Some(previous) = previous {
+        for skill in previous.skills {
+            if !manifest.skills.iter().any(|current| current.id == skill.id) {
+                let target = destination.join("skills").join(&skill.id);
+                if target.exists() {
+                    fs::remove_dir_all(target)?;
+                }
+            }
+        }
+        for artifact in previous.artifacts {
+            if !manifest
+                .artifacts
+                .iter()
+                .any(|current| current.category == artifact.category && current.id == artifact.id)
+            {
+                let target = destination.join(&artifact.category).join(&artifact.id);
+                if target.exists() {
+                    fs::remove_dir_all(target)?;
+                }
+            }
+        }
+    }
     fs::write(
         destination.join("manifest.json"),
         serde_json::to_vec_pretty(manifest)?,
@@ -1442,112 +1522,6 @@ pub fn write_snapshot(manifest: &BackupManifest, destination: &Path) -> Result<(
         )
     })?;
     Ok(())
-}
-
-fn merge_manifests(
-    existing: Option<BackupManifest>,
-    mut local: BackupManifest,
-) -> Result<BackupManifest> {
-    let Some(mut merged) = existing else {
-        return Ok(local);
-    };
-    merged.device_label = local.device_label.clone();
-    for mut skill in local.skills.drain(..) {
-        let original_id = skill.id.clone();
-        if merged
-            .skills
-            .iter()
-            .any(|existing| existing.files == skill.files)
-        {
-            continue;
-        }
-        let content_id = sha256_hex(
-            serde_json::to_string(&skill.files)
-                .expect("backup file metadata serializes")
-                .as_bytes(),
-        );
-        if merged.skills.iter().any(|existing| existing.id == skill.id) {
-            let base = skill.id.clone();
-            skill.id = format!("{base}-{}", &content_id[..8]);
-            let mut suffix = 2usize;
-            while merged.skills.iter().any(|existing| existing.id == skill.id) {
-                skill.id = format!("{base}-{}-{suffix}", &content_id[..8]);
-                suffix += 1;
-            }
-        }
-        if let Some(source_path) = local.source_paths.remove(&original_id) {
-            merged.source_paths.insert(skill.id.clone(), source_path);
-        }
-        merged.skills.push(skill);
-    }
-    for mut artifact in local.artifacts.drain(..) {
-        let original_id = artifact.id.clone();
-        let original_key = artifact_key(&artifact.category, &original_id);
-        if merged.artifacts.iter().any(|existing| {
-            existing.category == artifact.category
-                && existing.agent == artifact.agent
-                && existing.source_relative_path == artifact.source_relative_path
-                && existing.entry_key == artifact.entry_key
-                && existing.entry_selector == artifact.entry_selector
-                && existing.files == artifact.files
-        }) {
-            continue;
-        }
-        if merged
-            .artifacts
-            .iter()
-            .any(|existing| existing.id == artifact.id)
-        {
-            let content_id = sha256_hex(
-                serde_json::to_string(&artifact.files)
-                    .expect("backup artifact metadata serializes")
-                    .as_bytes(),
-            );
-            let base = artifact.id.clone();
-            artifact.id = format!("{base}-{}", &content_id[..8]);
-            let mut suffix = 2usize;
-            while merged
-                .artifacts
-                .iter()
-                .any(|existing| existing.id == artifact.id)
-            {
-                artifact.id = format!("{base}-{}-{suffix}", &content_id[..8]);
-                suffix += 1;
-            }
-        }
-        if let Some(source_path) = local.artifact_source_paths.remove(&original_key) {
-            merged
-                .artifact_source_paths
-                .insert(artifact_key(&artifact.category, &artifact.id), source_path);
-        }
-        if let Some(content) = local.artifact_contents.remove(&original_key) {
-            merged
-                .artifact_contents
-                .insert(artifact_key(&artifact.category, &artifact.id), content);
-        }
-        merged.artifacts.push(artifact);
-    }
-    let mut excluded = merged
-        .excluded
-        .into_iter()
-        .map(|skill| (skill.name, skill.reason))
-        .collect::<BTreeSet<_>>();
-    excluded.extend(
-        local
-            .excluded
-            .into_iter()
-            .map(|skill| (skill.name, skill.reason)),
-    );
-    merged.excluded = excluded
-        .into_iter()
-        .map(|(name, reason)| BackupExcludedSkill { name, reason })
-        .collect();
-    merged.skills.sort_by(|left, right| left.id.cmp(&right.id));
-    merged
-        .artifacts
-        .sort_by(|left, right| left.id.cmp(&right.id));
-    validate_manifest(&merged)?;
-    Ok(merged)
 }
 
 fn verify_snapshot_skill(skill: &BackupSkill, target: &Path) -> Result<()> {
@@ -1633,7 +1607,11 @@ pub fn validate_manifest(manifest: &BackupManifest) -> Result<()> {
     }
     let mut ids = BTreeSet::new();
     for skill in &manifest.skills {
-        if skill.id.trim().is_empty() || skill.id.contains('/') || skill.id.contains('\\') {
+        if skill.id.trim().is_empty()
+            || matches!(skill.id.as_str(), "." | "..")
+            || skill.id.contains('/')
+            || skill.id.contains('\\')
+        {
             bail!("backup manifest contains an invalid skill id");
         }
         if !ids.insert(&skill.id) {
@@ -1663,6 +1641,7 @@ pub fn validate_manifest(manifest: &BackupManifest) -> Result<()> {
     let mut artifact_ids = BTreeSet::new();
     for artifact in &manifest.artifacts {
         if artifact.id.trim().is_empty()
+            || matches!(artifact.id.as_str(), "." | "..")
             || artifact.id.contains('/')
             || artifact.id.contains('\\')
             || artifact.category.trim().is_empty()
@@ -1670,6 +1649,9 @@ pub fn validate_manifest(manifest: &BackupManifest) -> Result<()> {
             || artifact.category.contains('\\')
         {
             bail!("backup manifest contains an invalid artifact id");
+        }
+        if !matches!(artifact.category.as_str(), "mcp" | "rules" | "hooks") {
+            bail!("backup manifest contains an unsupported artifact category");
         }
         if !artifact_ids.insert(&artifact.id) {
             bail!(
@@ -1728,8 +1710,22 @@ pub fn validate_manifest(manifest: &BackupManifest) -> Result<()> {
 }
 
 fn backup_exclusion_reason(skill_path: &Path) -> Result<Option<String>> {
-    if !skill_path.join("SKILL.md").is_file() {
-        return Ok(Some("missing-skill-file".to_string()));
+    let skill_file = skill_path.join("SKILL.md");
+    match fs::symlink_metadata(&skill_file) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            return Ok(Some("unsupported-symlink".to_string()));
+        }
+        Ok(metadata) if !metadata.is_file() => {
+            return Ok(Some("invalid-skill-file".to_string()));
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(Some("missing-skill-file".to_string()));
+        }
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("failed to inspect {}", skill_file.display()));
+        }
     }
     if is_inside_git_worktree(skill_path) {
         return Ok(Some("project-repository".to_string()));
@@ -1877,8 +1873,14 @@ fn backup_skill_id(record: &SkillSourceRecord) -> String {
             }
         }
     }
-    let slug = record
-        .skill_name
+    let installation = record
+        .skill_path
+        .canonicalize()
+        .unwrap_or_else(|_| record.skill_path.clone());
+    let slug = installation
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("skill")
         .chars()
         .map(|character| {
             if character.is_ascii_alphanumeric() {
@@ -1890,11 +1892,9 @@ fn backup_skill_id(record: &SkillSourceRecord) -> String {
         .collect::<String>()
         .trim_matches('-')
         .to_string();
-    if slug.is_empty() {
-        "skill".to_string()
-    } else {
-        slug
-    }
+    let slug = if slug.is_empty() { "skill" } else { &slug };
+    let installation_id = sha256_hex(installation.to_string_lossy().as_bytes());
+    format!("{slug}-{}", &installation_id[..16])
 }
 
 fn portable_source(record: &SkillSourceRecord) -> BackupSkillSource {
@@ -2022,61 +2022,57 @@ fn checkout_has_remote(checkout: &Path) -> Result<bool> {
     Ok(remote.status.success() && !String::from_utf8_lossy(&remote.stdout).trim().is_empty())
 }
 
-fn synchronize_remote_checkout(
-    config: &BackupConfig,
-) -> Result<(Option<BackupManifest>, Option<(BackupManifest, PathBuf)>)> {
+// Fetching never publishes local inventory. Only an explicit sync replaces the
+// live set; pulling reads the remote revision even if this checkout is ahead.
+fn refresh_remote_checkout(config: &BackupConfig) -> Result<Option<String>> {
     if checkout_has_conflicts(&config.checkout_path) {
-        bail!("backup checkout has unresolved Git conflicts");
+        bail!("sync checkout has unresolved Git conflicts");
     }
-    let current_manifest = read_checkout_manifest(&config.checkout_path)?;
     run_git_success(&config.checkout_path, ["fetch", "origin"], true)?;
-    let remote_head = git_output(
+    let remote = git_output(
         &config.checkout_path,
         ["rev-parse", "--verify", "refs/remotes/origin/main"],
         false,
     )?;
-    if !remote_head.status.success() {
-        return Ok((current_manifest, None));
+    if !remote.status.success() {
+        return Ok(None);
     }
-    let local_head = git_output(
+    let revision = String::from_utf8_lossy(&remote.stdout).trim().to_string();
+    let head = git_output(
         &config.checkout_path,
         ["rev-parse", "--verify", "HEAD"],
         false,
     )?;
-    if !local_head.status.success() {
+    if !head.status.success() || git_is_ancestor(&config.checkout_path, "HEAD", "origin/main")? {
         run_git_success(
             &config.checkout_path,
             ["checkout", "-B", "main", "origin/main"],
             false,
         )?;
-        return Ok((read_checkout_manifest(&config.checkout_path)?, None));
     }
-    if git_is_ancestor(&config.checkout_path, "HEAD", "origin/main")? {
-        run_git_success(
-            &config.checkout_path,
-            ["checkout", "-B", "main", "origin/main"],
-            false,
-        )?;
-        return Ok((read_checkout_manifest(&config.checkout_path)?, None));
-    }
-    if git_is_ancestor(&config.checkout_path, "origin/main", "HEAD")? {
-        return Ok((current_manifest, None));
-    }
+    Ok(Some(revision))
+}
 
-    let manifest = current_manifest.context("diverged backup checkout is missing manifest.json")?;
-    let (preserved, temporary_root) = capture_checkout_manifest(&manifest, &config.checkout_path)?;
-    if let Err(error) = run_git_success(
-        &config.checkout_path,
-        ["checkout", "-B", "main", "origin/main"],
-        false,
-    ) {
-        let _ = fs::remove_dir_all(&temporary_root);
-        return Err(error.context("failed to switch a diverged backup checkout to the remote head"));
+fn prepare_publish_checkout(config: &BackupConfig) -> Result<bool> {
+    if refresh_remote_checkout(config)?.is_some()
+        && !git_is_ancestor(&config.checkout_path, "origin/main", "HEAD")?
+    {
+        // Retain both devices' commits in history, then publish the selected
+        // local snapshot in the merge commit. No old entries join the live set.
+        run_git_success(
+            &config.checkout_path,
+            [
+                "merge",
+                "--allow-unrelated-histories",
+                "--strategy=ours",
+                "--no-commit",
+                "origin/main",
+            ],
+            false,
+        )?;
+        return Ok(true);
     }
-    Ok((
-        read_checkout_manifest(&config.checkout_path)?,
-        Some((preserved, temporary_root)),
-    ))
+    Ok(false)
 }
 
 fn git_is_ancestor(checkout: &Path, first: &str, second: &str) -> Result<bool> {
@@ -2108,51 +2104,6 @@ fn checkout_needs_push(checkout: &Path) -> Result<bool> {
     Ok(!git_is_ancestor(checkout, "HEAD", "origin/main")?)
 }
 
-fn capture_checkout_manifest(
-    manifest: &BackupManifest,
-    checkout: &Path,
-) -> Result<(BackupManifest, PathBuf)> {
-    let temporary_root = std::env::temp_dir().join(format!(
-        "tendi-skill-backup-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos(),
-    ));
-    fs::create_dir_all(&temporary_root)
-        .with_context(|| format!("failed to create {}", temporary_root.display()))?;
-    let mut preserved = manifest.clone();
-    for skill in &manifest.skills {
-        let source = checkout.join("skills").join(&skill.id);
-        let target = temporary_root.join(&skill.id);
-        if let Err(error) = copy_skill_files(skill, &source, &target) {
-            let _ = fs::remove_dir_all(&temporary_root);
-            return Err(error);
-        }
-        preserved.source_paths.insert(skill.id.clone(), target);
-    }
-    for artifact in &manifest.artifacts {
-        let Some(file) = artifact.files.first() else {
-            continue;
-        };
-        let source = checkout
-            .join(&artifact.category)
-            .join(&artifact.id)
-            .join(safe_relative_path(&file.path)?);
-        let content =
-            fs::read(&source).with_context(|| format!("failed to read {}", source.display()))?;
-        if sha256_hex(&content) != file.sha256 || content.len() as u64 != file.size {
-            let _ = fs::remove_dir_all(&temporary_root);
-            bail!("backup artifact content did not match its manifest");
-        }
-        preserved
-            .artifact_contents
-            .insert(artifact_key(&artifact.category, &artifact.id), content);
-    }
-    Ok((preserved, temporary_root))
-}
-
 fn commit_checkout(
     config: &BackupConfig,
     manifest: &BackupManifest,
@@ -2164,10 +2115,17 @@ fn commit_checkout(
         ["diff", "--cached", "--quiet"],
         false,
     )?;
-    if diff.status.success() {
+    let merging = git_output(
+        &config.checkout_path,
+        ["rev-parse", "--verify", "MERGE_HEAD"],
+        false,
+    )?
+    .status
+    .success();
+    if diff.status.success() && !merging {
         return Ok(false);
     }
-    if diff.status.code() != Some(1) {
+    if !diff.status.success() && diff.status.code() != Some(1) {
         bail!("failed to determine whether the backup checkout changed");
     }
     run_git_success(
@@ -2175,12 +2133,12 @@ fn commit_checkout(
         [
             "config",
             "user.name",
-            &format!("Tendi Backup ({machine_name})"),
+            &format!("Tendi Sync ({machine_name})"),
         ],
         false,
     )?;
     let message = format!(
-        "backup: {} skill{} and {} configuration source{} from {}",
+        "sync: {} skill{} and {} configuration source{} from {}",
         manifest.skills.len(),
         if manifest.skills.len() == 1 { "" } else { "s" },
         manifest.artifacts.len(),

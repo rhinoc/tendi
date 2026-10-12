@@ -200,6 +200,149 @@ fn projection_refresh_contention_leaves_durable_work_pending() {
 }
 
 #[test]
+#[cfg(unix)]
+fn offline_sync_refreshes_enabled_inventory_and_saved_exclusions() {
+    const CHILD_HOME: &str = "TENDI_CLI_SYNC_TEST_HOME";
+    let Ok(home) = env::var(CHILD_HOME) else {
+        let root = env::temp_dir().join(format!(
+            "tendi-cli-sync-inventory-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(root.join("home")).unwrap();
+        std::fs::create_dir_all(root.join("workspace")).unwrap();
+        let root = root.canonicalize().unwrap();
+        let output = std::process::Command::new(env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "tests::offline_sync_refreshes_enabled_inventory_and_saved_exclusions",
+                "--nocapture",
+            ])
+            .env_clear()
+            .env("PATH", env::var_os("PATH").unwrap_or_default())
+            .env("HOME", root.join("home"))
+            .env(CHILD_HOME, root.join("home"))
+            .current_dir(root.join("workspace"))
+            .output()
+            .unwrap();
+        let _ = std::fs::remove_dir_all(root);
+        assert!(
+            output.status.success(),
+            "isolated sync test failed:\n{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    };
+    let home = std::path::PathBuf::from(home);
+    let root = home.parent().unwrap();
+    let cwd = root.join("workspace");
+    let store = tendi_core::storage::Store::open(root.join("state.db")).unwrap();
+    let skill_root = home.join(".agents/skills");
+    let write_skill = |name: &str| {
+        let path = skill_root.join(name);
+        std::fs::create_dir_all(&path).unwrap();
+        std::fs::write(
+            path.join("SKILL.md"),
+            format!("---\nname: {name}\ndescription: Test skill\n---\n{name}\n"),
+        )
+        .unwrap();
+        tendi_core::skill_backup::adopt_skill_for_backup(&store, &cwd, &path, name).unwrap();
+    };
+    write_skill("keep");
+    write_skill("excluded");
+    std::fs::create_dir_all(home.join(".codex")).unwrap();
+    std::fs::write(
+        home.join(".codex/config.toml"),
+        "[mcp_servers.synced]\ncommand = '/bin/echo'\n",
+    )
+    .unwrap();
+    std::fs::write(home.join(".codex/AGENTS.md"), "First rule\n").unwrap();
+    std::fs::create_dir_all(home.join(".claude")).unwrap();
+    std::fs::write(
+        home.join(".claude/settings.json"),
+        r#"{"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"echo synced"}]}]}}"#,
+    )
+    .unwrap();
+    let mut config = tendi_core::skill_backup::BackupConfig::new("", root.join("checkout"));
+    store.save_skill_backup_config(&config).unwrap();
+    refresh_backup_inventory(&store, &cwd).unwrap();
+    for domain in ["skills", "mcp", "rules", "hooks"] {
+        assert_eq!(
+            store.projection_status(domain, &cwd).unwrap(),
+            tendi_core::storage::ProjectionStatus::Fresh
+        );
+    }
+    let catalog = tendi_core::skill_backup::backup_catalog(&store, &cwd).unwrap();
+    assert!(!catalog.mcp.is_empty());
+    assert!(!catalog.rules.is_empty());
+    assert!(!catalog.hooks.is_empty());
+    config.contents.skills.excluded = vec![
+        catalog
+            .skills
+            .iter()
+            .find(|item| item.label == "excluded")
+            .unwrap()
+            .id
+            .clone(),
+    ];
+    store.save_skill_backup_config(&config).unwrap();
+
+    std::fs::remove_dir_all(skill_root.join("keep")).unwrap();
+    write_skill("fresh");
+    std::fs::write(home.join(".codex/AGENTS.md"), "Updated rule\n").unwrap();
+    refresh_backup_inventory(&store, &cwd).unwrap();
+    let report = tendi_core::skill_backup::backup_now(&store, &cwd).unwrap();
+    assert_eq!(report.manifest.skills.len(), 1);
+    assert_eq!(report.manifest.skills[0].name, "fresh");
+    for category in ["mcp", "rules", "hooks"] {
+        assert!(
+            report
+                .manifest
+                .artifacts
+                .iter()
+                .any(|artifact| artifact.category == category)
+        );
+    }
+    let rule = report
+        .manifest
+        .artifacts
+        .iter()
+        .find(|artifact| artifact.category == "rules" && artifact.agent == "codex")
+        .unwrap();
+    assert_eq!(
+        std::fs::read_to_string(
+            config
+                .checkout_path
+                .join("rules")
+                .join(&rule.id)
+                .join(&rule.files[0].path)
+        )
+        .unwrap(),
+        "Updated rule\n"
+    );
+
+    config.contents.skills.enabled = false;
+    config.contents.mcp.enabled = false;
+    config.contents.rules.enabled = false;
+    config.contents.hooks.enabled = false;
+    store.save_skill_backup_config(&config).unwrap();
+    for domain in ["skills", "mcp", "rules", "hooks"] {
+        store.invalidate_projection(domain, &cwd).unwrap();
+    }
+    refresh_backup_inventory(&store, &cwd).unwrap();
+    for domain in ["skills", "mcp", "rules", "hooks"] {
+        assert_ne!(
+            store.projection_status(domain, &cwd).unwrap(),
+            tendi_core::storage::ProjectionStatus::Fresh
+        );
+    }
+}
+
+#[test]
 fn standalone_search_drains_committed_dirty_sessions_without_a_daemon() {
     let root = std::env::temp_dir().join(format!(
         "tendi-cli-search-pending-{}-{}",
@@ -311,6 +454,25 @@ fn generated_runtime_client_emits_json_rpc_method_and_params() {
     assert_eq!(request.jsonrpc, "2.0");
     assert_eq!(request.method, "sessions_snapshot");
     assert_eq!(request.params, serde_json::json!({}));
+}
+
+#[test]
+fn sync_pull_accepts_a_destination_and_preview_without_a_history_revision() {
+    let cli = Cli::try_parse_from([
+        "tendi", "skills", "sync", "pull", "--to", "codex", "--dry-run",
+    ])
+    .unwrap();
+    let Command::Skills {
+        command: SkillCommand::Sync {
+            command: BackupCommand::Pull { to, scope, dry_run, .. },
+        },
+    } = cli.command
+    else {
+        panic!("unexpected command");
+    };
+    assert_eq!(to.id(), "codex");
+    assert_eq!(scope, tendi_core::SkillInstallScope::Global);
+    assert!(dry_run);
 }
 
 #[test]

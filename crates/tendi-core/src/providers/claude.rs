@@ -1422,6 +1422,13 @@ impl super::AgentProvider for ClaudeProvider {
         crate::mcp::merge_json_server_entry_at_path(path, server_path, name, entry)
     }
 
+    fn remove_mcp_entry(&self, path: &Path, server_path: &[String], name: &str) -> Result<String> {
+        if path.extension().and_then(|value| value.to_str()) != Some("json") {
+            bail!("Claude Code MCP source must be JSON");
+        }
+        crate::mcp::remove_json_server_entry_at_path(path, server_path, name)
+    }
+
     fn mcp_status_after_toggle(&self, enabled: bool) -> &'static str {
         if enabled { "configured" } else { "disabled" }
     }
