@@ -38,13 +38,31 @@ credential-free HTTPS URL instead. GitHub shorthands such as `owner/repository`
 and `github.com/owner/repository` are expanded to HTTPS remotes automatically.
 The remote is checked with Git when sync setup is saved.
 
-## Automatic snapshots
+## Sync and pull
 
-When the daemon starts, it marks one initial snapshot as pending. Writes to
-managed Skills, MCP, rules, or hooks only mark a snapshot as dirty. Every ten
-minutes, Tendi creates one sync snapshot if the dirty flag is set; multiple writes in
-that interval are combined. A sync failure keeps the dirty flag set for the
-next interval. The desktop **Sync now** action still runs immediately.
+**Sync** publishes this device's selected current set to the repository. Updating
+an included skill replaces its live version. Deleting or excluding it removes it
+from the live set. Earlier sets remain available in Git history.
+
+**Pull** fetches that published set and applies it to this device. The desktop
+installs skills in the global shared directory; the CLI can select another target. Subsequent pulls
+update and remove the items this device previously received from this repository.
+Local items that were never pulled remain local. An existing local item with
+conflicting content requires a choice on the first pull: replace or keep local.
+Skill and rule conflicts also support keeping both. Once resolved, later pulls
+use the recorded destination.
+
+These are explicit actions. Connecting a repository, focusing the desktop, and
+local edits do not publish automatically. A typical setup is to maintain the set
+on device A, click **Sync**, then click **Pull** on devices B and C.
+
+The CLI supports the same two directions:
+
+```sh
+tendi skills sync run
+tendi skills sync pull --to shared --scope global --dry-run
+tendi skills sync pull --to shared --scope global --yes
+```
 
 ## Inclusion rules
 
@@ -86,8 +104,9 @@ tendi skills sync restore <commit> --skill review --to codex --scope global --co
 Restored skills become locally managed sync sources and are included in later
 snapshots. Git history is append-only; Tendi does not prune old sync commits.
 
-Concurrent device edits are merged by skill content: identical copies collapse,
-while different contents stay as separate sync entries. If the checkout was
-manually changed into an unresolved Git conflict, affected skills show **Needs
-attention**. Resolve that Git conflict in the checkout directory shown on the
-Sync page, then run a sync again.
+An explicit sync publishes the calling device's selected set as the current
+set, including when another device previously published different content. The
+Git history retains previous commits; older skill versions are not added to the
+current manifest. A receiving device should pull to follow the maintained set.
+If the checkout contains an unresolved Git conflict, resolve it before syncing
+or pulling again.

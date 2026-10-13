@@ -5,7 +5,7 @@ pub use serde_json::Value;
 pub const PROTOCOL_VERSION: u64 = 2;
 pub const SCHEMA_VERSION: u64 = 1;
 pub const RUNTIME_CONTRACT_FINGERPRINT: &str =
-    "51c444d46529decedf5b1535de7141889b51b70d6cefa11d3c75dce2d263d483";
+    "fc5a464a9ad21eb4ca9ea723050e685d2b0cc2bff95a4a4e48ae8797fac83384";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -827,6 +827,20 @@ pub struct SkillsBackupVersionsRequest {
 pub struct BackupRestoreResolution {
     pub id: String,
     pub action: String,
+}
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SkillsBackupPullRequest {
+    pub target: String,
+    pub scope: String,
+    #[serde(rename = "dryRun")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dry_run: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub confirmed: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub revision: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resolutions: Option<Vec<BackupRestoreResolution>>,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SkillsBackupRestoreRequest {
@@ -2607,6 +2621,7 @@ pub type SkillsBackupSyncRequest = EmptyRequest;
 pub type SkillsBackupNowRequest = EmptyRequest;
 pub type SkillsBackupNowResponse = BackupSyncReport;
 pub type SkillsBackupVersionsResponse = BackupVersionList;
+pub type SkillsBackupPullResponse = BackupRestoreResponse;
 pub type SkillsBackupRestoreResponse = BackupRestoreResponse;
 pub type SkillsBackupAdoptResponse = BackupAdoptResponse;
 pub type SkillsBackupAdoptManyResponse = BackupAdoptResponse;
@@ -2776,6 +2791,8 @@ pub enum CommandRequest {
     SkillsBackupNow(SkillsBackupNowRequest),
     #[serde(rename = "skills_backup_versions")]
     SkillsBackupVersions(SkillsBackupVersionsRequest),
+    #[serde(rename = "skills_backup_pull")]
+    SkillsBackupPull(SkillsBackupPullRequest),
     #[serde(rename = "skills_backup_restore")]
     SkillsBackupRestore(SkillsBackupRestoreRequest),
     #[serde(rename = "skills_backup_adopt")]
@@ -2986,6 +3003,8 @@ pub enum CommandResult {
     SkillsBackupNow(SkillsBackupNowResponse),
     #[serde(rename = "skills_backup_versions")]
     SkillsBackupVersions(SkillsBackupVersionsResponse),
+    #[serde(rename = "skills_backup_pull")]
+    SkillsBackupPull(SkillsBackupPullResponse),
     #[serde(rename = "skills_backup_restore")]
     SkillsBackupRestore(SkillsBackupRestoreResponse),
     #[serde(rename = "skills_backup_adopt")]
@@ -3131,6 +3150,7 @@ pub enum CommandName {
     SkillsBackupSync,
     SkillsBackupNow,
     SkillsBackupVersions,
+    SkillsBackupPull,
     SkillsBackupRestore,
     SkillsBackupAdopt,
     SkillsBackupAdoptMany,
@@ -3238,6 +3258,7 @@ impl CommandName {
             "skills_backup_sync" => Some(Self::SkillsBackupSync),
             "skills_backup_now" => Some(Self::SkillsBackupNow),
             "skills_backup_versions" => Some(Self::SkillsBackupVersions),
+            "skills_backup_pull" => Some(Self::SkillsBackupPull),
             "skills_backup_restore" => Some(Self::SkillsBackupRestore),
             "skills_backup_adopt" => Some(Self::SkillsBackupAdopt),
             "skills_backup_adopt_many" => Some(Self::SkillsBackupAdoptMany),
@@ -3346,6 +3367,7 @@ impl CommandName {
             Self::SkillsBackupSync => "skills_backup_sync",
             Self::SkillsBackupNow => "skills_backup_now",
             Self::SkillsBackupVersions => "skills_backup_versions",
+            Self::SkillsBackupPull => "skills_backup_pull",
             Self::SkillsBackupRestore => "skills_backup_restore",
             Self::SkillsBackupAdopt => "skills_backup_adopt",
             Self::SkillsBackupAdoptMany => "skills_backup_adopt_many",
@@ -3966,6 +3988,15 @@ pub fn command_metadata(name: &str) -> Option<CommandMetadata> {
             internal: false,
             deprecated: false,
         }),
+        "skills_backup_pull" => Some(CommandMetadata {
+            name: "skills_backup_pull",
+            owner: Owner::Daemon,
+            execution: Execution::Write,
+            serialized_write: true,
+            requires_params: true,
+            internal: false,
+            deprecated: false,
+        }),
         "skills_backup_restore" => Some(CommandMetadata {
             name: "skills_backup_restore",
             owner: Owner::Daemon,
@@ -4505,6 +4536,10 @@ pub fn validate_request(name: &str, args: &Value) -> Result<(), String> {
             serde_json::from_value::<SkillsBackupVersionsRequest>(args.clone())
                 .map_err(|error| format!("request is invalid: {error}"))?;
         }
+        "skills_backup_pull" => {
+            serde_json::from_value::<SkillsBackupPullRequest>(args.clone())
+                .map_err(|error| format!("request is invalid: {error}"))?;
+        }
         "skills_backup_restore" => {
             serde_json::from_value::<SkillsBackupRestoreRequest>(args.clone())
                 .map_err(|error| format!("request is invalid: {error}"))?;
@@ -5034,6 +5069,11 @@ pub fn validate_result(name: &str, value: &Value) -> Result<(), String> {
         }
         "skills_backup_versions" => {
             serde_json::from_value::<BackupVersionList>(value.clone())
+                .map_err(|error| format!("result is invalid: {error}"))?;
+            Ok(())
+        }
+        "skills_backup_pull" => {
+            serde_json::from_value::<BackupRestoreResponse>(value.clone())
                 .map_err(|error| format!("result is invalid: {error}"))?;
             Ok(())
         }

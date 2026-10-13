@@ -13,7 +13,7 @@ test("Sync summary keeps loading local to settings and sync actions", () => {
   assert.match(backupViewCss, /\.settingsBackupPrimaryActions\s*\{[\s\S]*height:\s*var\(--control-height\);/);
   assert.doesNotMatch(backupView, /settingsBackupSummaryActions \$\{loading/);
   assert.doesNotMatch(backupView, /backupDetailsLoading|LoadingInline/);
-  assert.match(backupView, /className="backupDetailsSectionLoading" role="status" aria-label="Loading sync contents" aria-busy="true"><LoadingDots size=\{15\} \/><\/div>/);
+  assert.match(backupView, /<LoadingState className="backupDetailsSectionLoading" label="Loading sync contents" \/>/);
   assert.match(backupViewCss, /\.backupDetailsSectionLoading\s*\{[\s\S]*min-height: var\(--control-height\);[\s\S]*place-items: center;[\s\S]*color: var\(--muted\);/);
   assert.match(backupView, /configured \|\| loading \? <StatefulButton[\s\S]*state=\{stateFor\(BackupAction\.Backup\)\}/);
   assert.doesNotMatch(backupView, /state=\{stateFor\(BackupAction\.Backup\)\}[^>]*disabled=\{loading\}/);

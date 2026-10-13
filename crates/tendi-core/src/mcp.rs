@@ -1742,7 +1742,9 @@ pub(crate) fn read_json_server_entry_at_path(
     json_object_at_path(&value, server_path)
         .and_then(|servers| servers.get(name))
         .cloned()
-        .ok_or_else(|| anyhow::anyhow!("MCP server {name} was not found"))
+        .ok_or_else(|| {
+            crate::providers::MissingSyncEntry(format!("MCP server {name} was not found")).into()
+        })
 }
 
 pub(crate) fn merge_json_server_entry_at_path(
@@ -1780,7 +1782,42 @@ pub(crate) fn read_toml_server_entry(path: &Path, server_key: &str, name: &str) 
         .cloned()
         .map(|entry| serde_json::to_value(entry))
         .transpose()?
-        .ok_or_else(|| anyhow::anyhow!("MCP server {name} was not found"))
+        .ok_or_else(|| {
+            crate::providers::MissingSyncEntry(format!("MCP server {name} was not found")).into()
+        })
+}
+
+pub(crate) fn remove_json_server_entry_at_path(
+    path: &Path,
+    server_path: &[String],
+    name: &str,
+) -> Result<String> {
+    let source = fs::read_to_string(path)?;
+    let mut value = serde_json::from_str::<Value>(&source)?;
+    let before = value.clone();
+    let servers = json_object_at_path_mut_or_create(&mut value, server_path)
+        .ok_or_else(|| anyhow::anyhow!("MCP server collection must be a JSON object"))?;
+    servers.remove(name);
+    crate::json_edit::patch_json_text(&source, &before, &value)
+}
+
+pub(crate) fn remove_toml_server_entry(
+    path: &Path,
+    server_key: &str,
+    name: &str,
+) -> Result<String> {
+    let source = fs::read_to_string(path)?;
+    let mut document = source.parse::<DocumentMut>()?;
+    if let Some(servers) = document
+        .get_mut(server_key)
+        .and_then(Item::as_table_like_mut)
+    {
+        servers.remove(name);
+    }
+    Ok(crate::fsutil::preserve_newline_style(
+        &source,
+        document.to_string(),
+    ))
 }
 
 pub(crate) fn merge_toml_server_entry(

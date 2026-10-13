@@ -75,6 +75,7 @@
     { "name": "skills_backup_sync", "params": [], "result": { "name": "result", "schema": { "$ref": "#/components/schemas/SkillsBackupSyncResponse" } }, "x-tendi": { "owner": "daemon", "wire": "jsonrpc", "clients": ["desktop"], "execution": "write" } },
     { "name": "skills_backup_now", "params": [], "result": { "name": "result", "schema": { "$ref": "#/components/schemas/BackupSyncReport" } }, "x-tendi": { "owner": "daemon", "wire": "jsonrpc", "clients": ["desktop"], "execution": "write" } },
     { "name": "skills_backup_versions", "params": [{ "name": "request", "required": true, "schema": { "$ref": "#/components/schemas/SkillsBackupVersionsRequest" } }], "result": { "name": "result", "schema": { "$ref": "#/components/schemas/BackupVersionList" } }, "x-tendi": { "owner": "daemon", "wire": "jsonrpc", "clients": ["desktop"], "execution": "read" } },
+    { "name": "skills_backup_pull", "params": [{ "name": "request", "required": true, "schema": { "$ref": "#/components/schemas/SkillsBackupPullRequest" } }], "result": { "name": "result", "schema": { "$ref": "#/components/schemas/BackupRestoreResponse" } }, "x-tendi": { "owner": "daemon", "wire": "jsonrpc", "clients": ["desktop"], "execution": "write" } },
     { "name": "skills_backup_restore", "params": [{ "name": "request", "required": true, "schema": { "$ref": "#/components/schemas/SkillsBackupRestoreRequest" } }], "result": { "name": "result", "schema": { "$ref": "#/components/schemas/BackupRestoreResponse" } }, "x-tendi": { "owner": "daemon", "wire": "jsonrpc", "clients": ["desktop"], "execution": "write" } },
     { "name": "skills_backup_adopt", "params": [{ "name": "request", "required": true, "schema": { "$ref": "#/components/schemas/SkillsBackupAdoptRequest" } }], "result": { "name": "result", "schema": { "$ref": "#/components/schemas/BackupAdoptResponse" } }, "x-tendi": { "owner": "daemon", "wire": "jsonrpc", "clients": ["desktop"], "execution": "write" } },
     { "name": "skills_backup_adopt_many", "params": [{ "name": "request", "required": true, "schema": { "$ref": "#/components/schemas/SkillsBackupAdoptManyRequest" } }], "result": { "name": "result", "schema": { "$ref": "#/components/schemas/BackupAdoptResponse" } }, "x-tendi": { "owner": "daemon", "wire": "jsonrpc", "clients": ["desktop"], "execution": "write" } },
@@ -830,6 +831,17 @@
         "type": "object",
         "properties": { "id": { "type": "string", "minLength": 1 }, "action": { "type": "string", "minLength": 1 } },
         "required": ["id", "action"],
+        "additionalProperties": false
+      },
+      "SkillsBackupPullRequest": {
+        "type": "object",
+        "properties": {
+          "target": { "type": "string" }, "scope": {"type":"string","enum":["global","project"]},
+          "dryRun": { "type": "boolean" }, "confirmed": { "type": "boolean" },
+          "revision": { "type": "string" },
+          "resolutions": { "type": "array", "items": { "$ref": "#/components/schemas/BackupRestoreResolution" } }
+        },
+        "required": ["target", "scope"],
         "additionalProperties": false
       },
       "SkillsBackupRestoreRequest": {

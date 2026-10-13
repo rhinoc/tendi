@@ -762,6 +762,33 @@ impl Store {
         Ok(())
     }
 
+    pub(crate) fn complete_skill_pull(
+        &self,
+        workspace_root: &Path,
+        key: &str,
+        receipt: &crate::skill_backup::PullReceipt,
+        records: &[SkillSourceRecord],
+        deleted: &[PathBuf],
+    ) -> Result<()> {
+        let scope_key = workspace_scope_key(&canonical_workspace_root(workspace_root))?;
+        let resources = records
+            .iter()
+            .map(|record| &record.skill_path)
+            .chain(deleted.iter())
+            .map(|path| crate::coordination::canonical_resource_path(path))
+            .collect::<Result<Vec<_>>>()?;
+        self.with_named_write_transaction("complete_skill_pull", |tx| {
+            for path in deleted {
+                tx.execute("DELETE FROM scoped_skill_sources WHERE scope_key = ?1 AND skill_path = ?2", params![scope_key.as_str(), path.display().to_string()])?;
+                tx.execute("DELETE FROM scoped_skill_snapshots WHERE scope_key = ?1 AND skill_path = ?2", params![scope_key.as_str(), path.display().to_string()])?;
+            }
+            Self::persist_skill_update_in_tx(tx, scope_key.as_str(), records, &[])?;
+            tx.execute("INSERT INTO app_settings (key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = excluded.value", params![key, serde_json::to_string(receipt)?])?;
+            if !resources.is_empty() { self.mark_projection_resources_in_tx(tx, &scope_key, "skills", &resources, false, true)?; }
+            Ok(())
+        })
+    }
+
     pub fn upsert_skill_source_records_for_workspace(
         &self,
         workspace_root: &Path,

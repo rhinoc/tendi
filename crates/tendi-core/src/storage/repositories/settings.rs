@@ -2,6 +2,23 @@
 use super::super::*;
 
 impl Store {
+    pub(crate) fn skill_pull_receipt(
+        &self,
+        key: &str,
+    ) -> Result<Option<crate::skill_backup::PullReceipt>> {
+        let value = self
+            .conn
+            .query_row(
+                "SELECT value FROM app_settings WHERE key = ?1",
+                [key],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        value
+            .map(|value| serde_json::from_str(&value).context("invalid sync pull receipt"))
+            .transpose()
+    }
+
     pub fn save_skill_backup_config(
         &self,
         config: &crate::skill_backup::BackupConfig,
@@ -19,10 +36,15 @@ impl Store {
 
     pub fn clear_skill_backup_config(&self) -> Result<bool> {
         self.with_named_write_transaction("clear_skill_backup_config", |tx| {
-            Ok(tx.execute(
+            let disconnected = tx.execute(
                 "DELETE FROM app_settings WHERE key = 'skill_backup_config'",
                 [],
-            )? > 0)
+            )? > 0;
+            tx.execute(
+                "DELETE FROM app_settings WHERE key LIKE 'skill_sync_pull:%'",
+                [],
+            )?;
+            Ok(disconnected)
         })
     }
 

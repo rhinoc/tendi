@@ -14,6 +14,187 @@ use crate::{
     skills::AgentKind,
 };
 
+fn sync_hook_test_target(label: &str, extension: &str) -> (PathBuf, PathBuf) {
+    let root = std::env::temp_dir().join(format!(
+        "tendi-hook-{label}-{}-{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    fs::create_dir_all(&root).unwrap();
+    let path = root.join(format!("hooks.{extension}"));
+    (root, path)
+}
+
+fn sync_hook_test_identity(matcher: &str, command: &str) -> HookSourceMatch {
+    HookSourceMatch {
+        event: "PreToolUse".into(),
+        matcher: Some(matcher.into()),
+        hook_type: Some("command".into()),
+        command: Some(command.into()),
+        url: None,
+        prompt: None,
+        filter: None,
+        status_message: None,
+        enabled: None,
+    }
+}
+
+#[test]
+fn syncs_hook_effective_enabled_state_without_changing_other_hooks() {
+    for (extension, source) in [
+        (
+            "json",
+            r#"{"hooks":{"PreToolUse":[{"matcher":"Bash","enabled":false,"hooks":[{"type":"command","command":"remote"},{"type":"command","command":"local"}]}]}}"#,
+        ),
+        (
+            "toml",
+            "[[hooks.PreToolUse]]\nmatcher = 'Bash'\nenabled = false\n[[hooks.PreToolUse.hooks]]\ntype = 'command'\ncommand = 'remote'\n[[hooks.PreToolUse.hooks]]\ntype = 'command'\ncommand = 'local'\n",
+        ),
+    ] {
+        let (root, path) = sync_hook_test_target("sync-state", extension);
+        fs::write(&path, source).unwrap();
+        let identity = sync_hook_test_identity("Bash", "remote");
+        let local = sync_hook_test_identity("Bash", "local");
+        let disabled = read_hook_entry(&path, &identity).unwrap();
+        assert_eq!(disabled["enabled"], false);
+
+        let empty = root.join(format!("empty.{extension}"));
+        fs::write(
+            &empty,
+            merge_hook_entry(&empty, &identity, &disabled).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(read_hook_entry(&empty, &identity).unwrap(), disabled);
+
+        let mut enabled = disabled.clone();
+        enabled["enabled"] = serde_json::json!(true);
+        fs::write(&path, merge_hook_entry(&path, &identity, &enabled).unwrap()).unwrap();
+        assert_eq!(read_hook_entry(&path, &identity).unwrap(), enabled);
+        assert_eq!(read_hook_entry(&path, &local).unwrap()["enabled"], false);
+        fs::write(
+            &path,
+            merge_hook_entry(&path, &identity, &disabled).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(read_hook_entry(&path, &identity).unwrap(), disabled);
+        assert_eq!(read_hook_entry(&path, &local).unwrap()["enabled"], false);
+
+        let enabled_group = source.replace("false", "true");
+        fs::write(&path, enabled_group).unwrap();
+        fs::write(
+            &path,
+            merge_hook_entry(&path, &identity, &disabled).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(read_hook_entry(&path, &identity).unwrap(), disabled);
+        assert_eq!(read_hook_entry(&path, &local).unwrap()["enabled"], true);
+        fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[test]
+fn deletes_disabled_hooks_without_removing_other_hooks_in_the_group() {
+    for (extension, source) in [
+        (
+            "json",
+            r#"{"hooks":{"PreToolUse":[{"matcher":"Bash","enabled":false,"hooks":[{"type":"command","command":"remote"},{"type":"command","command":"local"}]}]}}"#,
+        ),
+        (
+            "toml",
+            "[[hooks.PreToolUse]]\nmatcher = 'Bash'\nenabled = false\n[[hooks.PreToolUse.hooks]]\ntype = 'command'\ncommand = 'remote'\n[[hooks.PreToolUse.hooks]]\ntype = 'command'\ncommand = 'local'\n",
+        ),
+        (
+            "toml",
+            "[hooks]\nPreToolUse = [{matcher = 'Bash', enabled = false, hooks = [{type = 'command', command = 'remote'}, {type = 'command', command = 'local'}]}]\n",
+        ),
+    ] {
+        let (root, path) = sync_hook_test_target("delete-disabled", extension);
+        fs::write(&path, source).unwrap();
+        let local = sync_hook_test_identity("Bash", "local");
+        let original_local = read_hook_entry(&path, &local).unwrap();
+        let request = super::HookDeleteRequest {
+            agent: AgentKind::Codex,
+            path: path.clone(),
+            expected_trust_hash: String::new(),
+            event: "PreToolUse".into(),
+            matcher: Some("Bash".into()),
+            hook_type: Some("command".into()),
+            command: Some("remote".into()),
+            url: None,
+            prompt: None,
+            filter: None,
+            status_message: None,
+        };
+        let provider = crate::providers::agent_provider(AgentKind::Codex);
+        let content = provider.delete_hooks(&[request.clone()], source).unwrap();
+        fs::write(&path, &content).unwrap();
+        assert!(read_hook_entry(&path, &sync_hook_test_identity("Bash", "remote")).is_err());
+        assert_eq!(read_hook_entry(&path, &local).unwrap(), original_local);
+        let mut local_request = request;
+        local_request.command = Some("local".into());
+        let content = provider.delete_hooks(&[local_request], &content).unwrap();
+        fs::write(&path, content).unwrap();
+        assert!(read_hook_entry(&path, &local).is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    for source in [
+        r#"{"hooks":{"PreToolUse":{"matcher":"Bash","enabled":false,"type":"command","command":"remote"}}}"#,
+        r#"{"hooks":{"PreToolUse":{"matcher":"Bash","enabled":false,"hooks":{"type":"command","command":"remote"}}}}"#,
+    ] {
+        let (root, path) = sync_hook_test_target("delete-direct", "json");
+        let identity = sync_hook_test_identity("Bash", "remote");
+        let request = super::HookDeleteRequest {
+            agent: AgentKind::Codex,
+            path: path.clone(),
+            expected_trust_hash: String::new(),
+            event: identity.event,
+            matcher: identity.matcher,
+            hook_type: identity.hook_type,
+            command: identity.command,
+            url: None,
+            prompt: None,
+            filter: None,
+            status_message: None,
+        };
+        let content = super::delete_json_hooks(&[request], source).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&content).unwrap();
+        assert!(value["hooks"].get("PreToolUse").is_none());
+        fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[test]
+fn syncs_same_hook_command_in_distinct_matcher_groups() {
+    for (extension, source) in [
+        (
+            "json",
+            r#"{"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"shared","timeout":11}]}]}}"#,
+        ),
+        (
+            "toml",
+            "[[hooks.PreToolUse]]\nmatcher = 'Bash'\n[[hooks.PreToolUse.hooks]]\ntype = 'command'\ncommand = 'shared'\ntimeout = 11\n",
+        ),
+    ] {
+        let (root, path) = sync_hook_test_target("sync-matcher", extension);
+        fs::write(&path, source).unwrap();
+        let bash = sync_hook_test_identity("Bash", "shared");
+        let read = sync_hook_test_identity("Read", "shared");
+        let original = read_hook_entry(&path, &bash).unwrap();
+        let incoming = serde_json::json!({
+            "event": "PreToolUse", "matcher": "Read", "enabled": true,
+            "hook": {"type": "command", "command": "shared", "timeout": 20},
+        });
+        fs::write(&path, merge_hook_entry(&path, &read, &incoming).unwrap()).unwrap();
+        assert_eq!(read_hook_entry(&path, &bash).unwrap(), original);
+        assert_eq!(read_hook_entry(&path, &read).unwrap(), incoming);
+        fs::remove_dir_all(root).unwrap();
+    }
+}
+
 #[test]
 fn marks_codex_untrusted_and_modified_hooks_for_review() {
     let root = std::env::temp_dir().join(format!(

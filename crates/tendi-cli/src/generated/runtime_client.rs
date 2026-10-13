@@ -895,6 +895,19 @@ impl RuntimeClient {
         let result = Self::decode_response(CommandName::SkillsBackupVersions, request_id, value)?;
         Ok(serde_json::from_value(result)?)
     }
+    pub fn skills_backup_pull(
+        &mut self,
+        params: tendi_core::generated::runtime_contract::SkillsBackupPullRequest,
+    ) -> JsonRpcRequest {
+        self.request(CommandName::SkillsBackupPull, params)
+    }
+    pub fn decode_skills_backup_pull_response(
+        request_id: &Value,
+        value: Value,
+    ) -> anyhow::Result<tendi_core::generated::runtime_contract::SkillsBackupPullResponse> {
+        let result = Self::decode_response(CommandName::SkillsBackupPull, request_id, value)?;
+        Ok(serde_json::from_value(result)?)
+    }
     pub fn skills_backup_restore(
         &mut self,
         params: tendi_core::generated::runtime_contract::SkillsBackupRestoreRequest,

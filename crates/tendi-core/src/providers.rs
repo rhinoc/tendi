@@ -27,6 +27,15 @@ pub(crate) mod cursor_sessions;
 pub(crate) mod shared;
 mod unknown;
 
+#[derive(Debug)]
+pub(crate) struct MissingSyncEntry(pub String);
+impl std::fmt::Display for MissingSyncEntry {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+impl std::error::Error for MissingSyncEntry {}
+
 pub(crate) struct ProviderContext {
     pub home: Option<PathBuf>,
     project_dirs: Vec<PathBuf>,
@@ -652,6 +661,18 @@ pub(crate) trait AgentProvider: Sync {
     }
 
     fn mcp_status_after_toggle(&self, enabled: bool) -> &'static str;
+
+    fn remove_mcp_entry(
+        &self,
+        _path: &Path,
+        _server_path: &[String],
+        _name: &str,
+    ) -> Result<String> {
+        bail!(
+            "MCP entry removal is not supported for {}",
+            self.storage_key()
+        )
+    }
 
     fn delete_hooks(&self, _requests: &[HookDeleteRequest], _source: &str) -> Result<String> {
         bail!("hook deletion is not supported for {}", self.storage_key())

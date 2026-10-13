@@ -89,6 +89,7 @@ export class RuntimeClient {
   async skillsBackupSync(request: RequestFor<"skills_backup_sync">): Promise<ResponseFor<"skills_backup_sync">> { return this.call("skills_backup_sync", request); }
   async skillsBackupNow(request: RequestFor<"skills_backup_now">): Promise<ResponseFor<"skills_backup_now">> { return this.call("skills_backup_now", request); }
   async skillsBackupVersions(request: RequestFor<"skills_backup_versions">): Promise<ResponseFor<"skills_backup_versions">> { return this.call("skills_backup_versions", request); }
+  async skillsBackupPull(request: RequestFor<"skills_backup_pull">): Promise<ResponseFor<"skills_backup_pull">> { return this.call("skills_backup_pull", request); }
   async skillsBackupRestore(request: RequestFor<"skills_backup_restore">): Promise<ResponseFor<"skills_backup_restore">> { return this.call("skills_backup_restore", request); }
   async skillsBackupAdopt(request: RequestFor<"skills_backup_adopt">): Promise<ResponseFor<"skills_backup_adopt">> { return this.call("skills_backup_adopt", request); }
   async skillsBackupAdoptMany(request: RequestFor<"skills_backup_adopt_many">): Promise<ResponseFor<"skills_backup_adopt_many">> { return this.call("skills_backup_adopt_many", request); }

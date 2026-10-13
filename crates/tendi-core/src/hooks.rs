@@ -914,7 +914,7 @@ pub(crate) fn delete_json_hooks(requests: &[HookDeleteRequest], source: &str) ->
     let mut value = serde_json::from_str::<Value>(source)?;
     let before = value.clone();
     for request in requests {
-        if !remove_json_hook_from_value(&mut value, request) {
+        if !remove_json_hook_from_value(&mut value, &hook_delete_source_match(request)) {
             bail!("matching hook was not found");
         }
     }
@@ -924,7 +924,7 @@ pub(crate) fn delete_json_hooks(requests: &[HookDeleteRequest], source: &str) ->
 pub(crate) fn delete_toml_hooks(requests: &[HookDeleteRequest], source: &str) -> Result<String> {
     let mut value = source.parse::<DocumentMut>()?;
     for request in requests {
-        if !remove_toml_hook_from_document(&mut value, request) {
+        if !remove_toml_hook_from_document(&mut value, &hook_delete_source_match(request)) {
             bail!("matching hook was not found");
         }
     }
@@ -932,6 +932,20 @@ pub(crate) fn delete_toml_hooks(requests: &[HookDeleteRequest], source: &str) ->
         source,
         value.to_string(),
     ))
+}
+
+fn hook_delete_source_match(request: &HookDeleteRequest) -> HookSourceMatch {
+    HookSourceMatch {
+        event: request.event.clone(),
+        matcher: request.matcher.clone(),
+        hook_type: request.hook_type.clone(),
+        command: request.command.clone(),
+        url: request.url.clone(),
+        prompt: request.prompt.clone(),
+        filter: request.filter.clone(),
+        status_message: request.status_message.clone(),
+        enabled: None,
+    }
 }
 
 pub(crate) fn set_json_hooks_enabled(
@@ -977,7 +991,10 @@ pub(crate) fn read_hook_entry(path: &Path, identity: &HookSourceMatch) -> Result
     };
     match path.extension().and_then(|value| value.to_str()) {
         Some("toml") | Some("md") | Some("json") => find_json_hook_snippet(&value, identity)
-            .context("matching hook was not found in source"),
+            .ok_or_else(|| {
+                crate::providers::MissingSyncEntry("matching hook was not found in source".into())
+                    .into()
+            }),
         _ => unreachable!(),
     }
 }
@@ -1084,6 +1101,16 @@ fn merge_json_hook_entry(
     if !hook.is_object() {
         bail!("hook sync entry payload must be an object");
     }
+    let enabled = sync_hook_enabled(identity, entry, &hook);
+    let lookup = HookSourceMatch {
+        enabled: None,
+        ..identity.clone()
+    };
+    if find_json_hook_snippet(value, &lookup)
+        .is_some_and(|current| hook_sync_requires_new_group(&current, &hook, enabled))
+    {
+        remove_json_hook_from_value(value, &lookup);
+    }
     let hook_map = value
         .as_object_mut()
         .context("hook source root must be an object")?
@@ -1091,12 +1118,8 @@ fn merge_json_hook_entry(
         .or_insert_with(|| Value::Object(serde_json::Map::new()))
         .as_object_mut()
         .context("hook collection must be an object")?;
-    let lookup = HookSourceMatch {
-        enabled: None,
-        ..identity.clone()
-    };
     if let Some(specs) = hook_map.get_mut(&identity.event) {
-        if replace_json_event_hook(specs, &lookup, identity.matcher.as_deref(), &hook) {
+        if replace_json_event_hook(specs, &lookup, None, &hook) {
             return Ok(());
         }
     }
@@ -1104,7 +1127,7 @@ fn merge_json_hook_entry(
     if let Some(matcher) = &identity.matcher {
         group.insert("matcher".to_string(), Value::String(matcher.clone()));
     }
-    if identity.enabled == Some(false) && hook.get("enabled").is_none() {
+    if !enabled {
         group.insert("enabled".to_string(), Value::Bool(false));
     }
     group.insert("hooks".to_string(), Value::Array(vec![hook]));
@@ -1136,6 +1159,17 @@ fn merge_toml_hook_entry(
     if !hook.is_object() {
         bail!("hook sync entry payload must be an object");
     }
+    let enabled = sync_hook_enabled(identity, entry, &hook);
+    let lookup = HookSourceMatch {
+        enabled: None,
+        ..identity.clone()
+    };
+    let current: TomlValue = toml::from_str(&document.to_string())?;
+    if find_toml_hook_snippet(&current, &lookup)
+        .is_some_and(|current| hook_sync_requires_new_group(&current, &hook, enabled))
+    {
+        remove_toml_hook_from_document(document, &lookup);
+    }
     let hook_item = toml_item_from_json(&hook)?;
     let hooks = document
         .as_table_mut()
@@ -1144,10 +1178,6 @@ fn merge_toml_hook_entry(
         .as_table_like_mut()
         .context("hook collection must be a TOML table")?;
     if let Some(specs) = hooks.get_mut(&identity.event) {
-        let lookup = HookSourceMatch {
-            enabled: None,
-            ..identity.clone()
-        };
         if replace_toml_event_hook(specs, &lookup, None, &hook_item) {
             return Ok(());
         }
@@ -1157,7 +1187,7 @@ fn merge_toml_hook_entry(
     if let Some(matcher) = &identity.matcher {
         group.insert("matcher", toml_edit::value(matcher.as_str()));
     }
-    if identity.enabled == Some(false) && hook.get("enabled").is_none() {
+    if !enabled {
         group.insert("enabled", toml_edit::value(false));
     }
     match hooks.get_mut(&identity.event) {
@@ -1204,6 +1234,20 @@ fn merge_toml_hook_entry(
         }
     }
     Ok(())
+}
+
+fn sync_hook_enabled(identity: &HookSourceMatch, entry: &Value, hook: &Value) -> bool {
+    entry
+        .get("enabled")
+        .and_then(Value::as_bool)
+        .or(identity.enabled)
+        .or_else(|| hook.get("enabled").and_then(Value::as_bool))
+        .unwrap_or(true)
+}
+
+fn hook_sync_requires_new_group(current: &Value, hook: &Value, enabled: bool) -> bool {
+    current.get("enabled").and_then(Value::as_bool) != Some(enabled)
+        || (!enabled && hook.get("enabled").and_then(Value::as_bool) != Some(false))
 }
 
 fn single_hook_array(hook_item: Item) -> Result<ArrayOfTables> {
@@ -1456,11 +1500,6 @@ fn replace_json_event_hook(
         .get("enabled")
         .and_then(Value::as_bool)
         .unwrap_or(true);
-    let request = HookSourceMatch {
-        matcher: next_matcher.clone(),
-        enabled: None,
-        ..identity.clone()
-    };
     if hook_object_matches_source_request(
         next_matcher.as_deref(),
         enabled,
@@ -1476,7 +1515,7 @@ fn replace_json_event_hook(
             .get("statusMessage")
             .or_else(|| object.get("status_message"))
             .and_then(Value::as_str),
-        &request,
+        identity,
     ) {
         *object = replacement.as_object().cloned().unwrap_or_default();
         return true;
@@ -1484,7 +1523,7 @@ fn replace_json_event_hook(
     false
 }
 
-fn remove_json_hook_from_value(value: &mut Value, request: &HookDeleteRequest) -> bool {
+fn remove_json_hook_from_value(value: &mut Value, request: &HookSourceMatch) -> bool {
     let Some(hook_map) = value.get_mut("hooks").and_then(Value::as_object_mut) else {
         return false;
     };
@@ -1500,7 +1539,7 @@ fn remove_json_hook_from_value(value: &mut Value, request: &HookDeleteRequest) -
 
 fn remove_json_event_hook(
     specs: &mut Value,
-    request: &HookDeleteRequest,
+    request: &HookSourceMatch,
     matcher: Option<&str>,
     group_enabled: bool,
 ) -> bool {
@@ -1544,24 +1583,31 @@ fn remove_json_event_hook(
         let removed =
             remove_json_event_hook(nested, request, next_matcher.as_deref(), next_enabled);
         if json_is_empty_hook_specs(nested) {
-            object.remove("hooks");
+            object.clear();
         }
         return removed;
     }
 
-    hook_object_matches_json(
+    if hook_object_matches_json(
         &request.event,
         next_matcher.as_deref(),
         next_enabled,
         object,
         request,
-    )
+    ) {
+        object.clear();
+        true
+    } else {
+        false
+    }
 }
 
 fn json_is_empty_hook_specs(value: &Value) -> bool {
     match value {
         Value::Array(items) => items.is_empty(),
-        Value::Object(object) => object.get("hooks").is_some_and(json_is_empty_hook_specs),
+        Value::Object(object) => {
+            object.is_empty() || object.get("hooks").is_some_and(json_is_empty_hook_specs)
+        }
         _ => false,
     }
 }
@@ -1571,7 +1617,7 @@ fn hook_object_matches_json(
     matcher: Option<&str>,
     group_enabled: bool,
     object: &serde_json::Map<String, Value>,
-    request: &HookDeleteRequest,
+    request: &HookSourceMatch,
 ) -> bool {
     let command = object
         .get("command")
@@ -1609,7 +1655,7 @@ fn hook_object_matches_json(
         && request.prompt.as_deref() == prompt
         && request.filter.as_deref() == filter
         && request.status_message.as_deref() == status_message
-        && enabled
+        && request.enabled.is_none_or(|expected| enabled == expected)
 }
 
 fn set_json_hook_enabled_in_value(value: &mut Value, request: &HookSetEnabledRequest) -> bool {
@@ -1690,7 +1736,7 @@ fn hook_object_matches_enabled_request(
         && request.status_message.as_deref() == status_message
 }
 
-fn remove_toml_hook_from_document(value: &mut DocumentMut, request: &HookDeleteRequest) -> bool {
+fn remove_toml_hook_from_document(value: &mut DocumentMut, request: &HookSourceMatch) -> bool {
     let Some(hook_map) = value
         .as_table_mut()
         .get_mut("hooks")
@@ -1702,12 +1748,7 @@ fn remove_toml_hook_from_document(value: &mut DocumentMut, request: &HookDeleteR
         return false;
     };
     let removed = remove_toml_event_hook(specs, request, None, true);
-    if removed
-        && (toml_is_empty_hook_specs_value(specs)
-            || specs
-                .as_table_like()
-                .is_some_and(|table| !table.contains_key("hooks")))
-    {
+    if removed && toml_is_empty_hook_specs_value(specs) {
         hook_map.remove(&request.event);
     }
     removed
@@ -1715,7 +1756,7 @@ fn remove_toml_hook_from_document(value: &mut DocumentMut, request: &HookDeleteR
 
 fn remove_toml_event_hook(
     specs: &mut Item,
-    request: &HookDeleteRequest,
+    request: &HookSourceMatch,
     matcher: Option<String>,
     group_enabled: bool,
 ) -> bool {
@@ -1728,10 +1769,9 @@ fn remove_toml_event_hook(
                     .expect("TOML array item exists while iterating");
                 remove_toml_event_hook_value(item, request, matcher.clone(), group_enabled)
             };
-            let remove_current = removed
-                || array
-                    .get(index)
-                    .is_some_and(toml_is_empty_hook_specs_edit_value);
+            let remove_current = array
+                .get(index)
+                .is_some_and(toml_is_empty_hook_specs_edit_value);
             if remove_current {
                 array.remove(index);
             } else {
@@ -1753,7 +1793,7 @@ fn remove_toml_event_hook(
                     .expect("TOML array-of-tables item exists while iterating");
                 remove_toml_event_hook_table(table, request, matcher.clone(), group_enabled)
             };
-            if removed || array.get(index).is_none_or(|table| table.is_empty()) {
+            if array.get(index).is_none_or(|table| table.is_empty()) {
                 array.remove(index);
             } else {
                 index += 1;
@@ -1773,7 +1813,7 @@ fn remove_toml_event_hook(
 
 fn remove_toml_event_hook_value(
     specs: &mut EditValue,
-    request: &HookDeleteRequest,
+    request: &HookSourceMatch,
     matcher: Option<String>,
     group_enabled: bool,
 ) -> bool {
@@ -1786,10 +1826,9 @@ fn remove_toml_event_hook_value(
                     .expect("TOML array value exists while iterating");
                 remove_toml_event_hook_value(value, request, matcher.clone(), group_enabled)
             };
-            let remove_current = removed
-                || array
-                    .get(index)
-                    .is_some_and(toml_is_empty_hook_specs_edit_value);
+            let remove_current = array
+                .get(index)
+                .is_some_and(toml_is_empty_hook_specs_edit_value);
             if remove_current {
                 array.remove(index);
             } else {
@@ -1809,7 +1848,7 @@ fn remove_toml_event_hook_value(
 
 fn remove_toml_event_hook_table(
     table: &mut dyn TableLike,
-    request: &HookDeleteRequest,
+    request: &HookSourceMatch,
     matcher: Option<String>,
     group_enabled: bool,
 ) -> bool {
@@ -1823,13 +1862,8 @@ fn remove_toml_event_hook_table(
 
     if let Some(nested) = table.get_mut("hooks") {
         let removed = remove_toml_event_hook(nested, request, next_matcher.clone(), next_enabled);
-        let remove_nested = toml_is_empty_hook_specs_value(nested)
-            || (removed
-                && !nested
-                    .as_table_like()
-                    .is_some_and(|nested| nested.contains_key("hooks")));
-        if remove_nested {
-            table.remove("hooks");
+        if toml_is_empty_hook_specs_value(nested) {
+            table.clear();
         }
         return removed;
     }
@@ -1851,16 +1885,20 @@ fn remove_toml_event_hook_table(
 fn toml_is_empty_hook_specs_edit_value(value: &EditValue) -> bool {
     value.as_array().is_some_and(|items| items.is_empty())
         || value.as_inline_table().is_some_and(|table| {
-            TableLike::get(table, "hooks").is_some_and(toml_is_empty_hook_specs_value)
+            table.is_empty()
+                || TableLike::get(table, "hooks").is_some_and(toml_is_empty_hook_specs_value)
         })
 }
 
 fn toml_is_empty_hook_specs_value(value: &Item) -> bool {
     match value {
         Item::Value(value) => toml_is_empty_hook_specs_edit_value(value),
-        Item::Table(table) => table
-            .get("hooks")
-            .is_some_and(toml_is_empty_hook_specs_value),
+        Item::Table(table) => {
+            table.is_empty()
+                || table
+                    .get("hooks")
+                    .is_some_and(toml_is_empty_hook_specs_value)
+        }
         Item::ArrayOfTables(items) => items.is_empty(),
         Item::None => true,
     }
@@ -1871,7 +1909,7 @@ fn hook_object_matches_toml(
     matcher: Option<&str>,
     group_enabled: bool,
     table: &dyn TableLike,
-    request: &HookDeleteRequest,
+    request: &HookSourceMatch,
 ) -> bool {
     let command = table
         .get("command")
@@ -1905,7 +1943,7 @@ fn hook_object_matches_toml(
         && request.prompt.as_deref() == prompt
         && request.filter.as_deref() == filter
         && request.status_message.as_deref() == status_message
-        && enabled
+        && request.enabled.is_none_or(|expected| enabled == expected)
 }
 
 fn set_toml_hook_enabled_in_document(

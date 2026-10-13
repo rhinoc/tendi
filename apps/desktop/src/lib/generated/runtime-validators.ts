@@ -2623,6 +2623,41 @@ const SCHEMAS: Record<string, Record<string, unknown>> = {
     ],
     "additionalProperties": false
   },
+  "SkillsBackupPullRequest": {
+    "type": "object",
+    "properties": {
+      "target": {
+        "type": "string"
+      },
+      "scope": {
+        "type": "string",
+        "enum": [
+          "global",
+          "project"
+        ]
+      },
+      "dryRun": {
+        "type": "boolean"
+      },
+      "confirmed": {
+        "type": "boolean"
+      },
+      "revision": {
+        "type": "string"
+      },
+      "resolutions": {
+        "type": "array",
+        "items": {
+          "$ref": "#/components/schemas/BackupRestoreResolution"
+        }
+      }
+    },
+    "required": [
+      "target",
+      "scope"
+    ],
+    "additionalProperties": false
+  },
   "SkillsBackupRestoreRequest": {
     "type": "object",
     "properties": {
@@ -7312,6 +7347,7 @@ const REQUEST_SCHEMAS: Record<CommandName, string> = {
   "skills_backup_sync": "EmptyRequest",
   "skills_backup_now": "EmptyRequest",
   "skills_backup_versions": "SkillsBackupVersionsRequest",
+  "skills_backup_pull": "SkillsBackupPullRequest",
   "skills_backup_restore": "SkillsBackupRestoreRequest",
   "skills_backup_adopt": "SkillsBackupAdoptRequest",
   "skills_backup_adopt_many": "SkillsBackupAdoptManyRequest",
@@ -7417,6 +7453,7 @@ const RESULT_SCHEMAS: Record<CommandName, string> = {
   "skills_backup_sync": "SkillsBackupSyncResponse",
   "skills_backup_now": "BackupSyncReport",
   "skills_backup_versions": "BackupVersionList",
+  "skills_backup_pull": "BackupRestoreResponse",
   "skills_backup_restore": "BackupRestoreResponse",
   "skills_backup_adopt": "BackupAdoptResponse",
   "skills_backup_adopt_many": "BackupAdoptResponse",

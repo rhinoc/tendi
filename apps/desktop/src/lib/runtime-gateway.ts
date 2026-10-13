@@ -624,14 +624,6 @@ export async function readSkillTargets(): Promise<SkillTargetResponse[] | null> 
   }
 }
 
-export async function syncSkillBackup(): Promise<void> {
-  try {
-    await invokeCommand(TauriCommand.SkillsBackupSync);
-  } catch {
-    // Background backup synchronization is best effort.
-  }
-}
-
 export async function readBundledSkillStatus(): Promise<BundledSkillStatus | null> {
   try {
     return await invokeCommand(TauriCommand.BundledSkillStatus) as BundledSkillStatus;
@@ -958,6 +950,18 @@ export async function configureSkillBackup(args: {
 
 export async function runSkillBackup(): Promise<void> {
   await invokeCommand(TauriCommand.SkillsBackupNow);
+}
+
+export async function pullSkillBackup(args: {
+  target: string;
+  scope: SkillScope;
+  dryRun?: boolean;
+  confirmed?: boolean;
+  revision?: string;
+  resolutions?: Array<{ id: string; action: string }>;
+}): Promise<BackupRestoreResponse> {
+  const response = await invokeCommand(TauriCommand.SkillsBackupPull, { ...args, scope: runtimeScope(args.scope) });
+  return { ...response, updated: response.updated === undefined ? undefined : recordRows(response.updated, "skills sync pull") } as BackupRestoreResponse;
 }
 
 export async function disconnectSkillBackup(): Promise<void> {

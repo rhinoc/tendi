@@ -217,6 +217,10 @@
     "skills_backup_sync": {},
     "skills_backup_now": {},
     "skills_backup_versions": {},
+    "skills_backup_pull": {
+      "target": "fixture",
+      "scope": "global"
+    },
     "skills_backup_restore": {
       "revision": "fixture",
       "target": "fixture",
@@ -427,6 +431,7 @@
     "skills_backup_sync": [],
     "skills_backup_now": [],
     "skills_backup_versions": [],
+    "skills_backup_pull": [],
     "skills_backup_restore": [],
     "skills_backup_adopt": [],
     "skills_backup_adopt_many": [],
@@ -1732,6 +1737,17 @@
         "summary": "fixture"
       }
     ],
+    "skills_backup_pull": {
+      "operations": [
+        {
+          "id": "fixture",
+          "name": "fixture",
+          "category": "fixture",
+          "target": "fixture",
+          "status": "fixture"
+        }
+      ]
+    },
     "skills_backup_restore": {
       "operations": [
         {
@@ -3008,6 +3024,11 @@
       "result": null
     },
     "skills_backup_versions": {
+      "jsonrpc": "1.0",
+      "id": "invalid",
+      "result": null
+    },
+    "skills_backup_pull": {
       "jsonrpc": "1.0",
       "id": "invalid",
       "result": null

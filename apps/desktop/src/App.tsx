@@ -68,7 +68,6 @@ import {
   readSkillIndexStatus as readSkillIndexStatusCommand,
   runSkillIndex as runSkillIndexCommand,
   searchSessionTranscript,
-  syncSkillBackup,
   previewSkillChange,
   previewSkillChangeIfAvailable,
   requestSkillUpdates,
@@ -522,26 +521,6 @@ export function App() {
   useEffect(() => {
     persistSidebarFilters(sidebarFilters);
   }, [sidebarFilters]);
-  useEffect(() => {
-    let pendingSync: number | null = null;
-    const syncBackup = () => {
-      if (pendingSync !== null) window.clearTimeout(pendingSync);
-      pendingSync = window.setTimeout(() => {
-        pendingSync = null;
-        void syncSkillBackup();
-      }, 100);
-    };
-    const syncWhenVisible = () => {
-      if (document.visibilityState === "visible") syncBackup();
-    };
-    window.addEventListener("focus", syncBackup);
-    document.addEventListener("visibilitychange", syncWhenVisible);
-    return () => {
-      if (pendingSync !== null) window.clearTimeout(pendingSync);
-      window.removeEventListener("focus", syncBackup);
-      document.removeEventListener("visibilitychange", syncWhenVisible);
-    };
-  }, []);
   const filteredData = useMemo(
     () => selectProjectScopeView(
       selectCatalogView(data, agentFilter, catalogs.indexes.sources),

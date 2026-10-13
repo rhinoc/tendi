@@ -240,6 +240,10 @@ pub trait RuntimeHandler {
         &self,
         request: runtime_schema::SkillsBackupVersionsRequest,
     ) -> Result<runtime_schema::SkillsBackupVersionsResponse, DaemonError>;
+    fn skills_backup_pull(
+        &self,
+        request: runtime_schema::SkillsBackupPullRequest,
+    ) -> Result<runtime_schema::SkillsBackupPullResponse, DaemonError>;
     fn skills_backup_restore(
         &self,
         request: runtime_schema::SkillsBackupRestoreRequest,
@@ -1480,6 +1484,24 @@ impl RuntimeHandler for Daemon {
         request: runtime_schema::SkillsBackupVersionsRequest,
     ) -> Result<runtime_schema::SkillsBackupVersionsResponse, DaemonError> {
         let result = { Daemon::skills_backup_versions(self, request) }?;
+        let result = serde_json::to_value(result).map_err(|error| {
+            DaemonError::new(
+                "CONTRACT_VIOLATION",
+                format!("generated response encode failed: {error}"),
+            )
+        })?;
+        serde_json::from_value(result).map_err(|error| {
+            DaemonError::new(
+                "CONTRACT_VIOLATION",
+                format!("generated response decode failed: {error}"),
+            )
+        })
+    }
+    fn skills_backup_pull(
+        &self,
+        request: runtime_schema::SkillsBackupPullRequest,
+    ) -> Result<runtime_schema::SkillsBackupPullResponse, DaemonError> {
+        let result = { Daemon::skills_backup_pull(self, request) }?;
         let result = serde_json::to_value(result).map_err(|error| {
             DaemonError::new(
                 "CONTRACT_VIOLATION",
@@ -2871,6 +2893,22 @@ macro_rules! runtime_dispatch {
                         )
                     })?;
                 let result = RuntimeHandler::skills_backup_versions($daemon, request)?;
+                serde_json::to_value(result).map_err(|error| {
+                    DaemonError::new(
+                        "CONTRACT_VIOLATION",
+                        format!("generated response encode failed: {error}"),
+                    )
+                })
+            }
+            "skills_backup_pull" => {
+                let request: runtime_schema::SkillsBackupPullRequest =
+                    serde_json::from_value($args.clone()).map_err(|error| {
+                        DaemonError::new(
+                            "INVALID_PARAMS",
+                            format!("generated request decode failed: {error}"),
+                        )
+                    })?;
+                let result = RuntimeHandler::skills_backup_pull($daemon, request)?;
                 serde_json::to_value(result).map_err(|error| {
                     DaemonError::new(
                         "CONTRACT_VIOLATION",

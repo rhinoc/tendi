@@ -4000,6 +4000,14 @@ impl super::AgentProvider for CodexProvider {
         }
     }
 
+    fn remove_mcp_entry(&self, path: &Path, server_path: &[String], name: &str) -> Result<String> {
+        match path.extension().and_then(|value| value.to_str()) {
+            Some("toml") => crate::mcp::remove_toml_server_entry(path, "mcp_servers", name),
+            Some("json") => crate::mcp::remove_json_server_entry_at_path(path, server_path, name),
+            _ => bail!("Codex MCP source must be JSON or TOML"),
+        }
+    }
+
     fn mcp_status_after_toggle(&self, enabled: bool) -> &'static str {
         if enabled { "configured" } else { "disabled" }
     }

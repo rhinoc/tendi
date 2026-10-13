@@ -576,6 +576,14 @@ export type BackupRestoreResolution = {
   id: string;
   action: string;
 };
+export type SkillsBackupPullRequest = {
+  target: string;
+  scope: "global" | "project";
+  dryRun?: boolean;
+  confirmed?: boolean;
+  revision?: string;
+  resolutions?: BackupRestoreResolution[];
+};
 export type SkillsBackupRestoreRequest = {
   revision: string;
   skillIds?: StringList;
@@ -1501,7 +1509,7 @@ export type JsonRpcError = { code: number; message: string; data?: JsonRpcErrorD
 export type JsonRpcResponse = { jsonrpc: "2.0"; id: JsonRpcId; result?: JsonValue; error?: JsonRpcError };
 export type RuntimeEventEnvelope = { id: number; event: string; payload: JsonValue; scopeKey?: string; domain?: string; operationId?: string; baseRevision?: number; revision?: number; sourceVersion?: string | null };
 
-export type CommandName = "scan" | "agents_list" | "bundled_skill_status" | "bundled_skill_install" | "bundled_skill_remove" | "bundled_skill_prompt_dismiss" | "skills_list" | "skills_refresh" | "sessions_snapshot" | "sessions_list" | "sessions_scan_start" | "sessions_search" | "analytics_overview" | "analytics_revision" | "session_skill_index_status" | "session_skill_index_run" | "session_skill_links" | "skill_session_links" | "settings_get" | "settings_save" | "assistant_ask" | "assistant_cancel" | "assistant_chat_sessions" | "tokenizer_count" | "session_projects_list" | "project_scan_scopes_list" | "project_scan_scopes_save" | "projects_list" | "projects_scan" | "terminal_apps_list" | "agent_configs_list" | "agent_config_watch" | "agent_config_read" | "agent_config_save" | "agent_configs_delete_many" | "config_profile_create" | "config_profile_set" | "rules_list" | "rule_file_read" | "rule_file_save" | "rule_file_delete_many" | "hooks_list" | "hook_delete" | "hook_delete_many" | "hook_set_enabled" | "hook_set_enabled_many" | "hook_review" | "hook_source_read" | "mcp_list" | "mcp_probe" | "mcp_set_enabled" | "mcp_set_enabled_many" | "prompts_list" | "prompt_save" | "prompts_delete_many" | "session_transcript" | "session_transcript_locator" | "session_transcript_search" | "skills_targets" | "skills_backup_status" | "skills_backup_configure" | "skills_backup_sync" | "skills_backup_now" | "skills_backup_versions" | "skills_backup_restore" | "skills_backup_adopt" | "skills_backup_adopt_many" | "skills_backup_disconnect" | "skills_add" | "skills_add_preview_read" | "skills_distribute" | "skills_remove_locations" | "skills_set" | "skills_wrap" | "skills_updates" | "skills_updates_cancel" | "skills_update" | "skills_update_many" | "skills_delete_many" | "skills_marketplace_search" | "skill_files" | "skill_file_read" | "skill_file_save" | "skill_file_create" | "skill_folder_create" | "skill_path_rename" | "skill_path_delete" | "app_icon_set" | "database_storage_status" | "database_reset" | "cli_status" | "cli_install" | "cli_remove" | "terminal_app_test" | "editor_app_test" | "session_resume_target" | "session_resume_in_terminal" | "open_in_editor" | "reveal_in_finder" | "logs_export" | "open_url" | "check_for_updates" | "install_update";
+export type CommandName = "scan" | "agents_list" | "bundled_skill_status" | "bundled_skill_install" | "bundled_skill_remove" | "bundled_skill_prompt_dismiss" | "skills_list" | "skills_refresh" | "sessions_snapshot" | "sessions_list" | "sessions_scan_start" | "sessions_search" | "analytics_overview" | "analytics_revision" | "session_skill_index_status" | "session_skill_index_run" | "session_skill_links" | "skill_session_links" | "settings_get" | "settings_save" | "assistant_ask" | "assistant_cancel" | "assistant_chat_sessions" | "tokenizer_count" | "session_projects_list" | "project_scan_scopes_list" | "project_scan_scopes_save" | "projects_list" | "projects_scan" | "terminal_apps_list" | "agent_configs_list" | "agent_config_watch" | "agent_config_read" | "agent_config_save" | "agent_configs_delete_many" | "config_profile_create" | "config_profile_set" | "rules_list" | "rule_file_read" | "rule_file_save" | "rule_file_delete_many" | "hooks_list" | "hook_delete" | "hook_delete_many" | "hook_set_enabled" | "hook_set_enabled_many" | "hook_review" | "hook_source_read" | "mcp_list" | "mcp_probe" | "mcp_set_enabled" | "mcp_set_enabled_many" | "prompts_list" | "prompt_save" | "prompts_delete_many" | "session_transcript" | "session_transcript_locator" | "session_transcript_search" | "skills_targets" | "skills_backup_status" | "skills_backup_configure" | "skills_backup_sync" | "skills_backup_now" | "skills_backup_versions" | "skills_backup_pull" | "skills_backup_restore" | "skills_backup_adopt" | "skills_backup_adopt_many" | "skills_backup_disconnect" | "skills_add" | "skills_add_preview_read" | "skills_distribute" | "skills_remove_locations" | "skills_set" | "skills_wrap" | "skills_updates" | "skills_updates_cancel" | "skills_update" | "skills_update_many" | "skills_delete_many" | "skills_marketplace_search" | "skill_files" | "skill_file_read" | "skill_file_save" | "skill_file_create" | "skill_folder_create" | "skill_path_rename" | "skill_path_delete" | "app_icon_set" | "database_storage_status" | "database_reset" | "cli_status" | "cli_install" | "cli_remove" | "terminal_app_test" | "editor_app_test" | "session_resume_target" | "session_resume_in_terminal" | "open_in_editor" | "reveal_in_finder" | "logs_export" | "open_url" | "check_for_updates" | "install_update";
 export const TauriCommand = {
   Scan: "scan",
   AgentsList: "agents_list",
@@ -1567,6 +1575,7 @@ export const TauriCommand = {
   SkillsBackupSync: "skills_backup_sync",
   SkillsBackupNow: "skills_backup_now",
   SkillsBackupVersions: "skills_backup_versions",
+  SkillsBackupPull: "skills_backup_pull",
   SkillsBackupRestore: "skills_backup_restore",
   SkillsBackupAdopt: "skills_backup_adopt",
   SkillsBackupAdoptMany: "skills_backup_adopt_many",
@@ -1701,6 +1710,7 @@ export type SkillsBackupSyncRequest = EmptyRequest;
 export type SkillsBackupNowRequest = EmptyRequest;
 export type SkillsBackupNowResponse = BackupSyncReport;
 export type SkillsBackupVersionsResponse = BackupVersionList;
+export type SkillsBackupPullResponse = BackupRestoreResponse;
 export type SkillsBackupRestoreResponse = BackupRestoreResponse;
 export type SkillsBackupAdoptResponse = BackupAdoptResponse;
 export type SkillsBackupAdoptManyResponse = BackupAdoptResponse;
@@ -1812,6 +1822,7 @@ export type RuntimeRequests = {
   "skills_backup_sync": SkillsBackupSyncRequest;
   "skills_backup_now": SkillsBackupNowRequest;
   "skills_backup_versions": SkillsBackupVersionsRequest;
+  "skills_backup_pull": SkillsBackupPullRequest;
   "skills_backup_restore": SkillsBackupRestoreRequest;
   "skills_backup_adopt": SkillsBackupAdoptRequest;
   "skills_backup_adopt_many": SkillsBackupAdoptManyRequest;
@@ -1917,6 +1928,7 @@ export type RuntimeResponses = {
   "skills_backup_sync": SkillsBackupSyncResponse;
   "skills_backup_now": SkillsBackupNowResponse;
   "skills_backup_versions": SkillsBackupVersionsResponse;
+  "skills_backup_pull": SkillsBackupPullResponse;
   "skills_backup_restore": SkillsBackupRestoreResponse;
   "skills_backup_adopt": SkillsBackupAdoptResponse;
   "skills_backup_adopt_many": SkillsBackupAdoptManyResponse;
@@ -2024,6 +2036,7 @@ export const COMMAND_METADATA = {
   "skills_backup_sync": { owner: "daemon", wire: "jsonrpc", clients: ["desktop"], execution: "write", serializedWrite: true, internal: false, deprecated: false },
   "skills_backup_now": { owner: "daemon", wire: "jsonrpc", clients: ["desktop"], execution: "write", serializedWrite: true, internal: false, deprecated: false },
   "skills_backup_versions": { owner: "daemon", wire: "jsonrpc", clients: ["desktop"], execution: "read", serializedWrite: false, internal: false, deprecated: false },
+  "skills_backup_pull": { owner: "daemon", wire: "jsonrpc", clients: ["desktop"], execution: "write", serializedWrite: true, internal: false, deprecated: false },
   "skills_backup_restore": { owner: "daemon", wire: "jsonrpc", clients: ["desktop"], execution: "write", serializedWrite: true, internal: false, deprecated: false },
   "skills_backup_adopt": { owner: "daemon", wire: "jsonrpc", clients: ["desktop"], execution: "write", serializedWrite: true, internal: false, deprecated: false },
   "skills_backup_adopt_many": { owner: "daemon", wire: "jsonrpc", clients: ["desktop"], execution: "write", serializedWrite: true, internal: false, deprecated: false },
@@ -2073,5 +2086,5 @@ export function isDesktopCommand(command: string): command is CommandName {
 }
 export const PROTOCOL_VERSION = 2;
 export const SCHEMA_VERSION = 1;
-export const RUNTIME_CONTRACT_FINGERPRINT = "51c444d46529decedf5b1535de7141889b51b70d6cefa11d3c75dce2d263d483";
+export const RUNTIME_CONTRACT_FINGERPRINT = "fc5a464a9ad21eb4ca9ea723050e685d2b0cc2bff95a4a4e48ae8797fac83384";
 export const RUNTIME_ERROR_CODES = {"INVALID_REQUEST":-32600,"METHOD_NOT_FOUND":-32601,"INVALID_PARAMS":-32602,"INVALID_ARGUMENT":-32602,"INTERNAL":-32603,"CORE_ERROR":-32603,"CONFLICT":-32002,"UNAUTHORIZED":-32003,"UNSUPPORTED_TRANSPORT":-32004,"CONTRACT_VIOLATION":-32005,"DAEMON_ERROR":-32001} as const;
