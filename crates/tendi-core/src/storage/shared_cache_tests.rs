@@ -183,7 +183,7 @@ fn projection_upgrade_converts_compressed_overview_payloads() {
         .conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(schema_version, 6);
+    assert_eq!(schema_version, crate::storage::STORAGE_SCHEMA_VERSION);
     let value_type: String = store
         .conn
         .query_row(
@@ -204,6 +204,47 @@ fn projection_upgrade_converts_compressed_overview_payloads() {
     assert_eq!(
         serde_json::from_str::<serde_json::Value>(&restored).unwrap(),
         json!({"project": {"name": "old"}})
+    );
+}
+
+#[test]
+fn overview_reader_decodes_compressed_cache_payloads_in_current_schema() {
+    let (_dir, store) = store();
+    let overview = json!({"sessions": 1}).to_string();
+    store
+        .with_named_write_transaction("test.shared_overview_compressed_read", |tx| {
+            tx.execute(
+                "INSERT INTO scoped_session_analytics_overview(
+                    scope_key,session_id,agent,session_path,event_min_date,event_max_date,
+                    has_activity,overview_json
+                 ) VALUES('workspace:/a','s','codex','/s.jsonl','2026-10-01','2026-10-01',0,?1)",
+                [&overview],
+            )?;
+            tx.execute(
+                "UPDATE shared_cache_values SET value=?1 WHERE kind='overview_json'",
+                [compress_analytics_json(&overview)?],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+
+    let mut restored = None;
+    visit_overview_payloads(
+        &store.conn,
+        "workspace:/a",
+        None,
+        "2026-01-01",
+        None,
+        |_, _, _, overview_json, _| {
+            restored = Some(std::str::from_utf8(overview_json).unwrap().to_owned());
+            Ok(())
+        },
+    )
+    .unwrap();
+
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(restored.as_deref().unwrap()).unwrap(),
+        json!({"sessions": 1})
     );
 }
 
@@ -313,13 +354,28 @@ fn populated_database_migration_preserves_cache_and_measures_space() {
     eprintln!("migrationSeconds={:.2}", started.elapsed().as_secs_f64());
     for (table, fields, expected) in snapshots {
         assert_eq!(
-            fingerprint(&store.conn, table, &fields),
+            fingerprint(&store.sessions.conn, table, &fields),
             expected,
             "{table}"
         );
         eprintln!("preserved {table}: {} rows", expected.0);
     }
     store.run_pending_storage_migrations().unwrap();
+    for layout in LAYOUTS {
+        let count: i64 = store
+            .conn
+            .query_row(
+                &format!("SELECT count(*) FROM {}", layout.table),
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            count, 0,
+            "primary {} still contains migrated rows",
+            layout.table
+        );
+    }
     store.run_pending_storage_maintenance().unwrap();
     let after = std::fs::metadata(&destination).unwrap().len();
     eprintln!(

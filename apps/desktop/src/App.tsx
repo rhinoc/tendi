@@ -7,7 +7,7 @@ import { Dialog } from "radix-ui";
 import { Appearance, applyAppearance, applyFontFamily, getThemeTransitionOrigin, listenForSystemAppearanceChange, resolveAppearance, startThemeTransition, type ColorTheme, type ThemePreferences } from "./lib/appearance.ts";
 import { applyAppIcon, type AppIcon } from "./lib/app-icon.ts";
 import { ALL_AGENT_FILTER, AppPage, assertRuntimeEventPayload, AsyncStatus, COLLAPSED_SIDEBAR_SIZE, configDisplayName, DaemonCommandError, DaemonErrorCode, DOMAIN_KEYS, DOMAIN_NAV_ITEMS, DesktopUpdateStatus, hookDisplayName, ProjectScopeFilter, promptDisplayName, RuntimeDomainKey, SessionResumeErrorAction, SessionResumeErrorCode, SessionResumeOutcomeStatus, SessionResumeTarget, SIDEBAR_SIZE, SkillChangeCommand, SkillVisibility, TauriCommand, UPDATE_AVAILABLE_EVENT, UpdateCheckStatus, agentIdentityKey, dialogCopy, formatSessionTitle, formatUserPath, friendlyAgent, hookItemsFromRows, hookSearchText, isConcreteAgent, isTauriRuntime, isVisibleAgent, logger, mcpDisplayName, mcpRowKey, navItems, normalizeSessionSkillLink, persistSidebarFilters, promptPreview, promptTitleFromBody, readCachedSidebarFilters, ruleSearchText, ruleTitle, selectProjectScopeView, sessionAppDeepLink, sessionExternalKey, sessionIdentity, sessionLaunchPayload, sessionResumeError, sessionSourceExternalKey, sessionResumeTargetForAgent, sessionTitleValue, skillChangeActionLabel, skillChangeDescription, skillChangeLoadingCopy, skillChangeTitle, skillDisplayName } from "./lib/index.ts";
-import type { BundledSkillStatus, DesktopUpdateState, DomainKey, HookRecord, McpRecord, NormalizedSkill, ProjectSummary, SessionRecord, SessionResumeOutcome, UpdateCheckResult } from "./lib/index.ts";
+import type { BundledSkillStatus, DesktopUpdateState, DomainKey, HookRecord, McpRecord, NormalizedSkill, ProjectSummary, SessionRecord, SessionResumeOutcome, TranscriptSearchScopes, UpdateCheckResult } from "./lib/index.ts";
 import { sortSidebarSources, type OrderedSidebarSource } from "./lib/sidebar-sources.ts";
 import { mcpColumns } from "./lib/tableColumns.tsx";
 import { PlaceholderView } from "./components/shared/PlaceholderView.tsx";
@@ -72,6 +72,7 @@ import {
   previewSkillChangeIfAvailable,
   requestSkillUpdates,
   resumeSessionInTerminal,
+  setSessionArchived as setSessionArchivedCommand,
   SkillUpdateCheckState,
   reviewHook as reviewHookCommand,
   savePrompt as savePromptCommand,
@@ -98,8 +99,8 @@ const MemoDataListView = memo(DataListView);
 const MemoConfigView = memo(ConfigView);
 const MemoSettingsView = memo(SettingsView);
 
-const searchSessionRecords = async (query: string): Promise<SessionRecord[]> => (
-  normalizeSessionRows(await invokeSessionSearch(query))
+const searchSessionRecords = async (query: string, searchScopes: TranscriptSearchScopes, archiveFilter: "unarchived" | "archived" | "all"): Promise<SessionRecord[]> => (
+  normalizeSessionRows(await invokeSessionSearch(query, undefined, searchScopes, archiveFilter))
 );
 
 type ViewId = AppPage;
@@ -1522,6 +1523,11 @@ export function App() {
     return request;
   }, [sessionResumeTarget]);
 
+  const setSessionArchived = useCallback(async (session: SessionRecord, archived: boolean) => {
+    const updated = await setSessionArchivedCommand(session, archived);
+    desktopStore.actions.applySessionDelta([updated]);
+  }, []);
+
   const resumeSession = useCallback(async (
     session: SessionRecord,
     requestedTarget?: Exclude<SessionResumeTarget, SessionResumeTarget.Auto>,
@@ -2062,6 +2068,7 @@ export function App() {
               sessionRefreshError={sessionRefreshError}
               onRefreshSessions={refreshSessionsFromScan}
               onResumeSession={resumeSession}
+              onSetSessionArchived={setSessionArchived}
               resolveSessionResumeTarget={resolveSessionResumeTarget}
               sessionResumeTarget={sessionResumeTarget}
               missingSessionProjectPolicy={missingSessionProjectPolicy}
@@ -2108,6 +2115,7 @@ export function App() {
               onTerminalChange={(value) => desktopStore.actions.patchSettings({ terminal: value })}
               onEditorChange={(value) => desktopStore.actions.patchSettings({ editor: value })}
               onAdditionalSessionRootsChange={(value) => desktopStore.actions.patchSettings({ additionalSessionRoots: value })}
+              onScanAdditionalSessions={refreshSessionsFromScan}
               onDeveloperModeChange={(value) => desktopStore.actions.patchSettings({ developerMode: value })}
               onSessionResumeTargetChange={(value) => desktopStore.actions.patchSettings({ sessionResumeTarget: value })}
               onMissingSessionProjectPolicyChange={(value) => desktopStore.actions.patchSettings({ missingSessionProjectPolicy: value })}

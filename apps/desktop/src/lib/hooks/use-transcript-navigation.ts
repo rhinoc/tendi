@@ -8,6 +8,19 @@ export type TranscriptNavigationTarget = {
   index?: number;
 };
 
+function expandDisclosure(element: HTMLElement): boolean {
+  const toggle = element.querySelector<HTMLButtonElement>(":scope > .disclosureSummaryRow > .disclosureSummary");
+  if (toggle?.getAttribute("aria-expanded") === "false") {
+    toggle.click();
+    return true;
+  }
+  if (element instanceof HTMLDetailsElement && !element.open) {
+    element.open = true;
+    return true;
+  }
+  return false;
+}
+
 type TranscriptFocusRequest = {
   target: TranscriptNavigationTarget;
   preferSearchMatch: boolean;
@@ -36,9 +49,11 @@ export function useTranscriptNavigation({
   if (!authorityRef.current) authorityRef.current = createTranscriptNavigationAuthority();
   const [highlightedKey, setHighlightedKey] = useState("");
   const [focusRequest, setFocusRequest] = useState<TranscriptFocusRequest | null>(null);
+  const [focusRetryRevision, setFocusRetryRevision] = useState(0);
   const [pendingBottom, setPendingBottom] = useState(false);
   const [jumpingToBottom, setJumpingToBottom] = useState(false);
   const highlightTimerRef = useRef(0);
+  const focusRetryFrameRef = useRef<number | null>(null);
   const scrolledFocusRevisionRef = useRef<number | null>(null);
   const authority = authorityRef.current;
 
@@ -70,6 +85,14 @@ export function useTranscriptNavigation({
     setFocusRequest({ target, preferSearchMatch, behavior, navigationRevision });
   }, [authority]);
 
+  const retryFocusAfterDisclosureChange = useCallback(() => {
+    if (focusRetryFrameRef.current !== null) return;
+    focusRetryFrameRef.current = window.requestAnimationFrame(() => {
+      focusRetryFrameRef.current = null;
+      setFocusRetryRevision((revision) => revision + 1);
+    });
+  }, []);
+
   useLayoutEffect(() => {
     const request = focusRequest;
     const root = rootRef.current;
@@ -87,13 +110,22 @@ export function useTranscriptNavigation({
     }
 
     if (request.target.groupKey) {
-      const group = root.querySelector(`[data-transcript-key="${escapeSelectorValue(request.target.groupKey)}"]`) as HTMLDetailsElement | null;
+      const group = root.querySelector<HTMLElement>(`[data-transcript-key="${escapeSelectorValue(request.target.groupKey)}"]`);
       if (!group) return;
-      if (!group.open) group.open = true;
+      if (expandDisclosure(group)) {
+        retryFocusAfterDisclosureChange();
+        return;
+      }
     }
 
     const node = root.querySelector(`[data-transcript-key="${escapeSelectorValue(request.target.key)}"]`);
     if (!node) return;
+    if (request.preferSearchMatch && node.classList.contains("disclosure")) {
+      if (expandDisclosure(node as HTMLElement)) {
+        retryFocusAfterDisclosureChange();
+        return;
+      }
+    }
     const details = node.closest("details");
     if (details && !details.open) details.open = true;
     const destination = request.preferSearchMatch
@@ -108,7 +140,7 @@ export function useTranscriptNavigation({
       - (root.clientHeight - destinationBounds.height) / 2;
     root.scrollTo({ top: Math.max(0, centeredTop), behavior: request.behavior });
     highlightTimerRef.current = window.setTimeout(() => setHighlightedKey(""), 1800);
-  }, [authority, focusRequest, indexFromKey, items, renderRangeKey, rootRef, scrollToIndex]);
+  }, [authority, focusRequest, focusRetryRevision, indexFromKey, items, renderRangeKey, retryFocusAfterDisclosureChange, rootRef, scrollToIndex]);
 
   useLayoutEffect(() => {
     if (!pendingBottom) return;
@@ -117,7 +149,10 @@ export function useTranscriptNavigation({
     setPendingBottom(false);
   }, [items, pendingBottom, renderRangeKey, scrollToBottom, updateScrollEdges]);
 
-  useEffect(() => () => window.clearTimeout(highlightTimerRef.current), []);
+  useEffect(() => () => {
+    window.clearTimeout(highlightTimerRef.current);
+    if (focusRetryFrameRef.current !== null) window.cancelAnimationFrame(focusRetryFrameRef.current);
+  }, []);
 
   const scrollToTop = useCallback(() => {
     beginNavigation("top");

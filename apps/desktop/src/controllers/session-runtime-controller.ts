@@ -4,6 +4,7 @@ import {
   invokeAnalyticsRevision,
   invokeSessionScanStart,
   invokeSessionSnapshot,
+  invokeSessionOwnershipSnapshot,
   SessionScanPhase,
   subscribeRuntimeEvents,
 } from "../lib/runtime-gateway.ts";
@@ -236,13 +237,33 @@ export function useSessionRuntimeController(
   }, [finishSessionScanWaiters, flushBufferedSessionEvents, resyncSessionSnapshot, scheduleSessionEventFlush, setSessionLoadError, setSessionRefreshError]);
 
   useEffect(() => {
+    let disposed = false;
+    let ownershipEvents = 0;
+    let ownershipSnapshotInFlight: Promise<void> | null = null;
+    const syncOwnershipSnapshot = () => {
+      if (ownershipSnapshotInFlight) return ownershipSnapshotInFlight;
+      const before = ownershipEvents;
+      ownershipSnapshotInFlight = invokeSessionOwnershipSnapshot().then((snapshot) => {
+        if (!disposed && ownershipEvents === before) desktopStore.actions.setSessionOwnership(snapshot);
+      }).catch((error) => logger.warn("session ownership snapshot failed", { error })).finally(() => {
+        ownershipSnapshotInFlight = null;
+      });
+      return ownershipSnapshotInFlight;
+    };
     const subscription = startAsyncSubscription(subscribeRuntimeEvents, (event) => {
       const previousEventId = lastDaemonEventId.current;
       lastDaemonEventId.current = event.id;
+      if (previousEventId !== null && (event.id > previousEventId + 1 || event.id <= previousEventId)
+        && event.event !== RuntimeEventName.SessionsOwnership) {
+        void syncOwnershipSnapshot();
+      }
       const isCurrentScopeEvent = !event.scopeKey
         || !sessionScopeKey.current
         || event.scopeKey === sessionScopeKey.current;
-      if (event.event === RuntimeEventName.SessionsScan) {
+      if (event.event === RuntimeEventName.SessionsOwnership) {
+        ownershipEvents += 1;
+        desktopStore.actions.setSessionOwnership(event.payload);
+      } else if (event.event === RuntimeEventName.SessionsScan) {
         if (previousEventId !== null && event.id > previousEventId + 1) {
           const scanEvent = event.payload;
           void resyncSessionSnapshot(
@@ -311,7 +332,9 @@ export function useSessionRuntimeController(
       logger.warn("daemon event subscription failed", { error });
     });
     sessionEventReady.current = subscription.ready;
+    void subscription.ready.then(syncOwnershipSnapshot);
     return () => {
+      disposed = true;
       subscription.dispose();
       if (sessionEventFlushTimer.current !== undefined) {
         window.clearTimeout(sessionEventFlushTimer.current);

@@ -25,12 +25,14 @@ mod operation_coordinator;
 mod preview_store;
 mod request_scheduler;
 mod rpc_admission;
+mod session_ownership;
 use operation_coordinator::OperationCoordinator;
 use preview_store::PreviewStore;
 use tendi_core::generated::runtime_contract as runtime_schema;
 
 include!("generated/runtime_dispatch.rs");
 
+pub const SESSION_OWNERSHIP_EVENT: &str = runtime_schema::EventName::SessionsOwnership.as_str();
 pub const SESSION_SCAN_EVENT: &str = runtime_schema::EventName::SessionsScan.as_str();
 pub const ANALYTICS_PROGRESS_EVENT: &str = runtime_schema::EventName::AnalyticsProgress.as_str();
 pub const ANALYTICS_REVISION_EVENT: &str = runtime_schema::EventName::AnalyticsRevision.as_str();
@@ -292,6 +294,7 @@ struct SessionWatcherState {
     watcher: Option<RecommendedWatcher>,
     watched_paths: BTreeSet<PathBuf>,
     dynamic_roots: Vec<PathBuf>,
+    watch_plan: Option<tendi_core::sessions::SessionWatchPlan>,
 }
 
 #[derive(Debug)]
@@ -440,6 +443,7 @@ struct DaemonState {
     projection_refreshes: Mutex<BTreeSet<String>>,
     skill_reconciliation_backoff: Mutex<BTreeMap<PathBuf, SkillReconciliationBackoff>>,
     session_runtime: Arc<SessionRuntime>,
+    session_ownership: session_ownership::OwnershipRuntime,
     config_runtime: Arc<ConfigRuntime>,
     skill_runtime: Arc<SkillRuntime>,
     rule_runtime: Arc<RuleRuntime>,
@@ -576,6 +580,7 @@ impl Daemon {
                 projection_refreshes: Mutex::new(BTreeSet::new()),
                 skill_reconciliation_backoff: Mutex::new(BTreeMap::new()),
                 session_runtime,
+                session_ownership: session_ownership::OwnershipRuntime::new(),
                 config_runtime,
                 skill_runtime,
                 rule_runtime,
@@ -607,6 +612,8 @@ impl Daemon {
                 );
             }
         }
+        let ownership_daemon = daemon.clone();
+        let ownership_worker = thread::Builder::new().name("tendi-session-ownership".into()).spawn(move || session_ownership::run(ownership_daemon)).expect("session ownership worker must start");
         let watch_daemon = daemon.clone();
         let watch_worker = thread::spawn(move || session_watch_loop(watch_daemon, watch_rx));
         let analytics_daemon = daemon.clone();
@@ -631,6 +638,7 @@ impl Daemon {
             .lock()
             .expect("daemon worker registry is healthy")
             .extend([
+                ownership_worker,
                 watch_worker,
                 analytics_worker,
                 search_worker,
@@ -1357,7 +1365,11 @@ impl Daemon {
             tendi_core::coordination::projection_key(domain, &self.state.cwd)
         };
         let resources = vec![tendi_core::coordination::ResourceRequest::named(
-            store.path(),
+            if domain == "sessions" {
+                store.session_database_path()
+            } else {
+                store.path()
+            },
             projection_key,
         )];
         let workload = if domain == "mcp" {
@@ -1734,6 +1746,10 @@ impl Daemon {
         Ok(apps)
     }
 
+    fn sessions_ownership_snapshot(&self) -> Result<runtime_schema::SessionOwnershipSnapshot, DaemonError> {
+        self.state.session_ownership.snapshot.lock().map(|snapshot| snapshot.clone()).map_err(|_| internal_error("session ownership snapshot is unavailable"))
+    }
+
     fn sessions_snapshot(&self) -> Result<runtime_schema::SessionSnapshot, DaemonError> {
         let store = self.open_store().map_err(core_error)?;
         let scope_key = daemon_scope_key(self)?;
@@ -1760,10 +1776,20 @@ impl Daemon {
         &self,
         request: runtime_schema::SessionsListRequest,
     ) -> Result<runtime_schema::SessionsListResponse, DaemonError> {
+        let archive_filter = session_archive_filter_from_request(request.archive_filter);
         let store = self.open_store().map_err(core_error)?;
         let scope_key = daemon_scope_key(self)?;
+        let search_scopes = request
+            .search_scopes
+            .map(|scopes| tendi_core::transcript::TranscriptSearchScopes {
+                user: scopes.user,
+                assistant: scopes.assistant,
+                system: scopes.system,
+                tool: scopes.tool,
+            })
+            .unwrap_or_else(tendi_core::transcript::TranscriptSearchScopes::session_search_default);
         let (revision, page) = store
-            .session_page_with_revision_for_scope(
+            .session_page_with_revision_for_scope_with_filters(
                 &scope_key,
                 tendi_core::storage::SessionListQuery {
                     query: request.query,
@@ -1778,6 +1804,11 @@ impl Daemon {
                     show_child_sessions: request.show_child_sessions,
                     selected_project_keys: request.selected_project_keys,
                     locate: request.locate.map(session_identity_from_request),
+                },
+                tendi_core::storage::SessionListFilters {
+                    started_after: request.started_after,
+                    search_scopes,
+                    archive_filter,
                 },
             )
             .map_err(core_error)?;
@@ -1954,6 +1985,7 @@ impl Daemon {
         &self,
         request: runtime_schema::SessionsSearchRequest,
     ) -> Result<runtime_schema::SessionSearchHitList, DaemonError> {
+        let archive_filter = session_archive_filter_from_request(request.archive_filter);
         let candidates = request.candidates.map(|values| {
             values
                 .into_iter()
@@ -1962,8 +1994,23 @@ impl Daemon {
         });
         let store = self.open_store().map_err(core_error)?;
         let scope_key = daemon_scope_key(self)?;
+        let search_scopes = request
+            .search_scopes
+            .map(|scopes| tendi_core::transcript::TranscriptSearchScopes {
+                user: scopes.user,
+                assistant: scopes.assistant,
+                system: scopes.system,
+                tool: scopes.tool,
+            })
+            .unwrap_or_else(tendi_core::transcript::TranscriptSearchScopes::session_search_default);
         let hits = store
-            .search_sessions_for_scope(&scope_key, &request.query, candidates.as_deref())
+            .search_sessions_for_scope_with_scopes_and_archive_filter(
+                &scope_key,
+                &request.query,
+                candidates.as_deref(),
+                &search_scopes,
+                archive_filter,
+            )
             .map_err(core_error)?;
         serde_json::from_value(serde_json::to_value(hits).map_err(internal_error)?).map_err(
             |error| {
@@ -3035,14 +3082,78 @@ impl Daemon {
         serde_json::from_value(json!({ "deleted": deleted })).map_err(internal_error)
     }
 
+    fn session_set_archived(
+        &self,
+        request: runtime_schema::SessionSetArchivedRequest,
+    ) -> Result<runtime_schema::SessionRecord, DaemonError> {
+        let store = self.open_store().map_err(core_error)?;
+        let scope_key = daemon_scope_key(self)?;
+        let identity = session_identity_from_request(request.session);
+        let session = store
+            .list_sessions_for_scope(&scope_key)
+            .map_err(core_error)?
+            .sessions
+            .into_iter()
+            .find(|session| {
+                session.id == identity.id
+                    && session.agent == identity.agent
+                    && session.path == identity.path
+            })
+            .ok_or_else(|| {
+                invalid_argument("session source changed; refresh sessions and try again")
+            })?;
+        let target =
+            tendi_core::set_session_archived(&session, request.archived).map_err(core_error)?;
+        let paths = vec![session.path, target.clone()];
+        let (upserts, deleted, analytics_sessions, base_revision, revision, operation_id) =
+            process_session_watch_paths_once(self, &paths, &scope_key)?;
+        if base_revision != revision {
+            self.emit_revisioned_event(
+                SESSION_SCAN_EVENT,
+                &scope_key,
+                "sessions",
+                &operation_id,
+                base_revision,
+                revision,
+                None,
+                runtime_event(
+                    SESSION_SCAN_EVENT,
+                    json!({
+                        "generation": self.state.session_runtime.generation.load(Ordering::SeqCst),
+                        "phase": "watch", "upserts": upserts, "deleted": deleted,
+                        "scanned": paths.len(), "complete": true, "error": Value::Null,
+                    }),
+                ),
+            );
+        }
+        let _ = self
+            .state
+            .session_runtime
+            .analytics_tx
+            .send(AnalyticsRefreshJob {
+                phase: "watch",
+                scope_key: scope_key.clone(),
+                sessions: analytics_sessions,
+            });
+        let updated = store
+            .list_sessions_for_scope(&scope_key)
+            .map_err(core_error)?
+            .sessions
+            .into_iter()
+            .find(|session| session.id == identity.id && session.path == target && session.agent == identity.agent)
+            .ok_or_else(|| internal_error("archived session was not persisted"))?;
+        Ok(session_record_runtime_value(updated))
+    }
+
     fn session_transcript(
         &self,
         request: runtime_schema::SessionTranscriptRequest,
     ) -> Result<runtime_schema::TranscriptPage, DaemonError> {
         let agent = agent_kind_from_request(request.agent);
-        let page = tendi_core::transcript::parse_transcript_page_if_changed(
+        let page = tendi_core::transcript::parse_session_transcript_page_if_changed(
             Path::new(&request.path),
             agent,
+            request.session_id.as_deref(),
             request.cursor.as_deref(),
             request.limit.map(|value| value as usize),
             request.known_source_version.as_deref(),
@@ -3058,7 +3169,7 @@ impl Daemon {
     ) -> Result<runtime_schema::TranscriptLocatorPage, DaemonError> {
         let agent = agent_kind_from_request(request.agent);
         let page =
-            tendi_core::transcript::parse_transcript_locator_page(Path::new(&request.path), agent)
+            tendi_core::transcript::parse_session_transcript_locator_page(Path::new(&request.path), agent, request.session_id.as_deref())
                 .map_err(core_error)?;
         serde_json::from_value(serde_json::to_value(page).map_err(internal_error)?)
             .map_err(internal_error)
@@ -3075,9 +3186,10 @@ impl Daemon {
             system: request.scopes.system,
             tool: request.scopes.tool,
         };
-        let result = tendi_core::transcript::search_transcript(
+        let result = tendi_core::transcript::search_session_transcript(
             Path::new(&request.path),
             agent,
+            request.session_id.as_deref(),
             &request.query,
             &scopes,
         )
@@ -3161,16 +3273,29 @@ impl Daemon {
                 return Err(error);
             }
         }
-        *self
+        let mut watcher_state = self
             .state
             .session_runtime
             .watcher
             .lock()
-            .map_err(|_| internal_error("session watcher is unavailable"))? = SessionWatcherState {
+            .map_err(|_| internal_error("session watcher is unavailable"))?;
+        let watch_plan_changed = watcher_state
+            .watch_plan
+            .as_ref()
+            .is_some_and(|configured_plan| configured_plan != plan);
+        *watcher_state = SessionWatcherState {
             watcher: Some(watcher),
             watched_paths,
             dynamic_roots: plan.dynamic_roots.clone(),
+            watch_plan: Some(plan.clone()),
         };
+        drop(watcher_state);
+        if watch_plan_changed {
+            self.state
+                .session_runtime
+                .watch_revision
+                .fetch_add(1, Ordering::AcqRel);
+        }
         Ok(())
     }
 
@@ -3876,6 +4001,30 @@ impl Daemon {
         let store = self.open_store().map_err(core_error)?;
         let disconnected = store.clear_skill_backup_config().map_err(core_error)?;
         serde_json::from_value(json!({ "disconnected": disconnected })).map_err(internal_error)
+    }
+
+    fn skills_create(
+        &self,
+        request: runtime_schema::SkillsCreateRequest,
+    ) -> Result<runtime_schema::SkillsCreateResponse, DaemonError> {
+        let target = request
+            .target
+            .parse::<tendi_core::SkillTarget>()
+            .map_err(core_error)?;
+        let before = self.skill_projection_for_mutation()?;
+        let directory = tendi_core::skills::create_local_skill(
+            &self.state.cwd,
+            &target,
+            &request.name,
+            &request.description,
+        )
+        .map_err(core_error)?;
+        let directories = vec![directory];
+        let refreshed = self.refresh_skill_projection(before, &[], &directories)?;
+        serde_json::from_value(json!({
+            "updated": skills_matching_paths(&refreshed.skills, &directories),
+        }))
+        .map_err(internal_error)
     }
 
     fn skills_add(
@@ -6428,7 +6577,9 @@ fn run_session_scan(
         .map_err(core_error)?
         .map(|head| head.revision)
         .unwrap_or(base_revision);
-    let analytics_sessions = changed_sessions;
+    // Requeue the complete scan so interrupted analytics backfills resume on
+    // the next scan. Unchanged analytics records are skipped by the refresh.
+    let analytics_sessions = report.sessions.clone();
     daemon.emit_revisioned_event(
         SESSION_SCAN_EVENT,
         &scope_key,
@@ -6740,6 +6891,7 @@ fn session_watch_loop(daemon: Daemon, receiver: Receiver<notify::Result<Event>>)
                 let mut relevant_paths = Vec::new();
                 let event_paths = event.paths;
                 for path in event_paths.iter().cloned() {
+                    let path = tendi_core::sessions::session_watch_source_path(&path);
                     if let Some(session_root) = advance_session_watcher(&runtime, &path) {
                         relevant = true;
                         relevant_paths.push(path.clone());
@@ -7151,6 +7303,7 @@ fn process_session_watch_paths_once(
         }),
     );
     let report = tendi_core::sessions::scan_session_paths(&existing_paths, &cache);
+    if !report.warnings.is_empty() { return Err(core_error(anyhow::anyhow!(report.warnings.join("; ")))); }
     tendi_core::logging::global().info(
         "session watcher scan completed",
         json!({
@@ -7609,6 +7762,16 @@ fn session_analytics_loop(daemon: Daemon, receiver: Receiver<AnalyticsRefreshJob
                 by_scope.entry(scope_key).or_default().push(session);
             }
             for (scope_key, sessions) in by_scope {
+                let mut sessions = sessions;
+                sessions.sort_by(|left, right| {
+                    tendi_core::compare_timestamps(
+                        right.updated_at.as_deref(),
+                        left.updated_at.as_deref(),
+                    )
+                        .then_with(|| left.agent.label().cmp(right.agent.label()))
+                        .then_with(|| left.id.cmp(&right.id))
+                        .then_with(|| left.path.cmp(&right.path))
+                });
                 match refresh_session_analytics_serialized_with_revision(
                     &daemon, phase, &scope_key, &sessions,
                 ) {
@@ -7909,6 +8072,9 @@ fn session_record_runtime_value(
         parent_session_id: session.parent_session_id,
         search_score: None,
         search_snippet: None,
+        archived: session.archived,
+        archive_supported: Some(session.archive_supported),
+        resumable: Some(session.resumable),
         token_usage: session
             .token_usage
             .map(|usage| runtime_schema::SessionTokenUsage {
@@ -7942,6 +8108,20 @@ fn session_list_sort_direction(value: runtime_schema::SessionListSortDirection) 
         runtime_schema::SessionListSortDirection::Desc => "desc",
     }
     .to_string()
+}
+
+fn session_archive_filter_from_request(
+    value: Option<runtime_schema::SessionArchiveFilter>,
+) -> tendi_core::storage::SessionArchiveFilter {
+    match value.unwrap_or(runtime_schema::SessionArchiveFilter::Unarchived) {
+        runtime_schema::SessionArchiveFilter::Unarchived => {
+            tendi_core::storage::SessionArchiveFilter::Unarchived
+        }
+        runtime_schema::SessionArchiveFilter::Archived => {
+            tendi_core::storage::SessionArchiveFilter::Archived
+        }
+        runtime_schema::SessionArchiveFilter::All => tendi_core::storage::SessionArchiveFilter::All,
+    }
 }
 
 fn bundled_skill_agent(value: Option<runtime_schema::AgentKind>) -> tendi_core::AgentKind {

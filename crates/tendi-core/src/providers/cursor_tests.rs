@@ -364,3 +364,15 @@ fn enriches_cursor_tool_items_with_store_arguments_and_results() {
 
     let _ = fs::remove_dir_all(root);
 }
+
+#[test]
+fn ownership_only_accepts_cli_runtime_and_chat_database_sources() {
+    use std::path::Path;
+    assert!(super::cursor_cli_process(Path::new("/home/me/.local/share/cursor-agent/versions/build/node")));
+    assert!(!super::cursor_cli_process(Path::new("/usr/bin/node")));
+    assert!(!super::cursor_cli_process(Path::new("/Applications/Cursor.app/Contents/MacOS/Cursor")));
+    assert_eq!(super::cursor_held_chat_id(Path::new("/custom/chats/project-hash/chat-id/store.db")).as_deref(), Some("chat-id"));
+    assert_eq!(super::cursor_held_chat_id(Path::new("/custom/acp-sessions/chat-id/store.db")).as_deref(), Some("chat-id"));
+    assert!(super::cursor_held_chat_id(Path::new("/custom/sdk-agent-store/agents/agent-hash/store.db")).is_none());
+    assert!(super::cursor_held_chat_id(Path::new("/custom/globalStorage/state.vscdb")).is_none());
+}

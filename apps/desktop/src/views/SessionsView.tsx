@@ -1,12 +1,13 @@
 import { Tooltip as AppTooltip } from "../components/shared/Tooltip.tsx";
 import { lazy, memo, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ChangeEvent, type ReactNode } from "react";
-import { AlertCircle, AppWindow, ArrowDownToLine, ArrowUpToLine, Check, ChevronLeft, ChevronRight, Filter, FolderOpen, GitFork, Info, LocateFixed, MessageSquarePlus, MessageSquareText, PanelRightClose, RefreshCw, Search, SearchX, Sparkles, TerminalSquare, Upload, X } from "lucide-react";
+import { AlertCircle, AppWindow, Archive, ArchiveRestore, ArrowDownToLine, ArrowUpToLine, Check, ChevronLeft, ChevronRight, Filter, FolderOpen, GitFork, Info, LocateFixed, MessageSquarePlus, MessageSquareText, PanelRightClose, RefreshCw, Search, SearchX, Sparkles, TerminalSquare, Upload, X } from "lucide-react";
 import { Group as PanelGroup, Panel } from "react-resizable-panels";
 import { ContextMenu, Dialog, DropdownMenu, Popover } from "radix-ui";
 
 import { DataTable } from "../components/DataTable.tsx";
 import type { ColumnDef, SortState } from "../components/DataTable.types";
 import { SortDirection } from "../lib/sort.ts";
+import type { SessionArchiveFilter } from "../lib/generated/runtime-types.ts";
 import { getTabScrollPosition, setTabScrollPosition, useTabState } from "../lib/tab-state.ts";
 import { useTranscriptNavigation } from "../lib/hooks/use-transcript-navigation.ts";
 import {
@@ -33,6 +34,9 @@ import { useSessionTranscriptNavigation } from "../features/sessions/useSessionT
 import { sessionSourceIdentity, useInferredSessionResumeTargets } from "../features/sessions/useInferredSessionResumeTargets.ts";
 import { useSessionListWorkspace } from "../features/sessions/useSessionListWorkspace.ts";
 import { useSessionRemoteListWorkspace } from "../features/sessions/useSessionRemoteListWorkspace.ts";
+import { SessionArchiveButton } from "../features/sessions/SessionArchiveButton.tsx";
+import { SessionStatusIcons } from "../features/sessions/SessionStatusIcons.tsx";
+import { useSessionArchiveOperations } from "../features/sessions/useSessionArchiveOperations.ts";
 import { useSessionResumeOperations } from "../features/sessions/useSessionResumeOperations.ts";
 import { useSessionSkillLinks } from "../features/sessions/useSessionSkillLinks.ts";
 import { ImportFeedbackState, useSessionImport } from "../features/sessions/useSessionImport.ts";
@@ -94,7 +98,6 @@ import {
   formatUserPath,
   friendlyAgent,
   groupTranscriptItems,
-  isWebSource,
   logger,
   promptActionLabels,
   revealPathLabel,
@@ -155,6 +158,27 @@ import {
 const SessionTokenStatusBar = lazy(() => import("../components/SessionTokenStatusBar.tsx").then(({ SessionTokenStatusBar: component }) => ({ default: component })));
 
 const SESSION_SEARCH_DEBOUNCE_MS = 300;
+type SessionTimeRange = "any" | "day" | "week" | "month" | "year";
+type SessionTimeFilter = { range: SessionTimeRange; startedAfter?: string };
+const SESSION_TIME_RANGE_OPTIONS: Array<{ id: SessionTimeRange; label: string; durationMs?: number }> = [
+  { id: "any", label: "Any time" },
+  { id: "day", label: "Past 24 hours", durationMs: 24 * 60 * 60 * 1000 },
+  { id: "week", label: "Past 7 days", durationMs: 7 * 24 * 60 * 60 * 1000 },
+  { id: "month", label: "Past 30 days", durationMs: 30 * 24 * 60 * 60 * 1000 },
+  { id: "year", label: "Past year", durationMs: 365 * 24 * 60 * 60 * 1000 },
+];
+
+function makeSessionTimeFilter(range: SessionTimeRange): SessionTimeFilter {
+  const option = SESSION_TIME_RANGE_OPTIONS.find((candidate) => candidate.id === range);
+  return {
+    range,
+    startedAfter: option?.durationMs ? new Date(Date.now() - option.durationMs).toISOString() : undefined,
+  };
+}
+
+function sessionTimeFilterLabel(range: SessionTimeRange): string {
+  return SESSION_TIME_RANGE_OPTIONS.find((option) => option.id === range)?.label ?? "Any time";
+}
 const SESSION_LOCATOR_MIN_ITEMS = 4;
 const SESSION_REFRESH_ERROR = "Could not refresh sessions. Try again.";
 const TRANSCRIPT_IMPORT_PROVIDER_PLACEHOLDER = "__choose_transcript_provider__";
@@ -684,6 +708,7 @@ export function TranscriptPanel({
   items,
   locatorMetadata,
   sessionSearchQuery,
+  inheritedSearchScopes,
   loading,
   hasMore,
   loadingMore,
@@ -702,6 +727,8 @@ export function TranscriptPanel({
   onReportError,
   searchTranscript,
   onSavePrompt,
+  onToggleArchive,
+  archiving = false,
   keyboardNavigationScopeRef,
 }: {
   session: SessionRecord;
@@ -710,6 +737,7 @@ export function TranscriptPanel({
   items: TranscriptItemRecord[];
   locatorMetadata?: TranscriptLocatorItem[];
   sessionSearchQuery?: string;
+  inheritedSearchScopes: TranscriptSearchScopeState;
   loading: boolean;
   hasMore: boolean;
   loadingMore: boolean;
@@ -728,6 +756,8 @@ export function TranscriptPanel({
   onReportError?: (message: string) => void;
   searchTranscript?: (session: SessionRecord, query: string, scopes: TranscriptSearchScopes) => Promise<TranscriptSearchResult | null>;
   onSavePrompt?: (body: string) => Promise<boolean>;
+  onToggleArchive?: (session: SessionRecord) => void | Promise<void>;
+  archiving?: boolean;
   keyboardNavigationScopeRef: KeyboardNavigationScopeRef;
 }) {
   const transcriptItems = useMemo(() => {
@@ -759,13 +789,20 @@ export function TranscriptPanel({
   const searchInputRef = useRef<HTMLInputElement | null>(null);
   const [searchQuery, setSearchQuery] = useState("");
   const [debouncedSearchQuery, setDebouncedSearchQuery] = useState("");
-  const [searchScopes, setSearchScopes] = useState<TranscriptSearchScopeState>(DEFAULT_TRANSCRIPT_SEARCH_SCOPES);
+  const [searchScopesOverride, setSearchScopesOverride] = useState<{
+    sessionKey: string;
+    scopes: TranscriptSearchScopeState;
+  } | null>(null);
   const [searchOpen, setSearchOpen] = useState(false);
   const [transcriptScrollEdges, setTranscriptScrollEdges] = useState({ atTop: true, atBottom: true });
   const reportedSearchErrorRevisionRef = useRef(0);
   const transcriptSearchScrollSnapshotRef = useRef<{ top: number; distanceFromBottom: number } | null>(null);
   const transcriptNavigationSessionKey = `${session.agent}:${session.id}:${session.path}`;
-  const normalizedSessionSearchQuery = `${sessionSearchQuery ?? ""}`.trim().toLowerCase();
+  const searchScopes = searchScopesOverride?.sessionKey === transcriptNavigationSessionKey
+    ? searchScopesOverride.scopes
+    : inheritedSearchScopes;
+  const sessionSearchQueryText = `${sessionSearchQuery ?? ""}`;
+  const normalizedSessionSearchQuery = sessionSearchQueryText.trim().toLowerCase();
   const updateTranscriptScrollEdges = useCallback(() => {
     const root = transcriptRef.current;
     if (!root) return;
@@ -824,12 +861,15 @@ export function TranscriptPanel({
     };
   }, [captureTranscriptSearchScroll, normalizedSessionSearchQuery, searchOpen, transcriptNavigationSessionKey]);
   useEffect(() => {
+    setSearchScopesOverride(null);
+  }, [transcriptNavigationSessionKey]);
+  useEffect(() => {
     beginTranscriptNavigation(normalizedSessionSearchQuery ? "search" : "idle");
     clearHighlight();
-    setSearchQuery(normalizedSessionSearchQuery);
+    setSearchQuery(sessionSearchQueryText);
     setDebouncedSearchQuery(normalizedSessionSearchQuery);
     setSearchOpen(Boolean(normalizedSessionSearchQuery));
-  }, [beginTranscriptNavigation, clearHighlight, normalizedSessionSearchQuery, transcriptNavigationSessionKey]);
+  }, [beginTranscriptNavigation, clearHighlight, normalizedSessionSearchQuery, sessionSearchQueryText, transcriptNavigationSessionKey]);
   const normalizedInputSearchQuery = searchQuery.trim().toLowerCase();
   const normalizedSearchQuery = debouncedSearchQuery;
   const selectedSearchScopeCount = TRANSCRIPT_SEARCH_SCOPES.filter((scope) => searchScopes[scope.id]).length;
@@ -938,18 +978,24 @@ export function TranscriptPanel({
     clearHighlight();
     setSearchQuery("");
     setDebouncedSearchQuery("");
-    setSearchScopes(DEFAULT_TRANSCRIPT_SEARCH_SCOPES);
+    setSearchScopesOverride(null);
     setSearchOpen(false);
   }, [beginTranscriptNavigation, captureTranscriptSearchScroll, clearHighlight]);
   const setSearchScope = useCallback((scope: keyof TranscriptSearchScopeState, checked: boolean) => {
     beginTranscriptNavigation("search");
-    setSearchScopes((current) => {
-      if (!checked && TRANSCRIPT_SEARCH_SCOPES.every((item) => item.id === scope || !current[item.id])) {
+    setSearchScopesOverride((current) => {
+      const currentScopes = current?.sessionKey === transcriptNavigationSessionKey
+        ? current.scopes
+        : inheritedSearchScopes;
+      if (!checked && TRANSCRIPT_SEARCH_SCOPES.every((item) => item.id === scope || !currentScopes[item.id])) {
         return current;
       }
-      return { ...current, [scope]: checked };
+      return {
+        sessionKey: transcriptNavigationSessionKey,
+        scopes: { ...currentScopes, [scope]: checked },
+      };
     });
-  }, [beginTranscriptNavigation]);
+  }, [beginTranscriptNavigation, inheritedSearchScopes, transcriptNavigationSessionKey]);
   useEffect(() => {
     if (!normalizedInputSearchQuery) {
       beginTranscriptNavigation("idle");
@@ -1046,8 +1092,12 @@ export function TranscriptPanel({
     >
       <header className="threadHeader">
         <div className="threadTitleLine">
-          <h2><SessionTitleText interactive={false} value={sessionTitleValue(session)} /></h2>
+          <h2 className="sessionThreadTitle">
+            <SessionStatusIcons session={session} subagent={sessionKind(session) === SessionKind.Child} archived={session.archived} />
+            <span className="sessionThreadTitleLabel"><SessionTitleText interactive={false} value={sessionTitleValue(session)} /></span>
+          </h2>
           <div className="threadHeaderActions">
+            {onToggleArchive ? <SessionArchiveButton session={session} loading={archiving} onToggle={onToggleArchive} /> : null}
             <SessionRelationsPopover
               session={session}
               sessionTree={sessionTree}
@@ -2192,6 +2242,7 @@ export function SessionsView({
   sessionRefreshError = "",
   onRefreshSessions,
   onResumeSession,
+  onSetSessionArchived,
   resolveSessionResumeTarget,
   sessionResumeTarget,
   missingSessionProjectPolicy,
@@ -2207,7 +2258,7 @@ export function SessionsView({
   loadTranscriptLocator?: (session: SessionRecord) => Promise<TranscriptLocatorPage>;
   searchTranscript?: (session: SessionRecord, query: string, scopes: TranscriptSearchScopes) => Promise<TranscriptSearchResult | null>;
   listSessions: (request: SessionListPageRequest) => Promise<SessionListPageResult>;
-  searchSessions: (query: string) => Promise<SessionRecord[]>;
+  searchSessions: (query: string, searchScopes: TranscriptSearchScopeState, archiveFilter: SessionArchiveFilter) => Promise<SessionRecord[]>;
   sessionAgentFilter?: string;
   loadSessionSkillLinks?: (session: SessionRecord) => Promise<SessionSkillLinkRecord[]>;
   skillIndexStatus?: SkillIndexStatus | null;
@@ -2220,6 +2271,7 @@ export function SessionsView({
     target?: Exclude<SessionResumeTarget, SessionResumeTarget.Auto>,
     options?: { reconcile?: boolean },
   ) => Promise<SessionResumeOutcome | null | undefined>;
+  onSetSessionArchived?: (session: SessionRecord, archived: boolean) => Promise<void>;
   resolveSessionResumeTarget: (session: SessionRecord) => Promise<Exclude<SessionResumeTarget, SessionResumeTarget.Auto>>;
   sessionResumeTarget: SessionResumeTarget;
   missingSessionProjectPolicy: MissingSessionProjectPolicy;
@@ -2236,6 +2288,9 @@ export function SessionsView({
   );
   const [transcriptImportProvider, setTranscriptImportProvider] = useState("");
   const [query, setQuery] = useTabState("sessions.query", "");
+  const [searchScopes, setSearchScopes] = useTabState<TranscriptSearchScopeState>("sessions.searchScopes", DEFAULT_TRANSCRIPT_SEARCH_SCOPES);
+  const [archiveFilter, setArchiveFilter] = useTabState<SessionArchiveFilter>("sessions.archiveFilter", "unarchived");
+  const [timeFilter, setTimeFilter] = useTabState<SessionTimeFilter>("sessions.timeFilter", { range: "any" });
   const [sort, setSort] = useTabState<SortState>("sessions.sort", { key: SessionSortKey.UpdatedAt, direction: SortDirection.Desc });
   const [searchSort, setSearchSort] = useTabState<SortState | null>("sessions.searchSort", null);
   const [pageSelection, setPageSelection] = useTabState("sessions.pageSelection", { contextKey: "", page: 0 });
@@ -2250,7 +2305,8 @@ export function SessionsView({
   const [activeSessionInListViewport, setActiveSessionInListViewport] = useState<boolean | null>(null);
   const [selectedProjectKeys, setSelectedProjectKeys] = useTabState<string[]>("sessions.selectedProjectKeys", []);
   const [projectFilterQuery, setProjectFilterQuery] = useState("");
-  const [projectFilterOpen, setProjectFilterOpen] = useState(false);
+  const [filterMenuOpen, setFilterMenuOpen] = useState(false);
+  const [projectSubmenuOpen, setProjectSubmenuOpen] = useState(false);
   const [debouncedQuery, setDebouncedQuery] = useState(() => query.trim().toLowerCase());
   const importInputRef = useRef<HTMLInputElement | null>(null);
   const sessionListBodyRef = useRef<HTMLDivElement | null>(null);
@@ -2327,6 +2383,7 @@ export function SessionsView({
     [sessionItems],
   );
   const activeSort = remoteSearchActive ? searchSort ?? SESSION_SEARCH_SORT : sort;
+  const searchFilterKey = `${timeFilter.startedAfter ?? ""}\0${JSON.stringify(searchScopes)}\0${archiveFilter}`;
   const pageContextKey = sessionPageContextKey(
     activeSort,
     groupBy,
@@ -2334,13 +2391,23 @@ export function SessionsView({
     pageSize,
     selectedProjectKeys.join("\0"),
     showChildSessions,
+    searchFilterKey,
   );
+  const activeFilterCount = Number(selectedProjectKeys.length > 0)
+    + Number(timeFilter.range !== "any")
+    + Number(archiveFilter !== "unarchived")
+    + Number(showChildSessions)
+    + Number(TRANSCRIPT_SEARCH_SCOPES.some(({ id }) => searchScopes[id] !== DEFAULT_TRANSCRIPT_SEARCH_SCOPES[id]));
   const requestedPage = pageSelection.contextKey === pageContextKey ? pageSelection.page : 0;
   const { localListView, searchingSessions } = useSessionListWorkspace({
     enabled: useLocalSessionList,
     sessions: sessionItems,
     importedSessions,
     query: normalizedQuery,
+    searchScopes,
+    archiveFilter,
+    searchFilterKey,
+    startedAfter: timeFilter.startedAfter,
     searchSort,
     sort,
     pageSize,
@@ -2358,6 +2425,9 @@ export function SessionsView({
   });
   const remoteListBaseRequest = useMemo<SessionListPageRequest>(() => ({
     query: normalizedQuery,
+    searchScopes,
+    startedAfter: timeFilter.startedAfter,
+    archiveFilter,
     agent: sessionAgentFilter,
     sort: activeSort,
     groupBy,
@@ -2365,7 +2435,7 @@ export function SessionsView({
     pageSize,
     showChildSessions,
     selectedProjectKeys,
-  }), [activeSort, groupBy, normalizedQuery, pageSize, requestedPage, selectedProjectKeys, sessionAgentFilter, showChildSessions]);
+  }), [activeSort, archiveFilter, groupBy, normalizedQuery, pageSize, requestedPage, searchScopes, selectedProjectKeys, sessionAgentFilter, showChildSessions, timeFilter.startedAfter]);
   const onRemoteSessionLocated = useCallback((session: SessionRecord, page?: number) => {
     const targetRowId = sessionTableRowId(session);
     if (page !== undefined) setPageSelection({ contextKey: pageContextKey, page });
@@ -2378,13 +2448,14 @@ export function SessionsView({
     setDebouncedQuery("");
     setSearchSort(null);
     setSelectedProjectKeys([]);
+    setTimeFilter(makeSessionTimeFilter("any"));
     setProjectFilterQuery("");
     if (showChildren && !showChildSessions) setShowChildSessions(true);
     setPageSelection({
-      contextKey: sessionPageContextKey(sort, groupBy, "", pageSize, "", showChildren),
+      contextKey: sessionPageContextKey(sort, groupBy, "", pageSize, "", showChildren, `\0${JSON.stringify(searchScopes)}`),
       page: 0,
     });
-  }, [groupBy, pageSize, setSelectedProjectKeys, setSearchSort, setShowChildSessions, setPageSelection, showChildSessions, sort]);
+  }, [groupBy, pageSize, searchScopes, setSelectedProjectKeys, setSearchSort, setShowChildSessions, setPageSelection, setTimeFilter, showChildSessions, sort]);
   const onRemoteSessionListError = useCallback((listError: unknown) => {
     logger.warn("sessions list failed", { error: listError });
     showSessionError("Could not load sessions. Try again.");
@@ -2411,7 +2482,6 @@ export function SessionsView({
   const projectOptions = localListView?.projectOptions ?? remoteList?.projectOptions ?? EMPTY_SESSION_PROJECT_OPTIONS;
   const visibleProjectOptions = localListView?.visibleProjectOptions
     ?? selectVisibleSessionProjectOptions(projectOptions, selectedProjectKeys, projectFilterQuery);
-  const childSessionCount = localListView?.childSessionCount ?? remoteList?.childSessionCount ?? 0;
   const currentPage = localListView?.currentPage ?? requestedPage;
   const sortedSessions = localListView?.sortedSessions ?? remoteList?.rows ?? EMPTY_SESSION_ROWS;
   const groupedPages = localListView?.groupedPages ?? EMPTY_GROUPED_SESSION_PAGES;
@@ -2437,9 +2507,9 @@ export function SessionsView({
     });
   }, [projectOptions, remoteList, setSelectedProjectKeys, useLocalSessionList]);
   useEffect(() => {
-    if (!projectFilterOpen) return;
+    if (!projectSubmenuOpen) return;
     window.requestAnimationFrame(() => projectFilterInputRef.current?.focus());
-  }, [projectFilterOpen]);
+  }, [projectSubmenuOpen]);
   const pageSizeOptions = useMemo(
     () => [25, 50, 100].map((value) => ({ value: `${value}`, label: `${value}` })),
     [],
@@ -2488,15 +2558,16 @@ export function SessionsView({
     setDebouncedQuery("");
     setSearchSort(null);
     setSelectedProjectKeys([]);
+    setTimeFilter(makeSessionTimeFilter("any"));
     setProjectFilterQuery("");
     if (showChildren && !showChildSessions) setShowChildSessions(true);
     setPageSelection({
-      contextKey: sessionPageContextKey(sort, groupBy, "", pageSize, "", showChildren),
+      contextKey: sessionPageContextKey(sort, groupBy, "", pageSize, "", showChildren, `\0${JSON.stringify(searchScopes)}`),
       page: targetPage,
     });
     setActiveRowId(targetRowId);
     setSessionLocatorRequest(targetRowId);
-  }, [allSessionItems, groupBy, pageSize, showChildSessions, sort]);
+  }, [allSessionItems, groupBy, pageSize, searchScopes, setTimeFilter, showChildSessions, sort]);
   const locateSessionInList = useCallback((session: SessionRecord) => {
     const targetRowId = sessionTableRowId(session);
     if (!useLocalSessionList) {
@@ -2810,6 +2881,7 @@ export function SessionsView({
     }),
     [getResumeState, inferredResumeTargets, normalizedQuery, resumeSession, sessionResumeTarget],
   );
+  const { toggleArchive, isArchiving } = useSessionArchiveOperations({ onSetArchived: onSetSessionArchived, onError: showSessionError });
   const rowContextMenu = useCallback((session: SessionRecord) => {
     const transcriptPath = session.path.trim();
     const workspacePath = sessionWorkspacePath(session);
@@ -2819,7 +2891,7 @@ export function SessionsView({
       configuredTarget,
       inferredResumeTargets[sessionSourceIdentity(session)],
     );
-    const canResume = session.agent !== IMPORTED_SESSION_AGENT
+    const canResume = session.resumable !== false && session.agent !== IMPORTED_SESSION_AGENT
       && Boolean(session.id && session.agent && transcriptPath);
     const resumeTargets = sessionResumeTargetsForMenu({
       terminal: canResume,
@@ -2864,6 +2936,15 @@ export function SessionsView({
         <CopyTextMenuItem Menu={ContextMenu} text={session.id} label="Copy session ID" />
         {deeplink && <CopyTextMenuItem Menu={ContextMenu} text={deeplink} label="Copy deeplink" />}
         <ContextMenu.Separator className="menuSeparator" />
+        {onSetSessionArchived && session.archiveSupported && typeof session.archived === "boolean" ? (
+          <>
+            <ContextMenu.Item className="menuItem" disabled={isArchiving(session)} onSelect={() => { void toggleArchive(session); }}>
+              {isArchiving(session) ? <LoadingIcon size={14} /> : session.archived ? <ArchiveRestore size={14} /> : <Archive size={14} />}
+              <span>{session.archived ? "Unarchive" : "Archive"}</span>
+            </ContextMenu.Item>
+            <ContextMenu.Separator className="menuSeparator" />
+          </>
+        ) : null}
         <OpenInEditorMenuItem Menu={ContextMenu} path={transcriptPath} />
         <CopyPathMenuItem Menu={ContextMenu} path={transcriptPath} label={copyPathLabel("transcript")} />
         <RevealInFinderMenuItem Menu={ContextMenu} path={transcriptPath} label={revealPathLabel("transcript")} />
@@ -2872,7 +2953,7 @@ export function SessionsView({
         <RevealInFinderMenuItem Menu={ContextMenu} path={workspacePath} label={revealPathLabel("workspace")} />
       </>
     );
-  }, [inferredResumeTargets, resumeSession, sessionResumeTarget]);
+  }, [inferredResumeTargets, isArchiving, onSetSessionArchived, resumeSession, sessionResumeTarget, toggleArchive]);
   const importButtonStateClass = importFeedback === ImportFeedbackState.Success
     ? "isSuccess"
     : importFeedback === ImportFeedbackState.Warning
@@ -2947,14 +3028,6 @@ export function SessionsView({
             >
               {refreshing ? <LoadingIcon size={16} /> : <RefreshCw size={16} />}
             </IconButton>
-            <IconButton
-              className={showChildSessions ? "filled" : ""}
-              aria-label={showChildSessions ? "Hide child sessions" : `Show ${childSessionCount} child sessions`}
-              aria-pressed={showChildSessions}
-              onClick={() => setShowChildSessions((visible) => !visible)}
-            >
-              <GitFork size={16} />
-            </IconButton>
             <div className="sessionSearchControls">
               <SearchField
                 pageSearch
@@ -2965,86 +3038,230 @@ export function SessionsView({
                 onClear={() => setQuery("")}
               />
               <DropdownMenu.Root
-                open={projectFilterOpen}
+                open={filterMenuOpen}
                 onOpenChange={(open) => {
-                  setProjectFilterOpen(open);
-                  if (!open) setProjectFilterQuery("");
+                  setFilterMenuOpen(open);
+                  if (!open) {
+                    setProjectSubmenuOpen(false);
+                    setProjectFilterQuery("");
+                  }
                 }}
               >
                 <DropdownMenu.Trigger asChild>
                   <IconButton
-                    className={`sessionProjectFilter${selectedProjectKeys.length > 0 ? " filled" : ""}`}
-                    aria-label={selectedProjectKeys.length > 0 ? `Filter projects, ${selectedProjectKeys.length} selected` : "Filter projects"}
-                    aria-pressed={selectedProjectKeys.length > 0}
+                    className={`sessionProjectFilter${activeFilterCount > 0 ? " filled" : ""}`}
+                    aria-label={activeFilterCount > 0 ? `Filters, ${activeFilterCount} active` : "Filters"}
+                    aria-pressed={activeFilterCount > 0}
                   >
                     <Filter size={16} aria-hidden="true" />
-                    {selectedProjectKeys.length > 0 ? <span className="sessionProjectFilterCount" aria-hidden="true">{selectedProjectKeys.length}</span> : null}
+                    {activeFilterCount > 0 ? <span className="sessionProjectFilterCount" aria-hidden="true">{activeFilterCount}</span> : null}
                   </IconButton>
                 </DropdownMenu.Trigger>
                 <DropdownMenu.Portal>
                   <MenuContent
-                    className="sessionProjectFilterMenu"
+                    className="sessionFilterMenu"
                     align="end"
                     sideOffset={6}
                     data-no-drag
                   >
-                    <div className="sessionProjectFilterSearch" onClick={(event) => event.stopPropagation()}>
-                      <Search size={13} aria-hidden="true" />
-                      <input
-                        ref={projectFilterInputRef}
-                        aria-label="Filter projects"
-                        placeholder="Filter projects"
-                        value={projectFilterQuery}
-                        onChange={(event) => setProjectFilterQuery(event.target.value)}
-                        onKeyDown={(event) => {
-                          if (event.key !== "Escape") event.stopPropagation();
-                        }}
-                      />
-                      <SearchClearButton value={projectFilterQuery} onClear={() => setProjectFilterQuery("")} ariaLabel="Clear project filter" />
-                    </div>
-                    <div className="sessionProjectFilterOptions">
-                      {visibleProjectOptions.map((option) => {
-                        const active = selectedProjectKeys.includes(option.key);
-                        return (
-                          <DropdownMenu.CheckboxItem
-                            key={option.key}
-                            className="menuItem sessionProjectFilterItem"
-                            checked={active}
-                            onCheckedChange={(checked) => {
-                              setSelectedProjectKeys((current) => checked
-                                ? current.includes(option.key) ? current : [...current, option.key]
-                                : current.filter((key) => key !== option.key));
-                            }}
-                            onSelect={(event) => event.preventDefault()}
-                          >
-                            <CheckboxIndicator checked={active} />
-                            {isWebSource(option.title.trim())
-                              ? <span className="sessionProjectFilterItemLabel">{option.label}</span>
-                              : <span className="sessionProjectFilterItemLabel">{option.label}</span>}
-                            <span className="sessionProjectFilterItemCount">{option.count}</span>
-                          </DropdownMenu.CheckboxItem>
-                        );
-                      })}
-                      {visibleProjectOptions.length === 0 ? <span className="sessionProjectFilterEmpty">No matching projects</span> : null}
-                    </div>
-                    <div className="sessionProjectFilterFooter">
-                      <span>{selectedProjectKeys.length} active</span>
-                      <Button
-                        variant="ghost"
-                        size="compact"
-                        className="sessionProjectFilterClearButton"
-                        disabled={selectedProjectKeys.length === 0}
-                        onClick={(event) => {
-                          setSelectedProjectKeys([]);
-                          setProjectFilterOpen(false);
-                          setProjectFilterQuery("");
-                          event.currentTarget.blur();
-                        }}
-                      >
-                        <X size={14} aria-hidden="true" />
-                        Clear all
-                      </Button>
-                    </div>
+                    <DropdownMenu.Sub open={projectSubmenuOpen} onOpenChange={setProjectSubmenuOpen}>
+                      <DropdownMenu.SubTrigger className="menuItem menuSubTrigger">
+                        <span className="selectItemText">Project</span>
+                        <span className="sessionFilterMenuSummary">{selectedProjectKeys.length > 0 ? `${selectedProjectKeys.length} selected` : "All"}</span>
+                        <ChevronRight className="menuSubIcon" size={14} aria-hidden="true" />
+                      </DropdownMenu.SubTrigger>
+                      <DropdownMenu.Portal>
+                        <DropdownMenu.SubContent
+                          className="menuContent sessionProjectFilterMenu"
+                          sideOffset={8}
+                          alignOffset={-6}
+                          data-no-drag
+                        >
+                          <div className="sessionProjectFilterSearch" onClick={(event) => event.stopPropagation()}>
+                            <Search size={13} aria-hidden="true" />
+                            <input
+                              ref={projectFilterInputRef}
+                              aria-label="Filter projects"
+                              placeholder="Filter projects"
+                              value={projectFilterQuery}
+                              onChange={(event) => setProjectFilterQuery(event.target.value)}
+                              onKeyDown={(event) => {
+                                if (event.key !== "Escape") event.stopPropagation();
+                              }}
+                            />
+                            <SearchClearButton value={projectFilterQuery} onClear={() => setProjectFilterQuery("")} ariaLabel="Clear project filter" />
+                          </div>
+                          <div className="sessionProjectFilterOptions">
+                            {visibleProjectOptions.map((option) => {
+                              const active = selectedProjectKeys.includes(option.key);
+                              return (
+                                <DropdownMenu.CheckboxItem
+                                  key={option.key}
+                                  className="menuItem sessionProjectFilterItem"
+                                  checked={active}
+                                  onCheckedChange={(checked) => {
+                                    setSelectedProjectKeys((current) => checked
+                                      ? current.includes(option.key) ? current : [...current, option.key]
+                                      : current.filter((key) => key !== option.key));
+                                  }}
+                                  onSelect={(event) => event.preventDefault()}
+                                >
+                                  <CheckboxIndicator checked={active} />
+                                  <span className="sessionProjectFilterItemLabel">{option.label}</span>
+                                  <span className="sessionProjectFilterItemCount">{option.count}</span>
+                                </DropdownMenu.CheckboxItem>
+                              );
+                            })}
+                            {visibleProjectOptions.length === 0 ? <span className="sessionProjectFilterEmpty">No matching projects</span> : null}
+                          </div>
+                          <div className="sessionProjectFilterFooter">
+                            <span>{selectedProjectKeys.length} active</span>
+                            <Button
+                              variant="ghost"
+                              size="compact"
+                              className="sessionProjectFilterClearButton"
+                              disabled={selectedProjectKeys.length === 0}
+                              onClick={(event) => {
+                                setSelectedProjectKeys([]);
+                                setProjectSubmenuOpen(false);
+                                setProjectFilterQuery("");
+                                event.currentTarget.blur();
+                              }}
+                            >
+                              <X size={14} aria-hidden="true" />
+                              Clear projects
+                            </Button>
+                          </div>
+                        </DropdownMenu.SubContent>
+                      </DropdownMenu.Portal>
+                    </DropdownMenu.Sub>
+                    <DropdownMenu.Sub>
+                      <DropdownMenu.SubTrigger className="menuItem menuSubTrigger">
+                        <span className="selectItemText">Time</span>
+                        <span className="sessionFilterMenuSummary">{sessionTimeFilterLabel(timeFilter.range)}</span>
+                        <ChevronRight className="menuSubIcon" size={14} aria-hidden="true" />
+                      </DropdownMenu.SubTrigger>
+                      <DropdownMenu.Portal>
+                        <DropdownMenu.SubContent className="menuContent sessionFilterSubmenu" sideOffset={8} alignOffset={-6} data-no-drag>
+                          {SESSION_TIME_RANGE_OPTIONS.map((option) => (
+                            <DropdownMenu.Item
+                              key={option.id}
+                              className="menuItem selectItemIndicatorRight"
+                              onSelect={(event) => {
+                                event.preventDefault();
+                                setTimeFilter(makeSessionTimeFilter(option.id));
+                              }}
+                            >
+                              <span className="selectItemText">{option.label}</span>
+                              <span className="selectItemLeadingIcon" aria-hidden="true">
+                                {timeFilter.range === option.id ? <Check className="selectItemIndicator" size={14} /> : null}
+                              </span>
+                            </DropdownMenu.Item>
+                          ))}
+                        </DropdownMenu.SubContent>
+                      </DropdownMenu.Portal>
+                    </DropdownMenu.Sub>
+                    <DropdownMenu.Sub>
+                      <DropdownMenu.SubTrigger className="menuItem menuSubTrigger">
+                        <span className="selectItemText">Archive status</span>
+                        <span className="sessionFilterMenuSummary">
+                          {archiveFilter === "unarchived" ? "Unarchived" : archiveFilter === "archived" ? "Archived" : "All"}
+                        </span>
+                        <ChevronRight className="menuSubIcon" size={14} aria-hidden="true" />
+                      </DropdownMenu.SubTrigger>
+                      <DropdownMenu.Portal>
+                        <DropdownMenu.SubContent className="menuContent sessionFilterSubmenu" sideOffset={8} alignOffset={-6} data-no-drag>
+                          {([
+                            ["unarchived", "Unarchived"],
+                            ["archived", "Archived"],
+                            ["all", "All"],
+                          ] as const).map(([value, label]) => (
+                            <DropdownMenu.Item
+                              key={value}
+                              className="menuItem selectItemIndicatorRight"
+                              onSelect={(event) => {
+                                event.preventDefault();
+                                setArchiveFilter(value);
+                              }}
+                            >
+                              <span className="selectItemText">{label}</span>
+                              <span className="selectItemLeadingIcon" aria-hidden="true">
+                                {archiveFilter === value ? <Check className="selectItemIndicator" size={14} /> : null}
+                              </span>
+                            </DropdownMenu.Item>
+                          ))}
+                        </DropdownMenu.SubContent>
+                      </DropdownMenu.Portal>
+                    </DropdownMenu.Sub>
+                    <DropdownMenu.Sub>
+                      <DropdownMenu.SubTrigger className="menuItem menuSubTrigger">
+                        <span className="selectItemText">Subagents</span>
+                        <span className="sessionFilterMenuSummary">{showChildSessions ? "Shown" : "Hidden"}</span>
+                        <ChevronRight className="menuSubIcon" size={14} aria-hidden="true" />
+                      </DropdownMenu.SubTrigger>
+                      <DropdownMenu.Portal>
+                        <DropdownMenu.SubContent className="menuContent sessionFilterSubmenu" sideOffset={8} alignOffset={-6} data-no-drag>
+                          {([
+                            [false, "Hide subagents"],
+                            [true, "Show subagents"],
+                          ] as const).map(([value, label]) => (
+                            <DropdownMenu.Item
+                              key={String(value)}
+                              className="menuItem selectItemIndicatorRight"
+                              onSelect={(event) => {
+                                event.preventDefault();
+                                setShowChildSessions(value);
+                              }}
+                            >
+                              <span className="selectItemText">{label}</span>
+                              <span className="selectItemLeadingIcon" aria-hidden="true">
+                                {showChildSessions === value ? <Check className="selectItemIndicator" size={14} /> : null}
+                              </span>
+                            </DropdownMenu.Item>
+                          ))}
+                        </DropdownMenu.SubContent>
+                      </DropdownMenu.Portal>
+                    </DropdownMenu.Sub>
+                    <DropdownMenu.Sub>
+                      <DropdownMenu.SubTrigger className="menuItem menuSubTrigger">
+                        <span className="selectItemText">Role</span>
+                        <span className="sessionFilterMenuSummary">
+                          {TRANSCRIPT_SEARCH_SCOPES.filter(({ id }) => searchScopes[id]).map(({ label }) => label).join(", ") || "None"}
+                        </span>
+                        <ChevronRight className="menuSubIcon" size={14} aria-hidden="true" />
+                      </DropdownMenu.SubTrigger>
+                      <DropdownMenu.Portal>
+                        <DropdownMenu.SubContent className="menuContent sessionFilterSubmenu" sideOffset={8} alignOffset={-6} data-no-drag>
+                          {TRANSCRIPT_SEARCH_SCOPES.map((scope) => (
+                            <DropdownMenu.CheckboxItem
+                              key={scope.id}
+                              className="menuItem sessionProjectFilterItem"
+                              checked={searchScopes[scope.id]}
+                              onCheckedChange={(checked) => setSearchScopes((current) => ({ ...current, [scope.id]: checked }))}
+                              onSelect={(event) => event.preventDefault()}
+                            >
+                              <CheckboxIndicator checked={searchScopes[scope.id]} />
+                              <span className="sessionProjectFilterItemLabel">{scope.label}</span>
+                            </DropdownMenu.CheckboxItem>
+                          ))}
+                        </DropdownMenu.SubContent>
+                      </DropdownMenu.Portal>
+                    </DropdownMenu.Sub>
+                    <DropdownMenu.Separator className="menuSeparator" />
+                    <DropdownMenu.Item
+                      className="menuItem"
+                      disabled={activeFilterCount === 0}
+                      onSelect={(event) => {
+                        event.preventDefault();
+                        setSelectedProjectKeys([]);
+                        setTimeFilter(makeSessionTimeFilter("any"));
+                        setArchiveFilter("unarchived");
+                        setShowChildSessions(false);
+                        setSearchScopes(DEFAULT_TRANSCRIPT_SEARCH_SCOPES);
+                      }}
+                    >
+                      Clear filters
+                    </DropdownMenu.Item>
                   </MenuContent>
                 </DropdownMenu.Portal>
               </DropdownMenu.Root>
@@ -3142,11 +3359,14 @@ export function SessionsView({
         >
           <TranscriptPanel
             session={activeSession}
+            inheritedSearchScopes={searchScopes}
+            onToggleArchive={onSetSessionArchived ? toggleArchive : undefined}
+            archiving={isArchiving(activeSession)}
             childSessions={activeChildSessions}
             sessionTree={activeSessionTree}
               items={items}
               locatorMetadata={activeTranscriptLocatorItems}
-              sessionSearchQuery={normalizedQuery}
+              sessionSearchQuery={query}
             loading={loading}
             scrollRestorationReady={scrollRestorationReady}
             onReportError={showSessionError}

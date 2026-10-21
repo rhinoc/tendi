@@ -24,6 +24,8 @@ import {
 } from "../lib/sessions.ts";
 import type { RawDomainRow } from "./controller-types.ts";
 import type { MissingSessionProjectPolicy, ProjectSummary, SessionProjectSummary } from "../lib/projects.ts";
+import type { SessionArchiveFilter } from "../lib/generated/runtime-types.ts";
+import type { TranscriptSearchScopes } from "../lib/transcript.ts";
 
 export type SessionProjectOption = {
   key: string;
@@ -34,6 +36,9 @@ export type SessionProjectOption = {
 
 export type SessionListPageRequest = {
   query: string;
+  searchScopes?: TranscriptSearchScopes;
+  startedAfter?: string;
+  archiveFilter?: SessionArchiveFilter;
   agent?: string;
   sort: SortState;
   groupBy: string | null;
@@ -83,6 +88,9 @@ export type SessionListControllerInput = {
   currentPage?: number;
   pageSelectionContextKey?: string;
   searchRowsKey?: string;
+  searchFilterKey?: string;
+  startedAfter?: string;
+  archiveFilter?: SessionArchiveFilter;
 };
 
 export type SessionListView = {
@@ -131,6 +139,9 @@ function sessionListRowNeedsStoreUpdate(source: SessionRecord, row: SessionRecor
     || source.logicalProjectId !== row.logicalProjectId
     || source.logicalProjectName !== row.logicalProjectName
     || source.path !== row.path
+    || source.archived !== row.archived
+    || source.archiveSupported !== row.archiveSupported
+    || source.resumable !== row.resumable
     || source.startedAt !== row.startedAt
     || source.updatedAt !== row.updatedAt
     || source.messages !== row.messages
@@ -497,8 +508,8 @@ function dedupeSessions(rows: readonly SessionRecord[]): SessionRecord[] {
   return [...result.values()];
 }
 
-export function sessionPageContextKey(sort: SortState, groupBy: string | null, query: string, pageSize: number, projectFilterKey: string, showChildSessions: boolean): string {
-  return JSON.stringify([sort.key, sort.direction, groupBy ?? "", query, pageSize, projectFilterKey, showChildSessions]);
+export function sessionPageContextKey(sort: SortState, groupBy: string | null, query: string, pageSize: number, projectFilterKey: string, showChildSessions: boolean, searchFilterKey = ""): string {
+  return JSON.stringify([sort.key, sort.direction, groupBy ?? "", query, pageSize, projectFilterKey, showChildSessions, searchFilterKey]);
 }
 
 type SessionListViewCacheEntry = {
@@ -526,7 +537,22 @@ function sameSessionListInput(left: SessionListControllerInput, right: SessionLi
     && left.sessionProjects === right.sessionProjects
     && left.currentPage === right.currentPage
     && left.pageSelectionContextKey === right.pageSelectionContextKey
-    && left.searchRowsKey === right.searchRowsKey;
+    && left.searchRowsKey === right.searchRowsKey
+    && left.searchFilterKey === right.searchFilterKey
+    && left.startedAfter === right.startedAfter
+    && left.archiveFilter === right.archiveFilter;
+}
+
+function sessionMatchesStartedAfter(session: SessionRecord, startedAfter?: string): boolean {
+  if (!startedAfter) return true;
+  const sessionTime = session.startedAt ? Date.parse(session.startedAt) : Number.NaN;
+  const filterTime = Date.parse(startedAfter);
+  return Number.isFinite(sessionTime) && Number.isFinite(filterTime) && sessionTime >= filterTime;
+}
+
+function sessionMatchesArchiveFilter(session: SessionRecord, archiveFilter: SessionArchiveFilter): boolean {
+  if (archiveFilter === "all") return true;
+  return archiveFilter === "archived" ? session.archived === true : session.archived !== true;
 }
 
 export function selectSessionListView(input: SessionListControllerInput): SessionListView {
@@ -562,26 +588,39 @@ export function selectSessionListView(input: SessionListControllerInput): Sessio
     });
   const projectKey = (session: SessionRecord) => projectKeyByRow.get(rowId(session)) ?? sessionProjectGroupKey(session);
   const activeSort = input.remoteSearch && query ? input.searchSort ?? SESSION_SEARCH_SORT : input.sort;
+  const archiveFilter = input.archiveFilter ?? "unarchived";
   const inProject = (session: SessionRecord) => selected.size === 0 || selected.has(projectKey(session));
   const searchCandidates = listSessionItems
     .filter((session) => (input.showChildSessions || sessionKind(session) === SessionKind.Main) && inProject(session))
+    .filter((session) => sessionMatchesArchiveFilter(session, archiveFilter))
+    .filter((session) => sessionMatchesStartedAfter(session, input.startedAfter))
     .sort((left, right) => compareSessions(left, right, activeSort));
-  const searchRequestKey = query ? `${query}\0${searchCandidates.map(sessionIdentity).join("\0")}` : "";
+  const searchRequestKey = query ? `${query}\0${input.searchFilterKey ?? ""}\0${searchCandidates.map(sessionIdentity).join("\0")}` : "";
   const searchResultRows = query && input.remoteSearch && input.searchRowsKey === searchRequestKey
     ? dedupeSessions(input.searchRows ?? [])
     : [];
   const allSessionItems = dedupeSessions([...listSessionItems, ...searchResultRows]);
-  const matchedSessions = query && input.remoteSearch
+  const matchedSessions = (query && input.remoteSearch
     ? searchResultRows.filter(inProject)
-    : query
-      ? listSessionItems.filter((session) => sessionMatchesQuery(session, query) && inProject(session))
-      : listSessionItems.filter(inProject);
+      : query
+        ? listSessionItems.filter((session) => sessionMatchesQuery(session, query) && inProject(session))
+        : listSessionItems.filter(inProject))
+    .filter((session) => sessionMatchesArchiveFilter(session, archiveFilter))
+    .filter((session) => sessionMatchesStartedAfter(session, input.startedAfter));
   const childSessionCount = matchedSessions.filter((session) => sessionKind(session) === SessionKind.Child).length;
   const filteredSessions = input.showChildSessions ? matchedSessions : matchedSessions.filter((session) => sessionKind(session) === SessionKind.Main);
   const sortedSessions = [...filteredSessions].sort((left, right) => compareSessions(left, right, activeSort));
   const groupedPages = buildGroupedSessionPages(sortedSessions, input.groupBy, input.pageSize);
   const pageCount = input.groupBy ? Math.max(1, groupedPages.length) : Math.max(1, Math.ceil(sortedSessions.length / input.pageSize));
-  const calculatedPageContextKey = sessionPageContextKey(activeSort, input.groupBy, query, input.pageSize, input.selectedProjectKeys.join("\0"), input.showChildSessions);
+  const calculatedPageContextKey = sessionPageContextKey(
+    activeSort,
+    input.groupBy,
+    query,
+    input.pageSize,
+    input.selectedProjectKeys.join("\0"),
+    input.showChildSessions,
+    input.searchFilterKey,
+  );
   const currentPage = input.pageSelectionContextKey === calculatedPageContextKey
     ? Math.max(0, input.currentPage ?? 0)
     : 0;

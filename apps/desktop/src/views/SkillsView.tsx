@@ -53,13 +53,14 @@ import { Toast } from "../components/shared/Toast.tsx";
 import { RelationshipGraphKind, SkillRelationshipMap } from "../features/skills/SkillRelationshipMap.tsx";
 import { SkillLocationDialog } from "../features/skills/SkillLocationDialog.tsx";
 import { SkillWrapperScopeDialog } from "../features/skills/SkillWrapperScopeDialog.tsx";
+import { CreateLocalSkillForm } from "../features/skills/CreateLocalSkillForm.tsx";
 import { useWrapperMutation } from "../features/skills/use-wrapper-mutation.ts";
 import { Visibility } from "../features/skills/Visibility.tsx";
 import { DataTable } from "../components/DataTable.tsx";
 import { ColumnDataType, type ColumnDef, type SortState } from "../components/DataTable.types";
 import { SortDirection } from "../lib/sort.ts";
 import { useTabState } from "../lib/tab-state.ts";
-import { actionLabels, isVisibleAgent, SKILL_FREEZE_COLUMN, scopeColumnFromValue, primarySkillPath, primarySkillScope, selectionDeleteLabel, SkillUpdateAvailability, TauriCommand, SkillOperationStatus, SkillVisibility, agentIdentityKey, allSkillVisibilities, compactDateTime, copyText, editableSkillVisibilities, isSkillRowSelectable, isSkillVisibilityEditable, safeInvoke, skillDisplayName, skillSourceAction, skillSourceDetails, skillTargets, sourceRemoteDetails, suppressNextClick, type NormalizedSkill, type ProjectSummary, type RawSkillRecord, type SkillAddPlan, type SkillInstallResult, type WrapperArgs } from "../lib/index.ts";
+import { actionLabels, isVisibleAgent, SKILL_FREEZE_COLUMN, scopeColumnFromValue, primarySkillPath, primarySkillScope, selectionDeleteLabel, SkillUpdateAvailability, TauriCommand, SkillOperationStatus, SkillVisibility, agentIdentityKey, allSkillVisibilities, compactDateTime, copyText, editableSkillVisibilities, isSkillRowSelectable, isSkillVisibilityEditable, normalizeSkill, safeInvoke, skillDisplayName, skillSourceAction, skillSourceDetails, skillTargets, sourceRemoteDetails, suppressNextClick, type NormalizedSkill, type ProjectSummary, type RawSkillRecord, type SkillAddPlan, type SkillInstallResult, type WrapperArgs } from "../lib/index.ts";
 import { resolveSkillInstallTarget, shouldShowSkillQuickSelect } from "../lib/add-skill-dialog.ts";
 import { SkillActionId, skillActionIds } from "../lib/skill-actions.ts";
 import {
@@ -613,6 +614,7 @@ export type AddSkillDialogProps = {
   onClose: () => void;
   onPreviewError: (message: string) => void;
   onInstalled: (result: SkillInstallResult) => void;
+  onCreated?: (skills: RawSkillRecord[]) => void;
   onBeginMutation: () => () => void;
   onRequestWrapper: (skills: SkillWrapperSelection[]) => void;
   installedAgentKeys: string[];
@@ -632,9 +634,11 @@ export type SkillTargetOption = {
   globalPath?: string;
 };
 
-export function AddSkillDialog({ open, onOpenChange, trigger, onClose, onPreviewError, onInstalled, onBeginMutation, onRequestWrapper, installedAgentKeys, targetOptions, initialSource = "", sourceLocked = false, title = "Add skills" }: AddSkillDialogProps) {
+export function AddSkillDialog({ open, onOpenChange, trigger, onClose, onPreviewError, onInstalled, onCreated, onBeginMutation, onRequestWrapper, installedAgentKeys, targetOptions, initialSource = "", sourceLocked = false, title = "Add skills" }: AddSkillDialogProps) {
   const lockedSource = sourceLocked && Boolean(initialSource.trim());
   const [source, setSource] = useState(initialSource);
+  const [creatingLocal, setCreatingLocal] = useState(false);
+  const [localCreationBusy, setLocalCreationBusy] = useState(false);
   const [target, setTarget] = useState("");
   const [copy, setCopy] = useState(false);
   const [visibility, setVisibility] = useState<SkillVisibility>(SkillVisibility.Auto);
@@ -711,7 +715,7 @@ export function AddSkillDialog({ open, onOpenChange, trigger, onClose, onPreview
     error,
     busy,
     installing,
-    dialogBusy,
+    dialogBusy: flowBusy,
     sourceActionReady,
     sourceActionText,
     sourceActionLabel,
@@ -719,6 +723,7 @@ export function AddSkillDialog({ open, onOpenChange, trigger, onClose, onPreview
     sourceCandidatesLabel,
     canGoBack,
   } = flow;
+  const dialogBusy = flowBusy || localCreationBusy;
   const available = plan?.available ?? [];
   const showSkillSearch = available.length > 10;
   const installView = useMemo(
@@ -768,6 +773,7 @@ export function AddSkillDialog({ open, onOpenChange, trigger, onClose, onPreview
 
   const resetDialogState = useCallback(() => {
     flow.reset();
+    setCreatingLocal(false);
     setTarget("");
     setCopy(false);
     setVisibility(SkillVisibility.Auto);
@@ -860,9 +866,16 @@ export function AddSkillDialog({ open, onOpenChange, trigger, onClose, onPreview
         onOpenChange(nextOpen);
       }}
       trigger={trigger}
-      className={`addSkillPanel ${plan ? "hasPlan" : "sourceStage"} ${reviewingSkills ? "isReviewing" : ""} ${advancedOpen ? "hasAdvanced" : ""} ${skillPreview ? "hasSkillPreview" : ""}`}
+      className={`addSkillPanel ${creatingLocal ? "isCreatingLocal" : plan ? "hasPlan" : "sourceStage"} ${reviewingSkills ? "isReviewing" : ""} ${advancedOpen ? "hasAdvanced" : ""} ${skillPreview ? "hasSkillPreview" : ""}`}
       descriptionId="add-skill-dialog-description"
     >
+      {creatingLocal && onCreated ? (
+        <CreateLocalSkillForm
+          target={resolvedTarget} targetOptions={visibleInstallTargets} onTargetChange={setTarget}
+          onBusyChange={setLocalCreationBusy} onBeginMutation={onBeginMutation} onCreated={onCreated}
+          onBack={() => setCreatingLocal(false)} onClose={onClose}
+        />
+      ) : <>
       <div className="addSkillBody">
         <div className="addSkillMain">
         <div className="addSkillHeader">
@@ -1243,6 +1256,10 @@ export function AddSkillDialog({ open, onOpenChange, trigger, onClose, onPreview
         cancelDisabled={dialogBusy}
         leading={canGoBack ? (
           <DialogActionButton variant="secondary" disabled={dialogBusy} onClick={goBack}>Back</DialogActionButton>
+        ) : !plan && !lockedSource && onCreated ? (
+          <DialogActionButton variant="secondary" disabled={dialogBusy} onClick={() => setCreatingLocal(true)}>
+            Create local skill
+          </DialogActionButton>
         ) : null}
       >
         {plan && reviewingSkills ? (
@@ -1275,6 +1292,7 @@ export function AddSkillDialog({ open, onOpenChange, trigger, onClose, onPreview
           </DialogActionButton>
         ) : null}
       </DialogActionBar>
+      </>}
     </DialogShell>
   );
 }
@@ -1461,6 +1479,11 @@ export function SkillsView({
     setViewMode(SkillsViewMode.List);
     setSkillLocatorRequest(name);
   }, [onAddInstalled, setQuery]);
+  const handleCreated = useCallback((rows: RawSkillRecord[]) => {
+    onSkillsUpdated(rows, { patch: true });
+    const skill = rows.map(normalizeSkill).find((row) => row !== undefined);
+    if (skill) openSkill(skill);
+  }, [onSkillsUpdated, openSkill]);
   const handleAddSkillOpenChange = useCallback((open: boolean) => {
     setShowAddSkill(open);
     if (open) setSkillAddError("");
@@ -1603,6 +1626,7 @@ export function SkillsView({
           onClose={() => setShowAddSkill(false)}
           onPreviewError={setSkillAddError}
           onInstalled={handleInstalled}
+          onCreated={handleCreated}
           onBeginMutation={onBeginMutation}
           installedAgentKeys={installedAgentKeys}
           targetOptions={targetOptions}

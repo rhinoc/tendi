@@ -34,6 +34,7 @@ export class RuntimeClient {
   async skillsList(request: RequestFor<"skills_list">): Promise<ResponseFor<"skills_list">> { return this.call("skills_list", request); }
   async skillsRefresh(request: RequestFor<"skills_refresh">): Promise<ResponseFor<"skills_refresh">> { return this.call("skills_refresh", request); }
   async sessionsSnapshot(request: RequestFor<"sessions_snapshot">): Promise<ResponseFor<"sessions_snapshot">> { return this.call("sessions_snapshot", request); }
+  async sessionsOwnershipSnapshot(request: RequestFor<"sessions_ownership_snapshot">): Promise<ResponseFor<"sessions_ownership_snapshot">> { return this.call("sessions_ownership_snapshot", request); }
   async sessionsList(request: RequestFor<"sessions_list">): Promise<ResponseFor<"sessions_list">> { return this.call("sessions_list", request); }
   async sessionsScanStart(request: RequestFor<"sessions_scan_start">): Promise<ResponseFor<"sessions_scan_start">> { return this.call("sessions_scan_start", request); }
   async sessionsSearch(request: RequestFor<"sessions_search">): Promise<ResponseFor<"sessions_search">> { return this.call("sessions_search", request); }
@@ -80,6 +81,7 @@ export class RuntimeClient {
   async promptsList(request: RequestFor<"prompts_list">): Promise<ResponseFor<"prompts_list">> { return this.call("prompts_list", request); }
   async promptSave(request: RequestFor<"prompt_save">): Promise<ResponseFor<"prompt_save">> { return this.call("prompt_save", request); }
   async promptsDeleteMany(request: RequestFor<"prompts_delete_many">): Promise<ResponseFor<"prompts_delete_many">> { return this.call("prompts_delete_many", request); }
+  async sessionSetArchived(request: RequestFor<"session_set_archived">): Promise<ResponseFor<"session_set_archived">> { return this.call("session_set_archived", request); }
   async sessionTranscript(request: RequestFor<"session_transcript">): Promise<ResponseFor<"session_transcript">> { return this.call("session_transcript", request); }
   async sessionTranscriptLocator(request: RequestFor<"session_transcript_locator">): Promise<ResponseFor<"session_transcript_locator">> { return this.call("session_transcript_locator", request); }
   async sessionTranscriptSearch(request: RequestFor<"session_transcript_search">): Promise<ResponseFor<"session_transcript_search">> { return this.call("session_transcript_search", request); }
@@ -94,6 +96,7 @@ export class RuntimeClient {
   async skillsBackupAdopt(request: RequestFor<"skills_backup_adopt">): Promise<ResponseFor<"skills_backup_adopt">> { return this.call("skills_backup_adopt", request); }
   async skillsBackupAdoptMany(request: RequestFor<"skills_backup_adopt_many">): Promise<ResponseFor<"skills_backup_adopt_many">> { return this.call("skills_backup_adopt_many", request); }
   async skillsBackupDisconnect(request: RequestFor<"skills_backup_disconnect">): Promise<ResponseFor<"skills_backup_disconnect">> { return this.call("skills_backup_disconnect", request); }
+  async skillsCreate(request: RequestFor<"skills_create">): Promise<ResponseFor<"skills_create">> { return this.call("skills_create", request); }
   async skillsAdd(request: RequestFor<"skills_add">): Promise<ResponseFor<"skills_add">> { return this.call("skills_add", request); }
   async skillsAddPreviewRead(request: RequestFor<"skills_add_preview_read">): Promise<ResponseFor<"skills_add_preview_read">> { return this.call("skills_add_preview_read", request); }
   async skillsDistribute(request: RequestFor<"skills_distribute">): Promise<ResponseFor<"skills_distribute">> { return this.call("skills_distribute", request); }

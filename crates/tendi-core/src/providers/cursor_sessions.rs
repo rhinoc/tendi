@@ -4,7 +4,7 @@ use std::{
     fs,
     io::{BufRead, BufReader},
     path::{Path, PathBuf},
-    sync::{LazyLock, Mutex},
+    sync::{Arc, LazyLock, Mutex},
     time::UNIX_EPOCH,
 };
 
@@ -191,6 +191,9 @@ pub(crate) fn scan_cursor_meta_file(
         approval_mode: store_meta.approval_mode.clone(),
         is_run_everything: store_meta.is_run_everything,
         parent_session_id: store_meta.parent_session_id,
+        archived: None,
+        archive_supported: false,
+        resumable: true,
         token_usage: None,
     });
     false
@@ -265,6 +268,9 @@ pub(crate) fn scan_cursor_store_file(
         approval_mode: store_meta.approval_mode,
         is_run_everything: store_meta.is_run_everything,
         parent_session_id: store_meta.parent_session_id,
+        archived: None,
+        archive_supported: false,
+        resumable: true,
         token_usage: None,
     });
     false
@@ -905,7 +911,7 @@ pub(crate) fn extract_cursor_blob_model(value: &Value) -> Option<String> {
         .and_then(|model| sessions::string_field(Some(model)))
 }
 
-fn parse_cursor_store_value(text: &str) -> Option<Value> {
+pub(super) fn parse_cursor_store_value(text: &str) -> Option<Value> {
     serde_json::from_str(text).ok().or_else(|| {
         if !text.len().is_multiple_of(2) {
             return None;
@@ -1043,14 +1049,17 @@ static CURSOR_PROJECT_CACHE: LazyLock<Mutex<CursorProjectCache>> =
 
 type CursorScanProjects = HashMap<PathBuf, Option<PathBuf>>;
 type CursorNativeSources = HashMap<PathBuf, HashMap<String, Vec<PathBuf>>>;
+type CursorDesktopArchiveStates = HashMap<PathBuf, Option<Arc<HashMap<String, bool>>>>;
 thread_local! {
     static CURSOR_SCAN_PROJECTS: RefCell<Option<CursorScanProjects>> = const { RefCell::new(None) };
     static CURSOR_SCAN_NATIVE_SOURCES: RefCell<Option<CursorNativeSources>> = const { RefCell::new(None) };
+    static CURSOR_SCAN_DESKTOP_ARCHIVE_STATES: RefCell<Option<CursorDesktopArchiveStates>> = const { RefCell::new(None) };
 }
 
 pub(super) struct CursorProjectScanCache {
     projects: Option<CursorScanProjects>,
     native_sources: Option<CursorNativeSources>,
+    desktop_archive_states: Option<CursorDesktopArchiveStates>,
     entered: bool,
 }
 
@@ -1059,12 +1068,15 @@ pub(super) fn project_scan_cache() -> CursorProjectScanCache {
         return CursorProjectScanCache {
             projects: None,
             native_sources: None,
+            desktop_archive_states: None,
             entered: false,
         };
     }
     CursorProjectScanCache {
         projects: CURSOR_SCAN_PROJECTS.with(|cache| cache.replace(Some(HashMap::new()))),
         native_sources: CURSOR_SCAN_NATIVE_SOURCES
+            .with(|cache| cache.replace(Some(HashMap::new()))),
+        desktop_archive_states: CURSOR_SCAN_DESKTOP_ARCHIVE_STATES
             .with(|cache| cache.replace(Some(HashMap::new()))),
         entered: true,
     }
@@ -1077,7 +1089,27 @@ impl Drop for CursorProjectScanCache {
         }
         CURSOR_SCAN_PROJECTS.with(|cache| cache.replace(self.projects.take()));
         CURSOR_SCAN_NATIVE_SOURCES.with(|cache| cache.replace(self.native_sources.take()));
+        CURSOR_SCAN_DESKTOP_ARCHIVE_STATES
+            .with(|cache| cache.replace(self.desktop_archive_states.take()));
     }
+}
+
+pub(super) fn cached_desktop_archive_states(
+    path: &Path,
+) -> Option<Option<Arc<HashMap<String, bool>>>> {
+    CURSOR_SCAN_DESKTOP_ARCHIVE_STATES.with(|cache| {
+        let cache = cache.borrow();
+        let states = cache.as_ref()?.get(path)?;
+        Some(states.as_ref().map(Arc::clone))
+    })
+}
+
+pub(super) fn cache_desktop_archive_states(path: &Path, states: Option<Arc<HashMap<String, bool>>>) {
+    CURSOR_SCAN_DESKTOP_ARCHIVE_STATES.with(|cache| {
+        if let Some(cache) = cache.borrow_mut().as_mut() {
+            cache.insert(path.to_path_buf(), states);
+        }
+    });
 }
 
 fn native_session_meta_paths(path: &Path) -> Vec<PathBuf> {
@@ -1133,6 +1165,13 @@ fn native_session_meta_paths(path: &Path) -> Vec<PathBuf> {
         }
     });
     paths
+}
+
+pub(super) fn has_cli_session_source(path: &Path) -> bool {
+    native_session_meta_paths(path).iter().any(|source| {
+        source.ancestors().any(|part| part.file_name().is_some_and(|name| name == "chats"))
+            && source.with_file_name("store.db").is_file()
+    })
 }
 
 pub(super) fn session_project(path: &Path, explicit: Option<PathBuf>) -> Option<PathBuf> {

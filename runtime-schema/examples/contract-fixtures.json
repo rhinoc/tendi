@@ -10,6 +10,7 @@
     "skills_list": {},
     "skills_refresh": {},
     "sessions_snapshot": {},
+    "sessions_ownership_snapshot": {},
     "sessions_list": {
       "query": "fixture",
       "sortKey": "title",
@@ -190,6 +191,14 @@
         "fixture"
       ]
     },
+    "session_set_archived": {
+      "session": {
+        "id": "fixture",
+        "agent": "codex",
+        "path": "fixture"
+      },
+      "archived": false
+    },
     "session_transcript": {
       "path": "fixture",
       "agent": "codex"
@@ -239,6 +248,11 @@
       ]
     },
     "skills_backup_disconnect": {},
+    "skills_create": {
+      "name": "fixture",
+      "description": "fixture",
+      "target": "fixture"
+    },
     "skills_add": {
       "source": "fixture",
       "target": "fixture",
@@ -376,6 +390,7 @@
     "skills_list": [],
     "skills_refresh": [],
     "sessions_snapshot": [],
+    "sessions_ownership_snapshot": [],
     "sessions_list": [],
     "sessions_scan_start": [],
     "sessions_search": [],
@@ -422,6 +437,7 @@
     "prompts_list": [],
     "prompt_save": [],
     "prompts_delete_many": [],
+    "session_set_archived": [],
     "session_transcript": [],
     "session_transcript_locator": [],
     "session_transcript_search": [],
@@ -436,6 +452,7 @@
     "skills_backup_adopt": [],
     "skills_backup_adopt_many": [],
     "skills_backup_disconnect": [],
+    "skills_create": [],
     "skills_add": [],
     "skills_add_preview_read": [],
     "skills_distribute": [],
@@ -779,6 +796,16 @@
           "id": "fixture",
           "agent": "codex",
           "path": "fixture"
+        }
+      ]
+    },
+    "sessions_ownership_snapshot": {
+      "epoch": "fixture",
+      "revision": 0,
+      "held": [
+        {
+          "id": "fixture",
+          "agent": "codex"
         }
       ]
     },
@@ -1517,6 +1544,11 @@
         "fixture"
       ]
     },
+    "session_set_archived": {
+      "id": "fixture",
+      "agent": "codex",
+      "path": "fixture"
+    },
     "session_transcript": {
       "items": [
         {
@@ -1991,6 +2023,58 @@
     },
     "skills_backup_disconnect": {
       "disconnected": false
+    },
+    "skills_create": {
+      "updated": [
+        {
+          "id": "fixture",
+          "installationId": "fixture",
+          "name": "fixture",
+          "tags": [
+            "fixture"
+          ],
+          "dependencies": [
+            "fixture"
+          ],
+          "dependents": [
+            "fixture"
+          ],
+          "dependencyIds": [
+            "fixture"
+          ],
+          "dependentIds": [
+            "fixture"
+          ],
+          "is_wrapper": false,
+          "visibility": "auto",
+          "agents": [
+            "codex"
+          ],
+          "paths": [
+            {
+              "path": "fixture",
+              "root": "fixture",
+              "scope": "fixture",
+              "agent": "codex",
+              "install_target": "fixture",
+              "source_kind": "fixture",
+              "symlink_status": "fixture",
+              "update_status": "fixture",
+              "sha256": "fixture",
+              "tags": [
+                "fixture"
+              ],
+              "effective_visibility": "auto"
+            }
+          ],
+          "source_summary": "fixture",
+          "install_targets": [
+            "fixture"
+          ],
+          "update_status": "fixture",
+          "is_system": false
+        }
+      ]
     },
     "skills_add": {
       "applied": false,
@@ -2753,6 +2837,11 @@
       "id": "invalid",
       "result": null
     },
+    "sessions_ownership_snapshot": {
+      "jsonrpc": "1.0",
+      "id": "invalid",
+      "result": null
+    },
     "sessions_list": {
       "jsonrpc": "1.0",
       "id": "invalid",
@@ -2983,6 +3072,11 @@
       "id": "invalid",
       "result": null
     },
+    "session_set_archived": {
+      "jsonrpc": "1.0",
+      "id": "invalid",
+      "result": null
+    },
     "session_transcript": {
       "jsonrpc": "1.0",
       "id": "invalid",
@@ -3049,6 +3143,11 @@
       "result": null
     },
     "skills_backup_disconnect": {
+      "jsonrpc": "1.0",
+      "id": "invalid",
+      "result": null
+    },
+    "skills_create": {
       "jsonrpc": "1.0",
       "id": "invalid",
       "result": null
@@ -3257,6 +3356,20 @@
       "baseRevision": 0,
       "revision": 1
     },
+    "sessions://ownership": {
+      "id": 1,
+      "event": "sessions://ownership",
+      "payload": {
+        "epoch": "fixture",
+        "revision": 0,
+        "held": [
+          {
+            "id": "fixture",
+            "agent": "codex"
+          }
+        ]
+      }
+    },
     "analytics://progress": {
       "id": 1,
       "event": "analytics://progress",
@@ -3392,6 +3505,11 @@
     "sessions://scan": {
       "id": "invalid",
       "event": "sessions://scan",
+      "payload": {}
+    },
+    "sessions://ownership": {
+      "id": "invalid",
+      "event": "sessions://ownership",
       "payload": {}
     },
     "analytics://progress": {

@@ -25,6 +25,11 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    /// Remove local database storage so Tendi can create a fresh database.
+    Reset {
+        #[arg(long)]
+        yes: bool,
+    },
     Scan {
         #[arg(long)]
         json: bool,
@@ -700,11 +705,33 @@ fn invalidate_skills_projection(
 }
 
 fn main() -> Result<()> {
-    let cli = Cli::parse();
-    let cwd = env::current_dir()?;
-    maybe_offer_bundled_skill(&cli.command)?;
+    match Cli::parse().command {
+        Command::Reset { yes } => reset_database(yes),
+        command => run_command(command),
+    }
+}
 
-    match cli.command {
+fn reset_database(yes: bool) -> Result<()> {
+    let database = tendi_core::storage::default_db_path()?;
+    let sessions = tendi_core::storage::session_database_path_for(&database)?;
+    println!("Database files to remove:");
+    println!("  {}", database.display());
+    println!("  {}", sessions.display());
+    if !yes && !confirm("Remove these databases and their SQLite journal files? [y/N] ")? {
+        println!("aborted");
+        return Ok(());
+    }
+    tendi_core::storage::reset_database_files(&database)?;
+    println!("database reset complete");
+    Ok(())
+}
+
+fn run_command(command: Command) -> Result<()> {
+    let cwd = env::current_dir()?;
+    maybe_offer_bundled_skill(&command)?;
+
+    match command {
+        Command::Reset { .. } => unreachable!("reset runs before database-aware startup hooks"),
         Command::Scan { json } => {
             if let Some(value) = try_daemon_json!(
                 &cwd,

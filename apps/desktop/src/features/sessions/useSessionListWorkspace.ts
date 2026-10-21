@@ -3,15 +3,21 @@ import { useEffect, useMemo, useState } from "react";
 import { selectSessionListView, type SessionListControllerInput, type SessionListView } from "../../controllers/session-controller.ts";
 import { logger } from "../../lib/logger.ts";
 import type { SessionRecord } from "../../lib/sessions.ts";
+import type { SessionArchiveFilter } from "../../lib/generated/runtime-types.ts";
+import type { TranscriptSearchScopes } from "../../lib/transcript.ts";
 
 type SessionListWorkspaceOptions = Omit<SessionListControllerInput, "remoteSearch" | "searchRows" | "searchRowsKey"> & {
   enabled: boolean;
-  searchSessions: (query: string) => Promise<SessionRecord[]>;
+  searchScopes: TranscriptSearchScopes;
+  archiveFilter: SessionArchiveFilter;
+  searchSessions: (query: string, searchScopes: TranscriptSearchScopes, archiveFilter: SessionArchiveFilter) => Promise<SessionRecord[]>;
   onSearchError: (message: string) => void;
 };
 
 export function useSessionListWorkspace({
   enabled,
+  searchScopes,
+  archiveFilter,
   searchSessions,
   onSearchError,
   ...listInput
@@ -38,6 +44,8 @@ export function useSessionListWorkspace({
     sessionProjects,
     currentPage,
     pageSelectionContextKey,
+    searchFilterKey,
+    startedAfter,
   } = listInput;
 
   const localListView = useMemo(() => {
@@ -61,14 +69,20 @@ export function useSessionListWorkspace({
       sessionProjects,
       currentPage,
       pageSelectionContextKey,
+      searchFilterKey,
+      startedAfter,
+      archiveFilter,
     });
   }, [
     currentPage,
+    archiveFilter,
     enabled,
     groupBy,
     importedSessions,
     missingSessionProjectPolicy,
     pageSelectionContextKey,
+    searchFilterKey,
+    startedAfter,
     pageSize,
     projectFilterQuery,
     projects,
@@ -99,7 +113,7 @@ export function useSessionListWorkspace({
 
     const runSearch = async () => {
       try {
-        const rows = await searchSessions(query);
+        const rows = await searchSessions(query, searchScopes, archiveFilter);
         if (cancelled) return;
         setSearchRows(rows);
         if (!cancelled) setSearchingSessions(false);
@@ -115,7 +129,7 @@ export function useSessionListWorkspace({
     return () => {
       cancelled = true;
     };
-  }, [enabled, localListView?.searchRequestKey, onSearchError, query, searchSessions]);
+  }, [archiveFilter, enabled, localListView?.searchRequestKey, onSearchError, query, searchScopes, searchSessions]);
 
   return { localListView, searchingSessions };
 }

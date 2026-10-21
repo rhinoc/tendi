@@ -27,6 +27,7 @@ import type {
   SessionsSearchRequest,
   SkillFileMutationResponse as GeneratedSkillFileMutationResponse,
   SkillsAddRequest as GeneratedSkillsAddRequest,
+  SkillsCreateRequest,
   SkillsBackupRestoreRequest as GeneratedSkillsBackupRestoreRequest,
   SkillsDistributeRequest as GeneratedSkillsDistributeRequest,
   SkillsDeleteManyRequest as GeneratedSkillsDeleteManyRequest,
@@ -43,6 +44,7 @@ import type {
   SkillsChangedEvent,
   AnalyticsProgressEvent,
   AnalyticsRevisionEvent,
+  SessionOwnershipSnapshot,
   ProjectionChangedEvent,
   SkillVisibility as GeneratedSkillVisibility,
 } from "./generated/runtime-types.ts";
@@ -313,7 +315,10 @@ export type RuntimeAnalyticsProgressEvent = AnalyticsRefreshProgress;
 export type RuntimeSkillChangedEvent = SkillsChangedEvent;
 export type RuntimeProjectionChangedEvent = ProjectionChangedEvent;
 
+export type SessionOwnershipSnapshotDto = SessionOwnershipSnapshot;
+
 export type RuntimeEvent =
+  | (DaemonEvent<SessionOwnershipSnapshot> & { event: typeof RuntimeEventName.SessionsOwnership })
   | (DaemonEvent<RuntimeSessionScanEvent> & { event: typeof RuntimeEventName.SessionsScan })
   | (DaemonEvent<RuntimeAnalyticsProgressEvent> & { event: typeof RuntimeEventName.AnalyticsProgress })
   | (DaemonEvent<RuntimeSkillUpdateEvent> & { event: typeof RuntimeEventName.SkillsUpdates })
@@ -435,7 +440,9 @@ export async function subscribeRuntimeEvents(handler: (event: RuntimeEvent) => v
     } catch {
       return;
     }
-    if (event.event === RuntimeEventName.SessionsScan) {
+    if (event.event === RuntimeEventName.SessionsOwnership) {
+      handler({ ...event, event: RuntimeEventName.SessionsOwnership, payload: event.payload });
+    } else if (event.event === RuntimeEventName.SessionsScan) {
       const payload = parseSessionScanEvent(event.payload);
       if (payload) handler({ ...event, event: RuntimeEventName.SessionsScan, payload });
     } else if (event.event === RuntimeEventName.AnalyticsProgress) {
@@ -500,6 +507,9 @@ export async function invokeSessionScanStart(): Promise<SessionScanStartDto> {
 export async function invokeSessionList(request: SessionListPageRequest): Promise<SessionListPageResult> {
   const runtimeRequest: SessionsListRequest = {
     query: request.query,
+    searchScopes: request.searchScopes,
+    startedAfter: request.startedAfter,
+    archiveFilter: request.archiveFilter,
     agent: request.agent ? runtimeAgentKind(request.agent) : undefined,
     sortKey: request.sort.key as SessionsListRequest["sortKey"],
     sortDirection: request.sort.direction,
@@ -532,10 +542,14 @@ function runtimeSessionCandidate(value: Pick<SessionRecord, "id" | "agent" | "pa
 export async function invokeSessionSearch(
   query: string,
   candidates?: readonly Pick<SessionRecord, "id" | "agent" | "path">[],
+  searchScopes?: SessionsSearchRequest["searchScopes"],
+  archiveFilter?: SessionsSearchRequest["archiveFilter"],
 ): Promise<RawDomainRow[]> {
   const request: SessionsSearchRequest = {
     query,
     candidates: candidates?.map(runtimeSessionCandidate),
+    searchScopes,
+    archiveFilter,
   };
   return recordRows(await invokeCommand(TauriCommand.SessionsSearch, request), "session search");
 }
@@ -877,6 +891,11 @@ export async function saveSkillFile(args: {
   return parseSkillFileSave(await invokeCommand(TauriCommand.SkillFileSave, args));
 }
 
+export async function createLocalSkill(args: SkillsCreateRequest): Promise<RawDomainRow[]> {
+  const response = await invokeCommand(TauriCommand.SkillsCreate, args);
+  return recordRows(response.updated, "skills create");
+}
+
 export async function createSkillFile(args: { skillId: string; relativePath: string; locationId?: string }): Promise<SkillFileMutationResponse> {
   return parseSkillFileMutation(await invokeCommand(TauriCommand.SkillFileCreate, args));
 }
@@ -994,12 +1013,13 @@ export async function restoreSkillBackup(args: {
 }
 
 export async function loadSessionTranscript(
-  session: Pick<SessionRecord, "path" | "agent">,
+  session: Pick<SessionRecord, "id" | "path" | "agent">,
   cursor?: string,
   knownSourceVersion?: string,
 ): Promise<TranscriptPage> {
   const value = await invokeCommand(TauriCommand.SessionTranscript, {
     path: session.path,
+    sessionId: session.id,
     agent: runtimeAgentKind(session.agent),
     cursor,
     limit: 160,
@@ -1008,21 +1028,23 @@ export async function loadSessionTranscript(
   return normalizeTranscriptPage(value);
 }
 
-export async function loadSessionTranscriptLocator(session: Pick<SessionRecord, "path" | "agent">): Promise<TranscriptLocatorPage> {
+export async function loadSessionTranscriptLocator(session: Pick<SessionRecord, "id" | "path" | "agent">): Promise<TranscriptLocatorPage> {
   const value = await invokeCommand(TauriCommand.SessionTranscriptLocator, {
     path: session.path,
+    sessionId: session.id,
     agent: runtimeAgentKind(session.agent),
   });
   return normalizeTranscriptLocatorPage(value);
 }
 
 export async function searchSessionTranscript(
-  session: Pick<SessionRecord, "path" | "agent">,
+  session: Pick<SessionRecord, "id" | "path" | "agent">,
   query: string,
   scopes: TranscriptSearchScopes,
 ): Promise<TranscriptSearchResult> {
   const value = await invokeCommand(TauriCommand.SessionTranscriptSearch, {
     path: session.path,
+    sessionId: session.id,
     agent: runtimeAgentKind(session.agent),
     query,
     scopes,
@@ -1035,6 +1057,14 @@ export async function inferSessionResumeTarget(session: SessionResumeRequest): P
   if (target === "app") return SessionResumeTarget.App;
   if (target === "terminal") return SessionResumeTarget.Terminal;
   throw new Error("Invalid session resume target response");
+}
+
+export async function setSessionArchived(session: SessionRecord, archived: boolean): Promise<RawDomainRow> {
+  const response = await invokeCommand(TauriCommand.SessionSetArchived, {
+    session: { id: session.id, agent: runtimeAgentKind(session.agent), path: session.path },
+    archived,
+  });
+  return toRawDomainRow(response, "session archive");
 }
 
 export async function openUrl(url: string): Promise<void> {
@@ -1301,4 +1331,8 @@ export async function applySkillChangeIfAvailable(command: SkillChangeCommand, a
   } catch {
     return null;
   }
+}
+
+export async function invokeSessionOwnershipSnapshot(): Promise<SessionOwnershipSnapshotDto> {
+  return invokeCommand(TauriCommand.SessionsOwnershipSnapshot);
 }

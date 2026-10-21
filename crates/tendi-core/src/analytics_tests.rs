@@ -38,6 +38,9 @@ fn session(path: &Path, agent: AgentKind) -> SessionRecord {
         approval_mode: None,
         is_run_everything: None,
         parent_session_id: None,
+        archived: None,
+        archive_supported: false,
+        resumable: true,
         token_usage: None,
     }
 }
@@ -110,6 +113,27 @@ fn codex_parser_uses_last_usage_for_non_monotonic_cumulative_totals() {
         Some(490)
     );
     assert_eq!(parsed.state.parser_version, ANALYTICS_PARSER_VERSION);
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn codex_analytics_reads_paginated_zstd_rollouts() {
+    let root = temp_dir("tendi-analytics-codex-zstd");
+    fs::create_dir_all(&root).unwrap();
+    let path = root.join("rollout-session-1.jsonl.zst");
+    let contents = concat!(
+        "{\"timestamp\":\"2026-08-01T01:00:00Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\",\"info\":{\"total_token_usage\":{\"input_tokens\":100,\"output_tokens\":20,\"total_tokens\":120}}}}\n",
+        "{\"timestamp\":\"2026-08-01T01:00:01Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\",\"info\":{\"total_token_usage\":{\"input_tokens\":180,\"output_tokens\":40,\"total_tokens\":220}}}}\n"
+    );
+    let mut encoder = zstd::Encoder::new(fs::File::create(&path).unwrap(), 0).unwrap();
+    encoder.write_all(contents.as_bytes()).unwrap();
+    encoder.finish().unwrap();
+
+    let parsed = analyze_session(&session(&path, AgentKind::Codex), None).unwrap();
+
+    assert_eq!(parsed.analytics.responses.len(), 2);
+    assert_eq!(parsed.analytics.responses[0].usage.total_tokens, 120);
+    assert_eq!(parsed.analytics.responses[1].usage.total_tokens, 100);
     let _ = fs::remove_dir_all(root);
 }
 

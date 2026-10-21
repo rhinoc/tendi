@@ -45,6 +45,15 @@ pub fn read_transcript_excerpt(
     agent: AgentKind,
     options: &TranscriptExcerptOptions,
 ) -> Result<TranscriptExcerpt> {
+    read_session_transcript_excerpt(path, agent, None, options)
+}
+
+pub fn read_session_transcript_excerpt(
+    path: &Path,
+    agent: AgentKind,
+    id: Option<&str>,
+    options: &TranscriptExcerptOptions,
+) -> Result<TranscriptExcerpt> {
     anyhow::ensure!(
         (1..=1000).contains(&options.limit),
         "limit must be between 1 and 1000"
@@ -69,7 +78,7 @@ pub fn read_transcript_excerpt(
     let mut centers = 0;
     let mut last_center = None;
     loop {
-        let page = parse_transcript_page(path, agent, cursor.as_deref(), Some(400))?;
+        let page = parse_session_transcript_page(path, agent, id, cursor.as_deref(), Some(400))?;
         anyhow::ensure!(
             !page.restart_required,
             "transcript changed during reading; restart the query"

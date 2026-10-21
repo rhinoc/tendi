@@ -39,6 +39,7 @@ fn skill_projection_writer(method: &str) -> bool {
             | "skill_path_rename"
             | "skill_path_delete"
             | "skills_refresh"
+            | "skills_create"
             | "skills_add"
             | "skills_update"
             | "skills_update_many"
@@ -228,7 +229,11 @@ impl Daemon {
                         skills_projection_resource(&store)
                     } else {
                         ResourceRequest::named(
-                            store.path(),
+                            if *domain == "sessions" {
+                                store.session_database_path()
+                            } else {
+                                store.path()
+                            },
                             tendi_core::coordination::projection_key(domain, &daemon.state.cwd),
                         )
                     }];
@@ -488,6 +493,22 @@ impl Daemon {
             .and_then(Value::as_bool)
             .unwrap_or(false);
         match method {
+            "session_set_archived" => {
+                let request: runtime_schema::SessionSetArchivedRequest =
+                    serde_json::from_value(params.clone())
+                        .map_err(|error| invalid_argument(error.to_string()))?;
+                let identity = session_identity_from_request(request.session);
+                let paths =
+                    tendi_core::session_archive_resource_paths(identity.agent, &identity.path);
+                let mut resources = vec![ResourceRequest::named(
+                    store.session_database_path(),
+                    tendi_core::coordination::projection_key("sessions", &self.state.cwd),
+                )];
+                if !paths.is_empty() {
+                    resources.push(ResourceRequest::files(paths).map_err(core_error)?);
+                }
+                return Ok(resources);
+            }
             "projects_scan" => {
                 return Ok(vec![ResourceRequest::named(
                     store.path(),
@@ -590,6 +611,19 @@ impl Daemon {
                     &scan,
                 )?;
                 paths.push(path);
+            }
+            "skills_create" => {
+                let target = text("target")?
+                    .parse::<tendi_core::SkillTarget>()
+                    .map_err(core_error)?;
+                paths.push(
+                    tendi_core::skills::local_skill_directory(
+                        &self.state.cwd,
+                        &target,
+                        text("name")?,
+                    )
+                    .map_err(core_error)?,
+                );
             }
             "skills_add" if !dry => {
                 let previews = self
@@ -897,6 +931,7 @@ impl Daemon {
                 | "skill_folder_create"
                 | "skill_path_rename"
                 | "skill_path_delete"
+                | "skills_create"
                 | "skills_add"
                 | "skills_update"
                 | "skills_update_many"
@@ -961,6 +996,7 @@ fn projection_dependencies(method: &str) -> &'static [&'static str] {
         | "skill_folder_create"
         | "skill_path_rename"
         | "skill_path_delete"
+        | "skills_create"
         | "skills_add"
         | "skills_update"
         | "skills_update_many"

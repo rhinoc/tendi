@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     fs,
@@ -184,13 +185,7 @@ pub(crate) fn scan_project_mcp(
 
 pub(super) fn cursor_state_db_path(projects_root: &Path) -> Option<PathBuf> {
     let home = projects_root.parent()?.parent()?;
-    #[cfg(target_os = "macos")]
-    let path = home.join("Library/Application Support/Cursor/User/globalStorage/state.vscdb");
-    #[cfg(target_os = "linux")]
-    let path = home.join(".config/Cursor/User/globalStorage/state.vscdb");
-    #[cfg(target_os = "windows")]
-    let path = home.join("AppData/Roaming/Cursor/User/globalStorage/state.vscdb");
-    Some(path)
+    Some(super::cursor_native_sessions::desktop_database(home))
 }
 
 fn state_value_rows(
@@ -1529,7 +1524,7 @@ impl super::AgentProvider for CursorProvider {
         &self,
         ctx: &ProviderContext,
         sessions_out: &mut Vec<SessionRecord>,
-        _warnings: &mut Vec<String>,
+        warnings: &mut Vec<String>,
         cache: Option<&SessionScanCache>,
     ) -> Result<()> {
         let _project_scan = cursor_sessions::project_scan_cache();
@@ -1549,10 +1544,11 @@ impl super::AgentProvider for CursorProvider {
             sessions::scan_jsonl_sessions(
                 &home.join(".cursor/projects"),
                 self.kind(),
-                4,
+                usize::MAX,
                 sessions_out,
                 cache,
             );
+            super::cursor_native_sessions::scan(home, sessions_out, warnings);
         }
         Ok(())
     }
@@ -1565,7 +1561,78 @@ impl super::AgentProvider for CursorProvider {
             home.join(".cursor/acp-sessions"),
             home.join(".cursor/chats"),
             home.join(".cursor/projects"),
+            super::cursor_native_sessions::desktop_database(home).parent().unwrap().to_path_buf(),
         ]
+    }
+
+    fn session_archive_state(&self, path: &Path, id: &str) -> Option<bool> {
+        super::cursor_native_sessions::archive_state(path, id)
+    }
+
+    fn session_archive_supported(&self, path: &Path) -> bool {
+        super::cursor_native_sessions::is_sdk(path)
+    }
+
+    fn session_resumable(&self, path: &Path, id: &str) -> bool {
+        if super::cursor_native_sessions::desktop_database_for_export(path).is_some() {
+            return cursor_sessions::has_cli_session_source(path);
+        }
+        !super::cursor_native_sessions::is_desktop(path)
+            && !super::cursor_native_sessions::is_sdk(path)
+            && !path.ancestors().any(|part| part.file_name().is_some_and(|name| name == "acp-sessions"))
+            && !(path.extension().is_some_and(|extension| extension == "jsonl") && super::cursor_native_sessions::archive_state(path, id).is_some())
+    }
+
+    fn session_archive_resource_paths(&self, path: &Path) -> Vec<PathBuf> {
+        if super::cursor_native_sessions::is_sdk(path) {
+            super::cursor_native_sessions::database_sources(path)
+        } else { Vec::new() }
+    }
+
+    fn set_session_archived(&self, session: &SessionRecord, archived: bool) -> Result<PathBuf> {
+        super::cursor_native_sessions::set_archived(session, archived)
+    }
+
+    fn read_session_transcript(&self, path: &Path, id: &str) -> Option<Result<crate::transcript::TranscriptScan>> {
+        (super::cursor_native_sessions::is_desktop(path) || super::cursor_native_sessions::is_sdk(path) || super::cursor_native_sessions::is_cli_store(path))
+            .then(|| super::cursor_native_sessions::read(path, id))
+    }
+
+    fn session_watch_source_path(&self, event_path: &Path) -> Option<PathBuf> {
+        if let Some(index) = super::cursor_native_sessions::sdk_index_for_blob_store(event_path) { return Some(index); }
+        let raw = event_path.to_string_lossy();
+        let path = PathBuf::from(raw.strip_suffix("-wal").unwrap_or(&raw));
+        if super::cursor_native_sessions::is_desktop(&path) || super::cursor_native_sessions::is_sdk(&path) {
+            Some(path)
+        } else { None }
+    }
+
+    fn owns_session_process(&self, executable: &Path) -> bool {
+        cursor_cli_process(executable)
+    }
+
+    fn held_sessions(
+        &self,
+        _ctx: &ProviderContext,
+        _roots: &[PathBuf],
+        processes: &mut crate::session_ownership::processes::Processes,
+    ) -> Result<BTreeSet<crate::session_ownership::HeldSession>> {
+        let mut held = BTreeSet::new();
+        for process in processes
+            .entries()
+            .iter()
+            .filter(|process| cursor_cli_process(&process.executable))
+        {
+            for path in crate::session_ownership::processes::writable_files(process.pid) {
+                if let Some(id) = cursor_held_chat_id(&path) {
+                    held.insert(crate::session_ownership::HeldSession {
+                        agent: self.kind(),
+                        id,
+                    });
+                }
+            }
+        }
+        Ok(held)
     }
 
     fn current_session_env_key(&self) -> Option<&'static str> {
@@ -1668,6 +1735,7 @@ impl super::AgentProvider for CursorProvider {
     }
 
     fn resume_session_command(&self, session: &SessionRecord) -> Option<SessionCommand> {
+        if !self.session_resumable(&session.path, &session.id) { return None; }
         let project = absolute_project(session);
         let mut args = vec![
             "agent".to_string(),
@@ -1815,6 +1883,19 @@ impl super::AgentProvider for CursorProvider {
         (models.iter().all(|model| model.trim() == first)).then(|| first.to_string())
     }
 
+    fn analytics_cost(
+        &self,
+        model: &str,
+        usage: crate::analytics::AnalyticsTokenUsage,
+    ) -> Option<crate::analytics::AnalyticsCost> {
+        crate::analytics::model_pricing::pricing_for_unambiguous_model(model)
+            .map(|pricing| crate::analytics::cost::calculate(usage, pricing))
+    }
+
+    fn analytics_pricing_revision(&self, model: &str) -> Option<String> {
+        crate::analytics::model_pricing::pricing_revision_for_unambiguous_model(model)
+    }
+
     fn parse_analytics_line(&self, line: &str, record: &mut SessionAnalyticsRecord) {
         let timestamp = serde_json::from_str::<Value>(line)
             .ok()
@@ -1841,8 +1922,15 @@ impl super::AgentProvider for CursorProvider {
         cursor_sessions::cursor_project_from_meta(Some(value))
     }
 
+    fn session_parent_id_from_path(&self, path: &Path) -> Option<String> {
+        let parent = path.ancestors().find(|part| part.file_name().is_some_and(|name| name == "subagents"))?.parent()?;
+        if parent.parent()?.file_name()? != "agent-transcripts" { return None; }
+        parent.file_name()?.to_str().map(str::to_owned)
+    }
+
     fn is_session_candidate_path(&self, path: &Path) -> bool {
-        matches!(
+        if super::cursor_native_sessions::sdk_index_for_blob_store(path).is_some() { return false; }
+        super::cursor_native_sessions::is_desktop(path) || super::cursor_native_sessions::is_sdk(path) || matches!(
             path.file_name().and_then(|name| name.to_str()),
             Some("meta.json" | "store.db")
         )
@@ -1862,7 +1950,17 @@ impl super::AgentProvider for CursorProvider {
     }
 
     fn session_scan_source_paths(&self, path: &Path) -> Vec<PathBuf> {
-        cursor_sessions::session_scan_source_paths(path)
+        if super::cursor_native_sessions::is_desktop(path) || super::cursor_native_sessions::is_sdk(path) {
+            super::cursor_native_sessions::database_sources(path)
+        } else {
+            let mut sources = cursor_sessions::session_scan_source_paths(path);
+            if let Some(database) = super::cursor_native_sessions::desktop_database_for_export(path) {
+                if self.session_id_from_path(path).is_some_and(|id| super::cursor_native_sessions::archive_state(&database, &id).is_some()) {
+                    sources.extend(super::cursor_native_sessions::database_sources(&database));
+                }
+            }
+            sources
+        }
     }
 
     fn session_scan_cache_scope(&self) -> Box<dyn std::any::Any> {
@@ -1899,15 +1997,19 @@ impl super::AgentProvider for CursorProvider {
         path: &Path,
         sessions: &mut Vec<SessionRecord>,
         cache: Option<&SessionScanCache>,
-    ) -> bool {
-        if cursor_sessions::is_cursor_meta_file(path) {
+    ) -> Result<bool> {
+        if super::cursor_native_sessions::is_desktop(path) || super::cursor_native_sessions::is_sdk(path) {
+            super::cursor_native_sessions::scan_database(path, sessions)?;
+            Ok(true)
+        } else if cursor_sessions::is_cursor_meta_file(path) {
             cursor_sessions::scan_cursor_meta_file(path, sessions, self.kind(), cache);
-            true
+            Ok(true)
         } else if path.file_name().and_then(|name| name.to_str()) == Some("store.db") {
+            if super::cursor_native_sessions::sdk_index_for_blob_store(path).is_some() { return Ok(false); }
             cursor_sessions::scan_cursor_store_file(path, sessions, self.kind(), cache);
-            true
+            Ok(true)
         } else {
-            false
+            Ok(false)
         }
     }
 
@@ -2166,3 +2268,29 @@ impl super::AgentProvider for CursorProvider {
 #[cfg(test)]
 #[path = "cursor_tests.rs"]
 mod tests;
+
+fn cursor_cli_process(executable: &Path) -> bool {
+    executable
+        .components()
+        .any(|part| part.as_os_str() == "cursor-agent")
+        && executable
+            .file_name()
+            .is_some_and(|name| name == "node" || name == "cursor-agent-sea")
+}
+
+fn cursor_held_chat_id(path: &Path) -> Option<String> {
+    if path.file_name()? != "store.db" {
+        return None;
+    }
+    if !path.ancestors().skip(2).any(|part| {
+        part.file_name()
+            .is_some_and(|name| name == "chats" || name == "acp-sessions")
+    }) {
+        return None;
+    }
+    path.parent()?
+        .file_name()?
+        .to_str()
+        .filter(|id| !id.is_empty())
+        .map(str::to_string)
+}

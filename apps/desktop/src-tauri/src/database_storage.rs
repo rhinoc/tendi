@@ -17,13 +17,21 @@ fn marker_path(path: &Path) -> PathBuf {
     sibling(path, ".reset-pending")
 }
 
+fn related_databases(path: &Path) -> io::Result<[PathBuf; 2]> {
+    let sessions =
+        tendi_core::storage::session_database_path_for(path).map_err(io::Error::other)?;
+    Ok([path.to_path_buf(), sessions])
+}
+
 pub(super) fn storage_bytes(path: &Path) -> io::Result<u64> {
     let mut bytes = 0_u64;
-    for suffix in DATABASE_SUFFIXES {
-        match fs::metadata(sibling(path, suffix)) {
-            Ok(metadata) => bytes = bytes.saturating_add(metadata.len()),
-            Err(error) if error.kind() == ErrorKind::NotFound => {}
-            Err(error) => return Err(error),
+    for database in related_databases(path)? {
+        for suffix in DATABASE_SUFFIXES {
+            match fs::metadata(sibling(&database, suffix)) {
+                Ok(metadata) => bytes = bytes.saturating_add(metadata.len()),
+                Err(error) if error.kind() == ErrorKind::NotFound => {}
+                Err(error) => return Err(error),
+            }
         }
     }
     Ok(bytes)
@@ -40,14 +48,7 @@ pub(super) fn apply_pending_reset(path: &Path) -> io::Result<bool> {
         Err(error) if error.kind() == ErrorKind::NotFound => return Ok(false),
         Err(error) => return Err(error),
     }
-    for suffix in DATABASE_SUFFIXES {
-        match fs::remove_file(sibling(path, suffix)) {
-            Ok(()) => {}
-            Err(error) if error.kind() == ErrorKind::NotFound => {}
-            Err(error) => return Err(error),
-        }
-    }
-    fs::remove_file(marker)?;
+    tendi_core::storage::reset_database_files(path).map_err(io::Error::other)?;
     Ok(true)
 }
 

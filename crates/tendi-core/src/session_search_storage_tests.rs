@@ -59,7 +59,7 @@ fn per_session_work_survives_restart_without_visiting_clean_sessions() {
         .apply_session_changes_for_scope(&scope, &[dirty.clone()], &[])
         .unwrap();
     let keys: Vec<String> = store
-        .conn
+        .sessions.conn
         .prepare("SELECT session_id FROM scoped_session_search_work")
         .unwrap()
         .query_map([], |row| row.get(0))
@@ -96,11 +96,11 @@ fn successful_old_generation_cannot_acknowledge_new_session_work() {
         .unwrap();
     let advanced = Cell::new(false);
     let (published, errors, pending) = store.refresh_pending_session_search_for_scope_until(&scope, || {
-            let building: bool = store.conn.query_row(
+            let building: bool = store.sessions.conn.query_row(
                 "SELECT EXISTS(SELECT 1 FROM scoped_session_search_index WHERE search_index_version = 0)", [], |row| row.get(0)
             ).unwrap();
             if building && !advanced.replace(true) {
-                store.with_named_write_transaction("test.new_search_generation", |tx|
+                store.with_session_write_transaction("test.new_search_generation", |tx|
                     mark_session_key_pending_in_tx(tx, &scope, &session)).unwrap();
             }
             false
@@ -155,7 +155,7 @@ fn durable_provisional_tail_is_replaced_not_duplicated() {
     assert!(errors.is_empty());
     assert!(!pending);
     let count: i64 = store
-        .conn
+        .sessions.conn
         .query_row(
             "SELECT count(*) FROM scoped_session_search_entries",
             [],
@@ -164,7 +164,7 @@ fn durable_provisional_tail_is_replaced_not_duplicated() {
         .unwrap();
     assert_eq!(count, 3);
     let encoded: String = store
-        .conn
+        .sessions.conn
         .query_row(
             "SELECT search_checkpoint FROM scoped_session_search_index",
             [],
@@ -284,7 +284,7 @@ fn readded_identity_is_not_pruned_by_an_old_deletion_tombstone() {
         .unwrap();
     let readded = std::cell::Cell::new(false);
     let missing: bool = store
-        .conn
+        .sessions.conn
         .query_row(
             "SELECT NOT EXISTS(SELECT 1 FROM scoped_sessions)",
             [],
@@ -369,7 +369,7 @@ fn metadata_commit_survives_index_failure_and_pending_work_recovers_after_restar
     assert_eq!(errors.len(), 1);
     assert!(pending);
     let last_error: String = store
-        .conn
+        .sessions.conn
         .query_row(
             "SELECT last_error FROM scoped_session_search_pending WHERE scope_key = ?1",
             [scope.as_str()],
@@ -499,7 +499,7 @@ fn source_bookkeeping_without_search_changes_does_not_advance_sessions_revision(
 #[test]
 fn rolled_back_metadata_does_not_leave_a_pending_request() {
     let (root, store, scope, _session) = fixture("pending-rollback");
-    let result: Result<()> = store.with_named_write_transaction("test.aborted_metadata", |tx| {
+    let result: Result<()> = store.with_session_write_transaction("test.aborted_metadata", |tx| {
         mark_session_search_pending_in_tx(tx, &scope)?;
         bail!("abort metadata transaction")
     });
@@ -560,7 +560,7 @@ fn cancellation_preserves_publications_and_pending_work_for_resume() {
     let (published, errors, pending) = store
         .refresh_pending_session_search_for_scope_until(&scope, || {
             store
-                .conn
+                .sessions.conn
                 .query_row(
                     "SELECT EXISTS(SELECT 1 FROM scoped_session_search_index
                  WHERE scope_key = ?1 AND search_index_version = ?2)",
@@ -574,7 +574,7 @@ fn cancellation_preserves_publications_and_pending_work_for_resume() {
     assert!(errors.is_empty());
     assert!(pending);
     let last_error: Option<String> = store
-        .conn
+        .sessions.conn
         .query_row(
             "SELECT last_error FROM scoped_session_search_pending WHERE scope_key = ?1",
             [scope.as_str()],
@@ -625,7 +625,7 @@ fn deletion_is_committed_before_independent_index_cleanup() {
     assert!(errors.is_empty());
     assert!(!pending);
     let remaining: i64 = store
-        .conn
+        .sessions.conn
         .query_row(
             "SELECT count(*) FROM scoped_session_search_entries",
             [],
@@ -648,7 +648,7 @@ fn append_retains_existing_search_entries_when_session_metadata_is_unchanged() {
         .ensure_scoped_session_search_for_scope(&scope)
         .unwrap();
     let original: i64 = store
-        .conn
+        .sessions.conn
         .query_row(
             "SELECT id FROM scoped_session_search_entries WHERE record_order = 1",
             [],
@@ -672,7 +672,7 @@ fn append_retains_existing_search_entries_when_session_metadata_is_unchanged() {
     assert!(errors.is_empty());
     assert!(!pending);
     let retained: i64 = store
-        .conn
+        .sessions.conn
         .query_row(
             "SELECT id FROM scoped_session_search_entries WHERE record_order = 1",
             [],
@@ -732,7 +732,7 @@ fn rewrite_and_truncation_remove_obsolete_search_results() {
         1
     );
     let count: i64 = store
-        .conn
+        .sessions.conn
         .query_row(
             "SELECT count(*) FROM scoped_session_search_entries",
             [],
@@ -824,7 +824,7 @@ fn unpublished_index_is_hidden_and_repaired_after_reopening() {
         .ensure_scoped_session_search_for_scope(&scope)
         .unwrap();
     store
-        .with_named_write_transaction("test.interrupt_search", |tx| {
+        .with_session_write_transaction("test.interrupt_search", |tx| {
             tx.execute(
                 "UPDATE scoped_session_search_index SET search_index_version = 0",
                 [],
@@ -901,7 +901,7 @@ fn session_reads_ignore_obsolete_full_snapshots() {
         1
     );
     let stored: String = store
-        .conn
+        .sessions.conn
         .query_row(
             "SELECT payload_json FROM normalized_snapshots WHERE domain='sessions'",
             [],

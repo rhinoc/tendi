@@ -19,6 +19,12 @@ const SCAN_WRITE_BATCH_SIZE: usize = 128;
 const SCAN_PROJECTION_DOMAINS: [&str; 6] =
     ["agents", "skills", "rules", "hooks", "mcp", "sessions"];
 
+fn uses_session_database(domain: &str) -> bool {
+    matches!(domain, "sessions" | "analytics")
+        || domain.starts_with("session-")
+        || domain.starts_with("session_")
+}
+
 #[cfg(test)]
 #[path = "projections_tests.rs"]
 mod concurrency_tests;
@@ -180,9 +186,21 @@ impl Store {
             .iter()
             .map(|path| crate::coordination::canonical_resource_path(path))
             .collect::<Result<Vec<_>>>()?;
-        self.with_named_write_transaction("invalidate_projection_resources", |tx| {
-            self.mark_projection_resources_in_tx(tx, &scope, domain, &resources, reconcile, true)
-        })
+        let invalidate = |tx: &Transaction<'_>| {
+            self.mark_projection_resources_in_tx(
+                tx,
+                &scope,
+                domain,
+                &resources,
+                reconcile,
+                !uses_session_database(domain),
+            )
+        };
+        if uses_session_database(domain) {
+            self.with_session_write_transaction("invalidate_projection_resources", invalidate)
+        } else {
+            self.with_named_write_transaction("invalidate_projection_resources", invalidate)
+        }
     }
 
     pub(in crate::storage) fn mark_projection_resources_in_tx(
@@ -290,7 +308,12 @@ impl Store {
     ) -> Result<ProjectionRefreshState<T>> {
         let scope = workspace_scope_key(workspace_root)?;
         // Both queries use this read-only connection's same snapshot.
-        let read = self.conn.unchecked_transaction()?;
+        let connection = if uses_session_database(domain) {
+            &self.sessions.conn
+        } else {
+            &self.conn
+        };
+        let read = connection.unchecked_transaction()?;
         let (revision, snapshot) =
             self.read_cached_projection_with_revision(domain, workspace_root)?;
         let mut statement = read.prepare("SELECT resource_key, generation, reconcile_generation FROM projection_dirty_resources WHERE scope_key = ?1 AND domain = ?2 ORDER BY resource_key")?;
@@ -333,7 +356,12 @@ impl Store {
     }
 
     pub fn pending_projection_scopes(&self, domain: &str) -> Result<Vec<PathBuf>> {
-        let mut statement = self.conn.prepare("SELECT DISTINCT scope_key FROM projection_dirty_resources WHERE domain = ?1 AND (generation > 0 OR reconcile_generation > 0) ORDER BY scope_key")?;
+        let connection = if uses_session_database(domain) {
+            &self.sessions.conn
+        } else {
+            &self.conn
+        };
+        let mut statement = connection.prepare("SELECT DISTINCT scope_key FROM projection_dirty_resources WHERE domain = ?1 AND (generation > 0 OR reconcile_generation > 0) ORDER BY scope_key")?;
         let scopes = statement
             .query_map([domain], |row| row.get::<_, String>(0))?
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -350,7 +378,7 @@ impl Store {
             }
         }
         if !orphaned.is_empty() {
-            self.with_named_write_transaction("prune_orphaned_projection_dirty_resources", |tx| {
+            let prune = |tx: &Transaction<'_>| {
                 for scope in &orphaned {
                     tx.execute(
                         "DELETE FROM projection_dirty_resources WHERE scope_key = ?1 AND domain = ?2",
@@ -358,7 +386,18 @@ impl Store {
                     )?;
                 }
                 Ok(())
-            })?;
+            };
+            if uses_session_database(domain) {
+                self.with_session_write_transaction(
+                    "prune_orphaned_projection_dirty_resources",
+                    prune,
+                )?;
+            } else {
+                self.with_named_write_transaction(
+                    "prune_orphaned_projection_dirty_resources",
+                    prune,
+                )?;
+            }
         }
         Ok(pending)
     }
@@ -370,11 +409,19 @@ impl Store {
         captured: Revision,
     ) -> Result<()> {
         let scope = workspace_scope_key(workspace_root)?;
-        self.with_named_write_transaction("acknowledge_projection_reconciliation", |tx| {
+        let acknowledge = |tx: &Transaction<'_>| {
             tx.execute("UPDATE projection_dirty_resources SET reconcile_generation = 0 WHERE scope_key = ?1 AND domain = ?2 AND reconcile_generation <= ?3", params![scope.as_str(), domain, captured.value()])?;
             tx.execute("DELETE FROM projection_dirty_resources WHERE scope_key = ?1 AND domain = ?2 AND generation = 0 AND reconcile_generation = 0", params![scope.as_str(), domain])?;
             Ok(())
-        })
+        };
+        if uses_session_database(domain) {
+            self.with_session_write_transaction(
+                "acknowledge_projection_reconciliation",
+                acknowledge,
+            )
+        } else {
+            self.with_named_write_transaction("acknowledge_projection_reconciliation", acknowledge)
+        }
     }
 
     pub fn save_hooks_for_workspace_if_revision(
@@ -531,11 +578,16 @@ impl Store {
         if status.trim().is_empty() {
             anyhow::bail!("projection status must not be empty");
         }
-        let head = self.with_named_write_transaction("advance_projection_head", |tx| {
+        let advance = |tx: &Transaction<'_>| {
             let head =
                 advance_projection_head_in_tx(&tx, scope_key, domain, source_version, status)?;
             Ok(head)
-        })?;
+        };
+        let head = if uses_session_database(domain) {
+            self.with_session_write_transaction("advance_projection_head", advance)?
+        } else {
+            self.with_named_write_transaction("advance_projection_head", advance)?
+        };
         Ok(head)
     }
 
@@ -670,8 +722,12 @@ impl Store {
         scope_key: &ScopeKey,
         domain: &str,
     ) -> Result<Option<ProjectionHead>> {
-        let row = self
-            .conn
+        let connection = if uses_session_database(domain) {
+            &self.sessions.conn
+        } else {
+            &self.conn
+        };
+        let row = connection
             .query_row(
                 "SELECT scope_key, domain, revision, source_version, schema_version, status
                  FROM projection_heads
@@ -911,7 +967,12 @@ impl Store {
     ) -> Result<(Revision, Option<T>)> {
         ensure_projection_domain(domain)?;
         let scope_key = workspace_scope_key(&canonical_workspace_root(workspace_root))?;
-        let (revision, payload) = self.conn.query_row(
+        let connection = if uses_session_database(domain) {
+            &self.sessions.conn
+        } else {
+            &self.conn
+        };
+        let (revision, payload) = connection.query_row(
             &format!("SELECT COALESCE(h.revision, 0), s.payload_json
                 FROM (SELECT ?1 AS scope_key, ?2 AS domain) requested
                 LEFT JOIN projection_heads h ON h.scope_key = requested.scope_key AND h.domain = requested.domain
@@ -933,7 +994,12 @@ impl Store {
         scope_key: &ScopeKey,
         domain: &str,
     ) -> Result<Option<T>> {
-        self.conn
+        let connection = if uses_session_database(domain) {
+            &self.sessions.conn
+        } else {
+            &self.conn
+        };
+        connection
             .query_row(
                 &format!(
                     "SELECT payload_json FROM {NORMALIZED_SNAPSHOT_TABLE}
@@ -968,7 +1034,12 @@ impl Store {
                 &self.list_session_projects_for_scope(scope_key)?,
             )?));
         }
-        self.conn
+        let connection = if uses_session_database(domain) {
+            &self.sessions.conn
+        } else {
+            &self.conn
+        };
+        connection
             .query_row(
                 &format!(
                     "SELECT payload_json FROM {NORMALIZED_SNAPSHOT_TABLE}
@@ -990,8 +1061,12 @@ impl Store {
         let workspace_root = canonical_workspace_root(workspace_root);
         let scope_key = ScopeKey::new(format!("workspace:{}", workspace_root.display()))
             .map_err(|error| anyhow::anyhow!(error))?;
-        let context = self
-            .conn
+        let connection = if uses_session_database(domain) {
+            &self.sessions.conn
+        } else {
+            &self.conn
+        };
+        let context = connection
             .query_row(
                 &format!(
                     "SELECT state
@@ -1008,8 +1083,7 @@ impl Store {
         if state == "refreshing" {
             return Ok(ProjectionStatus::Refreshing);
         }
-        let snapshot_exists = self
-            .conn
+        let snapshot_exists = connection
             .query_row(
                 &format!(
                     "SELECT 1 FROM {NORMALIZED_SNAPSHOT_TABLE}
@@ -1109,9 +1183,14 @@ impl Store {
         payload: &T,
     ) -> Result<()> {
         let payload_json = serde_json::to_string(payload)?;
-        self.with_named_write_transaction("write_normalized_snapshot", |tx| {
+        let write = |tx: &Transaction<'_>| {
             self.write_normalized_snapshot_json_in_tx(tx, scope_key, domain, &payload_json)
-        })
+        };
+        if uses_session_database(domain) {
+            self.with_session_write_transaction("write_normalized_snapshot", write)
+        } else {
+            self.with_named_write_transaction("write_normalized_snapshot", write)
+        }
     }
 
     pub(in crate::storage) fn write_normalized_snapshot_json_in_tx(
@@ -1247,10 +1326,15 @@ impl Store {
         let workspace_root = canonical_workspace_root(workspace_root);
         let scope_key = ScopeKey::new(format!("workspace:{}", workspace_root.display()))
             .map_err(|error| anyhow::anyhow!(error))?;
-        self.with_named_write_transaction("set_projection_context", |tx| {
+        let write_context = |tx: &Transaction<'_>| {
             self.set_projection_context_in_tx(&tx, &scope_key, domain, state, error)?;
             Ok(())
-        })?;
+        };
+        if uses_session_database(domain) {
+            self.with_session_write_transaction("set_projection_context", write_context)?;
+        } else {
+            self.with_named_write_transaction("set_projection_context", write_context)?;
+        }
         Ok(())
     }
 
@@ -1432,7 +1516,7 @@ impl Store {
         sources: &PreparedSessionSources,
         revision: Revision,
     ) -> Result<Option<Revision>> {
-        self.with_named_write_transaction("save_scan_session_batch", |tx| {
+        self.with_session_write_transaction("save_scan_session_batch", |tx| {
             if !scan_revision_matches(tx, scope_key, "sessions", revision)? {
                 return Ok(None);
             }
@@ -1447,7 +1531,7 @@ impl Store {
         sessions: &[SessionRecord],
         revision: Revision,
     ) -> Result<Option<Revision>> {
-        self.with_named_write_transaction("remove_scan_session_batch", |tx| {
+        self.with_session_write_transaction("remove_scan_session_batch", |tx| {
             if !scan_revision_matches(tx, scope_key, "sessions", revision)? {
                 return Ok(None);
             }
@@ -1514,7 +1598,7 @@ impl Store {
             None
         };
         let Some(mut revision) =
-            self.with_named_write_transaction("save_scan_sessions_begin", |tx| {
+            self.with_session_write_transaction("save_scan_sessions_begin", |tx| {
                 let current = projection_revision_in_tx(tx, scope_key, "sessions")?;
                 if expected.is_some_and(|expected| expected != current) {
                     return Ok(None);
@@ -1565,7 +1649,7 @@ impl Store {
             }
         }
 
-        self.with_named_write_transaction("save_scan_sessions_finalize", |tx| {
+        self.with_session_write_transaction("save_scan_sessions_finalize", |tx| {
             if !scan_revision_matches(tx, scope_key, "sessions", revision)? {
                 return Ok(false);
             }
@@ -1598,7 +1682,10 @@ impl Store {
         let scope_key = workspace_scope_key(&workspace_root)?;
         if let Some(expected) = expected {
             let preflight = self.with_named_write_transaction("save_scan_preflight", |tx| {
-                for domain in SCAN_PROJECTION_DOMAINS {
+                for domain in SCAN_PROJECTION_DOMAINS
+                    .into_iter()
+                    .filter(|domain| *domain != "sessions")
+                {
                     if !scan_revision_matches(tx, &scope_key, domain, expected[domain])? {
                         return Ok(false);
                     }
@@ -1606,6 +1693,13 @@ impl Store {
                 Ok(true)
             })?;
             if !preflight {
+                return Ok(false);
+            }
+            let session_preflight = self
+                .with_session_write_transaction("save_scan_session_preflight", |tx| {
+                    scan_revision_matches(tx, &scope_key, "sessions", expected["sessions"])
+                })?;
+            if !session_preflight {
                 return Ok(false);
             }
         }

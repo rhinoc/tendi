@@ -19,6 +19,7 @@ pub mod rules;
 pub mod runtime_contract;
 pub mod session_skills;
 pub mod sessions;
+pub mod session_ownership;
 pub mod skill_backup;
 pub mod skill_marketplace;
 pub mod skill_restore;
@@ -28,6 +29,7 @@ pub mod skill_targets;
 pub mod skills;
 pub mod storage;
 mod time;
+pub use time::compare_timestamps;
 pub mod transcript;
 
 #[cfg(test)]
@@ -44,7 +46,8 @@ pub use mcp::{McpScan, McpServerRecord};
 pub use providers::{
     SessionCommand, SessionResumePlan, SessionWriter, accepts_session_app_url,
     active_session_writer, apply_session_config_profile, config_profile_key, parse_agent,
-    plan_assistant_ask, plan_session_resume, session_resume_repair_commands, session_root_priority,
+    plan_assistant_ask, plan_session_resume, session_archive_resource_paths, session_archive_state, session_archive_supported, session_resumable,
+    session_resume_repair_commands, session_root_priority, set_session_archived,
 };
 pub use rules::{RuleRecord, RuleScan};
 pub use runtime_contract::{

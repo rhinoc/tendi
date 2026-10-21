@@ -123,6 +123,9 @@ fn resume_command_ignores_relative_project_paths() {
         approval_mode: None,
         is_run_everything: None,
         parent_session_id: None,
+        archived: None,
+        archive_supported: false,
+        resumable: true,
         token_usage: None,
     };
 
@@ -252,6 +255,9 @@ fn plan_session_resume_rejects_an_active_codex_writer() {
         approval_mode: None,
         is_run_everything: None,
         parent_session_id: None,
+        archived: None,
+        archive_supported: false,
+        resumable: true,
         token_usage: None,
     };
     let lock_path = codex::codex_thread_writer_lock_path(&session.path, &session.id).unwrap();
@@ -302,6 +308,9 @@ fn codex_resume_repair_archives_then_unarchives_the_session() {
         approval_mode: None,
         is_run_everything: None,
         parent_session_id: None,
+        archived: None,
+        archive_supported: false,
+        resumable: true,
         token_usage: None,
     };
 
@@ -312,4 +321,141 @@ fn codex_resume_repair_archives_then_unarchives_the_session() {
     assert_eq!(commands[0].args, ["archive", "session-id"]);
     assert_eq!(commands[1].executable, "codex");
     assert_eq!(commands[1].args, ["unarchive", "session-id"]);
+}
+
+fn archive_test_session(path: PathBuf) -> SessionRecord {
+    serde_json::from_value(serde_json::json!({
+        "id": "019eef10-7054-7a63-b9c8-fd16cc70cd53",
+        "agent": "codex", "path": path,
+    }))
+    .unwrap()
+}
+
+#[test]
+fn session_archive_capabilities_are_provider_owned() {
+    let live = PathBuf::from("/tmp/custom-codex-home/sessions/2026/10/session.jsonl");
+    let archived = PathBuf::from("/tmp/custom-codex-home/archived_sessions/session.jsonl");
+    assert_eq!(
+        super::session_archive_state(AgentKind::Codex, &live, "session"),
+        Some(false)
+    );
+    assert_eq!(
+        super::session_archive_state(AgentKind::Codex, &archived, "session"),
+        Some(true)
+    );
+    assert_eq!(
+        super::session_archive_state(AgentKind::Codex, &PathBuf::from("/tmp/import.jsonl"), "session"),
+        None
+    );
+    for agent in [
+        AgentKind::Claude,
+        AgentKind::Cursor,
+        AgentKind::Shared,
+        AgentKind::Unknown,
+    ] {
+        assert_eq!(super::session_archive_state(agent, &archived, "session"), None);
+        let mut session = archive_test_session(archived.clone());
+        session.agent = agent;
+        assert!(
+            super::set_session_archived(&session, false)
+                .unwrap_err()
+                .to_string()
+                .contains("not supported")
+        );
+    }
+}
+
+#[test]
+fn codex_archive_command_uses_the_session_home() {
+    let session = archive_test_session(PathBuf::from(
+        "/tmp/custom-codex-home/sessions/2026/10/session.jsonl",
+    ));
+    for archived in [true, false] {
+        let command = codex::session_archive_command(&session, archived).unwrap();
+        assert_eq!(command.executable, "codex");
+        assert_eq!(
+            command.args,
+            [if archived { "archive" } else { "unarchive" }, &session.id]
+        );
+        assert_eq!(command.cwd, Some(PathBuf::from("/tmp/custom-codex-home")));
+        assert_eq!(
+            command.env,
+            [(
+                "CODEX_HOME".to_string(),
+                "/tmp/custom-codex-home".to_string()
+            )]
+        );
+    }
+}
+
+#[test]
+fn codex_archive_roundtrip_resolves_transcript_and_propagates_failures() {
+    let root = temp_dir("tendi-codex-archive-test");
+    let mut session =
+        archive_test_session(root.join("sessions/019eef10-7054-7a63-b9c8-fd16cc70cd53.jsonl"));
+    fs::create_dir_all(session.path.parent().unwrap()).unwrap();
+    fs::create_dir_all(root.join("archived_sessions")).unwrap();
+    fs::write(&session.path, "transcript").unwrap();
+    let script = root.join("archive.sh");
+    fs::write(
+        &script,
+        r#"set -eu
+if [ "$1" = archive ]; then
+  mv "$CODEX_HOME/sessions/$2.jsonl" "$CODEX_HOME/archived_sessions/$2.jsonl"
+else
+  mv "$CODEX_HOME/archived_sessions/$2.jsonl" "$CODEX_HOME/sessions/$2.jsonl"
+fi
+"#,
+    )
+    .unwrap();
+    for archived in [true, false] {
+        let mut plan = codex::session_archive_command(&session, archived).unwrap();
+        plan.executable = "/bin/sh".to_string();
+        plan.args.insert(0, script.display().to_string());
+        let old_path = session.path.clone();
+        session.path = codex::apply_session_archive_command(&session, archived, plan).unwrap();
+        assert!(!old_path.exists());
+        assert!(session.path.is_file());
+        assert_eq!(
+            super::session_archive_state(session.agent, &session.path, &session.id),
+            Some(archived)
+        );
+    }
+    let mut plan = codex::session_archive_command(&session, true).unwrap();
+    plan.executable = "/bin/sh".to_string();
+    plan.args = vec![
+        "-c".to_string(),
+        "echo archive-failed >&2; exit 1".to_string(),
+    ];
+    assert!(
+        codex::apply_session_archive_command(&session, true, plan)
+            .unwrap_err()
+            .to_string()
+            .contains("archive-failed")
+    );
+    assert!(session.path.exists());
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn codex_archive_rejects_active_writers_before_running_command() {
+    let root = temp_dir("tendi-codex-archive-lock-test");
+    let session =
+        archive_test_session(root.join("sessions/019eef10-7054-7a63-b9c8-fd16cc70cd53.jsonl"));
+    fs::create_dir_all(session.path.parent().unwrap()).unwrap();
+    fs::write(&session.path, "transcript").unwrap();
+    let lock_path = codex::codex_thread_writer_lock_path(&session.path, &session.id).unwrap();
+    fs::create_dir_all(lock_path.parent().unwrap()).unwrap();
+    let lock = fs::File::create(lock_path).unwrap();
+    lock.lock().unwrap();
+    let mut plan = codex::session_archive_command(&session, true).unwrap();
+    plan.executable = "must-not-run".to_string();
+    assert!(
+        codex::apply_session_archive_command(&session, true, plan)
+            .unwrap_err()
+            .to_string()
+            .contains("active writer")
+    );
+    lock.unlock().unwrap();
+    fs::remove_dir_all(root).unwrap();
 }

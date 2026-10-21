@@ -390,6 +390,9 @@ fn session(path: &Path, agent: AgentKind) -> SessionRecord {
         approval_mode: None,
         is_run_everything: None,
         parent_session_id: None,
+        archived: None,
+        archive_supported: false,
+        resumable: true,
         token_usage: None,
     }
 }

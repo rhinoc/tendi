@@ -122,10 +122,14 @@ pub fn run_index_for_scope(
     let started = std::time::Instant::now();
     let store = Store::open_default()?;
     let _lease = crate::coordination::ResourceLease::try_acquire(
-        store.path(),
+        store.session_database_path(),
         &format!("session-skills:{}", scope_key.as_str()),
     )?
     .context("session-skill index is already running for this scope")?;
+    let _provider_cache_scopes = crate::providers::agent_providers()
+        .into_iter()
+        .map(|provider| provider.session_scan_cache_scope())
+        .collect::<Vec<_>>();
     let skill_scan = load_skills_for_index(&store, cwd)?;
     let session_scan = store.list_sessions_for_scope(scope_key)?;
     let loaded_at = started.elapsed();
@@ -323,10 +327,19 @@ fn extract_session_skill_links_from_offset(
         provider.session_path_role(&session.path),
         crate::providers::SessionPathRole::Transcript | crate::providers::SessionPathRole::Metadata
     ) {
-        let mut file = fs::File::open(&session.path)
+        let file = fs::File::open(&session.path)
             .with_context(|| format!("failed to read {}", session.path.display()))?;
-        file.seek(SeekFrom::Start(offset))?;
-        for line in BufReader::new(file).lines() {
+        let compressed = provider.is_compressed_session_transcript(&session.path);
+        let reader: Box<dyn BufRead> = if compressed {
+            Box::new(BufReader::new(zstd::Decoder::new(file)?))
+        } else {
+            let mut file = file;
+            if offset > 0 {
+                file.seek(SeekFrom::Start(offset))?;
+            }
+            Box::new(BufReader::new(file))
+        };
+        for line in reader.lines() {
             let line =
                 line.with_context(|| format!("failed to read {}", session.path.display()))?;
             if line.trim().is_empty()

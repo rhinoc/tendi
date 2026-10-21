@@ -5,6 +5,13 @@ use crate::{sessions::SessionTokenUsage, time::parse_timestamp};
 const SESSION_SOURCE_BATCH_SIZE: usize = 64;
 const SESSION_SCAN_PERSIST_BATCH_SIZE: usize = 8;
 
+pub(super) fn session_provider_cache_scopes() -> Vec<Box<dyn std::any::Any>> {
+    crate::providers::agent_providers()
+        .into_iter()
+        .map(|provider| provider.session_scan_cache_scope())
+        .collect()
+}
+
 pub(in crate::storage) struct PreparedSessionSource {
     sources: Vec<SessionScanSourceState>,
     search_needs_refresh: bool,
@@ -34,6 +41,7 @@ struct SessionListProjectionRow {
     logical_project_id: Option<String>,
     logical_project_name: Option<String>,
     path: PathBuf,
+    archived: Option<bool>,
     started_at: Option<String>,
     updated_at: Option<String>,
     message_count: Option<usize>,
@@ -45,6 +53,9 @@ struct SessionListProjectionRow {
 
 impl SessionListProjectionRow {
     fn into_session(self) -> SessionRecord {
+        let archived = self
+            .archived
+            .or_else(|| crate::providers::session_archive_state(self.agent, &self.path, &self.id));
         let token_usage =
             self.input_tokens
                 .or(self.cached_input_tokens)
@@ -64,6 +75,9 @@ impl SessionListProjectionRow {
             repository_url: self.repository_url,
             logical_project_id: self.logical_project_id,
             logical_project_name: self.logical_project_name,
+            archived,
+            archive_supported: crate::providers::session_archive_supported(self.agent, &self.path),
+            resumable: false,
             path: self.path,
             started_at: self.started_at,
             updated_at: self.updated_at,
@@ -157,17 +171,28 @@ fn session_list_projection_values(session: &SessionRecord) -> Result<SessionList
 /// Persist deletion tombstones before canonical membership is removed. The
 /// worker then cleans exactly these identities, including after a restart.
 fn mark_obsolete_session_search_in_tx(tx: &Transaction<'_>, scope: &ScopeKey) -> Result<()> {
-    let payloads = tx
+    let identities = tx
         .prepare(
-            "SELECT data_json FROM scoped_sessions s WHERE scope_key = ?1
+            "SELECT id, agent, path FROM scoped_sessions s WHERE scope_key = ?1
          AND NOT EXISTS(SELECT 1 FROM current_sessions c
              WHERE c.id = s.id AND c.agent = s.agent AND c.path = s.path)",
         )?
-        .query_map([scope.as_str()], |row| row.get::<_, String>(0))?
+        .query_map([scope.as_str()], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
-    for payload in payloads {
-        let session: SessionRecord = serde_json::from_str(&payload)?;
-        session_search_storage::mark_session_key_pending_in_tx(tx, scope, &session)?;
+    for (session_id, agent, path) in identities {
+        session_search_storage::mark_session_identity_pending_in_tx(
+            tx,
+            scope,
+            &session_id,
+            &agent,
+            Path::new(&path),
+        )?;
     }
     Ok(())
 }
@@ -322,7 +347,7 @@ fn replace_scoped_session_scan_sources(
     prepared: &PreparedSessionSources,
 ) -> Result<()> {
     let prepared_source = prepared
-        .get(&session.path)
+        .get(&crate::sessions::SessionIdentity::from(session))
         .context("session source changed during preparation; retry the scan")?;
     let sources = &prepared_source.sources;
     let existing = {
@@ -421,13 +446,34 @@ impl Store {
         scope_key: &ScopeKey,
         query: SessionListQuery,
     ) -> Result<(Revision, SessionListPage)> {
+        self.session_page_with_revision_for_scope_with_filters(
+            scope_key,
+            query,
+            SessionListFilters::default(),
+        )
+    }
+
+    pub fn session_page_with_revision_for_scope_with_filters(
+        &self,
+        scope_key: &ScopeKey,
+        query: SessionListQuery,
+        filters: SessionListFilters,
+    ) -> Result<(Revision, SessionListPage)> {
+        let _provider_cache_scopes = session_provider_cache_scopes();
+        if let Some(started_after) = filters.started_after.as_deref() {
+            anyhow::ensure!(
+                crate::time::parse_timestamp(started_after).is_some(),
+                "invalid session started-after timestamp"
+            );
+        }
         let snapshot_query = query.clone();
+        let snapshot_filters = filters.clone();
         let (revision, snapshot) = self.read_session_revisioned(scope_key, || {
-            self.read_session_page_snapshot(scope_key, &snapshot_query)
+            self.read_session_page_snapshot(scope_key, &snapshot_query, &snapshot_filters)
         })?;
         Ok((
             revision,
-            self.finish_session_page_snapshot(scope_key, query, snapshot)?,
+            self.finish_session_page_snapshot(scope_key, query, filters, snapshot)?,
         ))
     }
 
@@ -436,16 +482,22 @@ impl Store {
         scope_key: &ScopeKey,
         query: SessionListQuery,
     ) -> Result<SessionListPage> {
-        let snapshot = self.read_session_page_snapshot(scope_key, &query)?;
-        self.finish_session_page_snapshot(scope_key, query, snapshot)
+        let _provider_cache_scopes = session_provider_cache_scopes();
+        let filters = SessionListFilters::default();
+        let snapshot = self.read_session_page_snapshot(scope_key, &query, &filters)?;
+        self.finish_session_page_snapshot(scope_key, query, filters, snapshot)
     }
 
     fn read_session_page_snapshot(
         &self,
         scope_key: &ScopeKey,
         query: &SessionListQuery,
+        filters: &SessionListFilters,
     ) -> Result<SessionListPageDbSnapshot> {
-        if Self::is_simple_session_list_query(query) {
+        if Self::is_simple_session_list_query(query)
+            && filters.started_after.is_none()
+            && filters.archive_filter == SessionArchiveFilter::All
+        {
             // Keep the fast path ahead of all session hydration and project
             // resolution. The snapshot contains only SQL values; JSON and
             // filesystem work happen after the revisioned read transaction.
@@ -464,7 +516,12 @@ impl Store {
         let search_hits = if normalized_query.is_empty() {
             Vec::new()
         } else {
-            self.search_sessions_for_scope_once(scope_key, normalized_query, None)?
+            self.search_sessions_for_scope_once_with_scopes(
+                scope_key,
+                normalized_query,
+                None,
+                &filters.search_scopes,
+            )?
         };
         Ok(SessionListPageDbSnapshot::Complex {
             settings: self.app_settings_once()?,
@@ -478,9 +535,10 @@ impl Store {
         &self,
         scope_key: &ScopeKey,
         query: SessionListQuery,
+        filters: SessionListFilters,
         snapshot: SessionListPageDbSnapshot,
     ) -> Result<SessionListPage> {
-        let (settings, projects, projection_rows, search_hits) = match snapshot {
+        let (settings, projects, projection_rows, mut search_hits) = match snapshot {
             SessionListPageDbSnapshot::Simple {
                 page,
                 project_options,
@@ -517,12 +575,76 @@ impl Store {
             &session_projects,
         );
 
-        let base_sessions = all_sessions
+        let eligible_sessions = all_sessions
             .iter()
-            .filter(|session| query.agent.is_none_or(|agent| session.agent == agent))
+            .filter(|session| {
+                filters
+                    .started_after
+                    .as_deref()
+                    .is_none_or(|started_after| {
+                        session.started_at.as_deref().is_some_and(|started_at| {
+                            compare_timestamps(Some(started_at), Some(started_after)).is_ge()
+                        })
+                    })
+            })
             .cloned()
             .collect::<Vec<_>>();
+        let base_sessions = eligible_sessions
+            .iter()
+            .filter(|session| query.agent.is_none_or(|agent| session.agent == agent))
+            .filter(|session| filters.archive_filter.matches(session.archived))
+            .cloned()
+            .collect::<Vec<_>>();
+        let selected_projects = query
+            .selected_project_keys
+            .iter()
+            .map(String::as_str)
+            .collect::<HashSet<_>>();
         let normalized_query = query.query.trim();
+        if !normalized_query.is_empty()
+            && (filters.search_scopes.system || filters.search_scopes.tool)
+        {
+            let transient_scopes = crate::transcript::TranscriptSearchScopes {
+                user: false,
+                assistant: false,
+                system: filters.search_scopes.system,
+                tool: filters.search_scopes.tool,
+            };
+            let transcript_sessions = eligible_sessions
+                .iter()
+                .filter(|session| query.agent.is_none_or(|agent| session.agent == agent))
+                .filter(|session| {
+                    selected_projects.is_empty()
+                        || resolve_session_list_project(
+                            session,
+                            &settings.missing_session_project_policy,
+                            &session_projects,
+                            &projects,
+                        )
+                        .is_some_and(|project| selected_projects.contains(project.key.as_str()))
+                })
+                .cloned()
+                .collect::<Vec<_>>();
+            let transcript_hits = self.search_session_transcript_records(
+                &transcript_sessions,
+                normalized_query,
+                None,
+                &transient_scopes,
+                false,
+            )?;
+            Self::merge_session_search_hits(
+                &mut search_hits,
+                transcript_hits
+                    .into_iter()
+                    .map(|hit| SessionSearchHit {
+                        session: hit.session,
+                        search_score: hit.search_score,
+                        search_snippet: hit.search_snippet,
+                    })
+                    .collect(),
+                None,
+            );
+        }
         let mut rows = if normalized_query.is_empty() {
             base_sessions
                 .into_iter()
@@ -536,6 +658,17 @@ impl Store {
             search_hits
                 .into_iter()
                 .filter(|hit| query.agent.is_none_or(|agent| hit.session.agent == agent))
+                .filter(|hit| filters.archive_filter.matches(hit.session.archived))
+                .filter(|hit| {
+                    filters
+                        .started_after
+                        .as_deref()
+                        .is_none_or(|started_after| {
+                            hit.session.started_at.as_deref().is_some_and(|started_at| {
+                                compare_timestamps(Some(started_at), Some(started_after)).is_ge()
+                            })
+                        })
+                })
                 .map(|hit| SessionListRow {
                     session: hit.session,
                     search_score: Some(hit.search_score),
@@ -544,11 +677,6 @@ impl Store {
                 .collect::<Vec<_>>()
         };
 
-        let selected_projects = query
-            .selected_project_keys
-            .iter()
-            .map(String::as_str)
-            .collect::<HashSet<_>>();
         if !selected_projects.is_empty() {
             rows.retain(|row| {
                 resolve_session_list_project(
@@ -699,7 +827,7 @@ impl Store {
         scope_key: &ScopeKey,
     ) -> Result<()> {
         let sources = self.prepare_session_sources(scope_key, &sessions.sessions)?;
-        self.with_named_write_transaction("save_sessions_at_with_scope", |tx| {
+        self.with_session_write_transaction("save_sessions_at_with_scope", |tx| {
             self.save_sessions_at_with_scope_in_tx(tx, sessions, scanned_at, scope_key, &sources)
         })?;
         Ok(())
@@ -816,7 +944,7 @@ impl Store {
         sessions: &SessionScan,
         scanned_at: u64,
     ) -> Result<()> {
-        self.with_named_write_transaction("finalize_session_scan_for_scope", |tx| {
+        self.with_session_write_transaction("finalize_session_scan_for_scope", |tx| {
             tx.execute_batch(
                 "
             CREATE TEMP TABLE IF NOT EXISTS current_sessions (
@@ -905,25 +1033,52 @@ impl Store {
         let sources = self.prepare_session_sources(scope_key, sessions)?;
         let aliases = prepare_project_aliases(sessions);
         let result =
-            self.with_named_write_transaction("apply_session_changes_for_scope", |tx| {
+            self.with_session_write_transaction("apply_session_changes_for_scope", |tx| {
                 let mut changed =
                     Self::apply_session_delta_in_tx(&tx, sessions, scope_key, &sources)?;
                 self.resolve_session_projects_in_tx(&tx, &mut changed, scope_key, &aliases)?;
                 let existing = if removed_paths.is_empty() {
                     Vec::new()
                 } else {
-                    Self::list_sessions_in_tx(tx, scope_key)?
+                    let mut statement = tx.prepare(
+                        "SELECT id, agent, path FROM scoped_sessions WHERE scope_key = ?1",
+                    )?;
+                    statement
+                        .query_map([scope_key.as_str()], |row| {
+                            Ok((
+                                row.get::<_, String>(0)?,
+                                row.get::<_, String>(1)?,
+                                row.get::<_, String>(2)?,
+                            ))
+                        })?
+                        .collect::<rusqlite::Result<Vec<_>>>()?
                 };
                 let removed = existing
                     .into_iter()
-                    .filter(|session| {
+                    .filter(|(_, _, session_path)| {
+                        let session_path = Path::new(session_path);
                         removed_paths
                             .iter()
-                            .any(|path| session.path == *path || session.path.starts_with(path))
+                            .any(|path| session_path == path || session_path.starts_with(path))
+                    })
+                    .filter_map(|(id, agent, path)| {
+                        crate::providers::parse_agent(&agent).ok().map(|agent| {
+                            crate::sessions::SessionIdentity {
+                                id,
+                                agent,
+                                path: PathBuf::from(path),
+                            }
+                        })
                     })
                     .collect::<Vec<_>>();
                 for session in &removed {
-                    session_search_storage::mark_session_key_pending_in_tx(tx, scope_key, session)?;
+                    session_search_storage::mark_session_identity_pending_in_tx(
+                        tx,
+                        scope_key,
+                        &session.id,
+                        agent_label(session.agent),
+                        &session.path,
+                    )?;
                     tx.execute(
                         &format!(
                             "DELETE FROM {SCOPED_SESSION_TABLE}
@@ -945,13 +1100,7 @@ impl Store {
                     cleanup_stale_scoped_session_scan_source_rows(&tx, scope_key)?;
                 }
 
-                Ok((
-                    changed,
-                    removed
-                        .iter()
-                        .map(crate::sessions::SessionIdentity::from)
-                        .collect::<Vec<_>>(),
-                ))
+                Ok((changed, removed.iter().cloned().collect::<Vec<_>>()))
             })?;
         crate::logging::global().info(
             "session projection write completed",
@@ -1148,21 +1297,6 @@ impl Store {
         Ok(changed)
     }
 
-    pub(in crate::storage) fn list_sessions_in_tx(
-        tx: &Transaction<'_>,
-        scope_key: &ScopeKey,
-    ) -> Result<Vec<SessionRecord>> {
-        let mut stmt = tx.prepare("SELECT data_json FROM scoped_sessions WHERE scope_key = ?1")?;
-        let mut sessions = Vec::new();
-        let mut rows = stmt.query([scope_key.as_str()])?;
-        while let Some(row) = rows.next()? {
-            if let Ok(session) = serde_json::from_str::<SessionRecord>(&row.get::<_, String>(0)?) {
-                sessions.push(Self::normalize_cached_session(session));
-            }
-        }
-        Ok(sessions)
-    }
-
     pub fn remove_sessions_for_paths_for_scope(
         &self,
         scope_key: &ScopeKey,
@@ -1185,7 +1319,7 @@ impl Store {
             (String, String, String),
             Vec<SessionScanSourceState>,
         > = HashMap::new();
-        let mut statement = self.conn.prepare(&format!(
+        let mut statement = self.sessions.conn.prepare(&format!(
             "SELECT session_id, agent, session_path, source_path, file_mtime, file_size,
                     parser_version
              FROM {SCOPED_SESSION_SCAN_SOURCE_TABLE}
@@ -1245,12 +1379,13 @@ impl Store {
     /// Source metadata is provider-owned and reusable across workspace projections.
     /// Each entry retains its complete primary and additional source-state bundle.
     pub fn shared_session_scan_cache(&self) -> Result<SessionScanCache> {
-        let mut statement = self.conn.prepare(
+        let _provider_cache_scopes = session_provider_cache_scopes();
+        let mut statement = self.sessions.conn.prepare(
             "WITH ranked AS (
                 SELECT p.scope_key, p.session_id, p.agent, p.session_path,
                        p.file_mtime, p.file_size,
                        row_number() OVER (
-                           PARTITION BY p.agent, p.session_path
+                           PARTITION BY p.agent, p.session_path, p.session_id
                            ORDER BY p.file_mtime DESC, p.file_size DESC,
                                     CAST(marker.value AS INTEGER) DESC, p.scope_key
                        ) AS rank
@@ -1295,7 +1430,7 @@ impl Store {
             });
         }
         let cache = SessionScanCache::from_entries(entries);
-        let mut statement = self.conn.prepare(
+        let mut statement = self.sessions.conn.prepare(
             "SELECT agent, path, sources_json FROM session_scan_empty_sources WHERE parser_version = ?1",
         )?;
         let rows = statement.query_map([SESSION_SCAN_CACHE_PARSER_VERSION], |row| {
@@ -1348,7 +1483,7 @@ impl Store {
             })
             .collect::<Result<Vec<_>>>()?;
         let invalidated = cache.invalidated_empty_sources();
-        self.with_named_write_transaction("save_empty_session_sources", |tx| {
+        self.with_session_write_transaction("save_empty_session_sources", |tx| {
             let mut upsert = tx.prepare(
                 "INSERT INTO session_scan_empty_sources (agent, path, parser_version, sources_json)
                  VALUES (?1, ?2, ?3, ?4) ON CONFLICT(agent, path) DO UPDATE SET
@@ -1383,7 +1518,8 @@ impl Store {
         &self,
         key: &str,
     ) -> Result<Option<u64>> {
-        self.conn
+        self.sessions
+            .conn
             .query_row(
                 "SELECT value FROM meta WHERE key = ?1",
                 params![key],
@@ -1404,7 +1540,7 @@ impl Store {
         sessions: &[SessionRecord],
     ) -> Result<Vec<SessionRecord>> {
         let sources = self.prepare_session_sources(scope_key, sessions)?;
-        self.with_named_write_transaction("apply_session_delta_for_scope", |tx| {
+        self.with_session_write_transaction("apply_session_delta_for_scope", |tx| {
             let affected_keys = session_delta_storage_keys_in_tx(tx, scope_key, sessions)?;
             let changed = Self::apply_session_delta_in_tx(&tx, sessions, scope_key, &sources)?;
             if !changed.is_empty() {
@@ -1423,7 +1559,7 @@ impl Store {
     ) -> Result<Vec<SessionRecord>> {
         let sources = self.prepare_session_sources(scope_key, sessions)?;
         let aliases = prepare_project_aliases(sessions);
-        let changed = self.with_named_write_transaction(
+        let changed = self.with_session_write_transaction(
             "apply_session_delta_and_resolve_projects_for_scope",
             |tx| {
                 let affected_keys = session_delta_storage_keys_in_tx(tx, scope_key, sessions)?;
@@ -1451,6 +1587,9 @@ impl Store {
     pub(in crate::storage) fn normalize_cached_session(
         mut session: SessionRecord,
     ) -> SessionRecord {
+        session.archived = crate::providers::session_archive_state(session.agent, &session.path, &session.id);
+        session.archive_supported = crate::providers::session_archive_supported(session.agent, &session.path);
+        session.resumable = crate::providers::agent_provider(session.agent).session_resumable(&session.path, &session.id);
         session.title = clean_session_title(session.title.take());
         session.first_user_message = bound_session_preview(session.first_user_message.take());
         session.last_user_message = bound_session_preview(session.last_user_message.take());
@@ -1476,7 +1615,7 @@ impl Store {
     ) -> Result<()> {
         normalize_session_projects(sessions);
         let aliases = prepare_project_aliases(sessions);
-        self.with_named_write_transaction("resolve_session_projects_for_scope", |tx| {
+        self.with_session_write_transaction("resolve_session_projects_for_scope", |tx| {
             self.resolve_session_projects_in_tx(tx, sessions, scope_key, &aliases)
         })?;
         Ok(())
@@ -1651,11 +1790,12 @@ impl Store {
         &self,
         scope_key: &ScopeKey,
     ) -> Result<SessionScan> {
+        let _provider_cache_scopes = session_provider_cache_scopes();
         // `data_json` is the SessionRecord authority. The scalar session columns are
         // denormalized projections retained for compatibility and write-side indexing.
         let updated_order = Self::session_list_sql_order("updatedAt", "desc")
             .context("updatedAt is not SQL-orderable")?;
-        let mut stmt = self.conn.prepare(&format!(
+        let mut stmt = self.sessions.conn.prepare(&format!(
             "SELECT data_json FROM scoped_sessions
                  WHERE scope_key = ?1
                  ORDER BY {updated_order}, id ASC",
@@ -1749,10 +1889,11 @@ impl Store {
         scope_key: &ScopeKey,
         mut visit: impl FnMut(SessionListProjectionRow) -> Result<()>,
     ) -> Result<()> {
-        let mut statement = self.conn.prepare(
+        let mut statement = self.sessions.conn.prepare(
             "SELECT id, agent, title, project, path, started_at, updated_at, message_count,
                     repository, repository_url, logical_project_id, logical_project_name,
-                    turn_count, parent_session_id, input_tokens, cached_input_tokens
+                    turn_count, parent_session_id, input_tokens, cached_input_tokens,
+                    json_extract(data_json, '$.archived')
              FROM scoped_sessions
              WHERE scope_key = ?1 AND json_valid(data_json)",
         )?;
@@ -1774,6 +1915,7 @@ impl Store {
                 row.get::<_, Option<String>>(13)?,
                 row.get::<_, Option<i64>>(14)?,
                 row.get::<_, Option<i64>>(15)?,
+                row.get::<_, Option<bool>>(16)?,
             ))
         })?;
         for row in rows {
@@ -1794,6 +1936,7 @@ impl Store {
                 parent_session_id,
                 input_tokens,
                 cached_input_tokens,
+                archived,
             ) = row?;
             let Some(agent) = parse_agent_label(&agent) else {
                 continue;
@@ -1808,6 +1951,7 @@ impl Store {
                 logical_project_id,
                 logical_project_name,
                 path: PathBuf::from(path),
+                archived,
                 started_at,
                 updated_at,
                 message_count: message_count.and_then(|value| usize::try_from(value).ok()),
@@ -1931,7 +2075,7 @@ impl Store {
         scope_key: &ScopeKey,
         mut rows: Vec<SessionListRow>,
     ) -> Result<Vec<SessionListRow>> {
-        let mut statement = self.conn.prepare(
+        let mut statement = self.sessions.conn.prepare(
             "SELECT data_json FROM scoped_sessions
              WHERE scope_key = ?1 AND id = ?2 AND agent = ?3 AND path = ?4",
         )?;
@@ -2000,12 +2144,12 @@ impl Store {
         } else {
             format!("{common_where} AND parent_session_id IS NULL")
         };
-        let total = self.conn.query_row(
+        let total = self.sessions.conn.query_row(
             &format!("SELECT COUNT(*) FROM scoped_sessions WHERE {total_where}"),
             params_from_iter(sql_params.iter()),
             |row| row.get::<_, i64>(0),
         )?;
-        let child_session_count = self.conn.query_row(
+        let child_session_count = self.sessions.conn.query_row(
             &format!(
                 "SELECT COUNT(*) FROM scoped_sessions WHERE {common_where}
                  AND parent_session_id IS NOT NULL"
@@ -2034,7 +2178,7 @@ impl Store {
         let mut page_params = sql_params;
         page_params.push(SqlValue::Integer(limit));
         page_params.push(SqlValue::Integer(offset));
-        let mut statement = self.conn.prepare(&format!(
+        let mut statement = self.sessions.conn.prepare(&format!(
             "SELECT data_json FROM scoped_sessions
              WHERE {total_where}
              ORDER BY {order}, {updated_tie_order}, id ASC
@@ -2082,7 +2226,7 @@ impl Store {
                     .iter()
                     .flat_map(|session| [session.id.as_str(), agent_label(session.agent)]),
             );
-            let mut statement = self.conn.prepare(&identity_sql)?;
+            let mut statement = self.sessions.conn.prepare(&identity_sql)?;
             let rows = statement.query_map(rusqlite::params_from_iter(identity_params), |row| {
                 Ok((
                     row.get::<_, String>(0)?,
@@ -2127,7 +2271,7 @@ impl Store {
                     .iter()
                     .flat_map(|(id, agent, path)| [id.as_str(), agent.as_str(), path.as_str()]),
             );
-            let mut statement = self.conn.prepare(&index_sql)?;
+            let mut statement = self.sessions.conn.prepare(&index_sql)?;
             let rows = statement.query_map(rusqlite::params_from_iter(index_params), |row| {
                 Ok((
                     (
@@ -2145,7 +2289,7 @@ impl Store {
             })?;
             let index = rows.collect::<rusqlite::Result<std::collections::HashMap<_, _>>>()?;
             for session in source_sessions {
-                if sources.contains_key(&session.path) {
+                if sources.contains_key(&crate::sessions::SessionIdentity::from(&session)) {
                     continue;
                 }
                 let key = (
@@ -2154,7 +2298,7 @@ impl Store {
                     session.path.to_string_lossy().into_owned(),
                 );
                 sources.insert(
-                    session.path.clone(),
+                    crate::sessions::SessionIdentity::from(&session),
                     Self::prepare_session_source(&session, index.get(&key)),
                 );
             }
@@ -2211,7 +2355,10 @@ impl Store {
     ) -> Result<(Revision, T)> {
         // A WAL read transaction keeps the revision and rows on the same snapshot
         // without acquiring the application database write lock.
-        let tx = Transaction::new_unchecked(&self.conn, rusqlite::TransactionBehavior::Deferred)?;
+        let tx = Transaction::new_unchecked(
+            &self.sessions.conn,
+            rusqlite::TransactionBehavior::Deferred,
+        )?;
         let revision = self
             .projection_head(scope_key, "sessions")?
             .map(|head| head.revision)

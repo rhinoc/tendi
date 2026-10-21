@@ -36,6 +36,10 @@ pub trait RuntimeHandler {
         &self,
         request: runtime_schema::SessionsSnapshotRequest,
     ) -> Result<runtime_schema::SessionsSnapshotResponse, DaemonError>;
+    fn sessions_ownership_snapshot(
+        &self,
+        request: runtime_schema::SessionsOwnershipSnapshotRequest,
+    ) -> Result<runtime_schema::SessionsOwnershipSnapshotResponse, DaemonError>;
     fn sessions_list(
         &self,
         request: runtime_schema::SessionsListRequest,
@@ -204,6 +208,10 @@ pub trait RuntimeHandler {
         &self,
         request: runtime_schema::PromptsDeleteManyRequest,
     ) -> Result<runtime_schema::PromptsDeleteManyResponse, DaemonError>;
+    fn session_set_archived(
+        &self,
+        request: runtime_schema::SessionSetArchivedRequest,
+    ) -> Result<runtime_schema::SessionSetArchivedResponse, DaemonError>;
     fn session_transcript(
         &self,
         request: runtime_schema::SessionTranscriptRequest,
@@ -260,6 +268,10 @@ pub trait RuntimeHandler {
         &self,
         request: runtime_schema::SkillsBackupDisconnectRequest,
     ) -> Result<runtime_schema::SkillsBackupDisconnectResponse, DaemonError>;
+    fn skills_create(
+        &self,
+        request: runtime_schema::SkillsCreateRequest,
+    ) -> Result<runtime_schema::SkillsCreateResponse, DaemonError>;
     fn skills_add(
         &self,
         request: runtime_schema::SkillsAddRequest,
@@ -511,6 +523,27 @@ impl RuntimeHandler for Daemon {
         let result = {
             let _ = request;
             Daemon::sessions_snapshot(self)
+        }?;
+        let result = serde_json::to_value(result).map_err(|error| {
+            DaemonError::new(
+                "CONTRACT_VIOLATION",
+                format!("generated response encode failed: {error}"),
+            )
+        })?;
+        serde_json::from_value(result).map_err(|error| {
+            DaemonError::new(
+                "CONTRACT_VIOLATION",
+                format!("generated response decode failed: {error}"),
+            )
+        })
+    }
+    fn sessions_ownership_snapshot(
+        &self,
+        request: runtime_schema::SessionsOwnershipSnapshotRequest,
+    ) -> Result<runtime_schema::SessionsOwnershipSnapshotResponse, DaemonError> {
+        let result = {
+            let _ = request;
+            Daemon::sessions_ownership_snapshot(self)
         }?;
         let result = serde_json::to_value(result).map_err(|error| {
             DaemonError::new(
@@ -1323,6 +1356,24 @@ impl RuntimeHandler for Daemon {
             )
         })
     }
+    fn session_set_archived(
+        &self,
+        request: runtime_schema::SessionSetArchivedRequest,
+    ) -> Result<runtime_schema::SessionSetArchivedResponse, DaemonError> {
+        let result = { Daemon::session_set_archived(self, request) }?;
+        let result = serde_json::to_value(result).map_err(|error| {
+            DaemonError::new(
+                "CONTRACT_VIOLATION",
+                format!("generated response encode failed: {error}"),
+            )
+        })?;
+        serde_json::from_value(result).map_err(|error| {
+            DaemonError::new(
+                "CONTRACT_VIOLATION",
+                format!("generated response decode failed: {error}"),
+            )
+        })
+    }
     fn session_transcript(
         &self,
         request: runtime_schema::SessionTranscriptRequest,
@@ -1577,6 +1628,24 @@ impl RuntimeHandler for Daemon {
             let _ = request;
             Daemon::skills_backup_disconnect(self)
         }?;
+        let result = serde_json::to_value(result).map_err(|error| {
+            DaemonError::new(
+                "CONTRACT_VIOLATION",
+                format!("generated response encode failed: {error}"),
+            )
+        })?;
+        serde_json::from_value(result).map_err(|error| {
+            DaemonError::new(
+                "CONTRACT_VIOLATION",
+                format!("generated response decode failed: {error}"),
+            )
+        })
+    }
+    fn skills_create(
+        &self,
+        request: runtime_schema::SkillsCreateRequest,
+    ) -> Result<runtime_schema::SkillsCreateResponse, DaemonError> {
+        let result = { Daemon::skills_create(self, request) }?;
         let result = serde_json::to_value(result).map_err(|error| {
             DaemonError::new(
                 "CONTRACT_VIOLATION",
@@ -2077,6 +2146,22 @@ macro_rules! runtime_dispatch {
                         )
                     })?;
                 let result = RuntimeHandler::sessions_snapshot($daemon, request)?;
+                serde_json::to_value(result).map_err(|error| {
+                    DaemonError::new(
+                        "CONTRACT_VIOLATION",
+                        format!("generated response encode failed: {error}"),
+                    )
+                })
+            }
+            "sessions_ownership_snapshot" => {
+                let request: runtime_schema::SessionsOwnershipSnapshotRequest =
+                    serde_json::from_value($args.clone()).map_err(|error| {
+                        DaemonError::new(
+                            "INVALID_PARAMS",
+                            format!("generated request decode failed: {error}"),
+                        )
+                    })?;
+                let result = RuntimeHandler::sessions_ownership_snapshot($daemon, request)?;
                 serde_json::to_value(result).map_err(|error| {
                     DaemonError::new(
                         "CONTRACT_VIOLATION",
@@ -2756,6 +2841,22 @@ macro_rules! runtime_dispatch {
                     )
                 })
             }
+            "session_set_archived" => {
+                let request: runtime_schema::SessionSetArchivedRequest =
+                    serde_json::from_value($args.clone()).map_err(|error| {
+                        DaemonError::new(
+                            "INVALID_PARAMS",
+                            format!("generated request decode failed: {error}"),
+                        )
+                    })?;
+                let result = RuntimeHandler::session_set_archived($daemon, request)?;
+                serde_json::to_value(result).map_err(|error| {
+                    DaemonError::new(
+                        "CONTRACT_VIOLATION",
+                        format!("generated response encode failed: {error}"),
+                    )
+                })
+            }
             "session_transcript" => {
                 let request: runtime_schema::SessionTranscriptRequest =
                     serde_json::from_value($args.clone()).map_err(|error| {
@@ -2973,6 +3074,22 @@ macro_rules! runtime_dispatch {
                         )
                     })?;
                 let result = RuntimeHandler::skills_backup_disconnect($daemon, request)?;
+                serde_json::to_value(result).map_err(|error| {
+                    DaemonError::new(
+                        "CONTRACT_VIOLATION",
+                        format!("generated response encode failed: {error}"),
+                    )
+                })
+            }
+            "skills_create" => {
+                let request: runtime_schema::SkillsCreateRequest =
+                    serde_json::from_value($args.clone()).map_err(|error| {
+                        DaemonError::new(
+                            "INVALID_PARAMS",
+                            format!("generated request decode failed: {error}"),
+                        )
+                    })?;
+                let result = RuntimeHandler::skills_create($daemon, request)?;
                 serde_json::to_value(result).map_err(|error| {
                     DaemonError::new(
                         "CONTRACT_VIOLATION",

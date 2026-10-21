@@ -1,3 +1,4 @@
+import { SessionStatusIcons } from "./SessionStatusIcons.tsx";
 import { Tooltip } from "../../components/shared/Tooltip.tsx";
 import { AlertCircle, ArrowLeft, ArrowRight, Check } from "lucide-react";
 
@@ -5,7 +6,6 @@ import { ColumnCellVariant, ColumnDataType, type ColumnDef } from "../../compone
 import { AsyncStatus, compactDateTime, EMPTY_DISPLAY_VALUE, friendlyAgent, sessionCacheRate, sessionTitleValue, SessionKind, sessionKind, sessionProject, sessionProjectGroupKey, sessionProjectGroupLabel, sessionResumeLabel, sessionResumeTargetForAgent, sessionResumeTargetForMenu, SessionResumeTarget, SessionSortKey, sortValue, summarizeSessionPreviewRecord, type SessionRecord, type SessionResumeState } from "../../lib/index.ts";
 import { cacheRateTone } from "../../lib/token-style.ts";
 import { AgentBadge } from "../../components/shared/AgentBadge.tsx";
-import { Badge } from "../../components/shared/Badge.tsx";
 import { LoadingIcon } from "../../components/shared/LoadingIcon.tsx";
 import { StatefulButton } from "../../components/shared/StatefulButton.tsx";
 import { SessionTitleText, TranscriptLinkText } from "../../components/shared/TranscriptLinkText.tsx";
@@ -30,6 +30,8 @@ export type SessionTableRow = {
   messages?: number;
   turnCount?: number;
   parentSessionId?: string;
+  archived?: boolean;
+  resumable?: boolean;
   searchSnippet?: string;
   tokenUsage?: SessionRecord["tokenUsage"];
   [key: string]: unknown;
@@ -72,10 +74,14 @@ export function createSessionTableColumns<T extends SessionTableRow = SessionTab
         return (
           <>
             <span className="sessionTitleWithKind">
+              <SessionStatusIcons
+                session={session}
+                subagent={sessionKind(session as SessionRecord) === SessionKind.Child}
+                archived={session.archived}
+              />
               <Tooltip content={tooltipTitle} onlyWhenTruncated>
                 <span className="sessionTitleText"><SessionTitleText interactive={false} query={normalizedQuery} queryTerms={searchTerms} value={displayTitle} /></span>
               </Tooltip>
-              {sessionKind(session as SessionRecord) === SessionKind.Child ? <Badge tone="warning" uppercase>Child</Badge> : null}
             </span>
             {normalizedQuery && session.searchSnippet ? (
               <span className="dataCellSubLine">
@@ -108,7 +114,7 @@ export function createSessionTableColumns<T extends SessionTableRow = SessionTab
       sortValue: (session) => sortValue(session as SessionRecord, SessionSortKey.Agent),
       width: widths.agent ?? "78px",
       render: (session) => {
-        if (!canResume) {
+        if (!canResume || session.resumable === false) {
           return (
             <span className="sessionAgentCell">
               <AgentBadge agent={friendlyAgent(session.agent)} />

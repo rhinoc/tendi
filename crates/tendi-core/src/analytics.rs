@@ -15,6 +15,7 @@ use sha2::{Digest, Sha256};
 use crate::{sessions::SessionRecord, skills::AgentKind, time::parse_timestamp};
 
 pub(crate) mod cost;
+pub(crate) mod model_pricing;
 pub(crate) mod projects;
 
 pub use cost::AnalyticsCost;
@@ -224,6 +225,18 @@ impl SessionAnalytics {
 
 pub(crate) fn overview_record(record: &SessionAnalyticsRecord) -> SessionAnalyticsOverviewRecord {
     let analytics = &record.analytics;
+    let pricing_provider = crate::providers::agent_provider(analytics.agent);
+    let mut model_pricing_revisions = BTreeMap::new();
+    for response in &analytics.responses {
+        let model = response.model.trim();
+        if !model.is_empty() {
+            if let Some(revision) = pricing_provider.analytics_pricing_revision(model) {
+                model_pricing_revisions
+                    .entry(model.to_string())
+                    .or_insert(revision);
+            }
+        }
+    }
     let mut first = None;
     let mut last = None;
     let mut days = BTreeMap::<String, SessionAnalyticsOverviewDayAccumulator>::new();
@@ -332,6 +345,7 @@ pub(crate) fn overview_record(record: &SessionAnalyticsRecord) -> SessionAnalyti
         session_path: analytics.session_path.clone(),
         project: analytics.project.clone(),
         capabilities: analytics.capabilities(),
+        model_pricing_revisions,
         first,
         last,
         has_activity: !analytics.responses.is_empty()
@@ -448,6 +462,8 @@ pub(crate) struct SessionAnalyticsOverviewRecord {
     #[serde(default)]
     pub project: Option<AnalyticsProjectIdentity>,
     pub capabilities: AnalyticsCapabilities,
+    #[serde(default)]
+    pub model_pricing_revisions: BTreeMap<String, String>,
     pub first: Option<String>,
     pub last: Option<String>,
     pub has_activity: bool,
@@ -1596,18 +1612,21 @@ pub(crate) fn analyze_session(
         .with_context(|| format!("failed to open {}", session.path.display()))?;
     let (file_mtime, file_size) = analytics_file_state(&file, &session.path)?;
     let (source_device, source_inode) = analytics_file_identity(&file)?;
-    let is_jsonl = session
-        .path
-        .extension()
-        .is_some_and(|extension| extension.eq_ignore_ascii_case("jsonl"));
+    let provider = crate::providers::agent_provider(session.agent);
+    let is_jsonl = provider.is_session_transcript_path(&session.path);
     if !is_jsonl {
         return Ok(empty_record(session, file_mtime, file_size));
     }
+    let compressed = provider.is_compressed_session_transcript(&session.path);
 
-    let append_fingerprint = previous
-        .filter(|record| record.file_size >= 0)
-        .map(|record| analytics_source_hashes(&mut file, record.file_size as u64))
-        .transpose()?;
+    let append_fingerprint = if compressed {
+        None
+    } else {
+        previous
+            .filter(|record| record.file_size >= 0)
+            .map(|record| analytics_source_hashes(&mut file, record.file_size as u64))
+            .transpose()?
+    };
     let can_append = previous
         .zip(append_fingerprint.as_ref())
         .is_some_and(|(record, hashes)| {
@@ -1638,10 +1657,16 @@ pub(crate) fn analyze_session(
     } else {
         0
     };
-    file.seek(SeekFrom::Start(offset))
-        .with_context(|| format!("failed to seek {}", session.path.display()))?;
-    let remaining = (file_size as u64).saturating_sub(offset);
-    let mut reader = BufReader::new(file.take(remaining));
+    let mut reader: Box<dyn BufRead> = if compressed {
+        let compressed_file = File::open(&session.path)
+            .with_context(|| format!("failed to open {}", session.path.display()))?;
+        Box::new(BufReader::new(zstd::Decoder::new(compressed_file)?))
+    } else {
+        file.seek(SeekFrom::Start(offset))
+            .with_context(|| format!("failed to seek {}", session.path.display()))?;
+        let remaining = (file_size as u64).saturating_sub(offset);
+        Box::new(BufReader::new(file.try_clone()?.take(remaining)))
+    };
     let mut line = String::new();
     let mut indexed_size = file_size;
     loop {
@@ -1656,15 +1681,19 @@ pub(crate) fn analyze_session(
             continue;
         }
         if !has_trailing_newline && serde_json::from_str::<Value>(line).is_err() {
-            indexed_size = file_size.saturating_sub(bytes as i64);
+            if !compressed {
+                indexed_size = file_size.saturating_sub(bytes as i64);
+            }
             break;
         }
-        crate::providers::agent_provider(session.agent).parse_analytics_line(&line, &mut record);
+        provider.parse_analytics_line(&line, &mut record);
     }
 
-    let mut file = reader.into_inner().into_inner();
-    let (source_prefix_hash, source_boundary_hash) =
-        analytics_source_hashes(&mut file, indexed_size.max(0) as u64)?;
+    let (source_prefix_hash, source_boundary_hash) = if compressed {
+        (String::new(), String::new())
+    } else {
+        analytics_source_hashes(&mut file, indexed_size.max(0) as u64)?
+    };
 
     record.file_mtime = file_mtime;
     record.file_size = indexed_size;

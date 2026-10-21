@@ -2790,6 +2790,64 @@ pub fn list_installable_skills(cwd: &Path, source: &str) -> Result<SkillAddPlan>
     Ok(plan)
 }
 
+pub fn local_skill_directory(cwd: &Path, target: &SkillTarget, name: &str) -> Result<PathBuf> {
+    if name.is_empty()
+        || name.len() > 64
+        || name.starts_with('-')
+        || name.ends_with('-')
+        || name.contains("--")
+        || !name
+            .bytes()
+            .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == b'-')
+    {
+        bail!(
+            "Skill name must be 1–64 lowercase letters, numbers, or single hyphens, with no leading or trailing hyphen."
+        );
+    }
+    Ok(skill_target_root(cwd, target, SkillInstallScope::Global)?.join(name))
+}
+
+pub fn create_local_skill(
+    cwd: &Path,
+    target: &SkillTarget,
+    name: &str,
+    description: &str,
+) -> Result<PathBuf> {
+    let directory = local_skill_directory(cwd, target, name)?;
+    let description = description.trim();
+    if description.is_empty() {
+        bail!("Skill description is required.");
+    }
+    #[derive(Serialize)]
+    struct Frontmatter<'a> {
+        name: &'a str,
+        description: &'a str,
+    }
+    let yaml = serde_yaml::to_string(&Frontmatter { name, description })?;
+    let content = format!("---\n{yaml}---\n\n# {name}\n\n{description}\n");
+    let _resources = crate::coordination::acquire_file_resources(std::slice::from_ref(&directory))?;
+    fs::create_dir_all(
+        directory
+            .parent()
+            .context("skill directory has no parent")?,
+    )?;
+    if let Err(error) = fs::create_dir(&directory) {
+        if error.kind() == ErrorKind::AlreadyExists {
+            bail!(
+                "A skill directory named `{name}` already exists in this location. Choose a different name."
+            );
+        }
+        return Err(error).with_context(|| {
+            format!("Could not create skill `{name}` at {}", directory.display())
+        });
+    }
+    if let Err(error) = atomic_write(&directory.join("SKILL.md"), &content) {
+        let _ = fs::remove_dir(&directory);
+        return Err(error);
+    }
+    Ok(directory)
+}
+
 pub fn plan_skill_add(cwd: &Path, options: &SkillAddOptions) -> Result<SkillAddPlan> {
     let resolved = resolve_add_source(cwd, &options.source, true)?;
     let result = build_skill_add_plan(cwd, &resolved, options, true);

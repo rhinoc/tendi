@@ -14,6 +14,7 @@ pub enum SessionRecallSort {
 pub enum SessionRecallRole {
     User,
     Assistant,
+    Tool,
 }
 
 #[derive(Debug, Clone)]
@@ -93,27 +94,59 @@ fn date_bound(value: &str) -> Result<String> {
         .to_rfc3339())
 }
 
+fn session_matches_time_bounds(
+    session: &SessionRecord,
+    since: Option<&str>,
+    until: Option<&str>,
+) -> bool {
+    let Some(started_at) = session.started_at.as_deref() else {
+        return since.is_none() && until.is_none();
+    };
+    since.is_none_or(|bound| {
+        crate::time::compare_timestamps(Some(started_at), Some(bound)).is_ge()
+    }) && until.is_none_or(|bound| {
+        crate::time::compare_timestamps(Some(started_at), Some(bound)).is_lt()
+    })
+}
+
+fn session_matches_cwd(session: &SessionRecord, cwd: &[PathBuf], exact: bool) -> bool {
+    if cwd.is_empty() {
+        return true;
+    }
+    let Some(project) = session.project.as_deref() else {
+        return false;
+    };
+    cwd.iter().any(|path| {
+        let root = canonical_workspace_root(path);
+        if exact {
+            project == root.as_path()
+        } else {
+            project.starts_with(&root)
+        }
+    })
+}
+
 impl Store {
     pub fn session_recall_status(&self) -> Result<SessionRecallStatus> {
-        let indexed_sessions = self.conn.query_row(
+        let indexed_sessions = self.sessions.conn.query_row(
             "SELECT count(*) FROM (SELECT session_id, agent, session_path
              FROM scoped_session_search_index WHERE search_index_version = ?1
              GROUP BY session_id, agent, session_path)",
             [SESSION_SEARCH_INDEX_VERSION],
             |row| row.get(0),
         )?;
-        let pending_sessions = self.conn.query_row(
+        let pending_sessions = self.sessions.conn.query_row(
             "SELECT count(*) FROM (SELECT session_id, agent, session_path
              FROM scoped_session_search_work GROUP BY session_id, agent, session_path)",
             [],
             |row| row.get(0),
         )?;
-        let scopes = self.conn.query_row(
+        let scopes = self.sessions.conn.query_row(
             "SELECT count(DISTINCT scope_key) FROM scoped_session_search_index",
             [],
             |row| row.get(0),
         )?;
-        let last_scan_at = self.conn.query_row(
+        let last_scan_at = self.sessions.conn.query_row(
             "SELECT max(CAST(value AS INTEGER)) FROM meta WHERE key LIKE 'sessions_last_scan_at:%'",
             [], |row| row.get::<_, Option<i64>>(0))?.map(|time| time.to_string());
         Ok(SessionRecallStatus {
@@ -126,7 +159,7 @@ impl Store {
     }
 
     pub fn session_by_id(&self, id: &str, agent: Option<AgentKind>) -> Result<SessionRecord> {
-        let mut stmt = self.conn.prepare(
+        let mut stmt = self.sessions.conn.prepare(
             "SELECT data_json FROM scoped_sessions WHERE id = ?1 AND (?2 IS NULL OR agent = ?2)
              ORDER BY updated_at DESC",
         )?;
@@ -172,9 +205,104 @@ impl Store {
                 bail!("--until must be later than --since");
             }
         }
+        if matches!(options.role, Some(SessionRecallRole::Tool)) {
+            return self.recall_tool_sessions(options, &terms, since.as_deref(), until.as_deref());
+        }
         with_database_read_lock_retry(|| {
             self.recall_sessions_once(options, &terms, since.as_deref(), until.as_deref())
         })
+    }
+
+    fn recall_tool_sessions(
+        &self,
+        options: &SessionRecallOptions,
+        terms: &[String],
+        since: Option<&str>,
+        until: Option<&str>,
+    ) -> Result<SessionRecallPage> {
+        let sessions = with_database_read_lock_retry(|| self.all_session_records_once())?;
+        let sessions = sessions
+            .into_iter()
+            .filter(|session| options.agent.is_none_or(|agent| session.agent == agent))
+            .filter(|session| session_matches_time_bounds(session, since, until))
+            .filter(|session| session_matches_cwd(session, &options.cwd, options.exact_cwd))
+            .collect::<Vec<_>>();
+        let matches = self.search_session_transcript_records(
+            &sessions,
+            &terms.join(" "),
+            None,
+            &crate::transcript::TranscriptSearchScopes {
+                user: false,
+                assistant: false,
+                system: false,
+                tool: true,
+            },
+            options.phrase,
+        )?;
+        let mut hits = matches
+            .into_iter()
+            .map(|matched| SessionRecallHit {
+                id: matched.session.id.clone(),
+                agent: matched.session.agent,
+                title: matched.session.title.clone(),
+                project: matched.session.project.clone(),
+                path: matched.session.path.clone(),
+                started_at: matched.session.started_at.clone(),
+                score: matched.search_score,
+                snippet: matched.search_snippet,
+                role: "tool".to_string(),
+                record_order: matched.record_order,
+                session: matched.session,
+            })
+            .collect::<Vec<_>>();
+        hits.sort_by(|a, b| {
+            match (&a.started_at, &b.started_at) {
+                (None, Some(_)) => return std::cmp::Ordering::Greater,
+                (Some(_), None) => return std::cmp::Ordering::Less,
+                _ => {}
+            }
+            let time =
+                crate::time::compare_timestamps(a.started_at.as_deref(), b.started_at.as_deref());
+            match options.sort {
+                SessionRecallSort::Relevance => b.score.total_cmp(&a.score).then(time.reverse()),
+                SessionRecallSort::TimeAsc => time,
+                SessionRecallSort::TimeDesc => time.reverse(),
+            }
+            .then(a.id.cmp(&b.id))
+            .then(a.path.cmp(&b.path))
+        });
+        let total = hits.len();
+        let hits = hits
+            .into_iter()
+            .skip(options.offset)
+            .take(options.limit)
+            .collect();
+        Ok(SessionRecallPage {
+            hits,
+            total,
+            limit: options.limit,
+            offset: options.offset,
+            status: self.session_recall_status()?,
+        })
+    }
+
+    fn all_session_records_once(&self) -> Result<Vec<SessionRecord>> {
+        let mut statement = self.sessions.conn.prepare(
+            "SELECT data_json FROM scoped_sessions ORDER BY updated_at DESC, id, agent, path",
+        )?;
+        let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
+        let mut sessions = BTreeMap::new();
+        for row in rows {
+            let session: SessionRecord = serde_json::from_str(&row?)?;
+            sessions
+                .entry((
+                    session.id.clone(),
+                    agent_label(session.agent).to_string(),
+                    session.path.clone(),
+                ))
+                .or_insert(session);
+        }
+        Ok(sessions.into_values().collect())
     }
 
     fn recall_sessions_once(
@@ -187,6 +315,7 @@ impl Store {
         let text = match options.role {
             Some(SessionRecallRole::User) => "content.user_text",
             Some(SessionRecallRole::Assistant) => "content.assistant_text",
+            Some(SessionRecallRole::Tool) => unreachable!("tool searches use transcript sources"),
             None => {
                 "(search.metadata_text || ' ' || search.title || ' ' || search.project || ' ' || content.user_text || ' ' || content.assistant_text)"
             }
@@ -254,7 +383,7 @@ impl Store {
               )".to_string(),
              "FROM matches CROSS JOIN scoped_session_search_entries search ON search.id = matches.id".to_string())
         };
-        let mut stmt = self.conn.prepare(&format!(
+        let mut stmt = self.sessions.conn.prepare(&format!(
             "{with_matches} SELECT sessions.data_json, search.record_order, search.metadata_text,
                     search.title, search.project, content.user_text, content.assistant_text
              {from_matches}

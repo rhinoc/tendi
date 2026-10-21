@@ -126,6 +126,8 @@ async function sourceInventory() {
       // New typed handlers exist before their dispatch has been generated.
       ...[...daemon.matchAll(/\bfn\s+([a-z][a-z0-9_]*)\s*\([^)]*\)\s*->\s*Result<runtime_schema::[A-Za-z0-9_]+Response\s*,/g)].map((match) => match[1]).filter((name) => methods.some((method) => method.name === name)),
       ...[...daemonDispatch.matchAll(/"([a-z][a-z0-9_]*)"\s*=>\s*\{(?=[\s\S]{0,2500}?\$daemon\b)/g)].map((match) => match[1]),
+      ...methods.filter((method) => method["x-tendi"].owner === "daemon"
+        && new RegExp(`\\bfn\\s+${method.name}\\s*\\(`).test(daemon)).map((method) => method.name),
     ]);
     const tauriCommands = new Set([...tauri.matchAll(/#\[tauri::command[^\]]*\]\s*(?:pub\s+)?(?:async\s+)?fn\s+([a-z][a-z0-9_]*)/g)].map((match) => match[1]));
     const transportNames = new Set(schema["x-tendi"].transports.map((transport) => transport.name));

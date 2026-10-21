@@ -26,7 +26,7 @@ impl Store {
         agent: Option<AgentKind>,
     ) -> Result<Vec<String>> {
         let agent_value = agent.map(agent_label);
-        let mut stmt = self.conn.prepare(
+        let mut stmt = self.sessions.conn.prepare(
             "SELECT session_path, overview_index_error
              FROM scoped_session_analytics
              WHERE overview_index_error IS NOT NULL
@@ -104,7 +104,7 @@ impl Store {
                     .chain(keys.iter().flat_map(|(id, agent, path)| {
                         [id.as_str(), agent.as_str(), path.as_str()]
                     }));
-                let mut statement = self.conn.prepare(&sql)?;
+                let mut statement = self.sessions.conn.prepare(&sql)?;
                 let rows = statement.query_map(rusqlite::params_from_iter(parameters), |row| {
                     Ok((
                         (
@@ -151,7 +151,7 @@ impl Store {
                         continue;
                     }
                     let payload = if cached_row.is_some() {
-                        self.conn.query_row(
+                        self.sessions.conn.query_row(
                             "SELECT analytics_text, parser_state_json FROM scoped_session_analytics
                              WHERE scope_key=?1 AND session_id=?2 AND agent=?3 AND session_path=?4",
                             params![scope_key.as_str(), key.0, key.1, key.2],
@@ -206,60 +206,6 @@ impl Store {
             on_progress(analytics_refresh_progress(&report, completed));
         }
 
-        let has_stale_rows = self.conn.query_row(
-            "SELECT EXISTS(
-                SELECT 1 FROM scoped_session_analytics_overview overview
-                WHERE overview.scope_key = ?1
-                  AND NOT EXISTS (
-                      SELECT 1 FROM scoped_sessions
-                      WHERE scoped_sessions.scope_key = overview.scope_key
-                        AND scoped_sessions.id = overview.session_id
-                        AND scoped_sessions.agent = overview.agent
-                        AND scoped_sessions.path = overview.session_path
-                  )
-            ) OR EXISTS(
-                SELECT 1 FROM scoped_session_analytics analytics
-                WHERE analytics.scope_key = ?1
-                  AND NOT EXISTS (
-                      SELECT 1 FROM scoped_sessions
-                      WHERE scoped_sessions.scope_key = analytics.scope_key
-                        AND scoped_sessions.id = analytics.session_id
-                        AND scoped_sessions.agent = analytics.agent
-                        AND scoped_sessions.path = analytics.session_path
-                  )
-            )",
-            [scope_key.as_str()],
-            |row| row.get::<_, bool>(0),
-        )?;
-        if has_stale_rows {
-            self.with_named_write_transaction("prune_session_analytics", |tx| {
-                tx.execute(
-                    "DELETE FROM scoped_session_analytics_overview
-                 WHERE scope_key = ?1
-                   AND NOT EXISTS (
-                       SELECT 1 FROM scoped_sessions
-                       WHERE scoped_sessions.scope_key = scoped_session_analytics_overview.scope_key
-                         AND scoped_sessions.id = scoped_session_analytics_overview.session_id
-                         AND scoped_sessions.agent = scoped_session_analytics_overview.agent
-                         AND scoped_sessions.path = scoped_session_analytics_overview.session_path
-                   )",
-                    [scope_key.as_str()],
-                )?;
-                tx.execute(
-                    "DELETE FROM scoped_session_analytics
-                 WHERE scope_key = ?1
-                   AND NOT EXISTS (
-                       SELECT 1 FROM scoped_sessions
-                       WHERE scoped_sessions.scope_key = scoped_session_analytics.scope_key
-                         AND scoped_sessions.id = scoped_session_analytics.session_id
-                         AND scoped_sessions.agent = scoped_session_analytics.agent
-                         AND scoped_sessions.path = scoped_session_analytics.session_path
-                   )",
-                    [scope_key.as_str()],
-                )?;
-                Ok(())
-            })?;
-        }
         report.warnings = warnings;
         Ok(report)
     }
@@ -303,7 +249,7 @@ impl Store {
         let source_version = SourceVersion::new(PROJECTION_PARSER_VERSION)
             .map_err(|error| anyhow::anyhow!(error))?;
         let indexed_at = unix_now().to_string();
-        self.with_named_write_transaction("save_session_analytics_records_for_scope", |tx| {
+        self.with_session_write_transaction("save_session_analytics_records_for_scope", |tx| {
         for prepared in &prepared {
             let record = prepared.record;
             let overview = &prepared.overview;
@@ -416,24 +362,26 @@ impl Store {
         }
         let agent_value = agent.map(agent_label);
         let (first, last, total_sessions, indexed_sessions, analyzed_sessions) =
-            self.conn.query_row(
+            self.sessions.conn.query_row(
                 "SELECT MIN(overview.event_min_date),
                     MAX(overview.event_max_date),
-                    (SELECT COUNT(*) FROM scoped_sessions AS session
-                     WHERE session.scope_key = ?1
-                       AND (?2 IS NULL OR session.agent = ?2)),
+                    (SELECT COUNT(*) FROM (
+                        SELECT session.id, session.agent, session.path
+                        FROM scoped_sessions AS session
+                        WHERE session.scope_key = ?1
+                          AND (?2 IS NULL OR session.agent = ?2)
+                        UNION
+                        SELECT overview.session_id, overview.agent, overview.session_path
+                        FROM scoped_session_analytics_overview AS overview
+                        WHERE overview.scope_key = ?1
+                          AND (?2 IS NULL OR overview.agent = ?2)
+                    )),
                     COUNT(*),
                     COALESCE(SUM(CASE WHEN overview.has_activity THEN 1 ELSE 0 END), 0)
              FROM scoped_session_analytics_overview AS overview
              WHERE overview.scope_key = ?1
                AND (?2 IS NULL OR overview.agent = ?2)
-               AND EXISTS (
-                   SELECT 1 FROM scoped_sessions AS session
-                   WHERE session.scope_key = overview.scope_key
-                     AND session.id = overview.session_id
-                     AND session.agent = overview.agent
-                     AND session.path = overview.session_path
-               )",
+               ",
                 params![scope_key.as_str(), agent_value],
                 |row| {
                     Ok((
@@ -481,8 +429,9 @@ impl Store {
         let mut warnings = Vec::new();
         let mut invalid = false;
         let mut invalid_overview_keys = std::collections::HashSet::new();
+        let mut stale_pricing_keys = std::collections::HashSet::new();
         shared_cache::visit_overview_payloads(
-            &self.conn,
+            &self.sessions.conn,
             scope_key.as_str(),
             agent_value.as_deref(),
             cutoff,
@@ -503,7 +452,33 @@ impl Store {
                             Ok(record)
                         });
                 match record {
-                    Ok(record) => records.push(record),
+                    Ok(record) => {
+                        let pricing_provider = crate::providers::agent_provider(record.agent);
+                        let used_models = record
+                            .days
+                            .values()
+                            .flat_map(|day| day.models.iter().map(|model| model.model.as_str()))
+                            .collect::<std::collections::BTreeSet<_>>();
+                        let pricing_is_stale = used_models.into_iter().any(|model| {
+                            let Some(current_revision) =
+                                pricing_provider.analytics_pricing_revision(model)
+                            else {
+                                return false;
+                            };
+                            record.model_pricing_revisions.get(model).map_or_else(
+                                || current_revision != "unpriced",
+                                |cached_revision| cached_revision != &current_revision,
+                            )
+                        });
+                        if pricing_is_stale {
+                            stale_pricing_keys.insert((
+                                session_id.to_string(),
+                                agent.to_string(),
+                                session_path.to_string(),
+                            ));
+                        }
+                        records.push(record);
+                    }
                     Err(_) => {
                         invalid = true;
                         invalid_overview_keys.insert((
@@ -517,10 +492,20 @@ impl Store {
             },
         )?;
 
-        if invalid {
-            records.clear();
+        if invalid || !stale_pricing_keys.is_empty() {
+            if invalid {
+                records.clear();
+            } else {
+                records.retain(|record| {
+                    !stale_pricing_keys.contains(&(
+                        record.session_id.clone(),
+                        agent_label(record.agent).to_string(),
+                        record.session_path.display().to_string(),
+                    ))
+                });
+            }
             let mut cache_repairs = Vec::new();
-            let mut stmt = self.conn.prepare(
+            let mut stmt = self.sessions.conn.prepare(
                 "SELECT session_id, agent, session_path, analytics_json, parser_state_json
                  FROM scoped_session_analytics
                  WHERE scope_key = ?1
@@ -539,6 +524,13 @@ impl Store {
             })?;
             for row in rows {
                 let (session_id, agent, session_path, source_json, parser_state_json) = row?;
+                let overview_key = (session_id.clone(), agent.clone(), session_path.clone());
+                if !invalid
+                    && !stale_pricing_keys.contains(&overview_key)
+                    && !invalid_overview_keys.contains(&overview_key)
+                {
+                    continue;
+                }
                 let analytics_json = match decompress_analytics_json(&source_json) {
                     Ok(value) => value,
                     Err(error) => {
@@ -560,11 +552,9 @@ impl Store {
                             file_size: 0,
                         };
                         let overview = analytics::overview_record(&source_record);
-                        if invalid_overview_keys.contains(&(
-                            session_id.clone(),
-                            agent.clone(),
-                            session_path.clone(),
-                        )) {
+                        if invalid_overview_keys.contains(&overview_key)
+                            || stale_pricing_keys.contains(&overview_key)
+                        {
                             cache_repairs.push(SessionAnalyticsOverviewCacheRepair {
                                 session_id,
                                 agent,
@@ -632,7 +622,7 @@ impl Store {
             })
             .collect::<Result<Vec<_>>>()?;
 
-        self.with_named_write_transaction("repair_session_analytics_overview_cache", |tx| {
+        self.with_session_write_transaction("repair_session_analytics_overview_cache", |tx| {
             let mut repaired_count = 0;
             for prepared in &prepared {
                 let repair = prepared.repair;

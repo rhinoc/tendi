@@ -27,6 +27,43 @@ use super::{
 
 use cursor_sessions::{cursor_project_from_transcript_path, scan_cursor_meta};
 
+#[test]
+fn archived_codex_scan_updates_cached_paths_across_moves() {
+    let root = temp_dir("tendi-archive-scan-cache-test");
+    let live = root.join("sessions/019eef10-7054-7a63-b9c8-fd16cc70cd53.jsonl");
+    let archived = root.join("archived_sessions/019eef10-7054-7a63-b9c8-fd16cc70cd53.jsonl");
+    fs::create_dir_all(live.parent().unwrap()).unwrap();
+    fs::create_dir_all(archived.parent().unwrap()).unwrap();
+    fs::write(&live, concat!(
+        "{\"type\":\"session_meta\",\"payload\":{\"cwd\":\"/tmp/project\"}}\n",
+        "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"Archive scan fixture\"}]}}\n",
+        "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Answer\"}]}}\n",
+    )).unwrap();
+    let mut scan = super::scan_session_paths(&[live.clone()], &SessionScanCache::default());
+    assert_eq!(scan.sessions.len(), 1);
+    assert_eq!(scan.sessions[0].archived, Some(false));
+    scan.sessions[0].title = Some("Cached archive fixture title".to_string());
+    for (source, target, archived_state) in [(&live, &archived, true), (&archived, &live, false)] {
+        let (file_mtime, file_size) = file_state(source).unwrap();
+        let cache = SessionScanCache::from_entries([SessionScanCacheEntry {
+            session: scan.sessions[0].clone(),
+            file_mtime,
+            file_size,
+            additional_file_states: Vec::new(),
+        }]);
+        fs::rename(source, target).unwrap();
+        scan = super::scan_session_paths(&[target.clone()], &cache);
+        assert_eq!(scan.sessions.len(), 1);
+        assert_eq!(&scan.sessions[0].path, target);
+        assert_eq!(scan.sessions[0].archived, Some(archived_state));
+        assert_eq!(
+            scan.sessions[0].title.as_deref(),
+            Some("Cached archive fixture title")
+        );
+    }
+    fs::remove_dir_all(root).unwrap();
+}
+
 fn temp_dir(prefix: &str) -> PathBuf {
     std::env::temp_dir().join(format!(
         "{prefix}-{}-{}",
@@ -306,7 +343,7 @@ fn scans_additional_roots_by_transcript_format() {
     .unwrap();
 
     let mut sessions = Vec::new();
-    scan_additional_session_roots(&[root.clone()], &mut sessions, None);
+    scan_additional_session_roots(&[root.clone()], &mut sessions, &mut Vec::new(), None);
 
     assert_eq!(sessions.len(), 3);
     let codex = sessions
@@ -413,6 +450,9 @@ fn cached_empty_codex_session_is_rechecked_instead_of_reused() {
             approval_mode: None,
             is_run_everything: None,
             parent_session_id: None,
+            archived: None,
+            archive_supported: false,
+            resumable: true,
             token_usage: None,
         },
         file_mtime,
@@ -457,6 +497,9 @@ fn scan_changes_ignore_storage_resolved_project_fields() {
         approval_mode: None,
         is_run_everything: None,
         parent_session_id: None,
+        archived: None,
+        archive_supported: false,
+        resumable: true,
         token_usage: None,
     };
     let cache = SessionScanCache::from_entries([SessionScanCacheEntry {
@@ -641,6 +684,9 @@ fn session_scan_cache_reuses_hard_linked_transcript_across_roots() {
         approval_mode: None,
         is_run_everything: None,
         parent_session_id: None,
+        archived: None,
+        archive_supported: false,
+        resumable: true,
         token_usage: None,
     };
     let cache = SessionScanCache::from_entries([SessionScanCacheEntry {
@@ -1382,6 +1428,9 @@ fn codex_transcript_project_fills_index_session() {
             approval_mode: None,
             is_run_everything: None,
             parent_session_id: None,
+            archived: None,
+            archive_supported: false,
+            resumable: true,
             token_usage: None,
         },
         SessionRecord {
@@ -1406,6 +1455,9 @@ fn codex_transcript_project_fills_index_session() {
             approval_mode: None,
             is_run_everything: None,
             parent_session_id: Some("parent-session".to_string()),
+            archived: None,
+            archive_supported: false,
+            resumable: true,
             token_usage: None,
         },
     ]);
@@ -1475,6 +1527,9 @@ fn normalizes_ephemeral_chat_projects_without_touching_real_workspaces() {
             approval_mode: None,
             is_run_everything: None,
             parent_session_id: None,
+            archived: None,
+            archive_supported: false,
+            resumable: true,
             token_usage: None,
         },
         SessionRecord {
@@ -1499,6 +1554,9 @@ fn normalizes_ephemeral_chat_projects_without_touching_real_workspaces() {
             approval_mode: None,
             is_run_everything: None,
             parent_session_id: None,
+            archived: None,
+            archive_supported: false,
+            resumable: true,
             token_usage: None,
         },
     ];

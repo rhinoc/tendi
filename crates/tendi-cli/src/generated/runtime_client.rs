@@ -169,6 +169,21 @@ impl RuntimeClient {
         let result = Self::decode_response(CommandName::SessionsSnapshot, request_id, value)?;
         Ok(serde_json::from_value(result)?)
     }
+    pub fn sessions_ownership_snapshot(
+        &mut self,
+        params: tendi_core::generated::runtime_contract::SessionsOwnershipSnapshotRequest,
+    ) -> JsonRpcRequest {
+        self.request(CommandName::SessionsOwnershipSnapshot, params)
+    }
+    pub fn decode_sessions_ownership_snapshot_response(
+        request_id: &Value,
+        value: Value,
+    ) -> anyhow::Result<tendi_core::generated::runtime_contract::SessionsOwnershipSnapshotResponse>
+    {
+        let result =
+            Self::decode_response(CommandName::SessionsOwnershipSnapshot, request_id, value)?;
+        Ok(serde_json::from_value(result)?)
+    }
     pub fn sessions_list(
         &mut self,
         params: tendi_core::generated::runtime_contract::SessionsListRequest,
@@ -773,6 +788,19 @@ impl RuntimeClient {
         let result = Self::decode_response(CommandName::PromptsDeleteMany, request_id, value)?;
         Ok(serde_json::from_value(result)?)
     }
+    pub fn session_set_archived(
+        &mut self,
+        params: tendi_core::generated::runtime_contract::SessionSetArchivedRequest,
+    ) -> JsonRpcRequest {
+        self.request(CommandName::SessionSetArchived, params)
+    }
+    pub fn decode_session_set_archived_response(
+        request_id: &Value,
+        value: Value,
+    ) -> anyhow::Result<tendi_core::generated::runtime_contract::SessionSetArchivedResponse> {
+        let result = Self::decode_response(CommandName::SessionSetArchived, request_id, value)?;
+        Ok(serde_json::from_value(result)?)
+    }
     pub fn session_transcript(
         &mut self,
         params: tendi_core::generated::runtime_contract::SessionTranscriptRequest,
@@ -960,6 +988,19 @@ impl RuntimeClient {
     ) -> anyhow::Result<tendi_core::generated::runtime_contract::SkillsBackupDisconnectResponse>
     {
         let result = Self::decode_response(CommandName::SkillsBackupDisconnect, request_id, value)?;
+        Ok(serde_json::from_value(result)?)
+    }
+    pub fn skills_create(
+        &mut self,
+        params: tendi_core::generated::runtime_contract::SkillsCreateRequest,
+    ) -> JsonRpcRequest {
+        self.request(CommandName::SkillsCreate, params)
+    }
+    pub fn decode_skills_create_response(
+        request_id: &Value,
+        value: Value,
+    ) -> anyhow::Result<tendi_core::generated::runtime_contract::SkillsCreateResponse> {
+        let result = Self::decode_response(CommandName::SkillsCreate, request_id, value)?;
         Ok(serde_json::from_value(result)?)
     }
     pub fn skills_add(

@@ -29,9 +29,9 @@ use rusqlite::{Connection, params};
 
 use super::{
     ANALYTICS_JSON_ENCODING, AppSettings, PromptWrite, SESSION_SEARCH_CANDIDATE_TABLE,
-    SessionListQuery, SessionListRow, Store, compare_session_list_rows, decompress_analytics_json,
-    highlight_contains_match, is_database_io_error, is_database_io_error_message,
-    normalize_repository_url,
+    SessionArchiveFilter, SessionListFilters, SessionListQuery, SessionListRow, Store,
+    compare_session_list_rows, decompress_analytics_json, highlight_contains_match,
+    is_database_io_error, is_database_io_error_message, normalize_repository_url,
 };
 
 #[test]
@@ -127,6 +127,9 @@ fn session_scan_cache_uses_persisted_source_state() {
         approval_mode: None,
         is_run_everything: None,
         parent_session_id: None,
+        archived: None,
+        archive_supported: false,
+        resumable: true,
         token_usage: None,
     };
 
@@ -148,7 +151,7 @@ fn session_scan_cache_uses_persisted_source_state() {
             .is_none()
     );
 
-    Connection::open(store.path())
+    Connection::open(&store.sessions.path)
         .unwrap()
         .execute(
             "UPDATE scoped_session_scan_sources SET parser_version = 'legacy'",
@@ -199,6 +202,7 @@ fn finalizing_a_batched_session_scan_prunes_stale_rows() {
         .ensure_scoped_session_search_for_scope(&scope)
         .unwrap();
     let stale_search_rows_before: i64 = store
+        .sessions
         .conn
         .query_row(
             "SELECT COUNT(*) FROM scoped_session_search_entries
@@ -235,6 +239,7 @@ fn finalizing_a_batched_session_scan_prunes_stale_rows() {
     assert!(errors.is_empty());
     assert!(!pending);
     let stale_search_rows_after: i64 = store
+        .sessions
         .conn
         .query_row(
             "SELECT COUNT(*) FROM scoped_session_search_entries
@@ -579,7 +584,7 @@ fn scoped_session_search_rebuild_repairs_existing_projection_rows() {
             .ensure_scoped_session_search_for_scope(&scope)
             .unwrap()
     );
-    Connection::open(store.path())
+    Connection::open(&store.sessions.path)
         .unwrap()
         .execute(
             "DELETE FROM scoped_session_search_entries WHERE scope_key = ?1",
@@ -628,6 +633,7 @@ fn session_search_candidate_table_handles_large_and_empty_sets() {
         .unwrap();
     assert!(join.contains(SESSION_SEARCH_CANDIDATE_TABLE));
     let matched: i64 = store
+        .sessions
         .conn
         .query_row(
             &format!("SELECT COUNT(*) FROM temp.{SESSION_SEARCH_CANDIDATE_TABLE}"),
@@ -639,6 +645,7 @@ fn session_search_candidate_table_handles_large_and_empty_sets() {
 
     store.session_search_candidate_join(Some(&[])).unwrap();
     let matched_empty: i64 = store
+        .sessions
         .conn
         .query_row(
             &format!("SELECT COUNT(*) FROM temp.{SESSION_SEARCH_CANDIDATE_TABLE}"),
@@ -789,6 +796,77 @@ fn session_list_page_filters_sorts_pages_searches_and_locates_in_storage() {
 }
 
 #[test]
+fn session_list_page_applies_archive_filter_without_search() {
+    let temp = temp_dir("tendi-storage-session-list-archive-filter");
+    fs::create_dir_all(&temp).unwrap();
+    let store = Store::open(temp.join("tendi.sqlite3")).unwrap();
+    let scope = ScopeKey::new("workspace:session-list-archive-filter").unwrap();
+    let mut sessions = [
+        session("live", "Live session"),
+        session("archived", "Archived session"),
+        session("unknown", "Unknown archive state"),
+    ];
+    sessions[0].path = temp.join("codex/sessions/live.jsonl");
+    sessions[1].path = temp.join("codex/archived_sessions/archived.jsonl");
+    sessions[2].path = temp.join("other/unknown.jsonl");
+    store
+        .save_sessions_at_for_scope(
+            &scope,
+            &SessionScan {
+                sessions: sessions.to_vec(),
+                warnings: Vec::new(),
+            },
+            1,
+        )
+        .unwrap();
+    let query = SessionListQuery {
+        query: String::new(),
+        agent: None,
+        sort_key: "updatedAt".to_string(),
+        sort_direction: "desc".to_string(),
+        group_by: None,
+        page: 0,
+        page_size: 50,
+        show_child_sessions: false,
+        selected_project_keys: Vec::new(),
+        locate: None,
+    };
+    let list_with_filter = |archive_filter| {
+        store
+            .session_page_with_revision_for_scope_with_filters(
+                &scope,
+                query.clone(),
+                SessionListFilters {
+                    archive_filter,
+                    ..SessionListFilters::default()
+                },
+            )
+            .unwrap()
+            .1
+    };
+
+    let unarchived = list_with_filter(SessionArchiveFilter::Unarchived);
+    assert_eq!(unarchived.total, 2);
+    assert!(
+        !unarchived
+            .rows
+            .iter()
+            .any(|row| row.session.id == "archived")
+    );
+
+    let archived = list_with_filter(SessionArchiveFilter::Archived);
+    assert_eq!(archived.total, 1);
+    assert_eq!(archived.rows[0].session.id, "archived");
+    assert_eq!(archived.rows[0].session.archived, Some(true));
+
+    let all = list_with_filter(SessionArchiveFilter::All);
+    assert_eq!(all.total, 3);
+
+    drop(store);
+    fs::remove_dir_all(temp).unwrap();
+}
+
+#[test]
 fn session_list_uses_derived_numeric_projection_for_sql_page_ordering() {
     let temp = temp_dir("tendi-storage-session-list-projection");
     fs::create_dir_all(&temp).unwrap();
@@ -895,7 +973,7 @@ fn session_list_uses_derived_numeric_projection_for_sql_page_ordering() {
         .unwrap();
     assert_eq!(cache_page.rows[0].session.id, "high");
 
-    let projection = Connection::open(store.path())
+    let projection = Connection::open(store.session_database_path())
         .unwrap()
         .query_row(
             "SELECT turn_count, input_tokens, cached_input_tokens
@@ -995,7 +1073,7 @@ fn session_search_fts_optimize_resets_due_mutation_counter() {
     fs::create_dir_all(&temp).unwrap();
     let store = Store::open(temp.join("tendi.sqlite3")).unwrap();
     store
-        .with_named_write_transaction("test.session_search_maintenance_due", |tx| {
+        .with_session_write_transaction("test.session_search_maintenance_due", |tx| {
             tx.execute(
                 "UPDATE scoped_session_search_maintenance
                  SET pending_mutations = 2000, last_optimized_at = 0 WHERE id = 1",
@@ -1007,6 +1085,7 @@ fn session_search_fts_optimize_resets_due_mutation_counter() {
 
     assert!(store.optimize_session_search_fts_if_due().unwrap());
     let state: (i64, i64) = store
+        .sessions
         .conn
         .query_row(
             "SELECT pending_mutations, last_optimized_at
@@ -1138,6 +1217,7 @@ fn schema_v1_storage_discards_search_cache_and_migrates_analytics() {
         .unwrap();
     assert!(!legacy_search_tables);
     let search_rows: i64 = store
+        .sessions
         .conn
         .query_row(
             "SELECT (SELECT COUNT(*) FROM scoped_session_search_entries)
@@ -1148,6 +1228,7 @@ fn schema_v1_storage_discards_search_cache_and_migrates_analytics() {
         .unwrap();
     assert_eq!(search_rows, 0);
     let compressed: Vec<u8> = store
+        .sessions
         .conn
         .query_row(
             "SELECT analytics_json FROM scoped_session_analytics",
@@ -1160,6 +1241,20 @@ fn schema_v1_storage_discards_search_cache_and_migrates_analytics() {
         decompress_analytics_json(&compressed).unwrap(),
         analytics_json
     );
+    let primary_analytics_rows: i64 = store
+        .conn
+        .query_row("SELECT COUNT(*) FROM scoped_session_analytics", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(primary_analytics_rows, 0);
+    let primary_cached_values: i64 = store
+        .conn
+        .query_row("SELECT COUNT(*) FROM shared_cache_values", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(primary_cached_values, 0);
     assert!(
         store
             .conn
@@ -1181,6 +1276,243 @@ fn schema_v1_storage_discards_search_cache_and_migrates_analytics() {
             )
             .unwrap()
     );
+
+    drop(store);
+    fs::remove_dir_all(temp).unwrap();
+}
+
+#[test]
+fn session_database_rebuild_discards_cache_and_cleans_primary_copy() {
+    let temp = temp_dir("tendi-session-database-primary-cleanup");
+    fs::create_dir_all(&temp).unwrap();
+    let database = temp.join("tendi.sqlite3");
+    let store = Store::open(&database).unwrap();
+    store
+        .with_named_write_transaction("test.seed_primary_session_copy", |tx| {
+            tx.execute(
+                "INSERT INTO scoped_sessions(scope_key,id,agent,path,data_json)
+                 VALUES('workspace:/cleanup','s','codex','/s.jsonl','{}')",
+                [],
+            )?;
+            tx.execute(
+                "INSERT INTO session_search_content_records(content_hash,user_text,assistant_text)
+                 VALUES('cleanup-hash','searchable text','assistant text')",
+                [],
+            )?;
+            tx.execute(
+                "INSERT INTO scoped_session_search_entries(
+                    scope_key,session_id,agent,session_path,record_order,title,content_id
+                 ) VALUES('workspace:/cleanup','s','codex','/s.jsonl',0,'Session',1)",
+                [],
+            )?;
+            tx.execute(
+                "INSERT INTO scoped_session_analytics(
+                    scope_key,session_id,agent,session_path,file_mtime,file_size,indexed_at,
+                    analytics_json,parser_state_json
+                 ) VALUES('workspace:/cleanup','s','codex','/s.jsonl',0,0,'{}','{}','{}')",
+                [],
+            )?;
+            tx.execute(
+                "INSERT INTO scoped_session_analytics_overview(
+                    scope_key,session_id,agent,session_path,overview_json
+                 ) VALUES('workspace:/cleanup','s','codex','/s.jsonl','{}')",
+                [],
+            )?;
+            tx.execute(
+                "INSERT INTO session_projects(scope_key,id,name)
+                 VALUES('workspace:/cleanup','project','Project')",
+                [],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    store
+        .with_session_write_transaction("test.seed_old_session_database_cache", |tx| {
+            tx.execute(
+                "INSERT INTO scoped_sessions(scope_key,id,agent,path,data_json)
+                 VALUES('workspace:/cleanup','old','codex','/old.jsonl','{}')",
+                [],
+            )?;
+            tx.execute(
+                "DELETE FROM meta WHERE key = 'storage.session_database.rebuild.v2'",
+                [],
+            )?;
+            tx.execute(
+                "INSERT OR REPLACE INTO meta(key, value)
+                 VALUES ('storage.session_database.rebuild.v1', 'completed')",
+                [],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    store
+        .with_named_write_transaction("test.reset_primary_session_cleanup_marker", |tx| {
+            tx.execute(
+                "DELETE FROM storage_migrations
+                 WHERE key = 'storage.session_database.primary_cleanup.v1'",
+                [],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    drop(store);
+
+    let store = Store::open(&database).unwrap();
+    store.run_pending_storage_migrations().unwrap();
+    let rebuilt_rows: i64 = store
+        .sessions
+        .conn
+        .query_row(
+            "SELECT (SELECT COUNT(*) FROM scoped_sessions)
+                 + (SELECT COUNT(*) FROM scoped_session_search_entries)
+                 + (SELECT COUNT(*) FROM scoped_session_analytics)
+                 + (SELECT COUNT(*) FROM session_projects)
+                 + (SELECT COUNT(*) FROM scoped_session_search_metadata_fts)
+                 + (SELECT COUNT(*) FROM session_search_content_fts)",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(rebuilt_rows, 0);
+    let cached_analytics: i64 = store
+        .sessions
+        .conn
+        .query_row(
+            "SELECT COUNT(*) FROM scoped_session_analytics
+             WHERE scope_key='workspace:/cleanup' AND session_id='s'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(cached_analytics, 0);
+    let cached_overview: i64 = store
+        .sessions
+        .conn
+        .query_row(
+            "SELECT COUNT(*) FROM scoped_session_analytics_overview
+             WHERE scope_key='workspace:/cleanup' AND session_id='s'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(cached_overview, 0);
+    let rebuilt_content_index: i64 = store
+        .sessions
+        .conn
+        .query_row(
+            "SELECT COUNT(*) FROM session_search_content_fts",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(rebuilt_content_index, 0);
+    let primary_rows: i64 = store
+        .conn
+        .query_row(
+            "SELECT (SELECT COUNT(*) FROM scoped_sessions)
+                 + (SELECT COUNT(*) FROM scoped_session_search_entries)
+                 + (SELECT COUNT(*) FROM scoped_session_analytics)
+                 + (SELECT COUNT(*) FROM session_projects)
+                 + (SELECT COUNT(*) FROM session_search_content_records)
+                 + (SELECT COUNT(*) FROM scoped_session_search_metadata_fts)
+                 + (SELECT COUNT(*) FROM session_search_content_fts)
+                 + (SELECT COUNT(*) FROM shared_cache_values)
+                 + (SELECT COUNT(*) FROM cache_sessions)
+                 + (SELECT COUNT(*) FROM cache_scopes)",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(primary_rows, 0);
+    assert!(store.run_pending_storage_maintenance().unwrap());
+
+    drop(store);
+    fs::remove_dir_all(temp).unwrap();
+}
+
+#[test]
+fn session_database_rebuild_does_not_import_cache_from_recovery_copy() {
+    let temp = temp_dir("tendi-session-database-recovery-import");
+    fs::create_dir_all(&temp).unwrap();
+    let database = temp.join("tendi.sqlite3");
+    let recovery_copy = temp.join("tendi.sqlite3.pre-recovery-test.sqlite3");
+    let store = Store::open(&database).unwrap();
+    store
+        .with_named_write_transaction("test.seed_recovery_source", |tx| {
+            tx.execute(
+                "INSERT INTO scoped_sessions(scope_key,id,agent,path,data_json)
+                 VALUES('workspace:/recovery','old','codex','/old.jsonl','{}')",
+                [],
+            )?;
+            tx.execute(
+                "INSERT INTO scoped_session_analytics(
+                    scope_key,session_id,agent,session_path,file_mtime,file_size,indexed_at,
+                    analytics_json,parser_state_json,event_min_date,event_max_date,has_activity,
+                    capability_token_usage
+                 ) VALUES('workspace:/recovery','old','codex','/old.jsonl',0,0,'{}','{}','{}',
+                          '2026-05-25','2026-05-25',1,1)",
+                [],
+            )?;
+            tx.execute(
+                "INSERT INTO scoped_session_analytics_overview(
+                    scope_key,session_id,agent,session_path,event_min_date,event_max_date,
+                    has_activity,overview_json
+                 ) VALUES('workspace:/recovery','old','codex','/old.jsonl',
+                          '2026-05-25','2026-05-25',1,'{}')",
+                [],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    {
+        let mut backup = Connection::open(&recovery_copy).unwrap();
+        rusqlite::backup::Backup::new(&store.conn, &mut backup)
+            .unwrap()
+            .run_to_completion(128, Duration::from_millis(1), None)
+            .unwrap();
+    }
+    store
+        .with_named_write_transaction("test.clear_primary_recovery_source", |tx| {
+            tx.execute("DELETE FROM scoped_session_analytics_overview", [])?;
+            tx.execute("DELETE FROM scoped_session_analytics", [])?;
+            tx.execute("DELETE FROM scoped_sessions", [])?;
+            Ok(())
+        })
+        .unwrap();
+    drop(store);
+
+    let store = Store::open(&database).unwrap();
+    let recovered: i64 = store
+        .sessions
+        .conn
+        .query_row(
+            "SELECT COUNT(*) FROM scoped_session_analytics_overview
+             WHERE scope_key='workspace:/recovery' AND session_id='old'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(recovered, 0);
+    let scope = ScopeKey::new("workspace:/recovery").unwrap();
+    store
+        .save_sessions_at_for_scope(
+            &scope,
+            &SessionScan {
+                sessions: Vec::new(),
+                warnings: Vec::new(),
+            },
+            1,
+        )
+        .unwrap();
+    store
+        .refresh_session_analytics_for_scope_with_progress(&scope, &[], |_| {})
+        .unwrap();
+    let retained_history = store
+        .overview_analytics_for_scope(&scope, None, 30, 30)
+        .unwrap();
+    assert_eq!(retained_history.coverage.first.as_deref(), Some("2026-05-25"));
+    assert_eq!(retained_history.coverage.total_sessions, 1);
+    assert!(store.analytics_revision_for_scope(&scope).unwrap() > 0);
 
     drop(store);
     fs::remove_dir_all(temp).unwrap();
@@ -2202,6 +2534,7 @@ fn scoped_analytics_repairs_older_model_usage_overview_cache() {
         .unwrap();
 
     let mut legacy_overview: serde_json::Value = store
+        .sessions
         .conn
         .query_row(
             "SELECT overview_json FROM scoped_session_analytics_overview
@@ -2226,7 +2559,7 @@ fn scoped_analytics_repairs_older_model_usage_overview_cache() {
     assert_eq!(removed_model_fields, 2);
     let legacy_overview_json = serde_json::to_string(&legacy_overview).unwrap();
     store
-        .with_named_write_transaction("test_legacy_analytics_overview_cache", |tx| {
+        .with_session_write_transaction("test_legacy_analytics_overview_cache", |tx| {
             tx.execute(
                 "UPDATE scoped_session_analytics_overview
                  SET overview_json = ?1
@@ -2254,6 +2587,7 @@ fn scoped_analytics_repairs_older_model_usage_overview_cache() {
     assert_eq!(model.input_tokens, 11);
 
     let repaired_overview_json: String = store
+        .sessions
         .conn
         .query_row(
             "SELECT overview_json FROM scoped_session_analytics_overview
@@ -2658,6 +2992,9 @@ fn session(id: &str, title: &str) -> SessionRecord {
         approval_mode: None,
         is_run_everything: None,
         parent_session_id: None,
+        archived: None,
+        archive_supported: false,
+        resumable: true,
         token_usage: None,
     }
 }

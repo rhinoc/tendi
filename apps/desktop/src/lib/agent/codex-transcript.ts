@@ -19,6 +19,16 @@ import {
 import type { JsonObject } from "../transcript.ts";
 import type { TranscriptParseContext, TranscriptParser } from "./types.ts";
 
+const CODEX_OPEN_PAGE_CONTEXT_KIND = "additional_content.codex_apps_open_page";
+
+function isCodexOpenPageContext(value: JsonObject) {
+  const payload = value.payload;
+  if (!isJsonObject(payload) || payload.type !== "message" || payload.role !== "user") return false;
+  const passthrough = payload.internal_chat_message_metadata_passthrough;
+  if (!isJsonObject(passthrough) || !Array.isArray(passthrough.content_item_kinds)) return false;
+  return passthrough.content_item_kinds.includes(CODEX_OPEN_PAGE_CONTEXT_KIND);
+}
+
 function stripCodexInternalContext(value: string): string {
   return value
     .replace(/(^|\n)<codex_internal_context[\s\S]*?<\/codex_internal_context>\s*/g, "$1")
@@ -66,6 +76,7 @@ function collectCodexItem(value: JsonObject, items: TranscriptParseContext["item
   const payloadType = stringValue(payload.type);
   if (payloadType === "message") {
     const role = stringValue(payload.role);
+    if (isCodexOpenPageContext(value)) return;
     if (role === "developer" || role === "system") {
       const body = stripCodexInternalContext(extractRawContentText(payload.content));
       if (body) pushItem(items, "context", body, role === "system" ? "System" : "Developer", time);

@@ -17,6 +17,9 @@ export type SessionRecord = {
   logicalProjectName?: string;
   path: string;
   agent: string;
+  archived?: boolean;
+  archiveSupported?: boolean;
+  resumable?: boolean;
   startedAt?: string;
   updatedAt?: string;
   time?: string;
@@ -224,6 +227,9 @@ export function normalizeSession(session: Record<string, unknown>): SessionRecor
     // Keep the provider identity in the domain record. Display labels belong at
     // render boundaries; runtime commands require the canonical agent key.
     agent: agentIdentityKey(agent),
+    archived: typeof session.archived === "boolean" ? session.archived : undefined,
+    archiveSupported: session.archive_supported === true,
+    resumable: session.resumable !== false,
     startedAt,
     updatedAt,
     time: updatedAt,

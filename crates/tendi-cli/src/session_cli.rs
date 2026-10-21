@@ -14,6 +14,7 @@ use tendi_core::storage::{SessionRecallOptions, SessionRecallRole, SessionRecall
 pub enum RoleArg {
     User,
     Assistant,
+    Tool,
 }
 
 #[derive(Debug, Clone, Copy, Default, ValueEnum)]
@@ -185,6 +186,7 @@ pub fn search(cwd: &Path, query: String, args: SearchArgs, json: bool) -> Result
         role: args.role.map(|role| match role {
             RoleArg::User => SessionRecallRole::User,
             RoleArg::Assistant => SessionRecallRole::Assistant,
+            RoleArg::Tool => SessionRecallRole::Tool,
         }),
         phrase: args.phrase,
         sort: match args.sort {
@@ -267,7 +269,7 @@ pub fn transcript(
     args: TranscriptArgs,
     json: bool,
 ) -> Result<()> {
-    let (path, agent) = if current {
+    let (path, agent, session_id) = if current {
         let session = tendi_core::sessions::current_session(cwd, agent.map(Into::into))?;
         (
             session.path.with_context(|| {
@@ -278,32 +280,35 @@ pub fn transcript(
                 )
             })?,
             session.agent,
+            Some(session.id),
         )
     } else if let Some(id) = args.session.as_deref() {
         let session =
             tendi_core::storage::Store::open_default()?.session_by_id(id, agent.map(Into::into))?;
-        (session.path, session.agent)
+        (session.path, session.agent, Some(session.id))
     } else {
         (
             PathBuf::from(path.context("transcript path is required")?),
             agent
                 .context("--agent is required for an explicit path")?
                 .into(),
+            None,
         )
     };
     if args.all {
         if json {
             let stdout = std::io::stdout();
             let mut output = stdout.lock();
-            tendi_core::transcript::write_transcript_json(&path, agent, &mut output)?;
+            tendi_core::transcript::write_session_transcript_json(&path, agent, session_id.as_deref(), &mut output)?;
             writeln!(output)?;
         } else {
-            print_transcript(&tendi_core::transcript::parse_transcript(&path, agent)?.items)?;
+            print_transcript(&tendi_core::transcript::parse_session_transcript(&path, agent, session_id.as_deref())?.items)?;
         }
     } else if args.page || args.cursor.is_some() {
-        let page = tendi_core::transcript::parse_transcript_page(
+        let page = tendi_core::transcript::parse_session_transcript_page(
             &path,
             agent,
+            session_id.as_deref(),
             args.cursor.as_deref(),
             Some(args.limit),
         )?;
@@ -313,9 +318,10 @@ pub fn transcript(
             print_transcript(&page.items)?;
         }
     } else {
-        let excerpt = tendi_core::transcript::read_transcript_excerpt(
+        let excerpt = tendi_core::transcript::read_session_transcript_excerpt(
             &path,
             agent,
+            session_id.as_deref(),
             &tendi_core::transcript::TranscriptExcerptOptions {
                 query: args.query,
                 roles: args.roles,

@@ -149,6 +149,7 @@ type SettingsViewProps = {
   onTerminalChange: (terminal: string) => void;
   onEditorChange: (editor: string) => void;
   onAdditionalSessionRootsChange: (roots: string[]) => void;
+  onScanAdditionalSessions: () => Promise<number | null>;
   onDeveloperModeChange: (enabled: boolean) => void;
   sessionResumeTarget: SessionResumeTarget;
   missingSessionProjectPolicy: MissingSessionProjectPolicy;
@@ -319,7 +320,7 @@ function SettingsGroup({ title, children }: { title: string; children: ReactNode
   );
 }
 
-export function SettingsView({ appearance, themePreferences, fontFamily, terminal, editor, additionalSessionRoots, developerMode, sessionResumeTarget, missingSessionProjectPolicy, appIcon, projects, onAppearanceChange, onThemeChange, onFontFamilyChange, onTerminalChange, onEditorChange, onAdditionalSessionRootsChange, onDeveloperModeChange, onSessionResumeTargetChange, onMissingSessionProjectPolicyChange, onAppIconChange, onProjectsScanned, appSettingsLoading, appSettingsLoadError, onRetryAppSettings, update, lastUpdateCheckAt, onCheckForUpdates, onInstallUpdate, onSkillsUpdated, onBeginSkillMutation, installedAgentKeys, targetOptions }: SettingsViewProps) {
+export function SettingsView({ appearance, themePreferences, fontFamily, terminal, editor, additionalSessionRoots, developerMode, sessionResumeTarget, missingSessionProjectPolicy, appIcon, projects, onAppearanceChange, onThemeChange, onFontFamilyChange, onTerminalChange, onEditorChange, onAdditionalSessionRootsChange, onScanAdditionalSessions, onDeveloperModeChange, onSessionResumeTargetChange, onMissingSessionProjectPolicyChange, onAppIconChange, onProjectsScanned, appSettingsLoading, appSettingsLoadError, onRetryAppSettings, update, lastUpdateCheckAt, onCheckForUpdates, onInstallUpdate, onSkillsUpdated, onBeginSkillMutation, installedAgentKeys, targetOptions }: SettingsViewProps) {
   const showToast = useToast();
   const [relativeTimeNow, setRelativeTimeNow] = useState(() => Date.now());
   const [terminalInput, setTerminalInput] = useState(terminal);
@@ -332,6 +333,7 @@ export function SettingsView({ appearance, themePreferences, fontFamily, termina
   const [missingSessionProjectError, setMissingSessionProjectError] = useState("");
   const [editorError, setEditorError] = useState("");
   const [sessionRootsError, setSessionRootsError] = useState("");
+  const [additionalSessionScanState, setAdditionalSessionScanState] = useState<AsyncStatus>(AsyncStatus.Idle);
   const [projectScanScopesError, setProjectScanScopesError] = useState("");
   const [projectScanState, setProjectScanState] = useState<AsyncStatus>(AsyncStatus.Idle);
   const [projectScanSummary, setProjectScanSummary] = useState("");
@@ -370,6 +372,7 @@ export function SettingsView({ appearance, themePreferences, fontFamily, termina
   const fontFamilySaveRequestRef = useRef(0);
   const terminalSaveRequestRef = useRef(0);
   const editorSaveRequestRef = useRef(0);
+  const additionalSessionRootsSaveRef = useRef<{ value: string; promise: Promise<boolean> } | null>(null);
   const settingsRevisionRef = useRef<SettingsRevisions>(initialSettingsRevisions);
   const inputRevisionRef = useRef<SettingsInputRevisions>({
     terminal: 0,
@@ -710,23 +713,53 @@ export function SettingsView({ appearance, themePreferences, fontFamily, termina
     }
   };
 
-  const saveAdditionalSessionRoots = async (value: string) => {
-    const inputRevision = inputRevisionRef.current.additionalSessionRoots;
+  const saveAdditionalSessionRoots = (value: string): Promise<boolean> => {
     const roots = value
       .split("\n")
       .map((root) => root.trim())
       .filter(Boolean);
-    setAdditionalSessionRootsInput(roots.join("\n"));
-    if (roots.join("\n") === additionalSessionRoots.join("\n")) return;
+    const normalizedValue = roots.join("\n");
+    setAdditionalSessionRootsInput(normalizedValue);
+    const inFlightSave = additionalSessionRootsSaveRef.current;
+    if (inFlightSave?.value === normalizedValue) return inFlightSave.promise;
+    if (!inFlightSave && normalizedValue === additionalSessionRoots.join("\n")) return Promise.resolve(true);
+    const inputRevision = inputRevisionRef.current.additionalSessionRoots;
     const requestRevisions = beginSettingsSave("additionalSessionRoots");
-    const nextSettings = await saveSettings({ additionalSessionRoots: roots });
-    if (!isCurrentSettingsSave("additionalSessionRoots", requestRevisions)) return;
-    if (nextSettings) {
-      applySavedSettings(nextSettings, { additionalSessionRoots: inputRevision }, requestRevisions);
-      setSessionRootsError("");
-    } else {
+    const promise = (async () => {
+      const nextSettings = await saveSettings({ additionalSessionRoots: roots });
+      if (!isCurrentSettingsSave("additionalSessionRoots", requestRevisions)) return false;
+      if (nextSettings) {
+        applySavedSettings(nextSettings, { additionalSessionRoots: inputRevision }, requestRevisions);
+        setSessionRootsError("");
+        return true;
+      }
       setSessionRootsError(reportSaveFailure(`${actionLabels.saveFailed}: use absolute paths`));
+      return false;
+    })();
+    additionalSessionRootsSaveRef.current = { value: normalizedValue, promise };
+    const clearSave = () => {
+      if (additionalSessionRootsSaveRef.current?.promise === promise) additionalSessionRootsSaveRef.current = null;
+    };
+    void promise.then(clearSave, clearSave);
+    return promise;
+  };
+
+  const scanAdditionalSessions = async () => {
+    if (additionalSessionScanState === AsyncStatus.Loading) return;
+    setAdditionalSessionScanState(AsyncStatus.Loading);
+    setSessionRootsError("");
+    const saved = await saveAdditionalSessionRoots(additionalSessionRootsInput);
+    if (!saved) {
+      setAdditionalSessionScanState(AsyncStatus.Error);
+      return;
     }
+    const generation = await onScanAdditionalSessions();
+    if (generation === null) {
+      setSessionRootsError("Scan failed");
+      setAdditionalSessionScanState(AsyncStatus.Error);
+      return;
+    }
+    setAdditionalSessionScanState(AsyncStatus.Success);
   };
 
   const saveProjectScanScopes = async (value: string) => {
@@ -1089,10 +1122,12 @@ export function SettingsView({ appearance, themePreferences, fontFamily, termina
                 placeholder="~/path/to/sessions"
                 spellCheck={false}
                 value={additionalSessionRootsInput}
+                disabled={additionalSessionScanState === AsyncStatus.Loading}
                 onChange={(event) => {
                   inputRevisionRef.current.additionalSessionRoots += 1;
                   setAdditionalSessionRootsInput(event.target.value);
                   setSessionRootsError("");
+                  setAdditionalSessionScanState(AsyncStatus.Idle);
                 }}
                 onBlur={() => saveAdditionalSessionRoots(additionalSessionRootsInput)}
                 onKeyDown={(event) => {
@@ -1100,10 +1135,26 @@ export function SettingsView({ appearance, themePreferences, fontFamily, termina
                   if (event.key === "Escape") {
                     setAdditionalSessionRootsInput(additionalSessionRoots.join("\n"));
                     setSessionRootsError("");
+                    setAdditionalSessionScanState(AsyncStatus.Idle);
                     event.currentTarget.blur();
                   }
                 }}
               />
+              <div className="settingsScanActions">
+                <StatefulButton
+                  variant="primary"
+                  state={additionalSessionScanState}
+                  width={112}
+                  minWidth={112}
+                  aria-label={additionalSessionScanState === AsyncStatus.Loading ? "Scanning sessions" : "Scan sessions"}
+                  loadingContent={<LoadingIcon size={14} />}
+                  successContent="Scan now"
+                  errorContent="Scan now"
+                  onClick={() => { void scanAdditionalSessions(); }}
+                >
+                  Scan now
+                </StatefulButton>
+              </div>
               {sessionRootsError ? <Toast tone="error" message={sessionRootsError} /> : null}
           </SettingsSection>
           <SettingsSection title="Scan scopes">
@@ -1128,7 +1179,7 @@ export function SettingsView({ appearance, themePreferences, fontFamily, termina
                 }
               }}
             />
-            <div className="settingsProjectScanActions">
+            <div className="settingsScanActions">
               <StatefulButton
                 variant="primary"
                 state={projectScanState}

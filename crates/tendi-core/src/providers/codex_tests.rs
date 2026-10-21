@@ -66,6 +66,93 @@ fn selected_skill_message_is_context_and_emits_skill_evidence() {
 }
 
 #[test]
+fn scans_paginated_zstd_rollouts_as_archived_sessions() {
+    let root = temp_dir();
+    let archived = root.join("archived_sessions");
+    fs::create_dir_all(&archived).unwrap();
+    let id = "019e5ee9-9b6f-7ab0-a87f-5422b22b06ed";
+    let path = archived.join(format!("rollout-2026-05-25T19-33-48-{id}.jsonl.zst"));
+    let contents = concat!(
+        "{\"timestamp\":\"2026-05-25T19:33:49Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"hello\"}]}}\n",
+        "{\"timestamp\":\"2026-05-25T19:33:50Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\",\"info\":{\"total_token_usage\":{\"input_tokens\":100,\"output_tokens\":20,\"total_tokens\":120}}}}\n"
+    );
+    let mut encoder = zstd::Encoder::new(fs::File::create(&path).unwrap(), 0).unwrap();
+    std::io::Write::write_all(&mut encoder, contents.as_bytes()).unwrap();
+    encoder.finish().unwrap();
+
+    let mut sessions = Vec::new();
+    super::scan_jsonl_sessions_for_test(&archived, &mut sessions, None);
+
+    assert_eq!(sessions.len(), 1);
+    assert_eq!(sessions[0].id, id);
+    assert_eq!(sessions[0].path, path);
+    assert_eq!(sessions[0].archived, Some(true));
+    assert_eq!(sessions[0].first_user_message.as_deref(), Some("hello"));
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn open_page_additional_content_is_not_a_user_message_or_transcript_item() {
+    let value = json!({
+        "type": "response_item",
+        "timestamp": "2026-10-13T09:29:50.519Z",
+        "payload": {
+            "type": "message",
+            "role": "user",
+            "content": [{
+                "type": "input_text",
+                "text": "<external_codex_apps_open_page>{\"page_id\":null}</external_codex_apps_open_page>"
+            }],
+            "internal_chat_message_metadata_passthrough": {
+                "content_item_kinds": ["additional_content.codex_apps_open_page"]
+            }
+        }
+    });
+
+    assert_eq!(CodexProvider.session_message_kind(&value), None);
+    assert_eq!(
+        crate::sessions::extract_session_message_for_agent(AgentKind::Codex, &value),
+        None
+    );
+    assert_eq!(
+        crate::sessions::extract_session_title_for_agent(AgentKind::Codex, &value),
+        None
+    );
+    let mut items = Vec::new();
+    super::parse_transcript(&value, &mut items);
+    assert!(items.is_empty());
+}
+
+#[test]
+fn ordinary_user_text_with_content_kind_remains_a_user_message() {
+    let value = json!({
+        "type": "response_item",
+        "payload": {
+            "type": "message",
+            "role": "user",
+            "content": [{ "type": "input_text", "text": "whats next" }],
+            "internal_chat_message_metadata_passthrough": {
+                "content_item_kinds": ["user.text"]
+            }
+        }
+    });
+
+    assert_eq!(
+        CodexProvider.session_message_kind(&value),
+        Some(SessionMessageKind::User)
+    );
+    assert_eq!(
+        crate::sessions::extract_session_message_for_agent(AgentKind::Codex, &value),
+        Some(("user", "whats next".to_string()))
+    );
+    let mut items = Vec::new();
+    super::parse_transcript(&value, &mut items);
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].kind, "user");
+    assert_eq!(items[0].body, "whats next");
+}
+
+#[test]
 fn skill_wrapper_without_metadata_is_context_and_emits_skill_evidence() {
     let value = json!({
         "type": "response_item",
@@ -473,4 +560,26 @@ fn parses_codex_mcp_keyring_token_from_batch_item() {
             .as_deref(),
         Some("access-token")
     );
+}
+
+#[test]
+fn ownership_uses_actual_lock_and_discovers_custom_session_roots() {
+    use crate::providers::{AgentProvider, ProviderContext};
+    let root = std::env::temp_dir().join(format!("tendi-ownership-{}-{}", std::process::id(), SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()));
+    let source = root.join("sessions");
+    let directory = root.join("thread-writer-locks");
+    fs::create_dir_all(&directory).unwrap();
+    let path = directory.join("live-thread.lock");
+    let file = std::fs::OpenOptions::new().create(true).truncate(true).read(true).write(true).open(&path).unwrap();
+    let ctx = ProviderContext::new(&root);
+    let mut processes = crate::session_ownership::processes::Processes::default();
+    let provider = super::CodexProvider;
+    let identity = crate::session_ownership::HeldSession { agent: AgentKind::Codex, id: "live-thread".into() };
+    assert!(!provider.held_sessions(&ctx, &[source.clone()], &mut processes).unwrap().contains(&identity));
+    file.try_lock().unwrap();
+    assert!(provider.held_sessions(&ctx, &[source.clone()], &mut processes).unwrap().contains(&identity));
+    file.unlock().unwrap();
+    assert!(!provider.held_sessions(&ctx, &[source], &mut processes).unwrap().contains(&identity));
+    drop(file);
+    fs::remove_dir_all(root).unwrap();
 }

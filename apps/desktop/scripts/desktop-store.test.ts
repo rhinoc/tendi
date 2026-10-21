@@ -183,4 +183,22 @@ if (typeof mock.module !== "function") {
     const after = latestSnapshot?.();
     assert.equal(after, before);
   });
+  test("ownership updates leave session catalogs stable and ignore stale snapshots", () => {
+    const store = new DesktopStore();
+    const before = store.getSnapshot().catalogs;
+    const live = { epoch: "daemon-one", revision: 2, held: [{agent: "codex" as const, id: "live"}] };
+    store.actions.setSessionOwnership(live);
+    const held = store.getSnapshot().sessions.heldSessionKeys;
+    assert.equal(held.size, 1);
+    assert.equal(store.getSnapshot().catalogs, before);
+    store.actions.setSessionOwnership({ ...live, revision: 1, held: [] });
+    assert.equal(store.getSnapshot().sessions.heldSessionKeys, held);
+    store.actions.setSessionRefreshError("refresh failed");
+    assert.equal(store.getSnapshot().sessions.heldSessionKeys, held);
+    store.actions.commitSessionSnapshot([]);
+    assert.equal(store.getSnapshot().sessions.heldSessionKeys, held);
+    store.actions.setSessionOwnership({epoch:"daemon-two", revision:0, held:[]});
+    assert.equal(store.getSnapshot().sessions.heldSessionKeys.size, 0);
+  });
+
 }

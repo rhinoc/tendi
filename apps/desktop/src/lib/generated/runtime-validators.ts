@@ -2750,6 +2750,43 @@ const SCHEMAS: Record<string, Record<string, unknown>> = {
     ],
     "additionalProperties": false
   },
+  "SkillsCreateRequest": {
+    "type": "object",
+    "properties": {
+      "name": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 64,
+        "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$"
+      },
+      "description": {
+        "type": "string",
+        "minLength": 1
+      },
+      "target": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "required": [
+      "name",
+      "description",
+      "target"
+    ],
+    "additionalProperties": false
+  },
+  "SkillsCreateResponse": {
+    "type": "object",
+    "properties": {
+      "updated": {
+        "$ref": "#/components/schemas/SkillRecordList"
+      }
+    },
+    "required": [
+      "updated"
+    ],
+    "additionalProperties": false
+  },
   "SkillsAddRequest": {
     "type": "object",
     "properties": {
@@ -3930,6 +3967,14 @@ const SCHEMAS: Record<string, Record<string, unknown>> = {
       "desc"
     ]
   },
+  "SessionArchiveFilter": {
+    "type": "string",
+    "enum": [
+      "unarchived",
+      "archived",
+      "all"
+    ]
+  },
   "SessionsListRequest": {
     "type": "object",
     "properties": {
@@ -3969,6 +4014,16 @@ const SCHEMAS: Record<string, Record<string, unknown>> = {
       },
       "locate": {
         "$ref": "#/components/schemas/SessionIdentity"
+      },
+      "searchScopes": {
+        "$ref": "#/components/schemas/TranscriptSearchScopes"
+      },
+      "startedAfter": {
+        "type": "string",
+        "format": "date-time"
+      },
+      "archiveFilter": {
+        "$ref": "#/components/schemas/SessionArchiveFilter"
       }
     },
     "required": [
@@ -4091,6 +4146,12 @@ const SCHEMAS: Record<string, Record<string, unknown>> = {
         "items": {
           "$ref": "#/components/schemas/SessionIdentity"
         }
+      },
+      "searchScopes": {
+        "$ref": "#/components/schemas/TranscriptSearchScopes"
+      },
+      "archiveFilter": {
+        "$ref": "#/components/schemas/SessionArchiveFilter"
       }
     },
     "required": [
@@ -4337,6 +4398,18 @@ const SCHEMAS: Record<string, Record<string, unknown>> = {
         "type": "string",
         "minLength": 1
       },
+      "archived": {
+        "type": [
+          "boolean",
+          "null"
+        ]
+      },
+      "archive_supported": {
+        "type": "boolean"
+      },
+      "resumable": {
+        "type": "boolean"
+      },
       "started_at": {
         "type": [
           "string",
@@ -4427,6 +4500,47 @@ const SCHEMAS: Record<string, Record<string, unknown>> = {
       "id",
       "agent",
       "path"
+    ],
+    "additionalProperties": false
+  },
+  "SessionOwnershipIdentity": {
+    "type": "object",
+    "properties": {
+      "id": {
+        "type": "string",
+        "minLength": 1
+      },
+      "agent": {
+        "$ref": "#/components/schemas/AgentKind"
+      }
+    },
+    "required": [
+      "id",
+      "agent"
+    ],
+    "additionalProperties": false
+  },
+  "SessionOwnershipSnapshot": {
+    "type": "object",
+    "properties": {
+      "epoch": {
+        "type": "string",
+        "minLength": 1
+      },
+      "revision": {
+        "$ref": "#/components/schemas/Revision"
+      },
+      "held": {
+        "type": "array",
+        "items": {
+          "$ref": "#/components/schemas/SessionOwnershipIdentity"
+        }
+      }
+    },
+    "required": [
+      "epoch",
+      "revision",
+      "held"
     ],
     "additionalProperties": false
   },
@@ -6742,6 +6856,22 @@ const SCHEMAS: Record<string, Record<string, unknown>> = {
     ],
     "additionalProperties": false
   },
+  "SessionSetArchivedRequest": {
+    "type": "object",
+    "properties": {
+      "session": {
+        "$ref": "#/components/schemas/SessionIdentity"
+      },
+      "archived": {
+        "type": "boolean"
+      }
+    },
+    "required": [
+      "session",
+      "archived"
+    ],
+    "additionalProperties": false
+  },
   "SessionTranscriptRequest": {
     "type": "object",
     "properties": {
@@ -6751,6 +6881,13 @@ const SCHEMAS: Record<string, Record<string, unknown>> = {
       },
       "agent": {
         "$ref": "#/components/schemas/AgentKind"
+      },
+      "sessionId": {
+        "type": [
+          "string",
+          "null"
+        ],
+        "minLength": 1
       },
       "cursor": {
         "type": [
@@ -6785,6 +6922,13 @@ const SCHEMAS: Record<string, Record<string, unknown>> = {
       },
       "agent": {
         "$ref": "#/components/schemas/AgentKind"
+      },
+      "sessionId": {
+        "type": [
+          "string",
+          "null"
+        ],
+        "minLength": 1
       }
     },
     "required": [
@@ -6982,6 +7126,13 @@ const SCHEMAS: Record<string, Record<string, unknown>> = {
       },
       "agent": {
         "$ref": "#/components/schemas/AgentKind"
+      },
+      "sessionId": {
+        "type": [
+          "string",
+          "null"
+        ],
+        "minLength": 1
       },
       "query": {
         "type": "string"
@@ -7292,6 +7443,7 @@ const REQUEST_SCHEMAS: Record<CommandName, string> = {
   "skills_list": "EmptyRequest",
   "skills_refresh": "EmptyRequest",
   "sessions_snapshot": "EmptyRequest",
+  "sessions_ownership_snapshot": "EmptyRequest",
   "sessions_list": "SessionsListRequest",
   "sessions_scan_start": "EmptyRequest",
   "sessions_search": "SessionsSearchRequest",
@@ -7338,6 +7490,7 @@ const REQUEST_SCHEMAS: Record<CommandName, string> = {
   "prompts_list": "EmptyRequest",
   "prompt_save": "PromptSaveRequest",
   "prompts_delete_many": "PromptsDeleteManyRequest",
+  "session_set_archived": "SessionSetArchivedRequest",
   "session_transcript": "SessionTranscriptRequest",
   "session_transcript_locator": "SessionTranscriptLocatorRequest",
   "session_transcript_search": "SessionTranscriptSearchRequest",
@@ -7352,6 +7505,7 @@ const REQUEST_SCHEMAS: Record<CommandName, string> = {
   "skills_backup_adopt": "SkillsBackupAdoptRequest",
   "skills_backup_adopt_many": "SkillsBackupAdoptManyRequest",
   "skills_backup_disconnect": "EmptyRequest",
+  "skills_create": "SkillsCreateRequest",
   "skills_add": "SkillsAddRequest",
   "skills_add_preview_read": "SkillsAddPreviewReadRequest",
   "skills_distribute": "SkillsDistributeRequest",
@@ -7398,6 +7552,7 @@ const RESULT_SCHEMAS: Record<CommandName, string> = {
   "skills_list": "SkillRecordList",
   "skills_refresh": "SkillRefreshResponse",
   "sessions_snapshot": "SessionSnapshot",
+  "sessions_ownership_snapshot": "SessionOwnershipSnapshot",
   "sessions_list": "SessionsListResponse",
   "sessions_scan_start": "SessionScanStartResponse",
   "sessions_search": "SessionSearchHitList",
@@ -7444,6 +7599,7 @@ const RESULT_SCHEMAS: Record<CommandName, string> = {
   "prompts_list": "PromptRecordList",
   "prompt_save": "PromptSaveResponse",
   "prompts_delete_many": "PromptsDeleteManyResponse",
+  "session_set_archived": "SessionRecord",
   "session_transcript": "TranscriptPage",
   "session_transcript_locator": "TranscriptLocatorPage",
   "session_transcript_search": "TranscriptSearchResult",
@@ -7458,6 +7614,7 @@ const RESULT_SCHEMAS: Record<CommandName, string> = {
   "skills_backup_adopt": "BackupAdoptResponse",
   "skills_backup_adopt_many": "BackupAdoptResponse",
   "skills_backup_disconnect": "SkillsBackupDisconnectResponse",
+  "skills_create": "SkillsCreateResponse",
   "skills_add": "SkillsAddResponse",
   "skills_add_preview_read": "SkillPreviewReadResponse",
   "skills_distribute": "SkillsDistributeResponse",
@@ -7496,6 +7653,7 @@ const RESULT_SCHEMAS: Record<CommandName, string> = {
 };
 const EVENT_SCHEMAS: Record<string, string> = {
   "sessions://scan": "SessionScanEvent",
+  "sessions://ownership": "SessionOwnershipSnapshot",
   "analytics://progress": "AnalyticsProgressEvent",
   "analytics://revision": "AnalyticsRevisionEvent",
   "skills://updates": "SkillsUpdatesEvent",

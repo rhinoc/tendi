@@ -86,6 +86,13 @@ test("Search ranges preserve source positions when case folding expands text", (
   assert.deepEqual(findTextRanges("a.b", "."), [{ from: 1, to: 2 }]);
 });
 
+test("Search ranges preserve leading and trailing spaces", () => {
+  assert.deepEqual(findTextRanges("task ask", " ask"), [{ from: 4, to: 8 }]);
+  assert.deepEqual(findTextRanges("ask", " ask"), []);
+  assert.deepEqual(findTextRanges("one two ", "two "), [{ from: 4, to: 8 }]);
+  assert.deepEqual(findTextRanges("one two", "   "), []);
+});
+
 test("Session search ranges highlight each whitespace-delimited term", () => {
   assert.deepEqual(splitSearchQueryTerms("  title  Agent\nshared "), ["title", "Agent", "shared"]);
   assert.deepEqual(

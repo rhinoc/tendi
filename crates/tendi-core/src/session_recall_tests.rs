@@ -261,7 +261,7 @@ fn published_source_content_is_reused_across_scopes_and_invalidated_on_append() 
     assert!(errors.is_empty(), "{errors:?}");
     assert!(!pending);
     let checkpoints: Vec<String> = store
-        .conn
+        .sessions.conn
         .prepare("SELECT search_checkpoint FROM scoped_session_search_index ORDER BY scope_key")
         .unwrap()
         .query_map([], |row| row.get(0))
@@ -270,7 +270,7 @@ fn published_source_content_is_reused_across_scopes_and_invalidated_on_append() 
         .unwrap();
     assert_eq!(checkpoints.len(), 2);
     assert_eq!(checkpoints[0], checkpoints[1]);
-    let contents: i64=store.conn.query_row("SELECT count(DISTINCT content_id) FROM scoped_session_search_entries WHERE record_order > 0",[],|row|row.get(0)).unwrap();
+    let contents: i64=store.sessions.conn.query_row("SELECT count(DISTINCT content_id) FROM scoped_session_search_entries WHERE record_order > 0",[],|row|row.get(0)).unwrap();
     assert_eq!(contents, 1);
     let options = SessionRecallOptions {
         query: "cachedneedle".into(),

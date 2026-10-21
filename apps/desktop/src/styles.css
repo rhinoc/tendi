@@ -683,6 +683,16 @@ p {
   transition: width 160ms ease-out;
 }
 
+.addSkillPanel.isCreatingLocal {
+  height: auto;
+}
+
+.createLocalSkillBody {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+}
+
 .addSkillPanel.hasPlan:not(.isReviewing),
 .addSkillPanel.isReviewing {
   left: 50%;
@@ -1006,6 +1016,24 @@ p {
   gap: 6px;
   color: var(--muted);
   font-size: var(--text-ui);
+}
+
+.dialogTextFieldHeader {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.dialogTextFieldError {
+  flex: 1 1 0;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--danger);
+  font-size: var(--text-xs);
+  line-height: var(--leading-body);
+  text-align: right;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .dialogTextInput,

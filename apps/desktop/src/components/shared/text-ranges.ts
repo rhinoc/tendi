@@ -10,8 +10,8 @@ function escapeRegExp(value: string) {
 }
 
 export function findTextRanges(text: string, query: string): TextRange[] {
-  const needle = query.trim();
-  if (!needle) return [];
+  const needle = query;
+  if (!needle.trim()) return [];
   const source = `${text ?? ""}`;
   const ranges: TextRange[] = [];
   const chunkSize = Math.max(SEARCH_CHUNK_SIZE, needle.length);

@@ -53,7 +53,8 @@ impl Store {
         scope: &ScopeKey,
         session: &SessionRecord,
     ) -> Result<Option<CurrentSessionSearchState>> {
-        self.conn
+        self.sessions
+            .conn
             .query_row(
                 "SELECT file_mtime, file_size, search_metadata, search_index_version,
                     EXISTS (SELECT 1 FROM scoped_session_search_entries r
@@ -90,7 +91,7 @@ impl Store {
         start_record_order: usize,
         expected_checkpoint: Option<&str>,
     ) -> Result<BTreeMap<usize, SessionSearchDocument>> {
-        let mut statement = self.conn.prepare(
+        let mut statement = self.sessions.conn.prepare(
             "SELECT entry.record_order, entry.metadata_text, entry.title, entry.project,
                     content.user_text, content.assistant_text
              FROM scoped_session_search_entries AS entry
@@ -141,7 +142,8 @@ impl Store {
         agent: &str,
         path: &str,
     ) -> Result<Vec<i64>> {
-        self.conn
+        self.sessions
+            .conn
             .prepare(
                 "SELECT r.id FROM scoped_session_search_entries r WHERE r.scope_key = ?1
                  AND r.session_id = ?2 AND r.agent = ?3 AND r.session_path = ?4
@@ -164,12 +166,15 @@ impl Store {
     }
 
     fn lock_session_search(&self, scope: &ScopeKey) -> Result<crate::coordination::ResourceLease> {
-        crate::coordination::ResourceLease::acquire(self.path(), &session_search_lock_key(scope))
+        crate::coordination::ResourceLease::acquire(
+            self.sessions.path.as_path(),
+            &session_search_lock_key(scope),
+        )
     }
 
     /// Persistent scopes survive a stopped worker or a failed transcript read.
     pub fn pending_session_search_scopes(&self) -> Result<Vec<ScopeKey>> {
-        let mut statement = self.conn.prepare(
+        let mut statement = self.sessions.conn.prepare(
             "SELECT scope_key FROM scoped_session_search_work GROUP BY scope_key ORDER BY min(requested_at), scope_key",
         )?;
         let scopes = statement
@@ -201,7 +206,7 @@ impl Store {
             return Ok((Vec::new(), Vec::new(), true));
         }
         let Some(_search_lock) = crate::coordination::ResourceLease::try_acquire(
-            self.path(),
+            self.sessions.path.as_path(),
             &session_search_lock_key(scope),
         )?
         else {
@@ -219,6 +224,7 @@ impl Store {
     ) -> Result<(Vec<SessionSearchPublication>, Vec<String>, bool)> {
         // Snapshot only durable dirty identities, never the full workspace.
         let work = self
+            .sessions
             .conn
             .prepare(
                 "SELECT session_id, agent, session_path, generation FROM scoped_session_search_work
@@ -241,6 +247,7 @@ impl Store {
             }
             let outcome = (|| -> Result<bool> {
                 let payload: Option<String> = self
+                    .sessions
                     .conn
                     .query_row(
                         "SELECT data_json FROM scoped_sessions
@@ -273,7 +280,7 @@ impl Store {
             if let Some(error) = &error {
                 failures.push(error.clone());
             }
-            if let Err(error) = self.with_background_write_transaction("session_search.acknowledge", |tx| {
+            if let Err(error) = self.with_session_background_write_transaction("session_search.acknowledge", |tx| {
                 if retain {
                     tx.execute(
                         "UPDATE scoped_session_search_work SET last_error = ?6
@@ -293,7 +300,7 @@ impl Store {
         // Aggregate status is not a source of work: new generations can only be
         // acknowledged by the pass which actually observed that session key.
         if let Err(error) =
-            self.with_background_write_transaction("session_search.scope_status", |tx| {
+            self.with_session_background_write_transaction("session_search.scope_status", |tx| {
                 tx.execute(
                     "DELETE FROM scoped_session_search_pending WHERE scope_key = ?1
                  AND NOT EXISTS(SELECT 1 FROM scoped_session_search_work WHERE scope_key = ?1)",
@@ -311,7 +318,7 @@ impl Store {
         {
             failures.push(format!("search scope status: {error:#}"));
         }
-        let pending = match self.conn.query_row(
+        let pending = match self.sessions.conn.query_row(
             "SELECT EXISTS(SELECT 1 FROM scoped_session_search_work WHERE scope_key = ?1)",
             [scope.as_str()],
             |row| row.get::<_, bool>(0),
@@ -327,7 +334,7 @@ impl Store {
 
     /// Explicit synchronous index work; metadata APIs deliberately do not call it.
     pub fn ensure_scoped_session_search_for_scope(&self, scope: &ScopeKey) -> Result<bool> {
-        self.with_background_write_transaction("session_search.request", |tx| {
+        self.with_session_background_write_transaction("session_search.request", |tx| {
             mark_session_search_pending_in_tx(tx, scope)
         })?;
         let _search_lock = self.lock_session_search(scope)?;
@@ -340,7 +347,7 @@ impl Store {
 
     pub fn rebuild_scoped_session_search_for_scope(&self, scope: &ScopeKey) -> Result<usize> {
         let _search_lock = self.lock_session_search(scope)?;
-        self.with_background_write_transaction("session_search.rebuild", |tx| {
+        self.with_session_background_write_transaction("session_search.rebuild", |tx| {
             shared_cache::execute_changed(tx,
                 "UPDATE scoped_session_search_index SET search_index_version = 0 WHERE scope_key = ?1",
                 [scope.as_str()],
@@ -356,7 +363,7 @@ impl Store {
 
     pub fn optimize_session_search_fts_if_due(&self) -> Result<bool> {
         let Some(_maintenance_lease) = crate::coordination::ResourceLease::try_acquire(
-            self.path(),
+            self.sessions.path.as_path(),
             "session-search-fts-optimize",
         )?
         else {
@@ -366,7 +373,7 @@ impl Store {
             return Ok(false);
         };
         let now = unix_now();
-        let due = self.conn.query_row(
+        let due = self.sessions.conn.query_row(
             "SELECT pending_mutations, last_optimized_at
              FROM scoped_session_search_maintenance WHERE id = 1",
             [],
@@ -378,7 +385,7 @@ impl Store {
         {
             return Ok(false);
         }
-        let pending_work: bool = self.conn.query_row(
+        let pending_work: bool = self.sessions.conn.query_row(
             "SELECT EXISTS(SELECT 1 FROM scoped_session_search_work)",
             [],
             |row| row.get(0),
@@ -386,7 +393,7 @@ impl Store {
         if pending_work {
             return Ok(false);
         }
-        self.with_background_write_transaction("session_search.fts_optimize", |tx| {
+        self.with_session_background_write_transaction("session_search.fts_optimize", |tx| {
             tx.execute(
                 "INSERT INTO session_search_content_fts(session_search_content_fts)
                  VALUES ('optimize')",
@@ -419,7 +426,7 @@ impl Store {
         let mut current = self.session_search_current_state(scope, session)?;
         let mut donor = None;
         if current.is_none() {
-            let mut statement = self.conn.prepare(
+            let mut statement = self.sessions.conn.prepare(
                 "SELECT scope_key FROM scoped_session_search_index
                  WHERE session_id = ?1 AND agent = ?2 AND session_path = ?3
                    AND scope_key != ?4 AND search_index_version = ?5 ORDER BY indexed_at DESC")?;
@@ -484,7 +491,7 @@ impl Store {
                 .filter(|row| row.3 == SESSION_SEARCH_INDEX_VERSION && row.4)
                 .and(checkpoint.as_ref());
             let delta =
-                transcript::read_search_delta(&session.path, session.agent, previous, should_stop)?
+                transcript::read_session_search_delta(&session.path, session.agent, Some(&session.id), previous, should_stop)?
                     .ok_or(SearchRefreshCancelled)?;
             start_record_order = delta.start_record_order;
             for (index, item) in delta.items.into_iter().enumerate() {
@@ -558,7 +565,7 @@ impl Store {
                 || checkpoint.as_ref().is_some_and(|checkpoint| {
                     !checkpoint.matches_source(&session.path).unwrap_or(false)
                 });
-            self.with_background_write_transaction("session_search.source_version", |tx| {
+            self.with_session_background_write_transaction("session_search.source_version", |tx| {
                 ensure_session_unchanged(tx, scope, session, payload)?;
                 shared_cache::execute_changed(tx,
                     "UPDATE scoped_session_search_index SET file_mtime = ?5, file_size = ?6, indexed_at = ?7, search_metadata = ?8, search_checkpoint = ?9
@@ -570,7 +577,7 @@ impl Store {
             })?;
             return Ok((None, source_advanced));
         }
-        self.with_background_write_transaction("session_search.begin", |tx| {
+        self.with_session_background_write_transaction("session_search.begin", |tx| {
             ensure_session_unchanged(tx, scope, session, payload)?;
             // A failed or interrupted build remains unpublished and is repaired
             // by the next refresh, even if metadata was already committed.
@@ -604,7 +611,7 @@ impl Store {
                 }
             }
             let processed =
-                self.with_background_write_transaction("session_search.upsert_batch", |tx| {
+                self.with_session_background_write_transaction("session_search.upsert_batch", |tx| {
                     ensure_session_unchanged(tx, scope, session, payload)?;
                     let started = std::time::Instant::now();
                     let mut processed = 0;
@@ -624,7 +631,7 @@ impl Store {
         while removed_start < removed.len() {
             check_search_cancellation(should_stop)?;
             let removed_end = (removed_start + SEARCH_WRITE_BATCH_ROWS).min(removed.len());
-            let processed = self.with_background_write_transaction("session_search.remove_batch", |tx| {
+            let processed = self.with_session_background_write_transaction("session_search.remove_batch", |tx| {
                 ensure_session_unchanged(tx, scope, session, payload)?;
                 let started = std::time::Instant::now();
                 let mut processed = 0;
@@ -650,7 +657,7 @@ impl Store {
         // Publish the source version captured before parsing, not a later stat.
         // Appends during parsing remain stale and are picked up on the next pass.
         let publication =
-            self.with_background_write_transaction("session_search.publish", |tx| {
+            self.with_session_background_write_transaction("session_search.publish", |tx| {
                 ensure_session_unchanged(tx, scope, session, payload)?;
                 shared_cache::execute_changed(tx,
                     "UPDATE scoped_session_search_index SET file_mtime = ?5, file_size = ?6,
@@ -746,7 +753,7 @@ impl Store {
                 break;
             }
             check_search_cancellation(should_stop)?;
-            self.with_background_write_transaction("session_search.prune_batch", |tx| {
+            self.with_session_background_write_transaction("session_search.prune_batch", |tx| {
                 let started = std::time::Instant::now();
                 let mut processed = 0;
                 for id in &ids {
@@ -769,7 +776,7 @@ impl Store {
             })?;
         }
         check_search_cancellation(should_stop)?;
-        self.with_background_write_transaction("session_search.prune_index", |tx| {
+        self.with_session_background_write_transaction("session_search.prune_index", |tx| {
             tx.execute(
                 "DELETE FROM scoped_session_search_index WHERE scope_key = ?1
                 AND session_id = ?2 AND agent = ?3 AND session_path = ?4
@@ -863,12 +870,28 @@ pub(super) fn mark_session_key_pending_in_tx(
     scope: &ScopeKey,
     session: &SessionRecord,
 ) -> Result<()> {
+    mark_session_identity_pending_in_tx(
+        tx,
+        scope,
+        &session.id,
+        agent_label(session.agent),
+        &session.path,
+    )
+}
+
+pub(super) fn mark_session_identity_pending_in_tx(
+    tx: &Transaction<'_>,
+    scope: &ScopeKey,
+    session_id: &str,
+    agent: &str,
+    session_path: &Path,
+) -> Result<()> {
     tx.execute(
         "INSERT INTO scoped_session_search_work(scope_key, session_id, agent, session_path, generation, requested_at, last_error)
          VALUES (?1, ?2, ?3, ?4, 1, ?5, NULL)
          ON CONFLICT(scope_key, session_id, agent, session_path) DO UPDATE SET
          generation = generation + 1, requested_at = excluded.requested_at, last_error = NULL",
-        params![scope.as_str(), session.id, agent_label(session.agent), session.path.to_string_lossy(), unix_now().to_string()],
+        params![scope.as_str(), session_id, agent, session_path.to_string_lossy(), unix_now().to_string()],
     )?;
     mark_search_scope_pending_in_tx(tx, scope)
 }

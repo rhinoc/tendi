@@ -814,6 +814,9 @@ fn session(index: usize, path: PathBuf, project_index: usize) -> SessionRecord {
         approval_mode: Some("never".to_string()),
         is_run_everything: Some(false),
         parent_session_id: None,
+        archived: None,
+        archive_supported: false,
+        resumable: true,
         token_usage: None,
     }
 }

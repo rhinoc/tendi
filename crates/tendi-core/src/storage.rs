@@ -89,7 +89,7 @@ struct ProjectState {
 const SESSION_ANALYTICS_BATCH_SIZE: usize = 64;
 // The current schema is squashed; all development revisions before this
 // release were never published as compatibility boundaries.
-pub(crate) const STORAGE_SCHEMA_VERSION: i64 = 6;
+pub(crate) const STORAGE_SCHEMA_VERSION: i64 = 7;
 const SESSION_SEARCH_INDEX_VERSION: i64 = 2;
 pub(crate) const PROJECTION_PARSER_VERSION: &str = "scan-v9";
 pub(crate) const ANALYTICS_JSON_ENCODING: &str = "zlib-v1";
@@ -98,9 +98,10 @@ pub(crate) const SESSION_SEARCH_FTS_OPTIMIZE_MIN_MUTATIONS: i64 = 2_000;
 pub(crate) const SESSION_SEARCH_FTS_OPTIMIZE_INTERVAL: u64 = 7 * 24 * 60 * 60;
 const DATABASE_READ_LOCK_ATTEMPTS: usize = 100;
 const DATABASE_READ_LOCK_RETRY: Duration = Duration::from_millis(50);
+const DATABASE_RESET_SUFFIXES: [&str; 4] = ["", "-wal", "-shm", "-journal"];
 const SCOPED_SESSION_TABLE: &str = "scoped_sessions";
 const SCOPED_SESSION_SCAN_SOURCE_TABLE: &str = "scoped_session_scan_sources";
-const SESSION_SCAN_CACHE_PARSER_VERSION: &str = "scan-v10";
+const SESSION_SCAN_CACHE_PARSER_VERSION: &str = "scan-v11";
 const SESSION_SEARCH_CANDIDATE_TABLE: &str = "tendi_session_search_candidates";
 const SESSION_SEARCH_MATCH_TABLE: &str = "tendi_session_search_matches";
 const DEFAULT_SCOPE_KEY: &str = "installation:default";
@@ -277,7 +278,62 @@ pub fn recover_database(path: impl AsRef<Path>) -> Result<()> {
     let path = path.as_ref();
     let path = fs::canonicalize(path)
         .with_context(|| format!("failed to resolve sqlite database {}", path.display()))?;
-    database::DatabaseWriter::recover_path(&path)
+    database::DatabaseWriter::recover_path(&path)?;
+    let session_path = session_database_path_for(&path)?;
+    if session_path.exists() {
+        database::DatabaseWriter::recover_path(&session_path)?;
+    }
+    Ok(())
+}
+
+pub fn session_database_path_for(path: &Path) -> Result<PathBuf> {
+    let parent = path
+        .parent()
+        .context("sqlite database has no parent directory")?;
+    let stem = path
+        .file_stem()
+        .context("sqlite database has no file name")?
+        .to_string_lossy();
+    Ok(parent.join(format!("{stem}.sessions.sqlite3")))
+}
+
+pub fn default_session_database_path() -> Result<PathBuf> {
+    session_database_path_for(&default_db_path()?)
+}
+
+/// Remove the primary database, session database, and their SQLite journal files.
+/// This only operates on paths and files; it never opens either database.
+pub fn reset_database_files(path: impl AsRef<Path>) -> Result<()> {
+    let path = path.as_ref();
+    let session_path = session_database_path_for(path)?;
+    for database_path in [path, session_path.as_path()] {
+        for suffix in DATABASE_RESET_SUFFIXES {
+            let mut file_path = database_path.as_os_str().to_os_string();
+            file_path.push(suffix);
+            let file_path = PathBuf::from(file_path);
+            match fs::remove_file(&file_path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    return Err(error)
+                        .with_context(|| format!("failed to remove {}", file_path.display()));
+                }
+            }
+        }
+    }
+
+    let mut marker_path = path.as_os_str().to_os_string();
+    marker_path.push(".reset-pending");
+    let marker_path = PathBuf::from(marker_path);
+    match fs::remove_file(&marker_path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("failed to remove {}", marker_path.display()));
+        }
+    }
+    Ok(())
 }
 
 fn with_database_read_lock_retry<T, F>(mut read: F) -> Result<T>
@@ -298,7 +354,7 @@ where
     unreachable!("database read retry loop always returns");
 }
 
-type PreparedSessionSources = HashMap<PathBuf, repositories::PreparedSessionSource>;
+type PreparedSessionSources = HashMap<crate::sessions::SessionIdentity, repositories::PreparedSessionSource>;
 type PreparedProjectAliases = HashMap<(String, String), Vec<SessionProjectAlias>>;
 
 fn prepare_project_aliases(sessions: &[SessionRecord]) -> PreparedProjectAliases {
@@ -365,6 +421,13 @@ fn analytics_refresh_progress(
 pub struct Store {
     conn: Connection,
     path: PathBuf,
+    writer: std::sync::Arc<database::DatabaseWriter>,
+    pub(crate) sessions: SessionDatabase,
+}
+
+pub(crate) struct SessionDatabase {
+    pub(crate) conn: Connection,
+    pub(crate) path: PathBuf,
     writer: std::sync::Arc<database::DatabaseWriter>,
 }
 
@@ -505,6 +568,49 @@ pub struct SessionSearchHit {
     pub session: SessionRecord,
     pub search_score: f64,
     pub search_snippet: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct SessionTranscriptSearchHit {
+    pub session: SessionRecord,
+    pub record_order: usize,
+    pub search_score: f64,
+    pub search_snippet: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct SessionListFilters {
+    pub started_after: Option<String>,
+    pub search_scopes: transcript::TranscriptSearchScopes,
+    pub archive_filter: SessionArchiveFilter,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum SessionArchiveFilter {
+    #[default]
+    Unarchived,
+    Archived,
+    All,
+}
+
+impl SessionArchiveFilter {
+    pub fn matches(self, archived: Option<bool>) -> bool {
+        match self {
+            Self::Unarchived => archived != Some(true),
+            Self::Archived => archived == Some(true),
+            Self::All => true,
+        }
+    }
+}
+
+impl Default for SessionListFilters {
+    fn default() -> Self {
+        Self {
+            started_after: None,
+            search_scopes: transcript::TranscriptSearchScopes::session_search_default(),
+            archive_filter: SessionArchiveFilter::default(),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -912,6 +1018,10 @@ impl Store {
         &self.path
     }
 
+    pub fn session_database_path(&self) -> &Path {
+        &self.sessions.path
+    }
+
     /// Enter the named database-owned writer once, committing or rolling back together.
     fn with_named_write_transaction<T>(
         &self,
@@ -921,22 +1031,31 @@ impl Store {
         self.writer.write(operation, write)
     }
 
-    /// Rebuildable derived data with source/generation checks at commit time.
-    fn with_background_write_transaction<T>(
+    /// Session projections use their own SQLite file and writer admission queue.
+    fn with_session_write_transaction<T>(
         &self,
         operation: &str,
         write: impl FnOnce(&Transaction<'_>) -> Result<T>,
     ) -> Result<T> {
-        self.writer.write_background(operation, write)
+        self.sessions.writer.write(operation, write)
     }
 
-    fn with_background_write_transaction_until<T>(
+    fn with_session_background_write_transaction<T>(
+        &self,
+        operation: &str,
+        write: impl FnOnce(&Transaction<'_>) -> Result<T>,
+    ) -> Result<T> {
+        self.sessions.writer.write_background(operation, write)
+    }
+
+    fn with_session_background_write_transaction_until<T>(
         &self,
         operation: &str,
         deadline: std::time::Instant,
         write: impl FnOnce(&Transaction<'_>) -> Result<T>,
     ) -> Result<Option<T>> {
-        self.writer
+        self.sessions
+            .writer
             .write_background_until(operation, deadline, write)
     }
 }
@@ -1544,15 +1663,33 @@ fn snippet_context_end(value: &str, start: usize) -> usize {
 }
 
 fn contains_search_score(document: &SessionSearchDocument, terms: &[String]) -> f64 {
+    contains_search_score_with_scopes(
+        document,
+        terms,
+        &transcript::TranscriptSearchScopes::session_search_default(),
+    )
+}
+
+fn contains_search_score_with_scopes(
+    document: &SessionSearchDocument,
+    terms: &[String],
+    scopes: &transcript::TranscriptSearchScopes,
+) -> f64 {
     [
         (document.title.as_str(), 30.0),
-        (document.user_text.as_str(), 20.0),
-        (document.assistant_text.as_str(), 5.0),
+        (document.user_text.as_str(), if scopes.user { 20.0 } else { 0.0 }),
+        (
+            document.assistant_text.as_str(),
+            if scopes.assistant { 5.0 } else { 0.0 },
+        ),
         (document.project.as_str(), 3.0),
         (document.metadata_text.as_str(), 1.0),
     ]
     .into_iter()
     .map(|(value, weight)| {
+        if weight == 0.0 {
+            return 0.0;
+        }
         let value = value.to_lowercase();
         let matched = terms
             .iter()
@@ -1573,32 +1710,54 @@ fn contains_search_score(document: &SessionSearchDocument, terms: &[String]) -> 
     .fold(0.0, f64::max)
 }
 
-fn contains_search_terms(document: &SessionSearchDocument, terms: &[String]) -> bool {
+fn contains_search_terms_with_scopes(
+    document: &SessionSearchDocument,
+    terms: &[String],
+    scopes: &transcript::TranscriptSearchScopes,
+) -> bool {
     terms.iter().all(|term| {
-        [
+        let mut fields = vec![
             document.metadata_text.as_str(),
             document.title.as_str(),
             document.project.as_str(),
-            document.user_text.as_str(),
-            document.assistant_text.as_str(),
-        ]
-        .into_iter()
-        .any(|value| value.to_lowercase().contains(term))
+        ];
+        if scopes.user {
+            fields.push(document.user_text.as_str());
+        }
+        if scopes.assistant {
+            fields.push(document.assistant_text.as_str());
+        }
+        fields
+            .into_iter()
+            .any(|value| value.to_lowercase().contains(term))
     })
 }
 
 fn contains_search_snippet(document: &SessionSearchDocument, terms: &[String]) -> String {
+    contains_search_snippet_with_scopes(
+        document,
+        terms,
+        &transcript::TranscriptSearchScopes::session_search_default(),
+    )
+}
+
+fn contains_search_snippet_with_scopes(
+    document: &SessionSearchDocument,
+    terms: &[String],
+    scopes: &transcript::TranscriptSearchScopes,
+) -> String {
     let candidates = [
-        &document.title,
-        &document.user_text,
-        &document.project,
-        &document.assistant_text,
-        &document.metadata_text,
+        (&document.title, true),
+        (&document.user_text, scopes.user),
+        (&document.project, true),
+        (&document.assistant_text, scopes.assistant),
+        (&document.metadata_text, true),
     ];
     let candidate = candidates
         .into_iter()
+        .filter(|(_, enabled)| *enabled)
         .enumerate()
-        .max_by_key(|(index, candidate)| {
+        .max_by_key(|(index, (candidate, _))| {
             let lower = candidate.to_lowercase();
             (
                 terms
@@ -1608,7 +1767,7 @@ fn contains_search_snippet(document: &SessionSearchDocument, terms: &[String]) -
                 usize::MAX - index,
             )
         })
-        .map(|(_, candidate)| candidate);
+        .map(|(_, (candidate, _))| candidate);
     candidate
         .and_then(|value| highlight_contains_matches(value, terms))
         .map(|snippet| compact_search_snippet(&snippet))

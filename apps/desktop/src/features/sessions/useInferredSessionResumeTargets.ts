@@ -31,7 +31,7 @@ export function useInferredSessionResumeTargets({
     const resumableSessions = [...new Map(
       [...sessions, ...(activeSession ? [activeSession] : [])]
         .filter((session) => (
-          session.agent !== IMPORTED_SESSION_AGENT
+          session.resumable !== false && session.agent !== IMPORTED_SESSION_AGENT
           && Boolean(session.id && session.agent && session.path.trim())
         ))
         .map((session) => [sessionSourceIdentity(session), session] as const),

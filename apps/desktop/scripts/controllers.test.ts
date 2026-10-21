@@ -168,6 +168,35 @@ if (typeof mock.module !== "function") {
     assert.deepEqual(view.tableSessions.map((session) => session.id), ["older", "newer"]);
   });
 
+  test("applies archive and subagent filters to the session view without a query", () => {
+    const sessions = [
+      { id: "live", agent: "codex", title: "Live", path: "/live", projectPath: "/repo", archived: false },
+      { id: "archived", agent: "codex", title: "Archived", path: "/archived", projectPath: "/repo", archived: true },
+      { id: "archived-child", agent: "codex", title: "Archived child", path: "/child", projectPath: "/repo", archived: true, parentSessionId: "archived" },
+    ];
+    const input = {
+      sessions,
+      query: "",
+      remoteSearch: true,
+      sort: { key: "updatedAt", direction: "desc" },
+      pageSize: 50,
+      groupBy: null,
+      showChildSessions: false,
+      selectedProjectKeys: [],
+      projectFilterQuery: "",
+      missingSessionProjectPolicy: "show",
+      projects: [],
+      sessionProjects: [],
+      archiveFilter: "archived",
+    } as const;
+
+    const mainSessions = selectSessionListView(input);
+    assert.deepEqual(mainSessions.tableSessions.map((session) => session.id), ["archived"]);
+
+    const withSubagents = selectSessionListView({ ...input, showChildSessions: true });
+    assert.deepEqual(new Set(withSubagents.tableSessions.map((session) => session.id)), new Set(["archived", "archived-child"]));
+  });
+
   test("keeps imported-session search stable and leaves daemon list requests candidate-free", async () => {
     const base = [
       { id: "one", agent: "codex", title: "one", path: "/one", projectPath: "/repo", updatedAt: "2026-08-29T00:00:00Z" },
@@ -295,6 +324,49 @@ if (typeof mock.module !== "function") {
 
     assert.equal(merged[0], live);
     assert.equal(merged[0].lastUserMessage, "Latest prompt");
+  });
+
+  test("archive roundtrip updates paths without duplicating the logical session", () => {
+    const current = [{ id: "archive-session", agent: "codex", title: "Archive", path: "/custom/sessions/session.jsonl", archived: false }];
+    const archived = applySessionDelta(current, toRawDomainRows([{
+      id: "archive-session", agent: "codex", title: "Archive", path: "/custom/archived_sessions/session.jsonl", archived: true,
+    }], "archive response"));
+    assert.equal(archived.length, 1);
+    assert.equal(archived[0].archived, true);
+    assert.equal(archived[0].path, "/custom/archived_sessions/session.jsonl");
+    const live = applySessionDelta(archived, toRawDomainRows([{
+      id: "archive-session", agent: "codex", title: "Archive", path: "/custom/sessions/session.jsonl", archived: false,
+    }], "unarchive response"));
+    assert.equal(live.length, 1);
+    assert.equal(live[0].archived, false);
+    assert.equal(live[0].path, current[0].path);
+  });
+
+  test("archive metadata refresh replaces a stale paged badge and retains search results", () => {
+    const row = { id: "archive-session", agent: "codex", title: "Archive", path: "/custom/archived_sessions/session.jsonl", searchScore: 12, searchSnippet: "match" };
+    const source = { id: row.id, agent: row.agent, title: row.title, path: row.path, archived: true };
+    const merged = mergeSessionListRows([row], [source]);
+    assert.equal(merged[0].archived, true);
+    assert.equal(merged[0].searchScore, 12);
+    assert.equal(merged[0].searchSnippet, "match");
+  });
+
+  test("keeps read-only archive state separate from archive and resume capabilities", () => {
+    const rows = applySessionDelta([], toRawDomainRows([
+      { id: "desktop", agent: "cursor", path: "/desktop/state.vscdb", archived: true, archive_supported: false, resumable: false },
+      { id: "sdk", agent: "cursor", path: "/sdk/index.db", archived: false, archive_supported: true, resumable: false },
+    ], "session capabilities"));
+    const desktop = rows.find((row) => row.id === "desktop")!;
+    const sdk = rows.find((row) => row.id === "sdk")!;
+    assert.equal(desktop.archived, true);
+    assert.equal(desktop.archiveSupported, false);
+    assert.equal(desktop.resumable, false);
+    assert.equal(sdk.archiveSupported, true);
+    assert.equal(sdk.resumable, false);
+    const paged = { ...desktop, archiveSupported: true, resumable: true };
+    const merged = mergeSessionListRows([paged], [desktop]);
+    assert.equal(merged[0].archiveSupported, false);
+    assert.equal(merged[0].resumable, false);
   });
 
   test("preserves native session id casing when resolving relationships", () => {

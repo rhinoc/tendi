@@ -5,7 +5,7 @@ pub use serde_json::Value;
 pub const PROTOCOL_VERSION: u64 = 2;
 pub const SCHEMA_VERSION: u64 = 1;
 pub const RUNTIME_CONTRACT_FINGERPRINT: &str =
-    "fc5a464a9ad21eb4ca9ea723050e685d2b0cc2bff95a4a4e48ae8797fac83384";
+    "aa6065d443df59d906247852b0d256ec311ef0118f89bf2b104042ee435029d2";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -875,6 +875,16 @@ pub struct SkillsBackupAdoptManyRequest {
     pub skills: Vec<SkillsBackupAdoptManyEntry>,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SkillsCreateRequest {
+    pub name: String,
+    pub description: String,
+    pub target: String,
+}
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SkillsCreateResponse {
+    pub updated: SkillRecordList,
+}
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SkillsAddRequest {
     pub source: String,
     pub target: String,
@@ -1325,6 +1335,15 @@ pub enum SessionListSortDirection {
     #[serde(rename = "desc")]
     Desc,
 }
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SessionArchiveFilter {
+    #[serde(rename = "unarchived")]
+    Unarchived,
+    #[serde(rename = "archived")]
+    Archived,
+    #[serde(rename = "all")]
+    All,
+}
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SessionsListRequest {
     pub query: String,
@@ -1346,6 +1365,15 @@ pub struct SessionsListRequest {
     pub selected_project_keys: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub locate: Option<SessionIdentity>,
+    #[serde(rename = "searchScopes")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub search_scopes: Option<TranscriptSearchScopes>,
+    #[serde(rename = "startedAfter")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub started_after: Option<String>,
+    #[serde(rename = "archiveFilter")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub archive_filter: Option<SessionArchiveFilter>,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SessionListProjectOption {
@@ -1379,6 +1407,12 @@ pub struct SessionsSearchRequest {
     pub query: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub candidates: Option<Vec<SessionIdentity>>,
+    #[serde(rename = "searchScopes")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub search_scopes: Option<TranscriptSearchScopes>,
+    #[serde(rename = "archiveFilter")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub archive_filter: Option<SessionArchiveFilter>,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SessionSearchHit {
@@ -1453,6 +1487,12 @@ pub struct SessionRecord {
     pub logical_project_name: Option<String>,
     pub path: String,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub archived: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub archive_supported: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resumable: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub started_at: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub updated_at: Option<String>,
@@ -1482,6 +1522,17 @@ pub struct SessionRecord {
     pub search_snippet: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub token_usage: Option<SessionTokenUsage>,
+}
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SessionOwnershipIdentity {
+    pub id: String,
+    pub agent: AgentKind,
+}
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SessionOwnershipSnapshot {
+    pub epoch: String,
+    pub revision: Revision,
+    pub held: Vec<SessionOwnershipIdentity>,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SessionSnapshot {
@@ -2179,9 +2230,17 @@ pub struct AgentConfigDeleteResult {
     pub config_profiles: std::collections::BTreeMap<String, String>,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SessionSetArchivedRequest {
+    pub session: SessionIdentity,
+    pub archived: bool,
+}
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SessionTranscriptRequest {
     pub path: String,
     pub agent: AgentKind,
+    #[serde(rename = "sessionId")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cursor: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -2194,6 +2253,9 @@ pub struct SessionTranscriptRequest {
 pub struct SessionTranscriptLocatorRequest {
     pub path: String,
     pub agent: AgentKind,
+    #[serde(rename = "sessionId")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TranscriptItem {
@@ -2259,6 +2321,9 @@ pub struct TranscriptSearchScopes {
 pub struct SessionTranscriptSearchRequest {
     pub path: String,
     pub agent: AgentKind,
+    #[serde(rename = "sessionId")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
     pub query: String,
     pub scopes: TranscriptSearchScopes,
 }
@@ -2548,6 +2613,8 @@ pub type SkillsRefreshRequest = EmptyRequest;
 pub type SkillsRefreshResponse = SkillRefreshResponse;
 pub type SessionsSnapshotRequest = EmptyRequest;
 pub type SessionsSnapshotResponse = SessionSnapshot;
+pub type SessionsOwnershipSnapshotRequest = EmptyRequest;
+pub type SessionsOwnershipSnapshotResponse = SessionOwnershipSnapshot;
 
 pub type SessionsScanStartRequest = EmptyRequest;
 pub type SessionsScanStartResponse = SessionScanStartResponse;
@@ -2610,6 +2677,7 @@ pub type McpSetEnabledManyResponse = McpMutationResponse;
 pub type PromptsListRequest = EmptyRequest;
 pub type PromptsListResponse = PromptRecordList;
 
+pub type SessionSetArchivedResponse = SessionRecord;
 pub type SessionTranscriptResponse = TranscriptPage;
 pub type SessionTranscriptLocatorResponse = TranscriptLocatorPage;
 pub type SessionTranscriptSearchResponse = TranscriptSearchResult;
@@ -2681,6 +2749,8 @@ pub enum CommandRequest {
     SkillsRefresh(SkillsRefreshRequest),
     #[serde(rename = "sessions_snapshot")]
     SessionsSnapshot(SessionsSnapshotRequest),
+    #[serde(rename = "sessions_ownership_snapshot")]
+    SessionsOwnershipSnapshot(SessionsOwnershipSnapshotRequest),
     #[serde(rename = "sessions_list")]
     SessionsList(SessionsListRequest),
     #[serde(rename = "sessions_scan_start")]
@@ -2773,6 +2843,8 @@ pub enum CommandRequest {
     PromptSave(PromptSaveRequest),
     #[serde(rename = "prompts_delete_many")]
     PromptsDeleteMany(PromptsDeleteManyRequest),
+    #[serde(rename = "session_set_archived")]
+    SessionSetArchived(SessionSetArchivedRequest),
     #[serde(rename = "session_transcript")]
     SessionTranscript(SessionTranscriptRequest),
     #[serde(rename = "session_transcript_locator")]
@@ -2801,6 +2873,8 @@ pub enum CommandRequest {
     SkillsBackupAdoptMany(SkillsBackupAdoptManyRequest),
     #[serde(rename = "skills_backup_disconnect")]
     SkillsBackupDisconnect(SkillsBackupDisconnectRequest),
+    #[serde(rename = "skills_create")]
+    SkillsCreate(SkillsCreateRequest),
     #[serde(rename = "skills_add")]
     SkillsAdd(SkillsAddRequest),
     #[serde(rename = "skills_add_preview_read")]
@@ -2893,6 +2967,8 @@ pub enum CommandResult {
     SkillsRefresh(SkillsRefreshResponse),
     #[serde(rename = "sessions_snapshot")]
     SessionsSnapshot(SessionsSnapshotResponse),
+    #[serde(rename = "sessions_ownership_snapshot")]
+    SessionsOwnershipSnapshot(SessionsOwnershipSnapshotResponse),
     #[serde(rename = "sessions_list")]
     SessionsList(SessionsListResponse),
     #[serde(rename = "sessions_scan_start")]
@@ -2985,6 +3061,8 @@ pub enum CommandResult {
     PromptSave(PromptSaveResponse),
     #[serde(rename = "prompts_delete_many")]
     PromptsDeleteMany(PromptsDeleteManyResponse),
+    #[serde(rename = "session_set_archived")]
+    SessionSetArchived(SessionSetArchivedResponse),
     #[serde(rename = "session_transcript")]
     SessionTranscript(SessionTranscriptResponse),
     #[serde(rename = "session_transcript_locator")]
@@ -3013,6 +3091,8 @@ pub enum CommandResult {
     SkillsBackupAdoptMany(SkillsBackupAdoptManyResponse),
     #[serde(rename = "skills_backup_disconnect")]
     SkillsBackupDisconnect(SkillsBackupDisconnectResponse),
+    #[serde(rename = "skills_create")]
+    SkillsCreate(SkillsCreateResponse),
     #[serde(rename = "skills_add")]
     SkillsAdd(SkillsAddResponse),
     #[serde(rename = "skills_add_preview_read")]
@@ -3095,6 +3175,7 @@ pub enum CommandName {
     SkillsList,
     SkillsRefresh,
     SessionsSnapshot,
+    SessionsOwnershipSnapshot,
     SessionsList,
     SessionsScanStart,
     SessionsSearch,
@@ -3141,6 +3222,7 @@ pub enum CommandName {
     PromptsList,
     PromptSave,
     PromptsDeleteMany,
+    SessionSetArchived,
     SessionTranscript,
     SessionTranscriptLocator,
     SessionTranscriptSearch,
@@ -3155,6 +3237,7 @@ pub enum CommandName {
     SkillsBackupAdopt,
     SkillsBackupAdoptMany,
     SkillsBackupDisconnect,
+    SkillsCreate,
     SkillsAdd,
     SkillsAddPreviewRead,
     SkillsDistribute,
@@ -3203,6 +3286,7 @@ impl CommandName {
             "skills_list" => Some(Self::SkillsList),
             "skills_refresh" => Some(Self::SkillsRefresh),
             "sessions_snapshot" => Some(Self::SessionsSnapshot),
+            "sessions_ownership_snapshot" => Some(Self::SessionsOwnershipSnapshot),
             "sessions_list" => Some(Self::SessionsList),
             "sessions_scan_start" => Some(Self::SessionsScanStart),
             "sessions_search" => Some(Self::SessionsSearch),
@@ -3249,6 +3333,7 @@ impl CommandName {
             "prompts_list" => Some(Self::PromptsList),
             "prompt_save" => Some(Self::PromptSave),
             "prompts_delete_many" => Some(Self::PromptsDeleteMany),
+            "session_set_archived" => Some(Self::SessionSetArchived),
             "session_transcript" => Some(Self::SessionTranscript),
             "session_transcript_locator" => Some(Self::SessionTranscriptLocator),
             "session_transcript_search" => Some(Self::SessionTranscriptSearch),
@@ -3263,6 +3348,7 @@ impl CommandName {
             "skills_backup_adopt" => Some(Self::SkillsBackupAdopt),
             "skills_backup_adopt_many" => Some(Self::SkillsBackupAdoptMany),
             "skills_backup_disconnect" => Some(Self::SkillsBackupDisconnect),
+            "skills_create" => Some(Self::SkillsCreate),
             "skills_add" => Some(Self::SkillsAdd),
             "skills_add_preview_read" => Some(Self::SkillsAddPreviewRead),
             "skills_distribute" => Some(Self::SkillsDistribute),
@@ -3312,6 +3398,7 @@ impl CommandName {
             Self::SkillsList => "skills_list",
             Self::SkillsRefresh => "skills_refresh",
             Self::SessionsSnapshot => "sessions_snapshot",
+            Self::SessionsOwnershipSnapshot => "sessions_ownership_snapshot",
             Self::SessionsList => "sessions_list",
             Self::SessionsScanStart => "sessions_scan_start",
             Self::SessionsSearch => "sessions_search",
@@ -3358,6 +3445,7 @@ impl CommandName {
             Self::PromptsList => "prompts_list",
             Self::PromptSave => "prompt_save",
             Self::PromptsDeleteMany => "prompts_delete_many",
+            Self::SessionSetArchived => "session_set_archived",
             Self::SessionTranscript => "session_transcript",
             Self::SessionTranscriptLocator => "session_transcript_locator",
             Self::SessionTranscriptSearch => "session_transcript_search",
@@ -3372,6 +3460,7 @@ impl CommandName {
             Self::SkillsBackupAdopt => "skills_backup_adopt",
             Self::SkillsBackupAdoptMany => "skills_backup_adopt_many",
             Self::SkillsBackupDisconnect => "skills_backup_disconnect",
+            Self::SkillsCreate => "skills_create",
             Self::SkillsAdd => "skills_add",
             Self::SkillsAddPreviewRead => "skills_add_preview_read",
             Self::SkillsDistribute => "skills_distribute",
@@ -3486,6 +3575,15 @@ pub fn command_metadata(name: &str) -> Option<CommandMetadata> {
         }),
         "sessions_snapshot" => Some(CommandMetadata {
             name: "sessions_snapshot",
+            owner: Owner::Daemon,
+            execution: Execution::Read,
+            serialized_write: false,
+            requires_params: false,
+            internal: false,
+            deprecated: false,
+        }),
+        "sessions_ownership_snapshot" => Some(CommandMetadata {
+            name: "sessions_ownership_snapshot",
             owner: Owner::Daemon,
             execution: Execution::Read,
             serialized_write: false,
@@ -3907,6 +4005,15 @@ pub fn command_metadata(name: &str) -> Option<CommandMetadata> {
             internal: false,
             deprecated: false,
         }),
+        "session_set_archived" => Some(CommandMetadata {
+            name: "session_set_archived",
+            owner: Owner::Daemon,
+            execution: Execution::Write,
+            serialized_write: true,
+            requires_params: true,
+            internal: false,
+            deprecated: false,
+        }),
         "session_transcript" => Some(CommandMetadata {
             name: "session_transcript",
             owner: Owner::Daemon,
@@ -4030,6 +4137,15 @@ pub fn command_metadata(name: &str) -> Option<CommandMetadata> {
             execution: Execution::Write,
             serialized_write: true,
             requires_params: false,
+            internal: false,
+            deprecated: false,
+        }),
+        "skills_create" => Some(CommandMetadata {
+            name: "skills_create",
+            owner: Owner::Daemon,
+            execution: Execution::Write,
+            serialized_write: true,
+            requires_params: true,
             internal: false,
             deprecated: false,
         }),
@@ -4516,6 +4632,10 @@ pub fn validate_request(name: &str, args: &Value) -> Result<(), String> {
             serde_json::from_value::<PromptsDeleteManyRequest>(args.clone())
                 .map_err(|error| format!("request is invalid: {error}"))?;
         }
+        "session_set_archived" => {
+            serde_json::from_value::<SessionSetArchivedRequest>(args.clone())
+                .map_err(|error| format!("request is invalid: {error}"))?;
+        }
         "session_transcript" => {
             serde_json::from_value::<SessionTranscriptRequest>(args.clone())
                 .map_err(|error| format!("request is invalid: {error}"))?;
@@ -4550,6 +4670,10 @@ pub fn validate_request(name: &str, args: &Value) -> Result<(), String> {
         }
         "skills_backup_adopt_many" => {
             serde_json::from_value::<SkillsBackupAdoptManyRequest>(args.clone())
+                .map_err(|error| format!("request is invalid: {error}"))?;
+        }
+        "skills_create" => {
+            serde_json::from_value::<SkillsCreateRequest>(args.clone())
                 .map_err(|error| format!("request is invalid: {error}"))?;
         }
         "skills_add" => {
@@ -4664,6 +4788,7 @@ pub fn validate_request(name: &str, args: &Value) -> Result<(), String> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EventName {
     SessionsScan,
+    SessionsOwnership,
     AnalyticsProgress,
     AnalyticsRevision,
     SkillsUpdates,
@@ -4675,6 +4800,7 @@ pub enum EventName {
 }
 pub enum RuntimeEventPayload {
     SessionsScan(SessionScanEvent),
+    SessionsOwnership(SessionOwnershipSnapshot),
     AnalyticsProgress(AnalyticsProgressEvent),
     AnalyticsRevision(AnalyticsRevisionEvent),
     SkillsUpdates(SkillsUpdatesEvent),
@@ -4688,6 +4814,7 @@ impl RuntimeEventPayload {
     pub const fn event_name(&self) -> &'static str {
         match self {
             Self::SessionsScan(_) => "sessions://scan",
+            Self::SessionsOwnership(_) => "sessions://ownership",
             Self::AnalyticsProgress(_) => "analytics://progress",
             Self::AnalyticsRevision(_) => "analytics://revision",
             Self::SkillsUpdates(_) => "skills://updates",
@@ -4701,6 +4828,9 @@ impl RuntimeEventPayload {
     pub fn into_json(self) -> JsonValue {
         match self {
             Self::SessionsScan(payload) => {
+                serde_json::to_value(payload).expect("generated event payload serializes")
+            }
+            Self::SessionsOwnership(payload) => {
                 serde_json::to_value(payload).expect("generated event payload serializes")
             }
             Self::AnalyticsProgress(payload) => {
@@ -4734,6 +4864,7 @@ impl EventName {
     pub fn parse(value: &str) -> Option<Self> {
         match value {
             "sessions://scan" => Some(Self::SessionsScan),
+            "sessions://ownership" => Some(Self::SessionsOwnership),
             "analytics://progress" => Some(Self::AnalyticsProgress),
             "analytics://revision" => Some(Self::AnalyticsRevision),
             "skills://updates" => Some(Self::SkillsUpdates),
@@ -4748,6 +4879,7 @@ impl EventName {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::SessionsScan => "sessions://scan",
+            Self::SessionsOwnership => "sessions://ownership",
             Self::AnalyticsProgress => "analytics://progress",
             Self::AnalyticsRevision => "analytics://revision",
             Self::SkillsUpdates => "skills://updates",
@@ -4794,6 +4926,11 @@ pub fn validate_result(name: &str, value: &Value) -> Result<(), String> {
         }
         "skills_refresh" => {
             serde_json::from_value::<SkillRefreshResponse>(value.clone())
+                .map_err(|error| format!("result is invalid: {error}"))?;
+            Ok(())
+        }
+        "sessions_ownership_snapshot" => {
+            serde_json::from_value::<SessionOwnershipSnapshot>(value.clone())
                 .map_err(|error| format!("result is invalid: {error}"))?;
             Ok(())
         }
@@ -5027,6 +5164,11 @@ pub fn validate_result(name: &str, value: &Value) -> Result<(), String> {
                 .map_err(|error| format!("result is invalid: {error}"))?;
             Ok(())
         }
+        "session_set_archived" => {
+            serde_json::from_value::<SessionRecord>(value.clone())
+                .map_err(|error| format!("result is invalid: {error}"))?;
+            Ok(())
+        }
         "session_transcript" => {
             serde_json::from_value::<TranscriptPage>(value.clone())
                 .map_err(|error| format!("result is invalid: {error}"))?;
@@ -5094,6 +5236,11 @@ pub fn validate_result(name: &str, value: &Value) -> Result<(), String> {
         }
         "skills_backup_disconnect" => {
             serde_json::from_value::<SkillsBackupDisconnectResponse>(value.clone())
+                .map_err(|error| format!("result is invalid: {error}"))?;
+            Ok(())
+        }
+        "skills_create" => {
+            serde_json::from_value::<SkillsCreateResponse>(value.clone())
                 .map_err(|error| format!("result is invalid: {error}"))?;
             Ok(())
         }
@@ -5302,6 +5449,12 @@ pub fn validate_event(event: &RuntimeEventEnvelope) -> Result<(), String> {
         "sessions://scan" => {
             serde_json::from_value::<SessionScanEvent>(Value::Object(event.payload.clone()))
                 .map_err(|error| format!("event payload is invalid: {error}"))?;
+        }
+        "sessions://ownership" => {
+            serde_json::from_value::<SessionOwnershipSnapshot>(Value::Object(
+                event.payload.clone(),
+            ))
+            .map_err(|error| format!("event payload is invalid: {error}"))?;
         }
         "analytics://progress" => {
             serde_json::from_value::<AnalyticsProgressEvent>(Value::Object(event.payload.clone()))

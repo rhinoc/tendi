@@ -49,6 +49,12 @@ pub struct SessionRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub logical_project_name: Option<String>,
     pub path: PathBuf,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub archived: Option<bool>,
+    #[serde(default)]
+    pub archive_supported: bool,
+    #[serde(default = "session_resumable_default")]
+    pub resumable: bool,
     pub started_at: Option<String>,
     pub updated_at: Option<String>,
     pub message_count: Option<usize>,
@@ -74,7 +80,9 @@ pub struct SessionRecord {
     pub token_usage: Option<SessionTokenUsage>,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+fn session_resumable_default() -> bool { true }
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, Hash)]
 pub struct SessionIdentity {
     pub id: String,
     pub agent: AgentKind,
@@ -135,7 +143,7 @@ pub struct SessionScanSourceState {
 
 #[derive(Debug, Clone, Default)]
 pub struct SessionScanCache {
-    entries: BTreeMap<(AgentKind, PathBuf), SessionScanCacheEntry>,
+    entries: BTreeMap<(AgentKind, PathBuf, String), SessionScanCacheEntry>,
     entries_by_id: BTreeMap<(AgentKind, String), PathBuf>,
     #[cfg(unix)]
     entries_by_file: BTreeMap<(AgentKind, SessionFileIdentity), PathBuf>,
@@ -167,7 +175,7 @@ impl SessionScanCache {
             }
             cache
                 .entries
-                .insert((entry.session.agent, entry.session.path.clone()), entry);
+                .insert((entry.session.agent, entry.session.path.clone(), entry.session.id.clone()), entry);
         }
         cache
     }
@@ -251,7 +259,14 @@ impl SessionScanCache {
             && entry.file_size == file_size
             && self.additional_file_states_current(entry)
             && !session_requires_rescan(&entry.session))
-        .then(|| entry.session.clone())
+        .then(|| {
+            let mut session = entry.session.clone();
+            if !session.path.is_file() { session.path = path.to_path_buf(); }
+            session.archived = crate::providers::session_archive_state(agent, &session.path, &session.id);
+            session.archive_supported = crate::providers::session_archive_supported(agent, &session.path);
+            session.resumable = crate::providers::agent_provider(agent).session_resumable(&session.path, &session.id);
+            session
+        })
     }
 
     pub(crate) fn session_if_current_id(
@@ -260,7 +275,7 @@ impl SessionScanCache {
         id: &str,
     ) -> Option<SessionRecord> {
         let path = self.entries_by_id.get(&(agent, id.to_string()))?;
-        let entry = self.entries.get(&(agent, path.clone()))?;
+        let entry = self.entries.get(&(agent, path.clone(), id.to_owned()))?;
         let (file_mtime, file_size) = file_state(&entry.session.path)?;
         (entry.file_mtime == file_mtime
             && entry.file_size == file_size
@@ -273,7 +288,7 @@ impl SessionScanCache {
         let Some(path) = self.entries_by_id.get(&(agent, id.to_string())) else {
             return "id_missing";
         };
-        let Some(entry) = self.entries.get(&(agent, path.clone())) else {
+        let Some(entry) = self.entries.get(&(agent, path.clone(), id.to_owned())) else {
             return "entry_missing";
         };
         let Some((file_mtime, file_size)) = file_state(&entry.session.path) else {
@@ -378,17 +393,28 @@ impl SessionScanCache {
         if reason != "eligible" {
             return None;
         }
-        Some((entry.session.clone(), cached_size))
+        let mut session = entry.session.clone();
+        session.path = path.to_path_buf();
+        session.archived = crate::providers::session_archive_state(agent, path, &session.id);
+            session.archive_supported = crate::providers::session_archive_supported(agent, path);
+            session.resumable = crate::providers::agent_provider(agent).session_resumable(path, &session.id);
+        Some((session, cached_size))
+    }
+
+    fn entry_for_exact_path(&self, agent: AgentKind, path: &Path) -> Option<&SessionScanCacheEntry> {
+        self.entries.range((agent, path.to_path_buf(), String::new())..)
+            .next().filter(|((cached_agent, cached_path, _), _)| *cached_agent == agent && cached_path == path)
+            .map(|(_, entry)| entry)
     }
 
     fn entry_for_path(&self, agent: AgentKind, path: &Path) -> Option<&SessionScanCacheEntry> {
-        if let Some(entry) = self.entries.get(&(agent, path.to_path_buf())) {
+        if let Some(entry) = self.entry_for_exact_path(agent, path) {
             return Some(entry);
         }
         #[cfg(unix)]
         if let Some(identity) = session_file_identity(path) {
             let cached_path = self.entries_by_file.get(&(agent, identity))?;
-            return self.entries.get(&(agent, cached_path.clone()));
+            return self.entry_for_exact_path(agent, cached_path);
         }
         None
     }
@@ -421,7 +447,7 @@ impl SessionScanCache {
         let mut reasons = BTreeMap::<String, usize>::new();
         let mut examples = Vec::new();
         for session in sessions {
-            let reason = match self.entries.get(&(session.agent, session.path.clone())) {
+            let reason = match self.entries.get(&(session.agent, session.path.clone(), session.id.clone())) {
                 None => Some("missing_cache"),
                 Some(entry) if !scan_record_matches_cached(&entry.session, session) => {
                     Some("metadata_changed")
@@ -443,7 +469,7 @@ impl SessionScanCache {
                 if examples.len() < 5 {
                     let changed_fields = self
                         .entries
-                        .get(&(session.agent, session.path.clone()))
+                        .get(&(session.agent, session.path.clone(), session.id.clone()))
                         .filter(|entry| {
                             reason == "metadata_changed"
                                 && !scan_record_matches_cached(&entry.session, session)
@@ -485,7 +511,7 @@ impl SessionScanCache {
         let direct = self
             .entries
             .iter()
-            .find_map(|((agent, cached_path), _)| (cached_path == path).then_some(*agent));
+            .find_map(|((agent, cached_path, _), _)| (cached_path == path).then_some(*agent));
         if direct.is_some() {
             return direct;
         }
@@ -600,7 +626,7 @@ fn scan_sessions_with_additional_roots_with_cache(
             }),
         );
     }
-    scan_additional_session_roots(additional_session_roots, &mut sessions, cache);
+    scan_additional_session_roots(additional_session_roots, &mut sessions, &mut warnings, cache);
 
     let mut sessions = merge_sessions(sessions);
     sessions.retain(|session| !is_index_path(session.agent, &session.path));
@@ -683,6 +709,12 @@ pub fn session_watch_expansion(
         .find_map(|provider| provider.session_watch_expansion(dynamic_roots, event_path))
 }
 
+pub fn session_watch_source_path(event_path: &Path) -> PathBuf {
+    crate::providers::all_providers().into_iter()
+        .find_map(|provider| provider.session_watch_source_path(event_path))
+        .unwrap_or_else(|| event_path.to_path_buf())
+}
+
 pub fn recent_session_paths(
     cwd: &Path,
     additional_session_roots: &[PathBuf],
@@ -735,20 +767,23 @@ fn sorted_recent_paths(candidates: BTreeMap<PathBuf, SystemTime>) -> Vec<PathBuf
 }
 
 pub fn is_session_candidate_path(path: &Path) -> bool {
-    path.extension()
-        .is_some_and(|extension| extension == "jsonl")
-        || crate::providers::all_providers()
-            .into_iter()
-            .any(|provider| provider.is_session_candidate_path(path))
+    crate::providers::all_providers().into_iter().any(|provider| {
+        provider.is_session_transcript_path(path) || provider.is_session_candidate_path(path)
+    })
 }
 
 pub fn scan_session_paths(paths: &[PathBuf], cache: &SessionScanCache) -> SessionScan {
     let mut sessions = Vec::new();
-    let warnings = Vec::new();
+    let mut warnings = Vec::new();
     for path in paths.iter().filter(|path| path.is_file()) {
-        let handled = crate::providers::all_providers()
-            .into_iter()
-            .any(|provider| provider.scan_explicit_session_path(path, &mut sessions, Some(cache)));
+        let mut handled = false;
+        for provider in crate::providers::all_providers() {
+            match provider.scan_explicit_session_path(path, &mut sessions, Some(cache)) {
+                Ok(true) => { handled = true; break; }
+                Ok(false) => {}
+                Err(error) => { warnings.push(format!("{}: {error:#}", path.display())); handled = true; break; }
+            }
+        }
         if !handled
             && path
                 .extension()
@@ -974,6 +1009,7 @@ pub(crate) fn scan_jsonl_sessions(
     if !root.is_dir() {
         return;
     }
+    let provider = crate::providers::agent_provider(agent);
 
     for entry in WalkDir::new(root)
         .follow_links(true)
@@ -982,11 +1018,10 @@ pub(crate) fn scan_jsonl_sessions(
         .filter_map(Result::ok)
         .filter(|entry| {
             entry.file_type().is_file()
-                && entry.path().extension().is_some_and(|ext| ext == "jsonl")
+                && provider.is_session_transcript_path(entry.path())
         })
     {
         let path = entry.into_path();
-        let provider = crate::providers::agent_provider(agent);
         if let Some(session) = cache
             .and_then(|cache| cache.session_if_current(agent, &path))
             .filter(session_is_known_non_empty)
@@ -994,8 +1029,9 @@ pub(crate) fn scan_jsonl_sessions(
             sessions.push(session);
             continue;
         }
-        if let Some((session, offset)) =
-            cache.and_then(|cache| cache.session_if_appended(agent, &path))
+        if let Some((session, offset)) = (!provider.is_compressed_session_transcript(&path))
+            .then(|| cache.and_then(|cache| cache.session_if_appended(agent, &path)))
+            .flatten()
         {
             if let Some(session) = scan_jsonl_meta_from_offset(&path, offset, session) {
                 sessions.push(session);
@@ -1010,7 +1046,7 @@ pub(crate) fn scan_jsonl_sessions(
             continue;
         };
         sessions.push(SessionRecord {
-            id,
+            id: id.clone(),
             agent,
             title: meta.title,
             project: provider.infer_session_project(&path, meta.project),
@@ -1018,7 +1054,10 @@ pub(crate) fn scan_jsonl_sessions(
             repository_url: meta.repository_url,
             logical_project_id: None,
             logical_project_name: None,
-            path,
+            archived: provider.session_archive_state(&path, &id),
+            archive_supported: provider.session_archive_supported(&path),
+            resumable: provider.session_resumable(&path, &id),
+            path: path.clone(),
             started_at: meta.started_at,
             updated_at: meta.updated_at,
             message_count: meta.message_count,
@@ -1030,7 +1069,7 @@ pub(crate) fn scan_jsonl_sessions(
             mode: None,
             approval_mode: None,
             is_run_everything: None,
-            parent_session_id: meta.parent_session_id,
+            parent_session_id: meta.parent_session_id.or_else(|| provider.session_parent_id_from_path(&path)),
             token_usage: meta.token_usage,
         });
     }
@@ -1039,6 +1078,7 @@ pub(crate) fn scan_jsonl_sessions(
 pub(crate) fn scan_additional_session_roots(
     roots: &[PathBuf],
     sessions: &mut Vec<SessionRecord>,
+    warnings: &mut Vec<String>,
     cache: Option<&SessionScanCache>,
 ) {
     let mut session_paths = BTreeSet::new();
@@ -1071,8 +1111,10 @@ pub(crate) fn scan_additional_session_roots(
             scan_detected_jsonl_session(&path, sessions, cache);
         } else {
             for provider in crate::providers::all_providers() {
-                if provider.scan_explicit_session_path(&path, sessions, cache) {
-                    break;
+                match provider.scan_explicit_session_path(&path, sessions, cache) {
+                    Ok(true) => break,
+                    Ok(false) => {},
+                    Err(error) => { warnings.push(format!("{}: {error:#}", path.display())); break; }
                 }
             }
         }
@@ -1169,7 +1211,7 @@ fn scan_detected_jsonl_session(
     };
     let project = provider.infer_session_project(path, meta.project);
     let session = SessionRecord {
-        id,
+        id: id.clone(),
         agent,
         title: meta.title,
         project,
@@ -1189,7 +1231,10 @@ fn scan_detected_jsonl_session(
         mode: None,
         approval_mode: None,
         is_run_everything: None,
-        parent_session_id: meta.parent_session_id,
+        parent_session_id: meta.parent_session_id.or_else(|| provider.session_parent_id_from_path(path)),
+        archived: provider.session_archive_state(path, &id),
+        archive_supported: provider.session_archive_supported(path),
+        resumable: provider.session_resumable(path, &id),
         token_usage: meta.token_usage,
     };
     logger.debug(
@@ -1308,8 +1353,15 @@ fn merge_session(existing: &mut SessionRecord, incoming: &SessionRecord) {
     if existing.token_usage.is_none() {
         existing.token_usage = incoming.token_usage.clone();
     }
+    if incoming.archived.is_some() {
+        existing.archived = incoming.archived;
+        existing.archive_supported = incoming.archive_supported;
+        existing.resumable = incoming.resumable;
+    }
     if should_replace_session_path(existing.agent, &existing.path, &incoming.path) {
         existing.path = incoming.path.clone();
+        existing.archive_supported = incoming.archive_supported;
+        existing.resumable = incoming.resumable;
     }
 }
 
@@ -1362,6 +1414,17 @@ pub(crate) fn scan_jsonl_meta_for_agent(path: &Path, agent: Option<AgentKind>) -
     let Ok(file) = fs::File::open(path) else {
         return SessionMetadata::default();
     };
+    let provider = agent.map(crate::providers::agent_provider);
+    let reader: Box<dyn BufRead> = if provider
+        .is_some_and(|provider| provider.is_compressed_session_transcript(path))
+    {
+        let Ok(decoder) = zstd::Decoder::new(file) else {
+            return SessionMetadata::default();
+        };
+        Box::new(BufReader::new(decoder))
+    } else {
+        Box::new(BufReader::new(file))
+    };
     let mut meta = SessionMetadata {
         has_content: false,
         message_count: Some(0),
@@ -1369,7 +1432,6 @@ pub(crate) fn scan_jsonl_meta_for_agent(path: &Path, agent: Option<AgentKind>) -
         ..Default::default()
     };
     let mut deduplicated_usage = BTreeMap::new();
-    let provider = agent.map(crate::providers::agent_provider);
     let inherited_history_start_ordinal = agent.and_then(|agent| {
         crate::transcript::transcript_inherited_history_start_ordinal(path, agent)
             .ok()
@@ -1377,7 +1439,7 @@ pub(crate) fn scan_jsonl_meta_for_agent(path: &Path, agent: Option<AgentKind>) -
     });
 
     scan_jsonl_meta_lines(
-        BufReader::new(file).lines().map_while(Result::ok),
+        reader.lines().map_while(Result::ok),
         &mut meta,
         &mut deduplicated_usage,
         inherited_history_start_ordinal,

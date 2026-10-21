@@ -3,7 +3,7 @@
   "openrpc": "1.3.2",
   "protocolVersion": 2,
   "schemaVersion": 1,
-  "contractFingerprint": "fc5a464a9ad21eb4ca9ea723050e685d2b0cc2bff95a4a4e48ae8797fac83384",
+  "contractFingerprint": "aa6065d443df59d906247852b0d256ec311ef0118f89bf2b104042ee435029d2",
   "methods": [
     {
       "name": "scan",
@@ -87,6 +87,15 @@
       "clients": [
         "desktop",
         "cli"
+      ],
+      "execution": "read"
+    },
+    {
+      "name": "sessions_ownership_snapshot",
+      "owner": "daemon",
+      "wire": "jsonrpc",
+      "clients": [
+        "desktop"
       ],
       "execution": "read"
     },
@@ -507,6 +516,16 @@
       "execution": "write"
     },
     {
+      "name": "session_set_archived",
+      "owner": "daemon",
+      "wire": "jsonrpc",
+      "clients": [
+        "desktop",
+        "cli"
+      ],
+      "execution": "write"
+    },
+    {
       "name": "session_transcript",
       "owner": "daemon",
       "wire": "jsonrpc",
@@ -625,6 +644,15 @@
     },
     {
       "name": "skills_backup_disconnect",
+      "owner": "daemon",
+      "wire": "jsonrpc",
+      "clients": [
+        "desktop"
+      ],
+      "execution": "write"
+    },
+    {
+      "name": "skills_create",
       "owner": "daemon",
       "wire": "jsonrpc",
       "clients": [
@@ -965,6 +993,15 @@
       "replay": true
     },
     {
+      "name": "sessions://ownership",
+      "wire": "sse",
+      "clients": [
+        "desktop"
+      ],
+      "revisioned": false,
+      "replay": true
+    },
+    {
       "name": "analytics://progress",
       "wire": "sse",
       "clients": [
@@ -1078,6 +1115,7 @@
       "rules_list",
       "scan",
       "session_projects_list",
+      "session_set_archived",
       "session_skill_index_run",
       "session_skill_index_status",
       "session_skill_links",
@@ -1085,6 +1123,7 @@
       "session_transcript_locator",
       "session_transcript_search",
       "sessions_list",
+      "sessions_ownership_snapshot",
       "sessions_scan_start",
       "sessions_search",
       "sessions_snapshot",
@@ -1110,6 +1149,7 @@
       "skills_backup_status",
       "skills_backup_sync",
       "skills_backup_versions",
+      "skills_create",
       "skills_delete_many",
       "skills_distribute",
       "skills_list",
@@ -1227,6 +1267,7 @@
       "session_projects_list",
       "session_resume_in_terminal",
       "session_resume_target",
+      "session_set_archived",
       "session_skill_index_run",
       "session_skill_index_status",
       "session_skill_links",
@@ -1234,6 +1275,7 @@
       "session_transcript_locator",
       "session_transcript_search",
       "sessions_list",
+      "sessions_ownership_snapshot",
       "sessions_scan_start",
       "sessions_search",
       "sessions_snapshot",
@@ -1255,6 +1297,7 @@
       "skills_backup_pull",
       "skills_backup_restore",
       "skills_backup_status",
+      "skills_create",
       "skills_delete_many",
       "skills_distribute",
       "skills_list",
@@ -1275,6 +1318,7 @@
       "analytics://revision",
       "config://changed",
       "projection://changed",
+      "sessions://ownership",
       "sessions://scan",
       "skills://changed",
       "skills://updates"

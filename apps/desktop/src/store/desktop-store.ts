@@ -1,3 +1,4 @@
+import type { SessionOwnershipSnapshot } from "../lib/generated/runtime-types.ts";
 import { useCallback, useRef, useSyncExternalStore } from "react";
 
 import type { AnalyticsRefreshProgress, OverviewAnalytics } from "../lib/analytics.ts";
@@ -7,7 +8,7 @@ import { emptyRuntimeData, type RuntimeData } from "../lib/data.ts";
 import type { PromptRecord } from "../lib/prompt-model.ts";
 import type { ProjectSummary, SessionProjectSummary } from "../lib/projects.ts";
 import { MissingSessionProjectPolicy } from "../lib/projects.ts";
-import { SessionResumeTarget, type SessionIdentityRecord } from "../lib/sessions.ts";
+import { SessionResumeTarget, sessionLogicalIdentityRecordKey, type SessionIdentityRecord } from "../lib/sessions.ts";
 import { DOMAIN_KEYS, RuntimeDomainKey, type DomainKey } from "../lib/domain.ts";
 import { applySkillUpdateReportsToData } from "../lib/skill-updates.ts";
 import type { SkillUpdateReport } from "../lib/skill-updates.ts";
@@ -97,6 +98,9 @@ export type DesktopStoreState = {
   };
   sessions: {
     refreshError: string;
+    ownershipEpoch: string | null;
+    ownershipRevision: number;
+    heldSessionKeys: ReadonlySet<string>;
   };
   workspace: {
     projects: ProjectSummary[];
@@ -138,6 +142,9 @@ function createInitialState(): DesktopStoreState {
     },
     sessions: {
       refreshError: "",
+      ownershipEpoch: null,
+      ownershipRevision: -1,
+      heldSessionKeys: new Set(),
     },
     workspace: {
       projects: [],
@@ -254,6 +261,7 @@ export type DesktopStoreActions = {
   setSkillUpdateError: (message: string) => void;
   setSkillIndexStatus: (status: SkillIndexStatus | null) => void;
   setSkillUpdateReports: (updates: SkillUpdateReport[]) => void;
+  setSessionOwnership: (snapshot: SessionOwnershipSnapshot) => void;
   setSessionRefreshError: (message: string) => void;
   setProjects: (projects: ProjectSummary[]) => void;
   setSessionProjects: (projects: SessionProjectSummary[]) => void;
@@ -280,7 +288,7 @@ export class DesktopStore {
         const next = this.commitDomainSnapshotState(current, RuntimeDomainKey.Sessions, rows);
         return next.sessions.refreshError === ""
           ? next
-          : { ...next, sessions: { refreshError: "" } };
+          : { ...next, sessions: { ...next.sessions, refreshError: "" } };
       });
     },
     applyHookCommandResult: (result) => {
@@ -494,10 +502,20 @@ export class DesktopStore {
         };
       });
     },
+    setSessionOwnership: (snapshot) => {
+      this.update((current) => {
+        if (current.sessions.ownershipEpoch === snapshot.epoch && snapshot.revision <= current.sessions.ownershipRevision) return current;
+        const heldSessionKeys = new Set(snapshot.held.flatMap((identity) => {
+          const key = sessionLogicalIdentityRecordKey(identity);
+          return key ? [key] : [];
+        }));
+        return { ...current, sessions: { ...current.sessions, ownershipEpoch: snapshot.epoch, ownershipRevision: snapshot.revision, heldSessionKeys } };
+      });
+    },
     setSessionRefreshError: (refreshError) => {
       this.update((current) => current.sessions.refreshError === refreshError
         ? current
-        : { ...current, sessions: { refreshError } });
+        : { ...current, sessions: { ...current.sessions, refreshError } });
     },
     setProjects: (projects) => {
       this.update((current) => current.workspace.projects === projects

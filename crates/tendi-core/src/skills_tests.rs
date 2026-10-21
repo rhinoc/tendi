@@ -41,6 +41,52 @@ fn temp_dir(prefix: &str) -> PathBuf {
     ))
 }
 
+#[test]
+fn local_skill_creation_validates_input_and_preserves_existing_directories() {
+    let root = temp_dir("tendi-create-local-skill");
+    let target = "claude-code".parse().unwrap();
+    for name in [
+        "",
+        "../escape",
+        "Uppercase",
+        "a/b",
+        "-demo",
+        "demo-",
+        "a--b",
+        &"a".repeat(65),
+    ] {
+        assert!(super::create_local_skill(&root, &target, name, "Description").is_err());
+    }
+    assert!(super::create_local_skill(&root, &target, "valid", " \n ").is_err());
+    assert!(
+        super::create_local_skill(
+            &root,
+            &"promptscript".parse().unwrap(),
+            "valid",
+            "Description"
+        )
+        .is_err()
+    );
+
+    let name = format!(
+        "local-{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    let directory = super::local_skill_directory(&root, &target, &name).unwrap();
+    fs::create_dir_all(&directory).unwrap();
+    fs::write(directory.join("notes.md"), "keep these notes").unwrap();
+    assert!(super::create_local_skill(&root, &target, &name, "Description").is_err());
+    assert!(!directory.join("SKILL.md").exists());
+    assert_eq!(
+        fs::read_to_string(directory.join("notes.md")).unwrap(),
+        "keep these notes"
+    );
+    fs::remove_dir_all(directory).unwrap();
+}
+
 #[cfg(unix)]
 #[test]
 fn skill_write_materializes_read_only_source_at_observed_path() {

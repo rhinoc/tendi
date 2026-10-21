@@ -12,7 +12,7 @@ impl Store {
         let Some(candidates) = candidates else {
             return Ok(String::new());
         };
-        self.conn.execute_batch(&format!(
+        self.sessions.conn.execute_batch(&format!(
             "CREATE TEMP TABLE IF NOT EXISTS {SESSION_SEARCH_CANDIDATE_TABLE} (
                 session_id TEXT NOT NULL,
                 agent TEXT NOT NULL,
@@ -20,13 +20,13 @@ impl Store {
                 PRIMARY KEY (session_id, agent, session_path)
             )"
         ))?;
-        self.conn.execute(
+        self.sessions.conn.execute(
             &format!("DELETE FROM temp.{SESSION_SEARCH_CANDIDATE_TABLE}"),
             [],
         )?;
         let candidates_json =
             serde_json::to_string(candidates).context("serialize session search candidates")?;
-        self.conn.execute(
+        self.sessions.conn.execute(
             &format!(
                 "INSERT OR IGNORE INTO temp.{SESSION_SEARCH_CANDIDATE_TABLE}
                  SELECT
@@ -81,37 +81,217 @@ impl Store {
         query: &str,
         candidates: Option<&[SessionIdentity]>,
     ) -> Result<Vec<SessionSearchHit>> {
-        with_database_read_lock_retry(|| {
-            self.search_sessions_for_scope_once(scope_key, query, candidates)
-        })
+        self.search_sessions_for_scope_with_scopes(
+            scope_key,
+            query,
+            candidates,
+            &crate::transcript::TranscriptSearchScopes::session_search_default(),
+        )
     }
 
-    pub(in crate::storage) fn search_sessions_for_scope_once(
+    /// Search the published transcript index and scan transient transcript scopes.
+    /// System and tool text is read on demand and is not persisted.
+    pub fn search_sessions_for_scope_with_scopes(
         &self,
         scope_key: &ScopeKey,
         query: &str,
         candidates: Option<&[SessionIdentity]>,
+        search_scopes: &crate::transcript::TranscriptSearchScopes,
+    ) -> Result<Vec<SessionSearchHit>> {
+        self.search_sessions_for_scope_with_scopes_and_archive_filter(
+            scope_key,
+            query,
+            candidates,
+            search_scopes,
+            SessionArchiveFilter::default(),
+        )
+    }
+
+    pub fn search_sessions_for_scope_with_scopes_and_archive_filter(
+        &self,
+        scope_key: &ScopeKey,
+        query: &str,
+        candidates: Option<&[SessionIdentity]>,
+        search_scopes: &crate::transcript::TranscriptSearchScopes,
+        archive_filter: SessionArchiveFilter,
+    ) -> Result<Vec<SessionSearchHit>> {
+        let _provider_cache_scopes = super::sessions::session_provider_cache_scopes();
+        if !search_scopes.system && !search_scopes.tool {
+            let mut hits = with_database_read_lock_retry(|| {
+                self.search_sessions_for_scope_once_with_scopes(
+                    scope_key,
+                    query,
+                    candidates,
+                    search_scopes,
+                )
+            })?;
+            hits.retain(|hit| archive_filter.matches(hit.session.archived));
+            return Ok(hits);
+        }
+        let (mut hits, sessions) = with_database_read_lock_retry(|| {
+            Ok((
+                self.search_sessions_for_scope_once_with_scopes(
+                    scope_key,
+                    query,
+                    candidates,
+                    search_scopes,
+                )?,
+                self.list_sessions_for_scope_once(scope_key)?.sessions,
+            ))
+        })?;
+        let transient_scopes = crate::transcript::TranscriptSearchScopes {
+            user: false,
+            assistant: false,
+            system: search_scopes.system,
+            tool: search_scopes.tool,
+        };
+        let transcript_hits = self.search_session_transcript_records(
+            &sessions,
+            query,
+            candidates,
+            &transient_scopes,
+            false,
+        )?;
+        Self::merge_session_search_hits(
+            &mut hits,
+            transcript_hits
+                .into_iter()
+                .map(|hit| SessionSearchHit {
+                    session: hit.session,
+                    search_score: hit.search_score,
+                    search_snippet: hit.search_snippet,
+                })
+                .collect(),
+            candidates,
+        );
+        hits.retain(|hit| archive_filter.matches(hit.session.archived));
+        Ok(hits)
+    }
+
+    pub(in crate::storage) fn search_session_transcript_records(
+        &self,
+        sessions: &[SessionRecord],
+        query: &str,
+        candidates: Option<&[SessionIdentity]>,
+        scopes: &crate::transcript::TranscriptSearchScopes,
+        phrase: bool,
+    ) -> Result<Vec<SessionTranscriptSearchHit>> {
+        if !scopes.system && !scopes.tool {
+            return Ok(Vec::new());
+        }
+        let terms = if phrase {
+            vec![query.trim().to_lowercase()]
+        } else {
+            session_search_terms(query)
+        };
+        if terms.is_empty() {
+            return Ok(Vec::new());
+        }
+        let query = terms.join(" ");
+        let candidates = candidates.map(|candidates| {
+            candidates
+                .iter()
+                .map(|candidate| {
+                    (
+                        candidate.id.as_str(),
+                        agent_label(candidate.agent),
+                        candidate.path.as_path(),
+                    )
+                })
+                .collect::<HashSet<_>>()
+        });
+        let mut hits = Vec::new();
+        for session in sessions {
+            if candidates.as_ref().is_some_and(|candidates| {
+                !candidates.contains(&(
+                    session.id.as_str(),
+                    agent_label(session.agent),
+                    session.path.as_path(),
+                ))
+            }) {
+                continue;
+            }
+            let Some(found) = crate::transcript::search_session_scoped_match(
+                &session.path,
+                session.agent,
+                Some(&session.id),
+                &query,
+                scopes,
+                phrase,
+            )? else {
+                continue;
+            };
+            hits.push(SessionTranscriptSearchHit {
+                session: Self::normalize_cached_session(session.clone()),
+                record_order: found.record_order,
+                search_score: found.score,
+                search_snippet: format!("{}: {}", found.role, found.snippet),
+            });
+        }
+        Ok(hits)
+    }
+
+    pub(in crate::storage) fn merge_session_search_hits(
+        hits: &mut Vec<SessionSearchHit>,
+        transcript_hits: Vec<SessionSearchHit>,
+        candidates: Option<&[SessionIdentity]>,
+    ) {
+        let mut indexes = hits
+            .iter()
+            .enumerate()
+            .map(|(index, hit)| (Self::session_search_hit_key(&hit.session), index))
+            .collect::<HashMap<_, _>>();
+        for hit in transcript_hits {
+            let key = Self::session_search_hit_key(&hit.session);
+            if let Some(index) = indexes.get(&key).copied() {
+                if hit.search_score > hits[index].search_score {
+                    hits[index] = hit;
+                }
+            } else {
+                indexes.insert(key, hits.len());
+                hits.push(hit);
+            }
+        }
+        if let Some(candidates) = candidates {
+            let candidate_order = Self::session_search_candidate_order(candidates);
+            hits.sort_by_key(|hit| {
+                candidate_order
+                    .get(&Self::session_search_hit_key(&hit.session))
+                    .copied()
+                    .unwrap_or(usize::MAX)
+            });
+        } else {
+            hits.sort_by(Self::compare_session_search_hits);
+        }
+    }
+
+    pub(in crate::storage) fn search_sessions_for_scope_once_with_scopes(
+        &self,
+        scope_key: &ScopeKey,
+        query: &str,
+        candidates: Option<&[SessionIdentity]>,
+        search_scopes: &crate::transcript::TranscriptSearchScopes,
     ) -> Result<Vec<SessionSearchHit>> {
         let terms = session_search_terms(query);
         if terms.is_empty() {
             return Ok(Vec::new());
         }
         if terms.iter().any(|term| term.chars().count() < 3) {
-            self.search_scoped_sessions_by_contains(scope_key, &terms, candidates)
+            self.search_scoped_sessions_by_contains(scope_key, &terms, candidates, search_scopes)
         } else {
-            self.search_scoped_sessions_by_shared_fts(scope_key, &terms, candidates)
+            self.search_scoped_sessions_by_shared_fts(scope_key, &terms, candidates, search_scopes)
         }
     }
 
     fn session_search_matches(&self, query: &str) -> Result<()> {
-        self.conn.execute_batch(&format!(
+        self.sessions.conn.execute_batch(&format!(
             "DROP TABLE IF EXISTS temp.{SESSION_SEARCH_MATCH_TABLE};
              CREATE TEMP TABLE {SESSION_SEARCH_MATCH_TABLE} (
                 record_id INTEGER PRIMARY KEY,
                 bm25_score REAL NOT NULL
             )"
         ))?;
-        self.conn.execute(
+        self.sessions.conn.execute(
             &format!(
                 "INSERT OR IGNORE INTO temp.{SESSION_SEARCH_MATCH_TABLE}(record_id, bm25_score)
                  SELECT entries.id, 0.0
@@ -124,7 +304,7 @@ impl Store {
             ),
             [query],
         )?;
-        self.conn.execute(
+        self.sessions.conn.execute(
             &format!(
                 "INSERT OR IGNORE INTO temp.{SESSION_SEARCH_MATCH_TABLE}(record_id, bm25_score)
                  SELECT rowid, 0.0
@@ -141,6 +321,7 @@ impl Store {
         scope_key: &ScopeKey,
         terms: &[String],
         candidates: Option<&[SessionIdentity]>,
+        search_scopes: &crate::transcript::TranscriptSearchScopes,
     ) -> Result<Vec<SessionSearchHit>> {
         let query = session_search_query(terms);
         self.session_search_matches(&query)?;
@@ -164,7 +345,7 @@ impl Store {
                 .map(|term| SqlValue::Text(format!("%{}%", escape_like(term)))),
         );
         let candidate_join = self.session_search_candidate_join(candidates)?;
-        let mut stmt = self.conn.prepare(&format!(
+        let mut stmt = self.sessions.conn.prepare(&format!(
             "WITH matched AS (
                 SELECT
                     search.scope_key,
@@ -221,13 +402,17 @@ impl Store {
                 serde_json::from_str::<SessionRecord>(&data_json)
                     .context("invalid cached scoped session search row")?,
             );
-            if !contains_search_terms(&document, terms) {
+            if !contains_search_terms_with_scopes(&document, terms, search_scopes) {
                 continue;
             }
             let hit = SessionSearchHit {
                 session,
-                search_score: contains_search_score(&document, terms),
-                search_snippet: contains_search_snippet(&document, terms),
+                search_score: contains_search_score_with_scopes(&document, terms, search_scopes),
+                search_snippet: contains_search_snippet_with_scopes(
+                    &document,
+                    terms,
+                    search_scopes,
+                ),
             };
             let key = Self::session_search_hit_key(&hit.session);
             if let Some(index) = hit_indexes.get(&key).copied() {
@@ -257,6 +442,7 @@ impl Store {
         scope_key: &ScopeKey,
         terms: &[String],
         candidates: Option<&[SessionIdentity]>,
+        search_scopes: &crate::transcript::TranscriptSearchScopes,
     ) -> Result<Vec<SessionSearchHit>> {
         let where_clause = terms
             .iter()
@@ -317,7 +503,7 @@ impl Store {
              AND sessions.agent = matched.agent
              AND sessions.path = matched.session_path"
         );
-        let mut stmt = self.conn.prepare(&sql)?;
+        let mut stmt = self.sessions.conn.prepare(&sql)?;
         let rows = stmt.query_map(params_from_iter(sql_params.iter()), |row| {
             Ok((
                 row.get::<_, String>(0)?,
@@ -339,10 +525,17 @@ impl Store {
                 serde_json::from_str::<SessionRecord>(&data_json)
                     .context("invalid cached scoped session search row")?,
             );
+            if !contains_search_terms_with_scopes(&document, terms, search_scopes) {
+                continue;
+            }
             let key = Self::session_search_hit_key(&session);
             let hit = SessionSearchHit {
-                search_score: contains_search_score(&document, terms),
-                search_snippet: contains_search_snippet(&document, terms),
+                search_score: contains_search_score_with_scopes(&document, terms, search_scopes),
+                search_snippet: contains_search_snippet_with_scopes(
+                    &document,
+                    terms,
+                    search_scopes,
+                ),
                 session,
             };
             if let Some(index) = hit_indexes.get(&key).copied() {

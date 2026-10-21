@@ -114,7 +114,12 @@ pub(super) fn visit_overview_payloads(
         let session_id: String = row.get(0)?;
         let agent: String = row.get(1)?;
         let session_path: String = row.get(2)?;
-        let overview_json = row.get_ref(3)?.as_bytes()?;
+        let encoded_overview_json = row.get_ref(3)?.as_bytes()?;
+        let decoded_overview_json = decode_overview_json(encoded_overview_json).ok();
+        let overview_json = decoded_overview_json
+            .as_deref()
+            .map(str::as_bytes)
+            .unwrap_or(encoded_overview_json);
         let project_overlay = match row.get_ref(4)? {
             ValueRef::Null => None,
             value => Some(value.as_bytes()?),

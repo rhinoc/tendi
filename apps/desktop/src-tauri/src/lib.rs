@@ -687,7 +687,7 @@ async fn session_resume_in_terminal(
             }
         };
         let record = tendi_core::SessionRecord {
-            id: session.id,
+            id: session.id.clone(),
             agent,
             title: None,
             project,
@@ -695,6 +695,9 @@ async fn session_resume_in_terminal(
             repository_url: None,
             logical_project_id: None,
             logical_project_name: None,
+            archived: tendi_core::session_archive_state(agent, &path, &session.id),
+            archive_supported: tendi_core::session_archive_supported(agent, &path),
+            resumable: tendi_core::session_resumable(agent, &path, &session.id),
             path,
             started_at: None,
             updated_at: None,
@@ -1220,32 +1223,8 @@ pub fn run() {
             let setup_started = Instant::now();
             app.set_activation_policy(ActivationPolicy::Regular);
             let cwd = active_cwd().map_err(std::io::Error::other)?;
-            let database_path =
-                tendi_core::storage::default_db_path().map_err(std::io::Error::other)?;
-            if database_storage::apply_pending_reset(&database_path)? {
-                tendi_core::logging::global().warn(
-                    "database reset completed",
-                    serde_json::json!({ "database": database_path }),
-                );
-            }
-            let store_started = Instant::now();
-            let startup_store =
-                tendi_core::storage::Store::open_default().map_err(std::io::Error::other)?;
-            let store_ms = store_started.elapsed().as_secs_f64() * 1000.0;
-            let projects_started = Instant::now();
-            let project_roots = startup_store
-                .list_projects()
-                .map_err(std::io::Error::other)?
-                .into_iter()
-                .map(|project| project.root_path)
-                .collect::<Vec<_>>();
-            let project_ms = projects_started.elapsed().as_secs_f64() * 1000.0;
-            let initialize_started = Instant::now();
-            tendi_core::initialize_workspace(&startup_store, &cwd, &project_roots)
-                .map_err(std::io::Error::other)?;
-            let initialize_ms = initialize_started.elapsed().as_secs_f64() * 1000.0;
             app.manage(DaemonState {
-                daemon: Arc::new(tendi_daemon::Daemon::new(cwd)),
+                daemon: Arc::new(tendi_daemon::Daemon::new(cwd.clone())),
                 subscriptions: Mutex::new(HashMap::new()),
                 next_subscription_id: AtomicU64::new(0),
             });
@@ -1254,15 +1233,63 @@ pub fn run() {
             let _ = window.show();
             let _ = window.set_focus();
             tendi_core::logging::global().info(
-                "desktop setup completed",
+                "desktop window shown",
                 serde_json::json!({
-                    "storeMs": store_ms,
-                    "projectsMs": project_ms,
-                    "initializeWorkspaceMs": initialize_ms,
                     "totalMs": setup_started.elapsed().as_secs_f64() * 1000.0,
-                    "projectCount": project_roots.len(),
                 }),
             );
+            std::thread::Builder::new()
+                .name("tendi-startup-storage".to_string())
+                .spawn(move || {
+                    let result = (|| -> Result<_, String> {
+                        let database_path = tendi_core::storage::default_db_path()
+                            .map_err(|error| format!("{error:#}"))?;
+                        if database_storage::apply_pending_reset(&database_path)
+                            .map_err(|error| format!("{error:#}"))?
+                        {
+                            tendi_core::logging::global().warn(
+                                "database reset completed",
+                                serde_json::json!({ "database": database_path }),
+                            );
+                        }
+                        let store_started = Instant::now();
+                        let startup_store = tendi_core::storage::Store::open_default()
+                            .map_err(|error| format!("{error:#}"))?;
+                        let store_ms = store_started.elapsed().as_secs_f64() * 1000.0;
+                        let projects_started = Instant::now();
+                        let project_roots = startup_store
+                            .list_projects()
+                            .map_err(|error| format!("{error:#}"))?
+                            .into_iter()
+                            .map(|project| project.root_path)
+                            .collect::<Vec<_>>();
+                        let project_ms = projects_started.elapsed().as_secs_f64() * 1000.0;
+                        let initialize_started = Instant::now();
+                        tendi_core::initialize_workspace(&startup_store, &cwd, &project_roots)
+                            .map_err(|error| format!("{error:#}"))?;
+                        let initialize_ms = initialize_started.elapsed().as_secs_f64() * 1000.0;
+                        Ok((store_ms, project_ms, initialize_ms, project_roots.len()))
+                    })();
+                    match result {
+                        Ok((store_ms, project_ms, initialize_ms, project_count)) => {
+                            tendi_core::logging::global().info(
+                                "desktop startup storage ready",
+                                serde_json::json!({
+                                    "storeMs": store_ms,
+                                    "projectsMs": project_ms,
+                                    "initializeWorkspaceMs": initialize_ms,
+                                    "projectCount": project_count,
+                                }),
+                            );
+                        }
+                        Err(error) => {
+                            tendi_core::logging::global().error(
+                                "desktop startup storage failed",
+                                serde_json::json!({ "error": error }),
+                            );
+                        }
+                    }
+                })?;
             Ok(())
         })
         .on_menu_event(|app, event| {

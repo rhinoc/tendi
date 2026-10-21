@@ -8,11 +8,11 @@ const MIGRATION_KEY_PREFIX: &str = "session_skill_index_version:";
 
 pub(super) fn ensure_current_version(store: &Store, scope_key: &ScopeKey) -> Result<bool> {
     let meta_key = format!("{MIGRATION_KEY_PREFIX}{}", scope_key.as_str());
-    if current_version_matches(&store.conn, &meta_key)? {
+    if current_version_matches(&store.sessions.conn, &meta_key)? {
         return Ok(false);
     }
 
-    store.with_named_write_transaction("migration.session_skill_index_version", |tx| {
+    store.with_session_write_transaction("migration.session_skill_index_version", |tx| {
         if current_version_matches(tx, &meta_key)? {
             return Ok(false);
         }

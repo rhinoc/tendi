@@ -600,6 +600,7 @@ pub(crate) fn workload(method: &str) -> Option<Workload> {
     match method {
         "skills_updates_cancel" => None,
         "mcp_probe"
+        | "session_set_archived"
         | "skills_add"
         | "skills_update"
         | "skills_update_many"

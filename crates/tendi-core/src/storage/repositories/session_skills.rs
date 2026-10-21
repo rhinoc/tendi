@@ -41,6 +41,7 @@ impl Store {
     ) -> Result<SessionSkillIndexStatus> {
         with_database_read_lock_retry(|| {
             let total = self
+                .sessions
                 .conn
                 .query_row(
                     "SELECT COUNT(*) FROM scoped_sessions WHERE scope_key = ?1",
@@ -49,6 +50,7 @@ impl Store {
                 )?
                 .max(0) as usize;
             let indexed = self
+                .sessions
                 .conn
                 .query_row(
                     "SELECT COUNT(*) FROM scoped_session_skill_index
@@ -58,6 +60,7 @@ impl Store {
                 )?
                 .max(0) as usize;
             let failed = self
+                .sessions
                 .conn
                 .query_row(
                     "SELECT COUNT(*) FROM scoped_session_skill_index
@@ -66,7 +69,7 @@ impl Store {
                     |row| row.get::<_, i64>(0),
                 )?
                 .max(0) as usize;
-            let last_indexed_at = self.conn.query_row(
+            let last_indexed_at = self.sessions.conn.query_row(
                 "SELECT MAX(indexed_at) FROM scoped_session_skill_index
                  WHERE scope_key = ?1 AND status = 'indexed'",
                 [scope_key.as_str()],
@@ -178,7 +181,7 @@ impl Store {
                 links.evidence_time DESC,
                 links.skill_name ASC"
         );
-        let mut stmt = self.conn.prepare(&sql)?;
+        let mut stmt = self.sessions.conn.prepare(&sql)?;
         let rows = stmt.query_map(params, |row| {
             Ok((
                 row.get::<_, String>(0)?,
@@ -284,7 +287,7 @@ impl Store {
     }
 
     pub fn clear_session_skill_index_for_scope(&self, scope_key: &ScopeKey) -> Result<()> {
-        self.with_named_write_transaction("clear_session_skill_index_for_scope", |tx| {
+        self.with_session_write_transaction("clear_session_skill_index_for_scope", |tx| {
             tx.execute(
                 "DELETE FROM scoped_session_skill_links WHERE scope_key = ?1",
                 [scope_key.as_str()],
@@ -306,6 +309,7 @@ impl Store {
         file_size: i64,
     ) -> Result<bool> {
         let status = self
+            .sessions
             .conn
             .query_row(
                 "SELECT status FROM scoped_session_skill_index
@@ -330,7 +334,7 @@ impl Store {
         scope_key: &ScopeKey,
     ) -> Result<BTreeMap<(String, String, String), (i64, i64)>> {
         with_database_read_lock_retry(|| {
-            let mut statement = self.conn.prepare(
+            let mut statement = self.sessions.conn.prepare(
                 "SELECT session_id, agent, session_path, file_mtime, file_size
                  FROM scoped_session_skill_index
                  WHERE scope_key = ?1 AND status = 'indexed'",
@@ -381,7 +385,7 @@ impl Store {
         links: &[SessionSkillLink],
         append: bool,
     ) -> Result<()> {
-        self.with_named_write_transaction("write_session_skill_links_for_scope", |tx| {
+        self.with_session_write_transaction("write_session_skill_links_for_scope", |tx| {
             let agent = agent_label(session.agent);
             let session_path = session.path.display().to_string();
             if !append {
@@ -392,7 +396,8 @@ impl Store {
                 )?;
             }
             for link in links {
-                shared_cache::execute_changed(tx,
+                shared_cache::execute_changed(
+                    tx,
                     "INSERT OR IGNORE INTO scoped_session_skill_links (
                     scope_key, session_id, agent, session_path, skill_name, skill_path,
                     skill_agent, skill_scope, evidence_kind, evidence_text,
@@ -415,7 +420,8 @@ impl Store {
                     ],
                 )?;
             }
-            shared_cache::execute_changed(tx,
+            shared_cache::execute_changed(
+                tx,
                 "INSERT INTO scoped_session_skill_index (
                 scope_key, session_id, agent, session_path, file_mtime, file_size,
                 indexed_at, status, error
@@ -444,8 +450,9 @@ impl Store {
         file_size: i64,
         error: &str,
     ) -> Result<()> {
-        self.with_named_write_transaction("mark_session_skill_index_failed_for_scope", |tx| {
-            shared_cache::execute_changed(tx,
+        self.with_session_write_transaction("mark_session_skill_index_failed_for_scope", |tx| {
+            shared_cache::execute_changed(
+                tx,
                 "INSERT INTO scoped_session_skill_index (
                 scope_key, session_id, agent, session_path, file_mtime, file_size,
                 indexed_at, status, error

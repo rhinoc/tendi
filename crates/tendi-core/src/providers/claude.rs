@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::{collections::BTreeMap, fs, path::Path};
 
 use anyhow::{Context, Result, bail};
@@ -14,40 +15,6 @@ use crate::{analytics::AnalyticsCapabilities, skills::SkillVisibility, time::tim
 use super::*;
 
 pub(super) struct ClaudeProvider;
-
-fn claude_analytics_pricing(model: &str) -> Option<crate::analytics::cost::AnalyticsPricing> {
-    let model = model.trim().to_ascii_lowercase();
-    // Standard Claude API rates per million tokens. Cache writes use the
-    // documented 5-minute 1.25x multiplier; transcript usage has no TTL bit.
-    let (input, cached, output) = if model.contains("fable") || model.contains("mythos") {
-        (10.0, 0.25, 50.0)
-    } else if model.contains("opus-5")
-        || model.contains("opus-4-8")
-        || model.contains("opus-4-7")
-        || model.contains("opus-4-6")
-        || model.contains("opus-4-5")
-    {
-        (5.0, 0.5, 25.0)
-    } else if model.contains("opus") {
-        (15.0, 1.5, 75.0)
-    } else if model.contains("sonnet-5") {
-        (2.0, 0.2, 10.0)
-    } else if model.contains("sonnet") {
-        (3.0, 0.3, 15.0)
-    } else if model.contains("haiku-4-5") {
-        (1.0, 0.1, 5.0)
-    } else if model.contains("haiku") {
-        (0.8, 0.08, 4.0)
-    } else {
-        return None;
-    };
-    Some(crate::analytics::cost::AnalyticsPricing::new(
-        input,
-        cached,
-        input * 1.25,
-        output,
-    ))
-}
 
 const CLAUDE_USER_MCP_SOURCE_KEY: &str = "__claude_user_mcp__.json";
 const CLAUDE_SKILL_FRONTMATTER_KEY: &str = "disable-model-invocation";
@@ -1090,6 +1057,56 @@ impl super::AgentProvider for ClaudeProvider {
             .unwrap_or_default()
     }
 
+    fn session_ownership_paths(&self, ctx: &ProviderContext, _roots: &[PathBuf]) -> Vec<PathBuf> {
+        std::env::var_os("CLAUDE_CONFIG_DIR")
+            .map(PathBuf::from)
+            .or_else(|| ctx.home.as_ref().map(|home| home.join(".claude")))
+            .map(|root| vec![root.join("sessions")])
+            .unwrap_or_default()
+    }
+
+    fn owns_session_process(&self, executable: &Path) -> bool {
+        executable.file_name().is_some_and(|name| name == "claude")
+            || executable
+                .components()
+                .any(|part| part.as_os_str() == "claude")
+    }
+
+    fn held_sessions(
+        &self,
+        ctx: &ProviderContext,
+        roots: &[PathBuf],
+        _processes: &mut crate::session_ownership::processes::Processes,
+    ) -> Result<BTreeSet<crate::session_ownership::HeldSession>> {
+        let mut held = BTreeSet::new();
+        for root in self.session_ownership_paths(ctx, roots) {
+            let entries = match fs::read_dir(root) {
+                Ok(entries) => entries,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(error.into()),
+            };
+            for entry in entries {
+                let path = entry?.path();
+                if path.extension().is_none_or(|ext| ext != "json") {
+                    continue;
+                }
+                let Ok(body) = fs::read(&path) else {
+                    continue;
+                };
+                let Ok(value) = serde_json::from_slice::<Value>(&body) else {
+                    continue;
+                };
+                if let Some(id) = held_registry_session(&value) {
+                    held.insert(crate::session_ownership::HeldSession {
+                        agent: self.kind(),
+                        id,
+                    });
+                }
+            }
+        }
+        Ok(held)
+    }
+
     fn current_session_env_key(&self) -> Option<&'static str> {
         Some("CLAUDE_CODE_SESSION_ID")
     }
@@ -1290,8 +1307,12 @@ impl super::AgentProvider for ClaudeProvider {
         model: &str,
         usage: crate::analytics::AnalyticsTokenUsage,
     ) -> Option<crate::analytics::AnalyticsCost> {
-        claude_analytics_pricing(model)
+        crate::analytics::model_pricing::pricing_for_provider_model("anthropic", model)
             .map(|pricing| crate::analytics::cost::calculate(usage, pricing))
+    }
+
+    fn analytics_pricing_revision(&self, model: &str) -> Option<String> {
+        crate::analytics::model_pricing::pricing_revision_for_provider_model("anthropic", model)
     }
 
     fn parse_analytics_line(&self, line: &str, record: &mut SessionAnalyticsRecord) {
@@ -1556,3 +1577,23 @@ impl super::AgentProvider for ClaudeProvider {
 #[cfg(test)]
 #[path = "claude_tests.rs"]
 mod tests;
+
+fn held_registry_session(value: &Value) -> Option<String> {
+    let pid = i32::try_from(value.get("pid")?.as_i64()?).ok()?;
+    let registered = chrono::NaiveDateTime::parse_from_str(
+        value.get("procStart")?.as_str()?,
+        "%a %b %e %H:%M:%S %Y",
+    )
+    .ok()?
+    .and_utc()
+    .timestamp();
+    let current = crate::session_ownership::processes::start(pid)?;
+    if registered < 0 || current != registered as u64 {
+        return None;
+    }
+    value
+        .get("sessionId")?
+        .as_str()
+        .filter(|id| !id.is_empty())
+        .map(str::to_string)
+}

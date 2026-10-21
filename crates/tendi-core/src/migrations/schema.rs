@@ -383,6 +383,290 @@ pub(super) fn bootstrap(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+pub(super) fn bootstrap_session_database(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS meta (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS storage_migrations (
+            key TEXT PRIMARY KEY,
+            state TEXT NOT NULL CHECK (state IN ('pending', 'running', 'completed', 'failed')),
+            cursor INTEGER NOT NULL DEFAULT 0,
+            updated_at INTEGER NOT NULL DEFAULT 0,
+            last_error TEXT
+        );
+        CREATE TABLE IF NOT EXISTS normalized_snapshots (
+            scope_key TEXT NOT NULL,
+            domain TEXT NOT NULL,
+            payload_json TEXT NOT NULL,
+            source_version TEXT,
+            revision INTEGER NOT NULL DEFAULT 0,
+            updated_at INTEGER NOT NULL,
+            PRIMARY KEY (scope_key, domain)
+        );
+        CREATE TABLE IF NOT EXISTS scoped_projection_contexts (
+            scope_key TEXT NOT NULL,
+            domain TEXT NOT NULL,
+            state TEXT NOT NULL,
+            scanned_at INTEGER,
+            error TEXT,
+            parser_version TEXT NOT NULL,
+            PRIMARY KEY (scope_key, domain)
+        );
+        CREATE TABLE IF NOT EXISTS projection_heads (
+            scope_key TEXT NOT NULL,
+            domain TEXT NOT NULL,
+            revision INTEGER NOT NULL,
+            source_version TEXT,
+            schema_version INTEGER NOT NULL DEFAULT 1,
+            status TEXT NOT NULL,
+            updated_at INTEGER NOT NULL,
+            PRIMARY KEY (scope_key, domain)
+        );
+        CREATE TABLE IF NOT EXISTS scoped_sessions (
+            scope_key TEXT NOT NULL,
+            id TEXT NOT NULL,
+            agent TEXT NOT NULL,
+            title TEXT,
+            project TEXT,
+            path TEXT NOT NULL,
+            started_at TEXT,
+            updated_at TEXT,
+            message_count INTEGER,
+            first_user_message TEXT,
+            last_user_message TEXT,
+            last_assistant_message TEXT,
+            repository TEXT,
+            repository_url TEXT,
+            logical_project_id TEXT,
+            logical_project_name TEXT,
+            started_at_ms INTEGER,
+            updated_at_ms INTEGER,
+            turn_count INTEGER,
+            parent_session_id TEXT,
+            input_tokens INTEGER,
+            cached_input_tokens INTEGER,
+            data_json TEXT NOT NULL,
+            PRIMARY KEY (scope_key, id, agent, path)
+        );
+        CREATE INDEX IF NOT EXISTS idx_scoped_sessions_updated_id
+            ON scoped_sessions(updated_at DESC, id ASC);
+        CREATE INDEX IF NOT EXISTS idx_scoped_sessions_agent_updated_id
+            ON scoped_sessions(agent, updated_at DESC, id ASC);
+        CREATE INDEX IF NOT EXISTS idx_scoped_sessions_path ON scoped_sessions(path);
+        CREATE TABLE IF NOT EXISTS scoped_session_scan_sources (
+            scope_key TEXT NOT NULL,
+            session_id TEXT NOT NULL,
+            agent TEXT NOT NULL,
+            session_path TEXT NOT NULL,
+            source_path TEXT NOT NULL,
+            file_mtime INTEGER NOT NULL,
+            file_size INTEGER NOT NULL,
+            parser_version TEXT NOT NULL,
+            PRIMARY KEY (scope_key, session_id, agent, session_path, source_path)
+        );
+        CREATE INDEX IF NOT EXISTS idx_scoped_session_scan_sources_source
+            ON scoped_session_scan_sources(scope_key, source_path);
+        CREATE TABLE IF NOT EXISTS session_projects (
+            scope_key TEXT NOT NULL DEFAULT 'installation:default',
+            id TEXT NOT NULL,
+            name TEXT NOT NULL,
+            name_custom INTEGER NOT NULL DEFAULT 0,
+            last_seen_at TEXT NOT NULL DEFAULT '',
+            PRIMARY KEY (scope_key, id)
+        );
+        CREATE TABLE IF NOT EXISTS session_project_aliases (
+            scope_key TEXT NOT NULL DEFAULT 'installation:default',
+            project_id TEXT NOT NULL,
+            kind TEXT NOT NULL,
+            value TEXT NOT NULL,
+            PRIMARY KEY (scope_key, kind, value)
+        );
+        CREATE INDEX IF NOT EXISTS idx_session_project_aliases_project
+            ON session_project_aliases(project_id);
+        CREATE TABLE IF NOT EXISTS scoped_session_skill_index (
+            scope_key TEXT NOT NULL,
+            session_id TEXT NOT NULL,
+            agent TEXT NOT NULL,
+            session_path TEXT NOT NULL,
+            file_mtime INTEGER NOT NULL,
+            file_size INTEGER NOT NULL,
+            indexed_at TEXT,
+            status TEXT NOT NULL,
+            error TEXT,
+            PRIMARY KEY (scope_key, session_id, agent, session_path)
+        );
+        CREATE TABLE IF NOT EXISTS scoped_session_skill_links (
+            scope_key TEXT NOT NULL,
+            session_id TEXT NOT NULL,
+            agent TEXT NOT NULL,
+            session_path TEXT NOT NULL,
+            skill_name TEXT NOT NULL,
+            skill_path TEXT NOT NULL,
+            skill_agent TEXT,
+            skill_scope TEXT,
+            evidence_kind TEXT NOT NULL,
+            evidence_text TEXT NOT NULL,
+            evidence_time TEXT,
+            confidence TEXT NOT NULL,
+            PRIMARY KEY (scope_key, session_id, agent, session_path, skill_path)
+        );
+        CREATE INDEX IF NOT EXISTS idx_scoped_session_skill_links_session
+            ON scoped_session_skill_links(scope_key, session_id, agent);
+        CREATE INDEX IF NOT EXISTS idx_scoped_session_skill_links_skill
+            ON scoped_session_skill_links(scope_key, skill_name);
+        CREATE TABLE IF NOT EXISTS scoped_session_analytics (
+            scope_key TEXT NOT NULL,
+            session_id TEXT NOT NULL,
+            agent TEXT NOT NULL,
+            session_path TEXT NOT NULL,
+            file_mtime INTEGER NOT NULL,
+            file_size INTEGER NOT NULL,
+            indexed_at TEXT NOT NULL,
+            analytics_json BLOB NOT NULL,
+            parser_state_json TEXT NOT NULL,
+            event_min_date TEXT,
+            event_max_date TEXT,
+            has_activity INTEGER NOT NULL DEFAULT 0,
+            capability_token_usage INTEGER NOT NULL DEFAULT 0,
+            capability_reasoning_tokens INTEGER NOT NULL DEFAULT 0,
+            capability_explicit_runs INTEGER NOT NULL DEFAULT 0,
+            capability_rate_limit_history INTEGER NOT NULL DEFAULT 0,
+            overview_indexed INTEGER NOT NULL DEFAULT 1,
+            overview_index_error TEXT,
+            PRIMARY KEY (scope_key, session_id, agent, session_path)
+        );
+        CREATE TABLE IF NOT EXISTS scoped_session_analytics_overview (
+            scope_key TEXT NOT NULL,
+            session_id TEXT NOT NULL,
+            agent TEXT NOT NULL,
+            session_path TEXT NOT NULL,
+            event_min_date TEXT,
+            event_max_date TEXT,
+            has_activity INTEGER NOT NULL DEFAULT 0,
+            overview_json TEXT NOT NULL,
+            PRIMARY KEY (scope_key, session_id, agent, session_path)
+        );
+        CREATE TABLE IF NOT EXISTS scoped_session_search_index (
+            scope_key TEXT NOT NULL,
+            session_id TEXT NOT NULL,
+            agent TEXT NOT NULL,
+            session_path TEXT NOT NULL,
+            file_mtime INTEGER NOT NULL,
+            file_size INTEGER NOT NULL,
+            indexed_at TEXT NOT NULL,
+            search_metadata TEXT NOT NULL DEFAULT '',
+            search_index_version INTEGER NOT NULL DEFAULT 1,
+            search_checkpoint TEXT,
+            PRIMARY KEY (scope_key, session_id, agent, session_path)
+        );
+        CREATE TABLE IF NOT EXISTS scoped_session_search_pending (
+            scope_key TEXT PRIMARY KEY NOT NULL,
+            generation INTEGER NOT NULL,
+            requested_at TEXT NOT NULL,
+            last_error TEXT
+        );
+        CREATE TABLE IF NOT EXISTS scoped_session_search_maintenance (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            pending_mutations INTEGER NOT NULL DEFAULT 0,
+            last_optimized_at INTEGER NOT NULL DEFAULT 0
+        );
+        INSERT OR IGNORE INTO scoped_session_search_maintenance(
+            id, pending_mutations, last_optimized_at
+        ) VALUES (1, 0, 0);
+        CREATE TABLE IF NOT EXISTS scoped_session_search_work (
+            scope_key TEXT NOT NULL,
+            session_id TEXT NOT NULL,
+            agent TEXT NOT NULL,
+            session_path TEXT NOT NULL,
+            generation INTEGER NOT NULL,
+            requested_at TEXT NOT NULL,
+            last_error TEXT,
+            PRIMARY KEY (scope_key, session_id, agent, session_path)
+        );
+        CREATE INDEX IF NOT EXISTS idx_session_search_work_requested
+            ON scoped_session_search_work(scope_key, requested_at);
+        CREATE TABLE IF NOT EXISTS projection_dirty_resources (
+            scope_key TEXT NOT NULL,
+            domain TEXT NOT NULL,
+            resource_key TEXT NOT NULL,
+            generation INTEGER NOT NULL,
+            reconcile_generation INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (scope_key, domain, resource_key)
+        );
+        CREATE INDEX IF NOT EXISTS idx_projection_dirty_domain_scope
+            ON projection_dirty_resources(domain, scope_key);
+        CREATE TABLE IF NOT EXISTS session_search_content_records (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            content_hash TEXT NOT NULL UNIQUE,
+            user_text TEXT NOT NULL,
+            assistant_text TEXT NOT NULL
+        );
+        CREATE VIRTUAL TABLE IF NOT EXISTS session_search_content_fts USING fts5(
+            user_text, assistant_text, content = '', contentless_delete = 1,
+            detail = column, tokenize = 'trigram case_sensitive 0'
+        );
+        CREATE TABLE IF NOT EXISTS scoped_session_search_entries (
+            scope_key TEXT NOT NULL,
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id TEXT NOT NULL,
+            agent TEXT NOT NULL,
+            session_path TEXT NOT NULL,
+            record_order INTEGER NOT NULL,
+            metadata_text TEXT NOT NULL DEFAULT '',
+            title TEXT NOT NULL DEFAULT '',
+            project TEXT NOT NULL DEFAULT '',
+            content_id INTEGER NOT NULL,
+            UNIQUE (scope_key, session_id, agent, session_path, record_order)
+        );
+        CREATE INDEX IF NOT EXISTS idx_scoped_session_search_entries_content
+            ON scoped_session_search_entries(content_id);
+        CREATE VIRTUAL TABLE IF NOT EXISTS scoped_session_search_metadata_fts USING fts5(
+            metadata_text, title, project, content = '', contentless_delete = 1,
+            detail = column, tokenize = 'trigram case_sensitive 0'
+        );
+        CREATE TABLE IF NOT EXISTS session_scan_empty_sources (
+            agent TEXT NOT NULL,
+            path TEXT NOT NULL,
+            parser_version TEXT NOT NULL,
+            sources_json TEXT NOT NULL,
+            PRIMARY KEY (agent, path)
+        );",
+    )?;
+    recreate_shared_session_search_triggers(conn)?;
+    crate::storage::shared_cache::install(conn)?;
+    conn.execute_batch(&format!("PRAGMA user_version = {STORAGE_SCHEMA_VERSION};"))?;
+    Ok(())
+}
+
+pub(super) fn needs_session_database_shape(conn: &Connection) -> Result<bool> {
+    Ok(!table_exists(conn, "meta")?
+        || !table_exists(conn, "storage_migrations")?
+        || !table_exists(conn, "normalized_snapshots")?
+        || !table_exists(conn, "scoped_projection_contexts")?
+        || !table_exists(conn, "projection_heads")?
+        || !table_exists(conn, "scoped_sessions")?
+        || !column_exists(conn, "scoped_sessions", "cached_input_tokens")?
+        || !table_exists(conn, "scoped_session_scan_sources")?
+        || !table_exists(conn, "session_projects")?
+        || !table_exists(conn, "session_project_aliases")?
+        || !table_exists(conn, "scoped_session_skill_index")?
+        || !table_exists(conn, "scoped_session_skill_links")?
+        || !table_exists(conn, "scoped_session_analytics")?
+        || !table_exists(conn, "scoped_session_analytics_overview")?
+        || !column_exists(conn, "scoped_session_search_index", "search_checkpoint")?
+        || !table_exists(conn, "scoped_session_search_pending")?
+        || !table_exists(conn, "scoped_session_search_maintenance")?
+        || !table_exists(conn, "scoped_session_search_work")?
+        || !table_exists(conn, "session_search_content_records")?
+        || !table_exists(conn, "session_search_content_fts")?
+        || !table_exists(conn, "scoped_session_search_entries")?
+        || !table_exists(conn, "scoped_session_search_metadata_fts")?
+        || !table_exists(conn, "projection_dirty_resources")?
+        || !table_exists(conn, "session_scan_empty_sources")?)
+}
+
 fn ensure_fs_manifest(conn: &Connection) -> Result<()> {
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS fs_manifest (
@@ -581,6 +865,13 @@ pub(super) fn run(conn: &Connection, existing_schema: bool) -> Result<()> {
             parser_version TEXT NOT NULL,
             sources_json TEXT NOT NULL,
             PRIMARY KEY (agent, path)
+        );
+        CREATE TABLE IF NOT EXISTS storage_migrations (
+            key TEXT PRIMARY KEY,
+            state TEXT NOT NULL CHECK (state IN ('pending', 'running', 'completed', 'failed')),
+            cursor INTEGER NOT NULL DEFAULT 0,
+            updated_at INTEGER NOT NULL DEFAULT 0,
+            last_error TEXT
         );",
     )?;
     conn.execute_batch(
@@ -939,7 +1230,10 @@ fn initialize_migration_state(conn: &Connection, key: &str, pending: bool) -> Re
     Ok(())
 }
 
-fn migration_state(tx: &rusqlite::Transaction<'_>, key: &str) -> Result<Option<(String, i64)>> {
+pub(super) fn migration_state(
+    tx: &rusqlite::Transaction<'_>,
+    key: &str,
+) -> Result<Option<(String, i64)>> {
     tx.query_row(
         "SELECT state, cursor FROM storage_migrations WHERE key = ?1",
         [key],
@@ -949,7 +1243,7 @@ fn migration_state(tx: &rusqlite::Transaction<'_>, key: &str) -> Result<Option<(
     .map_err(Into::into)
 }
 
-fn update_migration_state(
+pub(super) fn update_migration_state(
     tx: &rusqlite::Transaction<'_>,
     key: &str,
     state: &str,
@@ -1071,6 +1365,18 @@ fn json_i64_nested_field(value: Option<&serde_json::Value>, keys: &[&str]) -> Op
 pub(super) fn migrate_analytics_json_batch(
     tx: &rusqlite::Transaction<'_>,
 ) -> Result<MigrationBatch> {
+    if crate::storage::shared_cache::installed(tx)? {
+        tx.execute(
+            "INSERT INTO meta(key, value) VALUES ('storage.analytics_json_encoding', ?1)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            [ANALYTICS_JSON_ENCODING],
+        )?;
+        update_migration_state(tx, ANALYTICS_MIGRATION_KEY, "completed", 0)?;
+        return Ok(MigrationBatch {
+            processed: 0,
+            complete: true,
+        });
+    }
     let Some((state, cursor)) = migration_state(tx, ANALYTICS_MIGRATION_KEY)? else {
         return Ok(MigrationBatch {
             processed: 0,

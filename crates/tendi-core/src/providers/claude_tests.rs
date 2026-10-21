@@ -154,3 +154,20 @@ fn ignores_synthetic_model_in_session_metadata() {
 
     assert_eq!(metadata.model, None);
 }
+
+#[cfg(target_os = "macos")]
+#[test]
+fn ownership_registry_rejects_reused_and_exited_pids() {
+    let pid = std::process::id() as i32;
+    let start = crate::session_ownership::processes::start(pid).unwrap();
+    let stamp = chrono::DateTime::from_timestamp(start as i64, 0).unwrap().format("%a %b %e %H:%M:%S %Y").to_string();
+    let mut value = serde_json::json!({"pid":pid,"procStart":stamp,"sessionId":"live-session"});
+    assert_eq!(super::held_registry_session(&value).as_deref(), Some("live-session"));
+    value["sessionId"] = serde_json::json!("switched-session");
+    assert_eq!(super::held_registry_session(&value).as_deref(), Some("switched-session"));
+    value["procStart"] = serde_json::json!("Thu Jan  1 00:00:00 1970");
+    assert!(super::held_registry_session(&value).is_none());
+    value["procStart"] = serde_json::json!(stamp);
+    value["pid"] = serde_json::json!(i32::MAX);
+    assert!(super::held_registry_session(&value).is_none());
+}

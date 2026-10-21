@@ -14,11 +14,20 @@ use crate::{providers::agent_provider, skills::AgentKind, time::timestamp_ms};
 
 #[path = "transcript_search.rs"]
 mod search;
-pub(crate) use search::{SearchCheckpoint, read_search_delta};
+pub(crate) use search::{SearchCheckpoint, read_session_search_delta};
+
 
 #[path = "transcript_excerpt.rs"]
 mod excerpt;
-pub use excerpt::{TranscriptExcerpt, TranscriptExcerptItem, TranscriptExcerptOptions, read_transcript_excerpt};
+pub use excerpt::{TranscriptExcerpt, TranscriptExcerptItem, TranscriptExcerptOptions, read_transcript_excerpt, read_session_transcript_excerpt};
+
+#[path = "transcript_native.rs"]
+mod native;
+pub use native::{
+    parse_session_transcript_locator_page, parse_session_transcript_page,
+    parse_session_transcript_page_if_changed, parse_session_transcript, search_session_scoped_match,
+    search_session_transcript, write_session_transcript_json, TranscriptItemMatch,
+};
 
 #[derive(Debug, Clone, Serialize)]
 pub struct TranscriptItem {
@@ -86,6 +95,17 @@ pub struct TranscriptSearchScopes {
     pub assistant: bool,
     pub system: bool,
     pub tool: bool,
+}
+
+impl TranscriptSearchScopes {
+    pub fn session_search_default() -> Self {
+        Self {
+            user: true,
+            assistant: true,
+            system: false,
+            tool: false,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -806,7 +826,12 @@ pub(crate) fn transcript_inherited_history_start_ordinal(
 ) -> Result<Option<u64>> {
     let file =
         fs::File::open(path).with_context(|| format!("failed to read {}", path.display()))?;
-    for line in BufReader::new(file).lines().take(64) {
+    let reader: Box<dyn BufRead> = if agent_provider(agent).is_compressed_session_transcript(path) {
+        Box::new(BufReader::new(zstd::Decoder::new(file)?))
+    } else {
+        Box::new(BufReader::new(file))
+    };
+    for line in reader.lines().take(64) {
         let Ok(line) = line else {
             break;
         };
@@ -868,6 +893,44 @@ pub fn parse_transcript(path: &Path, agent: AgentKind) -> Result<TranscriptScan>
 
     agent_provider(agent).append_transcript_metadata(path, &mut items)?;
 
+    Ok(TranscriptScan { items, warnings })
+}
+
+pub(crate) fn parse_compressed_transcript(
+    path: &Path,
+    agent: AgentKind,
+) -> Result<TranscriptScan> {
+    let file = fs::File::open(path).with_context(|| format!("failed to read {}", path.display()))?;
+    let reader = BufReader::new(zstd::Decoder::new(file)?);
+    let inherited_history_start_ordinal = transcript_inherited_history_start_ordinal(path, agent)?;
+    let mut items = Vec::new();
+    let mut warnings = Vec::new();
+
+    for (index, line) in reader.lines().enumerate() {
+        let line = match line {
+            Ok(line) => line,
+            Err(err) => {
+                warnings.push(format!("{}:{}: {err}", path.display(), index + 1));
+                continue;
+            }
+        };
+        if line.trim().is_empty() {
+            continue;
+        }
+        let value = match serde_json::from_str::<Value>(&line) {
+            Ok(value) => value,
+            Err(err) => {
+                warnings.push(format!("{}:{}: {err}", path.display(), index + 1));
+                continue;
+            }
+        };
+        if is_inherited_transcript_value(&value, inherited_history_start_ordinal) {
+            continue;
+        }
+        collect_transcript_value(&value, agent, &mut items);
+    }
+
+    agent_provider(agent).append_transcript_metadata(path, &mut items)?;
     Ok(TranscriptScan { items, warnings })
 }
 
@@ -1411,11 +1474,7 @@ pub fn search_transcript(
     }
 
     let mut cursor = None;
-    let mut group_index = 0usize;
-    let mut previous_tool_group = None;
-    let mut next_tool_index = 0usize;
-    let mut tool_groups = HashMap::<String, (usize, usize)>::new();
-    let mut hits = Vec::new();
+    let mut search_builder = TranscriptSearchBuilder::default();
     let mut warnings = Vec::new();
     let mut offset_index = TranscriptOffsetIndex::new();
     let source_version = loop {
@@ -1489,53 +1548,7 @@ pub fn search_transcript(
         warnings.extend(page_warnings);
         offset_index.record(chunk_start, chunk_end);
 
-        for item in &items {
-            let kind = item.kind.as_str();
-            let mapped_tool = if kind == "tool_result" {
-                item.call_id
-                    .as_ref()
-                    .and_then(|call_id| tool_groups.get(call_id).copied())
-            } else {
-                None
-            };
-            let (item_group_index, tool_index, is_tool_scope) =
-                if let Some((group, index)) = mapped_tool {
-                    (group, Some(index), true)
-                } else if kind == "tool" {
-                    let group = previous_tool_group.unwrap_or_else(|| {
-                        let current = group_index;
-                        group_index += 1;
-                        current
-                    });
-                    let index = if previous_tool_group == Some(group) {
-                        next_tool_index
-                    } else {
-                        0
-                    };
-                    previous_tool_group = Some(group);
-                    next_tool_index = index + 1;
-                    if let Some(call_id) = item.call_id.as_ref() {
-                        tool_groups.insert(call_id.clone(), (group, index));
-                    }
-                    (group, Some(index), true)
-                } else {
-                    previous_tool_group = None;
-                    next_tool_index = 0;
-                    let current = group_index;
-                    group_index += 1;
-                    (current, None, false)
-                };
-
-            if !scope_enabled(kind, is_tool_scope, scopes) {
-                continue;
-            }
-            if transcript_item_contains(item, &needle) {
-                hits.push(TranscriptSearchHit {
-                    group_index: item_group_index,
-                    tool_index,
-                });
-            }
-        }
+        for item in &items { search_builder.push(item, &needle, scopes); }
 
         if page_done {
             break page_source_version;
@@ -1546,7 +1559,7 @@ pub fn search_transcript(
         }
     };
 
-    hits.sort_by_key(|hit| (hit.group_index, hit.tool_index.unwrap_or(0)));
+    let hits = search_builder.finish();
     if !transcript_search_snapshot_is_compatible(path, &initial_source, initial_boundary_hash)? {
         anyhow::bail!("transcript source changed during search")
     }
@@ -2316,3 +2329,68 @@ pub fn compact_local_time(value: &str) -> String {
 #[cfg(test)]
 #[path = "transcript_tests.rs"]
 mod tests;
+
+#[derive(Default)]
+struct TranscriptSearchBuilder {
+    group_index: usize,
+    previous_tool_group: Option<usize>,
+    next_tool_index: usize,
+    tool_groups: HashMap<String, (usize, usize)>,
+    hits: Vec<TranscriptSearchHit>,
+}
+
+impl TranscriptSearchBuilder {
+    fn push(&mut self, item: &TranscriptItem, needle: &str, scopes: &TranscriptSearchScopes) {
+        let kind = item.kind.as_str();
+        let mapped_tool = if kind == "tool_result" {
+            item.call_id
+                .as_ref()
+                .and_then(|call_id| self.tool_groups.get(call_id).copied())
+        } else {
+            None
+        };
+        let (item_group_index, tool_index, is_tool_scope) =
+            if let Some((group, index)) = mapped_tool {
+                (group, Some(index), true)
+            } else if kind == "tool" {
+                let group = self.previous_tool_group.unwrap_or_else(|| {
+                    let current = self.group_index;
+                    self.group_index += 1;
+                    current
+                });
+                let index = if self.previous_tool_group == Some(group) {
+                    self.next_tool_index
+                } else {
+                    0
+                };
+                self.previous_tool_group = Some(group);
+                self.next_tool_index = index + 1;
+                if let Some(call_id) = item.call_id.as_ref() {
+                    self.tool_groups.insert(call_id.clone(), (group, index));
+                }
+                (group, Some(index), true)
+            } else {
+                self.previous_tool_group = None;
+                self.next_tool_index = 0;
+                let current = self.group_index;
+                self.group_index += 1;
+                (current, None, false)
+            };
+
+        if !scope_enabled(kind, is_tool_scope, scopes) {
+            return;
+        }
+        if transcript_item_contains(item, &needle) {
+            self.hits.push(TranscriptSearchHit {
+                group_index: item_group_index,
+                tool_index,
+            });
+        }
+    }
+
+    fn finish(mut self) -> Vec<TranscriptSearchHit> {
+        self.hits
+            .sort_by_key(|hit| (hit.group_index, hit.tool_index.unwrap_or(0)));
+        self.hits
+    }
+}

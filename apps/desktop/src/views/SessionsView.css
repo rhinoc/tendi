@@ -72,6 +72,55 @@
   line-height: var(--leading-ui);
 }
 
+.sessionStatusIcons {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 3px;
+}
+
+.sessionStatusIcon {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  color: var(--muted);
+  line-height: 0;
+  cursor: help;
+}
+
+.sessionStatusIcon:focus-visible {
+  border-radius: 3px;
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+
+.sessionStatusIcon--subagent {
+  color: var(--accent);
+}
+
+.sessionStatusIcon--inUse {
+  color: var(--tone-meta-ink);
+}
+
+.sessionStatusIcon--archived {
+  color: var(--muted);
+}
+
+.threadTitleLine h2.sessionThreadTitle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.sessionThreadTitleLabel {
+  min-width: 0;
+  flex: 1 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .sessionPreviewSubLine {
   display: grid;
   align-items: stretch;
@@ -524,6 +573,31 @@
   font-weight: 700;
   line-height: var(--leading-tight);
   font-variant-numeric: tabular-nums;
+}
+
+.sessionFilterMenu {
+  width: min(240px, calc(100vw - 32px));
+  padding: 4px;
+}
+
+.sessionFilterMenu .menuSubTrigger {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr) 14px;
+}
+
+.sessionFilterSubmenu {
+  min-width: 190px;
+  padding: 4px;
+}
+
+.sessionFilterMenuSummary {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: var(--text-sm);
+  text-align: right;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .sessionProjectFilterMenu {

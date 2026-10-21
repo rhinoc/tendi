@@ -29,42 +29,6 @@ use super::*;
 
 pub(super) struct CodexProvider;
 
-fn codex_analytics_pricing(model: &str) -> Option<crate::analytics::cost::AnalyticsPricing> {
-    let model = model.trim().to_ascii_lowercase();
-    let (input, cached, output) = if model.contains("o4-mini") {
-        (1.1, 0.275, 4.4)
-    } else if model.contains("o3") {
-        (2.0, 0.5, 8.0)
-    } else if model.contains("gpt-4.1") {
-        (2.0, 0.5, 8.0)
-    } else if model.contains("gpt-4o") {
-        (2.5, 1.25, 10.0)
-    } else if model.contains("codex-mini") {
-        (0.25, 0.025, 2.0)
-    } else if model.contains("gpt-6-astra") {
-        (10.0, 1.0, 50.0)
-    } else if model.contains("gpt-5.6-sol") {
-        (4.0, 0.4, 20.0)
-    } else if model.contains("gpt-5.6-terra") {
-        (2.0, 0.2, 12.0)
-    } else if model.contains("gpt-5.6-luna") {
-        (0.2, 0.02, 1.2)
-    } else if model.contains("gpt-5.5") {
-        (5.0, 0.5, 30.0)
-    } else if model.contains("gpt-5.4") {
-        (2.5, 0.25, 15.0)
-    } else if model.contains("gpt-5.2") {
-        (1.75, 0.175, 14.0)
-    } else if model.contains("gpt-5") || model.contains("codex") {
-        (1.25, 0.125, 10.0)
-    } else {
-        return None;
-    };
-    Some(crate::analytics::cost::AnalyticsPricing::new(
-        input, cached, input, output,
-    ))
-}
-
 const CODEX_EXTERNAL_SOURCE_PREFIX: &str = "__codex_external__/";
 const CODEX_PLUGIN_READ_ONLY_REASON: &str = "Codex plugin MCP is managed by the plugin";
 
@@ -674,6 +638,24 @@ const CODEX_INTERNAL_CONTEXT_MARKERS: [InternalContextMarker; 1] = [(
 const CODEX_GOAL_CONTEXT_PREFIX: &str = "<codex_internal_context source=\"goal\">";
 const CODEX_CONTEXT_CLOSE: &str = "</codex_internal_context>";
 const CODEX_SELECTED_SKILL_KIND: &str = "skills.selected_skill_instructions";
+const CODEX_OPEN_PAGE_CONTEXT_KIND: &str = "additional_content.codex_apps_open_page";
+
+fn is_codex_open_page_context(value: &Value) -> bool {
+    if value.pointer("/payload/type").and_then(Value::as_str) != Some("message")
+        || value.pointer("/payload/role").and_then(Value::as_str) != Some("user")
+    {
+        return false;
+    }
+
+    value
+        .pointer("/payload/internal_chat_message_metadata_passthrough/content_item_kinds")
+        .and_then(Value::as_array)
+        .is_some_and(|kinds| {
+            kinds
+                .iter()
+                .any(|kind| kind.as_str() == Some(CODEX_OPEN_PAGE_CONTEXT_KIND))
+        })
+}
 
 fn is_codex_selected_skill(value: &Value) -> bool {
     if value.pointer("/payload/type").and_then(Value::as_str) != Some("message")
@@ -805,6 +787,9 @@ pub(crate) fn scan_session_index(
                         approval_mode: None,
                         is_run_everything: None,
                         parent_session_id: None,
+                        archived: None,
+                        archive_supported: false,
+                        resumable: true,
                         token_usage: None,
                     });
                 }
@@ -825,10 +810,11 @@ pub(crate) fn scan_jsonl_sessions_for_test(
 }
 
 pub(crate) fn session_id_from_path(path: &Path) -> Option<String> {
-    let raw_id = path
-        .file_stem()
-        .and_then(|name| name.to_str())
-        .map(|name| name.trim_start_matches("rollout-"))?;
+    let file_name = path.file_name()?.to_str()?;
+    let raw_id = file_name
+        .strip_suffix(".jsonl.zst")
+        .or_else(|| file_name.strip_suffix(".jsonl"))?
+        .trim_start_matches("rollout-");
     if raw_id.is_empty() {
         return None;
     }
@@ -2203,10 +2189,83 @@ pub(super) fn codex_thread_writer_lock_path(
     })
 }
 
+fn session_archive_location(path: &Path) -> Option<(&Path, bool)> {
+    path.ancestors().skip(1).find_map(|ancestor| {
+        let archived = match ancestor.file_name()?.to_str()? {
+            "sessions" => false,
+            "archived_sessions" => true,
+            _ => return None,
+        };
+        Some((ancestor.parent()?, archived))
+    })
+}
+
+pub(super) fn session_archive_command(
+    session: &SessionRecord,
+    archived: bool,
+) -> Result<SessionCommand> {
+    let (home, _) = session_archive_location(&session.path)
+        .ok_or_else(|| anyhow::anyhow!("session is outside Codex session storage"))?;
+    Ok(SessionCommand {
+        executable: "codex".to_string(),
+        args: vec![
+            if archived { "archive" } else { "unarchive" }.to_string(),
+            session.id.clone(),
+        ],
+        cwd: Some(home.to_path_buf()),
+        env: vec![("CODEX_HOME".to_string(), home.display().to_string())],
+    })
+}
+
+pub(super) fn apply_session_archive_command(
+    session: &SessionRecord,
+    archived: bool,
+    plan: SessionCommand,
+) -> Result<PathBuf> {
+    let (home, current) = session_archive_location(&session.path)
+        .ok_or_else(|| anyhow::anyhow!("session is outside Codex session storage"))?;
+    if !session.path.is_file() {
+        bail!("Codex session source no longer exists; refresh sessions and try again");
+    }
+    if current == archived {
+        return Ok(session.path.clone());
+    }
+    validate_session_writer(session)?;
+    let mut command = std::process::Command::new(&plan.executable);
+    command.args(&plan.args).envs(plan.env);
+    if let Some(cwd) = plan.cwd {
+        command.current_dir(cwd);
+    }
+    let output = command
+        .output()
+        .context("failed to run Codex session archive command")?;
+    if !output.status.success() {
+        bail!(
+            "Codex session archive command failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    let target = home.join(if archived {
+        "archived_sessions"
+    } else {
+        "sessions"
+    });
+    sessions::current::find_transcript(&[target], 6, |path| {
+        session_id_from_path(path).as_deref() == Some(session.id.as_str())
+    })?
+    .ok_or_else(|| {
+        anyhow::anyhow!("Codex archive command completed but the session transcript was not found")
+    })
+}
+
 pub(super) fn active_session_writer(session: &SessionRecord) -> Result<Option<SessionWriter>> {
     let Some(lock_path) = codex_thread_writer_lock_path(&session.path, &session.id) else {
         return Ok(None);
     };
+    active_writer_at_lock_path(lock_path)
+}
+
+fn active_writer_at_lock_path(lock_path: PathBuf) -> Result<Option<SessionWriter>> {
     let lock_file = match OpenOptions::new().read(true).write(true).open(&lock_path) {
         Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -2922,6 +2981,9 @@ fn collect_codex_item(value: &Value, items: &mut Vec<TranscriptItem>) {
         Some("message") => {
             let role = payload.get("role").and_then(Value::as_str).unwrap_or("");
             let content = payload.get("content");
+            if is_codex_open_page_context(value) {
+                return;
+            }
             if is_codex_selected_skill(value) {
                 if let Some(body) = extract_raw_content_text(content) {
                     push_item(items, "context", body, Some("Skill".to_string()), time);
@@ -3471,14 +3533,32 @@ impl super::AgentProvider for CodexProvider {
     fn session_path_role(&self, path: &Path) -> SessionPathRole {
         if path.file_name().and_then(|name| name.to_str()) == Some("session_index.jsonl") {
             SessionPathRole::Index
-        } else if path
-            .extension()
-            .is_some_and(|extension| extension == "jsonl")
-        {
+        } else if self.is_session_transcript_path(path) {
             SessionPathRole::Transcript
         } else {
             SessionPathRole::Other
         }
+    }
+
+    fn is_session_transcript_path(&self, path: &Path) -> bool {
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.ends_with(".jsonl") || name.ends_with(".jsonl.zst"))
+    }
+
+    fn is_compressed_session_transcript(&self, path: &Path) -> bool {
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.ends_with(".jsonl.zst"))
+    }
+
+    fn read_session_transcript(
+        &self,
+        path: &Path,
+        _id: &str,
+    ) -> Option<Result<crate::transcript::TranscriptScan>> {
+        self.is_compressed_session_transcript(path)
+            .then(|| crate::transcript::parse_compressed_transcript(path, self.kind()))
     }
 
     fn skill_roots(&self, ctx: &ProviderContext) -> Vec<SkillRoot> {
@@ -3674,6 +3754,28 @@ impl super::AgentProvider for CodexProvider {
             .collect()
     }
 
+    fn session_archive_state(&self, path: &Path, _id: &str) -> Option<bool> {
+        session_archive_location(path).map(|(_, archived)| archived)
+    }
+
+    fn session_archive_supported(&self, path: &Path) -> bool {
+        session_archive_location(path).is_some()
+    }
+
+    fn session_archive_resource_paths(&self, path: &Path) -> Vec<PathBuf> {
+        session_archive_location(path)
+            .map(|(home, _)| vec![home.to_path_buf()])
+            .unwrap_or_default()
+    }
+
+    fn set_session_archived(&self, session: &SessionRecord, archived: bool) -> Result<PathBuf> {
+        apply_session_archive_command(
+            session,
+            archived,
+            session_archive_command(session, archived)?,
+        )
+    }
+
     fn assistant_ask_command(&self, workspace: &Path, prompt: &str) -> Option<SessionCommand> {
         Some(SessionCommand {
             executable: "codex".to_string(),
@@ -3693,6 +3795,61 @@ impl super::AgentProvider for CodexProvider {
 
     fn validate_session_resume(&self, session: &SessionRecord) -> Result<()> {
         validate_session_writer(session)
+    }
+
+    fn session_ownership_paths(&self, ctx: &ProviderContext, roots: &[PathBuf]) -> Vec<PathBuf> {
+        let mut paths = BTreeSet::from([codex_home(ctx).join("thread-writer-locks")]);
+        for root in roots {
+            let nested = if is_tutti_run_root(root) { tutti_run_session_roots(root) } else { Vec::new() };
+            for source in std::iter::once(root.clone()).chain(nested) {
+                if let Some(path) = codex_thread_writer_lock_path(&source, "ownership") {
+                    if let Some(parent) = path.parent() {
+                        paths.insert(parent.to_path_buf());
+                    }
+                }
+            }
+        }
+        paths.into_iter().collect()
+    }
+
+    fn owns_session_process(&self, executable: &Path) -> bool {
+        executable.file_name().is_some_and(|name| name == "codex")
+    }
+
+    fn held_sessions(
+        &self,
+        ctx: &ProviderContext,
+        roots: &[PathBuf],
+        _processes: &mut crate::session_ownership::processes::Processes,
+    ) -> Result<BTreeSet<crate::session_ownership::HeldSession>> {
+        let mut held = BTreeSet::new();
+        for directory in self.session_ownership_paths(ctx, roots) {
+            let entries = match fs::read_dir(&directory) {
+                Ok(entries) => entries,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(error.into()),
+            };
+            for entry in entries {
+                let path = entry?.path();
+                let Some(id) = path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .and_then(|name| name.strip_suffix(".lock"))
+                else {
+                    continue;
+                };
+                if id.starts_with('.') || id.is_empty() {
+                    continue;
+                }
+                if active_writer_at_lock_path(path.clone())?.is_some() {
+                    held.insert(crate::session_ownership::HeldSession {
+                        agent: self.kind(),
+                        id: id.to_string(),
+                    });
+                }
+            }
+        }
+        Ok(held)
     }
 
     fn active_session_writer(&self, session: &SessionRecord) -> Result<Option<SessionWriter>> {
@@ -3753,7 +3910,9 @@ impl super::AgentProvider for CodexProvider {
     }
 
     fn session_message_kind(&self, value: &Value) -> Option<SessionMessageKind> {
-        if is_codex_selected_skill(value) {
+        if is_codex_open_page_context(value) {
+            None
+        } else if is_codex_selected_skill(value) {
             Some(SessionMessageKind::Context)
         } else {
             default_session_message_kind(value)
@@ -3792,7 +3951,7 @@ impl super::AgentProvider for CodexProvider {
     }
 
     fn transcript_search_append_version(&self) -> Option<&'static str> {
-        Some("codex-search-jsonl-v1")
+        Some("codex-search-jsonl-v2")
     }
 
     fn recognizes_transcript(&self, value: &Value) -> bool {
@@ -3821,8 +3980,12 @@ impl super::AgentProvider for CodexProvider {
         model: &str,
         usage: crate::analytics::AnalyticsTokenUsage,
     ) -> Option<crate::analytics::AnalyticsCost> {
-        codex_analytics_pricing(model)
+        crate::analytics::model_pricing::pricing_for_provider_model("openai", model)
             .map(|pricing| crate::analytics::cost::calculate(usage, pricing))
+    }
+
+    fn analytics_pricing_revision(&self, model: &str) -> Option<String> {
+        crate::analytics::model_pricing::pricing_revision_for_provider_model("openai", model)
     }
 
     fn parse_analytics_line(&self, line: &str, record: &mut SessionAnalyticsRecord) {

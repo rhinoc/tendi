@@ -7,6 +7,120 @@ use std::{
 static TEST_LOCK: Mutex<()> = Mutex::new(());
 
 #[test]
+fn cursor_sdk_archive_boundary_updates_the_selected_session_in_a_shared_index() {
+    let root = temp_workspace().join("sdk-archive-boundary");
+    let daemon = test_daemon_without_background(root.clone()); let store = test_store(&daemon); let scope = daemon_scope_key(&daemon).unwrap();
+    let path = root.join(".cursor/projects/work/sdk-agent-store/workspace/index.db"); fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let native = rusqlite::Connection::open(&path).unwrap();
+    native.execute_batch("CREATE TABLE agents(agent_id TEXT PRIMARY KEY,workspace_ref TEXT,status TEXT,active_run_id TEXT,latest_checkpoint_ref_json TEXT,name TEXT,metadata_json TEXT,created_at TEXT,updated_at TEXT);").unwrap();
+    for id in ["sdk-one","sdk-two"] {
+        native.execute("INSERT INTO agents VALUES(?1,'/tmp/sdk-workspace','IDLE',NULL,NULL,?1,'{}','2026-05-28T20:26:40.000Z','2026-05-28T20:26:40.000Z')",[id]).unwrap();
+    }
+    let scan = tendi_core::sessions::scan_session_paths(&[path.clone()],&Default::default()); assert!(scan.warnings.is_empty()); assert_eq!(scan.sessions.len(),2);
+    store.save_sessions_at_for_scope(&scope,&scan,1).unwrap();
+    for archived in [true,false] {
+        let result = daemon.session_set_archived(serde_json::from_value(json!({"session":{"id":"sdk-two","agent":"cursor","path":path},"archived":archived})).unwrap()).unwrap();
+        assert_eq!(result.id,"sdk-two"); assert_eq!(result.archived,Some(archived)); assert_eq!(result.archive_supported,Some(true)); assert_eq!(result.resumable,Some(false));
+        let snapshot = daemon.sessions_snapshot().unwrap(); assert_eq!(snapshot.payload.len(),2);
+        assert_eq!(snapshot.payload.iter().find(|session|session.id=="sdk-one").unwrap().archived,Some(false));
+        assert_eq!(snapshot.payload.iter().find(|session|session.id=="sdk-two").unwrap().archived,Some(archived));
+    }
+    native.execute_batch("DROP TABLE agents;").unwrap();
+    assert!(process_session_watch_paths_once(&daemon,&[path],&scope).is_err());
+    assert_eq!(daemon.sessions_snapshot().unwrap().payload.len(),2);
+    daemon.shutdown(); drop(native); fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn session_archive_boundary_exposes_state_and_rejects_unsupported_providers() {
+    let root = temp_workspace().join("archive-boundary");
+    let daemon = test_daemon_without_background(root.clone());
+    let store = test_store(&daemon);
+    let scope = daemon_scope_key(&daemon).unwrap();
+    let path = root.join("custom-codex-home/archived_sessions/session-id.jsonl");
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(&path, concat!(
+        "{\"type\":\"session_meta\",\"payload\":{\"cwd\":\"/tmp/project\"}}\n",
+        "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"Archive boundary fixture\"}]}}\n",
+    )).unwrap();
+    let scan = tendi_core::sessions::scan_session_paths(&[path.clone()], &Default::default());
+    assert_eq!(scan.sessions.len(), 1);
+    store.save_sessions_at_for_scope(&scope, &scan, 1).unwrap();
+    let result = daemon
+        .session_set_archived(
+            serde_json::from_value(json!({
+                "session": {"id": "session-id", "agent": "codex", "path": path}, "archived": true,
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+    assert_eq!(result.archived, Some(true));
+    assert_eq!(result.path, path.display().to_string());
+    assert_eq!(
+        daemon.sessions_snapshot().unwrap().payload[0].archived,
+        Some(true)
+    );
+
+    let unsupported: tendi_core::SessionRecord = serde_json::from_value(json!({
+        "id": "claude-id", "agent": "claude", "path": root.join("claude.jsonl"),
+    }))
+    .unwrap();
+    store
+        .apply_session_changes_for_scope(&scope, &[unsupported.clone()], &[])
+        .unwrap();
+    let error = daemon.session_set_archived(serde_json::from_value(json!({
+        "session": {"id": unsupported.id, "agent": "claude", "path": unsupported.path}, "archived": true,
+    })).unwrap()).unwrap_err();
+    assert!(error.message.contains("not supported"));
+    assert_eq!(
+        store
+            .list_sessions_for_scope(&scope)
+            .unwrap()
+            .sessions
+            .len(),
+        2
+    );
+    daemon.shutdown();
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn session_archive_move_updates_projection_and_preserves_session_identity() {
+    let root = temp_workspace().join("archive-projection");
+    let daemon = test_daemon_without_background(root.clone());
+    let store = test_store(&daemon);
+    let scope = daemon_scope_key(&daemon).unwrap();
+    let live = root.join("custom-codex-home/sessions/session-id.jsonl");
+    let archived = root.join("custom-codex-home/archived_sessions/session-id.jsonl");
+    fs::create_dir_all(live.parent().unwrap()).unwrap();
+    fs::create_dir_all(archived.parent().unwrap()).unwrap();
+    fs::write(&live, concat!(
+        "{\"type\":\"session_meta\",\"payload\":{\"cwd\":\"/tmp/project\"}}\n",
+        "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"Archive projection fixture\"}]}}\n",
+    )).unwrap();
+    let scan = tendi_core::sessions::scan_session_paths(&[live.clone()], &Default::default());
+    store.save_sessions_at_for_scope(&scope, &scan, 1).unwrap();
+    for (source, target, archived_state) in [(&live, &archived, true), (&archived, &live, false)] {
+        fs::rename(source, target).unwrap();
+        let (upserts, deleted, _, base, revision, _) =
+            process_session_watch_paths_once(&daemon, &[source.clone(), target.clone()], &scope)
+                .unwrap();
+        assert_eq!(upserts.len(), 1);
+        assert!(deleted.is_empty());
+        assert!(revision > base);
+        assert_eq!(&upserts[0].path, target);
+        assert_eq!(upserts[0].archived, Some(archived_state));
+        let snapshot = daemon.sessions_snapshot().unwrap();
+        assert_eq!(snapshot.payload.len(), 1);
+        assert_eq!(snapshot.payload[0].id, "session-id");
+        assert_eq!(snapshot.payload[0].archived, Some(archived_state));
+        assert_eq!(snapshot.payload[0].path, target.display().to_string());
+    }
+    daemon.shutdown();
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn sqlite_database_error_classification_separates_locks_from_recovery_errors() {
     let cases = [
         (
@@ -939,6 +1053,73 @@ fn skill_file_round_trip_and_conflict_are_protocol_errors() {
             .expect_err("stale skill file save should conflict");
     assert_eq!(conflict.code, "CONFLICT");
     let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn local_skill_creation_refreshes_provider_projections_and_supports_editing() {
+    let _test_lock = TEST_LOCK.lock().unwrap();
+    let root = temp_workspace();
+    let daemon = test_daemon_without_background(root.clone());
+    let _ = run_method_ok(&daemon, "skills_list", json!({}));
+    for target in ["shared", "codex", "claude-code", "cursor"] {
+        let name = format!(
+            "local-{target}-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let description = "Use for \"local\": tasks\nwith multiple lines.";
+        let args = json!({ "name": name, "description": description, "target": target });
+        let created = run_method_ok(&daemon, "skills_create", args.clone());
+        assert_eq!(created["updated"].as_array().unwrap().len(), 1);
+        let skill = &created["updated"][0];
+        assert_eq!(skill["name"], name);
+        assert_eq!(skill["description"], description);
+        assert_eq!(skill["paths"][0]["source_kind"], "local");
+        assert_eq!(skill["paths"][0]["scope"], "global");
+        assert_eq!(skill["is_system"], false);
+        let id = skill["id"].as_str().unwrap();
+        let path = skill["paths"][0]["path"].as_str().unwrap();
+        let content = fs::read_to_string(Path::new(path).join("SKILL.md")).unwrap();
+        assert!(run_method(&daemon, "skills_create", args).is_err());
+        assert_eq!(
+            fs::read_to_string(Path::new(path).join("SKILL.md")).unwrap(),
+            content
+        );
+
+        let listed = run_method_ok(&daemon, "skills_list", json!({}));
+        assert!(listed.as_array().unwrap().iter().any(|row| row["id"] == id));
+        let read = run_method_ok(
+            &daemon,
+            "skill_file_read",
+            json!({
+                "skillName": name, "skillPath": path, "relativePath": "SKILL.md",
+            }),
+        );
+        let edited = format!("{content}\nFollow these local instructions.\n");
+        let saved = run_method_ok(
+            &daemon,
+            "skill_file_save",
+            json!({
+                "skillId": id, "relativePath": "SKILL.md", "expectedSha256": read["sha256"], "content": edited,
+            }),
+        );
+        assert!(
+            saved["skills"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|row| row["id"] == id)
+        );
+        assert_eq!(
+            fs::read_to_string(Path::new(path).join("SKILL.md")).unwrap(),
+            edited
+        );
+        fs::remove_dir_all(path).unwrap();
+    }
+    daemon.shutdown();
+    fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
@@ -2200,6 +2381,9 @@ fn analytics_refresh_publishes_committed_batches_before_completion() {
             approval_mode: None,
             is_run_everything: None,
             parent_session_id: None,
+            archived: None,
+            archive_supported: false,
+            resumable: true,
             token_usage: None,
         }
     }).collect::<Vec<_>>();
@@ -2524,6 +2708,9 @@ fn sessions_snapshot_preserves_full_session_records() {
                     approval_mode: None,
                     is_run_everything: None,
                     parent_session_id: None,
+                    archived: None,
+                    archive_supported: false,
+                    resumable: true,
                     token_usage: None,
                 }],
                 warnings: Vec::new(),

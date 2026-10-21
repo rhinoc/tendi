@@ -366,7 +366,7 @@
   min-width: 112px;
 }
 
-.settingsProjectScanActions {
+.settingsScanActions {
   display: flex;
   align-items: center;
   flex-wrap: wrap;

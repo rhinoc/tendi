@@ -24,6 +24,7 @@ pub(crate) mod claude;
 pub(crate) mod codex;
 pub(crate) mod cursor;
 pub(crate) mod cursor_sessions;
+mod cursor_native_sessions;
 pub(crate) mod shared;
 mod unknown;
 
@@ -162,6 +163,15 @@ pub(crate) trait AgentProvider: Sync {
     }
 
     fn is_session_candidate_path(&self, _path: &Path) -> bool {
+        false
+    }
+
+    fn is_session_transcript_path(&self, path: &Path) -> bool {
+        path.extension()
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("jsonl"))
+    }
+
+    fn is_compressed_session_transcript(&self, _path: &Path) -> bool {
         false
     }
 
@@ -382,6 +392,10 @@ pub(crate) trait AgentProvider: Sync {
         None
     }
 
+    fn session_watch_source_path(&self, _event_path: &Path) -> Option<PathBuf> {
+        None
+    }
+
     fn collect_additional_session_paths(
         &self,
         _root: &Path,
@@ -407,6 +421,35 @@ pub(crate) trait AgentProvider: Sync {
         Vec::new()
     }
 
+    fn session_archive_state(&self, _path: &Path, _id: &str) -> Option<bool> {
+        None
+    }
+
+    fn session_archive_supported(&self, _path: &Path) -> bool {
+        false
+    }
+
+    fn session_resumable(&self, _path: &Path, _id: &str) -> bool { true }
+
+    fn read_session_transcript(
+        &self,
+        _path: &Path,
+        _id: &str,
+    ) -> Option<Result<crate::transcript::TranscriptScan>> {
+        None
+    }
+
+    fn session_archive_resource_paths(&self, _path: &Path) -> Vec<PathBuf> {
+        Vec::new()
+    }
+
+    fn set_session_archived(&self, _session: &SessionRecord, _archived: bool) -> Result<PathBuf> {
+        bail!(
+            "session archiving is not supported for {}",
+            self.storage_key()
+        )
+    }
+
     fn assistant_ask_command(&self, _workspace: &Path, _prompt: &str) -> Option<SessionCommand> {
         None
     }
@@ -421,6 +464,16 @@ pub(crate) trait AgentProvider: Sync {
 
     fn active_session_writer(&self, _session: &SessionRecord) -> Result<Option<SessionWriter>> {
         Ok(None)
+    }
+
+    fn session_ownership_paths(&self, _ctx: &ProviderContext, _roots: &[PathBuf]) -> Vec<PathBuf> {
+        Vec::new()
+    }
+
+    fn owns_session_process(&self, _executable: &Path) -> bool { false }
+
+    fn held_sessions(&self, _ctx: &ProviderContext, _roots: &[PathBuf], _processes: &mut crate::session_ownership::processes::Processes) -> Result<std::collections::BTreeSet<crate::session_ownership::HeldSession>> {
+        Ok(Default::default())
     }
 
     fn validate_session_resume(&self, _session: &SessionRecord) -> Result<()> {
@@ -551,6 +604,8 @@ pub(crate) trait AgentProvider: Sync {
             .map(str::to_string)
     }
 
+    fn session_parent_id_from_path(&self, _path: &Path) -> Option<String> { None }
+
     fn session_project_aliases(&self, _path: &str) -> Vec<String> {
         Vec::new()
     }
@@ -564,8 +619,8 @@ pub(crate) trait AgentProvider: Sync {
         _path: &Path,
         _sessions: &mut Vec<SessionRecord>,
         _cache: Option<&SessionScanCache>,
-    ) -> bool {
-        false
+    ) -> Result<bool> {
+        Ok(false)
     }
 
     fn analytics_capabilities(&self) -> AnalyticsCapabilities {
@@ -587,6 +642,10 @@ pub(crate) trait AgentProvider: Sync {
         _model: &str,
         _usage: crate::analytics::AnalyticsTokenUsage,
     ) -> Option<crate::analytics::AnalyticsCost> {
+        None
+    }
+
+    fn analytics_pricing_revision(&self, _model: &str) -> Option<String> {
         None
     }
 
@@ -1034,6 +1093,26 @@ pub fn active_session_writer(session: &SessionRecord) -> Result<Option<SessionWr
 
 pub fn session_resume_repair_commands(session: &SessionRecord) -> Vec<SessionCommand> {
     agent_provider(session.agent).session_resume_repair_commands(session)
+}
+
+pub fn session_archive_state(agent: AgentKind, path: &Path, id: &str) -> Option<bool> {
+    agent_provider(agent).session_archive_state(path, id)
+}
+
+pub fn session_archive_supported(agent: AgentKind, path: &Path) -> bool {
+    agent_provider(agent).session_archive_supported(path)
+}
+
+pub fn session_resumable(agent: AgentKind, path: &Path, id: &str) -> bool {
+    agent_provider(agent).session_resumable(path, id)
+}
+
+pub fn session_archive_resource_paths(agent: AgentKind, path: &Path) -> Vec<PathBuf> {
+    agent_provider(agent).session_archive_resource_paths(path)
+}
+
+pub fn set_session_archived(session: &SessionRecord, archived: bool) -> Result<PathBuf> {
+    agent_provider(session.agent).set_session_archived(session, archived)
 }
 
 pub fn accepts_session_app_url(url: &str) -> bool {

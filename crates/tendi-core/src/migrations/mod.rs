@@ -14,7 +14,10 @@ use rusqlite::{Connection, OptionalExtension, params};
 use crate::storage::default_db_path;
 use crate::{
     skills::{SkillPath, SkillScan, SkillSourceRecord},
-    storage::{PROJECTION_PARSER_VERSION, STORAGE_SCHEMA_VERSION, Store},
+    storage::{
+        ANALYTICS_JSON_ENCODING, PROJECTION_PARSER_VERSION, STORAGE_SCHEMA_VERSION,
+        SessionDatabase, Store,
+    },
 };
 
 mod git_skill_snapshots;
@@ -26,8 +29,87 @@ mod skill_visibility;
 
 const CODEX_GLOBAL_SKILL_CONFIG_MIGRATION_KEY: &str = "codex_global_skill_config_migrated_v1";
 const GIT_SOURCE_VERSION_LONG_SHA_MIGRATION_KEY: &str = "git_source_version_long_sha_migrated_v1";
-const MAX_SQUASHED_DEVELOPMENT_SCHEMA_VERSION: i64 = 6;
+const MAX_SQUASHED_DEVELOPMENT_SCHEMA_VERSION: i64 = 7;
 const STORAGE_MAINTENANCE_TIME_SLICE: Duration = Duration::from_millis(100);
+const SESSION_DATABASE_MIGRATION_KEY: &str = "storage.session_database.v1";
+const SESSION_DATABASE_REBUILD_KEY: &str = "storage.session_database.rebuild.v2";
+const PRIMARY_SESSION_CLEANUP_MIGRATION_KEY: &str = "storage.session_database.primary_cleanup.v1";
+const SESSION_DOMAIN_CLEANUP_PREDICATE: &str = "domain IN (
+    'sessions', 'analytics', 'session-search', 'session-analytics', 'session-skills'
+) OR domain LIKE 'session-%' OR domain LIKE 'session_%'";
+const SESSION_CACHE_LAYOUTS: &[&str] = &[
+    "scoped_sessions",
+    "scoped_session_search_entries",
+    "scoped_session_search_index",
+    "scoped_session_analytics",
+    "scoped_session_analytics_overview",
+    "scoped_session_skill_links",
+    "scoped_session_skill_index",
+    "scoped_session_scan_sources",
+];
+const SESSION_CACHE_TABLES: &[&str] = &[
+    "scoped_session_search_pending",
+    "scoped_session_search_maintenance",
+    "scoped_session_search_work",
+    "session_projects",
+    "session_project_aliases",
+    "session_search_content_records",
+    "session_search_content_fts",
+    "scoped_session_search_metadata_fts",
+    "session_scan_empty_sources",
+    "shared_cache_values",
+    "cache_source_paths",
+    "cache_sessions",
+    "cache_scopes",
+];
+const PRIMARY_SESSION_CLEANUP_PHASES: &[(&str, &str)] = &[
+    ("scoped_session_search_entries", "1 = 1"),
+    ("session_search_content_records", "1 = 1"),
+    ("scoped_session_search_metadata_fts", "1 = 1"),
+    ("session_search_content_fts", "1 = 1"),
+    ("scoped_session_search_work", "1 = 1"),
+    ("scoped_session_search_pending", "1 = 1"),
+    ("scoped_session_search_index", "1 = 1"),
+    ("scoped_session_search_maintenance", "1 = 1"),
+    ("scoped_session_analytics_overview", "1 = 1"),
+    ("scoped_session_analytics", "1 = 1"),
+    ("scoped_session_skill_links", "1 = 1"),
+    ("scoped_session_skill_index", "1 = 1"),
+    ("scoped_session_scan_sources", "1 = 1"),
+    ("scoped_sessions", "1 = 1"),
+    ("session_project_aliases", "1 = 1"),
+    ("session_projects", "1 = 1"),
+    ("session_scan_empty_sources", "1 = 1"),
+    (
+        "projection_dirty_resources",
+        SESSION_DOMAIN_CLEANUP_PREDICATE,
+    ),
+    ("projection_heads", SESSION_DOMAIN_CLEANUP_PREDICATE),
+    (
+        "scoped_projection_contexts",
+        SESSION_DOMAIN_CLEANUP_PREDICATE,
+    ),
+    ("normalized_snapshots", SESSION_DOMAIN_CLEANUP_PREDICATE),
+    (
+        "meta",
+        "key LIKE 'sessions_last_scan_at:%'
+         OR key LIKE 'session_skill_index_version:%'
+         OR key = 'storage.analytics_json_encoding'",
+    ),
+    (
+        "storage_migrations",
+        "key IN (
+            'storage.scoped_session_list.v2',
+            'storage.analytics_json.v2',
+            'storage.session_search_fts.v2',
+            'storage.session_search_shared_content.v1'
+        )",
+    ),
+    ("shared_cache_values", "1 = 1"),
+    ("cache_source_paths", "1 = 1"),
+    ("cache_sessions", "1 = 1"),
+    ("cache_scopes", "1 = 1"),
+];
 
 static STORAGE_MAINTENANCE_SCHEDULED: LazyLock<Mutex<HashSet<PathBuf>>> =
     LazyLock::new(|| Mutex::new(HashSet::new()));
@@ -78,15 +160,13 @@ impl Store {
             .with_context(|| format!("failed to open sqlite reader {}", path.display()))?;
         super::shared_cache::register_functions(&conn)?;
         conn.busy_timeout(Duration::from_secs(30))?;
-        let store = Self { conn, path, writer };
-        let existing_schema = schema::has_user_schema(&store.conn)?;
-        let schema_version = store
-            .conn
-            .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))?;
+        let existing_schema = schema::has_user_schema(&conn)?;
+        let schema_version =
+            conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))?;
         let schema_needs_initialization =
-            schema_version != STORAGE_SCHEMA_VERSION || schema::needs_current_shape(&store.conn)?;
+            schema_version != STORAGE_SCHEMA_VERSION || schema::needs_current_shape(&conn)?;
         if schema_needs_initialization {
-            store.with_named_write_transaction("schema.initialize", |tx| {
+            writer.write("schema.initialize", |tx| {
                 let current: i64 = tx.query_row("PRAGMA user_version", [], |row| row.get(0))?;
                 if current != STORAGE_SCHEMA_VERSION || schema::needs_current_shape(tx)? {
                     anyhow::ensure!(
@@ -99,7 +179,7 @@ impl Store {
                 Ok(())
             })?;
         }
-        let fs_manifest_rebuild_pending: bool = store.conn.query_row(
+        let fs_manifest_rebuild_pending: bool = conn.query_row(
             "SELECT EXISTS(
                  SELECT 1 FROM meta WHERE key = ?1 AND value = '1'
              )",
@@ -107,12 +187,51 @@ impl Store {
             |row| row.get(0),
         )?;
         if fs_manifest_rebuild_pending {
-            store.with_named_write_transaction("schema.finish_fs_manifest_rebuild", |tx| {
+            writer.write("schema.finish_fs_manifest_rebuild", |tx| {
                 schema::finish_pending_fs_manifest_rebuild(tx)?;
                 Ok(())
             })?;
         }
+        let sessions = open_session_database(&path)?;
+        let legacy_session_migrations_pending: bool = conn.query_row(
+            "SELECT EXISTS(
+                 SELECT 1 FROM storage_migrations
+                 WHERE key IN (?1, ?2) AND state != 'completed'
+             )",
+            params![
+                schema::SESSION_LIST_MIGRATION_KEY,
+                schema::ANALYTICS_MIGRATION_KEY,
+            ],
+            |row| row.get(0),
+        )?;
+        if legacy_session_migrations_pending {
+            writer.write(
+                "migration.session_database.release_legacy_migrations",
+                |tx| {
+                    tx.execute(
+                        "UPDATE storage_migrations
+                     SET state = 'completed', cursor = 0,
+                         updated_at = CAST(strftime('%s', 'now') AS INTEGER), last_error = NULL
+                     WHERE key IN (?1, ?2)",
+                        params![
+                            schema::SESSION_LIST_MIGRATION_KEY,
+                            schema::ANALYTICS_MIGRATION_KEY,
+                        ],
+                    )?;
+                    Ok(())
+                },
+            )?;
+        }
+        let store = Self {
+            conn,
+            path,
+            writer,
+            sessions,
+        };
         git_skill_snapshots::purge(&store)?;
+        initialize_primary_session_cleanup(&store)?;
+        #[cfg(not(test))]
+        store.schedule_pending_storage_work();
         Ok(store)
     }
 
@@ -129,30 +248,39 @@ impl Store {
     }
 
     fn run_pending_storage_migrations_until(&self, deadline: Option<Instant>) -> Result<bool> {
+        {
+            let Some(_migration_lease) = crate::coordination::ResourceLease::try_acquire(
+                &self.sessions.path,
+                "storage-migrations",
+            )?
+            else {
+                return Ok(false);
+            };
+            if !run_migration_until_complete(
+                self,
+                schema::SESSION_LIST_MIGRATION_KEY,
+                "migration.scoped_session_list",
+                schema::migrate_session_list_batch,
+                deadline,
+            )? {
+                return Ok(false);
+            }
+            if !run_migration_until_complete(
+                self,
+                schema::ANALYTICS_MIGRATION_KEY,
+                "migration.analytics_json",
+                schema::migrate_analytics_json_batch,
+                deadline,
+            )? {
+                return Ok(false);
+            }
+        }
         let Some(_migration_lease) =
             crate::coordination::ResourceLease::try_acquire(&self.path, "storage-migrations")?
         else {
             return Ok(false);
         };
-        if !run_migration_until_complete(
-            self,
-            schema::SESSION_LIST_MIGRATION_KEY,
-            "migration.scoped_session_list",
-            schema::migrate_session_list_batch,
-            deadline,
-        )? {
-            return Ok(false);
-        }
-        if !run_migration_until_complete(
-            self,
-            schema::ANALYTICS_MIGRATION_KEY,
-            "migration.analytics_json",
-            schema::migrate_analytics_json_batch,
-            deadline,
-        )? {
-            return Ok(false);
-        }
-        Ok(true)
+        run_primary_session_cleanup_until_complete(self, deadline)
     }
 
     /// Explicitly consume the durable compaction marker. This is never called from `Store::open`.
@@ -242,6 +370,7 @@ impl Store {
 
     fn schedule_pending_storage_work(&self) {
         let pending_migrations = self
+            .sessions
             .conn
             .query_row(
                 "SELECT EXISTS(
@@ -263,7 +392,18 @@ impl Store {
             .ok()
             .flatten()
             .unwrap_or(false);
-        if !pending_migrations && !pending_compaction {
+        let pending_primary_cleanup = self
+            .conn
+            .query_row(
+                "SELECT EXISTS(
+                    SELECT 1 FROM storage_migrations
+                    WHERE key = ?1 AND state IN ('pending', 'failed')
+                )",
+                [PRIMARY_SESSION_CLEANUP_MIGRATION_KEY],
+                |row| row.get::<_, bool>(0),
+            )
+            .unwrap_or(false);
+        if !pending_migrations && !pending_compaction && !pending_primary_cleanup {
             return;
         }
         let should_spawn = STORAGE_MAINTENANCE_SCHEDULED
@@ -295,7 +435,7 @@ impl Store {
                 });
                 if let Err(error) = result {
                     crate::logging::global().warn(
-                        "background storage compaction deferred",
+                        "background storage maintenance deferred",
                         serde_json::json!({
                             "database": path,
                             "error": format!("{error:#}"),
@@ -311,12 +451,266 @@ impl Store {
                 scheduled.remove(&self.path);
             }
             crate::logging::global().warn(
-                "background storage compaction could not start",
+                "background storage maintenance could not start",
                 serde_json::json!({
                     "database": self.path,
                     "error": error.to_string(),
                 }),
             );
+        }
+    }
+}
+
+fn open_session_database(source_path: &Path) -> Result<SessionDatabase> {
+    let path = super::session_database_path_for(source_path)?;
+    let writer = super::database::DatabaseWriter::open(&path)?;
+    let conn = Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .with_context(|| format!("failed to open session sqlite reader {}", path.display()))?;
+    super::shared_cache::register_functions(&conn)?;
+    conn.busy_timeout(Duration::from_secs(30))?;
+
+    let schema_version = conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))?;
+    if schema_version != STORAGE_SCHEMA_VERSION || schema::needs_session_database_shape(&conn)? {
+        writer.write("session_schema.initialize", |tx| {
+            let current: i64 = tx.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+            if current != STORAGE_SCHEMA_VERSION || schema::needs_session_database_shape(tx)? {
+                anyhow::ensure!(
+                    (0..=MAX_SQUASHED_DEVELOPMENT_SCHEMA_VERSION).contains(&current),
+                    "unsupported session database schema version {current}; this build only supports schema versions 0 through {MAX_SQUASHED_DEVELOPMENT_SCHEMA_VERSION}"
+                );
+                if crate::storage::shared_cache::installed(tx)? {
+                    schema::run(tx, true)?;
+                } else {
+                    schema::bootstrap_session_database(tx)?;
+                }
+            }
+            Ok(())
+        })?;
+    }
+
+    let rebuilt: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM meta WHERE key = ?1 AND value = 'completed')",
+        [SESSION_DATABASE_REBUILD_KEY],
+        |row| row.get(0),
+    )?;
+    if !rebuilt {
+        writer.write("migration.session_database.rebuild", |tx| {
+            let rebuilt: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM meta WHERE key = ?1 AND value = 'completed')",
+                [SESSION_DATABASE_REBUILD_KEY],
+                |row| row.get(0),
+            )?;
+            if rebuilt {
+                return Ok(());
+            }
+
+            drop_session_cache_objects(tx)?;
+            schema::bootstrap_session_database(tx)?;
+            tx.execute("DELETE FROM projection_dirty_resources", [])?;
+            tx.execute("DELETE FROM projection_heads", [])?;
+            tx.execute("DELETE FROM scoped_projection_contexts", [])?;
+            tx.execute("DELETE FROM normalized_snapshots", [])?;
+            tx.execute("DELETE FROM storage_migrations", [])?;
+            tx.execute("DELETE FROM meta", [])?;
+            tx.execute(
+                "INSERT INTO meta(key, value) VALUES (?1, 'completed')",
+                [SESSION_DATABASE_MIGRATION_KEY],
+            )?;
+            tx.execute(
+                "INSERT INTO meta(key, value) VALUES (?1, 'completed')",
+                [SESSION_DATABASE_REBUILD_KEY],
+            )?;
+            tx.execute(
+                "INSERT INTO meta(key, value) VALUES ('storage.analytics_json_encoding', ?1)",
+                [ANALYTICS_JSON_ENCODING],
+            )?;
+            Ok(())
+        })?;
+        crate::logging::global().info(
+            "session database cache cleared for source rebuild",
+            serde_json::json!({
+                "sessionDatabase": path,
+            }),
+        );
+    }
+
+    Ok(SessionDatabase { conn, path, writer })
+}
+
+fn drop_session_cache_objects(tx: &rusqlite::Transaction<'_>) -> Result<()> {
+    for table in SESSION_CACHE_LAYOUTS {
+        drop_session_cache_object(tx, table)?;
+        drop_session_cache_object(tx, &format!("{table}_storage"))?;
+    }
+    for table in SESSION_CACHE_TABLES {
+        drop_session_cache_object(tx, table)?;
+    }
+    Ok(())
+}
+
+fn drop_session_cache_object(tx: &rusqlite::Transaction<'_>, name: &str) -> Result<()> {
+    let object_type = tx
+        .query_row(
+            "SELECT type FROM sqlite_schema WHERE name = ?1 AND type IN ('table', 'view')",
+            [name],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?;
+    if let Some(object_type) = object_type {
+        tx.execute_batch(&format!("DROP {object_type} {name}"))?;
+    }
+    Ok(())
+}
+
+fn initialize_primary_session_cleanup(store: &Store) -> Result<()> {
+    let session_database_ready: bool = store.sessions.conn.query_row(
+        "SELECT EXISTS(
+             SELECT 1 FROM meta WHERE key = ?1 AND value = 'completed'
+         )",
+        [SESSION_DATABASE_MIGRATION_KEY],
+        |row| row.get(0),
+    )?;
+    if !session_database_ready {
+        return Ok(());
+    }
+    store
+        .writer
+        .write("migration.session_database.schedule_cleanup", |tx| {
+            if schema::migration_state(tx, PRIMARY_SESSION_CLEANUP_MIGRATION_KEY)?.is_some() {
+                return Ok(());
+            }
+            let state = if primary_session_cleanup_has_data(tx)? {
+                "pending"
+            } else {
+                "completed"
+            };
+            tx.execute(
+                "INSERT INTO storage_migrations(key, state, cursor, updated_at, last_error)
+             VALUES (?1, ?2, 0, CAST(strftime('%s', 'now') AS INTEGER), NULL)",
+                params![PRIMARY_SESSION_CLEANUP_MIGRATION_KEY, state],
+            )?;
+            Ok(())
+        })
+}
+
+fn primary_session_cleanup_has_data(conn: &Connection) -> Result<bool> {
+    for (table, predicate) in PRIMARY_SESSION_CLEANUP_PHASES {
+        let sql = format!("SELECT EXISTS(SELECT 1 FROM {table} WHERE {predicate})");
+        if conn.query_row(&sql, [], |row| row.get::<_, bool>(0))? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn reset_primary_session_cache(
+    tx: &rusqlite::Transaction<'_>,
+) -> Result<schema::MigrationBatch> {
+    let Some((state, cursor)) = schema::migration_state(tx, PRIMARY_SESSION_CLEANUP_MIGRATION_KEY)?
+    else {
+        return Ok(schema::MigrationBatch {
+            processed: 0,
+            complete: true,
+        });
+    };
+    if state == "completed" {
+        return Ok(schema::MigrationBatch {
+            processed: 0,
+            complete: true,
+        });
+    }
+
+    drop_session_cache_objects(tx)?;
+    schema::bootstrap_session_database(tx)?;
+    tx.execute(
+        &format!("DELETE FROM projection_dirty_resources WHERE {SESSION_DOMAIN_CLEANUP_PREDICATE}"),
+        [],
+    )?;
+    tx.execute(
+        &format!("DELETE FROM projection_heads WHERE {SESSION_DOMAIN_CLEANUP_PREDICATE}"),
+        [],
+    )?;
+    tx.execute(
+        &format!("DELETE FROM scoped_projection_contexts WHERE {SESSION_DOMAIN_CLEANUP_PREDICATE}"),
+        [],
+    )?;
+    tx.execute(
+        &format!("DELETE FROM normalized_snapshots WHERE {SESSION_DOMAIN_CLEANUP_PREDICATE}"),
+        [],
+    )?;
+    tx.execute(
+        "DELETE FROM meta
+         WHERE key LIKE 'sessions_last_scan_at:%'
+            OR key LIKE 'session_skill_index_version:%'
+            OR key = 'storage.analytics_json_encoding'",
+        [],
+    )?;
+    tx.execute(
+        "DELETE FROM storage_migrations
+         WHERE key IN (?1, ?2, 'storage.session_search_fts.v2',
+                       'storage.session_search_shared_content.v1')",
+        params![
+            schema::SESSION_LIST_MIGRATION_KEY,
+            schema::ANALYTICS_MIGRATION_KEY,
+        ],
+    )?;
+    tx.execute(
+        "INSERT INTO meta(key, value) VALUES ('storage.analytics_json_encoding', ?1)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        [ANALYTICS_JSON_ENCODING],
+    )?;
+
+    schema::update_migration_state(
+        tx,
+        PRIMARY_SESSION_CLEANUP_MIGRATION_KEY,
+        "completed",
+        cursor,
+    )?;
+    tx.execute(
+        "INSERT INTO meta(key, value) VALUES ('storage.compaction.pending', '1')
+         ON CONFLICT(key) DO UPDATE SET value = '1'",
+        [],
+    )?;
+    Ok(schema::MigrationBatch {
+        processed: 0,
+        complete: true,
+    })
+}
+
+fn run_primary_session_cleanup_until_complete(
+    store: &Store,
+    deadline: Option<Instant>,
+) -> Result<bool> {
+    loop {
+        if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+            return Ok(false);
+        }
+        match store.writer.write_background_until(
+            "migration.session_database.primary_cleanup",
+            deadline.unwrap_or_else(|| Instant::now() + Duration::from_secs(30)),
+            reset_primary_session_cache,
+        ) {
+            Ok(Some(batch)) if batch.complete => return Ok(true),
+            Ok(Some(_)) => continue,
+            Ok(None) => return Ok(false),
+            Err(error) => {
+                let message = format!("{error:#}");
+                let _ = store.writer.write_background_until(
+                    "migration.record_primary_cleanup_failure",
+                    deadline.unwrap_or_else(|| Instant::now() + Duration::from_secs(30)),
+                    |tx| {
+                        tx.execute(
+                            "UPDATE storage_migrations
+                             SET state = 'failed', last_error = ?1,
+                                 updated_at = CAST(strftime('%s', 'now') AS INTEGER)
+                             WHERE key = ?2",
+                            params![message, PRIMARY_SESSION_CLEANUP_MIGRATION_KEY],
+                        )?;
+                        Ok(())
+                    },
+                );
+                return Err(error).context("primary session data cleanup failed");
+            }
         }
     }
 }
@@ -332,7 +726,7 @@ fn run_migration_until_complete(
         if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
             return Ok(false);
         }
-        match store.with_background_write_transaction_until(
+        match store.with_session_background_write_transaction_until(
             operation,
             deadline.unwrap_or_else(|| Instant::now() + Duration::from_secs(30)),
             migrate,
@@ -342,16 +736,19 @@ fn run_migration_until_complete(
             Ok(None) => return Ok(false),
             Err(error) => {
                 let message = format!("{error:#}");
-                let _ = store.with_background_write_transaction("migration.record_failure", |tx| {
-                    tx.execute(
-                        "UPDATE storage_migrations
+                let _ = store.with_session_background_write_transaction(
+                    "migration.record_failure",
+                    |tx| {
+                        tx.execute(
+                            "UPDATE storage_migrations
                              SET state = 'failed', last_error = ?1,
                                  updated_at = CAST(strftime('%s', 'now') AS INTEGER)
                              WHERE key = ?2",
-                        params![message, key],
-                    )?;
-                    Ok(())
-                });
+                            params![message, key],
+                        )?;
+                        Ok(())
+                    },
+                );
                 return Err(error).with_context(|| format!("storage migration {key} failed"));
             }
         }
@@ -418,6 +815,42 @@ fn invalidate_old_projection_contexts(store: &Store) -> Result<()> {
         return Ok(());
     }
 
+    store.with_session_write_transaction(
+        "migration.invalidate_old_session_projection_contexts",
+        |tx| {
+            let mut statement = tx.prepare(
+                "SELECT scope_key, domain FROM scoped_projection_contexts
+             WHERE parser_version != ?1
+               AND (domain IN ('sessions', 'analytics')
+                    OR domain LIKE 'session-%' OR domain LIKE 'session_%')",
+            )?;
+            let outdated = statement
+                .query_map([PROJECTION_PARSER_VERSION], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            drop(statement);
+            for (scope, domain) in outdated {
+                store.set_projection_context_in_tx(
+                    tx,
+                    &crate::ScopeKey::new(scope)?,
+                    &domain,
+                    "stale",
+                    None,
+                )?;
+            }
+            tx.execute(
+                "UPDATE scoped_projection_contexts
+             SET state = 'stale', scanned_at = NULL, error = NULL,
+                 parser_version = ?1
+             WHERE parser_version != ?1
+               AND (domain IN ('sessions', 'analytics')
+                    OR domain LIKE 'session-%' OR domain LIKE 'session_%')",
+                params![PROJECTION_PARSER_VERSION],
+            )?;
+            Ok(())
+        },
+    )?;
     store.with_named_write_transaction("migration.invalidate_old_projection_contexts", |tx| {
         if tx.query_row(
             "SELECT EXISTS(SELECT 1 FROM meta WHERE key = ?1)",
@@ -428,7 +861,9 @@ fn invalidate_old_projection_contexts(store: &Store) -> Result<()> {
         }
         let mut statement = tx.prepare(
             "SELECT scope_key, domain FROM scoped_projection_contexts
-             WHERE parser_version != ?1",
+             WHERE parser_version != ?1
+               AND NOT (domain IN ('sessions', 'analytics')
+                        OR domain LIKE 'session-%' OR domain LIKE 'session_%')",
         )?;
         let outdated = statement
             .query_map([PROJECTION_PARSER_VERSION], |row| {
@@ -449,7 +884,9 @@ fn invalidate_old_projection_contexts(store: &Store) -> Result<()> {
             "UPDATE scoped_projection_contexts
              SET state = 'stale', scanned_at = NULL, error = NULL,
                  parser_version = ?1
-             WHERE parser_version != ?1",
+             WHERE parser_version != ?1
+               AND NOT (domain IN ('sessions', 'analytics')
+                        OR domain LIKE 'session-%' OR domain LIKE 'session_%')",
             params![PROJECTION_PARSER_VERSION],
         )?;
         mark_migration_completed_in_tx(tx, &migration_key)?;

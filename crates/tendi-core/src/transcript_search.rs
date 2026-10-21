@@ -25,6 +25,10 @@ pub(crate) struct SearchCheckpoint {
     inherited_ordinal: Option<u64>,
     prefix_hash: String,
     boundary_hash: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    native_session: Option<crate::sessions::SessionIdentity>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    native_version: Option<String>,
 }
 
 pub(crate) struct SearchDelta {
@@ -38,6 +42,10 @@ pub(crate) struct SearchDelta {
 
 impl SearchCheckpoint {
     pub(crate) fn matches_source(&self, path: &Path) -> Result<bool> {
+        if let Some(session) = &self.native_session {
+            let Some(scan) = agent_provider(session.agent).read_session_transcript(path, &session.id) else { return Ok(false); };
+            return Ok(Some(native::source_version(Some(&session.id), &scan?)?) == self.native_version);
+        }
         let metadata = fs::metadata(path)?;
         Ok(self.identity == file_identity(&metadata)
             && self.source_size == metadata.len()
@@ -73,12 +81,38 @@ fn anchor(file: &mut fs::File, offset: u64, length: u64, bytes: &mut u64) -> Res
     Ok(format!("{:x}", Sha256::digest(content)))
 }
 
+#[cfg(test)]
 pub(crate) fn read_search_delta(
     path: &Path,
     agent: AgentKind,
     previous: Option<&SearchCheckpoint>,
     should_stop: &dyn Fn() -> bool,
 ) -> Result<Option<SearchDelta>> {
+    read_session_search_delta(path, agent, None, previous, should_stop)
+}
+
+pub(crate) fn read_session_search_delta(
+    path: &Path,
+    agent: AgentKind,
+    id: Option<&str>,
+    previous: Option<&SearchCheckpoint>,
+    should_stop: &dyn Fn() -> bool,
+) -> Result<Option<SearchDelta>> {
+    if let Some(scan) = agent_provider(agent).read_session_transcript(path, id.unwrap_or("")) {
+        let scan = scan?;
+        if should_stop() { return Ok(None); }
+        let metadata = fs::metadata(path)?;
+        let version = native::source_version(id, &scan)?;
+        let checkpoint = SearchCheckpoint {
+            parser_version: agent_provider(agent).transcript_search_append_version().unwrap_or("native-transcript-v1").to_owned(),
+            identity: file_identity(&metadata), source_size: metadata.len(), source_modified_ns: modified_ns(&metadata),
+            committed_offset: 0, next_record_order: scan.items.len() + 1, line_count: 0, inherited_ordinal: None,
+            prefix_hash: String::new(), boundary_hash: String::new(),
+            native_session: Some(crate::sessions::SessionIdentity { id: id.unwrap_or("").to_owned(), agent, path: path.to_path_buf() }),
+            native_version: Some(version),
+        };
+        return Ok(Some(SearchDelta { checkpoint, start_record_order: 1, bytes_read: serde_json::to_vec(&scan)?.len() as u64, validation_bytes_read: 0, items: scan.items, warnings: scan.warnings }));
+    }
     let mut file =
         fs::File::open(path).with_context(|| format!("failed to read {}", path.display()))?;
     let metadata = file.metadata()?;
@@ -119,6 +153,8 @@ pub(crate) fn read_search_delta(
         inherited_ordinal: None,
         prefix_hash: String::new(),
         boundary_hash: String::new(),
+        native_session: None,
+        native_version: None,
     });
     let start_record_order = checkpoint.next_record_order;
     let start_offset = checkpoint.committed_offset;
