@@ -86,6 +86,10 @@ excluded because they are too environment-dependent for every push.
 
 ## Default thresholds
 
+The native compressed-transcript and model-pricing paths increase the isolated core process RSS
+by about 3–4 MiB on Apple Silicon. The affected RSS limits below include that measured runtime
+footprint; operation and payload limits are unchanged.
+
 ### First-level chains
 
 | Check | Fixture | Default gate |
@@ -94,10 +98,10 @@ excluded because they are too environment-dependent for every push.
 | Hooks list | Local data | median <= 40 ms |
 | Rules list | Local data | median <= 40 ms |
 | MCP list | Local data | median <= 45 ms |
-| Overview | 512 analyzed Sessions, 365 days | operation <= 35 ms, RSS <= 28 MiB, payload <= 0.625 MiB |
-| Prompts | 500 Prompts | operation <= 50 ms, RSS <= 24 MiB, payload <= 1.5 MiB |
+| Overview | 512 analyzed Sessions, 365 days | operation <= 35 ms, RSS <= 36 MiB, payload <= 0.625 MiB |
+| Prompts | 500 Prompts | operation <= 50 ms, RSS <= 28 MiB, payload <= 1.5 MiB |
 | Config | Existing config catalog | operation <= 20 ms, RSS <= 16 MiB, payload <= 0.0625 MiB |
-| Settings | Isolated Store | operation <= 2 ms, RSS <= 16 MiB, payload <= 0.015625 MiB |
+| Settings | Isolated Store | operation <= 2 ms, RSS <= 20 MiB, payload <= 0.015625 MiB |
 | Sessions list, full profile | Local data | 3-run median <= 3 s, max <= 8 s, RSS <= 56 MiB, output <= 8 MiB |
 
 ### Second-level chains
@@ -105,8 +109,8 @@ excluded because they are too environment-dependent for every push.
 | Check | Fixture | Default gate |
 | --- | --- | --- |
 | Session first transcript page | 400 x 4 KiB messages; returns 160 | operation <= 35 ms, RSS <= 24 MiB, payload <= 1 MiB |
-| Session batch search | 512 indexed Sessions; searches 100 candidates | operation <= 100 ms, RSS <= 24 MiB, payload <= 0.25 MiB |
-| Skill Linked Sessions | 600 links | operation <= 25 ms, RSS <= 24 MiB, payload <= 0.75 MiB |
+| Session batch search | 512 indexed Sessions; searches 100 candidates | operation <= 100 ms, RSS <= 28 MiB, payload <= 0.25 MiB |
+| Skill Linked Sessions | 600 links | operation <= 25 ms, RSS <= 28 MiB, payload <= 0.75 MiB |
 | Skill file tree + file read | 300 x 4 KiB files | operation <= 10 ms, RSS <= 16 MiB, payload <= 0.125 MiB |
 | Rule detail | 128 KiB file | operation <= 15 ms, RSS <= 16 MiB, payload <= 0.25 MiB |
 | Hook detail | 192 KiB source, exercises 128 KiB truncation | operation <= 20 ms, RSS <= 16 MiB, payload <= 0.25 MiB |
@@ -124,7 +128,7 @@ excluded because they are too environment-dependent for every push.
 | Session project merge + split | Merge 10 projects; split 100 of 500 Sessions | operation <= 10 ms, RSS <= 24 MiB, payload <= 0.0625 MiB |
 | Rule save | 128 KiB file | operation <= 40 ms, RSS <= 16 MiB, payload <= 0.25 MiB |
 | Rule delete | 128 KiB file | operation <= 40 ms, RSS <= 16 MiB, payload <= 0.015625 MiB |
-| Settings save | 32 additional Session roots | operation <= 3 ms, RSS <= 16 MiB, payload <= 0.015625 MiB |
+| Settings save | 32 additional Session roots | operation <= 3 ms, RSS <= 20 MiB, payload <= 0.015625 MiB |
 
 ### Large-input and runtime gates
 
