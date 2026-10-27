@@ -924,10 +924,7 @@ pub(crate) fn collect_tutti_run_session_paths(root: &Path, session_paths: &mut B
             .filter_map(Result::ok)
             .filter(|entry| {
                 entry.file_type().is_file()
-                    && entry
-                        .path()
-                        .extension()
-                        .is_some_and(|extension| extension == "jsonl")
+                    && CodexProvider.is_session_transcript_path(entry.path())
             })
         {
             session_paths.insert(entry.into_path());
@@ -3561,6 +3558,19 @@ impl super::AgentProvider for CodexProvider {
         path.file_name()
             .and_then(|name| name.to_str())
             .is_some_and(|name| name.ends_with(".jsonl.zst"))
+    }
+
+    fn scan_explicit_session_path(
+        &self,
+        path: &Path,
+        sessions: &mut Vec<SessionRecord>,
+        cache: Option<&SessionScanCache>,
+    ) -> Result<bool> {
+        if !self.is_compressed_session_transcript(path) {
+            return Ok(false);
+        }
+        sessions::scan_jsonl_session(path, self.kind(), sessions, cache);
+        Ok(true)
     }
 
     fn read_session_transcript(

@@ -1136,6 +1136,17 @@ fn scan_detected_jsonl_session(
         );
         return;
     };
+    scan_jsonl_session(path, agent, sessions, cache);
+}
+
+pub(crate) fn scan_jsonl_session(
+    path: &Path,
+    agent: AgentKind,
+    sessions: &mut Vec<SessionRecord>,
+    cache: Option<&SessionScanCache>,
+) {
+    let logger = crate::logging::global();
+    let provider = crate::providers::agent_provider(agent);
     if let Some(session) = cache
         .and_then(|cache| cache.session_if_current(agent, path))
         .filter(session_is_known_non_empty)
@@ -1157,7 +1168,7 @@ fn scan_detected_jsonl_session(
         sessions.push(session);
         return;
     }
-    if crate::providers::agent_provider(agent).session_supports_append_cache() {
+    if provider.session_supports_append_cache() && !provider.is_compressed_session_transcript(path) {
         if let Some((session, offset)) =
             cache.and_then(|cache| cache.session_if_appended(agent, path))
         {
@@ -1204,7 +1215,6 @@ fn scan_detected_jsonl_session(
         return;
     }
     let file_updated_at = file_modified_iso(path);
-    let provider = crate::providers::agent_provider(agent);
     let Some(id) = provider.session_id_from_path(path) else {
         return;
     };
