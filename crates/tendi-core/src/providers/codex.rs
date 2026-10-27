@@ -2200,6 +2200,12 @@ fn session_archive_location(path: &Path) -> Option<(&Path, bool)> {
     })
 }
 
+fn session_command_env(path: &Path) -> Vec<(String, String)> {
+    session_archive_location(path)
+        .map(|(home, _)| vec![("CODEX_HOME".to_string(), home.display().to_string())])
+        .unwrap_or_default()
+}
+
 pub(super) fn session_archive_command(
     session: &SessionRecord,
     archived: bool,
@@ -2213,7 +2219,7 @@ pub(super) fn session_archive_command(
             session.id.clone(),
         ],
         cwd: Some(home.to_path_buf()),
-        env: vec![("CODEX_HOME".to_string(), home.display().to_string())],
+        env: session_command_env(&session.path),
     })
 }
 
@@ -2882,8 +2888,13 @@ fn collect_codex_fallbacks_from_config(path: &Path, values: &mut Vec<String>) {
 }
 
 pub(super) fn apply_config_profile(command: &mut SessionCommand, profile: &str) -> Result<()> {
-    if !crate::config::config_profile_exists(crate::skills::AgentKind::Codex, profile)? {
-        bail!("Codex profile not found: {profile}");
+    crate::config::validate_profile_name(profile)?;
+    let profile_path = match command.env.iter().find(|(key, _)| key == "CODEX_HOME") {
+        Some((_, home)) => PathBuf::from(home).join(format!("{profile}.config.toml")),
+        None => crate::config::config_profile_path(AgentKind::Codex, profile)?,
+    };
+    if !profile_path.is_file() {
+        bail!("Codex profile not found: {}", profile_path.display());
     }
     command
         .args
@@ -3724,6 +3735,21 @@ impl super::AgentProvider for CodexProvider {
         }
     }
 
+    fn session_app_resume_supported(&self, path: &Path) -> bool {
+        let Some((home, _)) = session_archive_location(path) else {
+            return false;
+        };
+        let Some(app_home) = dirs::home_dir().map(|home| home.join(".codex")) else {
+            return false;
+        };
+        home == app_home
+            || home
+                .canonicalize()
+                .ok()
+                .zip(app_home.canonicalize().ok())
+                .is_some_and(|(home, app_home)| home == app_home)
+    }
+
     fn resume_session_command(&self, session: &SessionRecord) -> Option<SessionCommand> {
         let project = absolute_project(session);
         let mut args = Vec::new();
@@ -3737,7 +3763,7 @@ impl super::AgentProvider for CodexProvider {
             executable: "codex".to_string(),
             args,
             cwd: project,
-            env: Vec::new(),
+            env: session_command_env(&session.path),
         })
     }
 
@@ -3749,7 +3775,7 @@ impl super::AgentProvider for CodexProvider {
                 executable: "codex".to_string(),
                 args: vec![operation.to_string(), session.id.clone()],
                 cwd: project.clone(),
-                env: Vec::new(),
+                env: session_command_env(&session.path),
             })
             .collect()
     }
@@ -3896,8 +3922,12 @@ impl super::AgentProvider for CodexProvider {
         }
     }
 
-    fn resume_target_from_transcript_value(&self, value: &Value) -> Option<&'static str> {
-        resume_target_from_transcript_value(value)
+    fn resume_target_from_transcript_value(&self, path: &Path, value: &Value) -> Option<&'static str> {
+        let target = resume_target_from_transcript_value(value);
+        if target == Some("app") && !self.session_app_resume_supported(path) {
+            return Some("terminal");
+        }
+        target
     }
 
     fn accepts_session_app_url(&self, url: &str) -> bool {

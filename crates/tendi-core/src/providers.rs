@@ -417,6 +417,10 @@ pub(crate) trait AgentProvider: Sync {
         None
     }
 
+    fn session_app_resume_supported(&self, _path: &Path) -> bool {
+        false
+    }
+
     fn session_resume_repair_commands(&self, _session: &SessionRecord) -> Vec<SessionCommand> {
         Vec::new()
     }
@@ -454,7 +458,7 @@ pub(crate) trait AgentProvider: Sync {
         None
     }
 
-    fn resume_target_from_transcript_value(&self, _value: &Value) -> Option<&'static str> {
+    fn resume_target_from_transcript_value(&self, _path: &Path, _value: &Value) -> Option<&'static str> {
         None
     }
 
@@ -1101,6 +1105,10 @@ pub fn session_archive_state(agent: AgentKind, path: &Path, id: &str) -> Option<
 
 pub fn session_archive_supported(agent: AgentKind, path: &Path) -> bool {
     agent_provider(agent).session_archive_supported(path)
+}
+
+pub fn session_app_resume_supported(agent: AgentKind, path: &Path) -> bool {
+    agent_provider(agent).session_app_resume_supported(path)
 }
 
 pub fn session_resumable(agent: AgentKind, path: &Path, id: &str) -> bool {

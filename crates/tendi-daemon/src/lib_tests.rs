@@ -7,6 +7,40 @@ use std::{
 static TEST_LOCK: Mutex<()> = Mutex::new(());
 
 #[test]
+fn session_app_resume_capability_survives_snapshot_list_and_watch_boundaries() {
+    let root = temp_workspace().join("session-resume-capability");
+    let daemon = test_daemon_without_background(root.clone());
+    let store = test_store(&daemon);
+    let scope = daemon_scope_key(&daemon).unwrap();
+    let sessions: Vec<tendi_core::SessionRecord> = serde_json::from_value(json!([
+        {"id": "custom", "agent": "codex", "path": root.join("home/sessions/custom.jsonl")},
+        {"id": "default", "agent": "codex", "path": PathBuf::from(std::env::var_os("HOME").unwrap()).join(".codex/sessions/default.jsonl")},
+        {"id": "claude", "agent": "claude", "path": root.join("claude.jsonl")},
+        {"id": "cursor", "agent": "cursor", "path": root.join("cursor.jsonl")}
+    ])).unwrap();
+    store.save_sessions_at_for_scope(&scope, &tendi_core::sessions::SessionScan {
+        sessions: sessions.clone(), warnings: Vec::new(),
+    }, 1).unwrap();
+    let snapshot = daemon.sessions_snapshot().unwrap();
+    let page = daemon.sessions_list(serde_json::from_value(json!({
+        "query": "", "sortKey": "title", "sortDirection": "asc", "page": 1,
+        "pageSize": 20, "showChildSessions": true, "selectedProjectKeys": []
+    })).unwrap()).unwrap();
+    let runtime_schema::RuntimeEventPayload::SessionsScan(event) = runtime_event(SESSION_SCAN_EVENT, json!({
+        "generation": 1, "phase": "watch", "upserts": sessions, "deleted": [],
+        "scanned": 4, "complete": true, "error": null
+    })) else { panic!("expected session scan event") };
+    for records in [&snapshot.payload, &page.rows, &event.upserts] {
+        assert_eq!(records.len(), 4);
+        for record in records {
+            assert_eq!(record.app_resume_supported, Some(matches!(record.id.as_str(), "default" | "claude")));
+        }
+    }
+    daemon.shutdown();
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn cursor_sdk_archive_boundary_updates_the_selected_session_in_a_shared_index() {
     let root = temp_workspace().join("sdk-archive-boundary");
     let daemon = test_daemon_without_background(root.clone()); let store = test_store(&daemon); let scope = daemon_scope_key(&daemon).unwrap();

@@ -985,14 +985,13 @@ pub fn infer_session_resume_target(path: &Path, agent: AgentKind) -> Option<&'st
     if !is_transcript_path(agent, path) {
         return None;
     }
+    let provider = crate::providers::agent_provider(agent);
     let file = fs::File::open(path).ok()?;
     for line in BufReader::new(file).lines().map_while(Result::ok).take(16) {
         let Ok(value) = serde_json::from_str::<Value>(&line) else {
             continue;
         };
-        if let Some(target) =
-            crate::providers::agent_provider(agent).resume_target_from_transcript_value(&value)
-        {
+        if let Some(target) = provider.resume_target_from_transcript_value(path, &value) {
             return Some(target);
         }
     }

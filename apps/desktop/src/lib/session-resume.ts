@@ -42,6 +42,9 @@ export function sessionResumeErrorMessage(error?: SessionResumeError): string {
     case SessionResumeErrorCode.TerminalUnavailable:
       return "The selected terminal is unavailable. Choose another terminal in Settings.";
     case SessionResumeErrorCode.TerminalLaunchFailed:
+      if (error.provider === "rex-beta") {
+        return "Could not open session in Rex Beta. Enable Remote Control in Rex Beta Settings → Rex Server, then try again.";
+      }
       return `Could not open session${resumeProviderSuffix(error.provider)}. Try again.`;
     case SessionResumeErrorCode.SessionNotResumable:
       return "This session cannot be resumed in a terminal.";
@@ -74,6 +77,7 @@ function resumeProviderLabel(provider: string | null): string {
     ghostty: "Ghostty",
     warp: "Warp",
     orca: "Orca",
+    "rex-beta": "Rex Beta",
   };
   return labels[provider] ?? provider;
 }

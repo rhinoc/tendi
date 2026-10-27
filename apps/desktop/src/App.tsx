@@ -1505,7 +1505,7 @@ export function App() {
 
   const resolveSessionResumeTarget = useCallback(async (session: SessionRecord): Promise<Exclude<SessionResumeTarget, SessionResumeTarget.Auto>> => {
     if (!isTauriRuntime()) return SessionResumeTarget.Terminal;
-    const configuredTarget = sessionResumeTargetForAgent(sessionResumeTarget, session.agent);
+    const configuredTarget = sessionResumeTargetForAgent(sessionResumeTarget, session.agent, session.appResumeSupported !== false);
     if (configuredTarget !== SessionResumeTarget.Auto) return configuredTarget;
     const requestKey = sessionIdentity(session);
     const existingRequest = sessionResumeTargetRequests.current.get(requestKey);

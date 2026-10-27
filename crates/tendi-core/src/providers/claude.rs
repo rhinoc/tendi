@@ -1211,6 +1211,10 @@ impl super::AgentProvider for ClaudeProvider {
         );
     }
 
+    fn session_app_resume_supported(&self, _path: &Path) -> bool {
+        true
+    }
+
     fn resume_session_command(&self, session: &SessionRecord) -> Option<SessionCommand> {
         let project = absolute_project(session);
         Some(SessionCommand {

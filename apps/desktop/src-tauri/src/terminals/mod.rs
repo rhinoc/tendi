@@ -4,6 +4,7 @@ mod custom;
 mod ghostty;
 mod iterm;
 mod orca;
+mod rex_beta;
 mod superset;
 mod terminal;
 mod warp;
@@ -105,6 +106,7 @@ fn providers() -> Vec<Box<dyn TerminalProvider>> {
         Box::new(ghostty::GhosttyProvider),
         Box::new(warp::WarpProvider),
         Box::new(orca::OrcaProvider),
+        Box::new(rex_beta::RexBetaProvider),
         Box::new(superset::SupersetProvider),
     ]
 }

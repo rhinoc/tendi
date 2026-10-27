@@ -151,9 +151,15 @@ impl DaemonEventSubscription {
 
 fn runtime_event(event: &str, payload: Value) -> runtime_schema::RuntimeEventPayload {
     match event {
-        SESSION_SCAN_EVENT => runtime_schema::RuntimeEventPayload::SessionsScan(
-            serde_json::from_value(payload).expect("session scan event matches generated schema"),
-        ),
+        SESSION_SCAN_EVENT => {
+            let mut event: runtime_schema::SessionScanEvent =
+                serde_json::from_value(payload).expect("session scan event matches generated schema");
+            event
+                .upserts
+                .iter_mut()
+                .for_each(enrich_session_resume_capabilities);
+            runtime_schema::RuntimeEventPayload::SessionsScan(event)
+        }
         ANALYTICS_PROGRESS_EVENT => runtime_schema::RuntimeEventPayload::AnalyticsProgress(
             serde_json::from_value(payload)
                 .expect("analytics progress event matches generated schema"),
@@ -1627,8 +1633,15 @@ impl Daemon {
             hooks: self.hooks_projection()?,
             mcp: self.mcp_projection()?,
         };
-        serde_json::from_value(serde_json::to_value(report).map_err(internal_error)?)
-            .map_err(internal_error)
+        let mut response: runtime_schema::ScanResponse =
+            serde_json::from_value(serde_json::to_value(report).map_err(internal_error)?)
+                .map_err(internal_error)?;
+        response
+            .sessions
+            .sessions
+            .iter_mut()
+            .for_each(enrich_session_resume_capabilities);
+        Ok(response)
     }
 
     fn bundled_skill_status(
@@ -1737,6 +1750,14 @@ impl Daemon {
                 available: app_available(&["/Applications/Orca.app"]),
             },
             runtime_schema::TerminalAppRecord {
+                id: "rex-beta".to_string(),
+                label: "Rex Beta".to_string(),
+                available: Path::new(
+                    "/Applications/Rex Beta.app/Contents/Helpers/Rex Server.rex/Contents/MacOS/rex",
+                )
+                .is_file(),
+            },
+            runtime_schema::TerminalAppRecord {
                 id: "superset".to_string(),
                 label: "Superset".to_string(),
                 available: app_available(&["/Applications/Superset.app"])
@@ -1814,12 +1835,18 @@ impl Daemon {
             .map_err(core_error)?;
         let mut value = serde_json::to_value(page).map_err(internal_error)?;
         value["revision"] = json!(revision.value());
-        serde_json::from_value(value).map_err(|error| {
-            DaemonError::new(
-                "CONTRACT_VIOLATION",
-                format!("session list encode failed: {error}"),
-            )
-        })
+        let mut response: runtime_schema::SessionsListResponse =
+            serde_json::from_value(value).map_err(|error| {
+                DaemonError::new(
+                    "CONTRACT_VIOLATION",
+                    format!("session list encode failed: {error}"),
+                )
+            })?;
+        response
+            .rows
+            .iter_mut()
+            .for_each(enrich_session_resume_capabilities);
+        Ok(response)
     }
 
     fn sessions_scan_start(&self) -> Result<runtime_schema::SessionScanStartResponse, DaemonError> {
@@ -8048,7 +8075,7 @@ fn runtime_agent_kind(value: tendi_core::AgentKind) -> runtime_schema::AgentKind
 fn session_record_runtime_value(
     session: tendi_core::SessionRecord,
 ) -> runtime_schema::SessionRecord {
-    runtime_schema::SessionRecord {
+    let mut record = runtime_schema::SessionRecord {
         id: session.id,
         agent: runtime_agent_kind(session.agent),
         title: session.title,
@@ -8075,6 +8102,7 @@ fn session_record_runtime_value(
         archived: session.archived,
         archive_supported: Some(session.archive_supported),
         resumable: Some(session.resumable),
+        app_resume_supported: None,
         token_usage: session
             .token_usage
             .map(|usage| runtime_schema::SessionTokenUsage {
@@ -8084,7 +8112,16 @@ fn session_record_runtime_value(
                 reasoning_output_tokens: usage.reasoning_output_tokens,
                 total_tokens: usage.total_tokens,
             }),
-    }
+    };
+    enrich_session_resume_capabilities(&mut record);
+    record
+}
+
+fn enrich_session_resume_capabilities(session: &mut runtime_schema::SessionRecord) {
+    session.app_resume_supported = Some(tendi_core::session_app_resume_supported(
+        agent_kind_from_request(session.agent),
+        Path::new(&session.path),
+    ));
 }
 
 fn session_list_sort_key(value: runtime_schema::SessionListSortKey) -> String {

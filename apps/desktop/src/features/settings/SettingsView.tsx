@@ -55,6 +55,7 @@ const terminalAppLabels: Record<string, string> = {
   ghostty: "Ghostty",
   warp: "Warp",
   orca: "Orca",
+  "rex-beta": "Rex Beta",
   superset: "Superset",
 };
 

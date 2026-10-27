@@ -20,6 +20,7 @@ export type SessionRecord = {
   archived?: boolean;
   archiveSupported?: boolean;
   resumable?: boolean;
+  appResumeSupported?: boolean;
   startedAt?: string;
   updatedAt?: string;
   time?: string;
@@ -128,15 +129,16 @@ export function normalizeSessionResumeTarget(value: unknown): SessionResumeTarge
   return SessionResumeTarget.Auto;
 }
 
-export function sessionResumeTargetForAgent(target: SessionResumeTarget, agent: unknown): SessionResumeTarget {
+export function sessionResumeTargetForAgent(target: SessionResumeTarget, agent: unknown, appResumeSupported = true): SessionResumeTarget {
   if (target === SessionResumeTarget.Auto) return SessionResumeTarget.Auto;
   const definition = agentDefinition(normalizedAgentKey(agent));
-  return target === SessionResumeTarget.App && definition?.sessionAppDeepLink
+  return target === SessionResumeTarget.App && appResumeSupported && definition?.sessionAppDeepLink
     ? SessionResumeTarget.App
     : SessionResumeTarget.Terminal;
 }
 
-export function sessionAppDeepLink(session: Pick<SessionRecord, "id" | "agent" | "project" | "projectPath">): string | undefined {
+export function sessionAppDeepLink(session: Pick<SessionRecord, "id" | "agent" | "project" | "projectPath" | "appResumeSupported">): string | undefined {
+  if (session.appResumeSupported === false) return undefined;
   return agentDefinition(normalizedAgentKey(session.agent))?.sessionAppDeepLink?.(session);
 }
 
@@ -230,6 +232,7 @@ export function normalizeSession(session: Record<string, unknown>): SessionRecor
     archived: typeof session.archived === "boolean" ? session.archived : undefined,
     archiveSupported: session.archive_supported === true,
     resumable: session.resumable !== false,
+    appResumeSupported: typeof session.app_resume_supported === "boolean" ? session.app_resume_supported : undefined,
     startedAt,
     updatedAt,
     time: updatedAt,

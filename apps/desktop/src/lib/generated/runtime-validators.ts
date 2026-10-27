@@ -4410,6 +4410,9 @@ const SCHEMAS: Record<string, Record<string, unknown>> = {
       "resumable": {
         "type": "boolean"
       },
+      "app_resume_supported": {
+        "type": "boolean"
+      },
       "started_at": {
         "type": [
           "string",

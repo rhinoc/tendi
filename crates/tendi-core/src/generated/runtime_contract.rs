@@ -5,7 +5,7 @@ pub use serde_json::Value;
 pub const PROTOCOL_VERSION: u64 = 2;
 pub const SCHEMA_VERSION: u64 = 1;
 pub const RUNTIME_CONTRACT_FINGERPRINT: &str =
-    "aa6065d443df59d906247852b0d256ec311ef0118f89bf2b104042ee435029d2";
+    "4c8130db56d44591c2a6c29b475e3b8abf2ec04359aac8df5d9975e9390ede2a";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -1492,6 +1492,8 @@ pub struct SessionRecord {
     pub archive_supported: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub resumable: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub app_resume_supported: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub started_at: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]

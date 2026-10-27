@@ -1393,6 +1393,7 @@
           "archived": { "type": ["boolean", "null"] },
           "archive_supported": { "type": "boolean" },
           "resumable": { "type": "boolean" },
+          "app_resume_supported": { "type": "boolean" },
           "started_at": { "type": ["string", "null"] },
           "updated_at": { "type": ["string", "null"] },
           "message_count": { "type": ["integer", "null"], "minimum": 0, "maximum": 9007199254740991 },

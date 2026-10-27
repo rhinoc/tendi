@@ -32,6 +32,7 @@ export type SessionTableRow = {
   parentSessionId?: string;
   archived?: boolean;
   resumable?: boolean;
+  appResumeSupported?: boolean;
   searchSnippet?: string;
   tokenUsage?: SessionRecord["tokenUsage"];
   [key: string]: unknown;
@@ -122,7 +123,7 @@ export function createSessionTableColumns<T extends SessionTableRow = SessionTab
           );
         }
         const state = resumeState?.(session as T) ?? AsyncStatus.Idle;
-        const configuredTarget = sessionResumeTargetForAgent(resumeTarget, session.agent);
+        const configuredTarget = sessionResumeTargetForAgent(resumeTarget, session.agent, session.appResumeSupported !== false);
         const resolvedTarget = sessionResumeTargetForMenu(configuredTarget, resumeTargetForSession?.(session as T));
         const label = sessionResumeLabel(state, resolvedTarget);
         return (

@@ -2886,7 +2886,7 @@ export function SessionsView({
     const transcriptPath = session.path.trim();
     const workspacePath = sessionWorkspacePath(session);
     const deeplink = sessionAppDeepLink(session);
-    const configuredTarget = sessionResumeTargetForAgent(sessionResumeTarget, session.agent);
+    const configuredTarget = sessionResumeTargetForAgent(sessionResumeTarget, session.agent, session.appResumeSupported !== false);
     const target = sessionResumeTargetForMenu(
       configuredTarget,
       inferredResumeTargets[sessionSourceIdentity(session)],

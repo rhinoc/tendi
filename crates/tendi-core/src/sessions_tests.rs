@@ -94,7 +94,7 @@ fn compares_session_timestamps_by_instant_across_offsets() {
 }
 
 #[test]
-fn infers_session_resume_target_from_codex_session_meta() {
+fn infers_session_resume_target_from_codex_session_meta_and_home() {
     let root = temp_dir("tendi-session-resume-target");
     fs::create_dir_all(&root).unwrap();
     let terminal = root.join("terminal.jsonl");
@@ -108,7 +108,8 @@ fn infers_session_resume_target_from_codex_session_meta() {
         Some("terminal")
     );
 
-    let app = root.join("app.jsonl");
+    let app = root.join("sessions/2026/10/app.jsonl");
+    fs::create_dir_all(app.parent().unwrap()).unwrap();
     fs::write(
         &app,
         r#"{"type":"session_meta","source":"vscode","originator":"Codex Desktop"}"#,
@@ -116,7 +117,7 @@ fn infers_session_resume_target_from_codex_session_meta() {
     .unwrap();
     assert_eq!(
         infer_session_resume_target(&app, AgentKind::Codex),
-        Some("app")
+        Some("terminal")
     );
 
     let unknown = root.join("unknown.jsonl");
