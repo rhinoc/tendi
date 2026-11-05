@@ -3,7 +3,7 @@
   "openrpc": "1.3.2",
   "protocolVersion": 2,
   "schemaVersion": 1,
-  "contractFingerprint": "4c8130db56d44591c2a6c29b475e3b8abf2ec04359aac8df5d9975e9390ede2a",
+  "contractFingerprint": "3d584ab7391c3b28c96fb52c18982d30d94e0f280bce8b69897a2d1b560d169e",
   "methods": [
     {
       "name": "scan",
@@ -522,6 +522,15 @@
       "clients": [
         "desktop",
         "cli"
+      ],
+      "execution": "write"
+    },
+    {
+      "name": "session_release_held",
+      "owner": "daemon",
+      "wire": "jsonrpc",
+      "clients": [
+        "desktop"
       ],
       "execution": "write"
     },
@@ -1115,6 +1124,7 @@
       "rules_list",
       "scan",
       "session_projects_list",
+      "session_release_held",
       "session_set_archived",
       "session_skill_index_run",
       "session_skill_index_status",

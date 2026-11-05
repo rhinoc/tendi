@@ -603,9 +603,7 @@ fn primary_session_cleanup_has_data(conn: &Connection) -> Result<bool> {
     Ok(false)
 }
 
-fn reset_primary_session_cache(
-    tx: &rusqlite::Transaction<'_>,
-) -> Result<schema::MigrationBatch> {
+fn reset_primary_session_cache(tx: &rusqlite::Transaction<'_>) -> Result<schema::MigrationBatch> {
     let Some((state, cursor)) = schema::migration_state(tx, PRIMARY_SESSION_CLEANUP_MIGRATION_KEY)?
     else {
         return Ok(schema::MigrationBatch {

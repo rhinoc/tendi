@@ -212,6 +212,10 @@ pub trait RuntimeHandler {
         &self,
         request: runtime_schema::SessionSetArchivedRequest,
     ) -> Result<runtime_schema::SessionSetArchivedResponse, DaemonError>;
+    fn session_release_held(
+        &self,
+        request: runtime_schema::SessionReleaseHeldRequest,
+    ) -> Result<runtime_schema::SessionReleaseHeldResponse, DaemonError>;
     fn session_transcript(
         &self,
         request: runtime_schema::SessionTranscriptRequest,
@@ -1361,6 +1365,24 @@ impl RuntimeHandler for Daemon {
         request: runtime_schema::SessionSetArchivedRequest,
     ) -> Result<runtime_schema::SessionSetArchivedResponse, DaemonError> {
         let result = { Daemon::session_set_archived(self, request) }?;
+        let result = serde_json::to_value(result).map_err(|error| {
+            DaemonError::new(
+                "CONTRACT_VIOLATION",
+                format!("generated response encode failed: {error}"),
+            )
+        })?;
+        serde_json::from_value(result).map_err(|error| {
+            DaemonError::new(
+                "CONTRACT_VIOLATION",
+                format!("generated response decode failed: {error}"),
+            )
+        })
+    }
+    fn session_release_held(
+        &self,
+        request: runtime_schema::SessionReleaseHeldRequest,
+    ) -> Result<runtime_schema::SessionReleaseHeldResponse, DaemonError> {
+        let result = { Daemon::session_release_held(self, request) }?;
         let result = serde_json::to_value(result).map_err(|error| {
             DaemonError::new(
                 "CONTRACT_VIOLATION",
@@ -2850,6 +2872,22 @@ macro_rules! runtime_dispatch {
                         )
                     })?;
                 let result = RuntimeHandler::session_set_archived($daemon, request)?;
+                serde_json::to_value(result).map_err(|error| {
+                    DaemonError::new(
+                        "CONTRACT_VIOLATION",
+                        format!("generated response encode failed: {error}"),
+                    )
+                })
+            }
+            "session_release_held" => {
+                let request: runtime_schema::SessionReleaseHeldRequest =
+                    serde_json::from_value($args.clone()).map_err(|error| {
+                        DaemonError::new(
+                            "INVALID_PARAMS",
+                            format!("generated request decode failed: {error}"),
+                        )
+                    })?;
+                let result = RuntimeHandler::session_release_held($daemon, request)?;
                 serde_json::to_value(result).map_err(|error| {
                     DaemonError::new(
                         "CONTRACT_VIOLATION",

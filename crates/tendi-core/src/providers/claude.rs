@@ -1,5 +1,9 @@
 use std::collections::BTreeSet;
-use std::{collections::BTreeMap, fs, path::Path};
+use std::{
+    collections::BTreeMap,
+    fs,
+    path::{Path, PathBuf},
+};
 
 use anyhow::{Context, Result, bail};
 use serde_json::Value;
@@ -1107,6 +1111,10 @@ impl super::AgentProvider for ClaudeProvider {
         Ok(held)
     }
 
+    fn release_held_session(&self, ctx: &ProviderContext, session: &SessionRecord) -> Result<()> {
+        release_registered_session(&self.session_ownership_paths(ctx, &[]), &session.id)
+    }
+
     fn current_session_env_key(&self) -> Option<&'static str> {
         Some("CLAUDE_CODE_SESSION_ID")
     }
@@ -1581,6 +1589,78 @@ impl super::AgentProvider for ClaudeProvider {
 #[cfg(test)]
 #[path = "claude_tests.rs"]
 mod tests;
+
+const RELEASE_STILL_HELD: &str = "This thread is still in use.";
+
+fn release_registered_session(roots: &[PathBuf], session_id: &str) -> Result<()> {
+    let mut holders = Vec::new();
+    for root in roots {
+        let entries = match fs::read_dir(root) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error.into()),
+        };
+        for entry in entries {
+            let path = entry?.path();
+            if path.extension().is_none_or(|ext| ext != "json") {
+                continue;
+            }
+            let Ok(body) = fs::read(&path) else {
+                continue;
+            };
+            let Ok(value) = serde_json::from_slice::<Value>(&body) else {
+                continue;
+            };
+            if held_registry_session(&value).as_deref() != Some(session_id) {
+                continue;
+            }
+            let Some(pid) = value
+                .get("pid")
+                .and_then(Value::as_i64)
+                .and_then(|pid| i32::try_from(pid).ok())
+            else {
+                continue;
+            };
+            holders.push(pid);
+        }
+    }
+    if holders.is_empty() {
+        return Ok(());
+    }
+    for pid in &holders {
+        crate::session_ownership::processes::terminate(*pid)
+            .with_context(|| format!("failed to release Claude session {session_id}"))?;
+    }
+    let released = crate::session_ownership::processes::wait_for(
+        std::time::Duration::from_millis(800),
+        || !registry_holds_session(roots, session_id),
+    );
+    if released {
+        return Ok(());
+    }
+    bail!(RELEASE_STILL_HELD);
+}
+
+fn registry_holds_session(roots: &[PathBuf], session_id: &str) -> bool {
+    roots.iter().any(|root| {
+        let Ok(entries) = fs::read_dir(root) else {
+            return false;
+        };
+        entries.flatten().any(|entry| {
+            let path = entry.path();
+            if path.extension().is_none_or(|ext| ext != "json") {
+                return false;
+            }
+            let Ok(body) = fs::read(&path) else {
+                return false;
+            };
+            let Ok(value) = serde_json::from_slice::<Value>(&body) else {
+                return false;
+            };
+            held_registry_session(&value).as_deref() == Some(session_id)
+        })
+    })
+}
 
 fn held_registry_session(value: &Value) -> Option<String> {
     let pid = i32::try_from(value.get("pid")?.as_i64()?).ok()?;

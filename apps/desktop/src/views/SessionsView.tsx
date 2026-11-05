@@ -1,5 +1,5 @@
 import { Tooltip as AppTooltip } from "../components/shared/Tooltip.tsx";
-import { lazy, memo, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ChangeEvent, type ReactNode } from "react";
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ChangeEvent, type ReactNode } from "react";
 import { AlertCircle, AppWindow, Archive, ArchiveRestore, ArrowDownToLine, ArrowUpToLine, Check, ChevronLeft, ChevronRight, Filter, FolderOpen, GitFork, Info, LocateFixed, MessageSquarePlus, MessageSquareText, PanelRightClose, RefreshCw, Search, SearchX, Sparkles, TerminalSquare, Upload, X } from "lucide-react";
 import { Group as PanelGroup, Panel } from "react-resizable-panels";
 import { ContextMenu, Dialog, DropdownMenu, Popover } from "radix-ui";
@@ -34,14 +34,15 @@ import { useSessionTranscriptNavigation } from "../features/sessions/useSessionT
 import { sessionSourceIdentity, useInferredSessionResumeTargets } from "../features/sessions/useInferredSessionResumeTargets.ts";
 import { useSessionListWorkspace } from "../features/sessions/useSessionListWorkspace.ts";
 import { useSessionRemoteListWorkspace } from "../features/sessions/useSessionRemoteListWorkspace.ts";
+import { SessionContextBar, SessionFamilyList } from "../features/sessions/SessionContextBar.tsx";
 import { SessionArchiveButton } from "../features/sessions/SessionArchiveButton.tsx";
 import { SessionStatusIcons } from "../features/sessions/SessionStatusIcons.tsx";
 import { useSessionArchiveOperations } from "../features/sessions/useSessionArchiveOperations.ts";
+import { useSessionReleaseOperations } from "../features/sessions/useSessionReleaseOperations.ts";
 import { useSessionResumeOperations } from "../features/sessions/useSessionResumeOperations.ts";
 import { useSessionSkillLinks } from "../features/sessions/useSessionSkillLinks.ts";
 import { ImportFeedbackState, useSessionImport } from "../features/sessions/useSessionImport.ts";
 import { agentDefinitions } from "../lib/agent/index.ts";
-import type { TokenMetricProps } from "../components/TokenStatusBar.tsx";
 import { AgentBadge } from "../components/shared/AgentBadge.tsx";
 import { Badge } from "../components/shared/Badge.tsx";
 import { Button } from "../components/shared/Button.tsx";
@@ -77,9 +78,8 @@ import { createSessionTableColumns } from "../features/sessions/createSessionTab
 import { SessionTitleText, TranscriptLinkText } from "../components/shared/TranscriptLinkText.tsx";
 import { PretextText } from "../components/shared/PretextText.tsx";
 import "./SessionsView.css";
-import { cacheRateTone } from "../lib/token-style.ts";
-import { TokenUsageSource } from "../lib/tokenizer-types.ts";
 import { planSessionListLocation, SessionListLocationPlan, shouldShowSessionListLocator } from "../lib/session-list-locator.ts";
+import { useDesktopStore } from "../store/desktop-store.ts";
 import { measureTranscriptTextHeight, type TranscriptTextLayout } from "../lib/pretext-layout.ts";
 import { fixedVirtualRange, variableVirtualRangeFor } from "../lib/virtualization.ts";
 import {
@@ -104,7 +104,6 @@ import {
   sessionExternalKey,
   resolveInitialSession,
   safeInvoke,
-  sessionCacheRate,
   sessionTitleValue,
   sessionLogicalIdentity,
   sessionSourceExternalKey,
@@ -155,8 +154,6 @@ import {
   type SessionListPageResult,
 } from "../controllers/session-controller.ts";
 
-const SessionTokenStatusBar = lazy(() => import("../components/SessionTokenStatusBar.tsx").then(({ SessionTokenStatusBar: component }) => ({ default: component })));
-
 const SESSION_SEARCH_DEBOUNCE_MS = 300;
 type SessionTimeRange = "any" | "day" | "week" | "month" | "year";
 type SessionTimeFilter = { range: SessionTimeRange; startedAfter?: string };
@@ -188,52 +185,6 @@ const TRANSCRIPT_IMPORT_PROVIDERS = agentDefinitions
 const EMPTY_SESSION_ROWS: SessionRecord[] = [];
 const EMPTY_SESSION_PROJECT_OPTIONS: SessionListPageResult["projectOptions"] = [];
 const EMPTY_GROUPED_SESSION_PAGES: GroupedSessionPage[] = [];
-
-function sessionCacheMetrics(session: SessionRecord): TokenMetricProps[] {
-  const usage = session.tokenUsage;
-  const rate = sessionCacheRate(session);
-  if (!usage || rate === undefined) return [];
-  const value = `${rate.toFixed(1)}%`;
-  return [{
-    label: "Cache",
-    value,
-    title: `${usage.cachedInputTokens.toLocaleString()} cached of ${usage.inputTokens.toLocaleString()} input tokens`,
-    tone: cacheRateTone(rate),
-  }];
-}
-
-function reportedTokenSegments(session: SessionRecord) {
-  const usage = session.tokenUsage;
-  if (!usage) return null;
-  const uncachedInputTokens = Math.max(0, usage.inputTokens - usage.cachedInputTokens);
-  const nonReasoningOutputTokens = Math.max(0, usage.outputTokens - usage.reasoningOutputTokens);
-  return [
-    {
-      label: "Input",
-      value: usage.inputTokens,
-      details: [
-        { label: "Cached", value: usage.cachedInputTokens },
-        { label: "Uncached", value: uncachedInputTokens },
-      ],
-    },
-    {
-      label: "Output",
-      value: usage.outputTokens,
-      details: [
-        { label: "Reasoning", value: usage.reasoningOutputTokens },
-        { label: "Other", value: nonReasoningOutputTokens },
-      ],
-    },
-    {
-      label: "Total",
-      value: usage.totalTokens,
-      details: [
-        { label: "Input", value: usage.inputTokens },
-        { label: "Output", value: usage.outputTokens },
-      ],
-    },
-  ];
-}
 
 enum KeyboardNavigationScope {
   List = "list",
@@ -729,6 +680,8 @@ export function TranscriptPanel({
   onSavePrompt,
   onToggleArchive,
   archiving = false,
+  releasingSession,
+  onReleaseHeld,
   keyboardNavigationScopeRef,
 }: {
   session: SessionRecord;
@@ -758,6 +711,8 @@ export function TranscriptPanel({
   onSavePrompt?: (body: string) => Promise<boolean>;
   onToggleArchive?: (session: SessionRecord) => void | Promise<void>;
   archiving?: boolean;
+  releasingSession?: (session: SessionRecord) => boolean;
+  onReleaseHeld?: (session: SessionRecord) => void;
   keyboardNavigationScopeRef: KeyboardNavigationScopeRef;
 }) {
   const transcriptItems = useMemo(() => {
@@ -767,9 +722,6 @@ export function TranscriptPanel({
     ? buildSessionLocatorItemsFromMetadata(locatorMetadata, 0)
     : buildSessionLocatorItems(transcriptItems), [locatorMetadata, transcriptItems]);
   const initialTranscriptLoading = loading && transcriptItems.length === 0;
-  const reportedSegments = useMemo(() => reportedTokenSegments(session), [session]);
-  const hasReportedUsage = Boolean(session.tokenUsage);
-  const cacheMetrics = useMemo(() => sessionCacheMetrics(session), [session]);
   const transcriptRef = useRef<HTMLDivElement | null>(null);
   const loadMoreRef = useRef<HTMLDivElement | null>(null);
   const {
@@ -1093,7 +1045,13 @@ export function TranscriptPanel({
       <header className="threadHeader">
         <div className="threadTitleLine">
           <h2 className="sessionThreadTitle">
-            <SessionStatusIcons session={session} subagent={sessionKind(session) === SessionKind.Child} archived={session.archived} />
+            <SessionStatusIcons
+              session={session}
+              subagent={sessionKind(session) === SessionKind.Child}
+              archived={session.archived}
+              releasing={releasingSession?.(session)}
+              onRelease={onReleaseHeld ? () => onReleaseHeld(session) : undefined}
+            />
             <span className="sessionThreadTitleLabel"><SessionTitleText interactive={false} value={sessionTitleValue(session)} /></span>
           </h2>
           <div className="threadHeaderActions">
@@ -1101,6 +1059,8 @@ export function TranscriptPanel({
             <SessionRelationsPopover
               session={session}
               sessionTree={sessionTree}
+              releasingSession={releasingSession}
+              onReleaseHeld={onReleaseHeld}
               onOpenSession={onOpenSession}
             />
             <SessionSkillsPopover
@@ -1285,17 +1245,15 @@ export function TranscriptPanel({
           onSelect={selectLocatorItem}
         />
       )}
-      <Suspense fallback={null}>
-        {hasReportedUsage || !hasMore ? (
-          <SessionTokenStatusBar
-            items={items}
-            skillLinks={skillLinks}
-            reportedSegments={reportedSegments}
-            metrics={cacheMetrics}
-            usageSource={hasReportedUsage ? TokenUsageSource.Reported : TokenUsageSource.Estimated}
-          />
-        ) : null}
-      </Suspense>
+      {initialTranscriptLoading ? null : (
+        <SessionContextBar
+          key={sessionExternalKey(session)}
+          session={session}
+          items={transcriptItems}
+          loading={loadingMore}
+          onJump={selectLocatorItem}
+        />
+      )}
     </aside>
   );
 }
@@ -1521,10 +1479,14 @@ export function SessionRelationsPopover({
   session,
   sessionTree,
   onOpenSession,
+  releasingSession,
+  onReleaseHeld,
 }: {
   session: SessionRecord;
   sessionTree: SessionRecord[];
   onOpenSession: (session: SessionRecord) => void;
+  releasingSession?: (session: SessionRecord) => boolean;
+  onReleaseHeld?: (session: SessionRecord) => void;
 }) {
   const relationCount = Math.max(0, sessionTree.length - 1);
   if (relationCount === 0) return null;
@@ -1548,6 +1510,13 @@ export function SessionRelationsPopover({
           onMouseDown={(event) => event.stopPropagation()}
         >
           <div className="sessionRelationsHeader">Related sessions</div>
+          <SessionFamilyList
+            session={session}
+            sessionTree={sessionTree}
+            onOpenSession={onOpenSession}
+            releasingSession={releasingSession}
+            onReleaseHeld={onReleaseHeld}
+          />
           <SessionRelationsConvergence
             session={session}
             sessionTree={sessionTree}
@@ -2290,6 +2259,8 @@ export function SessionsView({
   const [query, setQuery] = useTabState("sessions.query", "");
   const [searchScopes, setSearchScopes] = useTabState<TranscriptSearchScopeState>("sessions.searchScopes", DEFAULT_TRANSCRIPT_SEARCH_SCOPES);
   const [archiveFilter, setArchiveFilter] = useTabState<SessionArchiveFilter>("sessions.archiveFilter", "unarchived");
+  const [inUseFilter, setInUseFilter] = useTabState<"all" | "inUse">("sessions.inUseFilter", "all");
+  const heldSessionKeys = useDesktopStore((state) => state.sessions.heldSessionKeys);
   const [timeFilter, setTimeFilter] = useTabState<SessionTimeFilter>("sessions.timeFilter", { range: "any" });
   const [sort, setSort] = useTabState<SortState>("sessions.sort", { key: SessionSortKey.UpdatedAt, direction: SortDirection.Desc });
   const [searchSort, setSearchSort] = useTabState<SortState | null>("sessions.searchSort", null);
@@ -2372,7 +2343,8 @@ export function SessionsView({
   useEffect(() => () => {
     if (sessionToastTimerRef.current !== undefined) window.clearTimeout(sessionToastTimerRef.current);
   }, []);
-  const useLocalSessionList = importedSessions.length > 0;
+  const inUseOnly = inUseFilter === "inUse";
+  const useLocalSessionList = importedSessions.length > 0 || inUseOnly;
   const allSessionItems = useMemo(() => {
     const byId = new Map<string, SessionRecord>();
     for (const session of [...importedSessions, ...sessionItems]) byId.set(sessionTableRowId(session), session);
@@ -2383,7 +2355,7 @@ export function SessionsView({
     [sessionItems],
   );
   const activeSort = remoteSearchActive ? searchSort ?? SESSION_SEARCH_SORT : sort;
-  const searchFilterKey = `${timeFilter.startedAfter ?? ""}\0${JSON.stringify(searchScopes)}\0${archiveFilter}`;
+  const searchFilterKey = `${timeFilter.startedAfter ?? ""}\0${JSON.stringify(searchScopes)}\0${archiveFilter}\0${inUseFilter}`;
   const pageContextKey = sessionPageContextKey(
     activeSort,
     groupBy,
@@ -2396,6 +2368,7 @@ export function SessionsView({
   const activeFilterCount = Number(selectedProjectKeys.length > 0)
     + Number(timeFilter.range !== "any")
     + Number(archiveFilter !== "unarchived")
+    + Number(inUseOnly)
     + Number(showChildSessions)
     + Number(TRANSCRIPT_SEARCH_SCOPES.some(({ id }) => searchScopes[id] !== DEFAULT_TRANSCRIPT_SEARCH_SCOPES[id]));
   const requestedPage = pageSelection.contextKey === pageContextKey ? pageSelection.page : 0;
@@ -2413,6 +2386,8 @@ export function SessionsView({
     pageSize,
     groupBy,
     showChildSessions,
+    inUseOnly,
+    heldSessionKeys,
     selectedProjectKeys,
     projectFilterQuery,
     missingSessionProjectPolicy,
@@ -2737,6 +2712,7 @@ export function SessionsView({
   const {
     pendingResumeConflict,
     repairingResume,
+    resumeConflictError,
     resumeSession,
     repairAndResume,
     cancelResumeConflict,
@@ -2871,6 +2847,7 @@ export function SessionsView({
     importedAgent: IMPORTED_SESSION_AGENT,
     onToastError: showSessionError,
   });
+  const { releaseHeldSession, isReleasing } = useSessionReleaseOperations(showSessionError);
   const columns = useMemo(
     (): ColumnDef<SessionRecord>[] => createSessionTableColumns({
       normalizedQuery,
@@ -2878,8 +2855,10 @@ export function SessionsView({
       resumeState: getResumeState,
       resumeTarget: sessionResumeTarget,
       resumeTargetForSession: (session) => inferredResumeTargets[sessionSourceIdentity(session as SessionRecord)],
+      releasingSession: isReleasing,
+      releaseHeldSession: (session) => { void releaseHeldSession(session); },
     }),
-    [getResumeState, inferredResumeTargets, normalizedQuery, resumeSession, sessionResumeTarget],
+    [getResumeState, inferredResumeTargets, isReleasing, normalizedQuery, releaseHeldSession, resumeSession, sessionResumeTarget],
   );
   const { toggleArchive, isArchiving } = useSessionArchiveOperations({ onSetArchived: onSetSessionArchived, onError: showSessionError });
   const rowContextMenu = useCallback((session: SessionRecord) => {
@@ -3195,6 +3174,35 @@ export function SessionsView({
                     </DropdownMenu.Sub>
                     <DropdownMenu.Sub>
                       <DropdownMenu.SubTrigger className="menuItem menuSubTrigger">
+                        <span className="selectItemText">In use</span>
+                        <span className="sessionFilterMenuSummary">{inUseOnly ? "In use" : "All"}</span>
+                        <ChevronRight className="menuSubIcon" size={14} aria-hidden="true" />
+                      </DropdownMenu.SubTrigger>
+                      <DropdownMenu.Portal>
+                        <DropdownMenu.SubContent className="menuContent sessionFilterSubmenu" sideOffset={8} alignOffset={-6} data-no-drag>
+                          {([
+                            ["all", "All"],
+                            ["inUse", "In use"],
+                          ] as const).map(([value, label]) => (
+                            <DropdownMenu.Item
+                              key={value}
+                              className="menuItem selectItemIndicatorRight"
+                              onSelect={(event) => {
+                                event.preventDefault();
+                                setInUseFilter(value);
+                              }}
+                            >
+                              <span className="selectItemText">{label}</span>
+                              <span className="selectItemLeadingIcon" aria-hidden="true">
+                                {inUseFilter === value ? <Check className="selectItemIndicator" size={14} /> : null}
+                              </span>
+                            </DropdownMenu.Item>
+                          ))}
+                        </DropdownMenu.SubContent>
+                      </DropdownMenu.Portal>
+                    </DropdownMenu.Sub>
+                    <DropdownMenu.Sub>
+                      <DropdownMenu.SubTrigger className="menuItem menuSubTrigger">
                         <span className="selectItemText">Subagents</span>
                         <span className="sessionFilterMenuSummary">{showChildSessions ? "Shown" : "Hidden"}</span>
                         <ChevronRight className="menuSubIcon" size={14} aria-hidden="true" />
@@ -3256,6 +3264,7 @@ export function SessionsView({
                         setSelectedProjectKeys([]);
                         setTimeFilter(makeSessionTimeFilter("any"));
                         setArchiveFilter("unarchived");
+                        setInUseFilter("all");
                         setShowChildSessions(false);
                         setSearchScopes(DEFAULT_TRANSCRIPT_SEARCH_SCOPES);
                       }}
@@ -3362,6 +3371,8 @@ export function SessionsView({
             inheritedSearchScopes={searchScopes}
             onToggleArchive={onSetSessionArchived ? toggleArchive : undefined}
             archiving={isArchiving(activeSession)}
+            releasingSession={isReleasing}
+            onReleaseHeld={(session) => { void releaseHeldSession(session); }}
             childSessions={activeChildSessions}
             sessionTree={activeSessionTree}
               items={items}
@@ -3404,6 +3415,7 @@ export function SessionsView({
       <Dialog.Description id="session-resume-conflict-description" className="confirmDialogDescription">
         This {pendingResumeConflict ? friendlyAgent(pendingResumeConflict.session.agent) : "agent"} session is still open in another process. Close it first, then archive and unarchive it before resuming.
       </Dialog.Description>
+      {resumeConflictError ? <p className="confirmDialogDescription" role="alert">{resumeConflictError}</p> : null}
       <div className="confirmDialogActions">
         <DialogActionButton
           variant="primary"

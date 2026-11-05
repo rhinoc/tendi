@@ -29,6 +29,9 @@ static CANONICAL_MATERIALIZATION_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 const KEEP_LOCAL_RESOLUTION: &str = "__tendi_keep_local__";
 const USE_UPDATE_RESOLUTION: &str = "__tendi_use_update__";
 
+#[path = "skills_well_known.rs"]
+pub(crate) mod well_known;
+
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd, Hash, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum AgentKind {
@@ -602,6 +605,8 @@ pub struct SkillUpdateReport {
     pub latest_version: Option<String>,
     pub source: Option<String>,
     pub source_kind: String,
+    #[serde(skip)]
+    pub source_files: Option<std::sync::Arc<BTreeMap<String, Vec<u8>>>>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -628,6 +633,7 @@ pub struct SkillMergeIssue {
 pub struct SkillUpdatePlan {
     pub file_changes: ChangeSet,
     pub git_updates: Vec<GitUpdateAction>,
+    pub directory_updates: Vec<SkillDirectoryUpdate>,
     pub skipped: Vec<SkillUpdateReport>,
     pub source_updates: Vec<SkillSourceUpdate>,
     pub merge_issues: Vec<SkillMergeIssue>,
@@ -640,8 +646,19 @@ impl SkillUpdatePlan {
                 .git_updates
                 .iter()
                 .any(GitUpdateAction::has_effective_changes)
+            || self
+                .directory_updates
+                .iter()
+                .any(|update| !update.files.is_empty())
             || !self.merge_issues.is_empty()
     }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SkillDirectoryUpdate {
+    pub name: String,
+    pub target: PathBuf,
+    pub files: Vec<GitUpdateFile>,
 }
 
 #[derive(Debug, Clone)]
@@ -2973,7 +2990,9 @@ pub fn apply_skill_add_preview(
     apply_built_skill_add_plan(plan, options, &target_root)
 }
 
-pub fn skill_source_records_for_add(report: &SkillAddApplyReport) -> Vec<SkillSourceRecord> {
+pub fn skill_source_records_for_add(
+    report: &SkillAddApplyReport,
+) -> Result<Vec<SkillSourceRecord>> {
     let git_source = matches!(
         report.plan.source_kind.as_str(),
         "github" | "git" | "gitlab" | "huggingface"
@@ -2989,34 +3008,45 @@ pub fn skill_source_records_for_add(report: &SkillAddApplyReport) -> Vec<SkillSo
         .selected
         .iter()
         .zip(&report.results)
-        .map(|(skill, result)| SkillSourceRecord {
-            skill_name: skill.name.clone(),
-            skill_path: result.target.clone(),
-            source_kind: report.plan.source_kind.clone(),
-            source: Some(report.plan.source.clone()),
-            source_ref: report.plan.source_ref.clone(),
-            source_version: source_version.clone(),
-            source_relative_path: source_repo
-                .as_deref()
-                .and_then(|repo| {
-                    skill
-                        .path
-                        .canonicalize()
-                        .ok()
-                        .and_then(|path| path.strip_prefix(repo).ok().map(Path::to_path_buf))
-                })
-                .map(|path| path.to_string_lossy().replace('\\', "/"))
-                .or_else(|| (!skill.relative_path.is_empty()).then(|| skill.relative_path.clone())),
-            update_status: if matches!(
-                report.plan.source_kind.as_str(),
-                "github" | "git" | "gitlab" | "huggingface"
-            ) {
-                "tracked"
-            } else {
-                "local"
-            }
-            .to_string(),
-            origin: "tendi-install".to_string(),
+        .map(|(skill, result)| {
+            Ok(SkillSourceRecord {
+                skill_name: skill.name.clone(),
+                skill_path: result.target.clone(),
+                source_kind: report.plan.source_kind.clone(),
+                source: Some(report.plan.source.clone()),
+                source_ref: report.plan.source_ref.clone(),
+                source_version: if report.plan.source_kind == "well-known" {
+                    Some(well_known::installed_source_version(
+                        &skill.path,
+                        &report.plan.target,
+                    )?)
+                } else {
+                    source_version.clone()
+                },
+                source_relative_path: source_repo
+                    .as_deref()
+                    .and_then(|repo| {
+                        skill
+                            .path
+                            .canonicalize()
+                            .ok()
+                            .and_then(|path| path.strip_prefix(repo).ok().map(Path::to_path_buf))
+                    })
+                    .map(|path| path.to_string_lossy().replace('\\', "/"))
+                    .or_else(|| {
+                        (!skill.relative_path.is_empty()).then(|| skill.relative_path.clone())
+                    }),
+                update_status: if matches!(
+                    report.plan.source_kind.as_str(),
+                    "github" | "git" | "gitlab" | "huggingface" | "well-known"
+                ) {
+                    "tracked"
+                } else {
+                    "local"
+                }
+                .to_string(),
+                origin: "tendi-install".to_string(),
+            })
         })
         .collect()
 }
@@ -3986,6 +4016,13 @@ pub fn format_update_plan(plan: &SkillUpdatePlan) -> String {
     for action in &plan.git_updates {
         lines.push(format!("Merge {} from {}", action.name, action.source));
     }
+    for update in &plan.directory_updates {
+        lines.push(format!(
+            "Merge {} at {}",
+            update.name,
+            update.target.display()
+        ));
+    }
     for issue in &plan.merge_issues {
         lines.push(format!("Block {} ({})", issue.path.display(), issue.status));
     }
@@ -4012,6 +4049,7 @@ fn plan_skill_updates_for_matches(
     let mut skipped = Vec::new();
     let mut source_updates = Vec::new();
     let mut merge_issues = Vec::new();
+    let mut directory_updates = Vec::new();
     let mut updates_by_id = reports
         .iter()
         .cloned()
@@ -4070,6 +4108,29 @@ fn plan_skill_updates_for_matches(
                     skipped.push(update);
                 }
             }
+            "well-known" => {
+                let planned = well_known::plan_update(skill, path, store, workspace_root, &update)?;
+                if planned.files.is_empty() {
+                    skipped.push(SkillUpdateReport {
+                        status: "up-to-date".to_string(),
+                        ..update
+                    });
+                    continue;
+                }
+                source_updates.extend(
+                    skill
+                        .paths
+                        .iter()
+                        .filter(|candidate| {
+                            candidate.source_kind == "well-known" && candidate.source == path.source
+                        })
+                        .map(|candidate| SkillSourceUpdate {
+                            skill_path: candidate.path.clone(),
+                            source_version: source_version.clone(),
+                        }),
+                );
+                directory_updates.push(planned);
+            }
             "registry" => {
                 match plan_registry_update(skill, path, store, workspace_root, &source_version)? {
                     Some(RegistryUpdatePlan::Change(change, source_update)) => {
@@ -4095,6 +4156,7 @@ fn plan_skill_updates_for_matches(
             changes: dedupe_changes(file_changes),
         },
         git_updates: git_updates.into_values().collect(),
+        directory_updates,
         skipped,
         source_updates,
         merge_issues,
@@ -4136,6 +4198,11 @@ pub fn skill_update_resource_paths(plan: &SkillUpdatePlan) -> Result<Vec<PathBuf
         skill_source_updates_for_plan(plan)
             .into_iter()
             .map(|update| update.skill_path),
+    );
+    paths.extend(
+        plan.directory_updates
+            .iter()
+            .map(|update| update.target.clone()),
     );
     for action in &plan.git_updates {
         paths.push(action.repo.clone());
@@ -4243,6 +4310,9 @@ fn apply_skill_update_plan_filesystem_unchecked(plan: &SkillUpdatePlan) -> Resul
     for action in &plan.git_updates {
         apply_git_update_with_store(action, None)?;
     }
+    for update in &plan.directory_updates {
+        apply_update_files(&update.target, &update.files)?;
+    }
     Ok(())
 }
 
@@ -4270,6 +4340,11 @@ impl SkillFilesystemTransaction {
                 .changes
                 .iter()
                 .map(|change| change.path.clone()),
+        );
+        paths.extend(
+            plan.directory_updates
+                .iter()
+                .map(|update| update.target.clone()),
         );
         let mut git_repos = BTreeSet::new();
         for action in &plan.git_updates {
@@ -4639,6 +4714,11 @@ fn apply_merge_resolutions(
             }
         }
     }
+    for update in &mut plan.directory_updates {
+        for file in &mut update.files {
+            resolve_update_file(file, resolutions);
+        }
+    }
     Ok(())
 }
 
@@ -4677,6 +4757,13 @@ fn resolve_update_file(file: &mut GitUpdateFile, resolutions: &BTreeMap<String, 
 
 fn plan_has_merge_blockers(plan: &SkillUpdatePlan) -> bool {
     if !plan.merge_issues.is_empty() {
+        return true;
+    }
+    if plan
+        .directory_updates
+        .iter()
+        .any(|update| update.files.iter().any(is_merge_blocker))
+    {
         return true;
     }
     plan.git_updates.iter().any(|action| {
@@ -4905,14 +4992,10 @@ fn sanitize_skill_dir_name(name: &str) -> Result<String> {
 }
 
 fn ensure_path_inside(base: &Path, target: &Path) -> Result<()> {
-    let base = base.canonicalize().unwrap_or_else(|_| base.to_path_buf());
+    let base = canonical_change_path(base);
     let target = target
         .parent()
-        .map(|parent| {
-            parent
-                .canonicalize()
-                .unwrap_or_else(|_| parent.to_path_buf())
-        })
+        .map(canonical_change_path)
         .unwrap_or_else(|| target.to_path_buf())
         .join(target.file_name().unwrap_or_default());
     if target == base || target.starts_with(&base) {
@@ -6223,6 +6306,9 @@ fn fetch_git_remote_commits(
         let Some(path) = skill.paths.iter().find(|path| is_update_check_path(path)) else {
             continue;
         };
+        if !is_git_source_kind(&path.source_kind) {
+            continue;
+        }
         let Some(repo) = git_checkout_for_skill_path(path, cancelled) else {
             continue;
         };
@@ -6376,6 +6462,7 @@ fn check_skill_update(
             latest_version: None,
             source: None,
             source_kind: "unknown".to_string(),
+            source_files: None,
         };
     };
 
@@ -6384,6 +6471,7 @@ fn check_skill_update(
             check_git_update(skill, path, git_remote_heads, git_changed_paths, cancelled)
         }
         "registry" => check_registry_update(skill, path),
+        "well-known" => well_known::check_update(skill, path, cancelled),
         _ => SkillUpdateReport {
             id: ensure_skill_record_id(skill),
             name: skill.name.clone(),
@@ -6392,6 +6480,7 @@ fn check_skill_update(
             latest_version: None,
             source: path.source.clone(),
             source_kind: path.source_kind.clone(),
+            source_files: None,
         },
     }
 }
@@ -6412,6 +6501,7 @@ fn check_git_update(
             latest_version: None,
             source: None,
             source_kind: path.source_kind.clone(),
+            source_files: None,
         };
     };
 
@@ -6456,6 +6546,7 @@ fn check_git_update(
         latest_version: latest.map(|head| head.oid),
         source: Some(source),
         source_kind: path.source_kind.clone(),
+        source_files: None,
     }
 }
 
@@ -7763,6 +7854,7 @@ fn check_registry_update(skill: &SkillRecord, path: &SkillPath) -> SkillUpdateRe
             latest_version: None,
             source: None,
             source_kind: path.source_kind.clone(),
+            source_files: None,
         };
     };
 
@@ -7785,6 +7877,7 @@ fn check_registry_update(skill: &SkillRecord, path: &SkillPath) -> SkillUpdateRe
         latest_version: latest,
         source: Some(source),
         source_kind: path.source_kind.clone(),
+        source_files: None,
     }
 }
 

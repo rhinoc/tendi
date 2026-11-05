@@ -5,6 +5,7 @@ export const TOKENIZER_URL = "https://github.com/niieani/gpt-tokenizer";
 export enum TokenizerKind {
   Markdown = "markdown",
   Transcript = "transcript",
+  Texts = "texts",
 }
 
 export enum TokenizerWorkerResponseType {

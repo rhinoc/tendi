@@ -1059,6 +1059,12 @@ export async function inferSessionResumeTarget(session: SessionResumeRequest): P
   throw new Error("Invalid session resume target response");
 }
 
+export async function releaseHeldSession(session: Pick<SessionRecord, "id" | "agent" | "path">): Promise<void> {
+  await invokeCommand(TauriCommand.SessionReleaseHeld, {
+    session: { id: session.id, agent: runtimeAgentKind(session.agent), path: session.path },
+  });
+}
+
 export async function setSessionArchived(session: SessionRecord, archived: boolean): Promise<RawDomainRow> {
   const response = await invokeCommand(TauriCommand.SessionSetArchived, {
     session: { id: session.id, agent: runtimeAgentKind(session.agent), path: session.path },
@@ -1073,7 +1079,8 @@ export async function openUrl(url: string): Promise<void> {
 
 export type SessionResumeInTerminalResponse =
   | { status: typeof SessionResumeOutcomeStatus.ActiveWriter; lockPath: string }
-  | { status: typeof SessionResumeOutcomeStatus.Launched; agent: string; terminal: string; commandLine: string }
+  | { status: typeof SessionResumeOutcomeStatus.ActiveWriterInApp; lockPath: string }
+  | { status: typeof SessionResumeOutcomeStatus.Launched; agent: string; terminal: string; commandLine?: string | null }
   | { status: typeof SessionResumeOutcomeStatus.Failed; error: SessionResumeError };
 
 export async function resumeSessionInTerminal(session: SessionResumeRequest): Promise<SessionResumeInTerminalResponse> {
@@ -1114,11 +1121,11 @@ export async function resumeSessionInTerminal(session: SessionResumeRequest): Pr
       ),
     };
   }
-  if (response.status === "activeWriter") {
+  if (response.status === "activeWriter" || response.status === "activeWriterInApp") {
     if (!response.lockPath) throw new Error("Invalid active writer response");
-    return { status: SessionResumeOutcomeStatus.ActiveWriter, lockPath: response.lockPath };
+    return { status: response.status === "activeWriterInApp" ? SessionResumeOutcomeStatus.ActiveWriterInApp : SessionResumeOutcomeStatus.ActiveWriter, lockPath: response.lockPath };
   }
-  if (!response.agent || !response.terminal || !response.commandLine) throw new Error("Invalid terminal launch response");
+  if (!response.agent || !response.terminal) throw new Error("Invalid terminal launch response");
   return {
     status: SessionResumeOutcomeStatus.Launched,
     agent: response.agent,

@@ -18,6 +18,24 @@ impl TerminalProvider for GhosttyProvider {
     fn application_name(&self) -> String {
         "Ghostty".to_string()
     }
+    #[cfg(target_os = "macos")]
+    fn focus_process(&self, pid: i32) -> Result<bool, TerminalLaunchError> {
+        super::focus_with_applescript("Ghostty", r#"
+on run argv
+    set targetPID to (item 1 of argv) as integer
+    tell application "Ghostty"
+        repeat with term in terminals
+            if pid of term is targetPID then
+                focus term
+                activate
+                return "found"
+            end if
+        end repeat
+    end tell
+    return "not found"
+end run
+"#, &pid.to_string())
+    }
     fn launch(&self, command: &tendi_core::SessionCommand) -> Result<(), TerminalLaunchError> {
         let script = terminal_input_script(command);
         #[cfg(target_os = "macos")]

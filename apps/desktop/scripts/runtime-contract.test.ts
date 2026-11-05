@@ -93,6 +93,13 @@ test("accepts structured session resume failures", () => {
   }), RuntimeContractError);
 });
 
+test("accepts a session held by the desktop app", () => {
+  validateResult("session_resume_in_terminal", {
+    status: "activeWriterInApp",
+    lockPath: "/tmp/thread-writer-locks/session-1.lock",
+  });
+});
+
 test("generated runtime contract fingerprint matches the source schema", () => {
   const schema = readFileSync(new URL("../../../runtime-schema/runtime.openrpc.json", import.meta.url));
   assert.equal(

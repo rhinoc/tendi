@@ -41,6 +41,9 @@ fn temp_dir(prefix: &str) -> PathBuf {
     ))
 }
 
+#[path = "skills_well_known_tests.rs"]
+mod well_known_tests;
+
 #[test]
 fn local_skill_creation_validates_input_and_preserves_existing_directories() {
     let root = temp_dir("tendi-create-local-skill");
@@ -355,6 +358,7 @@ fn skill_update_plan_only_applies_when_it_has_actionable_changes() {
             changes: Vec::new(),
         },
         git_updates: Vec::new(),
+        directory_updates: Vec::new(),
         skipped: Vec::new(),
         source_updates: Vec::new(),
         merge_issues: Vec::new(),
@@ -387,6 +391,7 @@ fn skill_update_plan_only_applies_when_it_has_actionable_changes() {
             changes: Vec::new(),
         },
         git_updates: vec![empty_git_action],
+        directory_updates: Vec::new(),
         skipped: Vec::new(),
         source_updates: Vec::new(),
         merge_issues: Vec::new(),
@@ -403,6 +408,7 @@ fn skill_update_plan_only_applies_when_it_has_actionable_changes() {
             }],
         },
         git_updates: Vec::new(),
+        directory_updates: Vec::new(),
         skipped: Vec::new(),
         source_updates: Vec::new(),
         merge_issues: Vec::new(),
@@ -720,6 +726,7 @@ fn filesystem_transaction_rolls_back_when_persistence_becomes_stale() {
             }],
         },
         git_updates: Vec::new(),
+        directory_updates: Vec::new(),
         skipped: Vec::new(),
         source_updates: vec![SkillSourceUpdate {
             skill_path: skill_dir.clone(),
@@ -770,6 +777,7 @@ fn file_resources_remain_owned_until_filesystem_rollback_finishes() {
             }],
         },
         git_updates: Vec::new(),
+        directory_updates: Vec::new(),
         skipped: Vec::new(),
         source_updates: Vec::new(),
         merge_issues: Vec::new(),
@@ -1164,6 +1172,7 @@ fn merge_issue_resolution_uses_selected_side_content() {
             changes: Vec::new(),
         },
         git_updates: Vec::new(),
+        directory_updates: Vec::new(),
         skipped: Vec::new(),
         source_updates: Vec::new(),
         merge_issues: vec![SkillMergeIssue {
@@ -1284,7 +1293,7 @@ fn git_clone_checks_out_requested_ref() {
             applied: true,
         }],
     };
-    let records = super::skill_source_records_for_add(&report);
+    let records = super::skill_source_records_for_add(&report).unwrap();
     assert_eq!(
         records[0].source_relative_path.as_deref(),
         Some("skills/demo")
@@ -1705,7 +1714,7 @@ fn apply_add_sets_selected_visibility_on_installed_skill() {
             .contains("allow_implicit_invocation: false")
     );
     assert_eq!(report.results.len(), 1);
-    let source_records = super::skill_source_records_for_add(&report);
+    let source_records = super::skill_source_records_for_add(&report).unwrap();
     assert_eq!(source_records.len(), 1);
     assert_eq!(source_records[0].skill_name, "demo");
     assert_eq!(source_records[0].skill_path, target_root.join("demo"));
@@ -2529,6 +2538,7 @@ fn update_plan_can_use_cached_reports_without_rechecking_sources() {
             latest_version: Some("3.0.0".to_string()),
             source: Some(format!("file://{}", registry_file.display())),
             source_kind: "registry".to_string(),
+            source_files: None,
         }],
     )
     .unwrap();
@@ -2919,6 +2929,7 @@ fn materialized_git_update_replaces_copy_and_advances_database_source() {
                 changes: Vec::new(),
             },
             git_updates: vec![action],
+            directory_updates: Vec::new(),
             skipped: Vec::new(),
             source_updates: Vec::new(),
             merge_issues: Vec::new(),

@@ -1587,9 +1587,12 @@ impl Store {
     pub(in crate::storage) fn normalize_cached_session(
         mut session: SessionRecord,
     ) -> SessionRecord {
-        session.archived = crate::providers::session_archive_state(session.agent, &session.path, &session.id);
-        session.archive_supported = crate::providers::session_archive_supported(session.agent, &session.path);
-        session.resumable = crate::providers::agent_provider(session.agent).session_resumable(&session.path, &session.id);
+        session.archived =
+            crate::providers::session_archive_state(session.agent, &session.path, &session.id);
+        session.archive_supported =
+            crate::providers::session_archive_supported(session.agent, &session.path);
+        session.resumable = crate::providers::agent_provider(session.agent)
+            .session_resumable(&session.path, &session.id);
         session.title = clean_session_title(session.title.take());
         session.first_user_message = bound_session_preview(session.first_user_message.take());
         session.last_user_message = bound_session_preview(session.last_user_message.take());
@@ -1744,7 +1747,8 @@ impl Store {
         for session in sessions.iter() {
             let projection = session_list_projection_values(session)?;
             let data_json = Self::session_metadata_json(session)?;
-            let changed = shared_cache::execute_changed(tx,
+            let changed = shared_cache::execute_changed(
+                tx,
                 &format!(
                     "UPDATE {SCOPED_SESSION_TABLE}
                      SET repository = ?1,

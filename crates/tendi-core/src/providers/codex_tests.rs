@@ -33,6 +33,23 @@ fn temp_dir() -> PathBuf {
 }
 
 #[test]
+fn identifies_codex_desktop_app_server_executables() {
+    for path in [
+        "/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex",
+        "/Applications/Codex.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex",
+    ] {
+        assert!(super::is_codex_app_server(std::path::Path::new(path)));
+    }
+    for path in [
+        "/Users/ryan/.codex/packages/app-server-daemon/current/bin/codex",
+        "/usr/local/bin/codex",
+        "/Applications/Other.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex",
+    ] {
+        assert!(!super::is_codex_app_server(std::path::Path::new(path)));
+    }
+}
+
+#[test]
 fn selected_skill_message_is_context_and_emits_skill_evidence() {
     let value = json!({
         "type": "response_item",
@@ -565,21 +582,148 @@ fn parses_codex_mcp_keyring_token_from_batch_item() {
 #[test]
 fn ownership_uses_actual_lock_and_discovers_custom_session_roots() {
     use crate::providers::{AgentProvider, ProviderContext};
-    let root = std::env::temp_dir().join(format!("tendi-ownership-{}-{}", std::process::id(), SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()));
+    let root = std::env::temp_dir().join(format!(
+        "tendi-ownership-{}-{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
     let source = root.join("sessions");
     let directory = root.join("thread-writer-locks");
     fs::create_dir_all(&directory).unwrap();
     let path = directory.join("live-thread.lock");
-    let file = std::fs::OpenOptions::new().create(true).truncate(true).read(true).write(true).open(&path).unwrap();
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .read(true)
+        .write(true)
+        .open(&path)
+        .unwrap();
     let ctx = ProviderContext::new(&root);
     let mut processes = crate::session_ownership::processes::Processes::default();
     let provider = super::CodexProvider;
-    let identity = crate::session_ownership::HeldSession { agent: AgentKind::Codex, id: "live-thread".into() };
-    assert!(!provider.held_sessions(&ctx, &[source.clone()], &mut processes).unwrap().contains(&identity));
+    let identity = crate::session_ownership::HeldSession {
+        agent: AgentKind::Codex,
+        id: "live-thread".into(),
+    };
+    assert!(
+        !provider
+            .held_sessions(&ctx, &[source.clone()], &mut processes)
+            .unwrap()
+            .contains(&identity)
+    );
     file.try_lock().unwrap();
-    assert!(provider.held_sessions(&ctx, &[source.clone()], &mut processes).unwrap().contains(&identity));
+    assert!(
+        provider
+            .held_sessions(&ctx, &[source.clone()], &mut processes)
+            .unwrap()
+            .contains(&identity)
+    );
     file.unlock().unwrap();
-    assert!(!provider.held_sessions(&ctx, &[source], &mut processes).unwrap().contains(&identity));
+    assert!(
+        !provider
+            .held_sessions(&ctx, &[source], &mut processes)
+            .unwrap()
+            .contains(&identity)
+    );
     drop(file);
     fs::remove_dir_all(root).unwrap();
+}
+
+fn release_test_session(path: PathBuf) -> crate::sessions::SessionRecord {
+    crate::sessions::SessionRecord {
+        id: "live-thread".to_string(),
+        agent: AgentKind::Codex,
+        title: None,
+        project: None,
+        repository: None,
+        repository_url: None,
+        logical_project_id: None,
+        logical_project_name: None,
+        path,
+        started_at: None,
+        updated_at: None,
+        message_count: None,
+        first_user_message: None,
+        last_user_message: None,
+        last_assistant_message: None,
+        turn_count: None,
+        model: None,
+        mode: None,
+        approval_mode: None,
+        is_run_everything: None,
+        parent_session_id: None,
+        archived: None,
+        archive_supported: false,
+        resumable: true,
+        token_usage: None,
+    }
+}
+
+#[test]
+fn release_leaves_the_current_process_running_when_it_holds_the_lock() {
+    let root = temp_dir();
+    let session_path = root.join("sessions/live-thread.jsonl");
+    fs::create_dir_all(session_path.parent().unwrap()).unwrap();
+    fs::write(&session_path, "").unwrap();
+    let session = release_test_session(session_path);
+    let lock_path = super::codex_thread_writer_lock_path(&session.path, &session.id).unwrap();
+    fs::create_dir_all(lock_path.parent().unwrap()).unwrap();
+    let file = fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .open(&lock_path)
+        .unwrap();
+    file.try_lock().unwrap();
+    let error = CodexProvider
+        .release_held_session(&ProviderContext::new(&root), &session)
+        .unwrap_err();
+    assert!(error.to_string().contains("could not be released"));
+    file.unlock().unwrap();
+    drop(file);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn release_stops_the_process_holding_the_thread_lock() {
+    let root = temp_dir();
+    let session_path = root.join("sessions/live-thread.jsonl");
+    fs::create_dir_all(session_path.parent().unwrap()).unwrap();
+    fs::write(&session_path, "").unwrap();
+    let session = release_test_session(session_path);
+    let lock_path = super::codex_thread_writer_lock_path(&session.path, &session.id).unwrap();
+    fs::create_dir_all(lock_path.parent().unwrap()).unwrap();
+    let child = std::process::Command::new("/usr/bin/perl")
+        .arg("-e")
+        .arg("use Fcntl qw(:flock); open my $f, '>>', $ARGV[0] or die $!; flock($f, LOCK_EX) or die $!; sleep 30;")
+        .arg(&lock_path)
+        .spawn()
+        .expect("spawn thread lock holder");
+    struct KillOnDrop(Option<std::process::Child>);
+    impl Drop for KillOnDrop {
+        fn drop(&mut self) {
+            if let Some(child) = self.0.as_mut() {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+        }
+    }
+    let mut child = KillOnDrop(Some(child));
+    let observed = crate::session_ownership::processes::wait_for(Duration::from_secs(2), || {
+        super::active_session_writer(&session)
+            .ok()
+            .is_some_and(|writer| writer.is_some())
+    });
+    assert!(observed, "thread lock should be visible");
+    CodexProvider
+        .release_held_session(&ProviderContext::new(&root), &session)
+        .unwrap();
+    let status = child.0.take().unwrap().wait().unwrap();
+    assert!(!status.success());
+    assert!(super::active_session_writer(&session).unwrap().is_none());
+    let _ = fs::remove_dir_all(root);
 }

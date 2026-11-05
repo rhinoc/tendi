@@ -293,9 +293,15 @@ export type SkillsWrapResponse = {
 export type SkillUpdatePlan = {
   file_changes: ChangeSet;
   git_updates: GitUpdateAction[];
+  directory_updates: SkillDirectoryUpdate[];
   skipped: SkillUpdateReport[];
   source_updates: SkillSourceUpdate[];
   merge_issues: SkillMergeIssue[];
+};
+export type SkillDirectoryUpdate = {
+  name: string;
+  target: string;
+  files: GitUpdateFile[];
 };
 export type SkillSourceUpdate = {
   skill_path: string;
@@ -774,7 +780,7 @@ export type SessionResumeError = {
   action: "retry" | "settings" | "open_project" | "none";
 };
 export type SessionResumeResponse = {
-  status: "activeWriter" | "launched" | "failed";
+  status: "activeWriter" | "activeWriterInApp" | "launched" | "failed";
   lockPath?: string | null;
   agent?: string | null;
   terminal?: string | null;
@@ -1444,6 +1450,9 @@ export type SessionSetArchivedRequest = {
   session: SessionIdentity;
   archived: boolean;
 };
+export type SessionReleaseHeldRequest = {
+  session: SessionIdentity;
+};
 export type SessionTranscriptRequest = {
   path: string;
   agent: AgentKind;
@@ -1543,7 +1552,7 @@ export type JsonRpcError = { code: number; message: string; data?: JsonRpcErrorD
 export type JsonRpcResponse = { jsonrpc: "2.0"; id: JsonRpcId; result?: JsonValue; error?: JsonRpcError };
 export type RuntimeEventEnvelope = { id: number; event: string; payload: JsonValue; scopeKey?: string; domain?: string; operationId?: string; baseRevision?: number; revision?: number; sourceVersion?: string | null };
 
-export type CommandName = "scan" | "agents_list" | "bundled_skill_status" | "bundled_skill_install" | "bundled_skill_remove" | "bundled_skill_prompt_dismiss" | "skills_list" | "skills_refresh" | "sessions_snapshot" | "sessions_ownership_snapshot" | "sessions_list" | "sessions_scan_start" | "sessions_search" | "analytics_overview" | "analytics_revision" | "session_skill_index_status" | "session_skill_index_run" | "session_skill_links" | "skill_session_links" | "settings_get" | "settings_save" | "assistant_ask" | "assistant_cancel" | "assistant_chat_sessions" | "tokenizer_count" | "session_projects_list" | "project_scan_scopes_list" | "project_scan_scopes_save" | "projects_list" | "projects_scan" | "terminal_apps_list" | "agent_configs_list" | "agent_config_watch" | "agent_config_read" | "agent_config_save" | "agent_configs_delete_many" | "config_profile_create" | "config_profile_set" | "rules_list" | "rule_file_read" | "rule_file_save" | "rule_file_delete_many" | "hooks_list" | "hook_delete" | "hook_delete_many" | "hook_set_enabled" | "hook_set_enabled_many" | "hook_review" | "hook_source_read" | "mcp_list" | "mcp_probe" | "mcp_set_enabled" | "mcp_set_enabled_many" | "prompts_list" | "prompt_save" | "prompts_delete_many" | "session_set_archived" | "session_transcript" | "session_transcript_locator" | "session_transcript_search" | "skills_targets" | "skills_backup_status" | "skills_backup_configure" | "skills_backup_sync" | "skills_backup_now" | "skills_backup_versions" | "skills_backup_pull" | "skills_backup_restore" | "skills_backup_adopt" | "skills_backup_adopt_many" | "skills_backup_disconnect" | "skills_create" | "skills_add" | "skills_add_preview_read" | "skills_distribute" | "skills_remove_locations" | "skills_set" | "skills_wrap" | "skills_updates" | "skills_updates_cancel" | "skills_update" | "skills_update_many" | "skills_delete_many" | "skills_marketplace_search" | "skill_files" | "skill_file_read" | "skill_file_save" | "skill_file_create" | "skill_folder_create" | "skill_path_rename" | "skill_path_delete" | "app_icon_set" | "database_storage_status" | "database_reset" | "cli_status" | "cli_install" | "cli_remove" | "terminal_app_test" | "editor_app_test" | "session_resume_target" | "session_resume_in_terminal" | "open_in_editor" | "reveal_in_finder" | "logs_export" | "open_url" | "check_for_updates" | "install_update";
+export type CommandName = "scan" | "agents_list" | "bundled_skill_status" | "bundled_skill_install" | "bundled_skill_remove" | "bundled_skill_prompt_dismiss" | "skills_list" | "skills_refresh" | "sessions_snapshot" | "sessions_ownership_snapshot" | "sessions_list" | "sessions_scan_start" | "sessions_search" | "analytics_overview" | "analytics_revision" | "session_skill_index_status" | "session_skill_index_run" | "session_skill_links" | "skill_session_links" | "settings_get" | "settings_save" | "assistant_ask" | "assistant_cancel" | "assistant_chat_sessions" | "tokenizer_count" | "session_projects_list" | "project_scan_scopes_list" | "project_scan_scopes_save" | "projects_list" | "projects_scan" | "terminal_apps_list" | "agent_configs_list" | "agent_config_watch" | "agent_config_read" | "agent_config_save" | "agent_configs_delete_many" | "config_profile_create" | "config_profile_set" | "rules_list" | "rule_file_read" | "rule_file_save" | "rule_file_delete_many" | "hooks_list" | "hook_delete" | "hook_delete_many" | "hook_set_enabled" | "hook_set_enabled_many" | "hook_review" | "hook_source_read" | "mcp_list" | "mcp_probe" | "mcp_set_enabled" | "mcp_set_enabled_many" | "prompts_list" | "prompt_save" | "prompts_delete_many" | "session_set_archived" | "session_release_held" | "session_transcript" | "session_transcript_locator" | "session_transcript_search" | "skills_targets" | "skills_backup_status" | "skills_backup_configure" | "skills_backup_sync" | "skills_backup_now" | "skills_backup_versions" | "skills_backup_pull" | "skills_backup_restore" | "skills_backup_adopt" | "skills_backup_adopt_many" | "skills_backup_disconnect" | "skills_create" | "skills_add" | "skills_add_preview_read" | "skills_distribute" | "skills_remove_locations" | "skills_set" | "skills_wrap" | "skills_updates" | "skills_updates_cancel" | "skills_update" | "skills_update_many" | "skills_delete_many" | "skills_marketplace_search" | "skill_files" | "skill_file_read" | "skill_file_save" | "skill_file_create" | "skill_folder_create" | "skill_path_rename" | "skill_path_delete" | "app_icon_set" | "database_storage_status" | "database_reset" | "cli_status" | "cli_install" | "cli_remove" | "terminal_app_test" | "editor_app_test" | "session_resume_target" | "session_resume_in_terminal" | "open_in_editor" | "reveal_in_finder" | "logs_export" | "open_url" | "check_for_updates" | "install_update";
 export const TauriCommand = {
   Scan: "scan",
   AgentsList: "agents_list",
@@ -1602,6 +1611,7 @@ export const TauriCommand = {
   PromptSave: "prompt_save",
   PromptsDeleteMany: "prompts_delete_many",
   SessionSetArchived: "session_set_archived",
+  SessionReleaseHeld: "session_release_held",
   SessionTranscript: "session_transcript",
   SessionTranscriptLocator: "session_transcript_locator",
   SessionTranscriptSearch: "session_transcript_search",
@@ -1739,6 +1749,7 @@ export type PromptsListResponse = PromptRecordList;
 
 
 export type SessionSetArchivedResponse = SessionRecord;
+export type SessionReleaseHeldResponse = Unit;
 export type SessionTranscriptResponse = TranscriptPage;
 export type SessionTranscriptLocatorResponse = TranscriptLocatorPage;
 export type SessionTranscriptSearchResponse = TranscriptSearchResult;
@@ -1856,6 +1867,7 @@ export type RuntimeRequests = {
   "prompt_save": PromptSaveRequest;
   "prompts_delete_many": PromptsDeleteManyRequest;
   "session_set_archived": SessionSetArchivedRequest;
+  "session_release_held": SessionReleaseHeldRequest;
   "session_transcript": SessionTranscriptRequest;
   "session_transcript_locator": SessionTranscriptLocatorRequest;
   "session_transcript_search": SessionTranscriptSearchRequest;
@@ -1965,6 +1977,7 @@ export type RuntimeResponses = {
   "prompt_save": PromptSaveResponse;
   "prompts_delete_many": PromptsDeleteManyResponse;
   "session_set_archived": SessionSetArchivedResponse;
+  "session_release_held": SessionReleaseHeldResponse;
   "session_transcript": SessionTranscriptResponse;
   "session_transcript_locator": SessionTranscriptLocatorResponse;
   "session_transcript_search": SessionTranscriptSearchResponse;
@@ -2076,6 +2089,7 @@ export const COMMAND_METADATA = {
   "prompt_save": { owner: "daemon", wire: "jsonrpc", clients: ["desktop"], execution: "write", serializedWrite: true, internal: false, deprecated: false },
   "prompts_delete_many": { owner: "daemon", wire: "jsonrpc", clients: ["desktop"], execution: "write", serializedWrite: true, internal: false, deprecated: false },
   "session_set_archived": { owner: "daemon", wire: "jsonrpc", clients: ["desktop","cli"], execution: "write", serializedWrite: true, internal: false, deprecated: false },
+  "session_release_held": { owner: "daemon", wire: "jsonrpc", clients: ["desktop"], execution: "write", serializedWrite: true, internal: false, deprecated: false },
   "session_transcript": { owner: "daemon", wire: "jsonrpc", clients: ["desktop"], execution: "read", serializedWrite: false, internal: false, deprecated: false },
   "session_transcript_locator": { owner: "daemon", wire: "jsonrpc", clients: ["desktop"], execution: "read", serializedWrite: false, internal: false, deprecated: false },
   "session_transcript_search": { owner: "daemon", wire: "jsonrpc", clients: ["desktop"], execution: "read", serializedWrite: false, internal: false, deprecated: false },
@@ -2136,5 +2150,5 @@ export function isDesktopCommand(command: string): command is CommandName {
 }
 export const PROTOCOL_VERSION = 2;
 export const SCHEMA_VERSION = 1;
-export const RUNTIME_CONTRACT_FINGERPRINT = "4c8130db56d44591c2a6c29b475e3b8abf2ec04359aac8df5d9975e9390ede2a";
+export const RUNTIME_CONTRACT_FINGERPRINT = "3d584ab7391c3b28c96fb52c18982d30d94e0f280bce8b69897a2d1b560d169e";
 export const RUNTIME_ERROR_CODES = {"INVALID_REQUEST":-32600,"METHOD_NOT_FOUND":-32601,"INVALID_PARAMS":-32602,"INVALID_ARGUMENT":-32602,"INTERNAL":-32603,"CORE_ERROR":-32603,"CONFLICT":-32002,"UNAUTHORIZED":-32003,"UNSUPPORTED_TRANSPORT":-32004,"CONTRACT_VIOLATION":-32005,"DAEMON_ERROR":-32001} as const;

@@ -194,3 +194,69 @@ pub(crate) fn start(_pid: i32) -> Option<u64> {
 pub(crate) fn writable_files(_pid: i32) -> Vec<PathBuf> {
     Vec::new()
 }
+
+pub(crate) fn terminate(pid: i32) -> std::io::Result<()> {
+    if pid <= 0 || pid as u32 == std::process::id() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "refusing to stop the current process",
+        ));
+    }
+    #[cfg(unix)]
+    {
+        unsafe extern "C" {
+            fn kill(pid: i32, sig: i32) -> i32;
+        }
+        if unsafe { kill(pid, 15) } == 0 {
+            return Ok(());
+        }
+        let error = std::io::Error::last_os_error();
+        // ESRCH: the process already exited, so the thread is no longer held.
+        if error.raw_os_error() == Some(3) {
+            return Ok(());
+        }
+        Err(error)
+    }
+    #[cfg(not(unix))]
+    {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "stopping a process is not supported on this platform",
+        ))
+    }
+}
+
+pub(crate) fn pids_holding(
+    path: &std::path::Path,
+    owns: impl Fn(&std::path::Path) -> bool,
+) -> Vec<i32> {
+    let Ok(target) = path.canonicalize() else {
+        return Vec::new();
+    };
+    let self_pid = std::process::id() as i32;
+    let mut processes = Processes::default();
+    processes
+        .entries()
+        .iter()
+        .filter(|process| process.pid != self_pid && owns(&process.executable))
+        .filter(|process| {
+            writable_files(process.pid)
+                .iter()
+                .any(|open| open == &target)
+        })
+        .map(|process| process.pid)
+        .collect()
+}
+
+pub(crate) fn wait_for(timeout: std::time::Duration, mut ready: impl FnMut() -> bool) -> bool {
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        if ready() {
+            return true;
+        }
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+}

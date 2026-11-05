@@ -1332,6 +1332,12 @@ const SCHEMAS: Record<string, Record<string, unknown>> = {
           "$ref": "#/components/schemas/GitUpdateAction"
         }
       },
+      "directory_updates": {
+        "type": "array",
+        "items": {
+          "$ref": "#/components/schemas/SkillDirectoryUpdate"
+        }
+      },
       "skipped": {
         "type": "array",
         "items": {
@@ -1354,9 +1360,33 @@ const SCHEMAS: Record<string, Record<string, unknown>> = {
     "required": [
       "file_changes",
       "git_updates",
+      "directory_updates",
       "skipped",
       "source_updates",
       "merge_issues"
+    ],
+    "additionalProperties": false
+  },
+  "SkillDirectoryUpdate": {
+    "type": "object",
+    "properties": {
+      "name": {
+        "type": "string"
+      },
+      "target": {
+        "type": "string"
+      },
+      "files": {
+        "type": "array",
+        "items": {
+          "$ref": "#/components/schemas/GitUpdateFile"
+        }
+      }
+    },
+    "required": [
+      "name",
+      "target",
+      "files"
     ],
     "additionalProperties": false
   },
@@ -3544,6 +3574,7 @@ const SCHEMAS: Record<string, Record<string, unknown>> = {
         "type": "string",
         "enum": [
           "activeWriter",
+          "activeWriterInApp",
           "launched",
           "failed"
         ]
@@ -6875,6 +6906,18 @@ const SCHEMAS: Record<string, Record<string, unknown>> = {
     ],
     "additionalProperties": false
   },
+  "SessionReleaseHeldRequest": {
+    "type": "object",
+    "properties": {
+      "session": {
+        "$ref": "#/components/schemas/SessionIdentity"
+      }
+    },
+    "required": [
+      "session"
+    ],
+    "additionalProperties": false
+  },
   "SessionTranscriptRequest": {
     "type": "object",
     "properties": {
@@ -7494,6 +7537,7 @@ const REQUEST_SCHEMAS: Record<CommandName, string> = {
   "prompt_save": "PromptSaveRequest",
   "prompts_delete_many": "PromptsDeleteManyRequest",
   "session_set_archived": "SessionSetArchivedRequest",
+  "session_release_held": "SessionReleaseHeldRequest",
   "session_transcript": "SessionTranscriptRequest",
   "session_transcript_locator": "SessionTranscriptLocatorRequest",
   "session_transcript_search": "SessionTranscriptSearchRequest",
@@ -7603,6 +7647,7 @@ const RESULT_SCHEMAS: Record<CommandName, string> = {
   "prompt_save": "PromptSaveResponse",
   "prompts_delete_many": "PromptsDeleteManyResponse",
   "session_set_archived": "SessionRecord",
+  "session_release_held": "Unit",
   "session_transcript": "TranscriptPage",
   "session_transcript_locator": "TranscriptLocatorPage",
   "session_transcript_search": "TranscriptSearchResult",

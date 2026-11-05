@@ -24,14 +24,24 @@ export type TokenizerWorkerRequest =
       kind: TokenizerKind.Transcript;
       items: TranscriptTokenItem[];
       skillLinks: TranscriptSkillLink[];
+    }
+  | {
+      kind: TokenizerKind.Texts;
+      texts: string[];
     };
 
 export type TokenizerWorkerResponse =
   | {
       id: number;
-      kind: TokenizerWorkerRequest["kind"];
+      kind: TokenizerKind.Markdown | TokenizerKind.Transcript;
       type: TokenizerWorkerResponseType.Result;
       segments: TokenBreakdownSegment[];
+    }
+  | {
+      id: number;
+      kind: TokenizerKind.Texts;
+      type: TokenizerWorkerResponseType.Result;
+      counts: number[];
     }
   | {
       id: number;
@@ -64,6 +74,16 @@ function createNativeTokenizerClient(
   };
 
   const run = async (request: TokenizerWorkerRequest, id: number) => {
+    if (request.kind === TokenizerKind.Texts) {
+      const counts = await countNativeTokens(request.texts);
+      emitResponse({
+        id,
+        kind: request.kind,
+        type: TokenizerWorkerResponseType.Result,
+        counts,
+      });
+      return;
+    }
     if (request.kind === TokenizerKind.Markdown) {
       const parts = markdownTokenParts(request.activePath, request.content, request.selectionText);
       const counts = await countNativeTokens(parts.texts);

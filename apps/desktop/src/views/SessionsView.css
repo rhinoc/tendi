@@ -100,7 +100,15 @@
 }
 
 .sessionStatusIcon--inUse {
+  padding: 0;
+  border: 0;
+  background: transparent;
   color: var(--tone-meta-ink);
+  cursor: pointer;
+}
+
+button.sessionStatusIcon--inUse:disabled {
+  cursor: default;
 }
 
 .sessionStatusIcon--archived {
@@ -260,7 +268,7 @@
 }
 
 .transcriptScrollControls .transcriptScrollBottom {
-  bottom: 56px;
+  bottom: 12px;
   transform: translateX(-50%);
 }
 

@@ -160,14 +160,50 @@ fn ignores_synthetic_model_in_session_metadata() {
 fn ownership_registry_rejects_reused_and_exited_pids() {
     let pid = std::process::id() as i32;
     let start = crate::session_ownership::processes::start(pid).unwrap();
-    let stamp = chrono::DateTime::from_timestamp(start as i64, 0).unwrap().format("%a %b %e %H:%M:%S %Y").to_string();
+    let stamp = chrono::DateTime::from_timestamp(start as i64, 0)
+        .unwrap()
+        .format("%a %b %e %H:%M:%S %Y")
+        .to_string();
     let mut value = serde_json::json!({"pid":pid,"procStart":stamp,"sessionId":"live-session"});
-    assert_eq!(super::held_registry_session(&value).as_deref(), Some("live-session"));
+    assert_eq!(
+        super::held_registry_session(&value).as_deref(),
+        Some("live-session")
+    );
     value["sessionId"] = serde_json::json!("switched-session");
-    assert_eq!(super::held_registry_session(&value).as_deref(), Some("switched-session"));
+    assert_eq!(
+        super::held_registry_session(&value).as_deref(),
+        Some("switched-session")
+    );
     value["procStart"] = serde_json::json!("Thu Jan  1 00:00:00 1970");
     assert!(super::held_registry_session(&value).is_none());
     value["procStart"] = serde_json::json!(stamp);
     value["pid"] = serde_json::json!(i32::MAX);
     assert!(super::held_registry_session(&value).is_none());
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn release_stops_only_the_registered_claude_process() {
+    let root = temp_dir();
+    let sessions = root.join("sessions");
+    fs::create_dir_all(&sessions).unwrap();
+    let mut child = std::process::Command::new("/bin/sleep")
+        .arg("30")
+        .spawn()
+        .unwrap();
+    let pid = child.id() as i32;
+    let start = crate::session_ownership::processes::start(pid).unwrap();
+    let stamp = chrono::DateTime::from_timestamp(start as i64, 0)
+        .unwrap()
+        .format("%a %b %e %H:%M:%S %Y");
+    fs::write(
+        sessions.join("live.json"),
+        format!(r#"{{"pid":{pid},"procStart":"{stamp}","sessionId":"live-session"}}"#),
+    )
+    .unwrap();
+    super::release_registered_session(std::slice::from_ref(&sessions), "other-session").unwrap();
+    assert!(child.try_wait().unwrap().is_none());
+    super::release_registered_session(std::slice::from_ref(&sessions), "live-session").unwrap();
+    assert!(!child.wait().unwrap().success());
+    let _ = fs::remove_dir_all(root);
 }

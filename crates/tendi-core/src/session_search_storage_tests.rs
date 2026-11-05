@@ -59,7 +59,8 @@ fn per_session_work_survives_restart_without_visiting_clean_sessions() {
         .apply_session_changes_for_scope(&scope, &[dirty.clone()], &[])
         .unwrap();
     let keys: Vec<String> = store
-        .sessions.conn
+        .sessions
+        .conn
         .prepare("SELECT session_id FROM scoped_session_search_work")
         .unwrap()
         .query_map([], |row| row.get(0))
@@ -155,7 +156,8 @@ fn durable_provisional_tail_is_replaced_not_duplicated() {
     assert!(errors.is_empty());
     assert!(!pending);
     let count: i64 = store
-        .sessions.conn
+        .sessions
+        .conn
         .query_row(
             "SELECT count(*) FROM scoped_session_search_entries",
             [],
@@ -164,7 +166,8 @@ fn durable_provisional_tail_is_replaced_not_duplicated() {
         .unwrap();
     assert_eq!(count, 3);
     let encoded: String = store
-        .sessions.conn
+        .sessions
+        .conn
         .query_row(
             "SELECT search_checkpoint FROM scoped_session_search_index",
             [],
@@ -284,7 +287,8 @@ fn readded_identity_is_not_pruned_by_an_old_deletion_tombstone() {
         .unwrap();
     let readded = std::cell::Cell::new(false);
     let missing: bool = store
-        .sessions.conn
+        .sessions
+        .conn
         .query_row(
             "SELECT NOT EXISTS(SELECT 1 FROM scoped_sessions)",
             [],
@@ -369,7 +373,8 @@ fn metadata_commit_survives_index_failure_and_pending_work_recovers_after_restar
     assert_eq!(errors.len(), 1);
     assert!(pending);
     let last_error: String = store
-        .sessions.conn
+        .sessions
+        .conn
         .query_row(
             "SELECT last_error FROM scoped_session_search_pending WHERE scope_key = ?1",
             [scope.as_str()],
@@ -560,7 +565,8 @@ fn cancellation_preserves_publications_and_pending_work_for_resume() {
     let (published, errors, pending) = store
         .refresh_pending_session_search_for_scope_until(&scope, || {
             store
-                .sessions.conn
+                .sessions
+                .conn
                 .query_row(
                     "SELECT EXISTS(SELECT 1 FROM scoped_session_search_index
                  WHERE scope_key = ?1 AND search_index_version = ?2)",
@@ -574,7 +580,8 @@ fn cancellation_preserves_publications_and_pending_work_for_resume() {
     assert!(errors.is_empty());
     assert!(pending);
     let last_error: Option<String> = store
-        .sessions.conn
+        .sessions
+        .conn
         .query_row(
             "SELECT last_error FROM scoped_session_search_pending WHERE scope_key = ?1",
             [scope.as_str()],
@@ -625,7 +632,8 @@ fn deletion_is_committed_before_independent_index_cleanup() {
     assert!(errors.is_empty());
     assert!(!pending);
     let remaining: i64 = store
-        .sessions.conn
+        .sessions
+        .conn
         .query_row(
             "SELECT count(*) FROM scoped_session_search_entries",
             [],
@@ -648,7 +656,8 @@ fn append_retains_existing_search_entries_when_session_metadata_is_unchanged() {
         .ensure_scoped_session_search_for_scope(&scope)
         .unwrap();
     let original: i64 = store
-        .sessions.conn
+        .sessions
+        .conn
         .query_row(
             "SELECT id FROM scoped_session_search_entries WHERE record_order = 1",
             [],
@@ -672,7 +681,8 @@ fn append_retains_existing_search_entries_when_session_metadata_is_unchanged() {
     assert!(errors.is_empty());
     assert!(!pending);
     let retained: i64 = store
-        .sessions.conn
+        .sessions
+        .conn
         .query_row(
             "SELECT id FROM scoped_session_search_entries WHERE record_order = 1",
             [],
@@ -732,7 +742,8 @@ fn rewrite_and_truncation_remove_obsolete_search_results() {
         1
     );
     let count: i64 = store
-        .sessions.conn
+        .sessions
+        .conn
         .query_row(
             "SELECT count(*) FROM scoped_session_search_entries",
             [],
@@ -901,7 +912,8 @@ fn session_reads_ignore_obsolete_full_snapshots() {
         1
     );
     let stored: String = store
-        .sessions.conn
+        .sessions
+        .conn
         .query_row(
             "SELECT payload_json FROM normalized_snapshots WHERE domain='sessions'",
             [],

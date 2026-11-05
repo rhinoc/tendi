@@ -36,6 +36,73 @@ struct Principal {
     transport: String,
 }
 
+#[derive(Deserialize)]
+struct SessionList {
+    sessions: Vec<SessionId>,
+}
+
+#[derive(Deserialize)]
+struct SessionId {
+    session_id: String,
+}
+
+#[derive(Deserialize)]
+struct BlockList {
+    blocks: Vec<Block>,
+}
+
+#[derive(Deserialize)]
+struct Block {
+    block_id: String,
+    window_id: String,
+    creator_name: String,
+}
+
+#[derive(Deserialize)]
+struct BlockProcess {
+    foreground: Option<ForegroundProcess>,
+}
+
+#[derive(Deserialize)]
+struct ForegroundProcess {
+    pid: i32,
+}
+
+pub(super) fn focus_process(pid: i32) -> Result<bool, TerminalLaunchError> {
+    if !Path::new(CLI_PATH).is_file() {
+        return Ok(false);
+    }
+    let client = match local_client(&cli_output(cli_command()?.args(["client", "ls", "--json"]))?)? {
+        Some(client) => client,
+        None => return Ok(false),
+    };
+    let Some((session, block)) = find_process(pid)? else {
+        return Ok(false);
+    };
+    open_terminal_application("Rex Beta").map_err(TerminalLaunchError::launch_failed)?;
+    cli_output(cli_command()?.args(["-C", &client, "do", "session.select", &format!("session_id={session}"), &format!("window_id={}", block.window_id)]))?;
+    cli_output(cli_command()?.args(["focus", "-s", &session, &block.block_id]))?;
+    Ok(true)
+}
+
+fn find_process(pid: i32) -> Result<Option<(String, Block)>, TerminalLaunchError> {
+    let sessions: SessionList = serde_json::from_slice(&cli_output(cli_command()?.args(["ls", "--json"]))?)
+        .map_err(|error| TerminalLaunchError::launch_failed(format!("invalid Rex session list: {error}")))?;
+    for session in sessions.sessions {
+        let blocks: BlockList = serde_json::from_slice(&cli_output(cli_command()?.args(["block", "ls", "-s", &session.session_id, "--json"]))?)
+            .map_err(|error| TerminalLaunchError::launch_failed(format!("invalid Rex block list: {error}")))?;
+        for block in blocks.blocks.into_iter().filter(|block| block.creator_name == "com.superlogical.terminal") {
+            let bytes = cli_output(cli_command()?.args(["block", "call", "-s", &session.session_id, "-b", &block.block_id, "process"]))?;
+            let process: BlockProcess = serde_json::from_slice(&bytes)
+                .map_err(|error| TerminalLaunchError::launch_failed(format!("invalid Rex process: {error}")))?;
+            if process.foreground.is_some_and(|foreground| foreground.pid == pid) {
+                return Ok(Some((session.session_id, block)));
+            }
+        }
+    }
+    Ok(None)
+}
+
 fn cli_command() -> Result<Command, TerminalLaunchError> {
     let socket = dirs::data_dir()
         .ok_or_else(|| TerminalLaunchError::terminal_unavailable("Rex state directory not found"))?
@@ -128,6 +195,10 @@ impl TerminalProvider for RexBetaProvider {
 
     fn application_name(&self) -> String {
         "Rex Beta".to_string()
+    }
+
+    fn focus_process(&self, pid: i32) -> Result<bool, TerminalLaunchError> {
+        focus_process(pid)
     }
 
     fn launch(&self, command: &tendi_core::SessionCommand) -> Result<(), TerminalLaunchError> {

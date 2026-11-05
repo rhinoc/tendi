@@ -280,28 +280,28 @@ impl Daemon {
                                 "dryRun": request.dry_run.unwrap_or(false),
                             }),
                         );
-                        let plan = match tendi_core::skills::plan_skill_updates_many_for_scan_in_workspace_with_store(
-                            &scan, &ids, &daemon.state.cwd, &store,
-                        ) {
-                            Ok(plan) => plan,
-                            Err(error) => {
-                                tendi_core::logging::global().error(
+                        let (plan, used_cached_reports) =
+                            match daemon.plan_skill_updates_for_selection(&scan, &ids, &store) {
+                                Ok(result) => result,
+                                Err(error) => {
+                                    tendi_core::logging::global().error(
                                     "skill update plan failed",
                                     serde_json::json!({
                                         "skillCount": ids.len(),
                                         "durationMs": plan_started.elapsed().as_secs_f64() * 1000.0,
-                                        "error": error.to_string(),
+                                        "error": error.message,
                                     }),
                                 );
-                                return Err(error);
-                            }
-                        };
+                                    return Err(anyhow::anyhow!(error.message));
+                                }
+                            };
                         tendi_core::logging::global().info(
                             "skill update plan completed",
                             serde_json::json!({
                                 "skillCount": ids.len(),
                                 "durationMs": plan_started.elapsed().as_secs_f64() * 1000.0,
                                 "canApply": plan.can_apply(),
+                                "usedCachedReports": used_cached_reports,
                                 "fileChangeCount": plan.file_changes.changes.len(),
                                 "gitUpdateCount": plan.git_updates.len(),
                                 "mergeIssueCount": plan.merge_issues.len(),

@@ -1457,7 +1457,7 @@ fn run_command(command: Command) -> Result<()> {
                         )
                     })
                     .collect::<Vec<_>>();
-                let source_records = tendi_core::skills::skill_source_records_for_add(&report);
+                let source_records = tendi_core::skills::skill_source_records_for_add(&report)?;
                 let snapshots = tendi_core::skills::capture_skill_snapshots(&source_records)?;
                 let store = tendi_core::storage::Store::open_default()?;
                 store.upsert_skill_visibilities_for_workspace(&cwd, &visibility_values)?;
@@ -2242,6 +2242,25 @@ fn print_update_plan(plan: &tendi_core::skills::SkillUpdatePlan) -> Result<()> {
                 .map(short_hash)
                 .unwrap_or_else(|| "-".to_string())
         )?;
+    }
+    for update in &plan.directory_updates {
+        for file in &update.files {
+            let op = if matches!(file.status.as_str(), "conflict" | "unavailable" | "binary") {
+                "!"
+            } else if !file.after_exists {
+                "D"
+            } else if file.before_exists {
+                "M"
+            } else {
+                "A"
+            };
+            writeln!(
+                stdout,
+                "{op} {} ({})",
+                update.target.join(&file.path).display(),
+                file.status
+            )?;
+        }
     }
     for skipped in &plan.skipped {
         writeln!(stdout, "S {} {}", skipped.name, skipped.status)?;

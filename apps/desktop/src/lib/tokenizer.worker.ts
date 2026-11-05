@@ -1,4 +1,5 @@
 import {
+  countTextTokens,
   markdownTokenStats,
   transcriptTokenSegments,
 } from "./tokenizer.ts";
@@ -18,10 +19,16 @@ type TokenizerWorkerRequest =
       kind: TokenizerKind.Transcript;
       items: TranscriptTokenItem[];
       skillLinks: TranscriptSkillLink[];
+    }
+  | {
+      id: number;
+      kind: TokenizerKind.Texts;
+      texts: string[];
     };
 
 type TokenizerWorkerResponse =
-  | { id: number; kind: TokenizerWorkerRequest["kind"]; type: TokenizerWorkerResponseType.Result; segments: TokenBreakdownSegment[] }
+  | { id: number; kind: TokenizerKind.Markdown | TokenizerKind.Transcript; type: TokenizerWorkerResponseType.Result; segments: TokenBreakdownSegment[] }
+  | { id: number; kind: TokenizerKind.Texts; type: TokenizerWorkerResponseType.Result; counts: number[] }
   | { id: number; kind: TokenizerWorkerRequest["kind"]; type: TokenizerWorkerResponseType.Error; message: string };
 
 type TokenizerWorkerScope = {
@@ -34,6 +41,15 @@ const workerScope = self as unknown as TokenizerWorkerScope;
 workerScope.onmessage = (event) => {
   const request = event.data;
   try {
+    if (request.kind === TokenizerKind.Texts) {
+      workerScope.postMessage({
+        id: request.id,
+        kind: request.kind,
+        type: TokenizerWorkerResponseType.Result,
+        counts: request.texts.map((text) => countTextTokens(text)),
+      });
+      return;
+    }
     const segments = request.kind === TokenizerKind.Markdown
       ? markdownTokenSegments(request.activePath, request.content, request.selectionText)
       : transcriptTokenSegments(request.items, request.skillLinks);

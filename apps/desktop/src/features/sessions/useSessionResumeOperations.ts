@@ -40,6 +40,7 @@ export type SessionResumeOperationsOptions = {
 export type SessionResumeOperationsResult = {
   pendingResumeConflict: PendingSessionResumeConflict | null;
   repairingResume: boolean;
+  resumeConflictError: string;
   resumeSession: SessionResumeOperationHandler;
   repairAndResume: () => Promise<void>;
   cancelResumeConflict: () => void;
@@ -60,6 +61,7 @@ export function useSessionResumeOperations({
   const [resumeFeedback, setResumeFeedback] = useState<Record<string, ResumeFeedbackState>>({});
   const [pendingResumeConflict, setPendingResumeConflict] = useState<PendingSessionResumeConflict | null>(null);
   const [repairingResume, setRepairingResume] = useState(false);
+  const [resumeConflictError, setResumeConflictError] = useState("");
   const resumeFeedbackTimerRef = useRef<Record<string, number>>({});
 
   const finishResumeFeedback = useCallback((sessionId: string, state: AsyncStatus.Success | AsyncStatus.Error) => {
@@ -111,40 +113,48 @@ export function useSessionResumeOperations({
       return;
     }
     dismissSessionError();
+    setResumeConflictError("");
     setResumeFeedback((current) => ({ ...current, [session.id]: AsyncStatus.Loading }));
     try {
       const result = await onResumeSession(session, target, options);
       if (result?.status === SessionResumeOutcomeStatus.ActiveWriter) {
         clearResumeFeedback(session.id);
         setPendingResumeConflict({ session, target });
+        if (options?.reconcile) setResumeConflictError("The session is still open. Close it in the other process, then try again.");
       } else if (result?.status === SessionResumeOutcomeStatus.Launched) {
         finishResumeFeedback(session.id, AsyncStatus.Success);
         setPendingResumeConflict(null);
       } else if (result?.status === SessionResumeOutcomeStatus.Failed) {
         finishResumeFeedback(session.id, AsyncStatus.Error);
-        showSessionError(sessionResumeErrorMessage(result.error));
+        const message = sessionResumeErrorMessage(result.error);
+        if (options?.reconcile) setResumeConflictError(message);
+        else showSessionError(message);
       } else {
         finishResumeFeedback(session.id, AsyncStatus.Error);
-        showSessionError(sessionResumeErrorMessage(
+        const message = sessionResumeErrorMessage(
           sessionResumeError(
             SessionResumeErrorCode.Internal,
             null,
             true,
             SessionResumeErrorAction.Retry,
           ),
-        ));
+        );
+        if (options?.reconcile) setResumeConflictError(message);
+        else showSessionError(message);
       }
     } catch (error) {
       finishResumeFeedback(session.id, AsyncStatus.Error);
       logger.warn("sessions resume failed", { error });
-      showSessionError(sessionResumeErrorMessage(
+      const message = sessionResumeErrorMessage(
         sessionResumeError(
           SessionResumeErrorCode.DesktopCommandFailed,
           null,
           true,
           SessionResumeErrorAction.Retry,
         ),
-      ));
+      );
+      if (options?.reconcile) setResumeConflictError(message);
+      else showSessionError(message);
     }
   }, [clearResumeFeedback, dismissSessionError, finishResumeFeedback, onResumeSession, showSessionError]);
 
@@ -166,6 +176,7 @@ export function useSessionResumeOperations({
     if (repairingResume) return;
     if (pendingResumeConflict) clearResumeFeedback(pendingResumeConflict.session.id);
     setPendingResumeConflict(null);
+    setResumeConflictError("");
   }, [clearResumeFeedback, pendingResumeConflict, repairingResume]);
 
   const getResumeState = useCallback((session: SessionRecord): SessionResumeState => (
@@ -175,6 +186,7 @@ export function useSessionResumeOperations({
   return {
     pendingResumeConflict,
     repairingResume,
+    resumeConflictError,
     resumeSession,
     repairAndResume,
     cancelResumeConflict,

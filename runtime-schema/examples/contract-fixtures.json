@@ -199,6 +199,13 @@
       },
       "archived": false
     },
+    "session_release_held": {
+      "session": {
+        "id": "fixture",
+        "agent": "codex",
+        "path": "fixture"
+      }
+    },
     "session_transcript": {
       "path": "fixture",
       "agent": "codex"
@@ -438,6 +445,7 @@
     "prompt_save": [],
     "prompts_delete_many": [],
     "session_set_archived": [],
+    "session_release_held": [],
     "session_transcript": [],
     "session_transcript_locator": [],
     "session_transcript_search": [],
@@ -1549,6 +1557,7 @@
       "agent": "codex",
       "path": "fixture"
     },
+    "session_release_held": {},
     "session_transcript": {
       "items": [
         {
@@ -2453,6 +2462,26 @@
             ]
           }
         ],
+        "directory_updates": [
+          {
+            "name": "fixture",
+            "target": "fixture",
+            "files": [
+              {
+                "path": "fixture",
+                "resolution_key": "fixture",
+                "before": "fixture",
+                "base": "fixture",
+                "incoming": "fixture",
+                "after": "fixture",
+                "before_exists": false,
+                "incoming_exists": false,
+                "after_exists": false,
+                "status": "fixture"
+              }
+            ]
+          }
+        ],
         "skipped": [
           {
             "id": "fixture",
@@ -2597,6 +2626,26 @@
                     "status": "fixture"
                   }
                 ]
+              }
+            ]
+          }
+        ],
+        "directory_updates": [
+          {
+            "name": "fixture",
+            "target": "fixture",
+            "files": [
+              {
+                "path": "fixture",
+                "resolution_key": "fixture",
+                "before": "fixture",
+                "base": "fixture",
+                "incoming": "fixture",
+                "after": "fixture",
+                "before_exists": false,
+                "incoming_exists": false,
+                "after_exists": false,
+                "status": "fixture"
               }
             ]
           }
@@ -3073,6 +3122,11 @@
       "result": null
     },
     "session_set_archived": {
+      "jsonrpc": "1.0",
+      "id": "invalid",
+      "result": null
+    },
+    "session_release_held": {
       "jsonrpc": "1.0",
       "id": "invalid",
       "result": null

@@ -91,6 +91,8 @@ export type SessionListControllerInput = {
   searchFilterKey?: string;
   startedAfter?: string;
   archiveFilter?: SessionArchiveFilter;
+  inUseOnly?: boolean;
+  heldSessionKeys?: ReadonlySet<string>;
 };
 
 export type SessionListView = {
@@ -540,7 +542,9 @@ function sameSessionListInput(left: SessionListControllerInput, right: SessionLi
     && left.searchRowsKey === right.searchRowsKey
     && left.searchFilterKey === right.searchFilterKey
     && left.startedAfter === right.startedAfter
-    && left.archiveFilter === right.archiveFilter;
+    && left.archiveFilter === right.archiveFilter
+    && left.inUseOnly === right.inUseOnly
+    && (!left.inUseOnly || left.heldSessionKeys === right.heldSessionKeys);
 }
 
 function sessionMatchesStartedAfter(session: SessionRecord, startedAfter?: string): boolean {
@@ -553,6 +557,11 @@ function sessionMatchesStartedAfter(session: SessionRecord, startedAfter?: strin
 function sessionMatchesArchiveFilter(session: SessionRecord, archiveFilter: SessionArchiveFilter): boolean {
   if (archiveFilter === "all") return true;
   return archiveFilter === "archived" ? session.archived === true : session.archived !== true;
+}
+
+function sessionMatchesInUse(session: SessionRecord, inUseOnly: boolean | undefined, heldSessionKeys: ReadonlySet<string> | undefined): boolean {
+  if (!inUseOnly) return true;
+  return Boolean(heldSessionKeys?.has(sessionLogicalIdentity(session)));
 }
 
 export function selectSessionListView(input: SessionListControllerInput): SessionListView {
@@ -590,10 +599,12 @@ export function selectSessionListView(input: SessionListControllerInput): Sessio
   const activeSort = input.remoteSearch && query ? input.searchSort ?? SESSION_SEARCH_SORT : input.sort;
   const archiveFilter = input.archiveFilter ?? "unarchived";
   const inProject = (session: SessionRecord) => selected.size === 0 || selected.has(projectKey(session));
+  const matchesInUse = (session: SessionRecord) => sessionMatchesInUse(session, input.inUseOnly, input.heldSessionKeys);
   const searchCandidates = listSessionItems
-    .filter((session) => (input.showChildSessions || sessionKind(session) === SessionKind.Main) && inProject(session))
+    .filter((session) => (input.showChildSessions || input.inUseOnly || sessionKind(session) === SessionKind.Main) && inProject(session))
     .filter((session) => sessionMatchesArchiveFilter(session, archiveFilter))
     .filter((session) => sessionMatchesStartedAfter(session, input.startedAfter))
+    .filter(matchesInUse)
     .sort((left, right) => compareSessions(left, right, activeSort));
   const searchRequestKey = query ? `${query}\0${input.searchFilterKey ?? ""}\0${searchCandidates.map(sessionIdentity).join("\0")}` : "";
   const searchResultRows = query && input.remoteSearch && input.searchRowsKey === searchRequestKey
@@ -606,9 +617,10 @@ export function selectSessionListView(input: SessionListControllerInput): Sessio
         ? listSessionItems.filter((session) => sessionMatchesQuery(session, query) && inProject(session))
         : listSessionItems.filter(inProject))
     .filter((session) => sessionMatchesArchiveFilter(session, archiveFilter))
-    .filter((session) => sessionMatchesStartedAfter(session, input.startedAfter));
+    .filter((session) => sessionMatchesStartedAfter(session, input.startedAfter))
+    .filter(matchesInUse);
   const childSessionCount = matchedSessions.filter((session) => sessionKind(session) === SessionKind.Child).length;
-  const filteredSessions = input.showChildSessions ? matchedSessions : matchedSessions.filter((session) => sessionKind(session) === SessionKind.Main);
+  const filteredSessions = input.showChildSessions || input.inUseOnly ? matchedSessions : matchedSessions.filter((session) => sessionKind(session) === SessionKind.Main);
   const sortedSessions = [...filteredSessions].sort((left, right) => compareSessions(left, right, activeSort));
   const groupedPages = buildGroupedSessionPages(sortedSessions, input.groupBy, input.pageSize);
   const pageCount = input.groupBy ? Math.max(1, groupedPages.length) : Math.max(1, Math.ceil(sortedSessions.length / input.pageSize));

@@ -41,7 +41,7 @@ export function SessionTokenStatusBar({ items, skillLinks, reportedSegments, met
     const worker = createTokenizerWorker(
       (response) => {
         if (response.id !== latestRequestRef.current) return;
-        if (response.type === TokenizerWorkerResponseType.Result) setEstimate({ status: TokenEstimateStatus.Ready, segments: response.segments });
+        if (response.type === TokenizerWorkerResponseType.Result && "segments" in response) setEstimate({ status: TokenEstimateStatus.Ready, segments: response.segments });
         else setEstimate((current) => ({ ...current, status: TokenEstimateStatus.Error }));
       },
       () => setEstimate((current) => ({ ...current, status: TokenEstimateStatus.Error })),

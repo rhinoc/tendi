@@ -82,6 +82,7 @@ export class RuntimeClient {
   async promptSave(request: RequestFor<"prompt_save">): Promise<ResponseFor<"prompt_save">> { return this.call("prompt_save", request); }
   async promptsDeleteMany(request: RequestFor<"prompts_delete_many">): Promise<ResponseFor<"prompts_delete_many">> { return this.call("prompts_delete_many", request); }
   async sessionSetArchived(request: RequestFor<"session_set_archived">): Promise<ResponseFor<"session_set_archived">> { return this.call("session_set_archived", request); }
+  async sessionReleaseHeld(request: RequestFor<"session_release_held">): Promise<ResponseFor<"session_release_held">> { return this.call("session_release_held", request); }
   async sessionTranscript(request: RequestFor<"session_transcript">): Promise<ResponseFor<"session_transcript">> { return this.call("session_transcript", request); }
   async sessionTranscriptLocator(request: RequestFor<"session_transcript_locator">): Promise<ResponseFor<"session_transcript_locator">> { return this.call("session_transcript_locator", request); }
   async sessionTranscriptSearch(request: RequestFor<"session_transcript_search">): Promise<ResponseFor<"session_transcript_search">> { return this.call("session_transcript_search", request); }

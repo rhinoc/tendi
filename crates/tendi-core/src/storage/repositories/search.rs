@@ -218,7 +218,8 @@ impl Store {
                 &query,
                 scopes,
                 phrase,
-            )? else {
+            )?
+            else {
                 continue;
             };
             hits.push(SessionTranscriptSearchHit {

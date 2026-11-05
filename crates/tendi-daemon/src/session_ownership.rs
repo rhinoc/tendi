@@ -156,6 +156,39 @@ pub(super) fn run(daemon: Daemon) {
     }
 }
 
+pub(super) fn refresh_now(daemon: &Daemon) {
+    let roots = daemon
+        .state
+        .session_runtime
+        .watcher
+        .lock()
+        .ok()
+        .and_then(|state| state.watch_plan.clone())
+        .map(|plan| {
+            plan.targets
+                .into_iter()
+                .map(|target| target.path)
+                .chain(plan.dynamic_roots)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let probe = tendi_core::session_ownership::probe(&daemon.state.cwd, &roots);
+    let mut held = Vec::new();
+    for (_, result) in probe.providers {
+        let Ok(sessions) = result else {
+            return;
+        };
+        held.extend(sessions);
+    }
+    let held = held
+        .iter()
+        .map(|held| json!({ "id": held.id, "agent": held.agent }))
+        .collect::<Vec<_>>();
+    if let Ok(held) = serde_json::from_value(json!(held)) {
+        publish(daemon, held);
+    }
+}
+
 fn publish(daemon: &Daemon, held: Vec<runtime_schema::SessionOwnershipIdentity>) {
     let changed = daemon
         .state

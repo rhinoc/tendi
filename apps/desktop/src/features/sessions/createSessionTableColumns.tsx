@@ -1,3 +1,4 @@
+import { SessionUsageMix } from "./SessionContextBar.tsx";
 import { SessionStatusIcons } from "./SessionStatusIcons.tsx";
 import { Tooltip } from "../../components/shared/Tooltip.tsx";
 import { AlertCircle, ArrowLeft, ArrowRight, Check } from "lucide-react";
@@ -44,6 +45,8 @@ export type CreateSessionTableColumnsOptions<T extends SessionTableRow = Session
   resumeState?: (session: T) => SessionResumeState;
   resumeTarget?: SessionResumeTarget;
   resumeTargetForSession?: (session: T) => Exclude<SessionResumeTarget, SessionResumeTarget.Auto> | undefined;
+  releasingSession?: (session: T) => boolean;
+  releaseHeldSession?: (session: T) => void;
   keys?: string[];
   widths?: Partial<Record<string, string>>;
 };
@@ -54,6 +57,8 @@ export function createSessionTableColumns<T extends SessionTableRow = SessionTab
   resumeState,
   resumeTarget = SessionResumeTarget.Auto,
   resumeTargetForSession,
+  releasingSession,
+  releaseHeldSession,
   keys,
   widths = {},
 }: CreateSessionTableColumnsOptions<T> = {}): ColumnDef<T>[] {
@@ -79,6 +84,8 @@ export function createSessionTableColumns<T extends SessionTableRow = SessionTab
                 session={session}
                 subagent={sessionKind(session as SessionRecord) === SessionKind.Child}
                 archived={session.archived}
+                releasing={releasingSession?.(session)}
+                onRelease={releaseHeldSession ? () => releaseHeldSession(session) : undefined}
               />
               <Tooltip content={tooltipTitle} onlyWhenTruncated>
                 <span className="sessionTitleText"><SessionTitleText interactive={false} query={normalizedQuery} queryTerms={searchTerms} value={displayTitle} /></span>
@@ -207,7 +214,7 @@ export function createSessionTableColumns<T extends SessionTableRow = SessionTab
       type: ColumnDataType.Text,
       sortable: true,
       sortValue: (session) => sortValue(session as SessionRecord, SessionSortKey.CacheRate),
-      width: widths.cacheRate ?? "70px",
+      width: widths.cacheRate ?? "112px",
       cell: ColumnCellVariant.Number,
       render: (session) => {
         const record = session as SessionRecord;
@@ -216,11 +223,14 @@ export function createSessionTableColumns<T extends SessionTableRow = SessionTab
         if (rate === undefined || !usage) return <span className="dataCellNumber">-</span>;
         const value = `${rate.toFixed(1)}%`;
         return (
-          <Tooltip content={`${usage.cachedInputTokens.toLocaleString()} cached of ${usage.inputTokens.toLocaleString()} input tokens`}><span
-            className={`dataCellNumber tokenTone-${cacheRateTone(rate)}`}
-          >
-            {value}
-          </span></Tooltip>
+          <span className="sessionCacheCell">
+            <SessionUsageMix usage={usage} />
+            <Tooltip content={`${usage.cachedInputTokens.toLocaleString()} cached of ${usage.inputTokens.toLocaleString()} input tokens`}><span
+              className={`dataCellNumber tokenTone-${cacheRateTone(rate)}`}
+            >
+              {value}
+            </span></Tooltip>
+          </span>
         );
       },
     },

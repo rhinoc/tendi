@@ -20,6 +20,31 @@ impl TerminalProvider for Iterm {
     fn application_name(&self) -> String {
         "iTerm".to_string()
     }
+    #[cfg(target_os = "macos")]
+    fn focus_process(&self, pid: i32) -> Result<bool, TerminalLaunchError> {
+        let Some(tty) = super::process_tty(pid)? else { return Ok(false) };
+        super::focus_with_applescript("iTerm", r#"
+on run argv
+    set targetTTY to item 1 of argv
+    tell application "iTerm"
+        repeat with win in windows
+            repeat with tabItem in tabs of win
+                repeat with term in sessions of tabItem
+                    if tty of term is targetTTY then
+                        select win
+                        select tabItem
+                        select term
+                        activate
+                        return "found"
+                    end if
+                end repeat
+            end repeat
+        end repeat
+    end tell
+    return "not found"
+end run
+"#, &tty)
+    }
     fn launch(&self, command: &tendi_core::SessionCommand) -> Result<(), TerminalLaunchError> {
         let script = terminal_script(command);
         #[cfg(target_os = "macos")]

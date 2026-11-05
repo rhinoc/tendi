@@ -1561,7 +1561,10 @@ impl super::AgentProvider for CursorProvider {
             home.join(".cursor/acp-sessions"),
             home.join(".cursor/chats"),
             home.join(".cursor/projects"),
-            super::cursor_native_sessions::desktop_database(home).parent().unwrap().to_path_buf(),
+            super::cursor_native_sessions::desktop_database(home)
+                .parent()
+                .unwrap()
+                .to_path_buf(),
         ]
     }
 
@@ -1579,32 +1582,51 @@ impl super::AgentProvider for CursorProvider {
         }
         !super::cursor_native_sessions::is_desktop(path)
             && !super::cursor_native_sessions::is_sdk(path)
-            && !path.ancestors().any(|part| part.file_name().is_some_and(|name| name == "acp-sessions"))
-            && !(path.extension().is_some_and(|extension| extension == "jsonl") && super::cursor_native_sessions::archive_state(path, id).is_some())
+            && !path
+                .ancestors()
+                .any(|part| part.file_name().is_some_and(|name| name == "acp-sessions"))
+            && !(path
+                .extension()
+                .is_some_and(|extension| extension == "jsonl")
+                && super::cursor_native_sessions::archive_state(path, id).is_some())
     }
 
     fn session_archive_resource_paths(&self, path: &Path) -> Vec<PathBuf> {
         if super::cursor_native_sessions::is_sdk(path) {
             super::cursor_native_sessions::database_sources(path)
-        } else { Vec::new() }
+        } else {
+            Vec::new()
+        }
     }
 
     fn set_session_archived(&self, session: &SessionRecord, archived: bool) -> Result<PathBuf> {
         super::cursor_native_sessions::set_archived(session, archived)
     }
 
-    fn read_session_transcript(&self, path: &Path, id: &str) -> Option<Result<crate::transcript::TranscriptScan>> {
-        (super::cursor_native_sessions::is_desktop(path) || super::cursor_native_sessions::is_sdk(path) || super::cursor_native_sessions::is_cli_store(path))
-            .then(|| super::cursor_native_sessions::read(path, id))
+    fn read_session_transcript(
+        &self,
+        path: &Path,
+        id: &str,
+    ) -> Option<Result<crate::transcript::TranscriptScan>> {
+        (super::cursor_native_sessions::is_desktop(path)
+            || super::cursor_native_sessions::is_sdk(path)
+            || super::cursor_native_sessions::is_cli_store(path))
+        .then(|| super::cursor_native_sessions::read(path, id))
     }
 
     fn session_watch_source_path(&self, event_path: &Path) -> Option<PathBuf> {
-        if let Some(index) = super::cursor_native_sessions::sdk_index_for_blob_store(event_path) { return Some(index); }
+        if let Some(index) = super::cursor_native_sessions::sdk_index_for_blob_store(event_path) {
+            return Some(index);
+        }
         let raw = event_path.to_string_lossy();
         let path = PathBuf::from(raw.strip_suffix("-wal").unwrap_or(&raw));
-        if super::cursor_native_sessions::is_desktop(&path) || super::cursor_native_sessions::is_sdk(&path) {
+        if super::cursor_native_sessions::is_desktop(&path)
+            || super::cursor_native_sessions::is_sdk(&path)
+        {
             Some(path)
-        } else { None }
+        } else {
+            None
+        }
     }
 
     fn owns_session_process(&self, executable: &Path) -> bool {
@@ -1633,6 +1655,45 @@ impl super::AgentProvider for CursorProvider {
             }
         }
         Ok(held)
+    }
+
+    fn release_held_session(&self, ctx: &ProviderContext, session: &SessionRecord) -> Result<()> {
+        let mut processes = crate::session_ownership::processes::Processes::default();
+        let holders = processes
+            .entries()
+            .iter()
+            .filter(|process| self.owns_session_process(&process.executable))
+            .filter(|process| {
+                crate::session_ownership::processes::writable_files(process.pid)
+                    .iter()
+                    .any(|path| cursor_held_chat_id(path).as_deref() == Some(session.id.as_str()))
+            })
+            .map(|process| process.pid)
+            .collect::<Vec<_>>();
+        if holders.is_empty() {
+            let held = self.held_sessions(ctx, &[], &mut processes)?;
+            if held.iter().any(|held| held.id == session.id) {
+                bail!("This thread is still open, but its process could not be released.");
+            }
+            return Ok(());
+        }
+        for pid in holders {
+            crate::session_ownership::processes::terminate(pid)
+                .with_context(|| format!("failed to release Cursor session {}", session.id))?;
+        }
+        let released = crate::session_ownership::processes::wait_for(
+            std::time::Duration::from_millis(800),
+            || {
+                let mut processes = crate::session_ownership::processes::Processes::default();
+                self.held_sessions(ctx, &[], &mut processes)
+                    .ok()
+                    .is_some_and(|held| held.iter().all(|held| held.id != session.id))
+            },
+        );
+        if released {
+            return Ok(());
+        }
+        bail!("This thread is still in use.");
     }
 
     fn current_session_env_key(&self) -> Option<&'static str> {
@@ -1735,7 +1796,9 @@ impl super::AgentProvider for CursorProvider {
     }
 
     fn resume_session_command(&self, session: &SessionRecord) -> Option<SessionCommand> {
-        if !self.session_resumable(&session.path, &session.id) { return None; }
+        if !self.session_resumable(&session.path, &session.id) {
+            return None;
+        }
         let project = absolute_project(session);
         let mut args = vec![
             "agent".to_string(),
@@ -1923,17 +1986,26 @@ impl super::AgentProvider for CursorProvider {
     }
 
     fn session_parent_id_from_path(&self, path: &Path) -> Option<String> {
-        let parent = path.ancestors().find(|part| part.file_name().is_some_and(|name| name == "subagents"))?.parent()?;
-        if parent.parent()?.file_name()? != "agent-transcripts" { return None; }
+        let parent = path
+            .ancestors()
+            .find(|part| part.file_name().is_some_and(|name| name == "subagents"))?
+            .parent()?;
+        if parent.parent()?.file_name()? != "agent-transcripts" {
+            return None;
+        }
         parent.file_name()?.to_str().map(str::to_owned)
     }
 
     fn is_session_candidate_path(&self, path: &Path) -> bool {
-        if super::cursor_native_sessions::sdk_index_for_blob_store(path).is_some() { return false; }
-        super::cursor_native_sessions::is_desktop(path) || super::cursor_native_sessions::is_sdk(path) || matches!(
-            path.file_name().and_then(|name| name.to_str()),
-            Some("meta.json" | "store.db")
-        )
+        if super::cursor_native_sessions::sdk_index_for_blob_store(path).is_some() {
+            return false;
+        }
+        super::cursor_native_sessions::is_desktop(path)
+            || super::cursor_native_sessions::is_sdk(path)
+            || matches!(
+                path.file_name().and_then(|name| name.to_str()),
+                Some("meta.json" | "store.db")
+            )
     }
 
     fn session_path_role(&self, path: &Path) -> SessionPathRole {
@@ -1950,12 +2022,17 @@ impl super::AgentProvider for CursorProvider {
     }
 
     fn session_scan_source_paths(&self, path: &Path) -> Vec<PathBuf> {
-        if super::cursor_native_sessions::is_desktop(path) || super::cursor_native_sessions::is_sdk(path) {
+        if super::cursor_native_sessions::is_desktop(path)
+            || super::cursor_native_sessions::is_sdk(path)
+        {
             super::cursor_native_sessions::database_sources(path)
         } else {
             let mut sources = cursor_sessions::session_scan_source_paths(path);
-            if let Some(database) = super::cursor_native_sessions::desktop_database_for_export(path) {
-                if self.session_id_from_path(path).is_some_and(|id| super::cursor_native_sessions::archive_state(&database, &id).is_some()) {
+            if let Some(database) = super::cursor_native_sessions::desktop_database_for_export(path)
+            {
+                if self.session_id_from_path(path).is_some_and(|id| {
+                    super::cursor_native_sessions::archive_state(&database, &id).is_some()
+                }) {
                     sources.extend(super::cursor_native_sessions::database_sources(&database));
                 }
             }
@@ -1998,14 +2075,18 @@ impl super::AgentProvider for CursorProvider {
         sessions: &mut Vec<SessionRecord>,
         cache: Option<&SessionScanCache>,
     ) -> Result<bool> {
-        if super::cursor_native_sessions::is_desktop(path) || super::cursor_native_sessions::is_sdk(path) {
+        if super::cursor_native_sessions::is_desktop(path)
+            || super::cursor_native_sessions::is_sdk(path)
+        {
             super::cursor_native_sessions::scan_database(path, sessions)?;
             Ok(true)
         } else if cursor_sessions::is_cursor_meta_file(path) {
             cursor_sessions::scan_cursor_meta_file(path, sessions, self.kind(), cache);
             Ok(true)
         } else if path.file_name().and_then(|name| name.to_str()) == Some("store.db") {
-            if super::cursor_native_sessions::sdk_index_for_blob_store(path).is_some() { return Ok(false); }
+            if super::cursor_native_sessions::sdk_index_for_blob_store(path).is_some() {
+                return Ok(false);
+            }
             cursor_sessions::scan_cursor_store_file(path, sessions, self.kind(), cache);
             Ok(true)
         } else {

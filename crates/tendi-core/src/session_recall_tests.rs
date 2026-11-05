@@ -261,7 +261,8 @@ fn published_source_content_is_reused_across_scopes_and_invalidated_on_append() 
     assert!(errors.is_empty(), "{errors:?}");
     assert!(!pending);
     let checkpoints: Vec<String> = store
-        .sessions.conn
+        .sessions
+        .conn
         .prepare("SELECT search_checkpoint FROM scoped_session_search_index ORDER BY scope_key")
         .unwrap()
         .query_map([], |row| row.get(0))

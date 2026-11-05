@@ -262,6 +262,7 @@ export type DesktopStoreActions = {
   setSkillIndexStatus: (status: SkillIndexStatus | null) => void;
   setSkillUpdateReports: (updates: SkillUpdateReport[]) => void;
   setSessionOwnership: (snapshot: SessionOwnershipSnapshot) => void;
+  forgetHeldSession: (session: SessionIdentityRecord) => void;
   setSessionRefreshError: (message: string) => void;
   setProjects: (projects: ProjectSummary[]) => void;
   setSessionProjects: (projects: SessionProjectSummary[]) => void;
@@ -510,6 +511,16 @@ export class DesktopStore {
           return key ? [key] : [];
         }));
         return { ...current, sessions: { ...current.sessions, ownershipEpoch: snapshot.epoch, ownershipRevision: snapshot.revision, heldSessionKeys } };
+      });
+    },
+    forgetHeldSession: (session) => {
+      const key = sessionLogicalIdentityRecordKey(session);
+      if (!key) return;
+      this.update((current) => {
+        const heldSessionKeys = updateSet(current.sessions.heldSessionKeys, key, false);
+        return heldSessionKeys === current.sessions.heldSessionKeys
+          ? current
+          : { ...current, sessions: { ...current.sessions, heldSessionKeys } };
       });
     },
     setSessionRefreshError: (refreshError) => {

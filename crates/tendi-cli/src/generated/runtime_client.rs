@@ -801,6 +801,19 @@ impl RuntimeClient {
         let result = Self::decode_response(CommandName::SessionSetArchived, request_id, value)?;
         Ok(serde_json::from_value(result)?)
     }
+    pub fn session_release_held(
+        &mut self,
+        params: tendi_core::generated::runtime_contract::SessionReleaseHeldRequest,
+    ) -> JsonRpcRequest {
+        self.request(CommandName::SessionReleaseHeld, params)
+    }
+    pub fn decode_session_release_held_response(
+        request_id: &Value,
+        value: Value,
+    ) -> anyhow::Result<tendi_core::generated::runtime_contract::SessionReleaseHeldResponse> {
+        let result = Self::decode_response(CommandName::SessionReleaseHeld, request_id, value)?;
+        Ok(serde_json::from_value(result)?)
+    }
     pub fn session_transcript(
         &mut self,
         params: tendi_core::generated::runtime_contract::SessionTranscriptRequest,

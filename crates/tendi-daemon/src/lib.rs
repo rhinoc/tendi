@@ -393,6 +393,12 @@ struct SkillUpdateCheckCache {
 
 const SKILL_UPDATE_REPORT_CACHE_TTL: Duration = Duration::from_secs(15);
 
+#[derive(Clone, Copy)]
+enum SkillUpdateCacheUse {
+    Check,
+    Preview,
+}
+
 #[derive(Debug)]
 struct SkillDistributionPreview {
     sources: Vec<PathBuf>,
@@ -3172,6 +3178,43 @@ impl Daemon {
         Ok(session_record_runtime_value(updated))
     }
 
+    fn session_release_held(
+        &self,
+        request: runtime_schema::SessionReleaseHeldRequest,
+    ) -> Result<runtime_schema::SessionReleaseHeldResponse, DaemonError> {
+        let identity = session_identity_from_request(request.session);
+        let session = tendi_core::SessionRecord {
+            id: identity.id,
+            agent: identity.agent,
+            title: None,
+            project: None,
+            repository: None,
+            repository_url: None,
+            logical_project_id: None,
+            logical_project_name: None,
+            path: identity.path,
+            archived: None,
+            archive_supported: false,
+            resumable: true,
+            started_at: None,
+            updated_at: None,
+            message_count: None,
+            first_user_message: None,
+            last_user_message: None,
+            last_assistant_message: None,
+            turn_count: None,
+            model: None,
+            mode: None,
+            approval_mode: None,
+            is_run_everything: None,
+            parent_session_id: None,
+            token_usage: None,
+        };
+        tendi_core::release_held_session(&session).map_err(core_error)?;
+        session_ownership::refresh_now(self);
+        Ok(None)
+    }
+
     fn session_transcript(
         &self,
         request: runtime_schema::SessionTranscriptRequest,
@@ -4153,7 +4196,8 @@ impl Daemon {
         store
             .upsert_skill_visibilities_for_workspace(&self.state.cwd, &visibility_values)
             .map_err(core_error)?;
-        let source_records = tendi_core::skills::skill_source_records_for_add(&report);
+        let source_records =
+            tendi_core::skills::skill_source_records_for_add(&report).map_err(core_error)?;
         let snapshots =
             tendi_core::skills::capture_skill_snapshots(&source_records).map_err(core_error)?;
         store
@@ -5022,9 +5066,12 @@ impl Daemon {
             .iter()
             .map(|skill| skill.id.clone())
             .collect::<Vec<_>>();
-        if let Ok(Some(updates)) =
-            self.cached_skill_update_reports_at_revision(&scan, &skill_ids, check_revision)
-        {
+        if let Ok(Some(updates)) = self.cached_skill_update_reports_at_revision(
+            &scan,
+            &skill_ids,
+            check_revision,
+            SkillUpdateCacheUse::Check,
+        ) {
             tendi_core::logging::global().info(
                 "skill update check completed from cache",
                 json!({
@@ -5156,7 +5203,7 @@ impl Daemon {
         &self,
         request: runtime_schema::SkillsUpdateRequest,
     ) -> Result<runtime_schema::SkillsUpdateResponse, DaemonError> {
-        let (scan, projection_revision) = self.skill_projection_with_revision()?;
+        let scan = self.skill_projection()?;
         let ids = if let Some(pattern) = request.pattern.as_deref() {
             tendi_core::skills::skill_ids_matching_pattern(&scan, pattern)
         } else {
@@ -5168,25 +5215,8 @@ impl Daemon {
         }
         let plan_started = Instant::now();
         let store = self.open_store().map_err(core_error)?;
-        let cached_reports =
-            self.cached_skill_update_reports_at_revision(&scan, &ids, projection_revision)?;
-        let used_cached_reports = cached_reports.is_some();
-        let plan = match cached_reports {
-            Some(reports) => tendi_core::skills::plan_skill_updates_many_for_scan_in_workspace_with_store_and_reports(
-                &scan,
-                &ids,
-                &self.state.cwd,
-                &store,
-                &reports,
-            ),
-            None => tendi_core::skills::plan_skill_updates_many_for_scan_in_workspace_with_store(
-                &scan,
-                &ids,
-                &self.state.cwd,
-                &store,
-            ),
-        }
-        .map_err(core_error)?;
+        let (plan, used_cached_reports) =
+            self.plan_skill_updates_for_selection(&scan, &ids, &store)?;
         tendi_core::logging::global().info(
             "skill update planning completed",
             json!({
@@ -5276,27 +5306,8 @@ impl Daemon {
         let plan = if dry_run {
             let scan = self.skill_projection_for_ids(&ids)?;
             let store = self.open_store().map_err(core_error)?;
-            let cached_reports = self.cached_skill_update_reports(&scan, &ids)?;
-            let used_cached_reports = cached_reports.is_some();
-            let plan = match cached_reports {
-                Some(reports) => {
-                    tendi_core::skills::plan_skill_updates_many_for_scan_in_workspace_with_store_and_reports(
-                        &scan,
-                        &ids,
-                        &self.state.cwd,
-                        &store,
-                        &reports,
-                    )
-                    .map_err(core_error)?
-                }
-                None => tendi_core::skills::plan_skill_updates_many_for_scan_in_workspace_with_store(
-                    &scan,
-                    &ids,
-                    &self.state.cwd,
-                    &store,
-                )
-                .map_err(core_error)?,
-            };
+            let (plan, used_cached_reports) =
+                self.plan_skill_updates_for_selection(&scan, &ids, &store)?;
             tendi_core::logging::global().info(
                 "skill update many planning completed",
                 json!({
@@ -5854,13 +5865,40 @@ impl Daemon {
         Ok(())
     }
 
+    fn plan_skill_updates_for_selection(
+        &self,
+        scan: &tendi_core::skills::SkillScan,
+        ids: &[String],
+        store: &tendi_core::storage::Store,
+    ) -> Result<(tendi_core::skills::SkillUpdatePlan, bool), DaemonError> {
+        let reports = self.cached_skill_update_reports(scan, ids)?;
+        let used_cached_reports = reports.is_some();
+        let plan = match reports {
+            Some(reports) => {
+                tendi_core::skills::plan_skill_updates_many_for_scan_in_workspace_with_store_and_reports(
+                    scan, ids, &self.state.cwd, store, &reports,
+                )
+            }
+            None => tendi_core::skills::plan_skill_updates_many_for_scan_in_workspace_with_store(
+                scan, ids, &self.state.cwd, store,
+            ),
+        }
+        .map_err(core_error)?;
+        Ok((plan, used_cached_reports))
+    }
+
     fn cached_skill_update_reports(
         &self,
         scan: &tendi_core::skills::SkillScan,
         skill_ids: &[String],
     ) -> Result<Option<Vec<tendi_core::skills::SkillUpdateReport>>, DaemonError> {
         let revision = self.skill_projection_revision()?;
-        self.cached_skill_update_reports_at_revision(scan, skill_ids, revision)
+        self.cached_skill_update_reports_at_revision(
+            scan,
+            skill_ids,
+            revision,
+            SkillUpdateCacheUse::Preview,
+        )
     }
 
     fn cached_skill_update_reports_at_revision(
@@ -5868,6 +5906,7 @@ impl Daemon {
         scan: &tendi_core::skills::SkillScan,
         skill_ids: &[String],
         revision: tendi_core::Revision,
+        usage: SkillUpdateCacheUse,
     ) -> Result<Option<Vec<tendi_core::skills::SkillUpdateReport>>, DaemonError> {
         let selected_ids = scan
             .skills
@@ -5896,7 +5935,14 @@ impl Daemon {
             );
             return Ok(None);
         };
-        if cache.checked_at.elapsed() > SKILL_UPDATE_REPORT_CACHE_TTL {
+        let downloaded_preview = matches!(usage, SkillUpdateCacheUse::Preview)
+            && selected_ids.iter().all(|id| {
+                cache
+                    .reports
+                    .iter()
+                    .any(|report| report.id == *id && report.source_files.is_some())
+            });
+        if cache.checked_at.elapsed() > SKILL_UPDATE_REPORT_CACHE_TTL && !downloaded_preview {
             tendi_core::logging::global().info(
                 "skill update report cache miss",
                 json!({
@@ -5960,31 +6006,10 @@ impl Daemon {
                 "selectedSkillCount": selected_ids.len(),
                 "cachedReportCount": cache.reports.len(),
                 "projectionRevision": revision,
+                "downloadedPreview": downloaded_preview,
             }),
         );
         Ok(Some(cache.reports.clone()))
-    }
-
-    fn skill_projection_with_revision(
-        &self,
-    ) -> Result<(tendi_core::skills::SkillScan, tendi_core::Revision), DaemonError> {
-        let store = self.open_store().map_err(core_error)?;
-        if let Some(scan) = store
-            .list_skills_for_workspace(&self.state.cwd)
-            .map_err(core_error)?
-        {
-            let scope = daemon_scope_key(self)?;
-            let revision = store
-                .projection_head(&scope, "skills")
-                .map_err(core_error)?
-                .map(|head| head.revision)
-                .unwrap_or(tendi_core::Revision::ZERO);
-            return Ok((scan, revision));
-        }
-        drop(store);
-        let scan = self.refresh_pending_skills()?;
-        let revision = self.skill_projection_revision()?;
-        Ok((scan, revision))
     }
 
     fn cached_skill_projection_with_revision(
@@ -6464,6 +6489,11 @@ fn skill_update_refresh_dirs(plan: &tendi_core::skills::SkillUpdatePlan) -> Vec<
                 .iter()
                 .map(|target| target.target.clone())
         })
+        .chain(
+            plan.directory_updates
+                .iter()
+                .map(|update| update.target.clone()),
+        )
         .collect()
 }
 

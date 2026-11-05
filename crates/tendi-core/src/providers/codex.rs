@@ -29,6 +29,15 @@ use super::*;
 
 pub(super) struct CodexProvider;
 
+fn is_codex_app_server(executable: &Path) -> bool {
+    let suffix = Path::new("Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex");
+    executable.ends_with(suffix)
+        && executable.ancestors().any(|path| {
+            path.file_name()
+                .is_some_and(|name| name == "Codex.app" || name == "ChatGPT.app")
+        })
+}
+
 const CODEX_EXTERNAL_SOURCE_PREFIX: &str = "__codex_external__/";
 const CODEX_PLUGIN_READ_ONLY_REASON: &str = "Codex plugin MCP is managed by the plugin";
 
@@ -2313,6 +2322,37 @@ pub(super) fn validate_session_writer(session: &SessionRecord) -> Result<()> {
     Ok(())
 }
 
+const RELEASE_UNAVAILABLE: &str =
+    "This thread is still open, but its process could not be released.";
+const RELEASE_STILL_HELD: &str = "This thread is still in use.";
+
+fn release_thread_writer(session: &SessionRecord) -> Result<()> {
+    let Some(lock_path) = codex_thread_writer_lock_path(&session.path, &session.id) else {
+        bail!("Codex session is outside thread storage");
+    };
+    if active_writer_at_lock_path(lock_path.clone())?.is_none() {
+        return Ok(());
+    }
+    let holders = crate::session_ownership::processes::pids_holding(&lock_path, |_| true);
+    if holders.is_empty() {
+        bail!(RELEASE_UNAVAILABLE);
+    }
+    for pid in holders {
+        crate::session_ownership::processes::terminate(pid)
+            .with_context(|| format!("failed to release Codex thread {}", session.id))?;
+    }
+    let released =
+        crate::session_ownership::processes::wait_for(Duration::from_millis(800), || {
+            active_writer_at_lock_path(lock_path.clone())
+                .ok()
+                .is_some_and(|writer| writer.is_none())
+        });
+    if released {
+        return Ok(());
+    }
+    bail!(RELEASE_STILL_HELD);
+}
+
 pub(super) fn codex_skill_roots(
     home: &Path,
     project_dirs: &[PathBuf],
@@ -3836,7 +3876,11 @@ impl super::AgentProvider for CodexProvider {
     fn session_ownership_paths(&self, ctx: &ProviderContext, roots: &[PathBuf]) -> Vec<PathBuf> {
         let mut paths = BTreeSet::from([codex_home(ctx).join("thread-writer-locks")]);
         for root in roots {
-            let nested = if is_tutti_run_root(root) { tutti_run_session_roots(root) } else { Vec::new() };
+            let nested = if is_tutti_run_root(root) {
+                tutti_run_session_roots(root)
+            } else {
+                Vec::new()
+            };
             for source in std::iter::once(root.clone()).chain(nested) {
                 if let Some(path) = codex_thread_writer_lock_path(&source, "ownership") {
                     if let Some(parent) = path.parent() {
@@ -3892,6 +3936,47 @@ impl super::AgentProvider for CodexProvider {
         active_session_writer(session)
     }
 
+    fn release_held_session(&self, _ctx: &ProviderContext, session: &SessionRecord) -> Result<()> {
+        release_thread_writer(session)
+    }
+
+    fn session_writer_is_app(&self, session: &SessionRecord, writer: &SessionWriter) -> bool {
+        if !self.session_app_resume_supported(&session.path) {
+            return false;
+        }
+        let lock_path = writer
+            .lock_path
+            .canonicalize()
+            .unwrap_or_else(|_| writer.lock_path.clone());
+        crate::session_ownership::processes::list()
+            .iter()
+            .any(|process| {
+                is_codex_app_server(&process.executable)
+                    && crate::session_ownership::processes::writable_files(process.pid)
+                        .contains(&lock_path)
+            })
+    }
+
+    fn session_writer_process(&self, writer: &SessionWriter) -> Option<i32> {
+        let lock_path = writer
+            .lock_path
+            .canonicalize()
+            .unwrap_or_else(|_| writer.lock_path.clone());
+        crate::session_ownership::processes::list()
+            .iter()
+            .filter(|process| {
+                process
+                    .executable
+                    .file_name()
+                    .is_some_and(|name| name == "codex")
+            })
+            .find(|process| {
+                crate::session_ownership::processes::writable_files(process.pid)
+                    .contains(&lock_path)
+            })
+            .map(|process| process.pid)
+    }
+
     fn session_line_has_content(&self, prefix: &str) -> Option<bool> {
         Some(session_line_has_content(prefix))
     }
@@ -3932,7 +4017,11 @@ impl super::AgentProvider for CodexProvider {
         }
     }
 
-    fn resume_target_from_transcript_value(&self, path: &Path, value: &Value) -> Option<&'static str> {
+    fn resume_target_from_transcript_value(
+        &self,
+        path: &Path,
+        value: &Value,
+    ) -> Option<&'static str> {
         let target = resume_target_from_transcript_value(value);
         if target == Some("app") && !self.session_app_resume_supported(path) {
             return Some("terminal");

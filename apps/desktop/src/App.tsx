@@ -1559,6 +1559,14 @@ export function App() {
       if (requestedTarget && !appUrl) throw new Error(`${session.agent} sessions cannot be resumed in app`);
     }
     const result = await resumeSessionInTerminal(sessionLaunchPayload(session, options));
+    if (result.status === SessionResumeOutcomeStatus.ActiveWriterInApp) {
+      const appUrl = sessionAppDeepLink(session);
+      if (appUrl) {
+        await openUrl(appUrl);
+        return { status: SessionResumeOutcomeStatus.Launched, target: SessionResumeTarget.App };
+      }
+      return { status: SessionResumeOutcomeStatus.ActiveWriter, lockPath: result.lockPath };
+    }
     if (result.status === SessionResumeOutcomeStatus.ActiveWriter) return result;
     if (result.status === SessionResumeOutcomeStatus.Failed) return result;
     return { status: SessionResumeOutcomeStatus.Launched, target: SessionResumeTarget.Terminal, terminal: result.terminal };

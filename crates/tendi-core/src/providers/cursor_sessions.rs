@@ -1104,7 +1104,10 @@ pub(super) fn cached_desktop_archive_states(
     })
 }
 
-pub(super) fn cache_desktop_archive_states(path: &Path, states: Option<Arc<HashMap<String, bool>>>) {
+pub(super) fn cache_desktop_archive_states(
+    path: &Path,
+    states: Option<Arc<HashMap<String, bool>>>,
+) {
     CURSOR_SCAN_DESKTOP_ARCHIVE_STATES.with(|cache| {
         if let Some(cache) = cache.borrow_mut().as_mut() {
             cache.insert(path.to_path_buf(), states);
@@ -1169,7 +1172,9 @@ fn native_session_meta_paths(path: &Path) -> Vec<PathBuf> {
 
 pub(super) fn has_cli_session_source(path: &Path) -> bool {
     native_session_meta_paths(path).iter().any(|source| {
-        source.ancestors().any(|part| part.file_name().is_some_and(|name| name == "chats"))
+        source
+            .ancestors()
+            .any(|part| part.file_name().is_some_and(|name| name == "chats"))
             && source.with_file_name("store.db").is_file()
     })
 }

@@ -5,7 +5,7 @@ pub use serde_json::Value;
 pub const PROTOCOL_VERSION: u64 = 2;
 pub const SCHEMA_VERSION: u64 = 1;
 pub const RUNTIME_CONTRACT_FINGERPRINT: &str =
-    "4c8130db56d44591c2a6c29b475e3b8abf2ec04359aac8df5d9975e9390ede2a";
+    "3d584ab7391c3b28c96fb52c18982d30d94e0f280bce8b69897a2d1b560d169e";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -452,9 +452,16 @@ pub struct SkillsWrapResponse {
 pub struct SkillUpdatePlan {
     pub file_changes: ChangeSet,
     pub git_updates: Vec<GitUpdateAction>,
+    pub directory_updates: Vec<SkillDirectoryUpdate>,
     pub skipped: Vec<SkillUpdateReport>,
     pub source_updates: Vec<SkillSourceUpdate>,
     pub merge_issues: Vec<SkillMergeIssue>,
+}
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SkillDirectoryUpdate {
+    pub name: String,
+    pub target: String,
+    pub files: Vec<GitUpdateFile>,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SkillSourceUpdate {
@@ -2237,6 +2244,10 @@ pub struct SessionSetArchivedRequest {
     pub archived: bool,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SessionReleaseHeldRequest {
+    pub session: SessionIdentity,
+}
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SessionTranscriptRequest {
     pub path: String,
     pub agent: AgentKind,
@@ -2680,6 +2691,7 @@ pub type PromptsListRequest = EmptyRequest;
 pub type PromptsListResponse = PromptRecordList;
 
 pub type SessionSetArchivedResponse = SessionRecord;
+pub type SessionReleaseHeldResponse = Unit;
 pub type SessionTranscriptResponse = TranscriptPage;
 pub type SessionTranscriptLocatorResponse = TranscriptLocatorPage;
 pub type SessionTranscriptSearchResponse = TranscriptSearchResult;
@@ -2847,6 +2859,8 @@ pub enum CommandRequest {
     PromptsDeleteMany(PromptsDeleteManyRequest),
     #[serde(rename = "session_set_archived")]
     SessionSetArchived(SessionSetArchivedRequest),
+    #[serde(rename = "session_release_held")]
+    SessionReleaseHeld(SessionReleaseHeldRequest),
     #[serde(rename = "session_transcript")]
     SessionTranscript(SessionTranscriptRequest),
     #[serde(rename = "session_transcript_locator")]
@@ -3065,6 +3079,8 @@ pub enum CommandResult {
     PromptsDeleteMany(PromptsDeleteManyResponse),
     #[serde(rename = "session_set_archived")]
     SessionSetArchived(SessionSetArchivedResponse),
+    #[serde(rename = "session_release_held")]
+    SessionReleaseHeld(SessionReleaseHeldResponse),
     #[serde(rename = "session_transcript")]
     SessionTranscript(SessionTranscriptResponse),
     #[serde(rename = "session_transcript_locator")]
@@ -3225,6 +3241,7 @@ pub enum CommandName {
     PromptSave,
     PromptsDeleteMany,
     SessionSetArchived,
+    SessionReleaseHeld,
     SessionTranscript,
     SessionTranscriptLocator,
     SessionTranscriptSearch,
@@ -3336,6 +3353,7 @@ impl CommandName {
             "prompt_save" => Some(Self::PromptSave),
             "prompts_delete_many" => Some(Self::PromptsDeleteMany),
             "session_set_archived" => Some(Self::SessionSetArchived),
+            "session_release_held" => Some(Self::SessionReleaseHeld),
             "session_transcript" => Some(Self::SessionTranscript),
             "session_transcript_locator" => Some(Self::SessionTranscriptLocator),
             "session_transcript_search" => Some(Self::SessionTranscriptSearch),
@@ -3448,6 +3466,7 @@ impl CommandName {
             Self::PromptSave => "prompt_save",
             Self::PromptsDeleteMany => "prompts_delete_many",
             Self::SessionSetArchived => "session_set_archived",
+            Self::SessionReleaseHeld => "session_release_held",
             Self::SessionTranscript => "session_transcript",
             Self::SessionTranscriptLocator => "session_transcript_locator",
             Self::SessionTranscriptSearch => "session_transcript_search",
@@ -4009,6 +4028,15 @@ pub fn command_metadata(name: &str) -> Option<CommandMetadata> {
         }),
         "session_set_archived" => Some(CommandMetadata {
             name: "session_set_archived",
+            owner: Owner::Daemon,
+            execution: Execution::Write,
+            serialized_write: true,
+            requires_params: true,
+            internal: false,
+            deprecated: false,
+        }),
+        "session_release_held" => Some(CommandMetadata {
+            name: "session_release_held",
             owner: Owner::Daemon,
             execution: Execution::Write,
             serialized_write: true,
@@ -4636,6 +4664,10 @@ pub fn validate_request(name: &str, args: &Value) -> Result<(), String> {
         }
         "session_set_archived" => {
             serde_json::from_value::<SessionSetArchivedRequest>(args.clone())
+                .map_err(|error| format!("request is invalid: {error}"))?;
+        }
+        "session_release_held" => {
+            serde_json::from_value::<SessionReleaseHeldRequest>(args.clone())
                 .map_err(|error| format!("request is invalid: {error}"))?;
         }
         "session_transcript" => {

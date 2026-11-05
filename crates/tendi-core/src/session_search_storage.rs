@@ -429,24 +429,48 @@ impl Store {
             let mut statement = self.sessions.conn.prepare(
                 "SELECT scope_key FROM scoped_session_search_index
                  WHERE session_id = ?1 AND agent = ?2 AND session_path = ?3
-                   AND scope_key != ?4 AND search_index_version = ?5 ORDER BY indexed_at DESC")?;
-            let scopes = statement.query_map(params![session.id, agent_label(session.agent),
-                session.path.to_string_lossy(), scope.as_str(), SESSION_SEARCH_INDEX_VERSION],
-                |row| row.get::<_, String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
+                   AND scope_key != ?4 AND search_index_version = ?5 ORDER BY indexed_at DESC",
+            )?;
+            let scopes = statement
+                .query_map(
+                    params![
+                        session.id,
+                        agent_label(session.agent),
+                        session.path.to_string_lossy(),
+                        scope.as_str(),
+                        SESSION_SEARCH_INDEX_VERSION
+                    ],
+                    |row| row.get::<_, String>(0),
+                )?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
             for candidate in scopes {
                 let candidate = ScopeKey::new(candidate)?;
                 let cached = self.session_search_current_state(&candidate, session)?;
-                let reusable = cached.as_ref().and_then(|row| row.5.as_deref())
-                    .and_then(|value| serde_json::from_str::<transcript::SearchCheckpoint>(value).ok())
+                let reusable = cached
+                    .as_ref()
+                    .and_then(|row| row.5.as_deref())
+                    .and_then(|value| {
+                        serde_json::from_str::<transcript::SearchCheckpoint>(value).ok()
+                    })
                     .is_some_and(|checkpoint| {
-                        crate::providers::agent_provider(session.agent).transcript_search_append_version()
+                        crate::providers::agent_provider(session.agent)
+                            .transcript_search_append_version()
                             == Some(checkpoint.parser_version.as_str())
                             && checkpoint.matches_source(&session.path).unwrap_or(false)
                     });
                 if reusable {
-                    let documents = self.existing_session_search_documents(&candidate, session, false, 1,
-                        cached.as_ref().and_then(|row| row.5.as_deref()))?;
-                    if !documents.is_empty() { current = cached; donor = Some(documents); break; }
+                    let documents = self.existing_session_search_documents(
+                        &candidate,
+                        session,
+                        false,
+                        1,
+                        cached.as_ref().and_then(|row| row.5.as_deref()),
+                    )?;
+                    if !documents.is_empty() {
+                        current = cached;
+                        donor = Some(documents);
+                        break;
+                    }
                 }
             }
         }
@@ -475,7 +499,10 @@ impl Store {
             checkpoint = None;
             donor = None;
         }
-        if donor.is_none() && content_current && current.as_ref().is_some_and(|row| row.2 == metadata) {
+        if donor.is_none()
+            && content_current
+            && current.as_ref().is_some_and(|row| row.2 == metadata)
+        {
             return Ok((None, false));
         }
 
@@ -490,9 +517,14 @@ impl Store {
                 .as_ref()
                 .filter(|row| row.3 == SESSION_SEARCH_INDEX_VERSION && row.4)
                 .and(checkpoint.as_ref());
-            let delta =
-                transcript::read_session_search_delta(&session.path, session.agent, Some(&session.id), previous, should_stop)?
-                    .ok_or(SearchRefreshCancelled)?;
+            let delta = transcript::read_session_search_delta(
+                &session.path,
+                session.agent,
+                Some(&session.id),
+                previous,
+                should_stop,
+            )?
+            .ok_or(SearchRefreshCancelled)?;
             start_record_order = delta.start_record_order;
             for (index, item) in delta.items.into_iter().enumerate() {
                 let mut document = SessionSearchDocument::default();
@@ -581,19 +613,31 @@ impl Store {
             ensure_session_unchanged(tx, scope, session, payload)?;
             // A failed or interrupted build remains unpublished and is repaired
             // by the next refresh, even if metadata was already committed.
-            shared_cache::execute_changed(tx,
+            shared_cache::execute_changed(
+                tx,
                 "UPDATE scoped_session_search_index SET search_index_version=0
                  WHERE scope_key=?1 AND session_id=?2 AND agent=?3 AND session_path=?4",
-                params![scope.as_str(), session.id, agent_label(session.agent), session.path.to_string_lossy()],
+                params![
+                    scope.as_str(),
+                    session.id,
+                    agent_label(session.agent),
+                    session.path.to_string_lossy()
+                ],
             )?;
-            shared_cache::execute_changed(tx,
+            shared_cache::execute_changed(
+                tx,
                 "INSERT INTO scoped_session_search_index
                  (scope_key, session_id, agent, session_path, file_mtime, file_size,
                   indexed_at, search_metadata, search_index_version)
                  SELECT ?1, ?2, ?3, ?4, 0, 0, '', '', 0
                  WHERE NOT EXISTS(SELECT 1 FROM scoped_session_search_index
                      WHERE scope_key=?1 AND session_id=?2 AND agent=?3 AND session_path=?4)",
-                params![scope.as_str(), session.id, agent_label(session.agent), session.path.to_string_lossy()],
+                params![
+                    scope.as_str(),
+                    session.id,
+                    agent_label(session.agent),
+                    session.path.to_string_lossy()
+                ],
             )?;
             Ok(())
         })?;
@@ -610,8 +654,9 @@ impl Store {
                     break;
                 }
             }
-            let processed =
-                self.with_session_background_write_transaction("session_search.upsert_batch", |tx| {
+            let processed = self.with_session_background_write_transaction(
+                "session_search.upsert_batch",
+                |tx| {
                     ensure_session_unchanged(tx, scope, session, payload)?;
                     let started = std::time::Instant::now();
                     let mut processed = 0;
@@ -624,7 +669,8 @@ impl Store {
                     }
                     record_session_search_mutations_in_tx(tx, processed)?;
                     Ok(processed)
-                })?;
+                },
+            )?;
             start += processed;
         }
         let mut removed_start = 0;
@@ -815,7 +861,8 @@ fn upsert_shared_session_search_record(
         [&content_hash],
         |row| row.get::<_, i64>(0),
     )?;
-    shared_cache::execute_changed(tx,
+    shared_cache::execute_changed(
+        tx,
         "INSERT INTO scoped_session_search_entries(
              scope_key, session_id, agent, session_path, record_order,
              metadata_text, title, project, content_id

@@ -16,17 +16,19 @@ use crate::{providers::agent_provider, skills::AgentKind, time::timestamp_ms};
 mod search;
 pub(crate) use search::{SearchCheckpoint, read_session_search_delta};
 
-
 #[path = "transcript_excerpt.rs"]
 mod excerpt;
-pub use excerpt::{TranscriptExcerpt, TranscriptExcerptItem, TranscriptExcerptOptions, read_transcript_excerpt, read_session_transcript_excerpt};
+pub use excerpt::{
+    TranscriptExcerpt, TranscriptExcerptItem, TranscriptExcerptOptions,
+    read_session_transcript_excerpt, read_transcript_excerpt,
+};
 
 #[path = "transcript_native.rs"]
 mod native;
 pub use native::{
-    parse_session_transcript_locator_page, parse_session_transcript_page,
-    parse_session_transcript_page_if_changed, parse_session_transcript, search_session_scoped_match,
-    search_session_transcript, write_session_transcript_json, TranscriptItemMatch,
+    TranscriptItemMatch, parse_session_transcript, parse_session_transcript_locator_page,
+    parse_session_transcript_page, parse_session_transcript_page_if_changed,
+    search_session_scoped_match, search_session_transcript, write_session_transcript_json,
 };
 
 #[derive(Debug, Clone, Serialize)]
@@ -896,11 +898,9 @@ pub fn parse_transcript(path: &Path, agent: AgentKind) -> Result<TranscriptScan>
     Ok(TranscriptScan { items, warnings })
 }
 
-pub(crate) fn parse_compressed_transcript(
-    path: &Path,
-    agent: AgentKind,
-) -> Result<TranscriptScan> {
-    let file = fs::File::open(path).with_context(|| format!("failed to read {}", path.display()))?;
+pub(crate) fn parse_compressed_transcript(path: &Path, agent: AgentKind) -> Result<TranscriptScan> {
+    let file =
+        fs::File::open(path).with_context(|| format!("failed to read {}", path.display()))?;
     let reader = BufReader::new(zstd::Decoder::new(file)?);
     let inherited_history_start_ordinal = transcript_inherited_history_start_ordinal(path, agent)?;
     let mut items = Vec::new();
@@ -1548,7 +1548,9 @@ pub fn search_transcript(
         warnings.extend(page_warnings);
         offset_index.record(chunk_start, chunk_end);
 
-        for item in &items { search_builder.push(item, &needle, scopes); }
+        for item in &items {
+            search_builder.push(item, &needle, scopes);
+        }
 
         if page_done {
             break page_source_version;

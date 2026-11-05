@@ -1510,7 +1510,10 @@ fn session_database_rebuild_does_not_import_cache_from_recovery_copy() {
     let retained_history = store
         .overview_analytics_for_scope(&scope, None, 30, 30)
         .unwrap();
-    assert_eq!(retained_history.coverage.first.as_deref(), Some("2026-05-25"));
+    assert_eq!(
+        retained_history.coverage.first.as_deref(),
+        Some("2026-05-25")
+    );
     assert_eq!(retained_history.coverage.total_sessions, 1);
     assert!(store.analytics_revision_for_scope(&scope).unwrap() > 0);
 

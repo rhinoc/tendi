@@ -43,8 +43,14 @@ pub(crate) struct SearchDelta {
 impl SearchCheckpoint {
     pub(crate) fn matches_source(&self, path: &Path) -> Result<bool> {
         if let Some(session) = &self.native_session {
-            let Some(scan) = agent_provider(session.agent).read_session_transcript(path, &session.id) else { return Ok(false); };
-            return Ok(Some(native::source_version(Some(&session.id), &scan?)?) == self.native_version);
+            let Some(scan) =
+                agent_provider(session.agent).read_session_transcript(path, &session.id)
+            else {
+                return Ok(false);
+            };
+            return Ok(
+                Some(native::source_version(Some(&session.id), &scan?)?) == self.native_version
+            );
         }
         let metadata = fs::metadata(path)?;
         Ok(self.identity == file_identity(&metadata)
@@ -100,18 +106,40 @@ pub(crate) fn read_session_search_delta(
 ) -> Result<Option<SearchDelta>> {
     if let Some(scan) = agent_provider(agent).read_session_transcript(path, id.unwrap_or("")) {
         let scan = scan?;
-        if should_stop() { return Ok(None); }
+        if should_stop() {
+            return Ok(None);
+        }
         let metadata = fs::metadata(path)?;
         let version = native::source_version(id, &scan)?;
         let checkpoint = SearchCheckpoint {
-            parser_version: agent_provider(agent).transcript_search_append_version().unwrap_or("native-transcript-v1").to_owned(),
-            identity: file_identity(&metadata), source_size: metadata.len(), source_modified_ns: modified_ns(&metadata),
-            committed_offset: 0, next_record_order: scan.items.len() + 1, line_count: 0, inherited_ordinal: None,
-            prefix_hash: String::new(), boundary_hash: String::new(),
-            native_session: Some(crate::sessions::SessionIdentity { id: id.unwrap_or("").to_owned(), agent, path: path.to_path_buf() }),
+            parser_version: agent_provider(agent)
+                .transcript_search_append_version()
+                .unwrap_or("native-transcript-v1")
+                .to_owned(),
+            identity: file_identity(&metadata),
+            source_size: metadata.len(),
+            source_modified_ns: modified_ns(&metadata),
+            committed_offset: 0,
+            next_record_order: scan.items.len() + 1,
+            line_count: 0,
+            inherited_ordinal: None,
+            prefix_hash: String::new(),
+            boundary_hash: String::new(),
+            native_session: Some(crate::sessions::SessionIdentity {
+                id: id.unwrap_or("").to_owned(),
+                agent,
+                path: path.to_path_buf(),
+            }),
             native_version: Some(version),
         };
-        return Ok(Some(SearchDelta { checkpoint, start_record_order: 1, bytes_read: serde_json::to_vec(&scan)?.len() as u64, validation_bytes_read: 0, items: scan.items, warnings: scan.warnings }));
+        return Ok(Some(SearchDelta {
+            checkpoint,
+            start_record_order: 1,
+            bytes_read: serde_json::to_vec(&scan)?.len() as u64,
+            validation_bytes_read: 0,
+            items: scan.items,
+            warnings: scan.warnings,
+        }));
     }
     let mut file =
         fs::File::open(path).with_context(|| format!("failed to read {}", path.display()))?;

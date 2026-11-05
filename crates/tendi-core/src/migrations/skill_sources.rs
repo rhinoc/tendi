@@ -30,6 +30,7 @@ struct SkillsCliLockEntry {
     skill_path: Option<String>,
     skill_folder_hash: Option<String>,
     computed_hash: Option<String>,
+    well_known_digest: Option<String>,
 }
 
 #[derive(Debug, Default)]
@@ -42,6 +43,11 @@ struct SkillsCliLockDatabase {
 /// lock inputs change. Runtime skill scanning reads only the scoped source table.
 pub(super) fn migrate_scan(store: &Store, cwd: &Path, scan: &mut SkillScan) -> Result<bool> {
     let migration_key = migration_key_for_workspace(cwd)?;
+    let digest_key = digest_migration_key_for_workspace(cwd)?;
+    let digest_only = super::migration_completed(store, &migration_key)?;
+    if digest_only && super::migration_completed(store, &digest_key)? {
+        return Ok(false);
+    }
     let existing_records = store
         .skill_source_records_for_workspace(cwd)?
         .into_iter()
@@ -51,6 +57,7 @@ pub(super) fn migrate_scan(store: &Store, cwd: &Path, scan: &mut SkillScan) -> R
     let has_lock_warnings = !lock_warnings.is_empty();
     scan.warnings.extend(lock_warnings);
     let mut records = Vec::new();
+    let mut snapshots = Vec::new();
 
     for skill in &scan.skills {
         for path in &skill.paths {
@@ -59,6 +66,16 @@ pub(super) fn migrate_scan(store: &Store, cwd: &Path, scan: &mut SkillScan) -> R
             };
             let existing = existing_records.get(&path.path);
             let source_kind = entry.source_type.trim().to_ascii_lowercase();
+            let source = normalize_locked_source(entry.source(), entry.source_type.as_str());
+            if digest_only
+                && (source_kind != "well-known"
+                    || existing.is_none_or(|record| {
+                        record.source_version.is_some()
+                            || record.source.as_deref() != Some(source.as_str())
+                    }))
+            {
+                continue;
+            }
             // Lock entries are authoritative for paths they identify. Upgrade inferred local
             // provenance and refresh records previously imported from the lock, while leaving
             // paths already attributed to a different source kind untouched.
@@ -67,20 +84,20 @@ pub(super) fn migrate_scan(store: &Store, cwd: &Path, scan: &mut SkillScan) -> R
             }) {
                 continue;
             }
+            let source_version = if source_kind == "well-known" {
+                non_empty(entry.well_known_digest.as_deref())
+            } else {
+                None
+            }
+            .or_else(|| non_empty(entry.skill_folder_hash.as_deref()))
+            .or_else(|| non_empty(entry.computed_hash.as_deref()));
             let record = SkillSourceRecord {
                 skill_name: skill.name.clone(),
                 skill_path: path.path.clone(),
                 source_kind,
-                source: Some(normalize_locked_source(
-                    entry.source(),
-                    entry.source_type.as_str(),
-                )),
+                source: Some(source),
                 source_ref: non_empty(entry.r#ref.as_deref()),
-                source_version: entry
-                    .skill_folder_hash
-                    .as_deref()
-                    .and_then(|value| non_empty(Some(value)))
-                    .or_else(|| non_empty(entry.computed_hash.as_deref())),
+                source_version,
                 source_relative_path: non_empty(entry.skill_path.as_deref()),
                 update_status: "tracked".to_string(),
                 origin: existing
@@ -88,6 +105,13 @@ pub(super) fn migrate_scan(store: &Store, cwd: &Path, scan: &mut SkillScan) -> R
                     .unwrap_or_else(|| "skills-cli-lock".to_string()),
             };
             if existing.is_none_or(|existing| !same_source_record(existing, &record)) {
+                if record.source_kind == "well-known"
+                    && let Some(version) = record.source_version.as_deref()
+                    && let Some(snapshot) =
+                        crate::skills::well_known::verified_source_snapshot(path, version)?
+                {
+                    snapshots.push(snapshot);
+                }
                 records.push(record);
             }
         }
@@ -97,12 +121,23 @@ pub(super) fn migrate_scan(store: &Store, cwd: &Path, scan: &mut SkillScan) -> R
         if !has_lock_warnings && !super::migration_completed(store, &migration_key)? {
             super::mark_migration_completed(store, &migration_key)?;
         }
+        if !has_lock_warnings {
+            super::mark_migration_completed(store, &digest_key)?;
+        }
         return Ok(false);
     }
 
-    let changed = store.upsert_skill_source_records_for_workspace(cwd, &records)? > 0;
+    let (remote_records, other_records): (Vec<_>, Vec<_>) = records
+        .into_iter()
+        .partition(|record| record.source_kind == "well-known");
+    let other_changed = store.upsert_skill_source_records_for_workspace(cwd, &other_records)? > 0;
+    let changed = !remote_records.is_empty() || other_changed;
+    store.persist_skill_update_persistence_for_workspace(cwd, &remote_records, &snapshots)?;
     if !has_lock_warnings && !super::migration_completed(store, &migration_key)? {
         super::mark_migration_completed(store, &migration_key)?;
+    }
+    if !has_lock_warnings {
+        super::mark_migration_completed(store, &digest_key)?;
     }
     Ok(changed)
 }
@@ -120,7 +155,15 @@ fn same_source_record(left: &SkillSourceRecord, right: &SkillSourceRecord) -> bo
 
 pub(super) fn migration_completed_for_workspace(store: &Store, cwd: &Path) -> Result<bool> {
     let migration_key = migration_key_for_workspace(cwd)?;
-    super::migration_completed(store, &migration_key)
+    Ok(super::migration_completed(store, &migration_key)?
+        && super::migration_completed(store, &digest_migration_key_for_workspace(cwd)?)?)
+}
+
+pub(super) fn digest_migration_key_for_workspace(cwd: &Path) -> Result<String> {
+    Ok(format!(
+        "{}:well-known-digests-v1",
+        migration_key_for_workspace(cwd)?
+    ))
 }
 
 pub(super) fn migration_key_for_workspace(cwd: &Path) -> Result<String> {

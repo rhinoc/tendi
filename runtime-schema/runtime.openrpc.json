@@ -68,6 +68,7 @@
     { "name": "prompt_save", "params": [{ "name": "request", "required": true, "schema": { "$ref": "#/components/schemas/PromptSaveRequest" } }], "result": { "name": "result", "schema": { "$ref": "#/components/schemas/PromptSaveResponse" } }, "x-tendi": { "owner": "daemon", "wire": "jsonrpc", "clients": ["desktop"], "execution": "write" } },
     { "name": "prompts_delete_many", "params": [{ "name": "request", "required": true, "schema": { "$ref": "#/components/schemas/PromptsDeleteManyRequest" } }], "result": { "name": "result", "schema": { "$ref": "#/components/schemas/PromptsDeleteManyResponse" } }, "x-tendi": { "owner": "daemon", "wire": "jsonrpc", "clients": ["desktop"], "execution": "write" } },
     { "name": "session_set_archived", "params": [{ "name": "request", "required": true, "schema": { "$ref": "#/components/schemas/SessionSetArchivedRequest" } }], "result": { "name": "result", "schema": { "$ref": "#/components/schemas/SessionRecord" } }, "x-tendi": { "owner": "daemon", "wire": "jsonrpc", "clients": ["desktop", "cli"], "execution": "write", "typedHandler": true } },
+    { "name": "session_release_held", "params": [{ "name": "request", "required": true, "schema": { "$ref": "#/components/schemas/SessionReleaseHeldRequest" } }], "result": { "name": "result", "schema": { "$ref": "#/components/schemas/Unit" } }, "x-tendi": { "owner": "daemon", "wire": "jsonrpc", "clients": ["desktop"], "execution": "write", "typedHandler": true } },
     { "name": "session_transcript", "params": [{ "name": "request", "required": true, "schema": { "$ref": "#/components/schemas/SessionTranscriptRequest" } }], "result": { "name": "result", "schema": { "$ref": "#/components/schemas/TranscriptPage" } }, "x-tendi": { "owner": "daemon", "wire": "jsonrpc", "clients": ["desktop"], "execution": "read", "typedHandler": true } },
     { "name": "session_transcript_locator", "params": [{ "name": "request", "required": true, "schema": { "$ref": "#/components/schemas/SessionTranscriptLocatorRequest" } }], "result": { "name": "result", "schema": { "$ref": "#/components/schemas/TranscriptLocatorPage" } }, "x-tendi": { "owner": "daemon", "wire": "jsonrpc", "clients": ["desktop"], "execution": "read", "typedHandler": true } },
     { "name": "session_transcript_search", "params": [{ "name": "request", "required": true, "schema": { "$ref": "#/components/schemas/SessionTranscriptSearchRequest" } }], "result": { "name": "result", "schema": { "$ref": "#/components/schemas/TranscriptSearchResult" } }, "x-tendi": { "owner": "daemon", "wire": "jsonrpc", "clients": ["desktop"], "execution": "read", "typedHandler": true } },
@@ -469,8 +470,14 @@
       },
       "SkillUpdatePlan": {
         "type": "object",
-        "properties": { "file_changes": { "$ref": "#/components/schemas/ChangeSet" }, "git_updates": { "type": "array", "items": { "$ref": "#/components/schemas/GitUpdateAction" } }, "skipped": { "type": "array", "items": { "$ref": "#/components/schemas/SkillUpdateReport" } }, "source_updates": { "type": "array", "items": { "$ref": "#/components/schemas/SkillSourceUpdate" } }, "merge_issues": { "type": "array", "items": { "$ref": "#/components/schemas/SkillMergeIssue" } } },
-        "required": ["file_changes", "git_updates", "skipped", "source_updates", "merge_issues"],
+        "properties": { "file_changes": { "$ref": "#/components/schemas/ChangeSet" }, "git_updates": { "type": "array", "items": { "$ref": "#/components/schemas/GitUpdateAction" } }, "directory_updates": { "type": "array", "items": { "$ref": "#/components/schemas/SkillDirectoryUpdate" } }, "skipped": { "type": "array", "items": { "$ref": "#/components/schemas/SkillUpdateReport" } }, "source_updates": { "type": "array", "items": { "$ref": "#/components/schemas/SkillSourceUpdate" } }, "merge_issues": { "type": "array", "items": { "$ref": "#/components/schemas/SkillMergeIssue" } } },
+        "required": ["file_changes", "git_updates", "directory_updates", "skipped", "source_updates", "merge_issues"],
+        "additionalProperties": false
+      },
+      "SkillDirectoryUpdate": {
+        "type": "object",
+        "properties": { "name": { "type": "string" }, "target": { "type": "string" }, "files": { "type": "array", "items": { "$ref": "#/components/schemas/GitUpdateFile" } } },
+        "required": ["name", "target", "files"],
         "additionalProperties": false
       },
       "SkillSourceUpdate": {
@@ -1130,7 +1137,7 @@
       "SessionResumeResponse": {
         "type": "object",
         "properties": {
-          "status": { "type": "string", "enum": ["activeWriter", "launched", "failed"] },
+          "status": { "type": "string", "enum": ["activeWriter", "activeWriterInApp", "launched", "failed"] },
           "lockPath": { "type": ["string", "null"] },
           "agent": { "type": ["string", "null"] },
           "terminal": { "type": ["string", "null"] },
@@ -2254,6 +2261,14 @@
           "archived": { "type": "boolean" }
         },
         "required": ["session", "archived"],
+        "additionalProperties": false
+      },
+      "SessionReleaseHeldRequest": {
+        "type": "object",
+        "properties": {
+          "session": { "$ref": "#/components/schemas/SessionIdentity" }
+        },
+        "required": ["session"],
         "additionalProperties": false
       },
       "SessionTranscriptRequest": {

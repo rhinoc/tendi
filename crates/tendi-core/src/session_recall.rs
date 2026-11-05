@@ -102,11 +102,10 @@ fn session_matches_time_bounds(
     let Some(started_at) = session.started_at.as_deref() else {
         return since.is_none() && until.is_none();
     };
-    since.is_none_or(|bound| {
-        crate::time::compare_timestamps(Some(started_at), Some(bound)).is_ge()
-    }) && until.is_none_or(|bound| {
-        crate::time::compare_timestamps(Some(started_at), Some(bound)).is_lt()
-    })
+    since.is_none_or(|bound| crate::time::compare_timestamps(Some(started_at), Some(bound)).is_ge())
+        && until.is_none_or(|bound| {
+            crate::time::compare_timestamps(Some(started_at), Some(bound)).is_lt()
+        })
 }
 
 fn session_matches_cwd(session: &SessionRecord, cwd: &[PathBuf], exact: bool) -> bool {

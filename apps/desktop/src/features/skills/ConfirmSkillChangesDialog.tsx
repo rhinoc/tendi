@@ -91,6 +91,7 @@ function updateFiles(preview: SkillChangeResponse | null | undefined): UpdateFil
   ]);
   const files = [
     ...gitFiles.map((file) => normalizeUpdateFile(file, false)),
+    ...plan.directory_updates.flatMap((update) => update.files.map((file) => normalizeUpdateFile(file, false))),
     ...plan.file_changes.changes.map((file) => normalizeUpdateFile(file, true)),
   ]
     .filter((file): file is UpdateFile => file !== null);

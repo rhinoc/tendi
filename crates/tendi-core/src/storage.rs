@@ -28,8 +28,8 @@ pub use session_search_storage::SessionSearchPublication;
 #[path = "session_recall.rs"]
 mod session_recall;
 pub use session_recall::{
-    SessionRecallHit, SessionRecallOptions, SessionRecallPage, SessionRecallRole, SessionRecallSort,
-    SessionRecallStatus,
+    SessionRecallHit, SessionRecallOptions, SessionRecallPage, SessionRecallRole,
+    SessionRecallSort, SessionRecallStatus,
 };
 
 #[path = "storage/repositories/mod.rs"]
@@ -42,12 +42,12 @@ mod database_writer;
 
 #[path = "storage/database.rs"]
 mod database;
-#[path = "storage/shared_cache.rs"]
-mod shared_cache;
 #[path = "storage/database_compatibility.rs"]
 mod database_compatibility;
 #[path = "storage/diagnostics.rs"]
 mod diagnostics;
+#[path = "storage/shared_cache.rs"]
+mod shared_cache;
 pub use diagnostics::database_file_diagnostics;
 #[path = "migrations/mod.rs"]
 pub(crate) mod migrations;
@@ -354,7 +354,8 @@ where
     unreachable!("database read retry loop always returns");
 }
 
-type PreparedSessionSources = HashMap<crate::sessions::SessionIdentity, repositories::PreparedSessionSource>;
+type PreparedSessionSources =
+    HashMap<crate::sessions::SessionIdentity, repositories::PreparedSessionSource>;
 type PreparedProjectAliases = HashMap<(String, String), Vec<SessionProjectAlias>>;
 
 fn prepare_project_aliases(sessions: &[SessionRecord]) -> PreparedProjectAliases {
@@ -1677,7 +1678,10 @@ fn contains_search_score_with_scopes(
 ) -> f64 {
     [
         (document.title.as_str(), 30.0),
-        (document.user_text.as_str(), if scopes.user { 20.0 } else { 0.0 }),
+        (
+            document.user_text.as_str(),
+            if scopes.user { 20.0 } else { 0.0 },
+        ),
         (
             document.assistant_text.as_str(),
             if scopes.assistant { 5.0 } else { 0.0 },

@@ -326,14 +326,24 @@ fn codex_resume_repair_archives_then_unarchives_the_session() {
 #[test]
 fn codex_resume_and_repair_use_the_transcript_home() {
     let root = temp_dir("tendi-codex-resume 'home'");
-    for relative in ["sessions/2026/10/session.jsonl", "archived_sessions/session.jsonl"] {
+    for relative in [
+        "sessions/2026/10/session.jsonl",
+        "archived_sessions/session.jsonl",
+    ] {
         let mut session = archive_test_session(root.join(relative));
         session.project = Some(PathBuf::from("/tmp/project"));
         let plan = plan_session_resume(&session).unwrap();
-        assert_eq!(plan.command.args, ["-C", "/tmp/project", "resume", &session.id]);
-        for command in std::iter::once(plan.command).chain(session_resume_repair_commands(&session)) {
+        assert_eq!(
+            plan.command.args,
+            ["-C", "/tmp/project", "resume", &session.id]
+        );
+        for command in std::iter::once(plan.command).chain(session_resume_repair_commands(&session))
+        {
             assert_eq!(command.cwd, session.project);
-            assert_eq!(command.env, [("CODEX_HOME".to_string(), root.display().to_string())]);
+            assert_eq!(
+                command.env,
+                [("CODEX_HOME".to_string(), root.display().to_string())]
+            );
         }
     }
 }
@@ -346,17 +356,40 @@ fn session_app_resume_support_and_inference_are_provider_owned() {
     let metadata = serde_json::json!({
         "type": "session_meta", "payload": { "source": "vscode", "originator": "Codex Desktop" }
     });
-    for relative in ["sessions/2026/10/session.jsonl", "archived_sessions/session.jsonl"] {
+    for relative in [
+        "sessions/2026/10/session.jsonl",
+        "archived_sessions/session.jsonl",
+    ] {
         let default_path = app_home.join(relative);
         let custom_path = custom_home.join(relative);
-        assert!(super::session_app_resume_supported(AgentKind::Codex, &default_path));
-        assert!(!super::session_app_resume_supported(AgentKind::Codex, &custom_path));
-        assert_eq!(provider.resume_target_from_transcript_value(&default_path, &metadata), Some("app"));
-        assert_eq!(provider.resume_target_from_transcript_value(&custom_path, &metadata), Some("terminal"));
+        assert!(super::session_app_resume_supported(
+            AgentKind::Codex,
+            &default_path
+        ));
+        assert!(!super::session_app_resume_supported(
+            AgentKind::Codex,
+            &custom_path
+        ));
+        assert_eq!(
+            provider.resume_target_from_transcript_value(&default_path, &metadata),
+            Some("app")
+        );
+        assert_eq!(
+            provider.resume_target_from_transcript_value(&custom_path, &metadata),
+            Some("terminal")
+        );
     }
     let path = custom_home.join("session.jsonl");
-    assert!(super::session_app_resume_supported(AgentKind::Claude, &path));
-    for agent in [AgentKind::Codex, AgentKind::Cursor, AgentKind::Unknown, AgentKind::Shared] {
+    assert!(super::session_app_resume_supported(
+        AgentKind::Claude,
+        &path
+    ));
+    for agent in [
+        AgentKind::Codex,
+        AgentKind::Cursor,
+        AgentKind::Unknown,
+        AgentKind::Shared,
+    ] {
         assert!(!super::session_app_resume_supported(agent, &path));
     }
 }
@@ -368,12 +401,23 @@ fn codex_resume_profile_is_resolved_in_the_command_home() {
     let session = archive_test_session(root.join("sessions/session.jsonl"));
     let mut command = plan_session_resume(&session).unwrap().command;
     let error = codex::apply_config_profile(&mut command, "review").unwrap_err();
-    assert!(error.to_string().contains(&root.join("review.config.toml").display().to_string()));
+    assert!(
+        error
+            .to_string()
+            .contains(&root.join("review.config.toml").display().to_string())
+    );
     assert_eq!(command.args[0], "resume");
-    fs::write(root.join("review.config.toml"), "model = \"review-model\"\n").unwrap();
+    fs::write(
+        root.join("review.config.toml"),
+        "model = \"review-model\"\n",
+    )
+    .unwrap();
     codex::apply_config_profile(&mut command, "review").unwrap();
     assert_eq!(&command.args[..3], ["--profile", "review", "resume"]);
-    assert_eq!(command.env, [("CODEX_HOME".to_string(), root.display().to_string())]);
+    assert_eq!(
+        command.env,
+        [("CODEX_HOME".to_string(), root.display().to_string())]
+    );
     fs::remove_dir_all(root).unwrap();
 }
 
@@ -398,7 +442,11 @@ fn session_archive_capabilities_are_provider_owned() {
         Some(true)
     );
     assert_eq!(
-        super::session_archive_state(AgentKind::Codex, &PathBuf::from("/tmp/import.jsonl"), "session"),
+        super::session_archive_state(
+            AgentKind::Codex,
+            &PathBuf::from("/tmp/import.jsonl"),
+            "session"
+        ),
         None
     );
     for agent in [
@@ -407,7 +455,10 @@ fn session_archive_capabilities_are_provider_owned() {
         AgentKind::Shared,
         AgentKind::Unknown,
     ] {
-        assert_eq!(super::session_archive_state(agent, &archived, "session"), None);
+        assert_eq!(
+            super::session_archive_state(agent, &archived, "session"),
+            None
+        );
         let mut session = archive_test_session(archived.clone());
         session.agent = agent;
         assert!(

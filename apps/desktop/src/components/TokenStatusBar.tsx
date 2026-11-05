@@ -231,11 +231,11 @@ export function TokenStatusBar({ activePath = "", content = "", selectionText = 
             window.clearTimeout(timeoutRef.current);
             timeoutRef.current = null;
           }
-          if (response.type === TokenizerWorkerResponseType.Result) setEstimatedSegments(response.segments);
-          else if (isTauriRuntime()) {
+          if (response.type === TokenizerWorkerResponseType.Result && "segments" in response) setEstimatedSegments(response.segments);
+          else if (response.type === TokenizerWorkerResponseType.Error && isTauriRuntime()) {
             setEstimatedSegments([]);
             logger.error("native tokenizer failed", { activePath: latestInputRef.current.activePath, error: response.message });
-          } else useMainThreadFallback(response.message, response.id);
+          } else if (response.type === TokenizerWorkerResponseType.Error) useMainThreadFallback(response.message, response.id);
         },
         (error) => {
           if (isTauriRuntime()) {

@@ -470,6 +470,14 @@ pub(crate) trait AgentProvider: Sync {
         Ok(None)
     }
 
+    fn session_writer_is_app(&self, _session: &SessionRecord, _writer: &SessionWriter) -> bool {
+        false
+    }
+
+    fn session_writer_process(&self, _writer: &SessionWriter) -> Option<i32> {
+        None
+    }
+
     fn session_ownership_paths(&self, _ctx: &ProviderContext, _roots: &[PathBuf]) -> Vec<PathBuf> {
         Vec::new()
     }
@@ -478,6 +486,13 @@ pub(crate) trait AgentProvider: Sync {
 
     fn held_sessions(&self, _ctx: &ProviderContext, _roots: &[PathBuf], _processes: &mut crate::session_ownership::processes::Processes) -> Result<std::collections::BTreeSet<crate::session_ownership::HeldSession>> {
         Ok(Default::default())
+    }
+
+    fn release_held_session(&self, _ctx: &ProviderContext, _session: &SessionRecord) -> Result<()> {
+        bail!(
+            "releasing an in-use session is not supported for {}",
+            self.storage_key()
+        )
     }
 
     fn validate_session_resume(&self, _session: &SessionRecord) -> Result<()> {
@@ -1095,6 +1110,14 @@ pub fn active_session_writer(session: &SessionRecord) -> Result<Option<SessionWr
     agent_provider(session.agent).active_session_writer(session)
 }
 
+pub fn session_writer_is_app(session: &SessionRecord, writer: &SessionWriter) -> bool {
+    agent_provider(session.agent).session_writer_is_app(session, writer)
+}
+
+pub fn session_writer_process(session: &SessionRecord, writer: &SessionWriter) -> Option<i32> {
+    agent_provider(session.agent).session_writer_process(writer)
+}
+
 pub fn session_resume_repair_commands(session: &SessionRecord) -> Vec<SessionCommand> {
     agent_provider(session.agent).session_resume_repair_commands(session)
 }
@@ -1121,6 +1144,11 @@ pub fn session_archive_resource_paths(agent: AgentKind, path: &Path) -> Vec<Path
 
 pub fn set_session_archived(session: &SessionRecord, archived: bool) -> Result<PathBuf> {
     agent_provider(session.agent).set_session_archived(session, archived)
+}
+
+pub fn release_held_session(session: &SessionRecord) -> Result<()> {
+    let cwd = session.project.as_deref().unwrap_or_else(|| Path::new("."));
+    agent_provider(session.agent).release_held_session(&ProviderContext::new(cwd), session)
 }
 
 pub fn accepts_session_app_url(url: &str) -> bool {

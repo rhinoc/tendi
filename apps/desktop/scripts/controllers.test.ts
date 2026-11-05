@@ -197,6 +197,31 @@ if (typeof mock.module !== "function") {
     assert.deepEqual(new Set(withSubagents.tableSessions.map((session) => session.id)), new Set(["archived", "archived-child"]));
   });
 
+  test("filters the session view to in-use sessions, including held subagents", () => {
+    const sessions = [
+      { id: "live", agent: "codex", title: "Live", path: "/live", projectPath: "/repo", updatedAt: "2026-08-29T00:00:00Z" },
+      { id: "idle", agent: "codex", title: "Idle", path: "/idle", projectPath: "/repo", updatedAt: "2026-08-28T00:00:00Z" },
+      { id: "child", agent: "codex", title: "Child", path: "/child", projectPath: "/repo", parentSessionId: "live", updatedAt: "2026-08-27T00:00:00Z" },
+    ];
+    const view = selectSessionListView({
+      sessions,
+      query: "",
+      remoteSearch: true,
+      sort: { key: "updatedAt", direction: "desc" },
+      pageSize: 50,
+      groupBy: null,
+      showChildSessions: false,
+      selectedProjectKeys: [],
+      projectFilterQuery: "",
+      missingSessionProjectPolicy: "show",
+      projects: [],
+      sessionProjects: [],
+      inUseOnly: true,
+      heldSessionKeys: new Set(["codex\0live", "codex\0child"]),
+    });
+    assert.deepEqual(view.tableSessions.map((session) => session.id), ["live", "child"]);
+  });
+
   test("keeps imported-session search stable and leaves daemon list requests candidate-free", async () => {
     const base = [
       { id: "one", agent: "codex", title: "one", path: "/one", projectPath: "/repo", updatedAt: "2026-08-29T00:00:00Z" },

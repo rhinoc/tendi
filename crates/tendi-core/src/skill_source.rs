@@ -1,7 +1,9 @@
 use std::{
+    collections::BTreeMap,
     fs,
     io::{Cursor, Read},
     path::{Component, Path, PathBuf},
+    sync::atomic::{AtomicU64, Ordering},
 };
 
 use anyhow::{Context, Result, bail};
@@ -11,6 +13,7 @@ use sha2::{Digest, Sha256};
 const DISCOVERY_SCHEMA_V2: &str = "https://schemas.agentskills.io/discovery/0.2.0/schema.json";
 const MAX_REMOTE_FILE_BYTES: u64 = 50 * 1024 * 1024;
 const MAX_ARCHIVE_FILES: usize = 1000;
+static UPDATE_DOWNLOAD_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub(crate) struct ParsedSkillSource {
@@ -442,6 +445,45 @@ struct DiscoveryEntry {
 }
 
 pub(crate) fn materialize_well_known(source: &str, target: &Path) -> Result<()> {
+    materialize_well_known_selection(source, target, None)
+}
+
+pub(crate) fn read_well_known_skill(source: &str, name: &str) -> Result<BTreeMap<String, Vec<u8>>> {
+    validate_skill_name(name)?;
+    let sequence = UPDATE_DOWNLOAD_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let target = std::env::temp_dir().join(format!(
+        "tendi-skill-download-{}-{sequence}",
+        std::process::id()
+    ));
+    let result = (|| {
+        materialize_well_known_selection(source, &target, Some(name))?;
+        let root = if target.join("SKILL.md").is_file() {
+            target.clone()
+        } else {
+            target.join(name)
+        };
+        if !root.join("SKILL.md").is_file() {
+            bail!("remote skill {name} does not include SKILL.md");
+        }
+        read_skill_files(&root)
+    })();
+    let cleanup = if target.exists() {
+        fs::remove_dir_all(&target)
+    } else {
+        Ok(())
+    };
+    let files = result?;
+    cleanup?;
+    Ok(files)
+}
+
+pub(crate) fn read_skill_files(root: &Path) -> Result<BTreeMap<String, Vec<u8>>> {
+    let mut files = Vec::new();
+    collect_skill_files(root, root, &mut files)?;
+    Ok(files.into_iter().collect())
+}
+
+fn materialize_well_known_selection(source: &str, target: &Path, name: Option<&str>) -> Result<()> {
     if source
         .strip_prefix("https://clawhub.ai/api/v1/download")
         .is_some()
@@ -456,9 +498,12 @@ pub(crate) fn materialize_well_known(source: &str, target: &Path) -> Result<()> 
         let Some(index_text) = fetch_text_optional(&index_url)? else {
             continue;
         };
-        let Ok(index) = serde_json::from_str::<DiscoveryIndex>(&index_text) else {
+        let Ok(mut index) = serde_json::from_str::<DiscoveryIndex>(&index_text) else {
             continue;
         };
+        if let Some(name) = name {
+            index.skills.retain(|entry| entry.name == name);
+        }
         if materialize_index(&index_url, &index, target)? {
             write_well_known_lock_metadata(&index_url, &index, target)?;
             return Ok(());
@@ -548,9 +593,10 @@ fn write_well_known_lock_metadata(
 }
 
 fn skill_content_digest(root: &Path) -> Result<String> {
-    let mut files = Vec::new();
-    collect_skill_files(root, root, &mut files)?;
-    files.sort_by(|left: &(String, Vec<u8>), right| left.0.cmp(&right.0));
+    Ok(skill_files_digest(&read_skill_files(root)?))
+}
+
+pub(crate) fn skill_files_digest(files: &BTreeMap<String, Vec<u8>>) -> String {
     let mut hash = Sha256::new();
     for (path, content) in files {
         hash.update(path.as_bytes());
@@ -558,7 +604,7 @@ fn skill_content_digest(root: &Path) -> Result<String> {
         hash.update(content);
         hash.update([0]);
     }
-    Ok(format!("sha256:{:x}", hash.finalize()))
+    format!("sha256:{:x}", hash.finalize())
 }
 
 fn collect_skill_files(
@@ -644,7 +690,7 @@ fn materialize_index(index_url: &str, index: &DiscoveryIndex, target: &Path) -> 
     let mut installed = 0;
     for entry in &index.skills {
         validate_skill_name(&entry.name)?;
-        if entry.description.is_empty() || entry.description.len() > 1024 {
+        if entry.description.is_empty() || entry.description.chars().count() > 1024 {
             bail!("invalid well-known description for {}", entry.name);
         }
         let skill_root = target.join(&entry.name);

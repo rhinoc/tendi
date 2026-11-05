@@ -18,22 +18,42 @@ fn session_app_resume_capability_survives_snapshot_list_and_watch_boundaries() {
         {"id": "claude", "agent": "claude", "path": root.join("claude.jsonl")},
         {"id": "cursor", "agent": "cursor", "path": root.join("cursor.jsonl")}
     ])).unwrap();
-    store.save_sessions_at_for_scope(&scope, &tendi_core::sessions::SessionScan {
-        sessions: sessions.clone(), warnings: Vec::new(),
-    }, 1).unwrap();
+    store
+        .save_sessions_at_for_scope(
+            &scope,
+            &tendi_core::sessions::SessionScan {
+                sessions: sessions.clone(),
+                warnings: Vec::new(),
+            },
+            1,
+        )
+        .unwrap();
     let snapshot = daemon.sessions_snapshot().unwrap();
-    let page = daemon.sessions_list(serde_json::from_value(json!({
-        "query": "", "sortKey": "title", "sortDirection": "asc", "page": 1,
-        "pageSize": 20, "showChildSessions": true, "selectedProjectKeys": []
-    })).unwrap()).unwrap();
-    let runtime_schema::RuntimeEventPayload::SessionsScan(event) = runtime_event(SESSION_SCAN_EVENT, json!({
-        "generation": 1, "phase": "watch", "upserts": sessions, "deleted": [],
-        "scanned": 4, "complete": true, "error": null
-    })) else { panic!("expected session scan event") };
+    let page = daemon
+        .sessions_list(
+            serde_json::from_value(json!({
+                "query": "", "sortKey": "title", "sortDirection": "asc", "page": 1,
+                "pageSize": 20, "showChildSessions": true, "selectedProjectKeys": []
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+    let runtime_schema::RuntimeEventPayload::SessionsScan(event) = runtime_event(
+        SESSION_SCAN_EVENT,
+        json!({
+            "generation": 1, "phase": "watch", "upserts": sessions, "deleted": [],
+            "scanned": 4, "complete": true, "error": null
+        }),
+    ) else {
+        panic!("expected session scan event")
+    };
     for records in [&snapshot.payload, &page.rows, &event.upserts] {
         assert_eq!(records.len(), 4);
         for record in records {
-            assert_eq!(record.app_resume_supported, Some(matches!(record.id.as_str(), "default" | "claude")));
+            assert_eq!(
+                record.app_resume_supported,
+                Some(matches!(record.id.as_str(), "default" | "claude"))
+            );
         }
     }
     daemon.shutdown();
@@ -43,26 +63,53 @@ fn session_app_resume_capability_survives_snapshot_list_and_watch_boundaries() {
 #[test]
 fn cursor_sdk_archive_boundary_updates_the_selected_session_in_a_shared_index() {
     let root = temp_workspace().join("sdk-archive-boundary");
-    let daemon = test_daemon_without_background(root.clone()); let store = test_store(&daemon); let scope = daemon_scope_key(&daemon).unwrap();
-    let path = root.join(".cursor/projects/work/sdk-agent-store/workspace/index.db"); fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let daemon = test_daemon_without_background(root.clone());
+    let store = test_store(&daemon);
+    let scope = daemon_scope_key(&daemon).unwrap();
+    let path = root.join(".cursor/projects/work/sdk-agent-store/workspace/index.db");
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
     let native = rusqlite::Connection::open(&path).unwrap();
     native.execute_batch("CREATE TABLE agents(agent_id TEXT PRIMARY KEY,workspace_ref TEXT,status TEXT,active_run_id TEXT,latest_checkpoint_ref_json TEXT,name TEXT,metadata_json TEXT,created_at TEXT,updated_at TEXT);").unwrap();
-    for id in ["sdk-one","sdk-two"] {
+    for id in ["sdk-one", "sdk-two"] {
         native.execute("INSERT INTO agents VALUES(?1,'/tmp/sdk-workspace','IDLE',NULL,NULL,?1,'{}','2026-05-28T20:26:40.000Z','2026-05-28T20:26:40.000Z')",[id]).unwrap();
     }
-    let scan = tendi_core::sessions::scan_session_paths(&[path.clone()],&Default::default()); assert!(scan.warnings.is_empty()); assert_eq!(scan.sessions.len(),2);
-    store.save_sessions_at_for_scope(&scope,&scan,1).unwrap();
-    for archived in [true,false] {
+    let scan = tendi_core::sessions::scan_session_paths(&[path.clone()], &Default::default());
+    assert!(scan.warnings.is_empty());
+    assert_eq!(scan.sessions.len(), 2);
+    store.save_sessions_at_for_scope(&scope, &scan, 1).unwrap();
+    for archived in [true, false] {
         let result = daemon.session_set_archived(serde_json::from_value(json!({"session":{"id":"sdk-two","agent":"cursor","path":path},"archived":archived})).unwrap()).unwrap();
-        assert_eq!(result.id,"sdk-two"); assert_eq!(result.archived,Some(archived)); assert_eq!(result.archive_supported,Some(true)); assert_eq!(result.resumable,Some(false));
-        let snapshot = daemon.sessions_snapshot().unwrap(); assert_eq!(snapshot.payload.len(),2);
-        assert_eq!(snapshot.payload.iter().find(|session|session.id=="sdk-one").unwrap().archived,Some(false));
-        assert_eq!(snapshot.payload.iter().find(|session|session.id=="sdk-two").unwrap().archived,Some(archived));
+        assert_eq!(result.id, "sdk-two");
+        assert_eq!(result.archived, Some(archived));
+        assert_eq!(result.archive_supported, Some(true));
+        assert_eq!(result.resumable, Some(false));
+        let snapshot = daemon.sessions_snapshot().unwrap();
+        assert_eq!(snapshot.payload.len(), 2);
+        assert_eq!(
+            snapshot
+                .payload
+                .iter()
+                .find(|session| session.id == "sdk-one")
+                .unwrap()
+                .archived,
+            Some(false)
+        );
+        assert_eq!(
+            snapshot
+                .payload
+                .iter()
+                .find(|session| session.id == "sdk-two")
+                .unwrap()
+                .archived,
+            Some(archived)
+        );
     }
     native.execute_batch("DROP TABLE agents;").unwrap();
-    assert!(process_session_watch_paths_once(&daemon,&[path],&scope).is_err());
-    assert_eq!(daemon.sessions_snapshot().unwrap().payload.len(),2);
-    daemon.shutdown(); drop(native); fs::remove_dir_all(root).unwrap();
+    assert!(process_session_watch_paths_once(&daemon, &[path], &scope).is_err());
+    assert_eq!(daemon.sessions_snapshot().unwrap().payload.len(), 2);
+    daemon.shutdown();
+    drop(native);
+    fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
@@ -2769,4 +2816,113 @@ fn sessions_snapshot_preserves_full_session_records() {
     daemon.shutdown();
     let _ = fs::remove_file(root.with_extension("sqlite3"));
     let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn skill_update_preview_reuses_downloaded_content_after_report_ttl() {
+    let _test_lock = TEST_LOCK.lock().unwrap();
+    let root = temp_workspace();
+    let daemon = test_daemon_without_background(root.clone());
+    let (mut scan, revision) = daemon.cached_skill_projection_with_revision().unwrap();
+    scan.skills.retain(|skill| skill.name == "demo");
+    scan.skills[0].paths[0].source_kind = "well-known".to_string();
+    scan.skills[0].paths[0].source = Some("https://example.test/skills/demo".to_string());
+    let skill = &scan.skills[0];
+    let id = skill.id.clone();
+    let files = std::sync::Arc::new(BTreeMap::from([(
+        "SKILL.md".to_string(),
+        b"---\nname: demo\ndescription: Demo\n---\n\n# Cached update\n".to_vec(),
+    )]));
+    let report = tendi_core::skills::SkillUpdateReport {
+        id: id.clone(),
+        name: skill.name.clone(),
+        status: "update-available".to_string(),
+        current_version: Some("original".to_string()),
+        latest_version: Some("checked".to_string()),
+        source: Some("https://example.test/skills/demo".to_string()),
+        source_kind: "well-known".to_string(),
+        source_files: Some(files.clone()),
+    };
+    daemon
+        .cache_skill_update_check(revision, &scan, &[report])
+        .unwrap();
+    daemon
+        .state
+        .skill_update_check
+        .lock()
+        .unwrap()
+        .as_mut()
+        .unwrap()
+        .checked_at = Instant::now() - Duration::from_secs(60);
+    let reports = daemon
+        .cached_skill_update_reports_at_revision(
+            &scan,
+            &[id.clone()],
+            revision,
+            SkillUpdateCacheUse::Preview,
+        )
+        .unwrap()
+        .unwrap();
+    assert!(std::sync::Arc::ptr_eq(
+        reports[0].source_files.as_ref().unwrap(),
+        &files
+    ));
+    let store = test_store(&daemon);
+    let (plan, used_cached_reports) = daemon
+        .plan_skill_updates_for_selection(&scan, &[id.clone()], &store)
+        .unwrap();
+    assert!(used_cached_reports);
+    assert!(plan.can_apply());
+    assert!(
+        plan.directory_updates[0].files[0]
+            .incoming
+            .contains("# Cached update")
+    );
+    assert!(
+        daemon
+            .cached_skill_update_reports_at_revision(
+                &scan,
+                &[id.clone()],
+                revision,
+                SkillUpdateCacheUse::Check
+            )
+            .unwrap()
+            .is_none()
+    );
+    let mut changed = scan.clone();
+    changed.skills[0].paths[0].sha256 = "modified-local-file".to_string();
+    assert!(
+        daemon
+            .cached_skill_update_reports_at_revision(
+                &changed,
+                &[id.clone()],
+                revision,
+                SkillUpdateCacheUse::Preview
+            )
+            .unwrap()
+            .is_none()
+    );
+    daemon
+        .state
+        .skill_update_check
+        .lock()
+        .unwrap()
+        .as_mut()
+        .unwrap()
+        .reports[0]
+        .source_files = None;
+    assert!(
+        daemon
+            .cached_skill_update_reports_at_revision(
+                &scan,
+                &[id],
+                revision,
+                SkillUpdateCacheUse::Preview
+            )
+            .unwrap()
+            .is_none()
+    );
+    daemon.shutdown();
+    drop(daemon);
+    fs::remove_dir_all(root).unwrap();
 }

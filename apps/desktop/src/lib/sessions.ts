@@ -90,6 +90,7 @@ export enum SessionResumeTarget {
 
 export enum SessionResumeOutcomeStatus {
   ActiveWriter = "activeWriter",
+  ActiveWriterInApp = "activeWriterInApp",
   Launched = "launched",
   Failed = "failed",
 }

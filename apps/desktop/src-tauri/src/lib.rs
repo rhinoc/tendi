@@ -139,10 +139,42 @@ fn terminal_launch_failure_response(
 }
 
 fn session_resume_active_writer_response(
+    session: &tendi_core::SessionRecord,
     writer: tendi_core::SessionWriter,
 ) -> runtime_schema::SessionResumeResponse {
+    let in_app = tendi_core::session_writer_is_app(session, &writer);
+    let focused_terminal = if in_app {
+        None
+    } else if let Some(pid) = tendi_core::session_writer_process(session, &writer) {
+        match terminals::focus_existing_process(pid) {
+            Ok(focused) => focused,
+            Err(error) => {
+                tendi_core::logging::global().warn(
+                    "session terminal focus failed",
+                    serde_json::json!({ "pid": pid, "detail": error.detail }),
+                );
+                None
+            }
+        }
+    } else {
+        None
+    };
+    if let Some(terminal) = focused_terminal {
+        return runtime_schema::SessionResumeResponse {
+            status: "launched".to_string(),
+            lock_path: None,
+            agent: Some(session.agent.label().to_string()),
+            terminal: Some(terminal),
+            command_line: None,
+            error: None,
+        };
+    }
+    tendi_core::logging::global().info(
+        "session resume blocked by active writer",
+        serde_json::json!({ "lockPath": writer.lock_path }),
+    );
     runtime_schema::SessionResumeResponse {
-        status: "activeWriter".to_string(),
+        status: if in_app { "activeWriterInApp" } else { "activeWriter" }.to_string(),
         lock_path: Some(writer.lock_path.display().to_string()),
         agent: None,
         terminal: None,
@@ -730,7 +762,7 @@ async fn session_resume_in_terminal(
             }
         };
         if let Some(writer) = active_writer {
-            return Ok(session_resume_active_writer_response(writer));
+            return Ok(session_resume_active_writer_response(&record, writer));
         }
         if reconcile {
             let repair_commands = tendi_core::session_resume_repair_commands(&record);
@@ -748,7 +780,7 @@ async fn session_resume_in_terminal(
                     }
                 };
                 if let Some(writer) = active_writer {
-                    return Ok(session_resume_active_writer_response(writer));
+                    return Ok(session_resume_active_writer_response(&record, writer));
                 }
                 return Ok(session_resume_failure_response(
                     "internal",
@@ -770,7 +802,7 @@ async fn session_resume_in_terminal(
                     ));
                 }
             } {
-                return Ok(session_resume_active_writer_response(writer));
+                return Ok(session_resume_active_writer_response(&record, writer));
             }
         }
         let mut plan = match tendi_core::plan_session_resume(&record) {
