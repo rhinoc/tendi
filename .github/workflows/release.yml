@@ -44,7 +44,7 @@ jobs:
         include:
           - arch: aarch64
             target: aarch64-apple-darwin
-            runner: macos-14
+            runner: macos-15
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
