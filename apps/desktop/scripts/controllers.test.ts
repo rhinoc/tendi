@@ -122,7 +122,7 @@ if (typeof mock.module !== "function") {
     const view = selectSessionListView({
       sessions: base,
       searchRows: [base[1]],
-      searchRowsKey: "needle\0codex\u0000one\u0000/one\0codex\u0000two\u0000/two",
+      searchRowsKey: "needle\0\0codex\u0000one\u0000/one\0codex\u0000two\u0000/two",
       query: "needle",
       remoteSearch: true,
       sort: { key: "updatedAt", direction: "desc" },
@@ -150,7 +150,7 @@ if (typeof mock.module !== "function") {
         { ...base[0], searchScore: 6 },
         { ...base[1], searchScore: 20 },
       ],
-      searchRowsKey: "needle\0codex\0newer\0/newer\0codex\0older\0/older",
+      searchRowsKey: "needle\0\0codex\0newer\0/newer\0codex\0older\0/older",
       query: "needle",
       remoteSearch: true,
       sort: { key: "updatedAt", direction: "desc" },

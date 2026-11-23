@@ -2489,6 +2489,9 @@ try {
         ];
       }
       if (command === "prompts_list") return report.prompts.prompts;
+      if (command === "sessions_ownership_snapshot") {
+        return { epoch: "alignment", revision: 0, held: [] };
+      }
       if (command === "sessions_snapshot") {
         if (sessionsSnapshotReleased) return sessionSnapshot();
         return new Promise((resolve) => sessionsSnapshotWaiters.push(resolve));
@@ -2689,6 +2692,7 @@ try {
             }],
           },
           git_updates: [],
+          directory_updates: [],
           skipped: [],
           source_updates: [],
           merge_issues: [],

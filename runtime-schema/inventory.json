@@ -1275,6 +1275,7 @@
       "rule_file_save",
       "rules_list",
       "session_projects_list",
+      "session_release_held",
       "session_resume_in_terminal",
       "session_resume_target",
       "session_set_archived",

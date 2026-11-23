@@ -28,10 +28,10 @@ use chrono::Local;
 use rusqlite::{Connection, params};
 
 use super::{
-    ANALYTICS_JSON_ENCODING, AppSettings, PromptWrite, SESSION_SEARCH_CANDIDATE_TABLE,
-    SessionArchiveFilter, SessionListFilters, SessionListQuery, SessionListRow, Store,
-    compare_session_list_rows, decompress_analytics_json, highlight_contains_match,
-    is_database_io_error, is_database_io_error_message, normalize_repository_url,
+    AppSettings, PromptWrite, SESSION_SEARCH_CANDIDATE_TABLE, SessionArchiveFilter,
+    SessionListFilters, SessionListQuery, SessionListRow, Store, compare_session_list_rows,
+    highlight_contains_match, is_database_io_error, is_database_io_error_message,
+    normalize_repository_url,
 };
 
 #[test]
@@ -1135,7 +1135,7 @@ fn current_schema_without_skill_installation_times_is_repaired_on_open() {
 }
 
 #[test]
-fn schema_v1_storage_discards_search_cache_and_migrates_analytics() {
+fn schema_v1_storage_discards_search_and_analytics_cache() {
     let temp = temp_dir("tendi-storage-v1-compaction-migration");
     fs::create_dir_all(&temp).unwrap();
     let db = temp.join("tendi.sqlite3");
@@ -1227,20 +1227,14 @@ fn schema_v1_storage_discards_search_cache_and_migrates_analytics() {
         )
         .unwrap();
     assert_eq!(search_rows, 0);
-    let compressed: Vec<u8> = store
+    let analytics_rows: i64 = store
         .sessions
         .conn
-        .query_row(
-            "SELECT analytics_json FROM scoped_session_analytics",
-            [],
-            |row| row.get(0),
-        )
+        .query_row("SELECT COUNT(*) FROM scoped_session_analytics", [], |row| {
+            row.get(0)
+        })
         .unwrap();
-    assert!(compressed.starts_with(ANALYTICS_JSON_ENCODING.as_bytes()));
-    assert_eq!(
-        decompress_analytics_json(&compressed).unwrap(),
-        analytics_json
-    );
+    assert_eq!(analytics_rows, 0);
     let primary_analytics_rows: i64 = store
         .conn
         .query_row("SELECT COUNT(*) FROM scoped_session_analytics", [], |row| {
@@ -1507,15 +1501,12 @@ fn session_database_rebuild_does_not_import_cache_from_recovery_copy() {
     store
         .refresh_session_analytics_for_scope_with_progress(&scope, &[], |_| {})
         .unwrap();
-    let retained_history = store
+    let rebuilt_history = store
         .overview_analytics_for_scope(&scope, None, 30, 30)
         .unwrap();
-    assert_eq!(
-        retained_history.coverage.first.as_deref(),
-        Some("2026-05-25")
-    );
-    assert_eq!(retained_history.coverage.total_sessions, 1);
-    assert!(store.analytics_revision_for_scope(&scope).unwrap() > 0);
+    assert_eq!(rebuilt_history.coverage.first, None);
+    assert_eq!(rebuilt_history.coverage.total_sessions, 0);
+    assert_eq!(store.analytics_revision_for_scope(&scope).unwrap(), 0);
 
     drop(store);
     fs::remove_dir_all(temp).unwrap();

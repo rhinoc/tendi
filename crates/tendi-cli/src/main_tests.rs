@@ -112,15 +112,11 @@ fn recall_filters_and_excerpt_source_constraints_are_exposed_by_cli() {
 
 #[test]
 fn projection_refresh_retries_only_the_pure_scan_after_concurrent_invalidation() {
-    let root = std::env::temp_dir().join(format!(
-        "tendi-cli-projection-cas-{}-{}",
-        std::process::id(),
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    std::fs::create_dir_all(&root).unwrap();
+    let Some(root) = isolated_database_test_root(
+        "projection_refresh_retries_only_the_pure_scan_after_concurrent_invalidation",
+    ) else {
+        return;
+    };
     let store = tendi_core::storage::Store::open(root.join("test.sqlite3")).unwrap();
     let scans = std::cell::Cell::new(0);
     let publications = std::cell::Cell::new(0);
@@ -156,20 +152,15 @@ fn projection_refresh_retries_only_the_pure_scan_after_concurrent_invalidation()
     assert!(!state.full_refresh);
     assert!(state.resources.is_empty());
     drop(store);
-    std::fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
 fn projection_refresh_contention_leaves_durable_work_pending() {
-    let root = std::env::temp_dir().join(format!(
-        "tendi-cli-projection-pending-{}-{}",
-        std::process::id(),
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    std::fs::create_dir_all(&root).unwrap();
+    let Some(root) =
+        isolated_database_test_root("projection_refresh_contention_leaves_durable_work_pending")
+    else {
+        return;
+    };
     let store = tendi_core::storage::Store::open(root.join("test.sqlite3")).unwrap();
     let result = refresh_projection(
         &store,
@@ -196,7 +187,6 @@ fn projection_refresh_contention_leaves_durable_work_pending() {
     assert!(state.full_refresh);
     assert!(state.snapshot.is_none());
     drop(store);
-    std::fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
@@ -344,15 +334,11 @@ fn offline_sync_refreshes_enabled_inventory_and_saved_exclusions() {
 
 #[test]
 fn standalone_search_drains_committed_dirty_sessions_without_a_daemon() {
-    let root = std::env::temp_dir().join(format!(
-        "tendi-cli-search-pending-{}-{}",
-        std::process::id(),
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    std::fs::create_dir_all(&root).unwrap();
+    let Some(root) = isolated_database_test_root(
+        "standalone_search_drains_committed_dirty_sessions_without_a_daemon",
+    ) else {
+        return;
+    };
     let store = tendi_core::storage::Store::open(root.join("test.sqlite3")).unwrap();
     let scope = workspace_scope_key(&root).unwrap();
     let path = root.join("session.jsonl");
@@ -378,7 +364,6 @@ fn standalone_search_drains_committed_dirty_sessions_without_a_daemon() {
         1
     );
     drop(store);
-    std::fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
@@ -507,4 +492,35 @@ fn generated_runtime_client_decodes_json_rpc_success_and_error() {
     )
     .unwrap_err();
     assert_eq!(error.to_string(), "CONFLICT: conflict");
+}
+
+// Store maintenance owns background connections until process exit. Remove the
+// database only after that lifetime ends, as the other isolated CLI tests do.
+fn isolated_database_test_root(test_name: &str) -> Option<std::path::PathBuf> {
+    const CHILD_ROOT: &str = "TENDI_CLI_DATABASE_TEST_ROOT";
+    if let Some(root) = env::var_os(CHILD_ROOT) {
+        return Some(root.into());
+    }
+    let root = env::temp_dir().join(format!(
+        "tendi-cli-{test_name}-{}-{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&root).unwrap();
+    let output = std::process::Command::new(env::current_exe().unwrap())
+        .args(["--exact", &format!("tests::{test_name}"), "--nocapture"])
+        .env(CHILD_ROOT, &root)
+        .output()
+        .unwrap();
+    std::fs::remove_dir_all(root).unwrap();
+    assert!(
+        output.status.success(),
+        "isolated database test failed:\n{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    None
 }
