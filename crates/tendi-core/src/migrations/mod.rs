@@ -573,6 +573,9 @@ fn initialize_primary_session_cleanup(store: &Store) -> Result<()> {
     if !session_database_ready {
         return Ok(());
     }
+    if schema::migration_state(&store.conn, PRIMARY_SESSION_CLEANUP_MIGRATION_KEY)?.is_some() {
+        return Ok(());
+    }
     store
         .writer
         .write("migration.session_database.schedule_cleanup", |tx| {

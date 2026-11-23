@@ -1230,11 +1230,8 @@ fn initialize_migration_state(conn: &Connection, key: &str, pending: bool) -> Re
     Ok(())
 }
 
-pub(super) fn migration_state(
-    tx: &rusqlite::Transaction<'_>,
-    key: &str,
-) -> Result<Option<(String, i64)>> {
-    tx.query_row(
+pub(super) fn migration_state(conn: &Connection, key: &str) -> Result<Option<(String, i64)>> {
+    conn.query_row(
         "SELECT state, cursor FROM storage_migrations WHERE key = ?1",
         [key],
         |row| Ok((row.get(0)?, row.get(1)?)),
