@@ -4,6 +4,7 @@ import test from "node:test";
 
 const hooksCss = await readFile(new URL("../src/views/HooksView.css", import.meta.url), "utf8");
 const sessionsView = await readFile(new URL("../src/views/SessionsView.tsx", import.meta.url), "utf8");
+const inferredResumeTargets = await readFile(new URL("../src/features/sessions/useInferredSessionResumeTargets.ts", import.meta.url), "utf8");
 
 test("Hooks source loading and preview keep the same outer height", () => {
   assert.match(hooksCss, /\.hookSourceLoading\s*\{[\s\S]*min-height:\s*142px;/);
@@ -20,6 +21,8 @@ test("Skills popover waits for loaded links before opening", () => {
 
 test("Sessions remote-list failure does not loop on empty fallback state", () => {
   assert.match(sessionsView, /const EMPTY_SESSION_ROWS: SessionRecord\[\] = \[\];/);
-  assert.match(sessionsView, /const tableSessions = localListView\?\.tableSessions \?\? remoteList\?\.rows \?\? EMPTY_SESSION_ROWS;/);
-  assert.match(sessionsView, /setInferredResumeTargets\(\(current\) => Object\.keys\(current\)\.length === 0 \? current : \{\}\);/);
+  assert.match(sessionsView, /const baseTableSessions = localListView\?\.tableSessions \?\? remoteList\?\.rows \?\? EMPTY_SESSION_ROWS;/);
+  assert.match(sessionsView, /const tableSessions = useMemo\([\s\S]*?\[allSessionItems, baseTableSessions, useLocalSessionList\],\s*\);/);
+  assert.match(sessionsView, /useInferredSessionResumeTargets\(\{\s*sessions: tableSessions,/);
+  assert.match(inferredResumeTargets, /setInferredTargets\(\(current\) => Object\.keys\(current\)\.length === 0 \? current : \{\}\);/);
 });

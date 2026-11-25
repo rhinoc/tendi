@@ -520,49 +520,39 @@ export function MultiSelectInput({
   );
 }
 
-type MultiSelectPosition = { left: number; top: number; width: number; height: number; side: "top" | "bottom" };
+type MultiSelectPosition = { left: number; top: number; width: number; maxHeight: number };
 
 function useMultiSelectPosition(
   triggerRef: RefObject<HTMLDivElement | null>,
-  contentRef: RefObject<HTMLDivElement | null>,
   open: boolean,
 ) {
   const [position, setPosition] = useState<MultiSelectPosition | null>(null);
   const update = useCallback(() => {
     const trigger = triggerRef.current;
-    const content = contentRef.current;
-    if (!trigger || !content) return;
+    if (!trigger) return;
     const rect = trigger.getBoundingClientRect();
     const width = rect.width;
     const viewportPadding = 8;
     const gap = 6;
-    const list = content.querySelector<HTMLElement>('[role="listbox"]');
-    const contentHeight = Math.max(content.scrollHeight, list?.scrollHeight ?? 0);
-    const desiredHeight = Math.min(contentHeight, window.innerHeight - viewportPadding * 2);
-    const below = Math.max(0, window.innerHeight - rect.bottom - gap - viewportPadding);
-    const side: MultiSelectPosition["side"] = "bottom";
-    const height = Math.min(desiredHeight, below);
-    const desiredLeft = rect.left;
-    const left = Math.min(Math.max(desiredLeft, 8), Math.max(8, window.innerWidth - width - 8));
-    const top = Math.min(rect.bottom + gap, window.innerHeight - viewportPadding - height);
-    const next = { left, top, width, height, side };
+    const viewportBottom = window.innerHeight - viewportPadding;
+    const top = Math.min(rect.bottom + gap, viewportBottom);
+    const maxHeight = viewportBottom - top;
+    const viewportRight = window.innerWidth - viewportPadding;
+    const left = Math.max(viewportPadding, Math.min(rect.left, viewportRight - width));
     setPosition((current) => current
       && current.left === left
       && current.top === top
       && current.width === width
-      && current.height === height
-      && current.side === side
+      && current.maxHeight === maxHeight
       ? current
-      : next);
-  }, [contentRef, triggerRef]);
+      : { left, top, width, maxHeight });
+  }, [triggerRef]);
   useLayoutEffect(() => {
-    update();
     if (!open) return;
+    update();
     const trigger = triggerRef.current;
-    const content = contentRef.current;
     const observer = typeof ResizeObserver === "function" ? new ResizeObserver(update) : null;
     if (trigger) observer?.observe(trigger);
-    if (content) observer?.observe(content);
     window.addEventListener("scroll", update, true);
     window.addEventListener("resize", update);
     return () => {
@@ -570,7 +560,7 @@ function useMultiSelectPosition(
       window.removeEventListener("scroll", update, true);
       window.removeEventListener("resize", update);
     };
-  }, [contentRef, open, triggerRef, update]);
+  }, [open, triggerRef, update]);
   return position;
 }
 
@@ -578,7 +568,7 @@ export type MultiSelectContentProps = { children: ReactNode; className?: string 
 
 export function MultiSelectContent({ children, className = "" }: MultiSelectContentProps) {
   const context = useMultiSelectContext("MultiSelectContent");
-  const position = useMultiSelectPosition(context.triggerRef, context.contentRef, context.open);
+  const position = useMultiSelectPosition(context.triggerRef, context.open);
   if (typeof document === "undefined") return null;
   const handleWheelCapture = (event: React.WheelEvent<HTMLDivElement>) => {
     const content = event.currentTarget;
@@ -607,10 +597,10 @@ export function MultiSelectContent({ children, className = "" }: MultiSelectCont
         left: position?.left ?? 0,
         top: position?.top ?? 0,
         width: position?.width ?? 0,
-        height: position?.height,
+        maxHeight: position?.maxHeight,
         visibility: position ? "visible" : "hidden",
         pointerEvents: context.open && position ? "auto" : "none",
-        transformOrigin: position?.side === "top" ? "bottom center" : "top center",
+        transformOrigin: "top center",
       } as CSSProperties}
       initial={false}
       animate={{ opacity: context.open ? 1 : 0, y: context.open ? 0 : -4, scale: context.open ? 1 : 0.985 }}
