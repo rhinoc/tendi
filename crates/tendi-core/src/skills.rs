@@ -5568,11 +5568,15 @@ fn infer_skill_root_for_dir(skill_dir: &Path) -> Option<SkillRoot> {
         return None;
     }
     let home = dirs::home_dir();
-    if let Some((agent, scope)) = crate::providers::agent_providers().into_iter().find_map(|provider| {
-        provider
-            .skill_scope_for_root(skills_root, home.as_deref())
-            .map(|scope| (provider.kind(), scope))
-    }) {
+    if let Some((agent, scope)) =
+        crate::providers::agent_providers()
+            .into_iter()
+            .find_map(|provider| {
+                provider
+                    .skill_scope_for_root(skills_root, home.as_deref())
+                    .map(|scope| (provider.kind(), scope))
+            })
+    {
         return Some(SkillRoot {
             path: skills_root.to_path_buf(),
             scope: scope.to_string(),
@@ -6140,7 +6144,11 @@ fn symlink_status(root: &Path, skill_dir: &Path) -> String {
 }
 
 fn install_target(agent: AgentKind, root: &Path) -> String {
-    format!("{}:{}", crate::providers::agent_provider(agent).skill_install_target_id(root), root.display())
+    format!(
+        "{}:{}",
+        crate::providers::agent_provider(agent).skill_install_target_id(root),
+        root.display()
+    )
 }
 
 fn is_update_check_path(path: &SkillPath) -> bool {

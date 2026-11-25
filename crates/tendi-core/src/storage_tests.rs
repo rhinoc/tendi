@@ -534,7 +534,9 @@ fn antigravity_analytics_projects_cached_tokens_and_models() {
     let store = Store::open(temp.join("tendi.sqlite3")).unwrap();
     let scope = ScopeKey::new("workspace:/repo").unwrap();
     let sessions = [record];
-    store.apply_session_delta_for_scope(&scope, &sessions).unwrap();
+    store
+        .apply_session_delta_for_scope(&scope, &sessions)
+        .unwrap();
 
     let refresh = store
         .refresh_session_analytics_for_scope_with_progress(&scope, &sessions, |_| {})

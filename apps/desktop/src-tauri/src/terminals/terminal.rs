@@ -25,8 +25,12 @@ impl TerminalProvider for Terminal {
     }
     #[cfg(target_os = "macos")]
     fn focus_process(&self, pid: i32) -> Result<bool, TerminalLaunchError> {
-        let Some(tty) = super::process_tty(pid)? else { return Ok(false) };
-        super::focus_with_applescript("Terminal", r#"
+        let Some(tty) = super::process_tty(pid)? else {
+            return Ok(false);
+        };
+        super::focus_with_applescript(
+            "Terminal",
+            r#"
 on run argv
     set targetTTY to item 1 of argv
     tell application "Terminal"
@@ -43,7 +47,9 @@ on run argv
     end tell
     return "not found"
 end run
-"#, &tty)
+"#,
+            &tty,
+        )
     }
     fn launch(&self, command: &tendi_core::SessionCommand) -> Result<(), TerminalLaunchError> {
         let script = terminal_script(command);

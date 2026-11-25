@@ -20,7 +20,9 @@ impl TerminalProvider for GhosttyProvider {
     }
     #[cfg(target_os = "macos")]
     fn focus_process(&self, pid: i32) -> Result<bool, TerminalLaunchError> {
-        super::focus_with_applescript("Ghostty", r#"
+        super::focus_with_applescript(
+            "Ghostty",
+            r#"
 on run argv
     set targetPID to (item 1 of argv) as integer
     tell application "Ghostty"
@@ -34,7 +36,9 @@ on run argv
     end tell
     return "not found"
 end run
-"#, &pid.to_string())
+"#,
+            &pid.to_string(),
+        )
     }
     fn launch(&self, command: &tendi_core::SessionCommand) -> Result<(), TerminalLaunchError> {
         let script = terminal_input_script(command);

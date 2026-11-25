@@ -235,7 +235,8 @@ pub fn scan_hooks_for_project_roots(cwd: &Path, project_roots: &[PathBuf]) -> Re
     let mut hooks = Vec::new();
     let mut warnings = Vec::new();
     let mut scanned_files = HashSet::new();
-    let context = crate::providers::ProviderContext::with_additional_project_dirs(cwd, project_roots);
+    let context =
+        crate::providers::ProviderContext::with_additional_project_dirs(cwd, project_roots);
     let tendi_hook_review_states = load_tendi_hook_review_states();
 
     for provider in crate::providers::agent_providers() {
@@ -619,8 +620,7 @@ pub fn read_hook_source_at_path(
         };
         (content, "source".to_string(), truncated)
     };
-    let read_only_reason = provider.hook_read_only_reason(path)
-        .map(str::to_string);
+    let read_only_reason = provider.hook_read_only_reason(path).map(str::to_string);
 
     Ok(HookSourceContent {
         path: path.to_path_buf(),
@@ -931,7 +931,13 @@ pub(crate) fn scan_hook_file(
         }
     };
     let trust_hash = sha256_text(&text);
-    if crate::providers::agent_provider(agent).parse_hook_file(path, &text, &trust_hash, hooks, warnings) {
+    if crate::providers::agent_provider(agent).parse_hook_file(
+        path,
+        &text,
+        &trust_hash,
+        hooks,
+        warnings,
+    ) {
         return;
     }
 

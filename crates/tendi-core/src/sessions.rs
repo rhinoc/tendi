@@ -1143,7 +1143,10 @@ fn scan_session_source(
             }
         }
     }
-    if path.extension().is_some_and(|extension| extension == "jsonl") {
+    if path
+        .extension()
+        .is_some_and(|extension| extension == "jsonl")
+    {
         scan_detected_jsonl_session(path, sessions, cache);
     }
 }

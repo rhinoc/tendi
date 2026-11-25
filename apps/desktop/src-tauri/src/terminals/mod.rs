@@ -80,36 +80,73 @@ pub(crate) fn terminal_application_name(terminal: &str) -> String {
 pub(crate) fn focus_existing_process(pid: i32) -> Result<Option<String>, TerminalLaunchError> {
     let mut error = None;
     for provider in providers() {
-        if !provider.available() { continue; }
+        if !provider.available() {
+            continue;
+        }
         match provider.focus_process(pid) {
             Ok(true) => return Ok(Some(provider.id().to_string())),
             Ok(false) => {}
             Err(failure) => error = Some(failure),
         }
     }
-    match error { Some(error) => Err(error), None => Ok(None) }
+    match error {
+        Some(error) => Err(error),
+        None => Ok(None),
+    }
 }
 
 #[cfg(target_os = "macos")]
 fn process_tty(pid: i32) -> Result<Option<String>, TerminalLaunchError> {
-    let output = Command::new("ps").args(["-p", &pid.to_string(), "-o", "tty="])
-        .output().map_err(|error| TerminalLaunchError::launch_failed(format!("failed to inspect process terminal: {error}")))?;
+    let output = Command::new("ps")
+        .args(["-p", &pid.to_string(), "-o", "tty="])
+        .output()
+        .map_err(|error| {
+            TerminalLaunchError::launch_failed(format!(
+                "failed to inspect process terminal: {error}"
+            ))
+        })?;
     let tty = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    Ok((output.status.success() && !tty.is_empty() && tty != "??" && tty != "?").then(|| format!("/dev/{tty}")))
+    Ok(
+        (output.status.success() && !tty.is_empty() && tty != "??" && tty != "?")
+            .then(|| format!("/dev/{tty}")),
+    )
 }
 
 #[cfg(target_os = "macos")]
-fn focus_with_applescript(app: &str, script: &str, target: &str) -> Result<bool, TerminalLaunchError> {
-    let running = Command::new("osascript").args(["-e", &format!("application \"{}\" is running", applescript_quote(app))])
-        .output().map_err(|error| TerminalLaunchError::launch_failed(format!("failed to inspect {app}: {error}")))?;
+fn focus_with_applescript(
+    app: &str,
+    script: &str,
+    target: &str,
+) -> Result<bool, TerminalLaunchError> {
+    let running = Command::new("osascript")
+        .args([
+            "-e",
+            &format!("application \"{}\" is running", applescript_quote(app)),
+        ])
+        .output()
+        .map_err(|error| {
+            TerminalLaunchError::launch_failed(format!("failed to inspect {app}: {error}"))
+        })?;
     if !running.status.success() {
-        return Err(TerminalLaunchError::launch_failed(format!("failed to inspect {app}: {}", String::from_utf8_lossy(&running.stderr).trim())));
+        return Err(TerminalLaunchError::launch_failed(format!(
+            "failed to inspect {app}: {}",
+            String::from_utf8_lossy(&running.stderr).trim()
+        )));
     }
-    if String::from_utf8_lossy(&running.stdout).trim() != "true" { return Ok(false); }
-    let output = Command::new("osascript").args(["-e", script, target]).output()
-        .map_err(|error| TerminalLaunchError::launch_failed(format!("failed to focus {app}: {error}")))?;
+    if String::from_utf8_lossy(&running.stdout).trim() != "true" {
+        return Ok(false);
+    }
+    let output = Command::new("osascript")
+        .args(["-e", script, target])
+        .output()
+        .map_err(|error| {
+            TerminalLaunchError::launch_failed(format!("failed to focus {app}: {error}"))
+        })?;
     if !output.status.success() {
-        return Err(TerminalLaunchError::launch_failed(format!("failed to focus {app}: {}", String::from_utf8_lossy(&output.stderr).trim())));
+        return Err(TerminalLaunchError::launch_failed(format!(
+            "failed to focus {app}: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
     }
     Ok(String::from_utf8_lossy(&output.stdout).trim() == "found")
 }

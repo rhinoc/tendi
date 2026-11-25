@@ -142,8 +142,8 @@ impl Store {
                             continue;
                         }
                     };
-                    let parser_version = crate::providers::agent_provider(session.agent)
-                        .analytics_parser_version();
+                    let parser_version =
+                        crate::providers::agent_provider(session.agent).analytics_parser_version();
                     if cached_row.is_some_and(|(file_mtime, file_size, cached_parser_version)| {
                         *file_mtime == file_state.file_mtime
                             && *file_size == file_state.file_size

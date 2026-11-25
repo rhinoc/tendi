@@ -174,7 +174,12 @@ fn session_resume_active_writer_response(
         serde_json::json!({ "lockPath": writer.lock_path }),
     );
     runtime_schema::SessionResumeResponse {
-        status: if in_app { "activeWriterInApp" } else { "activeWriter" }.to_string(),
+        status: if in_app {
+            "activeWriterInApp"
+        } else {
+            "activeWriter"
+        }
+        .to_string(),
         lock_path: Some(writer.lock_path.display().to_string()),
         agent: None,
         terminal: None,

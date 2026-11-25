@@ -72,7 +72,9 @@ pub(super) fn focus_process(pid: i32) -> Result<bool, TerminalLaunchError> {
     if !Path::new(CLI_PATH).is_file() {
         return Ok(false);
     }
-    let client = match local_client(&cli_output(cli_command()?.args(["client", "ls", "--json"]))?)? {
+    let client = match local_client(&cli_output(
+        cli_command()?.args(["client", "ls", "--json"]),
+    )?)? {
         Some(client) => client,
         None => return Ok(false),
     };
@@ -80,22 +82,57 @@ pub(super) fn focus_process(pid: i32) -> Result<bool, TerminalLaunchError> {
         return Ok(false);
     };
     open_terminal_application("Rex Beta").map_err(TerminalLaunchError::launch_failed)?;
-    cli_output(cli_command()?.args(["-C", &client, "do", "session.select", &format!("session_id={session}"), &format!("window_id={}", block.window_id)]))?;
+    cli_output(cli_command()?.args([
+        "-C",
+        &client,
+        "do",
+        "session.select",
+        &format!("session_id={session}"),
+        &format!("window_id={}", block.window_id),
+    ]))?;
     cli_output(cli_command()?.args(["focus", "-s", &session, &block.block_id]))?;
     Ok(true)
 }
 
 fn find_process(pid: i32) -> Result<Option<(String, Block)>, TerminalLaunchError> {
-    let sessions: SessionList = serde_json::from_slice(&cli_output(cli_command()?.args(["ls", "--json"]))?)
-        .map_err(|error| TerminalLaunchError::launch_failed(format!("invalid Rex session list: {error}")))?;
+    let sessions: SessionList = serde_json::from_slice(&cli_output(
+        cli_command()?.args(["ls", "--json"]),
+    )?)
+    .map_err(|error| {
+        TerminalLaunchError::launch_failed(format!("invalid Rex session list: {error}"))
+    })?;
     for session in sessions.sessions {
-        let blocks: BlockList = serde_json::from_slice(&cli_output(cli_command()?.args(["block", "ls", "-s", &session.session_id, "--json"]))?)
-            .map_err(|error| TerminalLaunchError::launch_failed(format!("invalid Rex block list: {error}")))?;
-        for block in blocks.blocks.into_iter().filter(|block| block.creator_name == "com.superlogical.terminal") {
-            let bytes = cli_output(cli_command()?.args(["block", "call", "-s", &session.session_id, "-b", &block.block_id, "process"]))?;
-            let process: BlockProcess = serde_json::from_slice(&bytes)
-                .map_err(|error| TerminalLaunchError::launch_failed(format!("invalid Rex process: {error}")))?;
-            if process.foreground.is_some_and(|foreground| foreground.pid == pid) {
+        let blocks: BlockList = serde_json::from_slice(&cli_output(cli_command()?.args([
+            "block",
+            "ls",
+            "-s",
+            &session.session_id,
+            "--json",
+        ]))?)
+        .map_err(|error| {
+            TerminalLaunchError::launch_failed(format!("invalid Rex block list: {error}"))
+        })?;
+        for block in blocks
+            .blocks
+            .into_iter()
+            .filter(|block| block.creator_name == "com.superlogical.terminal")
+        {
+            let bytes = cli_output(cli_command()?.args([
+                "block",
+                "call",
+                "-s",
+                &session.session_id,
+                "-b",
+                &block.block_id,
+                "process",
+            ]))?;
+            let process: BlockProcess = serde_json::from_slice(&bytes).map_err(|error| {
+                TerminalLaunchError::launch_failed(format!("invalid Rex process: {error}"))
+            })?;
+            if process
+                .foreground
+                .is_some_and(|foreground| foreground.pid == pid)
+            {
                 return Ok(Some((session.session_id, block)));
             }
         }

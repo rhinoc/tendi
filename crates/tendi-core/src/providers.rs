@@ -25,8 +25,8 @@ mod antigravity_sessions;
 pub(crate) mod claude;
 pub(crate) mod codex;
 pub(crate) mod cursor;
-pub(crate) mod cursor_sessions;
 mod cursor_native_sessions;
+pub(crate) mod cursor_sessions;
 pub(crate) mod shared;
 mod unknown;
 
@@ -140,7 +140,10 @@ pub(crate) trait AgentProvider: Sync {
         self.executable_names()
             .iter()
             .find_map(|name| crate::agents::which(name))
-            .or_else(|| self.default_executable_path(ctx).filter(|path| path.is_file()))
+            .or_else(|| {
+                self.default_executable_path(ctx)
+                    .filter(|path| path.is_file())
+            })
     }
 
     fn default_executable_path(&self, _ctx: &ProviderContext) -> Option<PathBuf> {
@@ -475,7 +478,9 @@ pub(crate) trait AgentProvider: Sync {
         false
     }
 
-    fn session_resumable(&self, _path: &Path, _id: &str) -> bool { true }
+    fn session_resumable(&self, _path: &Path, _id: &str) -> bool {
+        true
+    }
 
     fn read_session_transcript(
         &self,
@@ -500,7 +505,11 @@ pub(crate) trait AgentProvider: Sync {
         None
     }
 
-    fn resume_target_from_transcript_value(&self, _path: &Path, _value: &Value) -> Option<&'static str> {
+    fn resume_target_from_transcript_value(
+        &self,
+        _path: &Path,
+        _value: &Value,
+    ) -> Option<&'static str> {
         None
     }
 
@@ -524,9 +533,16 @@ pub(crate) trait AgentProvider: Sync {
         Vec::new()
     }
 
-    fn owns_session_process(&self, _executable: &Path) -> bool { false }
+    fn owns_session_process(&self, _executable: &Path) -> bool {
+        false
+    }
 
-    fn held_sessions(&self, _ctx: &ProviderContext, _roots: &[PathBuf], _processes: &mut crate::session_ownership::processes::Processes) -> Result<std::collections::BTreeSet<crate::session_ownership::HeldSession>> {
+    fn held_sessions(
+        &self,
+        _ctx: &ProviderContext,
+        _roots: &[PathBuf],
+        _processes: &mut crate::session_ownership::processes::Processes,
+    ) -> Result<std::collections::BTreeSet<crate::session_ownership::HeldSession>> {
         Ok(Default::default())
     }
 
@@ -665,7 +681,9 @@ pub(crate) trait AgentProvider: Sync {
             .map(str::to_string)
     }
 
-    fn session_parent_id_from_path(&self, _path: &Path) -> Option<String> { None }
+    fn session_parent_id_from_path(&self, _path: &Path) -> Option<String> {
+        None
+    }
 
     fn session_project_aliases(&self, _path: &str) -> Vec<String> {
         Vec::new()

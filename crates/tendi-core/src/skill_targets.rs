@@ -579,14 +579,17 @@ fn provider_target_configs() -> impl Iterator<Item = SkillTargetConfig> {
     crate::providers::all_providers()
         .into_iter()
         .flat_map(|provider| {
-            provider.skill_targets().iter().map(move |target| SkillTargetConfig {
-                id: target.id,
-                display_name: target.display_name,
-                project_skills_dir: "<provider-owned>",
-                listed: target.listed,
-                global: GlobalRoot::Provider(provider.kind()),
-                provider: Some(provider.kind()),
-            })
+            provider
+                .skill_targets()
+                .iter()
+                .map(move |target| SkillTargetConfig {
+                    id: target.id,
+                    display_name: target.display_name,
+                    project_skills_dir: "<provider-owned>",
+                    listed: target.listed,
+                    global: GlobalRoot::Provider(provider.kind()),
+                    provider: Some(provider.kind()),
+                })
         })
 }
 

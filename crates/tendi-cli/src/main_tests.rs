@@ -94,20 +94,93 @@ fn transcript_requires_either_current_or_path_with_provider() {
 
 #[test]
 fn recall_filters_and_excerpt_source_constraints_are_exposed_by_cli() {
-    assert!(Cli::try_parse_from([
-        "tendi", "sessions", "search", "叭哥说", "--cwd", "/douvo", "--cwd", "/old-douvo",
-        "--cwd-exact", "--since", "2026-06-01", "--until", "2026-07-01", "--agent", "codex",
-        "--role", "user", "--sort", "time-asc", "--limit", "5", "--fields", "id,path,snippet", "--json"
-    ]).is_ok());
-    assert!(Cli::try_parse_from([
-        "tendi", "sessions", "transcript", "--session", "session-id", "--match", "叭哥说", "--role", "user", "--around", "2", "--json"
-    ]).is_ok());
+    assert!(
+        Cli::try_parse_from([
+            "tendi",
+            "sessions",
+            "search",
+            "叭哥说",
+            "--cwd",
+            "/douvo",
+            "--cwd",
+            "/old-douvo",
+            "--cwd-exact",
+            "--since",
+            "2026-06-01",
+            "--until",
+            "2026-07-01",
+            "--agent",
+            "codex",
+            "--role",
+            "user",
+            "--sort",
+            "time-asc",
+            "--limit",
+            "5",
+            "--fields",
+            "id,path,snippet",
+            "--json"
+        ])
+        .is_ok()
+    );
+    assert!(
+        Cli::try_parse_from([
+            "tendi",
+            "sessions",
+            "transcript",
+            "--session",
+            "session-id",
+            "--match",
+            "叭哥说",
+            "--role",
+            "user",
+            "--around",
+            "2",
+            "--json"
+        ])
+        .is_ok()
+    );
     for args in [
-        vec!["tendi", "sessions", "transcript", "--session", "id", "--current"],
-        vec!["tendi", "sessions", "transcript", "/source", "--session", "id", "--agent", "codex"],
-        vec!["tendi", "sessions", "transcript", "--session", "id", "--all", "--match", "word"],
-        vec!["tendi", "sessions", "search", "word", "--fields", "token_usage", "--json"],
-    ] { assert!(Cli::try_parse_from(args).is_err()); }
+        vec![
+            "tendi",
+            "sessions",
+            "transcript",
+            "--session",
+            "id",
+            "--current",
+        ],
+        vec![
+            "tendi",
+            "sessions",
+            "transcript",
+            "/source",
+            "--session",
+            "id",
+            "--agent",
+            "codex",
+        ],
+        vec![
+            "tendi",
+            "sessions",
+            "transcript",
+            "--session",
+            "id",
+            "--all",
+            "--match",
+            "word",
+        ],
+        vec![
+            "tendi",
+            "sessions",
+            "search",
+            "word",
+            "--fields",
+            "token_usage",
+            "--json",
+        ],
+    ] {
+        assert!(Cli::try_parse_from(args).is_err());
+    }
 }
 
 #[test]
@@ -444,13 +517,23 @@ fn generated_runtime_client_emits_json_rpc_method_and_params() {
 #[test]
 fn sync_pull_accepts_a_destination_and_preview_without_a_history_revision() {
     let cli = Cli::try_parse_from([
-        "tendi", "skills", "sync", "pull", "--to", "codex", "--dry-run",
+        "tendi",
+        "skills",
+        "sync",
+        "pull",
+        "--to",
+        "codex",
+        "--dry-run",
     ])
     .unwrap();
     let Command::Skills {
-        command: SkillCommand::Sync {
-            command: BackupCommand::Pull { to, scope, dry_run, .. },
-        },
+        command:
+            SkillCommand::Sync {
+                command:
+                    BackupCommand::Pull {
+                        to, scope, dry_run, ..
+                    },
+            },
     } = cli.command
     else {
         panic!("unexpected command");

@@ -299,10 +299,22 @@ pub fn transcript(
         if json {
             let stdout = std::io::stdout();
             let mut output = stdout.lock();
-            tendi_core::transcript::write_session_transcript_json(&path, agent, session_id.as_deref(), &mut output)?;
+            tendi_core::transcript::write_session_transcript_json(
+                &path,
+                agent,
+                session_id.as_deref(),
+                &mut output,
+            )?;
             writeln!(output)?;
         } else {
-            print_transcript(&tendi_core::transcript::parse_session_transcript(&path, agent, session_id.as_deref())?.items)?;
+            print_transcript(
+                &tendi_core::transcript::parse_session_transcript(
+                    &path,
+                    agent,
+                    session_id.as_deref(),
+                )?
+                .items,
+            )?;
         }
     } else if args.page || args.cursor.is_some() {
         let page = tendi_core::transcript::parse_session_transcript_page(

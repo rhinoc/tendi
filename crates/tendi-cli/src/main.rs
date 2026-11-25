@@ -2034,14 +2034,26 @@ fn run_command(command: Command) -> Result<()> {
                     print_sessions(&report.sessions)?;
                 }
             }
-            SessionCommand::Search { query, json, options } => {
+            SessionCommand::Search {
+                query,
+                json,
+                options,
+            } => {
                 session_cli::search(&cwd, query, options, json)?;
             }
             SessionCommand::Refresh { json } => {
                 let report = session_cli::refresh(&cwd)?;
-                if json { println!("{}", serde_json::to_string(&report)?); }
+                if json {
+                    println!("{}", serde_json::to_string(&report)?);
+                }
             }
-            SessionCommand::Transcript { path, current, agent, json, options } => {
+            SessionCommand::Transcript {
+                path,
+                current,
+                agent,
+                json,
+                options,
+            } => {
                 session_cli::transcript(&cwd, path, current, agent, options, json)?;
             }
         },
