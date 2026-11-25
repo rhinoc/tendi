@@ -6,6 +6,8 @@ import {
   copyFileSync,
   existsSync,
   mkdirSync,
+  renameSync,
+  rmSync,
   writeFileSync,
 } from "node:fs";
 import { dirname, resolve } from "node:path";
@@ -33,8 +35,15 @@ const bundleIdentifier = "dev.tendi.desktop.dev";
 
 mkdirSync(executableDir, { recursive: true });
 mkdirSync(resourcesDir, { recursive: true });
-copyFileSync(executable, appExecutable);
-chmodSync(appExecutable, 0o755);
+// macOS may retain the previous code signature when the executable's inode is reused.
+const stagedExecutable = resolve(executableDir, `.tendi-desktop.${process.pid}.tmp`);
+try {
+  copyFileSync(executable, stagedExecutable);
+  chmodSync(stagedExecutable, 0o755);
+  renameSync(stagedExecutable, appExecutable);
+} finally {
+  rmSync(stagedExecutable, { force: true });
+}
 copyFileSync(iconSource, appIcon);
 writeFileSync(
   resolve(contentsDir, "Info.plist"),
