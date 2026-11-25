@@ -19,6 +19,8 @@ use crate::{
 pub struct HookRecord {
     pub agent: AgentKind,
     pub event: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
     pub matcher: Option<String>,
     pub hook_type: Option<String>,
     pub command: Option<String>,
@@ -58,9 +60,11 @@ pub struct HookSourceContent {
     pub truncated: bool,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct HookSourceMatch {
     pub event: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
     pub matcher: Option<String>,
     pub hook_type: Option<String>,
     pub command: Option<String>,
@@ -72,8 +76,15 @@ pub struct HookSourceMatch {
 }
 
 pub(crate) fn hook_source_match_from_record(hook: &HookRecord) -> HookSourceMatch {
+    if let Some(name) = &hook.name {
+        return HookSourceMatch {
+            name: Some(name.clone()),
+            ..HookSourceMatch::default()
+        };
+    }
     HookSourceMatch {
         event: hook.event.clone(),
+        name: None,
         matcher: hook.matcher.clone(),
         hook_type: hook.hook_type.clone(),
         command: hook.command.clone(),
@@ -103,6 +114,11 @@ pub(crate) fn hook_source_match_from_key(key: &str) -> Result<HookSourceMatch> {
 /// the source snapshot hash (`trust_hash`). Those values can change without
 /// changing which hook the caller means to address.
 pub fn hook_record_id(hook: &HookRecord) -> String {
+    if let Some(name) = &hook.name {
+        return serde_json::to_string(&(hook.agent, &hook.path, name))
+            .expect("named hook identity serializes");
+    }
+
     serde_json::to_string(&(
         hook.agent,
         hook.path.to_string_lossy(),
@@ -128,6 +144,8 @@ pub struct HookDeleteRequest {
     pub path: PathBuf,
     pub expected_trust_hash: String,
     pub event: String,
+    #[serde(default)]
+    pub name: Option<String>,
     pub matcher: Option<String>,
     pub hook_type: Option<String>,
     pub command: Option<String>,
@@ -143,6 +161,8 @@ pub struct HookSetEnabledRequest {
     pub path: PathBuf,
     pub expected_trust_hash: String,
     pub event: String,
+    #[serde(default)]
+    pub name: Option<String>,
     pub matcher: Option<String>,
     pub hook_type: Option<String>,
     pub command: Option<String>,
@@ -159,6 +179,8 @@ pub struct HookReviewRequest {
     pub path: PathBuf,
     pub expected_trust_hash: String,
     pub event: String,
+    #[serde(default)]
+    pub name: Option<String>,
     pub matcher: Option<String>,
     pub hook_type: Option<String>,
     pub command: Option<String>,
@@ -206,10 +228,14 @@ fn apply_tendi_hook_review_states(hooks: &mut [HookRecord], states: &HashMap<Str
 }
 
 pub fn scan_hooks(cwd: &Path) -> Result<HookScan> {
+    scan_hooks_for_project_roots(cwd, &[])
+}
+
+pub fn scan_hooks_for_project_roots(cwd: &Path, project_roots: &[PathBuf]) -> Result<HookScan> {
     let mut hooks = Vec::new();
     let mut warnings = Vec::new();
     let mut scanned_files = HashSet::new();
-    let context = crate::providers::ProviderContext::new(cwd);
+    let context = crate::providers::ProviderContext::with_additional_project_dirs(cwd, project_roots);
     let tendi_hook_review_states = load_tendi_hook_review_states();
 
     for provider in crate::providers::agent_providers() {
@@ -371,6 +397,7 @@ pub fn hooks_matching_delete_requests<'a>(
 fn hook_matches_delete_request(hook: &HookRecord, request: &HookDeleteRequest) -> bool {
     hook.path == request.path
         && hook.trust_hash == request.expected_trust_hash
+        && hook.name == request.name
         && hook.event == request.event
         && hook.matcher == request.matcher
         && hook.hook_type == request.hook_type
@@ -383,6 +410,7 @@ fn hook_matches_delete_request(hook: &HookRecord, request: &HookDeleteRequest) -
 
 fn hook_matches_set_enabled_identity(hook: &HookRecord, request: &HookSetEnabledRequest) -> bool {
     hook.path == request.path
+        && hook.name == request.name
         && hook.event == request.event
         && hook.matcher == request.matcher
         && hook.hook_type == request.hook_type
@@ -398,6 +426,7 @@ fn hook_matches_review_request(hook: &HookRecord, request: &HookReviewRequest) -
         && crate::providers::agent_provider(request.agent).discoverable()
         && hook.path == request.path
         && hook.trust_hash == request.expected_trust_hash
+        && hook.name == request.name
         && hook.event == request.event
         && hook.matcher == request.matcher
         && hook.hook_type == request.hook_type
@@ -567,8 +596,16 @@ pub fn read_hook_source_at_path(
         .map(|metadata| metadata.len())
         .unwrap_or(content.len() as u64);
 
-    let source_line = hook_match.and_then(|request| hook_source_line(&content, request));
-    let snippet = hook_match.and_then(|request| hook_source_snippet(path, &content, request));
+    let provider = crate::providers::agent_provider(agent);
+    let (source_line, snippet) = hook_match.map_or((None, None), |request| {
+        if let Some((line, snippet)) = provider.hook_source_preview(&content, request) {
+            return (line, Some(snippet));
+        }
+        (
+            hook_source_line(&content, request),
+            hook_source_snippet(path, &content, request),
+        )
+    });
     let (content, preview_scope, truncated) = if let Some(snippet) = snippet {
         (snippet, "hook".to_string(), false)
     } else {
@@ -582,8 +619,7 @@ pub fn read_hook_source_at_path(
         };
         (content, "source".to_string(), truncated)
     };
-    let read_only_reason = crate::providers::agent_provider(agent)
-        .hook_read_only_reason(path)
+    let read_only_reason = provider.hook_read_only_reason(path)
         .map(str::to_string);
 
     Ok(HookSourceContent {
@@ -629,7 +665,7 @@ fn hook_source_line(content: &str, request: &HookSourceMatch) -> Option<u32> {
     line_number_for_needle(content, &format!("\"{}\"", request.event))
 }
 
-fn line_number_for_needle(content: &str, needle: &str) -> Option<u32> {
+pub(crate) fn line_number_for_needle(content: &str, needle: &str) -> Option<u32> {
     content
         .lines()
         .enumerate()
@@ -895,7 +931,7 @@ pub(crate) fn scan_hook_file(
         }
     };
     let trust_hash = sha256_text(&text);
-    if crate::providers::agent_provider(agent).parse_hook_file(path, &trust_hash, hooks, warnings) {
+    if crate::providers::agent_provider(agent).parse_hook_file(path, &text, &trust_hash, hooks, warnings) {
         return;
     }
 
@@ -937,6 +973,7 @@ pub(crate) fn delete_toml_hooks(requests: &[HookDeleteRequest], source: &str) ->
 fn hook_delete_source_match(request: &HookDeleteRequest) -> HookSourceMatch {
     HookSourceMatch {
         event: request.event.clone(),
+        name: request.name.clone(),
         matcher: request.matcher.clone(),
         hook_type: request.hook_type.clone(),
         command: request.command.clone(),
@@ -2289,6 +2326,7 @@ fn push_hook_record(
     hooks.push(HookRecord {
         agent,
         event: event.to_string(),
+        name: None,
         matcher: matcher.map(str::to_string),
         hook_type,
         command,

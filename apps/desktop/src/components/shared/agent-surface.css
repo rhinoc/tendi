@@ -67,6 +67,10 @@
   transform: scale(0.72);
 }
 
+.agentIconSurface.antigravity .agentIconImage {
+  transform: none;
+}
+
 .chip.codex,
 .agentPill.codex {
   color: var(--agent-codex);

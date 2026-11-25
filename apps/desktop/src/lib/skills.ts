@@ -1,3 +1,4 @@
+import { supportsSkillVisibility } from "./agents.ts";
 import { friendlyAgent } from "./agents.ts";
 import {
   isWebSource,
@@ -169,12 +170,13 @@ export function statusTone(skill: { statusTone?: string; visibility?: SkillVisib
   return "ok";
 }
 
-export function isSkillVisibilityEditable(skill: { visibility?: SkillVisibility | string }): boolean {
-  return skill.visibility !== SkillVisibility.Mixed;
+export function isSkillVisibilityEditable(skill: { visibility?: SkillVisibility | string; paths?: SkillLike["paths"] }): boolean {
+  return skill.visibility !== SkillVisibility.Mixed
+    && (skill.paths ?? []).every((path) => supportsSkillVisibility(path.agent));
 }
 
 export function isSkillRowSelectable(skill: { visibility?: SkillVisibility | string }): boolean {
-  return isSkillVisibilityEditable(skill);
+  return skill.visibility !== SkillVisibility.Mixed;
 }
 
 export function isSkillSelectable(skill: SkillLike & { visibility?: SkillVisibility | string }): boolean {
@@ -322,6 +324,7 @@ export function targetLabel(target: NonNullable<SkillLike["paths"]>[number]): st
 export function targetAgentLabel(agent: unknown): string {
   const key = `${agent ?? ""}`.toLowerCase().replace(/[^a-z0-9]+/g, "");
   if (key === "shared") return "Shared";
+  if (key === "antigravitycli") return "Antigravity CLI";
   return friendlyAgent(agent);
 }
 

@@ -38,6 +38,7 @@ pub enum AgentKind {
     Codex,
     Cursor,
     Claude,
+    Antigravity,
     Shared,
     Unknown,
 }
@@ -1088,7 +1089,7 @@ fn scan_skills_with_resolver_for_projects(
     let mut referenced_files = VecDeque::new();
 
     for root in &roots {
-        for skill_file in find_skill_files(&root.path) {
+        for skill_file in find_skill_files(root) {
             match read_skill(root, &skill_file, provenance_resolver) {
                 Ok(skill) => {
                     scanned_files.insert(skill_file_key(&skill_file));
@@ -1697,6 +1698,7 @@ pub fn plan_visibility(
     let mut changes = Vec::new();
     for skill in &matches {
         for path in &skill.paths {
+            ensure_skill_visibility_supported(path.agent)?;
             changes.extend(plan_skill_visibility_at_path(
                 &path.path, path.agent, visibility, true,
             )?);
@@ -1725,6 +1727,7 @@ pub fn plan_visibility_many_for_scan(
     let mut changes = Vec::new();
     for skill in &matches {
         for path in &skill.paths {
+            ensure_skill_visibility_supported(path.agent)?;
             changes.extend(plan_skill_visibility_at_path(
                 &path.path, path.agent, visibility, true,
             )?);
@@ -1779,6 +1782,7 @@ pub fn plan_wrapper(
                 continue;
             }
             for path in &skill.paths {
+                ensure_skill_visibility_supported(path.agent)?;
                 changes.extend(plan_skill_visibility_at_path(
                     &path.path,
                     path.agent,
@@ -3227,6 +3231,9 @@ fn build_skill_add_plan_from_available(
         bail!("no skills found in {}", resolved.display_source);
     }
 
+    if options.visibility != SkillVisibility::Auto {
+        ensure_skill_visibility_supported(options.target.agent_kind()?)?;
+    }
     let (available, selected) = select_installable_skills(available, &options.skills)?;
     let selected = expand_installable_dependencies(&available, selected);
     // An add always creates or updates the canonical materialized installation.
@@ -4822,6 +4829,7 @@ fn plan_wrapper_for_matches(
                 continue;
             }
             for path in &skill.paths {
+                ensure_skill_visibility_supported(path.agent)?;
                 changes.extend(plan_skill_visibility_at_path(
                     &path.path,
                     path.agent,
@@ -5028,10 +5036,11 @@ fn push_root(
     }
 }
 
-fn find_skill_files(root: &Path) -> Vec<PathBuf> {
-    WalkDir::new(root)
+fn find_skill_files(root: &SkillRoot) -> Vec<PathBuf> {
+    let depth = crate::providers::agent_provider(root.agent).skill_scan_depth();
+    WalkDir::new(&root.path)
         .follow_links(true)
-        .max_depth(4)
+        .max_depth(depth)
         .into_iter()
         .filter_map(Result::ok)
         .filter(|entry| entry.file_type().is_file() && entry.file_name() == "SKILL.md")
@@ -5558,6 +5567,20 @@ fn infer_skill_root_for_dir(skill_dir: &Path) -> Option<SkillRoot> {
     if skills_root.file_name()?.to_str()? != "skills" {
         return None;
     }
+    let home = dirs::home_dir();
+    if let Some((agent, scope)) = crate::providers::agent_providers().into_iter().find_map(|provider| {
+        provider
+            .skill_scope_for_root(skills_root, home.as_deref())
+            .map(|scope| (provider.kind(), scope))
+    }) {
+        return Some(SkillRoot {
+            path: skills_root.to_path_buf(),
+            scope: scope.to_string(),
+            agent,
+            plugin_id: None,
+            plugin_enabled: None,
+        });
+    }
     let agent_dir = skills_root.parent()?;
     let agent = match agent_dir.file_name()?.to_str()? {
         ".agents" => AgentKind::Shared,
@@ -5566,7 +5589,7 @@ fn infer_skill_root_for_dir(skill_dir: &Path) -> Option<SkillRoot> {
         ".cursor" => AgentKind::Cursor,
         _ => return None,
     };
-    let scope = match dirs::home_dir() {
+    let scope = match home {
         Some(home) if agent_dir.parent().is_some_and(|parent| parent == home) => "global",
         _ => "project",
     };
@@ -6117,7 +6140,7 @@ fn symlink_status(root: &Path, skill_dir: &Path) -> String {
 }
 
 fn install_target(agent: AgentKind, root: &Path) -> String {
-    format!("{}:{}", agent.label(), root.display())
+    format!("{}:{}", crate::providers::agent_provider(agent).skill_install_target_id(root), root.display())
 }
 
 fn is_update_check_path(path: &SkillPath) -> bool {
@@ -8668,12 +8691,22 @@ fn skill_visibility_frontmatter_agents(agent: AgentKind) -> Vec<AgentKind> {
         .collect()
 }
 
+fn ensure_skill_visibility_supported(agent: AgentKind) -> Result<()> {
+    if !crate::providers::agent_provider(agent).supports_skill_visibility() {
+        bail!("skill visibility is not supported for {}", agent.label());
+    }
+    Ok(())
+}
+
 fn plan_skill_visibility_at_path(
     skill_dir: &Path,
     agent: AgentKind,
     visibility: SkillVisibility,
     update_provider_config: bool,
 ) -> Result<Vec<FileChange>> {
+    if !crate::providers::agent_provider(agent).supports_skill_visibility() {
+        return Ok(Vec::new());
+    }
     let frontmatter_agents = skill_visibility_frontmatter_agents(agent);
     let mut changes = Vec::new();
     let frontmatter_change = plan_skill_frontmatter_for_agents(

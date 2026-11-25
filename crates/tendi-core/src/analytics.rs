@@ -454,6 +454,28 @@ pub(crate) struct SessionAnalyticsRecord {
     pub file_size: i64,
 }
 
+impl SessionAnalyticsRecord {
+    pub(crate) fn record_response_usage(
+        &mut self,
+        timestamp: String,
+        model: String,
+        usage: AnalyticsTokenUsage,
+    ) {
+        if usage.total_tokens == 0 {
+            return;
+        }
+        self.state.cumulative_usage.add_assign(usage);
+        self.state.response_index += 1;
+        self.analytics.responses.push(AnalyticsResponseUsage {
+            index: self.state.response_index,
+            timestamp,
+            model,
+            usage,
+            cumulative: self.state.cumulative_usage,
+        });
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub(crate) struct SessionAnalyticsOverviewRecord {
     pub session_id: String,
@@ -1636,7 +1658,7 @@ pub(crate) fn analyze_session(
                 && record.state.source_inode == source_inode
                 && record.state.source_prefix_hash == hashes.0
                 && record.state.source_boundary_hash == hashes.1
-                && record.state.parser_version == ANALYTICS_PARSER_VERSION
+                && record.state.parser_version == provider.analytics_parser_version()
                 && record.file_size >= 0
                 && record.file_size < file_size
                 && record.file_mtime <= file_mtime
@@ -1701,7 +1723,9 @@ pub(crate) fn analyze_session(
     record.state.source_inode = source_inode;
     record.state.source_prefix_hash = source_prefix_hash;
     record.state.source_boundary_hash = source_boundary_hash;
-    resolve_single_model_runs(&mut record.analytics);
+    if provider.analytics_infers_single_model() {
+        resolve_single_model_runs(&mut record.analytics);
+    }
     Ok(record)
 }
 
@@ -1711,9 +1735,8 @@ fn empty_record(
     file_size: i64,
 ) -> SessionAnalyticsRecord {
     let capabilities = AnalyticsCapabilities::for_agent(session.agent);
-    let model_hint = crate::providers::agent_provider(session.agent)
-        .analytics_model_hint(session)
-        .unwrap_or_default();
+    let provider = crate::providers::agent_provider(session.agent);
+    let model_hint = provider.analytics_model_hint(session).unwrap_or_default();
     SessionAnalyticsRecord {
         analytics: SessionAnalytics {
             session_id: session.id.clone(),
@@ -1724,7 +1747,7 @@ fn empty_record(
             ..SessionAnalytics::default()
         },
         state: AnalyticsParserState {
-            parser_version: ANALYTICS_PARSER_VERSION,
+            parser_version: provider.analytics_parser_version(),
             last_timestamp: session
                 .started_at
                 .clone()
@@ -1914,19 +1937,11 @@ pub(crate) fn parse_message_line_with_timestamp(
             return;
         }
     }
-    let usage = message_usage(raw_usage);
-    if usage.total_tokens == 0 {
-        return;
-    }
-    record.state.cumulative_usage.add_assign(usage);
-    record.state.response_index += 1;
-    record.analytics.responses.push(AnalyticsResponseUsage {
-        index: record.state.response_index,
+    record.record_response_usage(
         timestamp,
-        model: record.state.current_model.clone(),
-        usage,
-        cumulative: record.state.cumulative_usage,
-    });
+        record.state.current_model.clone(),
+        message_usage(raw_usage),
+    );
 }
 
 pub(crate) fn set_model(record: &mut SessionAnalyticsRecord, model: &str) {

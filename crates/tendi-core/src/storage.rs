@@ -91,7 +91,7 @@ const SESSION_ANALYTICS_BATCH_SIZE: usize = 64;
 // release were never published as compatibility boundaries.
 pub(crate) const STORAGE_SCHEMA_VERSION: i64 = 7;
 const SESSION_SEARCH_INDEX_VERSION: i64 = 2;
-pub(crate) const PROJECTION_PARSER_VERSION: &str = "scan-v9";
+pub(crate) const PROJECTION_PARSER_VERSION: &str = "scan-v10";
 pub(crate) const ANALYTICS_JSON_ENCODING: &str = "zlib-v1";
 pub(crate) const SESSION_SEARCH_FTS_OPTIMIZE_MUTATIONS: i64 = 50_000;
 pub(crate) const SESSION_SEARCH_FTS_OPTIMIZE_MIN_MUTATIONS: i64 = 2_000;
@@ -1327,7 +1327,10 @@ fn append_manifest_candidates(
     let workspace_root = canonical_workspace_root(workspace_root);
     let mut candidates = BTreeSet::new();
     if let Some(home) = dirs::home_dir() {
-        for path in domain_candidate_files(domain, &home) {
+        let global = crate::providers::all_providers()
+            .into_iter()
+            .flat_map(|provider| provider.global_projection_candidate_files(domain, &home));
+        for path in global.chain(domain_candidate_files(domain, &home)) {
             if is_projection_candidate_directory(&path) {
                 if let Some(parent) = path.parent() {
                     candidates.insert(parent.to_path_buf());
@@ -1400,9 +1403,8 @@ fn is_projection_candidate_directory(path: &Path) -> bool {
 
 fn domain_candidate_files(domain: &str, root: &Path) -> Vec<PathBuf> {
     let mut paths = Vec::new();
-    let ancestors = root.ancestors().collect::<Vec<_>>();
-    for ancestor in ancestors {
-        for provider in crate::providers::all_providers() {
+    for provider in crate::providers::all_providers() {
+        for ancestor in root.ancestors() {
             paths.extend(provider.projection_candidate_files(domain, ancestor));
         }
     }

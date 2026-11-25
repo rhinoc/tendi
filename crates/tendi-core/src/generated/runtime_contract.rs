@@ -5,7 +5,7 @@ pub use serde_json::Value;
 pub const PROTOCOL_VERSION: u64 = 2;
 pub const SCHEMA_VERSION: u64 = 1;
 pub const RUNTIME_CONTRACT_FINGERPRINT: &str =
-    "3d584ab7391c3b28c96fb52c18982d30d94e0f280bce8b69897a2d1b560d169e";
+    "327402b969c91376a238ead680c747fe7ac0a3331e19a6d885f62829c4705a2e";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -764,6 +764,8 @@ pub struct HookSourceReadRequest {
     pub expected_trust_hash: String,
     pub event: String,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub matcher: Option<String>,
     #[serde(rename = "hookType")]
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1213,6 +1215,8 @@ pub enum AgentKind {
     Cursor,
     #[serde(rename = "claude")]
     Claude,
+    #[serde(rename = "antigravity")]
+    Antigravity,
     #[serde(rename = "shared")]
     Shared,
     #[serde(rename = "unknown")]
@@ -1229,6 +1233,8 @@ pub struct AgentRecord {
     pub executable: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub app_version: Option<String>,
 }
 pub type AgentRecordList = Vec<AgentRecord>;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1832,6 +1838,8 @@ pub struct HookRecord {
     pub id: String,
     pub agent: AgentKind,
     pub event: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub matcher: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]

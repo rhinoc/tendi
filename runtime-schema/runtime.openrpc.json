@@ -756,6 +756,7 @@
           "path": { "type": "string", "minLength": 1 },
           "expectedTrustHash": { "type": "string", "minLength": 1 },
           "event": { "type": "string", "minLength": 1 },
+          "name": { "type": ["string", "null"] },
           "matcher": { "type": ["string", "null"] },
           "hookType": { "type": ["string", "null"] },
           "command": { "type": ["string", "null"] },
@@ -1171,7 +1172,7 @@
       },
       "AgentKind": {
         "type": "string",
-        "enum": ["codex", "cursor", "claude", "shared", "unknown"]
+        "enum": ["codex", "cursor", "claude", "antigravity", "shared", "unknown"]
       },
       "AgentRecord": {
         "type": "object",
@@ -1181,7 +1182,8 @@
           "installed": { "type": "boolean" },
           "config_dir": { "type": ["string", "null"] },
           "executable": { "type": ["string", "null"] },
-          "version": { "type": ["string", "null"] }
+          "version": { "type": ["string", "null"] },
+          "app_version": { "type": ["string", "null"] }
         },
         "required": ["kind", "name", "installed"],
         "additionalProperties": false
@@ -1795,6 +1797,7 @@
           "id": { "type": "string" },
           "agent": { "$ref": "#/components/schemas/AgentKind" },
           "event": { "type": "string" },
+          "name": { "type": ["string", "null"] },
           "matcher": { "type": ["string", "null"] },
           "hook_type": { "type": ["string", "null"] },
           "command": { "type": ["string", "null"] },

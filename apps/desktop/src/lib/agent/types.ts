@@ -27,7 +27,9 @@ export type AgentDefinition = {
   displayName: string;
   trendClass?: string;
   icon?: string;
-  transcriptFormat: AgentTranscriptFormat;
+  transcriptFormat?: AgentTranscriptFormat;
+  skillVisibility?: boolean;
+  supportsAssistant?: boolean;
   transcriptParser?: TranscriptParser;
   sessionAppDeepLink?: (session: AgentSessionAppResumeInput) => string;
 };

@@ -20,6 +20,8 @@ use crate::{
     transcript::TranscriptItem,
 };
 
+mod antigravity;
+mod antigravity_sessions;
 pub(crate) mod claude;
 pub(crate) mod codex;
 pub(crate) mod cursor;
@@ -46,6 +48,7 @@ pub(crate) struct ProviderContext {
 pub(crate) struct ProviderSkillTarget {
     pub id: &'static str,
     pub display_name: &'static str,
+    pub listed: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -133,6 +136,21 @@ pub(crate) trait AgentProvider: Sync {
         &[]
     }
 
+    fn executable_path(&self, ctx: &ProviderContext) -> Option<PathBuf> {
+        self.executable_names()
+            .iter()
+            .find_map(|name| crate::agents::which(name))
+            .or_else(|| self.default_executable_path(ctx).filter(|path| path.is_file()))
+    }
+
+    fn default_executable_path(&self, _ctx: &ProviderContext) -> Option<PathBuf> {
+        None
+    }
+
+    fn config_indicates_installation(&self) -> bool {
+        true
+    }
+
     fn config_dir(&self, _ctx: &ProviderContext) -> Option<PathBuf> {
         None
     }
@@ -151,6 +169,10 @@ pub(crate) trait AgentProvider: Sync {
     }
 
     fn projection_candidate_files(&self, _domain: &str, _ancestor: &Path) -> Vec<PathBuf> {
+        Vec::new()
+    }
+
+    fn global_projection_candidate_files(&self, _domain: &str, _home: &Path) -> Vec<PathBuf> {
         Vec::new()
     }
 
@@ -308,8 +330,28 @@ pub(crate) trait AgentProvider: Sync {
         None
     }
 
-    fn skill_target(&self) -> Option<ProviderSkillTarget> {
+    fn skill_targets(&self) -> &'static [ProviderSkillTarget] {
+        &[]
+    }
+
+    fn global_skill_root_for_target(&self, _target: &str, home: &Path) -> Option<PathBuf> {
+        self.global_skill_root(home)
+    }
+
+    fn skill_scope_for_root(&self, _root: &Path, _home: Option<&Path>) -> Option<&'static str> {
         None
+    }
+
+    fn skill_scan_depth(&self) -> usize {
+        4
+    }
+
+    fn skill_install_target_id(&self, _root: &Path) -> &'static str {
+        self.storage_key()
+    }
+
+    fn supports_skill_visibility(&self) -> bool {
+        true
     }
 
     fn bundled_skill_files(&self) -> &'static [(&'static str, &'static str)] {
@@ -656,6 +698,14 @@ pub(crate) trait AgentProvider: Sync {
         None
     }
 
+    fn analytics_parser_version(&self) -> u32 {
+        crate::analytics::ANALYTICS_PARSER_VERSION
+    }
+
+    fn analytics_infers_single_model(&self) -> bool {
+        true
+    }
+
     fn analytics_cost(
         &self,
         _model: &str,
@@ -786,6 +836,14 @@ pub(crate) trait AgentProvider: Sync {
         )
     }
 
+    fn hook_source_preview(
+        &self,
+        _content: &str,
+        _identity: &HookSourceMatch,
+    ) -> Option<(Option<u32>, String)> {
+        None
+    }
+
     fn hook_read_only_reason(&self, path: &Path) -> Option<&'static str> {
         self.managed_hook_path(path)
             .then_some("this hook source is read-only")
@@ -830,6 +888,7 @@ pub(crate) trait AgentProvider: Sync {
     fn parse_hook_file(
         &self,
         _path: &Path,
+        _source: &str,
         _trust_hash: &str,
         _hooks: &mut Vec<HookRecord>,
         _warnings: &mut Vec<String>,
@@ -905,10 +964,11 @@ static SHARED: shared::SharedProvider = shared::SharedProvider;
 static CODEX: codex::CodexProvider = codex::CodexProvider;
 static CURSOR: cursor::CursorProvider = cursor::CursorProvider;
 static CLAUDE: claude::ClaudeProvider = claude::ClaudeProvider;
+static ANTIGRAVITY: antigravity::AntigravityProvider = antigravity::AntigravityProvider;
 static UNKNOWN: unknown::UnknownProvider = unknown::UnknownProvider;
 
 pub(crate) fn all_providers() -> Vec<&'static dyn AgentProvider> {
-    vec![&SHARED, &CODEX, &CURSOR, &CLAUDE, &UNKNOWN]
+    vec![&SHARED, &CODEX, &CURSOR, &CLAUDE, &ANTIGRAVITY, &UNKNOWN]
 }
 
 /// Providers whose frontmatter policy is materialized into a skill's
@@ -917,6 +977,9 @@ pub(crate) fn all_providers() -> Vec<&'static dyn AgentProvider> {
 pub(crate) fn skill_frontmatter_visibility_providers(
     agent: AgentKind,
 ) -> Vec<&'static dyn AgentProvider> {
+    if !agent_provider(agent).supports_skill_visibility() {
+        return Vec::new();
+    }
     let kinds = match agent {
         AgentKind::Unknown => vec![AgentKind::Claude, AgentKind::Cursor],
         _ => vec![agent, AgentKind::Claude, AgentKind::Cursor],
@@ -939,7 +1002,7 @@ pub(crate) fn skill_frontmatter_visibility_providers(
 /// source update and must not make a source revision look locally modified.
 pub(crate) fn skill_overlay_providers(agent: AgentKind) -> Vec<&'static dyn AgentProvider> {
     let kinds = match agent {
-        AgentKind::Codex => vec![AgentKind::Codex],
+        AgentKind::Codex | AgentKind::Antigravity => vec![agent],
         AgentKind::Cursor | AgentKind::Claude => vec![agent, AgentKind::Codex],
         AgentKind::Shared => vec![AgentKind::Shared, AgentKind::Codex],
         AgentKind::Unknown => vec![
@@ -947,6 +1010,7 @@ pub(crate) fn skill_overlay_providers(agent: AgentKind) -> Vec<&'static dyn Agen
             AgentKind::Codex,
             AgentKind::Cursor,
             AgentKind::Claude,
+            AgentKind::Antigravity,
         ],
     };
     let mut providers = Vec::new();
@@ -1047,8 +1111,9 @@ pub(crate) fn skill_target_uses_shared_layout(target: &str) -> bool {
         .into_iter()
         .find(|provider| {
             provider
-                .skill_target()
-                .is_some_and(|skill_target| skill_target.id == canonical)
+                .skill_targets()
+                .iter()
+                .any(|skill_target| skill_target.id == canonical)
         })
         .is_some_and(|provider| provider.uses_shared_skill_layout())
 }

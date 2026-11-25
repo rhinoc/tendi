@@ -1346,11 +1346,12 @@ impl super::AgentProvider for CursorProvider {
         Some(cwd.join(".cursor/skills"))
     }
 
-    fn skill_target(&self) -> Option<ProviderSkillTarget> {
-        Some(ProviderSkillTarget {
+    fn skill_targets(&self) -> &'static [ProviderSkillTarget] {
+        &[ProviderSkillTarget {
             id: "cursor",
             display_name: "Cursor",
-        })
+            listed: true,
+        }]
     }
 
     fn config_profile_path(&self, home: &Path, _agent_home: &Path, name: &str) -> Option<PathBuf> {

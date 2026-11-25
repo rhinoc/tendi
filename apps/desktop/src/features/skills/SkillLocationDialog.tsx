@@ -62,6 +62,7 @@ function skillHasTarget(skill: NormalizedSkill, target: SkillTargetOption): bool
   return skill.paths.some((path) => {
     const scope = `${path.scope ?? ""}`.toLowerCase();
     if (scope && scope !== SkillScope.Global) return false;
+    if (target.globalPath) return path.root === target.globalPath;
     const agent = path.install_target.split(":")[0];
     return agentIdentityKey(agent) === agentIdentityKey(target.id);
   });

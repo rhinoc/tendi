@@ -414,3 +414,35 @@ fn concurrent_prepared_scans_have_exactly_one_winner() {
         assert_eq!(revision.value(), 1);
     });
 }
+
+#[test]
+fn outdated_configuration_projection_is_refreshed_after_upgrade() {
+    with_database(|workspace, store| {
+        let scan = RuleScan {
+            rules: vec![],
+            warnings: vec![],
+        };
+        store.save_rules_for_workspace(workspace, &scan).unwrap();
+        assert_eq!(
+            store.projection_status("rules", workspace).unwrap(),
+            ProjectionStatus::Fresh
+        );
+        store
+            .with_named_write_transaction("test.seed_outdated_projection", |tx| {
+                tx.execute(
+                    &format!(
+                        "UPDATE {SCOPED_PROJECTION_CONTEXT_TABLE} SET parser_version = 'scan-v9'
+                         WHERE domain = 'rules'"
+                    ),
+                    [],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+
+        assert_eq!(
+            store.projection_status("rules", workspace).unwrap(),
+            ProjectionStatus::Stale
+        );
+    });
+}

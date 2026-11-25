@@ -85,7 +85,7 @@ fn scans_provider_declared_project_rules() {
                 "repo/crate/TEAM_GUIDE.md".to_string()
             ),
             (
-                vec![AgentKind::Cursor],
+                vec![AgentKind::Cursor, AgentKind::Antigravity],
                 "AGENTS.md",
                 "project",
                 "repo/AGENTS.md".to_string()
@@ -187,7 +187,7 @@ fn scans_same_rule_once_with_all_applicable_agents() {
     assert_eq!(project_rules.len(), 1);
     assert_eq!(
         project_rules[0].agents,
-        vec![AgentKind::Codex, AgentKind::Cursor]
+        vec![AgentKind::Codex, AgentKind::Cursor, AgentKind::Antigravity]
     );
 
     let _ = fs::remove_dir_all(root);

@@ -866,11 +866,12 @@ impl super::AgentProvider for ClaudeProvider {
         Some(cwd.join(".claude/skills"))
     }
 
-    fn skill_target(&self) -> Option<ProviderSkillTarget> {
-        Some(ProviderSkillTarget {
+    fn skill_targets(&self) -> &'static [ProviderSkillTarget] {
+        &[ProviderSkillTarget {
             id: "claude-code",
             display_name: "Claude Code",
-        })
+            listed: true,
+        }]
     }
 
     fn config_profile_path(&self, home: &Path, _agent_home: &Path, name: &str) -> Option<PathBuf> {

@@ -40,6 +40,7 @@ export const cursorAgent: AgentDefinition = {
   displayName: "Cursor",
   trendClass: "agentCursor",
   icon: cursorIcon,
+  supportsAssistant: true,
   transcriptFormat: AgentTranscriptFormat.Cursor,
   transcriptParser: cursorTranscriptParser,
 };

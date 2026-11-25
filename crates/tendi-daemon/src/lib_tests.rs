@@ -2926,3 +2926,311 @@ fn skill_update_preview_reuses_downloaded_content_after_report_ttl() {
     drop(daemon);
     fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn antigravity_project_config_round_trips_through_the_runtime() {
+    let root = temp_workspace();
+    let customizations = root.join(".agents");
+    let tools_path = customizations.join("mcp_config.json");
+    let hooks_path = customizations.join("hooks.json");
+    let rules_path = customizations.join("rules");
+    fs::create_dir(&rules_path).unwrap();
+    fs::write(root.join("AGENTS.md"), "Shared instructions").unwrap();
+    fs::write(
+        rules_path.join("style.md"),
+        "---\ntrigger: always_on\n---\nStyle rules",
+    )
+    .unwrap();
+    fs::write(rules_path.join("ignored.md"), "No Antigravity trigger").unwrap();
+    let mcp_source = json!({"mcpServers": {
+        "remote": {"serverUrl": "https://example.invalid/mcp", "disabledTools": ["hidden"]},
+        "local": {"command": "unused", "disabled": true}
+    }});
+    fs::write(&tools_path, mcp_source.to_string()).unwrap();
+    let hook_source = json!({
+        "check": {
+            "enabled": false,
+            "PreToolUse": [{"matcher": "run_command", "hooks": [{"command": "echo check"}]}],
+            "Stop": [{"command": "echo done"}]
+        },
+        "other": {"PreToolUse": [{"matcher": "run_command", "hooks": [{"command": "echo check"}]}]}
+    });
+    fs::write(&hooks_path, hook_source.to_string()).unwrap();
+
+    let external = root.join("registered");
+    fs::create_dir_all(external.join(".agents")).unwrap();
+    assert!(
+        std::process::Command::new("git")
+            .args(["init", "--quiet"])
+            .current_dir(&external)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let external_hooks = external.canonicalize().unwrap().join(".agents/hooks.json");
+    fs::write(
+        &external_hooks,
+        json!({"registered": {"Stop": [{"command": "echo registered"}]}}).to_string(),
+    )
+    .unwrap();
+
+    let daemon = test_daemon_without_background(root.clone());
+    let store = test_store(&daemon);
+    store
+        .save_project_scan_scopes(vec![root.to_string_lossy().into_owned()])
+        .unwrap();
+    store.scan_projects_for_workspace(&root).unwrap();
+    let targets = daemon.skills_targets().unwrap();
+    let antigravity = targets
+        .iter()
+        .find(|target| target.id == "antigravity")
+        .unwrap();
+    assert_eq!(antigravity.display_name, "Antigravity");
+    assert!(
+        Path::new(antigravity.global_path.as_deref().unwrap()).ends_with(".gemini/config/skills")
+    );
+    assert!(!targets.iter().any(|target| target.id == "antigravity-cli"));
+    for (id, suffix) in [
+        ("antigravity", ".gemini/config/skills"),
+        ("antigravity-cli", ".gemini/antigravity-cli/skills"),
+    ] {
+        let target = id.parse::<tendi_core::SkillTarget>().unwrap();
+        assert!(
+            tendi_core::skill_targets::skill_target_root(
+                &root,
+                &target,
+                tendi_core::SkillInstallScope::Global
+            )
+            .unwrap()
+            .ends_with(suffix)
+        );
+        assert_eq!(
+            target.agent_kind().unwrap(),
+            tendi_core::AgentKind::Antigravity
+        );
+        assert_eq!(
+            tendi_core::skill_targets::skill_target_root(
+                &root,
+                &target,
+                tendi_core::SkillInstallScope::Project
+            )
+            .unwrap(),
+            customizations.join("skills"),
+        );
+    }
+
+    let rule_scan = daemon.rules_projection().unwrap();
+    let shared = rule_scan
+        .rules
+        .iter()
+        .filter(|rule| rule.path == root.join("AGENTS.md"))
+        .collect::<Vec<_>>();
+    assert_eq!(shared.len(), 1);
+    assert!(
+        shared[0]
+            .agents
+            .contains(&tendi_core::AgentKind::Antigravity)
+    );
+    assert!(
+        rule_scan
+            .rules
+            .iter()
+            .any(|rule| rule.path == rules_path.join("style.md"))
+    );
+    assert!(
+        !rule_scan
+            .rules
+            .iter()
+            .any(|rule| rule.path == rules_path.join("ignored.md"))
+    );
+
+    daemon.mcp_projection().unwrap();
+    let mcp = daemon.mcp_list().unwrap();
+    let remote = mcp
+        .iter()
+        .find(|server| server.path == tools_path.to_string_lossy() && server.name == "remote")
+        .unwrap();
+    assert_eq!(remote.agent, runtime_schema::AgentKind::Antigravity);
+    assert_eq!(remote.transport, "http");
+    assert!(remote.enabled);
+    let result = daemon
+        .mcp_set_enabled(runtime_schema::McpSetEnabledRequest {
+            id: remote.id.clone(),
+            enabled: false,
+        })
+        .unwrap();
+    assert!(!result.updated[0].enabled);
+    let mcp_after: Value = serde_json::from_str(&fs::read_to_string(&tools_path).unwrap()).unwrap();
+    assert_eq!(mcp_after["mcpServers"]["remote"]["disabled"], true);
+    assert_eq!(
+        mcp_after["mcpServers"]["remote"]["disabledTools"],
+        json!(["hidden"])
+    );
+    assert_eq!(
+        mcp_after["mcpServers"]["local"],
+        mcp_source["mcpServers"]["local"]
+    );
+
+    daemon.hooks_projection().unwrap();
+    let hooks = daemon.hooks_list().unwrap();
+    assert!(hooks.iter().any(|hook| {
+        hook.path == external_hooks.to_string_lossy() && hook.name.as_deref() == Some("registered")
+    }));
+    let check = hooks
+        .iter()
+        .find(|hook| {
+            hook.path == hooks_path.to_string_lossy() && hook.name.as_deref() == Some("check")
+        })
+        .unwrap();
+    assert_eq!(check.agent, runtime_schema::AgentKind::Antigravity);
+    assert_eq!(check.event, "PreToolUse, Stop");
+    assert!(!check.enabled);
+    let preview = daemon
+        .hook_source_read(
+            serde_json::from_value(json!({
+                "agent": "antigravity", "path": hooks_path, "expectedTrustHash": check.trust_hash,
+                "event": check.event, "name": check.name,
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+    assert_eq!(preview.preview_scope, "hook");
+    assert_eq!(
+        serde_json::from_str::<Value>(&preview.content).unwrap(),
+        json!({"check": hook_source["check"]})
+    );
+    let result = daemon
+        .hook_set_enabled(runtime_schema::HookSetEnabledRequest {
+            id: check.id.clone(),
+            enabled: true,
+        })
+        .unwrap();
+    let updated = result
+        .updated
+        .iter()
+        .find(|hook| hook.id == check.id)
+        .unwrap();
+    assert!(updated.enabled);
+    let hooks_after: Value =
+        serde_json::from_str(&fs::read_to_string(&hooks_path).unwrap()).unwrap();
+    assert_eq!(hooks_after["check"]["enabled"], true);
+    assert_eq!(
+        hooks_after["check"]["PreToolUse"],
+        hook_source["check"]["PreToolUse"]
+    );
+    assert_eq!(hooks_after["other"], hook_source["other"]);
+    daemon
+        .hook_delete(runtime_schema::HookDeleteRequest {
+            id: check.id.clone(),
+        })
+        .unwrap();
+    let hooks_after: Value =
+        serde_json::from_str(&fs::read_to_string(&hooks_path).unwrap()).unwrap();
+    assert_eq!(hooks_after, json!({"other": hook_source["other"]}));
+
+    daemon.shutdown();
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn antigravity_session_watch_publishes_metadata_transcript_and_search() {
+    const ID: &str = "ec33ebf9-0cba-4100-8142-c61503f6c587";
+    let root = temp_workspace();
+    let app_data = root.join("antigravity");
+    let path = app_data
+        .join("brain")
+        .join(ID)
+        .join(".system_generated/logs/transcript.jsonl");
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(
+        &path,
+        include_str!("../../tendi-core/testdata/transcripts/antigravity.jsonl"),
+    )
+    .unwrap();
+    let db_path = app_data.join("conversation_summaries.db");
+    let native = rusqlite::Connection::open(&db_path).unwrap();
+    native.execute_batch(
+        "CREATE TABLE conversation_summaries (
+            conversation_id TEXT PRIMARY KEY, title TEXT, workspace_uris TEXT, parent_conversation_id TEXT
+        )",
+    ).unwrap();
+    let workspace_uri = format!("file://{}", root.display());
+    native
+        .execute(
+            "INSERT INTO conversation_summaries VALUES (?1, ?2, ?3, NULL)",
+            [ID, "Demo release", &json!([workspace_uri]).to_string()],
+        )
+        .unwrap();
+
+    let daemon = test_daemon_without_background(root.clone());
+    let scope = daemon_scope_key(&daemon).unwrap();
+    let (upserts, _, _, _, _, _) =
+        process_session_watch_paths_once(&daemon, std::slice::from_ref(&path), &scope).unwrap();
+    assert_eq!(upserts.len(), 1);
+    let session = &upserts[0];
+    assert_eq!(session.id, ID);
+    assert_eq!(session.agent, tendi_core::AgentKind::Antigravity);
+    assert_eq!(session.title.as_deref(), Some("Demo release"));
+    assert_eq!(
+        session.first_user_message.as_deref(),
+        Some("Look up the demo release.")
+    );
+    assert_eq!(
+        session.last_assistant_message.as_deref(),
+        Some("The demo release is ready.")
+    );
+    assert_eq!(session.project.as_deref(), Some(root.as_path()));
+    assert!(!session.resumable);
+
+    let snapshot = daemon.sessions_snapshot().unwrap();
+    assert_eq!(
+        snapshot.payload[0].agent,
+        runtime_schema::AgentKind::Antigravity
+    );
+    let page = daemon
+        .session_transcript(
+            serde_json::from_value(json!({
+                "path": path, "agent": "antigravity", "sessionId": ID,
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+    let kinds = page
+        .items
+        .iter()
+        .map(|item| item.kind.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(kinds, ["user", "thinking", "tool", "tool", "assistant"]);
+    assert_eq!(page.items[3].result.as_deref(), Some("Demo release result"));
+    let search = daemon
+        .session_transcript_search(
+            serde_json::from_value(json!({
+                "path": path, "agent": "antigravity", "sessionId": ID, "query": "release is ready",
+                "scopes": {"user": true, "assistant": true, "system": false, "tool": false}
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+    assert_eq!(search.hits.len(), 1);
+    test_store(&daemon)
+        .rebuild_scoped_session_search_for_scope(&scope)
+        .unwrap();
+    let hits = daemon
+        .sessions_search(serde_json::from_value(json!({"query": "release is ready"})).unwrap())
+        .unwrap();
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].id, ID);
+
+    native
+        .execute(
+            "UPDATE conversation_summaries SET title = ?1",
+            ["Renamed release"],
+        )
+        .unwrap();
+    let (upserts, _, _, _, _, _) =
+        process_session_watch_paths_once(&daemon, std::slice::from_ref(&db_path), &scope).unwrap();
+    assert_eq!(upserts[0].title.as_deref(), Some("Renamed release"));
+
+    daemon.shutdown();
+    fs::remove_dir_all(root).unwrap();
+}

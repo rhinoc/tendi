@@ -2300,7 +2300,7 @@ fn parse_wall_time_ms(output: &str) -> Option<u64> {
     })
 }
 
-fn truncate_text(value: &str, limit: usize) -> String {
+pub(crate) fn truncate_text(value: &str, limit: usize) -> String {
     let mut text: String = value.chars().take(limit).collect();
     if value.chars().count() > limit {
         text.push_str("\n... truncated");

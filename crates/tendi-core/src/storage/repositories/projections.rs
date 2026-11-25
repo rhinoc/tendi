@@ -1069,19 +1069,24 @@ impl Store {
         let context = connection
             .query_row(
                 &format!(
-                    "SELECT state
+                    "SELECT state, parser_version
                  FROM {SCOPED_PROJECTION_CONTEXT_TABLE}
                  WHERE scope_key = ?1 AND domain = ?2"
                 ),
                 params![scope_key.as_str(), domain],
-                |row| row.get::<_, String>(0),
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
             )
             .optional()?;
-        let Some(state) = context else {
+        let Some((state, parser_version)) = context else {
             return Ok(ProjectionStatus::Missing);
         };
         if state == "refreshing" {
             return Ok(ProjectionStatus::Refreshing);
+        }
+        if matches!(domain, "agents" | "skills" | "rules" | "hooks" | "mcp")
+            && parser_version != PROJECTION_PARSER_VERSION
+        {
+            return Ok(ProjectionStatus::Stale);
         }
         let snapshot_exists = connection
             .query_row(

@@ -5,6 +5,7 @@ export type HookRecord = {
   id: string;
   agent: AgentKind;
   event: string;
+  name?: string | null;
   matcher?: string | null;
   enabled: boolean;
   needs_review: boolean;
@@ -21,8 +22,8 @@ export type HookRecord = {
 
 export type HookItem = { key: string; hook: HookRecord };
 
-export function hookDisplayName(hook: Pick<HookRecord, "event"> | null | undefined): string {
-  return hook?.event || "Hook";
+export function hookDisplayName(hook: Pick<HookRecord, "event" | "name"> | null | undefined): string {
+  return hook?.name || hook?.event || "Hook";
 }
 
 function requiredString(value: unknown): string | undefined {
@@ -43,6 +44,7 @@ export function normalizeHook(hook: Record<string, unknown>): HookRecord | undef
     id,
     agent,
     event,
+    name: typeof hook.name === "string" ? hook.name : undefined,
     matcher: typeof hook.matcher === "string" ? hook.matcher : undefined,
     hook_type: typeof hook.hook_type === "string" ? hook.hook_type : undefined,
     command: typeof hook.command === "string" ? hook.command : undefined,
@@ -113,6 +115,7 @@ export function hookTrustHash(hook: HookRecord | null | undefined): string {
 export function hookSearchText(hook: HookRecord | null | undefined): string {
   return [
     hook?.agent,
+    hook?.name,
     hook?.event,
     hook?.matcher,
     hook?.filter,

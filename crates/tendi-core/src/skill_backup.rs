@@ -897,7 +897,7 @@ fn backup_catalog_with_contents(
                     .or_else(|| hook.url.clone())
                     .or_else(|| hook.prompt.clone())
                     .unwrap_or_default();
-                let label = hook.event;
+                let label = hook.name.unwrap_or(hook.event);
                 (hook.agent, hook.path, label, detail, entry_key, Vec::new())
             })
             .collect::<Vec<_>>(),

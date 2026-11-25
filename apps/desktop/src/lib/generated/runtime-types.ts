@@ -533,6 +533,7 @@ export type HookSourceReadRequest = {
   path: string;
   expectedTrustHash: string;
   event: string;
+  name?: string | null;
   matcher?: string | null;
   hookType?: string | null;
   command?: string | null;
@@ -791,7 +792,7 @@ export type LogsExportResponse = string;
 export type DatabaseStorageStatus = {
   bytes: number;
 };
-export type AgentKind = "codex" | "cursor" | "claude" | "shared" | "unknown";
+export type AgentKind = "codex" | "cursor" | "claude" | "antigravity" | "shared" | "unknown";
 export type AgentRecord = {
   kind: AgentKind;
   name: string;
@@ -799,6 +800,7 @@ export type AgentRecord = {
   config_dir?: string | null;
   executable?: string | null;
   version?: string | null;
+  app_version?: string | null;
 };
 export type AgentRecordList = AgentRecord[];
 export type SkillVisibility = "auto" | "manual" | "off" | "mixed";
@@ -1163,6 +1165,7 @@ export type HookRecord = {
   id: string;
   agent: AgentKind;
   event: string;
+  name?: string | null;
   matcher?: string | null;
   hook_type?: string | null;
   command?: string | null;
@@ -2150,5 +2153,5 @@ export function isDesktopCommand(command: string): command is CommandName {
 }
 export const PROTOCOL_VERSION = 2;
 export const SCHEMA_VERSION = 1;
-export const RUNTIME_CONTRACT_FINGERPRINT = "3d584ab7391c3b28c96fb52c18982d30d94e0f280bce8b69897a2d1b560d169e";
+export const RUNTIME_CONTRACT_FINGERPRINT = "327402b969c91376a238ead680c747fe7ac0a3331e19a6d885f62829c4705a2e";
 export const RUNTIME_ERROR_CODES = {"INVALID_REQUEST":-32600,"METHOD_NOT_FOUND":-32601,"INVALID_PARAMS":-32602,"INVALID_ARGUMENT":-32602,"INTERNAL":-32603,"CORE_ERROR":-32603,"CONFLICT":-32002,"UNAUTHORIZED":-32003,"UNSUPPORTED_TRANSPORT":-32004,"CONTRACT_VIOLATION":-32005,"DAEMON_ERROR":-32001} as const;

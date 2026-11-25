@@ -68,7 +68,7 @@ const HookSourcePreview = lazy(() => import("../features/hooks/HookSourcePreview
 
 function hookSelectionIdentity(hook: HookRecord | null | undefined) {
   if (!hook) return "";
-  return [hook.agent, hook.path, hook.event, hook.matcher, hook.hook_type]
+  return [hook.agent, hook.path, hook.name, hook.event, hook.matcher, hook.hook_type]
     .map((value) => `${value ?? ""}`).join("|");
 }
 
@@ -250,6 +250,7 @@ function hookParameterRows(hook: HookRecord | null, enabledControl: ReactNode): 
     { label: "Matcher", value: hook.matcher ?? "" },
     { label: "Enabled", render: enabledControl },
   ];
+  if (hook.name) rows.unshift({ label: "Events", value: hook.event });
   if (command) rows.push({ label: "Command", value: command, mono: true, copyable: true });
   if (hook.url) rows.push({ label: "URL", value: hook.url, mono: true, copyable: true });
   if (hook.prompt) rows.push({ label: "Prompt", value: hook.prompt, mono: true, copyable: true });
@@ -326,7 +327,7 @@ export function HooksView({ rows, loadingRows = false, loadError = "", hasRows =
   const hookColumns = useMemo((): ColumnDef<HookItem>[] => [
     {
       key: "event",
-      header: "Event",
+      header: "Hook",
       type: ColumnDataType.Enum,
       sticky: true,
       groupBy: (item) => hookDisplayName(item.hook),
@@ -335,7 +336,7 @@ export function HooksView({ rows, loadingRows = false, loadError = "", hasRows =
       width: "var(--data-freeze-column-width, 330px)",
       render: (item) => {
         const hook = item.hook;
-        const handler = hookHandlerText(hook);
+        const handler = hook.name ? [hook.event, hookHandlerText(hook)].filter(Boolean).join(" · ") : hookHandlerText(hook);
         return (
           <>
             <span className="dataCellTitleLine">

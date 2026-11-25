@@ -673,6 +673,7 @@ fn remove_artifact(artifact: &BackupArtifact, target: &Path) -> Result<()> {
                     path: target.to_path_buf(),
                     expected_trust_hash: String::new(),
                     event: identity.event,
+                    name: identity.name,
                     matcher: identity.matcher,
                     hook_type: identity.hook_type,
                     command: identity.command,

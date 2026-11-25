@@ -508,6 +508,54 @@ fn analytics_refresh_batches_reuse_cached_rows() {
 }
 
 #[test]
+fn antigravity_analytics_projects_cached_tokens_and_models() {
+    let temp = temp_dir("tendi-antigravity-analytics");
+    let mut record = session("12345678-1234-1234-1234-123456789abc", "Antigravity");
+    record.agent = AgentKind::Antigravity;
+    record.path = temp
+        .join("brain")
+        .join(&record.id)
+        .join(".system_generated/logs/transcript.jsonl");
+    fs::create_dir_all(record.path.parent().unwrap()).unwrap();
+    let timestamp = Local::now().to_rfc3339();
+    let lines = [
+        serde_json::json!({
+            "step_index": 1, "source": "MODEL", "type": "PLANNER_RESPONSE", "status": "DONE",
+            "created_at": timestamp, "model": "gemini-4-neon-high",
+            "input_tokens": 20, "cache_read_tokens": 80, "output_tokens": 5,
+        }),
+        serde_json::json!({
+            "step_index": 2, "source": "SYSTEM", "type": "CHECKPOINT", "status": "DONE",
+            "created_at": timestamp,
+            "input_tokens": 3, "cache_read_tokens": 30, "output_tokens": 2,
+        }),
+    ];
+    fs::write(&record.path, format!("{}\n{}\n", lines[0], lines[1])).unwrap();
+    let store = Store::open(temp.join("tendi.sqlite3")).unwrap();
+    let scope = ScopeKey::new("workspace:/repo").unwrap();
+    let sessions = [record];
+    store.apply_session_delta_for_scope(&scope, &sessions).unwrap();
+
+    let refresh = store
+        .refresh_session_analytics_for_scope_with_progress(&scope, &sessions, |_| {})
+        .unwrap();
+    assert_eq!(refresh.parsed, 1);
+    let overview = store
+        .overview_analytics_for_scope(&scope, Some(AgentKind::Antigravity), 30, 30)
+        .unwrap();
+    assert_eq!(overview.summary.usage.total_tokens, 140);
+    assert_eq!(overview.summary.usage.input_tokens, 133);
+    assert_eq!(overview.summary.usage.cached_input_tokens, 110);
+    let day = overview.days.iter().find(|day| day.responses == 2).unwrap();
+    assert_eq!(day.models.len(), 1);
+    assert_eq!(day.models[0].model, "gemini-4-neon-high");
+    assert_eq!(day.models[0].total_tokens, 105);
+
+    drop(store);
+    fs::remove_dir_all(temp).unwrap();
+}
+
+#[test]
 fn project_scan_scope_excludes_bang_prefixed_paths() {
     let temp = temp_dir("tendi-project-scope-exclude");
     let scope = temp.join("dev");

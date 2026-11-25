@@ -4527,3 +4527,46 @@ fn test_skill_path(
         plugin_enabled,
     }
 }
+
+#[test]
+fn antigravity_first_install_is_classified_during_incremental_refresh() {
+    let root = temp_dir("tendi-antigravity-skill-refresh");
+    let skills_root = root.join(".agent/skills");
+    let skill_dir = skills_root.join("new-skill");
+    let before = scan_skills(&root).unwrap();
+    assert!(!before.roots.iter().any(|root| root.path == skills_root));
+    fs::create_dir_all(&skill_dir).unwrap();
+    fs::write(
+        skill_dir.join("SKILL.md"),
+        "---\nname: new-skill\ndescription: New skill\n---\n",
+    )
+    .unwrap();
+
+    let refreshed = super::refresh_skill_scan_with_wrapper_sync(
+        &root,
+        before,
+        &[],
+        std::slice::from_ref(&skill_dir),
+        super::ProvenanceResolver::default(),
+        false,
+    )
+    .unwrap();
+    let skill = refreshed
+        .skills
+        .iter()
+        .find(|skill| skill.name == "new-skill")
+        .unwrap();
+    assert_eq!(skill.paths[0].root, skills_root);
+    assert_eq!(skill.paths[0].scope, "project");
+    assert_eq!(skill.paths[0].agent, AgentKind::Antigravity);
+    assert!(
+        super::plan_visibility_many_for_scan(
+            &refreshed,
+            std::slice::from_ref(&skill.id),
+            SkillVisibility::Manual,
+        )
+        .is_err()
+    );
+
+    fs::remove_dir_all(root).unwrap();
+}

@@ -9,6 +9,7 @@ export const codexAgent: AgentDefinition = {
   displayName: "Codex",
   trendClass: "agentCodex",
   icon: codexIcon,
+  supportsAssistant: true,
   transcriptFormat: AgentTranscriptFormat.Codex,
   transcriptParser: codexTranscriptParser,
   sessionAppDeepLink: ({ id }) => `codex://threads/${encodeURIComponent(id)}`,

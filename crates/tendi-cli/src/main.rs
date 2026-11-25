@@ -333,6 +333,7 @@ enum AgentArg {
     Codex,
     Cursor,
     Claude,
+    Antigravity,
     Shared,
 }
 
@@ -342,6 +343,7 @@ impl From<AgentArg> for tendi_core::AgentKind {
             AgentArg::Codex => tendi_core::AgentKind::Codex,
             AgentArg::Cursor => tendi_core::AgentKind::Cursor,
             AgentArg::Claude => tendi_core::AgentKind::Claude,
+            AgentArg::Antigravity => tendi_core::AgentKind::Antigravity,
             AgentArg::Shared => tendi_core::AgentKind::Shared,
         }
     }
@@ -352,6 +354,7 @@ fn runtime_agent_kind(agent: tendi_core::AgentKind) -> RuntimeAgentKind {
         tendi_core::AgentKind::Codex => RuntimeAgentKind::Codex,
         tendi_core::AgentKind::Cursor => RuntimeAgentKind::Cursor,
         tendi_core::AgentKind::Claude => RuntimeAgentKind::Claude,
+        tendi_core::AgentKind::Antigravity => RuntimeAgentKind::Antigravity,
         tendi_core::AgentKind::Shared => RuntimeAgentKind::Shared,
         tendi_core::AgentKind::Unknown => RuntimeAgentKind::Unknown,
     }
@@ -853,9 +856,12 @@ fn run_command(command: Command) -> Result<()> {
                 }
             }
             SkillCommand::Targets { json } => {
-                let targets = tendi_core::skill_targets::target_catalog();
+                let targets = tendi_core::skill_targets::listed_targets();
                 if json {
-                    println!("{}", serde_json::to_string_pretty(targets)?);
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&targets.collect::<Vec<_>>())?
+                    );
                 } else {
                     for target in targets {
                         let project_root = target.project_skills_root(&cwd)?;

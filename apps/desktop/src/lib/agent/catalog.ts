@@ -10,7 +10,7 @@ import promptscriptIcon from "../../assets/agent-icons/promptscript.svg";
 import reasonixIcon from "../../assets/agent-icons/reasonix.svg";
 import rovoDevIcon from "../../assets/agent-icons/rovodev.svg";
 import ampIcon from "@lobehub/icons-static-svg/icons/amp-color.svg";
-import antigravityIcon from "@lobehub/icons-static-svg/icons/antigravity-color.svg";
+import antigravityIcon from "../../assets/agent-icons/antigravity.svg";
 import autohandIcon from "../../assets/agent-icons/autohand.svg";
 import augmentIcon from "../../assets/agent-icons/augment.svg";
 import clineIcon from "@lobehub/icons-static-svg/icons/cline.svg";

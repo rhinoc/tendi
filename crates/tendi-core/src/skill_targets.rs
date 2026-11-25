@@ -103,6 +103,8 @@ pub struct SkillTargetConfig {
     pub display_name: &'static str,
     pub project_skills_dir: &'static str,
     #[serde(skip)]
+    listed: bool,
+    #[serde(skip)]
     global: GlobalRoot,
     #[serde(skip)]
     provider: Option<AgentKind>,
@@ -138,6 +140,7 @@ macro_rules! target {
             id: $id,
             display_name: $display,
             project_skills_dir: $project,
+            listed: true,
             global: $global,
             provider: None,
         }
@@ -156,18 +159,6 @@ static TARGETS: &[SkillTargetConfig] = &[
         "Amp",
         ".agents/skills",
         GlobalRoot::Config("agents/skills")
-    ),
-    target!(
-        "antigravity",
-        "Antigravity",
-        ".agents/skills",
-        GlobalRoot::Home(".gemini/antigravity/skills")
-    ),
-    target!(
-        "antigravity-cli",
-        "Antigravity CLI",
-        ".agents/skills",
-        GlobalRoot::Home(".gemini/antigravity-cli/skills")
     ),
     target!(
         "astrbot",
@@ -587,12 +578,12 @@ static LEGACY_SHARED: SkillTargetConfig = target!(
 fn provider_target_configs() -> impl Iterator<Item = SkillTargetConfig> {
     crate::providers::all_providers()
         .into_iter()
-        .filter_map(|provider| {
-            let target = provider.skill_target()?;
-            Some(SkillTargetConfig {
+        .flat_map(|provider| {
+            provider.skill_targets().iter().map(move |target| SkillTargetConfig {
                 id: target.id,
                 display_name: target.display_name,
                 project_skills_dir: "<provider-owned>",
+                listed: target.listed,
                 global: GlobalRoot::Provider(provider.kind()),
                 provider: Some(provider.kind()),
             })
@@ -609,6 +600,10 @@ static TARGET_CATALOG: LazyLock<Vec<SkillTargetConfig>> = LazyLock::new(|| {
 
 pub fn target_catalog() -> &'static [SkillTargetConfig] {
     TARGET_CATALOG.as_slice()
+}
+
+pub fn listed_targets() -> impl Iterator<Item = &'static SkillTargetConfig> {
+    target_catalog().iter().filter(|target| target.listed)
 }
 
 pub fn target_config(target: &SkillTarget) -> Result<&'static SkillTargetConfig> {
@@ -641,7 +636,7 @@ pub fn skill_target_root(
         }
         let home = dirs::home_dir().context("could not resolve home directory")?;
         return provider
-            .global_skill_root(&home)
+            .global_skill_root_for_target(config.id, &home)
             .with_context(|| format!("{target} does not support global installation"));
     }
     if scope == SkillInstallScope::Project {

@@ -7,7 +7,7 @@ import type { AgentKind } from "./generated/runtime-types.ts";
 
 export { agentIcons } from "./agent/catalog.ts";
 
-const visibleAgentKeys = new Set(["codex", "claude", "cursor"]);
+const visibleAgentKeys = new Set(["codex", "claude", "cursor", "antigravity"]);
 
 export const ALL_AGENT_FILTER = "All";
 
@@ -26,17 +26,25 @@ export function isVisibleAgent(agent: unknown): boolean {
   return visibleAgentKeys.has(agentIdentityKey(agent));
 }
 
+export function supportsAssistant(agent: unknown): boolean {
+  return agentDefinition(normalizedAgentKey(agent))?.supportsAssistant === true;
+}
+
+export function supportsSkillVisibility(agent: unknown): boolean {
+  return agentDefinition(normalizedAgentKey(agent))?.skillVisibility !== false;
+}
+
 export function isConcreteAgent(agent: unknown): boolean {
   const key = normalizedAgentKey(agent);
   return key !== "" && key !== "shared" && key !== "universal";
 }
 
 export function isRuntimeAgentKind(agent: unknown): boolean {
-  return ["codex", "cursor", "claude", "shared", "unknown"].includes(normalizedAgentKey(agent));
+  return ["codex", "cursor", "claude", "antigravity", "shared", "unknown"].includes(agentIdentityKey(agent));
 }
 
 export function runtimeAgentKind(agent: unknown): AgentKind {
-  const normalized = normalizedAgentKey(agent);
+  const normalized = agentIdentityKey(agent);
   if (isRuntimeAgentKind(normalized)) return normalized as AgentKind;
   throw new Error("Invalid runtime agent");
 }

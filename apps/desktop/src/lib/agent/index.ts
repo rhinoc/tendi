@@ -1,3 +1,4 @@
+import { antigravityAgent } from "./antigravity.ts";
 import { claudeAgent } from "./claude.ts";
 import { codexAgent } from "./codex.ts";
 import { cursorAgent } from "./cursor.ts";
@@ -11,6 +12,7 @@ export const agentDefinitions: readonly AgentDefinition[] = [
   codexAgent,
   claudeAgent,
   cursorAgent,
+  antigravityAgent,
   sharedAgent,
 ];
 

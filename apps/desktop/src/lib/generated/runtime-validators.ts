@@ -2420,6 +2420,12 @@ const SCHEMAS: Record<string, Record<string, unknown>> = {
         "type": "string",
         "minLength": 1
       },
+      "name": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
       "matcher": {
         "type": [
           "string",
@@ -3652,6 +3658,7 @@ const SCHEMAS: Record<string, Record<string, unknown>> = {
       "codex",
       "cursor",
       "claude",
+      "antigravity",
       "shared",
       "unknown"
     ]
@@ -3681,6 +3688,12 @@ const SCHEMAS: Record<string, Record<string, unknown>> = {
         ]
       },
       "version": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "app_version": {
         "type": [
           "string",
           "null"
@@ -5501,6 +5514,12 @@ const SCHEMAS: Record<string, Record<string, unknown>> = {
       },
       "event": {
         "type": "string"
+      },
+      "name": {
+        "type": [
+          "string",
+          "null"
+        ]
       },
       "matcher": {
         "type": [

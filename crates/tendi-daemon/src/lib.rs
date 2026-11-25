@@ -1272,7 +1272,8 @@ impl Daemon {
                     .map_err(core_error)?,
             ),
             "hooks" => serde_json::to_value(
-                tendi_core::hooks::scan_hooks(&self.state.cwd).map_err(core_error)?,
+                tendi_core::hooks::scan_hooks_for_project_roots(&self.state.cwd, &roots)
+                    .map_err(core_error)?,
             ),
             "mcp" => serde_json::to_value(
                 tendi_core::mcp::scan_mcp_for_project_roots(&self.state.cwd, &roots)
@@ -2844,6 +2845,7 @@ impl Daemon {
     ) -> Result<runtime_schema::HookSourceReadResponse, DaemonError> {
         let hook_match = tendi_core::hooks::HookSourceMatch {
             event: request.event,
+            name: request.name,
             matcher: request.matcher,
             hook_type: request.hook_type,
             command: request.command,
@@ -3274,7 +3276,8 @@ impl Daemon {
             "hooks",
             |store| store.list_hooks_for_workspace(&cwd),
             |store, revision| {
-                let report = tendi_core::hooks::scan_hooks(&cwd)?;
+                let roots = Self::registered_project_roots(store)?;
+                let report = tendi_core::hooks::scan_hooks_for_project_roots(&cwd, &roots)?;
                 anyhow::ensure!(
                     store.save_hooks_for_workspace_if_revision(&cwd, &report, revision)?,
                     "projection changed during preparation"
@@ -3632,8 +3635,7 @@ impl Daemon {
     fn skills_targets(&self) -> Result<runtime_schema::SkillTargetRecordList, DaemonError> {
         let targets = std::iter::once(("shared", "Shared", true))
             .chain(
-                tendi_core::skill_targets::target_catalog()
-                    .iter()
+                tendi_core::skill_targets::listed_targets()
                     .map(|target| (target.id, target.display_name, target.supports_global())),
             )
             .map(|(id, display_name, supports_global)| {
@@ -8087,6 +8089,7 @@ fn agent_kind_from_request(value: runtime_schema::AgentKind) -> tendi_core::Agen
         runtime_schema::AgentKind::Codex => tendi_core::AgentKind::Codex,
         runtime_schema::AgentKind::Cursor => tendi_core::AgentKind::Cursor,
         runtime_schema::AgentKind::Claude => tendi_core::AgentKind::Claude,
+        runtime_schema::AgentKind::Antigravity => tendi_core::AgentKind::Antigravity,
         runtime_schema::AgentKind::Shared => tendi_core::AgentKind::Shared,
         runtime_schema::AgentKind::Unknown => tendi_core::AgentKind::Unknown,
     }
@@ -8097,6 +8100,7 @@ fn runtime_agent_kind(value: tendi_core::AgentKind) -> runtime_schema::AgentKind
         tendi_core::AgentKind::Codex => runtime_schema::AgentKind::Codex,
         tendi_core::AgentKind::Cursor => runtime_schema::AgentKind::Cursor,
         tendi_core::AgentKind::Claude => runtime_schema::AgentKind::Claude,
+        tendi_core::AgentKind::Antigravity => runtime_schema::AgentKind::Antigravity,
         tendi_core::AgentKind::Shared => runtime_schema::AgentKind::Shared,
         tendi_core::AgentKind::Unknown => runtime_schema::AgentKind::Unknown,
     }
@@ -8229,6 +8233,7 @@ fn hook_delete_request_for_record(
         path: hook.path.clone(),
         expected_trust_hash: hook.trust_hash.clone(),
         event: hook.event.clone(),
+        name: hook.name.clone(),
         matcher: hook.matcher.clone(),
         hook_type: hook.hook_type.clone(),
         command: hook.command.clone(),
@@ -8248,6 +8253,7 @@ fn hook_set_enabled_request_for_record(
         path: hook.path.clone(),
         expected_trust_hash: hook.trust_hash.clone(),
         event: hook.event.clone(),
+        name: hook.name.clone(),
         matcher: hook.matcher.clone(),
         hook_type: hook.hook_type.clone(),
         command: hook.command.clone(),
@@ -8267,6 +8273,7 @@ fn hook_review_request_for_record(
         path: hook.path.clone(),
         expected_trust_hash: hook.trust_hash.clone(),
         event: hook.event.clone(),
+        name: hook.name.clone(),
         matcher: hook.matcher.clone(),
         hook_type: hook.hook_type.clone(),
         command: hook.command.clone(),

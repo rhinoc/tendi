@@ -172,7 +172,7 @@ fn assistant_commands_keep_provider_specific_cli_contracts() {
             AgentKind::Claude => "--dangerously-skip-permissions",
             AgentKind::Cursor => "--yolo",
             AgentKind::Shared => unreachable!("shared agents are not in assistant cases"),
-            AgentKind::Unknown => unreachable!("unknown agents are not in assistant cases"),
+            AgentKind::Antigravity | AgentKind::Unknown => unreachable!("agents without assistant support are not in assistant cases"),
         };
         assert!(command.args.iter().any(|arg| arg == expected_mode));
 

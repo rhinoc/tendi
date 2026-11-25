@@ -1991,21 +1991,11 @@ pub(crate) fn parse_analytics_line(line: &str, record: &mut SessionAnalyticsReco
     let usage =
         last.unwrap_or_else(|| crate::analytics::diff_usage(record.state.previous_usage, current));
     record.state.previous_usage = current;
-    if usage.total_tokens == 0 {
-        return;
-    }
-    record.state.cumulative_usage.add_assign(usage);
-    record.state.response_index += 1;
-    record
-        .analytics
-        .responses
-        .push(crate::analytics::AnalyticsResponseUsage {
-            index: record.state.response_index,
-            timestamp: timestamp.unwrap_or_default(),
-            model: record.state.current_model.clone(),
-            usage,
-            cumulative: record.state.cumulative_usage,
-        });
+    record.record_response_usage(
+        timestamp.unwrap_or_default(),
+        record.state.current_model.clone(),
+        usage,
+    );
 }
 
 pub(super) fn resume_target_from_transcript_value(value: &Value) -> Option<&'static str> {
@@ -3345,11 +3335,12 @@ impl super::AgentProvider for CodexProvider {
         Some(cwd.join(".codex/skills"))
     }
 
-    fn skill_target(&self) -> Option<ProviderSkillTarget> {
-        Some(ProviderSkillTarget {
+    fn skill_targets(&self) -> &'static [ProviderSkillTarget] {
+        &[ProviderSkillTarget {
             id: "codex",
             display_name: "Codex",
-        })
+            listed: true,
+        }]
     }
 
     fn bundled_skill_files(&self) -> &'static [(&'static str, &'static str)] {
@@ -4409,6 +4400,7 @@ impl super::AgentProvider for CodexProvider {
     fn parse_hook_file(
         &self,
         path: &Path,
+        _source: &str,
         trust_hash: &str,
         hooks: &mut Vec<HookRecord>,
         warnings: &mut Vec<String>,

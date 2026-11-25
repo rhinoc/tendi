@@ -809,28 +809,7 @@ pub fn scan_session_paths(paths: &[PathBuf], cache: &SessionScanCache) -> Sessio
     let mut sessions = Vec::new();
     let mut warnings = Vec::new();
     for path in paths.iter().filter(|path| path.is_file()) {
-        let mut handled = false;
-        for provider in crate::providers::all_providers() {
-            match provider.scan_explicit_session_path(path, &mut sessions, Some(cache)) {
-                Ok(true) => {
-                    handled = true;
-                    break;
-                }
-                Ok(false) => {}
-                Err(error) => {
-                    warnings.push(format!("{}: {error:#}", path.display()));
-                    handled = true;
-                    break;
-                }
-            }
-        }
-        if !handled
-            && path
-                .extension()
-                .is_some_and(|extension| extension == "jsonl")
-        {
-            scan_detected_jsonl_session(path, &mut sessions, Some(cache));
-        }
+        scan_session_source(path, &mut sessions, &mut warnings, Some(cache));
     }
     let mut sessions = merge_sessions(sessions);
     normalize_session_projects(&mut sessions);
@@ -1144,23 +1123,28 @@ pub(crate) fn scan_additional_session_roots(
         }
     }
     for path in session_paths {
-        if path
-            .extension()
-            .is_some_and(|extension| extension == "jsonl")
-        {
-            scan_detected_jsonl_session(&path, sessions, cache);
-        } else {
-            for provider in crate::providers::all_providers() {
-                match provider.scan_explicit_session_path(&path, sessions, cache) {
-                    Ok(true) => break,
-                    Ok(false) => {}
-                    Err(error) => {
-                        warnings.push(format!("{}: {error:#}", path.display()));
-                        break;
-                    }
-                }
+        scan_session_source(&path, sessions, warnings, cache);
+    }
+}
+
+fn scan_session_source(
+    path: &Path,
+    sessions: &mut Vec<SessionRecord>,
+    warnings: &mut Vec<String>,
+    cache: Option<&SessionScanCache>,
+) {
+    for provider in crate::providers::all_providers() {
+        match provider.scan_explicit_session_path(path, sessions, cache) {
+            Ok(true) => return,
+            Ok(false) => {}
+            Err(error) => {
+                warnings.push(format!("{}: {error:#}", path.display()));
+                return;
             }
         }
+    }
+    if path.extension().is_some_and(|extension| extension == "jsonl") {
+        scan_detected_jsonl_session(path, sessions, cache);
     }
 }
 

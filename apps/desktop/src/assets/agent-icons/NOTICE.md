@@ -2,6 +2,7 @@ These agent marks are copied from the following public repositories and official
 
 - `adal.svg`: official AdaL asset at `adal.sylph.ai`.
 - `aider.svg`, `augment.svg`: `agentsmd/agents.md`, MIT License.
+- `antigravity.svg`: LobeHub Antigravity mark, MIT License, with simplified gradient fills for small icons.
 - `codemaker.svg`: official CodeMaker AI GitHub organization mark at `github.com/codemakerai`.
 - `commandcode.svg`: `CommandCodeAI/command-code`, official Command Code mark.
 - `continue.svg`: `continuedev/continue`, Apache-2.0 License.

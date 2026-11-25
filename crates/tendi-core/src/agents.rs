@@ -9,7 +9,10 @@ use std::{
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
-use crate::{providers::ProviderContext, skills::AgentKind};
+use crate::{
+    providers::{AgentProvider, ProviderContext},
+    skills::AgentKind,
+};
 
 const VERSION_COMMAND_TIMEOUT: Duration = Duration::from_secs(2);
 
@@ -21,6 +24,8 @@ pub struct AgentRecord {
     pub config_dir: Option<PathBuf>,
     pub executable: Option<String>,
     pub version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub app_version: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -33,14 +38,7 @@ pub fn scan_agents(cwd: &Path) -> Result<AgentScan> {
     let ctx = ProviderContext::new(cwd);
     let agents = crate::providers::agent_providers()
         .into_iter()
-        .filter_map(|provider| {
-            Some(detect_agent(
-                provider.kind(),
-                provider.display_name()?,
-                provider.config_dir(&ctx),
-                provider.executable_names(),
-            ))
-        })
+        .filter_map(|provider| detect_agent(provider, &ctx))
         .collect();
 
     Ok(AgentScan {
@@ -49,45 +47,45 @@ pub fn scan_agents(cwd: &Path) -> Result<AgentScan> {
     })
 }
 
-fn detect_agent(
-    kind: AgentKind,
-    name: &str,
-    config_dir: Option<PathBuf>,
-    executable_names: &[&str],
-) -> AgentRecord {
-    let executable = executable_names.iter().find_map(|name| which(name));
+fn detect_agent(provider: &dyn AgentProvider, ctx: &ProviderContext) -> Option<AgentRecord> {
+    let name = provider.display_name()?;
+    let config_dir = provider.config_dir(ctx).filter(|path| path.is_dir());
+    let executable = provider.executable_path(ctx);
+    let app = provider
+        .app_bundle_path()
+        .filter(|path| Path::new(path).is_dir());
+    let app_version = app.and_then(app_version);
     let version = executable
-        .as_ref()
-        .and_then(|path| command_version(path))
-        .or_else(|| {
-            let app_path = crate::providers::agent_provider(kind).app_bundle_path()?;
-            app_version(app_path)
-        });
-    let config_exists = config_dir.as_ref().is_some_and(|path| path.is_dir());
+        .as_deref()
+        .and_then(command_version)
+        .or_else(|| app_version.clone());
 
-    AgentRecord {
-        kind,
+    Some(AgentRecord {
+        kind: provider.kind(),
         name: name.to_string(),
-        installed: config_exists || executable.is_some(),
-        config_dir: config_dir.filter(|path| path.exists()),
-        executable,
+        installed: (provider.config_indicates_installation() && config_dir.is_some())
+            || executable.is_some()
+            || app.is_some(),
+        config_dir,
+        executable: executable.map(|path| path.to_string_lossy().into_owned()),
         version,
-    }
+        app_version,
+    })
 }
 
-fn which(name: &str) -> Option<String> {
+pub(crate) fn which(name: &str) -> Option<PathBuf> {
     let path = env::var_os("PATH")?;
     for dir in env::split_paths(&path) {
         let candidate = dir.join(name);
         if candidate.is_file() {
-            return Some(candidate.display().to_string());
+            return Some(candidate);
         }
     }
     None
 }
 
-fn command_version(path: &str) -> Option<String> {
-    let output = run_command_with_timeout(path, &["--version"])?;
+fn command_version(path: &Path) -> Option<String> {
+    let output = run_command_with_timeout(path.as_os_str(), &["--version"])?;
     if !output.status.success() {
         return None;
     }
@@ -96,7 +94,14 @@ fn command_version(path: &str) -> Option<String> {
 }
 
 fn app_version(app_path: &str) -> Option<String> {
-    let output = run_command_with_timeout("mdls", &["-name", "kMDItemVersion", "-raw", app_path])?;
+    let output = run_command_with_timeout(
+        std::ffi::OsStr::new("/usr/libexec/PlistBuddy"),
+        &[
+            "-c",
+            "Print :CFBundleShortVersionString",
+            &format!("{app_path}/Contents/Info.plist"),
+        ],
+    )?;
     if !output.status.success() {
         return None;
     }
@@ -104,7 +109,7 @@ fn app_version(app_path: &str) -> Option<String> {
     (!value.is_empty() && value != "(null)").then_some(value)
 }
 
-fn run_command_with_timeout(program: &str, args: &[&str]) -> Option<Output> {
+fn run_command_with_timeout(program: &std::ffi::OsStr, args: &[&str]) -> Option<Output> {
     let mut child = Command::new(program)
         .args(args)
         .stdout(Stdio::piped())

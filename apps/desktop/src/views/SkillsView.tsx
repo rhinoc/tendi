@@ -1,3 +1,4 @@
+import { supportsSkillVisibility } from "../lib/agents.ts";
 import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { ComponentType, ReactNode } from "react";
 import { ContextMenu, Dialog, DropdownMenu } from "radix-ui";
@@ -94,6 +95,8 @@ type SkillWrapperSelection = {
   id: string;
   name: string;
   description?: string;
+  paths?: NormalizedSkill["paths"];
+  supportsManualChildren?: boolean;
 };
 
 type SkillTableRow = NormalizedSkill;
@@ -505,6 +508,9 @@ export function WrapperDialog({ open, selectedSkills, onOpenChange, onApplyWrapp
   const [description, setDescription] = useState("");
   const [descriptionEdited, setDescriptionEdited] = useState(false);
   const [manualChildren, setManualChildren] = useState(true);
+  const canMakeChildrenManual = selectedSkills.every((skill) => (
+    skill.supportsManualChildren !== false && isSkillVisibilityEditable(skill)
+  ));
   const { apply: applyWrapper, busy, clearError, error } = useWrapperMutation({ onApplyWrapper });
   const selectedNames = useMemo(() => selectedSkills.map((skill) => skill.name), [selectedSkills]);
   const selectedSkillIds = useMemo(() => selectedSkills.map((skill) => skill.id), [selectedSkills]);
@@ -542,9 +548,9 @@ export function WrapperDialog({ open, selectedSkills, onOpenChange, onApplyWrapp
     name: name.trim(),
     skillIds: selectedSkillIds,
     description: description.trim(),
-    manualChildren,
+    manualChildren: canMakeChildrenManual && manualChildren,
     refresh: false,
-  }), [description, manualChildren, name, selectedNames, selectedSkillIds]);
+  }), [canMakeChildrenManual, description, manualChildren, name, selectedSkillIds]);
 
   const apply = async () => {
     if (!canCreate || busy) return;
@@ -575,14 +581,14 @@ export function WrapperDialog({ open, selectedSkills, onOpenChange, onApplyWrapp
                 onChange={(event) => updateDescription(event.target.value)}
               />
             </label>
-            <label className="addSkillAdvancedCheckbox">
+            {canMakeChildrenManual && <label className="addSkillAdvancedCheckbox">
               <SelectionCheckbox
                 checked={manualChildren}
                 label="Only trigger selected skills through this wrapper"
                 onChange={(checked: boolean | "indeterminate") => setManualChildren(Boolean(checked))}
               />
               <span>Make children manual</span>
-            </label>
+            </label>}
             {error ? <Toast tone="error" message={error} /> : null}
           </div>
           <DialogActionBar cancelDisabled={busy} onCancel={() => onOpenChange(false)}>
@@ -656,6 +662,7 @@ export function AddSkillDialog({ open, onOpenChange, trigger, onClose, onPreview
     [targetOptions, installedAgentKeys],
   );
   const resolvedTarget = resolveSkillInstallTarget(target, visibleInstallTargets);
+  const canSetVisibility = supportsSkillVisibility(resolvedTarget);
   useEffect(() => {
     if (!visibleInstallTargets.some((option) => option.id === target)) {
       setTarget(visibleInstallTargets[0]?.id ?? "");
@@ -690,9 +697,9 @@ export function AddSkillDialog({ open, onOpenChange, trigger, onClose, onPreview
     lockedSource,
     source,
     onSourceChange: setSource,
-    target: resolveSkillInstallTarget(target, visibleInstallTargets),
+    target: resolvedTarget,
     copy,
-    visibility,
+    visibility: canSetVisibility ? visibility : SkillVisibility.Auto,
     replaceExisting,
     onPlanReady: handlePlanReady,
     onPageRestored: handlePageRestored,
@@ -700,7 +707,10 @@ export function AddSkillDialog({ open, onOpenChange, trigger, onClose, onPreview
     onPreviewError,
     onInstalled,
     onBeginMutation,
-    onRequestWrapper,
+    onRequestWrapper: (skills) => onRequestWrapper(skills.map((skill) => ({
+      ...skill,
+      supportsManualChildren: canSetVisibility,
+    }))),
     onClose,
   });
   const {
@@ -1181,7 +1191,7 @@ export function AddSkillDialog({ open, onOpenChange, trigger, onClose, onPreview
             <strong>Advanced settings</strong>
           </header>
           <div className="addSkillAdvancedBody">
-            <div className="dialogField">
+            {canSetVisibility && <div className="dialogField">
               <span>Visibility</span>
               <SegmentedControl
                 fullWidth
@@ -1199,7 +1209,7 @@ export function AddSkillDialog({ open, onOpenChange, trigger, onClose, onPreview
                   </SegmentedControlItem>
                 ))}
               </SegmentedControl>
-            </div>
+            </div>}
             <div className="dialogField">
               <span>Install mode</span>
               <SegmentedControl

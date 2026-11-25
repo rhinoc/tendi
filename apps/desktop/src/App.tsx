@@ -1,3 +1,4 @@
+import { supportsAssistant } from "./lib/agents.ts";
 import { lazy, memo, Suspense, useCallback, useDeferredValue, useEffect, useLayoutEffect, useMemo, useRef, useState, type ComponentProps } from "react";
 import { flushSync } from "react-dom";
 import { listen } from "@tauri-apps/api/event";
@@ -509,7 +510,7 @@ export function App() {
     return data.agents.flatMap((record) => {
       if (record.installed !== true || typeof record.name !== "string" || typeof record.executable !== "string" || !record.executable.trim()) return [];
       const value = agentIdentityKey(record.name);
-      if (!isConcreteAgent(value) || !isVisibleAgent(value) || seen.has(value)) return [];
+      if (!supportsAssistant(value) || seen.has(value)) return [];
       seen.add(value);
       return [{ value, label: friendlyAgent(record.name) }];
     });

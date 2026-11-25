@@ -31,6 +31,7 @@ fn sync_hook_test_target(label: &str, extension: &str) -> (PathBuf, PathBuf) {
 fn sync_hook_test_identity(matcher: &str, command: &str) -> HookSourceMatch {
     HookSourceMatch {
         event: "PreToolUse".into(),
+        name: None,
         matcher: Some(matcher.into()),
         hook_type: Some("command".into()),
         command: Some(command.into()),
@@ -120,6 +121,7 @@ fn deletes_disabled_hooks_without_removing_other_hooks_in_the_group() {
             path: path.clone(),
             expected_trust_hash: String::new(),
             event: "PreToolUse".into(),
+            name: None,
             matcher: Some("Bash".into()),
             hook_type: Some("command".into()),
             command: Some("remote".into()),
@@ -152,6 +154,7 @@ fn deletes_disabled_hooks_without_removing_other_hooks_in_the_group() {
             path: path.clone(),
             expected_trust_hash: String::new(),
             event: identity.event,
+            name: None,
             matcher: identity.matcher,
             hook_type: identity.hook_type,
             command: identity.command,
@@ -371,6 +374,7 @@ fn syncs_one_json_hook_without_dropping_other_hooks() {
     .expect("write hooks");
     let identity = HookSourceMatch {
         event: "PreToolUse".to_string(),
+        name: None,
         matcher: Some("Bash".to_string()),
         hook_type: Some("command".to_string()),
         command: Some("one".to_string()),
@@ -436,6 +440,7 @@ fn syncs_one_toml_hook_without_reformatting_other_entries() {
     fs::write(&path, source).expect("write hooks");
     let identity = HookSourceMatch {
         event: "PreToolUse".to_string(),
+        name: None,
         matcher: Some("Bash".to_string()),
         hook_type: Some("command".to_string()),
         command: Some("one".to_string()),
@@ -481,6 +486,7 @@ fn syncs_markdown_hook_without_reformatting_unrelated_frontmatter() {
     fs::write(&path, source).expect("write hooks");
     let identity = HookSourceMatch {
         event: "PreToolUse".to_string(),
+        name: None,
         matcher: Some("Bash".to_string()),
         hook_type: Some("command".to_string()),
         command: Some("one".to_string()),
@@ -692,6 +698,7 @@ fn review_projection_reads_only_the_requested_hook_source() {
             path: hook.path,
             expected_trust_hash: hook.trust_hash,
             event: hook.event,
+            name: None,
             matcher: hook.matcher,
             hook_type: hook.hook_type,
             command: hook.command,
@@ -901,6 +908,7 @@ fn deletes_multiple_hooks_from_one_json_source() {
         path: path.clone(),
         expected_trust_hash: trust_hash.clone(),
         event: "PreToolUse".to_string(),
+        name: None,
         matcher: Some(matcher.to_string()),
         hook_type: Some("command".to_string()),
         command: Some(command.to_string()),
@@ -935,6 +943,7 @@ fn deletes_hooks_from_multiple_json_event_members() {
         path: PathBuf::from("hooks.json"),
         expected_trust_hash: String::new(),
         event: event.to_string(),
+        name: None,
         matcher: None,
         hook_type: Some("command".to_string()),
         command: Some(command.to_string()),
@@ -993,6 +1002,7 @@ fn concurrent_hook_mutations_accept_only_one_stale_hash() {
                 path,
                 expected_trust_hash: trust_hash,
                 event: "Stop".to_string(),
+                name: None,
                 matcher: None,
                 hook_type: Some("command".to_string()),
                 command: Some(command.to_string()),
@@ -1045,6 +1055,7 @@ fn batch_delete_validates_every_source_before_writing() {
             path,
             expected_trust_hash,
             event: "Stop".to_string(),
+            name: None,
             matcher: None,
             hook_type: Some("command".to_string()),
             command: Some(command.to_string()),
@@ -1099,6 +1110,7 @@ command = "/bin/echo delete-me"
         path: path.clone(),
         expected_trust_hash: trust_hash,
         event: "PreToolUse".to_string(),
+        name: None,
         matcher: Some("Bash".to_string()),
         hook_type: Some("command".to_string()),
         command: Some("/bin/echo delete-me".to_string()),
@@ -1147,6 +1159,7 @@ fn toggles_matching_json_hook_enabled_state() {
         path: path.clone(),
         expected_trust_hash: trust_hash,
         event: "PreToolUse".to_string(),
+        name: None,
         matcher: None,
         hook_type: Some("command".to_string()),
         command: Some("/bin/echo toggle-me".to_string()),
@@ -1204,6 +1217,7 @@ enabled = false
         path: path.clone(),
         expected_trust_hash: trust_hash,
         event: "PreToolUse".to_string(),
+        name: None,
         matcher: Some("Bash".to_string()),
         hook_type: Some("command".to_string()),
         command: Some("/bin/echo toggle-me".to_string()),
@@ -1265,6 +1279,7 @@ enabled = false
             path: path.clone(),
             expected_trust_hash: expected_trust_hash.clone(),
             event: "PreToolUse".to_string(),
+            name: None,
             matcher: Some("Bash".to_string()),
             hook_type: Some("command".to_string()),
             command: Some(command.to_string()),
@@ -1324,6 +1339,7 @@ fn reads_known_hook_source_with_management_metadata() {
         Some(&trust_hash),
         Some(&super::HookSourceMatch {
             event: "PreToolUse".to_string(),
+            name: None,
             matcher: None,
             hook_type: Some("command".to_string()),
             command: Some("/bin/echo inspect".to_string()),

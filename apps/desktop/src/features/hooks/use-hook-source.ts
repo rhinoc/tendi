@@ -22,6 +22,7 @@ function hookSourceIdentity(hook: HookRecord | null): string {
     hook.agent,
     hook.path,
     hook.event,
+    hook.name,
     hook.matcher,
     hook.hook_type,
     hook.command,
@@ -37,6 +38,7 @@ export function useHookSource(hook: HookRecord | null) {
   const path = hook?.path;
   const expectedTrustHash = hook?.trust_hash;
   const event = hook?.event;
+  const name = hook?.name;
   const matcher = hook?.matcher;
   const hookType = hook?.hook_type;
   const command = hook?.command;
@@ -53,6 +55,7 @@ export function useHookSource(hook: HookRecord | null) {
     filter,
     hookType,
     matcher,
+    name,
     path,
     prompt,
     statusMessage,
@@ -87,6 +90,7 @@ export function useHookSource(hook: HookRecord | null) {
       path,
       expectedTrustHash,
       event,
+      name,
       matcher,
       hookType,
       command,
@@ -117,6 +121,7 @@ export function useHookSource(hook: HookRecord | null) {
     filter,
     hookType,
     matcher,
+    name,
     path,
     prompt,
     statusMessage,

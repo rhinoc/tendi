@@ -181,7 +181,7 @@ impl Store {
                 )?;
             }
             if let Some(scope_key) = invalidate_scope {
-                for domain in ["skills", "rules", "mcp"] {
+                for domain in ["skills", "rules", "hooks", "mcp"] {
                     self.set_projection_context_in_tx(tx, scope_key, domain, "stale", None)?;
                 }
             }

@@ -9,6 +9,7 @@ export const claudeAgent: AgentDefinition = {
   displayName: "Claude",
   trendClass: "agentClaude",
   icon: claudeIcon,
+  supportsAssistant: true,
   transcriptFormat: AgentTranscriptFormat.Claude,
   transcriptParser: claudeTranscriptParser,
   sessionAppDeepLink: ({ id, project, projectPath }) => {
